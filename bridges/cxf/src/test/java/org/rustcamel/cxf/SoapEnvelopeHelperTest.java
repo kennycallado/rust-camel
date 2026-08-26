@@ -2,14 +2,100 @@ package org.rustcamel.cxf;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.StringReader;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.Source;
 import javax.xml.transform.stream.StreamSource;
 import org.junit.jupiter.api.Test;
 
 class SoapEnvelopeHelperTest {
+
+  @Test
+  void configureSecureThrowsIllegalStateWhenFeatureUnsupported() {
+    ParserConfigurationException original = new ParserConfigurationException("boom");
+    DocumentBuilderFactory stub =
+        new DocumentBuilderFactory() {
+          @Override
+          public void setFeature(String name, boolean value) throws ParserConfigurationException {
+            throw original;
+          }
+
+          @Override
+          public Object getAttribute(String name) {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public void setAttribute(String name, Object value) {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public DocumentBuilder newDocumentBuilder() {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public boolean isNamespaceAware() {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public boolean isValidating() {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public boolean isXIncludeAware() {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public boolean getFeature(String name) {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public void setNamespaceAware(boolean awareness) {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public void setValidating(boolean validating) {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public void setXIncludeAware(boolean state) {
+            throw new UnsupportedOperationException();
+          }
+        };
+
+    IllegalStateException thrown =
+        assertThrows(IllegalStateException.class, () -> SoapEnvelopeHelper.configureSecure(stub));
+
+    assertSame(original, thrown.getCause());
+  }
+
+  @Test
+  void secureDbfHasAllHardeningFeaturesEnabled() throws ParserConfigurationException {
+    DocumentBuilderFactory dbf =
+        SoapEnvelopeHelper.configureSecure(DocumentBuilderFactory.newInstance());
+
+    assertTrue(dbf.getFeature("http://apache.org/xml/features/disallow-doctype-decl"));
+    assertFalse(dbf.getFeature("http://xml.org/sax/features/external-general-entities"));
+    assertFalse(dbf.getFeature("http://xml.org/sax/features/external-parameter-entities"));
+    assertFalse(
+        dbf.getFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd"));
+    assertFalse(dbf.isXIncludeAware());
+    assertTrue(dbf.isNamespaceAware());
+  }
 
   @Test
   void testWrapSoap11() throws Exception {

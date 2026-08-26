@@ -33,6 +33,18 @@ public class SoapEndpointPublisher {
 
   private HttpServer server;
 
+  /**
+   * One WSS processor per security profile: keeps Crypto instances and the inbound replay cache
+   * shared across requests of the same profile.
+   */
+  private final java.util.concurrent.ConcurrentHashMap<String, WssSecurityProcessor>
+      wssProcessorsByProfile = new java.util.concurrent.ConcurrentHashMap<>();
+
+  WssSecurityProcessor wssProcessorFor(String profileName, SecurityProfile profile) {
+    return wssProcessorsByProfile.computeIfAbsent(
+        profileName, n -> new WssSecurityProcessor(profile));
+  }
+
   synchronized void publish() {
     if (server != null) {
       return;
@@ -81,7 +93,7 @@ public class SoapEndpointPublisher {
               return;
             }
 
-            WssSecurityProcessor wssProcessor = new WssSecurityProcessor(profile);
+            WssSecurityProcessor wssProcessor = wssProcessorFor(profileName, profile);
 
             req.bodyHandler(
                 body -> {

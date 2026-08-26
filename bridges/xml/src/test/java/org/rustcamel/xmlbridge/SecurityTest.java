@@ -1,5 +1,6 @@
 package org.rustcamel.xmlbridge;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -7,7 +8,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.google.protobuf.ByteString;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import xml_bridge.BridgeError;
 import xml_bridge.CompileStylesheetRequest;
@@ -24,6 +32,40 @@ class SecurityTest {
 
   @GrpcClient("xslt-transformer")
   MutinyXsltTransformerGrpc.MutinyXsltTransformerStub xslt;
+
+  @Test
+  void happyPathTransformSucceeds() {
+    var stylesheet =
+        """
+        <xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="3.0">
+          <xsl:output omit-xml-declaration="yes"/>
+          <xsl:template match="/"><out><xsl:value-of select="name(/*)"/></out></xsl:template>
+        </xsl:stylesheet>
+        """;
+
+    var compile =
+        xslt.compileStylesheet(
+                CompileStylesheetRequest.newBuilder()
+                    .setStylesheetId("happy-path")
+                    .setStylesheet(bytes(stylesheet))
+                    .build())
+            .await()
+            .indefinitely();
+
+    assertFalse(compile.hasError(), compile.getError().getMessage());
+
+    var transform =
+        xslt.transform(
+                TransformRequest.newBuilder()
+                    .setStylesheetId("happy-path")
+                    .setDocument(bytes("<doc/>"))
+                    .build())
+            .await()
+            .indefinitely();
+
+    assertFalse(transform.hasError(), transform.getError().getMessage());
+    assertEquals("<out>doc</out>", transform.getResult().toStringUtf8());
+  }
 
   @Test
   void xxeExternalEntityInjectionReturnsBridgeError() {
@@ -175,6 +217,171 @@ class SecurityTest {
     assertFalse(resp.getValid());
     assertTrue(resp.hasError());
     assertNotEquals(BridgeError.Kind.UNKNOWN, resp.getError().getKind());
+  }
+
+  @Test
+  void unparsedTextSsrfAttemptRejectedWithoutConnection() throws Exception {
+    ServerSocket ss = new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"));
+    AtomicInteger accepted = new AtomicInteger();
+    Thread acceptLoop =
+        new Thread(
+            () -> {
+              while (true) {
+                try {
+                  Socket socket = ss.accept();
+                  accepted.incrementAndGet();
+                  socket.close();
+                } catch (IOException e) {
+                  return; // server socket closed — stop accepting
+                }
+              }
+            },
+            "unparsed-text-ssrf-acceptor");
+    acceptLoop.setDaemon(true);
+    acceptLoop.start();
+    try {
+      var stylesheet =
+          """
+          <xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="3.0">
+            <xsl:template match="/">rejected:<xsl:value-of select="unparsed-text('http://127.0.0.1:%d/poc')"/></xsl:template>
+          </xsl:stylesheet>
+          """
+              .formatted(ss.getLocalPort());
+
+      var compileResp =
+          xslt.compileStylesheet(
+              CompileStylesheetRequest.newBuilder()
+                  .setStylesheetId("deny-unparsed-text")
+                  .setStylesheet(bytes(stylesheet))
+                  .build())
+              .await()
+              .indefinitely();
+
+      // Attack must be exercised at transform time, not masked by compile failure.
+      assertFalse(compileResp.hasError());
+
+      var resp =
+          xslt.transform(
+                  TransformRequest.newBuilder()
+                      .setStylesheetId("deny-unparsed-text")
+                      .setDocument(bytes("<doc/>"))
+                      .build())
+              .await()
+              .indefinitely();
+
+      assertTrue(resp.hasError(), "unparsed-text() SSRF must produce an error response");
+      assertNotEquals(BridgeError.Kind.UNKNOWN, resp.getError().getKind());
+      assertFalse(resp.getError().getMessage().contains("rejected:"));
+      assertEquals(0, accepted.get(), "no TCP connection may reach the observed port");
+    } finally {
+      ss.close();
+      acceptLoop.join(5000);
+    }
+  }
+
+  @Test
+  void collectionAttemptRejected() throws Exception {
+    ServerSocket ss = new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"));
+    AtomicInteger accepted = new AtomicInteger();
+    Thread acceptLoop =
+        new Thread(
+            () -> {
+              while (true) {
+                try {
+                  Socket socket = ss.accept();
+                  accepted.incrementAndGet();
+                  socket.close();
+                } catch (IOException e) {
+                  return; // server socket closed — stop accepting
+                }
+              }
+            },
+            "collection-ssrf-acceptor");
+    acceptLoop.setDaemon(true);
+    acceptLoop.start();
+    try {
+      var stylesheet =
+          """
+          <xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="3.0">
+            <xsl:template match="/"><xsl:value-of select="count(collection('http://127.0.0.1:%d/poc'))"/></xsl:template>
+          </xsl:stylesheet>
+          """
+              .formatted(ss.getLocalPort());
+
+      var compile =
+          xslt.compileStylesheet(
+                  CompileStylesheetRequest.newBuilder()
+                      .setStylesheetId("deny-collection")
+                      .setStylesheet(bytes(stylesheet))
+                      .build())
+              .await()
+              .indefinitely();
+
+      // Whether compile succeeds or fails, collection() access must be blocked
+      // with no TCP connection reaching the observed port (the port-9 shape could
+      // not distinguish deny-all from connection-refused).
+      if (compile.hasError()) {
+        assertNotEquals(BridgeError.Kind.UNKNOWN, compile.getError().getKind());
+        assertEquals(0, accepted.get(), "no TCP connection may reach the observed port");
+        return;
+      }
+
+      var resp =
+          xslt.transform(
+                  TransformRequest.newBuilder()
+                      .setStylesheetId("deny-collection")
+                      .setDocument(bytes("<doc/>"))
+                      .build())
+              .await()
+              .indefinitely();
+
+      assertTrue(resp.hasError(), "collection() access must produce an error response");
+      assertNotEquals(BridgeError.Kind.UNKNOWN, resp.getError().getKind());
+      assertEquals(0, accepted.get(), "no TCP connection may reach the observed port");
+    } finally {
+      ss.close();
+      acceptLoop.join(5000);
+    }
+  }
+
+  @Test
+  void resultDocumentFileWriteRejected(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+    var canary = tmp.resolve("canary.txt");
+    var stylesheet =
+        """
+        <xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="3.0">
+          <xsl:template match="/"><xsl:result-document href="file://%s">x</xsl:result-document>ok</xsl:template>
+        </xsl:stylesheet>
+        """
+            .formatted(canary.toAbsolutePath());
+
+    var compile =
+        xslt.compileStylesheet(
+                CompileStylesheetRequest.newBuilder()
+                    .setStylesheetId("deny-result-document")
+                    .setStylesheet(bytes(stylesheet))
+                    .build())
+            .await()
+            .indefinitely();
+
+    if (compile.hasError()) {
+      assertNotEquals(BridgeError.Kind.UNKNOWN, compile.getError().getKind());
+      assertTrue(Files.notExists(canary), "canary file must not be created");
+      return;
+    }
+
+    var resp =
+        xslt.transform(
+                TransformRequest.newBuilder()
+                    .setStylesheetId("deny-result-document")
+                    .setDocument(bytes("<doc/>"))
+                    .build())
+            .await()
+            .indefinitely();
+
+    assertTrue(resp.hasError(), "result-document file write must produce an error response");
+    assertNotEquals(BridgeError.Kind.UNKNOWN, resp.getError().getKind());
+    assertTrue(Files.notExists(canary), "canary file must not be created");
   }
 
   private static ByteString bytes(String value) {

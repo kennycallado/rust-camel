@@ -6,6 +6,7 @@ import io.smallrye.mutiny.Uni;
 import jakarta.inject.Inject;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.net.URI;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
@@ -19,7 +20,10 @@ import javax.xml.transform.stream.StreamResult;
 import net.sf.saxon.Configuration;
 import net.sf.saxon.TransformerFactoryImpl;
 import net.sf.saxon.lib.Feature;
+import net.sf.saxon.lib.OutputURIResolver;
+import net.sf.saxon.trans.XPathException;
 import org.xml.sax.InputSource;
+import org.xml.sax.SAXException;
 import xml_bridge.BridgeError;
 import xml_bridge.CompileStylesheetRequest;
 import xml_bridge.CompileStylesheetResponse;
@@ -154,6 +158,35 @@ public class XsltTransformerService extends MutinyXsltTransformerGrpc.XsltTransf
         return existing;
       }
       var config = new Configuration();
+      // Deny-all secondary resolvers: defense-in-depth on top of the JAXP
+      // URIResolver wrap below. Saxon 12 already routes some access (e.g.
+      // unparsed-text()) through that wrap, but these hooks close the dedicated
+      // channels explicitly.
+      config.setUnparsedTextURIResolver(
+          (URI absoluteUri, String encoding, Configuration cfg) -> {
+            throw new XPathException("Unparsed-text access denied: " + absoluteUri);
+          });
+      config.setCollectionFinder(
+          (context, uri) -> {
+            throw new XPathException("Collection access denied: " + uri);
+          });
+      config.setOutputURIResolver(
+          new OutputURIResolver() {
+            @Override
+            public OutputURIResolver newInstance() {
+              return this;
+            }
+
+            @Override
+            public javax.xml.transform.Result resolve(String href, String base)
+                throws javax.xml.transform.TransformerException {
+              throw new javax.xml.transform.TransformerException(
+                  "Result-document access denied: " + href);
+            }
+
+            @Override
+            public void close(javax.xml.transform.Result result) {}
+          });
       config.setBooleanProperty(Feature.ALLOW_EXTERNAL_FUNCTIONS, false);
       config.setBooleanProperty(Feature.DTD_VALIDATION, false);
       var factory = new TransformerFactoryImpl(config);
@@ -182,7 +215,10 @@ public class XsltTransformerService extends MutinyXsltTransformerGrpc.XsltTransf
     spf.setFeature(FEATURE_EXTERNAL_PARAMETER_ENTITIES, false);
     spf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true); // I-4
     var reader = spf.newSAXParser().getXMLReader();
-    reader.setProperty(PROPERTY_ENTITY_EXPANSION_LIMIT, 100); // I-1
+    try {
+      reader.setProperty(PROPERTY_ENTITY_EXPANSION_LIMIT, 100); // I-1
+    } catch (SAXException ignored) {
+    }
     reader.setEntityResolver(
         (publicId, systemId) -> new InputSource(new ByteArrayInputStream(new byte[0])));
     return new SAXSource(reader, new InputSource(new ByteArrayInputStream(xmlBytes)));

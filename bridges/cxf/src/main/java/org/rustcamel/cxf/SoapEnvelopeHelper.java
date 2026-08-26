@@ -8,7 +8,6 @@ import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.OutputKeys;
 import javax.xml.transform.Source;
 import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import org.w3c.dom.Document;
@@ -20,21 +19,21 @@ public final class SoapEnvelopeHelper {
   private static final String SOAP_NS_11 = "http://schemas.xmlsoap.org/soap/envelope/";
   private static final String SOAP_NS_12 = "http://www.w3.org/2003/05/soap-envelope";
   private static final ThreadLocal<DocumentBuilderFactory> SECURE_DBF =
-      ThreadLocal.withInitial(
-          () -> {
-            DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
-            dbf.setNamespaceAware(true);
-            try {
-              dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-              dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
-              dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-              dbf.setFeature(
-                  "http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
-              dbf.setXIncludeAware(false);
-            } catch (ParserConfigurationException ignored) {
-            }
-            return dbf;
-          });
+      ThreadLocal.withInitial(() -> configureSecure(DocumentBuilderFactory.newInstance()));
+
+  static DocumentBuilderFactory configureSecure(DocumentBuilderFactory dbf) {
+    try {
+      dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+      dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+      dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+      dbf.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+    } catch (ParserConfigurationException e) {
+      throw new IllegalStateException("Unable to configure secure DocumentBuilderFactory", e);
+    }
+    dbf.setNamespaceAware(true);
+    dbf.setXIncludeAware(false);
+    return dbf;
+  }
 
   private SoapEnvelopeHelper() {}
 
@@ -166,16 +165,16 @@ public final class SoapEnvelopeHelper {
     return db.parse(new ByteArrayInputStream(bytes));
   }
 
-  private static byte[] sourceToBytes(Source source) throws Exception {
+  static byte[] sourceToBytes(Source source) throws Exception {
     ByteArrayOutputStream out = new ByteArrayOutputStream();
-    Transformer transformer = TransformerFactory.newInstance().newTransformer();
+    Transformer transformer = SecureTransformers.factory().newTransformer();
     transformer.transform(source, new StreamResult(out));
     return out.toByteArray();
   }
 
   public static String sourceToString(Source source, boolean omitDecl) throws Exception {
     ByteArrayOutputStream out = new ByteArrayOutputStream();
-    Transformer transformer = TransformerFactory.newInstance().newTransformer();
+    Transformer transformer = SecureTransformers.factory().newTransformer();
     transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, omitDecl ? "yes" : "no");
     transformer.setOutputProperty(OutputKeys.INDENT, "no");
     transformer.transform(source, new StreamResult(out));

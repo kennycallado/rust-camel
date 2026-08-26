@@ -11,6 +11,8 @@ import javax.crypto.SecretKey;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.transform.dom.DOMSource;
+import org.apache.wss4j.common.cache.MemoryReplayCache;
+import org.apache.wss4j.common.cache.ReplayCache;
 import org.apache.wss4j.common.ext.WSSecurityException;
 import org.apache.wss4j.dom.WSConstants;
 import org.apache.wss4j.dom.engine.WSSecurityEngine;
@@ -20,6 +22,7 @@ import org.apache.wss4j.dom.handler.WSHandlerResult;
 import org.apache.wss4j.dom.message.WSSecEncrypt;
 import org.apache.wss4j.dom.message.WSSecHeader;
 import org.apache.wss4j.dom.message.WSSecSignature;
+import org.apache.wss4j.dom.message.WSSecTimestamp;
 import org.w3c.dom.Document;
 
 /**
@@ -29,6 +32,9 @@ import org.w3c.dom.Document;
 public class WssSecurityProcessor {
 
   private final SecurityProfile profile;
+
+  /** Inbound replay protection for timestamp and nonce caches, shared across inbound calls. */
+  private final ReplayCache replayCache = new MemoryReplayCache();
 
   public WssSecurityProcessor(SecurityProfile profile) {
     this.profile = profile;
@@ -56,6 +62,11 @@ public class WssSecurityProcessor {
     Document doc = parseXml(soapXml);
     WSSecHeader secHeader = new WSSecHeader(doc);
     secHeader.insertSecurityHeader();
+
+    if (containsAction(actions, "Timestamp")) {
+      // Emitted before the signature so inbound replay detection keys off the timestamp
+      new WSSecTimestamp(secHeader).build();
+    }
 
     if (containsAction(actions, "Signature")) {
       WSSecSignature sign = new WSSecSignature(secHeader);
@@ -93,6 +104,8 @@ public class WssSecurityProcessor {
     requestData.setSigVerCrypto(profile.getVerificationCrypto());
     requestData.setDecCrypto(profile.getSignatureCrypto());
     requestData.setCallbackHandler(profile.createPasswordCallback());
+    requestData.setTimestampReplayCache(replayCache);
+    requestData.setNonceReplayCache(replayCache);
 
     WSHandlerResult handlerResult = engine.processSecurityHeader(doc, requestData);
     List<WSSecurityEngineResult> results =

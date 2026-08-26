@@ -15,10 +15,14 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -40,6 +44,20 @@ class SoapEndpointPublisherTest {
   SoapEndpointPublisher publisher;
 
   private static final String TEST_PROFILE_NAME = "test_profile";
+
+  private static Path keystorePath;
+
+  @BeforeAll
+  static void setUpKeystore() throws Exception {
+    keystorePath = TestKeystoreHelper.createTestKeystore();
+  }
+
+  @AfterAll
+  static void tearDownKeystore() throws Exception {
+    if (keystorePath != null) {
+      Files.deleteIfExists(keystorePath);
+    }
+  }
 
   @BeforeEach
   void setUp() throws Exception {
@@ -240,5 +258,116 @@ class SoapEndpointPublisherTest {
     @SuppressWarnings("unchecked")
     Callable<String> callable = callableCaptor.getValue();
     assertThrows(Exception.class, callable::call);
+  }
+
+  @Test
+  void publisherReusesProcessorPerProfile() {
+    SecurityProfile profile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
+
+    WssSecurityProcessor first = publisher.wssProcessorFor(TEST_PROFILE_NAME, profile);
+    WssSecurityProcessor second = publisher.wssProcessorFor(TEST_PROFILE_NAME, profile);
+    WssSecurityProcessor other = publisher.wssProcessorFor("other_profile", profile);
+
+    assertSame(first, second, "Same profile name must reuse the cached processor");
+    assertNotSame(first, other, "Different profile name must get its own processor");
+  }
+
+  @Test
+  void replayedRequestRejectedThroughPublishedEndpoint() throws Exception {
+    SecurityProfile realProfile =
+        SecurityProfile.builder(TEST_PROFILE_NAME)
+            .keystore(keystorePath.toString(), "changeit")
+            .truststore(keystorePath.toString(), "changeit")
+            .sigUser("alice", "changeit")
+            .encUser("alice")
+            .actionsOut("Timestamp Signature")
+            .actionsIn("Timestamp Signature")
+            .build();
+    when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(realProfile);
+
+    String plainEnvelope =
+        "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+            + "<soapenv:Body><test:Hello xmlns:test=\"http://test.example.com\">World</test:Hello>"
+            + "</soapenv:Body></soapenv:Envelope>";
+    String signedBody = new WssSecurityProcessor(realProfile).processOutbound(plainEnvelope);
+    when(bodyBuffer.toString(StandardCharsets.UTF_8)).thenReturn(signedBody);
+
+    ConsumerResponse okResponse =
+        ConsumerResponse.newBuilder()
+            .setRequestId("test-replay-1")
+            .setPayload(ByteString.copyFromUtf8("<result>ok</result>"))
+            .setSecurityProfile(TEST_PROFILE_NAME)
+            .build();
+    when(cxfServerManager.handleSoapRequest(any()))
+        .thenReturn(CompletableFuture.completedFuture(okResponse));
+
+    when(headers.entries())
+        .thenReturn(
+            List.of(
+                Map.entry("content-type", "text/xml"),
+                Map.entry("soapaction", "\"urn:test:Operation\"")));
+
+    ArgumentCaptor<Callable> callableCaptor = ArgumentCaptor.forClass(Callable.class);
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<AsyncResult<String>>> resultHandlerCaptor =
+        ArgumentCaptor.forClass(Handler.class);
+    doAnswer(invocation -> null)
+        .when(vertx)
+        .executeBlocking(callableCaptor.capture(), resultHandlerCaptor.capture());
+
+    doAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Handler<AsyncResult<HttpServer>> handler = invocation.getArgument(2);
+              handler.handle(Future.succeededFuture(httpServer));
+              return null;
+            })
+        .when(httpServer)
+        .listen(anyInt(), anyString(), any());
+
+    ArgumentCaptor<String> responseCaptor = ArgumentCaptor.forClass(String.class);
+    when(httpResponse.end(responseCaptor.capture())).thenAnswer(i -> Future.succeededFuture());
+
+    publisher.publish();
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<HttpServerRequest>> requestHandlerCaptor =
+        ArgumentCaptor.forClass(Handler.class);
+    verify(httpServer).requestHandler(requestHandlerCaptor.capture());
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<Buffer>> bodyHandlerCaptor = ArgumentCaptor.forClass(Handler.class);
+    when(httpRequest.bodyHandler(bodyHandlerCaptor.capture())).thenReturn(httpRequest);
+
+    // --- First POST: signed body accepted ---
+    requestHandlerCaptor.getValue().handle(httpRequest);
+    bodyHandlerCaptor.getAllValues().get(0).handle(bodyBuffer);
+
+    @SuppressWarnings("unchecked")
+    Callable<String> firstCallable = callableCaptor.getAllValues().get(0);
+    String firstResponseXml = firstCallable.call();
+
+    @SuppressWarnings("unchecked")
+    Handler<AsyncResult<String>> firstHandler = resultHandlerCaptor.getAllValues().get(0);
+    firstHandler.handle(Future.succeededFuture(firstResponseXml));
+    verify(httpResponse).setStatusCode(200);
+
+    // --- Second POST: identical bytes must be rejected as a WSS replay ---
+    requestHandlerCaptor.getValue().handle(httpRequest);
+    bodyHandlerCaptor.getAllValues().get(1).handle(bodyBuffer);
+
+    @SuppressWarnings("unchecked")
+    Callable<String> secondCallable = callableCaptor.getAllValues().get(1);
+    Exception replayError = assertThrows(Exception.class, secondCallable::call);
+
+    @SuppressWarnings("unchecked")
+    Handler<AsyncResult<String>> secondHandler = resultHandlerCaptor.getAllValues().get(1);
+    secondHandler.handle(Future.failedFuture(replayError));
+
+    verify(httpResponse).setStatusCode(400);
+    String endedBody = responseCaptor.getAllValues().get(1);
+    assertTrue(
+        endedBody.contains("soap:Client"),
+        "Failure branch must emit a soap:Client fault for WSS replay rejection");
   }
 }

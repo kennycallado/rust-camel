@@ -173,9 +173,9 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
     responseObserver.onCompleted();
   }
 
-  private static String toXmlString(Source source) throws Exception {
+  static String toXmlString(Source source) throws Exception {
     java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-    javax.xml.transform.TransformerFactory.newInstance()
+    SecureTransformers.factory()
         .newTransformer()
         .transform(source, new javax.xml.transform.stream.StreamResult(out));
     return out.toString(java.nio.charset.StandardCharsets.UTF_8);

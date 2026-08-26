@@ -5,6 +5,7 @@ import static org.mockito.Mockito.*;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import org.apache.wss4j.common.ext.WSSecurityException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -249,6 +250,38 @@ class WssSecurityProcessorIntegrationTest {
     SecurityProfile withNeither = SecurityProfile.builder("test").build();
     WssSecurityProcessor withNeitherStore = new WssSecurityProcessor(withNeither);
     assertFalse(withNeitherStore.canVerifyInbound(), "Should not verify without any store");
+  }
+
+  @Test
+  void replayedFreshSignedMessageRejectedAtProcessorLevel() throws Exception {
+    WssSecurityProcessor processor =
+        createProcessorWithActions(
+            keystorePath,
+            "changeit",
+            "alice",
+            "changeit",
+            "alice",
+            "Timestamp Signature",
+            "Timestamp Signature");
+
+    String plainEnvelope =
+        """
+        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+          <soapenv:Header/>
+          <soapenv:Body><test:Hello xmlns:test="http://test.example.com">World</test:Hello></soapenv:Body>
+        </soapenv:Envelope>
+        """;
+
+    String signed = processor.processOutbound(plainEnvelope);
+
+    // First delivery of the identical bytes must verify normally
+    assertDoesNotThrow(() -> processor.processInbound(signed));
+
+    // Replay: delivering the identical signed bytes again must hit the replay cache
+    assertThrows(
+        WSSecurityException.class,
+        () -> processor.processInbound(signed),
+        "Replayed signed message must be rejected at processor level");
   }
 
   // --- Helper ---
