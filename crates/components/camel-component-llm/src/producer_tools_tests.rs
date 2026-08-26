@@ -181,3 +181,136 @@ async fn empty_messages_rejected() {
         "expected InvalidRequest about non-empty, got: {err}"
     );
 }
+
+#[tokio::test]
+async fn tool_turn_with_text_sets_body_and_headers() {
+    let provider = Arc::new(
+        MockProvider::new("test", MockMode::Fixed("unused".into())).with_tool_calls_and_text(
+            "The answer is 42.",
+            vec![("call_1", "get_weather", r#"{"city":"London"}"#)],
+        ),
+    );
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: false,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(config, provider, 32768, "test-route".into()).build();
+    let mut exchange = make_exchange(Body::Text("prompt".into()));
+
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+
+    assert_eq!(exchange.input.body, Body::Text("The answer is 42.".into()));
+    let calls: Vec<crate::EmittedToolCall> =
+        serde_json::from_value(exchange.input.headers[CAMEL_LLM_TOOL_CALLS].clone())
+            .expect("tool calls header");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call_1");
+    assert_eq!(exchange.input.headers[CAMEL_LLM_TEXT], "The answer is 42.");
+}
+
+#[tokio::test]
+async fn duplicate_tool_call_ids_dedup_first_wins() {
+    let provider = Arc::new(
+        MockProvider::new("test", MockMode::Fixed("unused".into())).with_tool_calls_and_text(
+            "Done.",
+            vec![
+                ("call_1", "get_weather", r#"{"city":"London"}"#),
+                ("call_1", "get_weather", r#"{"city":"Paris"}"#),
+            ],
+        ),
+    );
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: false,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(config, provider, 32768, "test-route".into()).build();
+    let mut exchange = make_exchange(Body::Text("prompt".into()));
+
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+
+    let calls: Vec<crate::EmittedToolCall> =
+        serde_json::from_value(exchange.input.headers[CAMEL_LLM_TOOL_CALLS].clone())
+            .expect("tool calls header");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call_1");
+    assert_eq!(calls[0].arguments, r#"{"city":"London"}"#);
+}
+
+#[tokio::test]
+async fn duplicate_tool_call_ids_verbatim_repeat_collapses() {
+    let provider = Arc::new(
+        MockProvider::new("test", MockMode::Fixed("unused".into())).with_tool_calls_and_text(
+            "Done.",
+            vec![
+                ("call_1", "get_weather", r#"{"city":"London"}"#),
+                ("call_1", "get_weather", r#"{"city":"London"}"#),
+            ],
+        ),
+    );
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: false,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(config, provider, 32768, "test-route".into()).build();
+    let mut exchange = make_exchange(Body::Text("prompt".into()));
+
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+
+    let calls: Vec<crate::EmittedToolCall> =
+        serde_json::from_value(exchange.input.headers[CAMEL_LLM_TOOL_CALLS].clone())
+            .expect("tool calls header");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call_1");
+    assert_eq!(calls[0].arguments, r#"{"city":"London"}"#);
+}
+
+#[tokio::test]
+async fn tool_turn_without_text_keeps_empty_body() {
+    let provider = Arc::new(
+        MockProvider::new("test", MockMode::Fixed("unused".into())).with_tool_call(
+            "call_1",
+            "get_weather",
+            r#"{"city":"London"}"#,
+        ),
+    );
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: false,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(config, provider, 32768, "test-route".into()).build();
+    let mut exchange = make_exchange(Body::Text("prompt".into()));
+
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+
+    assert_eq!(exchange.input.body, Body::Empty);
+    let calls: Vec<crate::EmittedToolCall> =
+        serde_json::from_value(exchange.input.headers[CAMEL_LLM_TOOL_CALLS].clone())
+            .expect("tool calls header");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call_1");
+    assert!(!exchange.input.headers.contains_key(CAMEL_LLM_TEXT));
+}
+
+#[tokio::test]
+async fn text_only_turn_sets_body() {
+    let provider = Arc::new(MockProvider::new(
+        "test",
+        MockMode::Fixed("plain answer".into()),
+    ));
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: false,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(config, provider, 32768, "test-route".into()).build();
+    let mut exchange = make_exchange(Body::Text("prompt".into()));
+
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+
+    assert_eq!(exchange.input.body, Body::Text("plain answer".into()));
+    assert!(!exchange.input.headers.contains_key(CAMEL_LLM_TOOL_CALLS));
+}

@@ -686,6 +686,8 @@ impl LlmProducer {
                 let mut finish_reason = None;
                 let mut final_model = None;
                 let mut tool_calls: Vec<EmittedToolCall> = Vec::new();
+                let mut seen_tool_ids: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
 
                 while let Some(event) = stream.next().await {
                     match event? {
@@ -701,6 +703,24 @@ impl LlmProducer {
                             arguments,
                         } => {
                             cs.store(true, Ordering::SeqCst);
+                            if !seen_tool_ids.insert(id.clone()) {
+                                if let Some(first) = tool_calls.iter().find(|tc| tc.id == id) {
+                                    if first.name != name || first.arguments != arguments {
+                                        tracing::warn!(
+                                            route_id = %rid,
+                                            id = %id,
+                                            "duplicate tool call id with conflicting payload dropped; first wins"
+                                        );
+                                    } else {
+                                        tracing::debug!(
+                                            route_id = %rid,
+                                            id = %id,
+                                            "duplicate tool call id dropped"
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
                             tool_calls.push(EmittedToolCall {
                                 id,
                                 name,
@@ -774,11 +794,15 @@ impl LlmProducer {
         if tool_calls.is_empty() {
             exchange.input.body = Body::Text(full_text);
         } else {
+            // Dispatch rides the CamelLlmToolCalls header; the body carries
+            // accompanying text when present.
             let headers = &mut exchange.input.headers;
             if !full_text.is_empty() {
-                headers.insert(CAMEL_LLM_TEXT.to_string(), Value::String(full_text));
+                headers.insert(CAMEL_LLM_TEXT.to_string(), Value::String(full_text.clone()));
+                exchange.input.body = Body::Text(full_text);
+            } else {
+                exchange.input.body = Body::Empty;
             }
-            exchange.input.body = Body::Empty;
             headers.insert(
                 CAMEL_LLM_TOOL_CALLS.to_string(),
                 serde_json::to_value(&tool_calls).unwrap(), // allow-unwrap: EmittedToolCall impl Serialize, always succeeds

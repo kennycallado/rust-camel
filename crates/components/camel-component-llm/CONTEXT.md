@@ -27,7 +27,7 @@ The adapter that bridges `LlmProvider` to the siumai SDK. Lives in `provider/siu
 _Avoid_: OpenAiClient, OllamaClient (those are siumai types, never exposed)
 
 **Materialized mode**:
-When `stream=false`, the producer collects all `ChatEvent`s into a single `Body::Text` with complete usage headers (`CamelLlmTokensIn`, `CamelLlmTokensOut`).
+When `stream=false`, the producer collects all `ChatEvent`s into a single result with complete usage headers (`CamelLlmTokensIn`, `CamelLlmTokensOut`). Text-only turns use `Body::Text`. Tool-call turns with accompanying text use `Body::Text` plus `CamelLlmText` (the route owns dispatch through `CamelLlmToolCalls`). Tool-call turns without text use `Body::Empty`. Duplicate tool-call ids within one materialized turn keep the first occurrence (identical repeats log at `debug`, conflicting payloads at `warn`).
 _Avoid_: sync mode, blocking mode
 
 **Streaming mode**:

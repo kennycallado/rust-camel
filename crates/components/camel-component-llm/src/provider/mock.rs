@@ -61,6 +61,9 @@ pub struct MockProvider {
     start_times: Option<Arc<Mutex<Vec<std::time::Instant>>>>,
     /// Optional tool call to emit (id, name, arguments).
     tool_call: Option<(String, String, String)>,
+    /// Optional text followed by ordered tool calls to emit.
+    #[allow(clippy::type_complexity)]
+    tool_calls_with_text: Option<(String, Vec<(String, String, String)>)>,
     /// Records received ChatRequest messages for assertion in multi-turn tests.
     messages_recorder: Option<Arc<Mutex<Vec<ChatMessage>>>>,
 }
@@ -130,6 +133,7 @@ impl MockProvider {
             track_cancel: false,
             start_times: None,
             tool_call: None,
+            tool_calls_with_text: None,
             messages_recorder: None,
         }
     }
@@ -185,6 +189,22 @@ impl MockProvider {
         args: impl Into<String>,
     ) -> Self {
         self.tool_call = Some((id.into(), name.into(), args.into()));
+        self
+    }
+
+    /// Emit text, then tool calls, followed by `Finished` with `Stop`.
+    pub fn with_tool_calls_and_text(
+        mut self,
+        text: impl Into<String>,
+        calls: Vec<(&str, &str, &str)>,
+    ) -> Self {
+        self.tool_calls_with_text = Some((
+            text.into(),
+            calls
+                .into_iter()
+                .map(|(id, name, args)| (id.into(), name.into(), args.into()))
+                .collect(),
+        ));
         self
     }
 
@@ -270,6 +290,7 @@ impl LlmProvider for MockProvider {
         let mode = self.mode.clone();
         let model = req.model.clone();
         let tool_call = self.tool_call.clone();
+        let tool_calls_with_text = self.tool_calls_with_text.clone();
         let messages_recorder = self.messages_recorder.clone();
 
         let s = async_stream::stream! {
@@ -306,6 +327,25 @@ impl LlmProvider for MockProvider {
             if let Some(e) = fail {
                 finished.store(true, Ordering::SeqCst);
                 yield Err(e);
+                return;
+            }
+
+            if let Some((text, calls)) = tool_calls_with_text {
+                yield Ok(ChatEvent::Delta { text });
+                for (id, name, arguments) in calls {
+                    yield Ok(ChatEvent::ToolCall { id, name, arguments });
+                }
+                finished.store(true, Ordering::SeqCst);
+                yield Ok(ChatEvent::Finished {
+                    usage: Some(LlmUsage {
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        total_tokens: 2,
+                    }),
+                    model: Some(model),
+                    finish_reason: Some(FinishReason::Stop),
+                    metadata: serde_json::Map::new(),
+                });
                 return;
             }
 
