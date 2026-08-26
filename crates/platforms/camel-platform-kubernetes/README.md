@@ -81,7 +81,7 @@ if handle.is_leader() {
 ```rust
 use camel_platform_kubernetes::KubernetesPlatformIdentity;
 
-let identity = KubernetesPlatformIdentity::from_env();
+let identity = KubernetesPlatformIdentity::try_from_env()?;
 ```
 
 ### `KubernetesReadinessGate`
@@ -98,11 +98,16 @@ let namespace = std::env::var("POD_NAMESPACE")?;
 let readiness_gate = Arc::new(KubernetesReadinessGate::new(client, &namespace, pod_name));
 ```
 
-## Required Downward API environment variables
+## Downward API environment variables
 
-`KubernetesPlatformIdentity::from_env()` reads:
+`KubernetesPlatformIdentity::try_from_env()` resolves the node id from the
+first non-empty source in the chain `POD_NAME` → `HOSTNAME` → local hostname.
+`POD_NAME` is the authoritative source; fallback sources log a warning, and
+resolution fails with a config error when every source is empty. Expose
+`POD_NAME` in production via the Downward API.
 
-- `POD_NAME`
+Additional pod fields:
+
 - `POD_NAMESPACE`
 - `POD_NODE_NAME`
 - `POD_SERVICE_ACCOUNT`

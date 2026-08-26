@@ -119,8 +119,9 @@ impl CachedLock {
 
 pub struct KubernetesLeadershipService {
     client: Client,
-    identity: PlatformIdentity,
     config: KubernetesPlatformConfig,
+    namespace: String,
+    holder_identity: String,
     locks: Arc<Mutex<HashMap<String, Arc<CachedLock>>>>,
 }
 
@@ -131,10 +132,17 @@ impl KubernetesLeadershipService {
         config: KubernetesPlatformConfig,
     ) -> Result<Self, PlatformError> {
         config.validate()?;
+
+        // Single empty-identity gate: a node without a node_id must never
+        // compete for leadership.
+        let namespace = canonical_namespace(&config, &identity);
+        let holder_identity = holder_identity_string(&namespace, &identity.node_id)?;
+
         Ok(Self {
             client,
-            identity,
             config,
+            namespace,
+            holder_identity,
             locks: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -206,10 +214,10 @@ impl LeadershipService for KubernetesLeadershipService {
 
         let client = self.client.clone();
         let config = self.config.clone();
-        let holder_identity = self.identity.node_id.clone();
+        let holder_identity = self.holder_identity.clone();
         let lock_name_owned = lock_name.to_string();
         let lease_name = format!("{}{}", config.lease_name_prefix, lock_name_owned);
-        let namespace = resolve_lease_namespace(&config, &self.identity);
+        let namespace = self.namespace.clone();
         let cancel_task = cached_lock.cancel.clone();
         let is_leader_task = Arc::clone(&cached_lock.is_leader);
         let leader_epoch_task = Arc::clone(&cached_lock.leader_epoch);
@@ -437,13 +445,22 @@ impl KubernetesPlatformService {
     pub async fn try_default(config: KubernetesPlatformConfig) -> Result<Self, PlatformError> {
         config.validate()?;
 
+        // Identity is resolved before the client so a missing identity surfaces as
+        // `PlatformError::Config` instead of being masked by a client-availability failure.
+        let identity: PlatformIdentity = KubernetesPlatformIdentity::try_from_env()
+            .map_err(|err| {
+                // log-policy: system-broken
+                tracing::error!(error = %err, "kubernetes identity resolution failed");
+                err
+            })?
+            .into_platform_identity();
+
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let client = Client::try_default().await.map_err(|err| {
             PlatformError::NotAvailable(format!("kubernetes client not available: {err}"))
         })?;
 
-        let identity: PlatformIdentity = KubernetesPlatformIdentity::from_env().into();
         let leadership = Arc::new(KubernetesLeadershipService::new(
             client,
             identity.clone(),
@@ -486,10 +503,9 @@ impl Drop for KubernetesPlatformService {
     }
 }
 
-fn resolve_lease_namespace(
-    config: &KubernetesPlatformConfig,
-    identity: &PlatformIdentity,
-) -> String {
+/// Canonical namespace for Lease objects: the first non-empty of
+/// `config.namespace`, `identity.namespace`, then `"default"`.
+fn canonical_namespace(config: &KubernetesPlatformConfig, identity: &PlatformIdentity) -> String {
     if !config.namespace.is_empty() {
         return config.namespace.clone();
     }
@@ -501,6 +517,24 @@ fn resolve_lease_namespace(
     }
 
     "default".to_string()
+}
+
+/// Namespaced Lease holder identity (`{namespace}/{node_id}`).
+///
+/// The single empty-identity gate for the whole service: a node without a
+/// node_id must never compete for leadership.
+fn holder_identity_string(namespace: &str, node_id: &str) -> Result<String, PlatformError> {
+    if node_id.trim().is_empty() {
+        return Err(PlatformError::Config(format!(
+            "node_id must not be empty: a node without identity must not compete for leadership (namespace: {namespace})"
+        )));
+    }
+    Ok(format!("{namespace}/{node_id}"))
+}
+
+/// Whether `spec` is currently held by `holder`.
+fn holder_matches(spec: &LeaseSpec, holder: &str) -> bool {
+    spec.holder_identity.as_deref() == Some(holder)
 }
 
 async fn reconcile_lease(
@@ -543,8 +577,7 @@ async fn reconcile_lease(
     };
 
     let spec = lease.spec.clone().unwrap_or_default();
-    let holder = spec.holder_identity.as_deref();
-    let is_ours = holder == Some(holder_identity);
+    let is_ours = holder_matches(&spec, holder_identity);
 
     if is_ours {
         // Ensure annotation exists (for leases created before this feature).
@@ -664,7 +697,7 @@ async fn release_lease(
     let spec = lease.spec.clone().unwrap_or_default();
 
     // Only release if we still hold this lease.
-    if spec.holder_identity.as_deref() != Some(holder_identity) {
+    if !holder_matches(&spec, holder_identity) {
         return Ok(());
     }
 
@@ -705,51 +738,6 @@ mod tests {
     use super::*;
     use kube::core::Status;
     use kube::core::response::StatusSummary;
-
-    #[test]
-    fn namespace_resolution_uses_explicit_config_namespace_first() {
-        let config = KubernetesPlatformConfig {
-            namespace: "configured-ns".to_string(),
-            ..KubernetesPlatformConfig::default()
-        };
-        let identity = PlatformIdentity {
-            node_id: "pod-a".to_string(),
-            namespace: Some("pod-ns".to_string()),
-            labels: HashMap::new(),
-        };
-
-        assert_eq!(resolve_lease_namespace(&config, &identity), "configured-ns");
-    }
-
-    #[test]
-    fn namespace_resolution_falls_back_to_identity_namespace() {
-        let config = KubernetesPlatformConfig {
-            namespace: "".to_string(),
-            ..KubernetesPlatformConfig::default()
-        };
-        let identity = PlatformIdentity {
-            node_id: "pod-a".to_string(),
-            namespace: Some("pod-ns".to_string()),
-            labels: HashMap::new(),
-        };
-
-        assert_eq!(resolve_lease_namespace(&config, &identity), "pod-ns");
-    }
-
-    #[test]
-    fn namespace_resolution_falls_back_to_default_literal_when_missing() {
-        let config = KubernetesPlatformConfig {
-            namespace: "".to_string(),
-            ..KubernetesPlatformConfig::default()
-        };
-        let identity = PlatformIdentity {
-            node_id: "pod-a".to_string(),
-            namespace: None,
-            labels: HashMap::new(),
-        };
-
-        assert_eq!(resolve_lease_namespace(&config, &identity), "default");
-    }
 
     #[test]
     fn default_config_leaves_namespace_empty_to_enable_fallback_chain() {
@@ -845,5 +833,102 @@ mod tests {
         let sleep = next_cycle_sleep(false, Duration::from_secs(5), &config);
         assert!(sleep >= Duration::from_millis(1600));
         assert!(sleep <= Duration::from_millis(2400));
+    }
+
+    #[test]
+    fn canonical_namespace_prefers_config() {
+        let config = KubernetesPlatformConfig {
+            namespace: "prod".to_string(),
+            ..KubernetesPlatformConfig::default()
+        };
+        let identity = PlatformIdentity {
+            node_id: "pod-a".to_string(),
+            namespace: Some("other".to_string()),
+            labels: HashMap::new(),
+        };
+
+        assert_eq!(canonical_namespace(&config, &identity), "prod");
+    }
+
+    #[test]
+    fn canonical_namespace_uses_identity_when_config_empty() {
+        let config = KubernetesPlatformConfig {
+            namespace: "".to_string(),
+            ..KubernetesPlatformConfig::default()
+        };
+        let identity = PlatformIdentity {
+            node_id: "pod-a".to_string(),
+            namespace: Some("staging".to_string()),
+            labels: HashMap::new(),
+        };
+
+        assert_eq!(canonical_namespace(&config, &identity), "staging");
+    }
+
+    #[test]
+    fn canonical_namespace_defaults() {
+        let config = KubernetesPlatformConfig {
+            namespace: "".to_string(),
+            ..KubernetesPlatformConfig::default()
+        };
+        let identity = PlatformIdentity {
+            node_id: "pod-a".to_string(),
+            namespace: None,
+            labels: HashMap::new(),
+        };
+
+        assert_eq!(canonical_namespace(&config, &identity), "default");
+    }
+
+    #[test]
+    fn holder_identity_string_formats_namespaced() {
+        assert_eq!(
+            holder_identity_string("prod", "my-pod").unwrap(),
+            "prod/my-pod"
+        );
+    }
+
+    #[test]
+    fn holder_identity_string_rejects_empty_node_id() {
+        for node_id in ["", "   "] {
+            let err = holder_identity_string("default", node_id).unwrap_err();
+            assert!(
+                err.to_string().contains("must not compete for leadership"),
+                "unexpected error for node_id {node_id:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn holder_matches_round_trip() {
+        let spec = LeaseSpec {
+            holder_identity: Some("default/pod-a".to_string()),
+            ..LeaseSpec::default()
+        };
+
+        assert!(holder_matches(&spec, "default/pod-a"));
+        assert!(!holder_matches(&spec, "default/pod-b"));
+        assert!(!holder_matches(&spec, "pod-a"));
+
+        // A spec holding the empty string matches only the empty string —
+        // documents why construction rejects empty identities.
+        let empty_spec = LeaseSpec {
+            holder_identity: Some(String::new()),
+            ..LeaseSpec::default()
+        };
+        assert!(holder_matches(&empty_spec, ""));
+        assert!(!holder_matches(&empty_spec, "default/pod-a"));
+    }
+
+    #[test]
+    fn holder_matches_none_never_matches() {
+        let spec = LeaseSpec {
+            holder_identity: None,
+            ..LeaseSpec::default()
+        };
+
+        assert!(!holder_matches(&spec, "default/pod-a"));
+        assert!(!holder_matches(&spec, "pod-a"));
+        assert!(!holder_matches(&spec, ""));
     }
 }

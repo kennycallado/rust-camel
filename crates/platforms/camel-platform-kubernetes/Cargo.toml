@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
+hostname.workspace = true
 rustls = { version = "0.23", features = ["ring"] }
 
 [dev-dependencies]

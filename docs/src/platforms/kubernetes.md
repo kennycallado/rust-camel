@@ -26,6 +26,18 @@ Leader election uses Kubernetes Lease objects from the
 `coordination.k8s.io` API group. Each named lock maps to one Lease in
 the configured namespace.
 
+The Lease `holderIdentity` has the form `<namespace>/<node_id>`. The
+namespace is resolved once: config namespace, then pod namespace, then
+`default`. The same value scopes the Lease API client. This is the value
+an operator sees in `kubectl get lease`.
+
+The node id resolves from the first non-empty source in the chain
+`POD_NAME` → `HOSTNAME` → local hostname. `POD_NAME` comes from the
+Downward API. Fallback sources log a warning. When no source resolves,
+platform construction fails with a config error. After an upgrade, the
+first acquisition rewrites each Lease holder to the new format. This
+rewrite does not bypass lease expiry or optimistic concurrency.
+
 The `KubernetesLeadershipService` runs a background loop for each lock:
 
 1. Read the current Lease from the API.

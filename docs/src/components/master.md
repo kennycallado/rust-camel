@@ -52,6 +52,16 @@ The leader election backend comes from the configured `PlatformService`. The def
 
 Every acquired term increments the leader epoch. The bridge stamps the new epoch on each envelope. A node that loses leadership stops the delegate within `drain_timeout_ms` and steps down. The route stays alive; only delegate intake pauses until the node wins again.
 
+### Kubernetes identity
+
+`KubernetesPlatformService` builds its election identity from the pod it runs on. Production deployments MUST expose `POD_NAME` through the Kubernetes Downward API. Expose `POD_NAMESPACE` as well. The platform uses it when the configuration sets no namespace.
+
+The node ID resolves from the first non-empty source in a fixed chain. The chain tries the `POD_NAME` environment variable, then the `HOSTNAME` environment variable, then the local hostname. Resolution from a fallback source logs a warning. When no source resolves, platform construction fails with a configuration error.
+
+The Lease `holderIdentity` has the format `<namespace>/<node_id>`. This is the value operators see in `kubectl get lease`. The namespace resolves in this order: the configured namespace, the pod namespace, then `default`.
+
+An upgrade may leave Leases with a holder in the old format. The first post-upgrade acquisition rewrites each Lease's holder. The format change does not bypass lease expiry or optimistic concurrency.
+
 ## Configuration
 
 The Master reads from `[components.master]` in `Camel.toml`:

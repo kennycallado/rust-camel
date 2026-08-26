@@ -163,7 +163,7 @@ async fn master_component_processes_after_kubernetes_leadership() {
     ctx.start().await.expect("context should start");
 
     // The lease name is lease_name_prefix + lock_name = "camel-orders"
-    wait_for_leader(&client, "camel-orders", "test-pod", 30).await;
+    wait_for_leader(&client, "camel-orders", "default/test-pod", 30).await;
 
     let endpoint = mock
         .get_endpoint("result")
@@ -264,7 +264,13 @@ async fn master_route_uses_kubernetes_platform_from_config() {
         .expect("route should be added");
     ctx.start().await.expect("context should start");
 
-    wait_for_leader(&client, "camel-config-orders", "config-test-pod", 30).await;
+    wait_for_leader(
+        &client,
+        "camel-config-orders",
+        "default/config-test-pod",
+        30,
+    )
+    .await;
 
     ctx.stop().await.expect("context should stop");
 }

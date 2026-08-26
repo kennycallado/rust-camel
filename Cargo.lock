@@ -2402,6 +2402,7 @@ dependencies = [
  "async-trait",
  "camel-api",
  "camel-core",
+ "hostname",
  "k8s-openapi",
  "kube",
  "rand 0.10.2",
