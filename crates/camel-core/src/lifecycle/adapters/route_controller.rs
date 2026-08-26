@@ -1139,7 +1139,7 @@ impl DefaultRouteController {
         // consumer_ctx moves into the task so the failure arm can stop child
         // tasks spawned by consumer.start().
         let consumer_cancel_for_cleanup = consumer_ctx.cancel_token();
-        let (consumer_handle, startup_rx, watcher_inputs) =
+        let (consumer_handle, startup_rx, watcher_inputs, outer_inputs) =
             super::consumer_management::spawn_consumer_task(
                 route_id.to_string(),
                 consumer,
@@ -1169,6 +1169,15 @@ impl DefaultRouteController {
         // Detached failure watcher for Immediate consumers (rc-slvd).
         if let Some(inputs) = watcher_inputs {
             super::consumer_management::spawn_failure_watcher(inputs);
+        }
+
+        // Detached outer-task watcher for Explicit consumers (rc-a7rh):
+        // spawned only after the handshake resolved Ok — rollback
+        // terminations (abort-then-cancel above) happen before this point
+        // and are never watched. Explicit consumers on aggregate routes
+        // get identical coverage — no aggregate carve-out.
+        if let Some(outer) = outer_inputs {
+            super::consumer_management::spawn_outer_task_watcher(outer);
         }
 
         // Extend the stored consumer handle through aggregate force-completion.

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -198,6 +199,101 @@ async fn await_consumer_startup_bounded(
     }
 }
 
+/// Shared task↔watcher outcome cell: false = Pending (nobody accounted
+/// this task's termination), true = Accounted (a body path published its
+/// failure, or it completed normally through the finally-stop). Relaxed
+/// ordering suffices: the TerminationGuard's oneshot send provides the
+/// happens-before edge for the watcher's read.
+#[derive(Clone)]
+pub(crate) struct OuterOutcomeCell(Arc<AtomicBool>);
+
+impl OuterOutcomeCell {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub(crate) fn mark_accounted(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn is_accounted(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Fires the oneshot exactly once when the outer Explicit task ends, in every
+/// termination mode. `Option` + `take()` because `oneshot::Sender::send`
+/// consumes `self` (cannot move out of `&mut self`).
+pub(crate) struct TerminationGuard {
+    tx: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for TerminationGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Everything the detached outer-task watcher needs, produced once by
+/// `spawn_consumer_task` for Explicit-class consumers.
+pub(crate) struct OuterWatcherInputs {
+    /// Fired by the task-local TerminationGuard on any task end.
+    pub terminated: oneshot::Receiver<()>,
+    pub outcome: OuterOutcomeCell,
+    /// Cancelled stop → the stop flow owns termination; silent exit.
+    pub consumer_cancel: CancellationToken,
+    pub route_id: String,
+    pub runtime: Option<Weak<dyn RuntimeHandle>>,
+    pub crash_notifier: Option<mpsc::Sender<CrashNotification>>,
+}
+
+pub(crate) fn spawn_outer_task_watcher(inputs: OuterWatcherInputs) -> JoinHandle<()> {
+    tokio::spawn(run_outer_watcher(inputs))
+}
+
+async fn run_outer_watcher(inputs: OuterWatcherInputs) {
+    // (a) Await termination — the ONLY wait; no timeout (the guard
+    // fires when the task ends, however long it runs).
+    if inputs.terminated.await.is_err() {
+        // Sender dropped without firing (cannot happen with the guard;
+        // defensive) — treat as accounted, stay silent.
+        return;
+    }
+    // (b) Cancelled stop owns termination — silent.
+    if inputs.consumer_cancel.is_cancelled() {
+        return;
+    }
+    // (c) Accounted (failure already published by the body, or normal
+    // completion) — silent. Sole-publisher discipline.
+    if inputs.outcome.is_accounted() {
+        return;
+    }
+
+    let error_msg = format!(
+        "Consumer outer task terminated abnormally (panic or abort): {}",
+        inputs.route_id
+    );
+    // log-policy: system-broken
+    error!(route_id = %inputs.route_id, "{error_msg}");
+    if let Some(tx) = inputs.crash_notifier
+        && tx
+            .send(CrashNotification {
+                route_id: inputs.route_id.clone(),
+                error: error_msg.clone(),
+            })
+            .await
+            .is_err()
+    {
+        warn!(
+            route_id = %inputs.route_id,
+            "CrashNotification channel closed; crash will not be restarted"
+        );
+    }
+    publish_runtime_failure(inputs.runtime, &inputs.route_id, &error_msg).await;
+}
+
 /// Everything the detached failure watcher needs, produced once by
 /// `spawn_consumer_task` for Immediate consumers.
 pub(crate) struct ImmediateWatcherInputs {
@@ -298,6 +394,7 @@ pub(crate) fn spawn_consumer_task(
     JoinHandle<()>,
     StartupReceiver,
     Option<ImmediateWatcherInputs>,
+    Option<OuterWatcherInputs>,
 ) {
     match consumer.startup_mode() {
         ConsumerStartupMode::Immediate => {
@@ -460,7 +557,7 @@ pub(crate) fn spawn_consumer_task(
                 runtime: runtime_for_watcher,
             };
 
-            (handle, startup_receiver, Some(inputs))
+            (handle, startup_receiver, Some(inputs), None)
         }
         // Forward-compat: any future variant is treated as Explicit so the
         // consumer must signal readiness (or its start() error) before the
@@ -472,7 +569,21 @@ pub(crate) fn spawn_consumer_task(
             let startup_for_task = signal.clone();
             let consumer_ctx = consumer_ctx.with_startup(signal);
 
+            // Outer-task watcher plumbing. Everything the detached watcher
+            // needs is captured BEFORE the async move block takes ownership
+            // (same pre-spawn-clone idiom as the Immediate arm).
+            let outer_outcome = OuterOutcomeCell::new();
+            let outer_outcome_for_inputs = outer_outcome.clone();
+            let (term_tx, term_rx) = oneshot::channel::<()>();
+            let crash_notifier_for_inputs = crash_notifier.clone();
+            let route_id_for_inputs = route_id.clone();
+            let runtime_for_inputs = runtime_for_consumer.clone();
+            let consumer_cancel_for_inputs = consumer_ctx.cancel_token();
+
             let handle = tokio::spawn(async move {
+                // First statement: the guard fires term_rx on Drop, covering
+                // every termination mode of this task (return, panic, abort).
+                let _guard = TerminationGuard { tx: Some(term_tx) };
                 let result = consumer.start(consumer_ctx.clone()).await;
                 if let Err(e) = &result {
                     startup_for_task.mark_failed(e.to_string());
@@ -499,6 +610,8 @@ pub(crate) fn spawn_consumer_task(
                     }
 
                     publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
+                    // Accounted BEFORE the fallible stop below — a panic in that stop must not re-publish.
+                    outer_outcome.mark_accounted();
 
                     let _ = consumer.stop().await;
                     return;
@@ -535,6 +648,8 @@ pub(crate) fn spawn_consumer_task(
                                         warn!(route_id = %route_id, "CrashNotification channel closed; crash will not be restarted");
                                     }
                                     publish_runtime_failure(runtime_for_consumer.clone(), &route_id, &error_msg).await;
+                                    // Accounted immediately after publishing — the fallible finally-stop below must not re-publish.
+                                    outer_outcome.mark_accounted();
                                 }
                                 Ok(Err(e)) => {
                                     tracing::debug!(route_id = %route_id, "Consumer bg task error during shutdown: {e}");
@@ -555,6 +670,8 @@ pub(crate) fn spawn_consumer_task(
                                         warn!(route_id = %route_id, "CrashNotification channel closed; crash will not be restarted");
                                     }
                                     publish_runtime_failure(runtime_for_consumer.clone(), &route_id, &error_msg).await;
+                                    // Accounted immediately after publishing — the fallible finally-stop below must not re-publish.
+                                    outer_outcome.mark_accounted();
                                 }
                                 Err(join_err) => {
                                     tracing::debug!(
@@ -571,9 +688,19 @@ pub(crate) fn spawn_consumer_task(
                 }
 
                 let _ = consumer.stop().await;
+                // Normal/shutdown exit accounted only AFTER stop() completes — a panic above stays Pending (abnormal).
+                outer_outcome.mark_accounted();
             });
 
-            (handle, receiver, None)
+            let outer_inputs = OuterWatcherInputs {
+                terminated: term_rx,
+                outcome: outer_outcome_for_inputs,
+                consumer_cancel: consumer_cancel_for_inputs,
+                route_id: route_id_for_inputs,
+                runtime: runtime_for_inputs,
+                crash_notifier: crash_notifier_for_inputs,
+            };
+            (handle, receiver, None, Some(outer_inputs))
         }
     }
 }
@@ -804,6 +931,55 @@ mod tests {
         }
     }
 
+    struct ExplicitReadyConsumer {
+        stop_panics: bool,
+        bg: Option<tokio::task::JoinHandle<Result<(), CamelError>>>,
+    }
+
+    #[async_trait]
+    impl Consumer for ExplicitReadyConsumer {
+        async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+            ctx.mark_ready();
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            if self.stop_panics {
+                panic!("stop exploded");
+            }
+            Ok(())
+        }
+
+        fn startup_mode(&self) -> ConsumerStartupMode {
+            ConsumerStartupMode::Explicit
+        }
+
+        fn background_task_handle(
+            &mut self,
+        ) -> Option<tokio::task::JoinHandle<Result<(), CamelError>>> {
+            self.bg.take()
+        }
+    }
+
+    struct ParkedExplicitConsumer;
+
+    #[async_trait]
+    impl Consumer for ParkedExplicitConsumer {
+        async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+            ctx.mark_ready();
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        fn startup_mode(&self) -> ConsumerStartupMode {
+            ConsumerStartupMode::Explicit
+        }
+    }
+
     fn managed_route_with_handles(
         consumer_handle: Option<JoinHandle<()>>,
         pipeline_handle: Option<JoinHandle<()>>,
@@ -900,7 +1076,7 @@ mod tests {
         );
         let (crash_tx, mut crash_rx) = mpsc::channel(1);
 
-        let (handle, _startup_rx, _watcher_inputs) = spawn_consumer_task(
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-resume".to_string(),
             Box::new(FailingConsumer::new("resume start failed")),
             ctx,
@@ -928,7 +1104,7 @@ mod tests {
 
         let (consumer, stop_called) = FailingConsumer::with_stop_tracking("start failed");
 
-        let (handle, _startup_rx, _watcher_inputs) = spawn_consumer_task(
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-h9".to_string(),
             Box::new(consumer),
             ctx,
@@ -986,7 +1162,7 @@ mod tests {
         let ctx = ConsumerContext::new(exchange_tx, cancel, "consumer-mgmt-test-route".to_string());
         let (crash_tx, mut crash_rx) = mpsc::channel(1);
 
-        let (handle, _startup_rx, _watcher_inputs) = spawn_consumer_task(
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-deferred".to_string(),
             Box::new(DeferredFailConsumer::new("broker lost")),
             ctx,
@@ -1016,7 +1192,7 @@ mod tests {
         // Cancel BEFORE the bg task exits — simulates graceful shutdown
         cancel.cancel();
 
-        let (handle, _startup_rx, _watcher_inputs) = spawn_consumer_task(
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-cancel".to_string(),
             Box::new(DeferredFailConsumer::new("shutdown error")),
             ctx,
@@ -1058,7 +1234,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, cancel.clone(), "consumer-mgmt-test-route".to_string());
 
-        let (handle, _startup_rx, _watcher_inputs) = spawn_consumer_task(
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "test-route".into(),
             Box::new(StopTrackingConsumer),
             ctx,
@@ -1300,7 +1476,7 @@ mod tests {
         let (crash_tx, crash_rx) = mpsc::channel::<CrashNotification>(1);
         drop(crash_rx); // close the channel so send fails
 
-        let (handle, _startup_rx, _watcher_inputs) = spawn_consumer_task(
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-warn".to_string(),
             Box::new(FailingConsumer::new("start failed")),
             ctx,
@@ -1382,7 +1558,7 @@ mod tests {
             "immediate-ok-test".to_string(),
         );
 
-        let (handle, _startup_rx, _watcher_inputs) = spawn_consumer_task(
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-immediate".to_string(),
             Box::new(ImmediateOkConsumer),
             ctx,
@@ -1483,6 +1659,377 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn outer_task_watcher_silent_when_accounted() {
+        let recorder = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(RecordingRuntime {
+            recorder: Arc::clone(&recorder),
+            reject: false,
+        });
+        let (terminated_tx, terminated) = oneshot::channel();
+        let outcome = OuterOutcomeCell::new();
+        outcome.mark_accounted();
+        let watcher = spawn_outer_task_watcher(OuterWatcherInputs {
+            terminated,
+            outcome,
+            consumer_cancel: CancellationToken::new(),
+            route_id: "route-accounted".to_string(),
+            runtime: Some(Arc::downgrade(&runtime)),
+            crash_notifier: None,
+        });
+        terminated_tx
+            .send(())
+            .expect("termination signal must be delivered");
+
+        tokio::time::timeout(Duration::from_secs(2), watcher)
+            .await
+            .expect("watcher must complete") // allow-unwrap: test-only
+            .expect("watcher task must join");
+        assert!(recorder.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn outer_task_watcher_silent_when_cancelled() {
+        let recorder = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(RecordingRuntime {
+            recorder: Arc::clone(&recorder),
+            reject: false,
+        });
+        let consumer_cancel = CancellationToken::new();
+        consumer_cancel.cancel();
+        let (terminated_tx, terminated) = oneshot::channel();
+        let watcher = spawn_outer_task_watcher(OuterWatcherInputs {
+            terminated,
+            outcome: OuterOutcomeCell::new(),
+            consumer_cancel,
+            route_id: "route-cancelled".to_string(),
+            runtime: Some(Arc::downgrade(&runtime)),
+            crash_notifier: None,
+        });
+        terminated_tx
+            .send(())
+            .expect("termination signal must be delivered");
+
+        tokio::time::timeout(Duration::from_secs(2), watcher)
+            .await
+            .expect("watcher must complete") // allow-unwrap: test-only
+            .expect("watcher task must join");
+        assert!(recorder.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn outer_task_watcher_publishes_when_pending() {
+        let recorder = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(RecordingRuntime {
+            recorder: Arc::clone(&recorder),
+            reject: false,
+        });
+        let (terminated_tx, terminated) = oneshot::channel();
+        let watcher = spawn_outer_task_watcher(OuterWatcherInputs {
+            terminated,
+            outcome: OuterOutcomeCell::new(),
+            consumer_cancel: CancellationToken::new(),
+            route_id: "route-pending".to_string(),
+            runtime: Some(Arc::downgrade(&runtime)),
+            crash_notifier: None,
+        });
+        terminated_tx
+            .send(())
+            .expect("termination signal must be delivered");
+
+        tokio::time::timeout(Duration::from_secs(2), watcher)
+            .await
+            .expect("watcher must complete") // allow-unwrap: test-only
+            .expect("watcher task must join");
+        let commands = recorder.lock().expect("lock");
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            RuntimeCommand::FailRoute { error, .. } => {
+                assert!(error.contains("terminated abnormally"));
+            }
+            other => panic!("expected FailRoute, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn outer_task_watcher_failroute_on_panic_in_stop() {
+        let recorder = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(RecordingRuntime {
+            recorder: Arc::clone(&recorder),
+            reject: false,
+        });
+        let token = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, token.clone(), "route-stop-panic".to_string());
+
+        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
+            "route-stop-panic".to_string(),
+            Box::new(ExplicitReadyConsumer {
+                stop_panics: true,
+                bg: None,
+            }),
+            ctx,
+            None,
+            Some(Arc::downgrade(&runtime)),
+            false,
+        );
+        let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
+            .await
+            .expect("startup receiver must resolve") // allow-unwrap: test-only
+            ;
+        assert!(startup.is_ok());
+
+        let watcher = spawn_outer_task_watcher(
+            outer_inputs.expect("Explicit consumer must yield outer watcher inputs"), // allow-unwrap: test-only
+        );
+        let join = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("consumer task must terminate") // allow-unwrap: test-only
+            ;
+        assert!(join.is_err(), "stop panic must produce a JoinError");
+        tokio::time::timeout(Duration::from_secs(2), watcher)
+            .await
+            .expect("watcher must complete") // allow-unwrap: test-only
+            .expect("watcher task must join"); // allow-unwrap: test-only
+
+        let commands = recorder.lock().expect("recorder lock"); // allow-unwrap: test-only
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            &commands[0],
+            RuntimeCommand::FailRoute { error, .. } if error.contains("terminated abnormally")
+        ));
+    }
+
+    #[tokio::test]
+    async fn outer_task_watcher_silent_on_normal_completion() {
+        let recorder = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(RecordingRuntime {
+            recorder: Arc::clone(&recorder),
+            reject: false,
+        });
+        let token = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, token, "route-normal".to_string());
+
+        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
+            "route-normal".to_string(),
+            Box::new(ExplicitReadyConsumer {
+                stop_panics: false,
+                bg: None,
+            }),
+            ctx,
+            None,
+            Some(Arc::downgrade(&runtime)),
+            false,
+        );
+        let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
+            .await
+            .expect("startup receiver must resolve") // allow-unwrap: test-only
+            ;
+        assert!(startup.is_ok());
+        let watcher = spawn_outer_task_watcher(
+            outer_inputs.expect("Explicit consumer must yield outer watcher inputs"), // allow-unwrap: test-only
+        );
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("consumer task must terminate") // allow-unwrap: test-only
+            .expect("consumer task must join") // allow-unwrap: test-only
+            ;
+        tokio::time::timeout(Duration::from_secs(2), watcher)
+            .await
+            .expect("watcher must complete") // allow-unwrap: test-only
+            .expect("watcher task must join"); // allow-unwrap: test-only
+        assert!(recorder.lock().expect("recorder lock").is_empty()); // allow-unwrap: test-only
+    }
+
+    #[tokio::test]
+    async fn outer_task_watcher_silent_on_normal_completion_with_bg() {
+        let recorder = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(RecordingRuntime {
+            recorder: Arc::clone(&recorder),
+            reject: false,
+        });
+        let token = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, token, "route-normal-bg".to_string());
+
+        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
+            "route-normal-bg".to_string(),
+            Box::new(ExplicitReadyConsumer {
+                stop_panics: false,
+                bg: Some(tokio::spawn(async { Ok::<(), CamelError>(()) })),
+            }),
+            ctx,
+            None,
+            Some(Arc::downgrade(&runtime)),
+            false,
+        );
+        let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
+            .await
+            .expect("startup receiver must resolve") // allow-unwrap: test-only
+            ;
+        assert!(startup.is_ok());
+        let watcher = spawn_outer_task_watcher(
+            outer_inputs.expect("Explicit consumer must yield outer watcher inputs"), // allow-unwrap: test-only
+        );
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("consumer task must terminate") // allow-unwrap: test-only
+            .expect("consumer task must join") // allow-unwrap: test-only
+            ;
+        tokio::time::timeout(Duration::from_secs(2), watcher)
+            .await
+            .expect("watcher must complete") // allow-unwrap: test-only
+            .expect("watcher task must join"); // allow-unwrap: test-only
+        assert!(recorder.lock().expect("recorder lock").is_empty()); // allow-unwrap: test-only
+    }
+
+    #[tokio::test]
+    async fn outer_task_watcher_silent_on_cancel() {
+        let recorder = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(RecordingRuntime {
+            recorder: Arc::clone(&recorder),
+            reject: false,
+        });
+        let token = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, token.clone(), "route-cancel".to_string());
+
+        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
+            "route-cancel".to_string(),
+            Box::new(ParkedExplicitConsumer),
+            ctx,
+            None,
+            Some(Arc::downgrade(&runtime)),
+            false,
+        );
+        let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
+            .await
+            .expect("startup receiver must resolve") // allow-unwrap: test-only
+            ;
+        assert!(startup.is_ok());
+        let watcher = spawn_outer_task_watcher(
+            outer_inputs.expect("Explicit consumer must yield outer watcher inputs"), // allow-unwrap: test-only
+        );
+        token.cancel();
+        handle.abort();
+        let join = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("aborted consumer task must terminate") // allow-unwrap: test-only
+            ;
+        assert!(join.is_err());
+        tokio::time::timeout(Duration::from_secs(2), watcher)
+            .await
+            .expect("watcher must complete") // allow-unwrap: test-only
+            .expect("watcher task must join"); // allow-unwrap: test-only
+        assert!(recorder.lock().expect("recorder lock").is_empty()); // allow-unwrap: test-only
+    }
+
+    #[tokio::test]
+    async fn outer_task_watcher_failroute_on_uncancelled_abort() {
+        let recorder = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(RecordingRuntime {
+            recorder: Arc::clone(&recorder),
+            reject: false,
+        });
+        let runtime_weak = Arc::downgrade(&runtime);
+        let token = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, token, "route-uncancelled-abort".to_string());
+        let (crash_tx, mut crash_rx) = mpsc::channel(1);
+
+        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
+            "route-uncancelled-abort".to_string(),
+            Box::new(ParkedExplicitConsumer),
+            ctx,
+            Some(crash_tx),
+            Some(runtime_weak),
+            false,
+        );
+        let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
+            .await
+            .expect("startup receiver must resolve") // allow-unwrap: test-only
+            ;
+        assert!(startup.is_ok());
+        let watcher = spawn_outer_task_watcher(
+            outer_inputs.expect("Explicit consumer must yield outer watcher inputs"), // allow-unwrap: test-only
+        );
+        handle.abort();
+        let join = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("aborted consumer task must terminate") // allow-unwrap: test-only
+            ;
+        assert!(join.is_err());
+        tokio::time::timeout(Duration::from_secs(2), watcher)
+            .await
+            .expect("watcher must complete") // allow-unwrap: test-only
+            .expect("watcher task must join"); // allow-unwrap: test-only
+
+        let commands = recorder.lock().expect("recorder lock"); // allow-unwrap: test-only
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            &commands[0],
+            RuntimeCommand::FailRoute { error, .. } if error.contains("terminated abnormally")
+        ));
+        drop(commands);
+        let notification = tokio::time::timeout(Duration::from_secs(2), crash_rx.recv())
+            .await
+            .expect("crash notification must arrive") // allow-unwrap: test-only
+            .expect("crash notification must be sent"); // allow-unwrap: test-only
+        assert_eq!(notification.route_id, "route-uncancelled-abort");
+    }
+
+    #[tokio::test]
+    async fn outer_task_watcher_no_double_publish_when_stop_panics_after_bg_publish() {
+        let recorder = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(RecordingRuntime {
+            recorder: Arc::clone(&recorder),
+            reject: false,
+        });
+        let token = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, token, "route-bg-stop-panic".to_string());
+
+        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
+            "route-bg-stop-panic".to_string(),
+            Box::new(ExplicitReadyConsumer {
+                stop_panics: true,
+                bg: Some(tokio::spawn(async {
+                    Err(CamelError::RouteError("bg died".into()))
+                })),
+            }),
+            ctx,
+            None,
+            Some(Arc::downgrade(&runtime)),
+            false,
+        );
+        let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
+            .await
+            .expect("startup receiver must resolve") // allow-unwrap: test-only
+            ;
+        assert!(startup.is_ok());
+        let watcher = spawn_outer_task_watcher(
+            outer_inputs.expect("Explicit consumer must yield outer watcher inputs"), // allow-unwrap: test-only
+        );
+        let join = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("consumer task must terminate") // allow-unwrap: test-only
+            ;
+        assert!(join.is_err(), "stop panic must produce a JoinError");
+        tokio::time::timeout(Duration::from_secs(2), watcher)
+            .await
+            .expect("watcher must complete") // allow-unwrap: test-only
+            .expect("watcher task must join"); // allow-unwrap: test-only
+
+        let commands = recorder.lock().expect("recorder lock"); // allow-unwrap: test-only
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            &commands[0],
+            RuntimeCommand::FailRoute { error, .. }
+                if error.contains("bg died") && !error.contains("terminated abnormally")
+        ));
+    }
+
+    #[tokio::test]
     async fn immediate_fast_error_watcher_fails_route() {
         // An Immediate consumer whose start() fails fast: the watcher
         // issues FailRoute, the controller never sees the error.
@@ -1501,7 +2048,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "immediate-err".to_string());
 
-        let (handle, startup_rx, watcher_inputs) = spawn_consumer_task(
+        let (handle, startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-immediate-err".to_string(),
             Box::new(FailingConsumer::new("boom")),
             ctx,
@@ -1568,7 +2115,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "immediate-ok".to_string());
 
-        let (handle, startup_rx, watcher_inputs) = spawn_consumer_task(
+        let (handle, startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-immediate-ok".to_string(),
             Box::new(ImmediateOkConsumer),
             ctx,
@@ -1638,7 +2185,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, cancel.clone(), "immediate-loop".to_string());
 
-        let (handle, _startup_rx, watcher_inputs) = spawn_consumer_task(
+        let (handle, _startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-immediate-loop".to_string(),
             Box::new(ImmediateLoopConsumer),
             ctx,
@@ -1810,7 +2357,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "retry-route".to_string());
 
-        let (handle, _startup_rx, watcher_inputs) = spawn_consumer_task(
+        let (handle, _startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-retry".to_string(),
             Box::new(FailingConsumer::new("boom")),
             ctx,
@@ -1872,7 +2419,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "exhaust-route".to_string());
 
-        let (handle, _startup_rx, watcher_inputs) = spawn_consumer_task(
+        let (handle, _startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-exhaust".to_string(),
             Box::new(FailingConsumer::new("boom")),
             ctx,
@@ -1930,7 +2477,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "nort-route".to_string());
 
-        let (handle, _startup_rx, watcher_inputs) = spawn_consumer_task(
+        let (handle, _startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
             "route-no-runtime".to_string(),
             Box::new(FailingConsumer::new("boom")),
             ctx,

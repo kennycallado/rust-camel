@@ -575,7 +575,7 @@ impl camel_api::RouteController for DefaultRouteController {
 
         // Start consumer after pipeline task is spawned to minimize the chance of
         // fire-and-forget events being produced before the pipeline loop is active.
-        let (consumer_handle, startup_rx, watcher_inputs) =
+        let (consumer_handle, startup_rx, watcher_inputs, outer_inputs) =
             consumer_management::spawn_consumer_task(
                 route_id.to_string(),
                 consumer,
@@ -618,6 +618,14 @@ impl camel_api::RouteController for DefaultRouteController {
         // oneshot, and command_id — ownership split prevents any coupling.
         if let Some(inputs) = watcher_inputs {
             consumer_management::spawn_failure_watcher(inputs);
+        }
+
+        // Detached outer-task watcher for Explicit consumers (rc-a7rh):
+        // spawned only after the handshake resolved Ok — rollback
+        // terminations (abort-then-cancel above) happen before this point
+        // and are never watched.
+        if let Some(outer) = outer_inputs {
+            consumer_management::spawn_outer_task_watcher(outer);
         }
 
         // Store handles and update status
@@ -791,7 +799,7 @@ impl camel_api::RouteController for DefaultRouteController {
             ConsumerContext::new(sender, consumer_cancel.clone(), route_id.to_string());
 
         // Spawn consumer task
-        let (consumer_handle, startup_rx, watcher_inputs) =
+        let (consumer_handle, startup_rx, watcher_inputs, outer_inputs) =
             consumer_management::spawn_consumer_task(
                 route_id.to_string(),
                 consumer,
@@ -818,6 +826,14 @@ impl camel_api::RouteController for DefaultRouteController {
         // Detached failure watcher for Immediate consumers (rc-slvd).
         if let Some(inputs) = watcher_inputs {
             consumer_management::spawn_failure_watcher(inputs);
+        }
+
+        // Detached outer-task watcher for Explicit consumers (rc-a7rh):
+        // spawned only after the resume handshake resolved Ok — rollback
+        // terminations (abort-then-cancel above) happen before this point
+        // and are never watched.
+        if let Some(outer) = outer_inputs {
+            consumer_management::spawn_outer_task_watcher(outer);
         }
 
         // Store consumer handle and update status

@@ -122,6 +122,10 @@ path waits for the grace. Loop-style Immediate consumers (timer, file, sql, cron
 surface nothing inside the budget, so the watcher exits when it elapses. `CamelContext::start()`
 does not fail fast on Immediate errors. Explicit bind failures still do.
 
+**Outer-task termination watch**:
+The detached watcher spawned with each Explicit-class consumer start, resume, and aggregate start after the startup handshake resolves Ok. A task-local drop guard signals termination in every mode (return, panic unwind, abort); the watcher publishes the route failure (crash notification + FailRoute) only when the task ended Pending — no body path accounted the outcome (failure published or normal finally-stop completed) — and the consumer cancel token was not fired. Stop-owned and rollback terminations stay silent. Established by bd rc-a7rh.
+_Avoid_: consumer watchdog, join monitor
+
 ## Compiled Step Variants
 
 **Process**:

@@ -130,7 +130,7 @@ async fn spawn_consumer_task_immediate_consumer_returns_resolved_receiver() {
         started: Arc::clone(&started),
     };
 
-    let (handle, startup_rx, watcher_inputs) = spawn_consumer_task(
+    let (handle, startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
         "immediate-route".to_string(),
         Box::new(consumer),
         ctx,
@@ -193,7 +193,7 @@ async fn spawn_consumer_task_explicit_consumer_waits_for_mark_ready() {
         mark_ready_called: Arc::clone(&mark_ready_called),
     };
 
-    let (handle, startup_rx, _watcher_inputs) = spawn_consumer_task(
+    let (handle, startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
         "explicit-route".to_string(),
         Box::new(consumer),
         ctx,
@@ -243,7 +243,7 @@ async fn spawn_consumer_task_explicit_consumer_start_error_propagates() {
     let cancel = CancellationToken::new();
     let ctx = ConsumerContext::new(tx, cancel, "explicit-fail-route".to_string());
 
-    let (handle, startup_rx, _watcher_inputs) = spawn_consumer_task(
+    let (handle, startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
         "explicit-fail-route".to_string(),
         Box::new(ExplicitBindFailConsumer),
         ctx,
@@ -281,7 +281,7 @@ async fn spawn_consumer_task_explicit_consumer_ok_without_mark_ready_does_not_ha
     let cancel = CancellationToken::new();
     let ctx = ConsumerContext::new(tx, cancel.clone(), "explicit-no-mark-ready".to_string());
 
-    let (handle, startup_rx, _watcher_inputs) = spawn_consumer_task(
+    let (handle, startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
         "explicit-no-mark-ready".to_string(),
         Box::new(ExplicitOkNoMarkReadyConsumer),
         ctx,
@@ -349,7 +349,7 @@ async fn spawn_consumer_task_explicit_deferred_mark_ready_not_defeated_by_fallba
 
     let consumer = ExplicitDeferredMarkReadyConsumer { bg_handle: None };
 
-    let (handle, startup_rx, _watcher_inputs) = spawn_consumer_task(
+    let (handle, startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
         "deferred-ready".to_string(),
         Box::new(consumer),
         ctx,

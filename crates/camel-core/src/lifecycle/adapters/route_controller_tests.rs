@@ -3093,6 +3093,72 @@ impl Component for ImmediateFailComponent {
     }
 }
 
+/// rc-a7rh: mock Explicit consumer whose `start()` latches readiness via
+/// `ctx.mark_ready()` and then panics — the production defect class where
+/// the bind succeeded but the consumer task died right after. The detached
+/// outer-task watcher must observe the dead handle and transition the Route
+/// to Failed; without it the Route stays Started with a dead handle.
+struct PanickingAfterReadyConsumer;
+
+#[async_trait::async_trait]
+impl Consumer for PanickingAfterReadyConsumer {
+    async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        ctx.mark_ready();
+        panic!("consumer exploded after readiness");
+    }
+    async fn stop(&mut self) -> Result<(), CamelError> {
+        Ok(())
+    }
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        ConsumerStartupMode::Explicit
+    }
+}
+
+/// Mock endpoint that vends `PanickingAfterReadyConsumer`.
+struct PanickingAfterReadyEndpoint {
+    uri: String,
+}
+
+impl Endpoint for PanickingAfterReadyEndpoint {
+    fn uri(&self) -> &str {
+        &self.uri
+    }
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(PanickingAfterReadyConsumer))
+    }
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
+        Err(CamelError::ProcessorError(
+            "panicready does not support producers".into(),
+        ))
+    }
+}
+
+/// Mock component that vends `PanickingAfterReadyEndpoint` under the
+/// `"panicready"` scheme.
+struct PanickingAfterReadyComponent;
+
+impl Component for PanickingAfterReadyComponent {
+    fn scheme(&self) -> &str {
+        "panicready"
+    }
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        Ok(Box::new(PanickingAfterReadyEndpoint {
+            uri: uri.to_string(),
+        }))
+    }
+}
+
 /// Mock consumer whose `start()` fails on demand: when `fail_next` is set it
 /// spawns an rc-kh7c-style counter child task (respects `ctx.cancelled()`,
 /// increments every 10ms) and returns Err (simulated resume failure);
@@ -3379,6 +3445,45 @@ async fn immediate_consumer_error_transitions_route_to_failed() {
         v1, v2,
         "counter child task kept running after the failed start (detached task leak): {v1} -> {v2}"
     );
+}
+
+// rc-a7rh: E2E for the production defect this change fixes — an Explicit
+// consumer that latches readiness then dies (panic). The detached outer-task
+// watcher must observe the dead handle and transition the Route to Failed.
+// Before the wiring, all three production call sites dropped the outer-watcher
+// inputs unwatched and the Route stayed Started with a dead handle.
+
+#[tokio::test]
+async fn outer_task_watcher_panic_after_ready_transitions_route_to_failed() {
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    {
+        let mut guard = registry.lock().expect("registry lock");
+        guard.register(Arc::new(PanickingAfterReadyComponent));
+    }
+    let (bus, _ctrl) = wired_bus_and_controller(registry).await;
+
+    register_route_via_bus(
+        &bus,
+        RouteDefinition::new("panicready:x", vec![]).with_route_id("panic-after-ready-e2e"),
+    )
+    .await;
+
+    // mark_ready latches BEFORE the panic — first-signal-wins resolves the
+    // handshake Ok, so StartRoute must return Ok and leave the failure
+    // surface to the outer-task watcher.
+    let result = bus
+        .execute(RuntimeCommand::StartRoute {
+            route_id: "panic-after-ready-e2e".to_string(),
+            command_id: "e2e-start".to_string(),
+            causation_id: None,
+        })
+        .await;
+    assert!(
+        result.is_ok(),
+        "StartRoute must return Ok (mark_ready latched before the panic): {result:?}"
+    );
+
+    poll_route_status(&bus, "panic-after-ready-e2e", "Failed").await;
 }
 
 // rc-slvd: a failed resume of an Immediate consumer returns Ok and the
