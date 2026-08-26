@@ -136,6 +136,8 @@ For leader election with `coordination.k8s.io/v1` Leases, grant your service acc
 
 - verbs: `get`, `create`, `update`, `patch`, `delete`
 
+Election Leases are created with the label `provider=camel` (`kubectl get leases -l provider=camel` filters camel-owned leases).
+
 If you use `KubernetesReadinessGate`, also allow patching pod status:
 
 - resource: `pods/status`

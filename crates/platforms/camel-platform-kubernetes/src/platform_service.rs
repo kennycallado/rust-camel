@@ -593,6 +593,33 @@ fn holder_matches(spec: &LeaseSpec, holder: &str) -> bool {
     spec.holder_identity.as_deref() == Some(holder)
 }
 
+fn build_first_time_lease(
+    lease_name: &str,
+    holder_identity: &str,
+    config: &KubernetesPlatformConfig,
+    now: JiffTimestamp,
+) -> Lease {
+    let mut annotations = BTreeMap::new();
+    annotations.insert(LEADER_TERM_ANNOTATION.to_string(), "1".to_string());
+    let mut labels = BTreeMap::new();
+    labels.insert("provider".to_string(), "camel".to_string());
+    Lease {
+        metadata: ObjectMeta {
+            name: Some(lease_name.to_string()),
+            labels: Some(labels),
+            annotations: Some(annotations),
+            ..ObjectMeta::default()
+        },
+        spec: Some(LeaseSpec {
+            holder_identity: Some(holder_identity.to_string()),
+            lease_duration_seconds: Some(config.lease_duration.as_secs() as i32),
+            acquire_time: Some(MicroTime(now)),
+            renew_time: Some(MicroTime(now)),
+            ..LeaseSpec::default()
+        }),
+    }
+}
+
 async fn reconcile_lease(
     leases: &Api<Lease>,
     lease_name: &str,
@@ -604,22 +631,7 @@ async fn reconcile_lease(
     let maybe_lease = leases.get_opt(lease_name).await?;
     let Some(mut lease) = maybe_lease else {
         // First-time create — initialize leader-term to 1.
-        let mut annotations = BTreeMap::new();
-        annotations.insert(LEADER_TERM_ANNOTATION.to_string(), "1".to_string());
-        let lease = Lease {
-            metadata: ObjectMeta {
-                name: Some(lease_name.to_string()),
-                annotations: Some(annotations),
-                ..ObjectMeta::default()
-            },
-            spec: Some(LeaseSpec {
-                holder_identity: Some(holder_identity.to_string()),
-                lease_duration_seconds: Some(config.lease_duration.as_secs() as i32),
-                acquire_time: Some(MicroTime(now)),
-                renew_time: Some(MicroTime(now)),
-                ..LeaseSpec::default()
-            }),
-        };
+        let lease = build_first_time_lease(lease_name, holder_identity, config, now);
         match leases.create(&PostParams::default(), &lease).await {
             Ok(created) => {
                 return Ok(ReconcileVerdict::Acquired {
@@ -809,6 +821,34 @@ mod tests {
     fn default_config_leaves_namespace_empty_to_enable_fallback_chain() {
         assert!(KubernetesPlatformConfig::default().namespace.is_empty());
         assert_eq!(KubernetesPlatformConfig::default().jitter_factor, 0.2);
+    }
+
+    #[test]
+    fn first_time_lease_carries_provider_label_and_term_annotation() {
+        let config = KubernetesPlatformConfig::default();
+        let lease = build_first_time_lease("test-lock", "ns/node-a", &config, JiffTimestamp::now());
+
+        assert_eq!(lease.metadata.name, Some("test-lock".to_string()));
+        assert_eq!(
+            lease.metadata.labels,
+            Some(BTreeMap::from([(
+                "provider".to_string(),
+                "camel".to_string()
+            )]))
+        );
+        assert_eq!(
+            lease.metadata.annotations,
+            Some(BTreeMap::from([(
+                LEADER_TERM_ANNOTATION.to_string(),
+                "1".to_string(),
+            )]))
+        );
+        let spec = lease.spec.expect("first-time lease has a spec");
+        assert_eq!(spec.holder_identity, Some("ns/node-a".to_string()));
+        assert_eq!(
+            spec.lease_duration_seconds,
+            Some(config.lease_duration.as_secs() as i32)
+        );
     }
 
     #[test]
