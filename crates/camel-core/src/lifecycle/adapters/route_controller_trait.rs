@@ -391,6 +391,12 @@ impl camel_api::RouteController for DefaultRouteController {
         // the error handler can cancel it to force immediate pipeline exit.
         let pipeline_cancel_for_cleanup = pipeline_cancel.clone();
 
+        // rc-jxkj cohort gate: the drain loop parks each dequeued envelope
+        // until the startup cohort opens the gate. Subscribed once here; the
+        // spawned task owns the receiver (`wait_for` needs &mut), mirroring
+        // the pipeline_cancel capture.
+        let mut cohort_rx = self.cohort.subscribe();
+
         // Spawn pipeline task with its own cancellation token
         let pipeline_handle = match effective_concurrency {
             ConcurrencyModel::Concurrent { max } => {
@@ -423,6 +429,18 @@ impl camel_api::RouteController for DefaultRouteController {
                             exchange,
                             mut reply_tx,
                         } = envelope;
+                        // rc-jxkj cohort gate: park dispatch until the startup
+                        // cohort completes. Level-triggered — after the first
+                        // open, later envelopes pass without parking.
+                        tokio::select! {
+                            _ = cohort_rx.wait_for(|open| *open) => {}
+                            _ = pipeline_cancel.cancelled() => {
+                                // Drop the envelope; reply_tx (if any)
+                                // resolves to ChannelClosed for the
+                                // send_and_wait waiter.
+                                return;
+                            }
+                        }
                         // ADR-0061 Task 2.9 strict-mode dispatch check (the
                         // flip deferred from Task 2.2): every transport now
                         // mints the typed carrier at its request boundary
@@ -498,6 +516,18 @@ impl camel_api::RouteController for DefaultRouteController {
                             exchange,
                             mut reply_tx,
                         } = envelope;
+                        // rc-jxkj cohort gate: park dispatch until the startup
+                        // cohort completes. Level-triggered — after the first
+                        // open, later envelopes pass without parking.
+                        tokio::select! {
+                            _ = cohort_rx.wait_for(|open| *open) => {}
+                            _ = pipeline_cancel.cancelled() => {
+                                // Drop the envelope; reply_tx (if any)
+                                // resolves to ChannelClosed for the
+                                // send_and_wait waiter.
+                                return;
+                            }
+                        }
 
                         // ADR-0061 Task 2.9 strict-mode dispatch check — see
                         // the Concurrent branch above for the full contract.

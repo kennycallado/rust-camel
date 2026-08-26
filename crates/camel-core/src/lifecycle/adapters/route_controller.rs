@@ -29,6 +29,7 @@ pub use camel_processor::aggregator::SharedLanguageRegistry;
 
 use crate::health_registry::HealthCheckRegistry;
 use crate::intercept::InterceptRules;
+use crate::lifecycle::CohortActivationGate;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
 use crate::lifecycle::adapters::route_compiler_ext::{
     RouteCompilerExt, build_eh_config_pipeline, transport_from_uri,
@@ -103,6 +104,10 @@ pub struct DefaultRouteController {
     /// `MarkStarted` actor command; never reset (stop/restart included),
     /// because compiled pipelines capture the rules at compile time.
     pub(super) frozen: bool,
+    /// Startup-cohort activation barrier (rc-jxkj). Cloned into the
+    /// `RouteControllerHandle` at spawn; reset/activate act on this shared
+    /// gate directly, never through the actor.
+    pub(super) cohort: Arc<CohortActivationGate>,
 }
 
 impl DefaultRouteController {
@@ -164,6 +169,7 @@ impl DefaultRouteController {
             bind_acks: Default::default(),
             intercept: InterceptRules::default(),
             frozen: false,
+            cohort: Arc::new(CohortActivationGate::new_closed()),
         }
     }
 
@@ -195,6 +201,7 @@ impl DefaultRouteController {
             bind_acks: Default::default(),
             intercept: InterceptRules::default(),
             frozen: false,
+            cohort: Arc::new(CohortActivationGate::new_closed()),
         }
     }
 
@@ -226,6 +233,7 @@ impl DefaultRouteController {
             bind_acks: Default::default(),
             intercept: InterceptRules::default(),
             frozen: false,
+            cohort: Arc::new(CohortActivationGate::new_closed()),
         }
     }
 
@@ -1009,6 +1017,9 @@ impl DefaultRouteController {
         let agg = Arc::new(svc);
 
         let pipeline_cancel_for_monitor = pipeline_cancel.clone();
+        // rc-jxkj cohort gate: owned by the forward loop — the envelope arm
+        // parks dispatch until the startup cohort opens the gate.
+        let mut cohort_rx = self.cohort.subscribe();
         let agg_for_monitor = Arc::clone(&agg);
 
         {
@@ -1029,6 +1040,10 @@ impl DefaultRouteController {
                 tokio::select! {
                     biased;
 
+                    // Ungated by design (D3, rc-jxkj): late exchanges exist
+                    // only after a dispatched envelope traversed the
+                    // aggregator — transitively post-activation. Gating here
+                    // would be dead code and a self-deadlock risk.
                     late_ex = async {
                         let mut rx = late_rx.lock().await;
                         rx.recv().await
@@ -1047,6 +1062,27 @@ impl DefaultRouteController {
                     envelope_opt = rx.recv() => {
                         match envelope_opt {
                             Some(envelope) => {
+                                // rc-jxkj cohort gate: park dispatch until
+                                // the startup cohort completes (same guard
+                                // as the non-aggregate drain loops).
+                                tokio::select! {
+                                    _ = cohort_rx.wait_for(|open| *open) => {}
+                                    _ = pipeline_cancel.cancelled() => {
+                                        // Drop the envelope; reply_tx (if
+                                        // any) resolves to ChannelClosed for
+                                        // the send_and_wait waiter.
+                                        // `continue`, not `return`: the token
+                                        // is already cancelled, so the next
+                                        // loop iteration lands in the biased
+                                        // outer select's cancel arm below,
+                                        // which runs the force_complete_all +
+                                        // late_rx cleanup. A `return` would
+                                        // skip that cleanup and silently
+                                        // drop a pending bucket across a
+                                        // stop→restart gate re-arm.
+                                        continue;
+                                    }
+                                }
                                 let ExchangeEnvelope { exchange, reply_tx } = envelope;
                                 let _drain_guard = super::route_helpers::DrainGuard::new(Arc::clone(&drain_in_flight));
                                 let pre_pipe = pre_pipeline.load();
@@ -1208,3 +1244,7 @@ impl crate::hot_reload::ports::ReloadIntrospectionPort for DefaultRouteControlle
 #[cfg(test)]
 #[path = "route_controller_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cohort_activation_regression.rs"]
+mod cohort_activation_regression;

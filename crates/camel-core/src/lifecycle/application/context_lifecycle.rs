@@ -38,7 +38,9 @@ pub(crate) fn next_context_command_id(op: &str, route_id: &str) -> String {
 /// `auto_startup_route_ids` StartRoute loop.
 ///
 /// `cancel_token` is reset to a fresh token on every entry so a restart
-/// after `stop()` gets a clean cancellation state.
+/// after `stop()` gets a clean cancellation state. The cohort activation
+/// gate is likewise re-armed at entry and activated on every exit (see
+/// rc-jxkj).
 pub(crate) async fn start_context(
     services: &mut [Box<dyn Lifecycle>],
     startup_checks: &mut Vec<Box<dyn ConfigCheck>>,
@@ -51,62 +53,84 @@ pub(crate) async fn start_context(
     // Reset cancellation state so a restart after stop() gets a fresh token.
     *cancel_token = CancellationToken::new();
 
-    // Start lifecycle services first
-    for (i, service) in services.iter_mut().enumerate() {
-        info!("Starting service: {}", service.name());
-        if let Err(e) = service.start().await {
-            // Rollback: stop already started services in reverse order
-            warn!(
-                "Service {} failed to start, rolling back {} services",
-                service.name(),
-                i
-            );
-            for j in (0..i).rev() {
-                if let Err(rollback_err) = services[j].stop().await {
-                    warn!(
-                        "Failed to stop service {} during rollback: {}",
-                        services[j].name(),
-                        rollback_err
-                    );
+    // Re-arm the cohort activation gate on every boot so this cohort's
+    // first consumer dispatches park until startup completes. Per-boot
+    // re-arm matters because every start() re-issues StartRoute for all
+    // routes whose auto_startup flag is set (route_registry.rs:95 filters
+    // on that flag) — a second boot after stop() would otherwise dispatch
+    // against a gate left open by the previous boot.
+    route_controller.reset_cohort().await;
+
+    // Everything below funnels through `result` — no early `?` returns
+    // after the reset — so activation always runs. A failing path that
+    // skipped activation would strand parked first dispatches forever.
+    let result: Result<(), CamelError> = async {
+        // Start lifecycle services first
+        for (i, service) in services.iter_mut().enumerate() {
+            info!("Starting service: {}", service.name());
+            if let Err(e) = service.start().await {
+                // Rollback: stop already started services in reverse order
+                warn!(
+                    "Service {} failed to start, rolling back {} services",
+                    service.name(),
+                    i
+                );
+                for j in (0..i).rev() {
+                    if let Err(rollback_err) = services[j].stop().await {
+                        warn!(
+                            "Failed to stop service {} during rollback: {}",
+                            services[j].name(),
+                            rollback_err
+                        );
+                    }
                 }
+                return Err(e);
             }
+        }
+
+        // ADR-0033: fail-closed startup validation. Drain the registered
+        // ConfigCheck list and run every check synchronously. If any check
+        // returns Err, refuse to start the runtime — no route consumer is
+        // started, no reconciliation runs. Drains the registry so a second
+        // call to start() (currently not supported) would not re-run checks.
+        let checks = std::mem::take(startup_checks);
+        if let Err(e) = run_startup_validation(checks) {
+            warn!("Startup validation failed: {e}");
             return Err(e);
         }
-    }
 
-    // ADR-0033: fail-closed startup validation. Drain the registered
-    // ConfigCheck list and run every check synchronously. If any check
-    // returns Err, refuse to start the runtime — no route consumer is
-    // started, no reconciliation runs. Drains the registry so a second
-    // call to start() (currently not supported) would not re-run checks.
-    let checks = std::mem::take(startup_checks);
-    if let Err(e) = run_startup_validation(checks) {
-        warn!("Startup validation failed: {e}");
-        return Err(e);
-    }
-
-    // H8: boot reconciliation — fail routes stuck in transient state
-    // (Starting/Stopping) from a previous run before auto_startup runs.
-    runtime
-        .reconcile_transient_states()
-        .await
-        .map_err(|e| CamelError::RouteError(format!("boot reconciliation failed: {e}")))?;
-
-    // Then start routes via runtime command bus (aggregate-first),
-    // preserving route controller startup ordering metadata.
-    let route_ids = route_controller.auto_startup_route_ids().await?;
-    for route_id in route_ids {
+        // H8: boot reconciliation — fail routes stuck in transient state
+        // (Starting/Stopping) from a previous run before auto_startup runs.
         runtime
-            .execute(camel_api::RuntimeCommand::StartRoute {
-                route_id: route_id.clone(),
-                command_id: next_context_command_id("start", &route_id),
-                causation_id: None,
-            })
-            .await?;
-    }
+            .reconcile_transient_states()
+            .await
+            .map_err(|e| CamelError::RouteError(format!("boot reconciliation failed: {e}")))?;
 
-    info!("CamelContext started");
-    Ok(())
+        // Then start routes via runtime command bus (aggregate-first),
+        // preserving route controller startup ordering metadata.
+        let route_ids = route_controller.auto_startup_route_ids().await?;
+        for route_id in route_ids {
+            runtime
+                .execute(camel_api::RuntimeCommand::StartRoute {
+                    route_id: route_id.clone(),
+                    command_id: next_context_command_id("start", &route_id),
+                    causation_id: None,
+                })
+                .await?;
+        }
+
+        info!("CamelContext started");
+        Ok(())
+    }
+    .await;
+
+    // Unconditional activation — releases parked first dispatches whether
+    // the cohort started cleanly or failed. The port method is infallible
+    // (watch-channel level set), so no activation error can shadow
+    // `result`.
+    route_controller.activate_cohort().await;
+
+    result
 }
 
 /// Graceful shutdown. The controller actor stays alive (owning route
@@ -241,5 +265,147 @@ pub(crate) async fn abort_context(
                 let _ = join.await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod start_context_gate {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::lifecycle::CohortActivationGate;
+    use crate::{CamelContext, RouteDefinition};
+
+    /// Lifecycle service that records the cohort gate level each time
+    /// `start()` runs — that moment sits after `reset_cohort` and before
+    /// the StartRoute loop — and optionally fails its own start.
+    struct GateProbeService {
+        gate: Arc<CohortActivationGate>,
+        levels: Arc<Mutex<Vec<bool>>>,
+        fail_start: bool,
+    }
+
+    impl GateProbeService {
+        fn new(
+            gate: Arc<CohortActivationGate>,
+            levels: Arc<Mutex<Vec<bool>>>,
+            fail_start: bool,
+        ) -> Self {
+            Self {
+                gate,
+                levels,
+                fail_start,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Lifecycle for GateProbeService {
+        fn name(&self) -> &str {
+            "gate-probe"
+        }
+
+        async fn start(&mut self) -> Result<(), CamelError> {
+            self.levels
+                .lock()
+                .expect("levels lock")
+                .push(self.gate.is_open());
+            if self.fail_start {
+                return Err(CamelError::Config("gate-probe start failure".into()));
+            }
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+    }
+
+    fn gate_of(ctx: &CamelContext) -> Arc<CohortActivationGate> {
+        ctx.runtime_execution_handle().controller.cohort_gate()
+    }
+
+    #[tokio::test]
+    async fn start_context_gate_boot_failure_still_activates() {
+        let mut ctx = CamelContext::builder()
+            .build()
+            .await
+            .expect("build context");
+        let gate = gate_of(&ctx);
+        assert!(!gate.is_open(), "fresh context gate must start closed");
+
+        let levels = Arc::new(Mutex::new(Vec::new()));
+        ctx = ctx.with_lifecycle(GateProbeService::new(
+            Arc::clone(&gate),
+            Arc::clone(&levels),
+            true,
+        ));
+
+        let result = ctx.start().await;
+        assert!(
+            result.is_err(),
+            "boot with a failing service must return Err"
+        );
+        // Activation runs on every exit — a failed boot still releases
+        // anything that parked behind the gate.
+        assert!(gate.is_open(), "gate must open even when the boot fails");
+        assert_eq!(*levels.lock().expect("levels lock"), vec![false]);
+    }
+
+    #[tokio::test]
+    async fn start_context_gate_boot_success_activates() {
+        let mut ctx = CamelContext::builder()
+            .build()
+            .await
+            .expect("build context");
+        ctx.register_component(camel_component_timer::TimerComponent::new());
+        ctx.add_route_definition(
+            RouteDefinition::new("timer:gate-r1?period=3600000", vec![]).with_route_id("gate-r1"),
+        )
+        .await
+        .expect("add route 1");
+        ctx.add_route_definition(
+            RouteDefinition::new("timer:gate-r2?period=3600000", vec![]).with_route_id("gate-r2"),
+        )
+        .await
+        .expect("add route 2");
+
+        let gate = gate_of(&ctx);
+        assert!(!gate.is_open());
+
+        ctx.start().await.expect("context start");
+        assert!(gate.is_open(), "successful boot must open the gate");
+
+        ctx.stop().await.expect("context stop");
+    }
+
+    #[tokio::test]
+    async fn start_context_gate_second_boot_rearms() {
+        let mut ctx = CamelContext::builder()
+            .build()
+            .await
+            .expect("build context");
+        let gate = gate_of(&ctx);
+        let levels = Arc::new(Mutex::new(Vec::new()));
+        ctx = ctx.with_lifecycle(GateProbeService::new(
+            Arc::clone(&gate),
+            Arc::clone(&levels),
+            false,
+        ));
+
+        ctx.start().await.expect("first boot");
+        assert!(gate.is_open());
+
+        ctx.stop().await.expect("stop");
+        // stop() leaves the gate open; only the next boot re-arms it.
+        assert!(gate.is_open());
+
+        ctx.start().await.expect("second boot");
+        // Both boots probed the gate closed at service-start time — i.e.
+        // after reset_cohort, before the StartRoute loop.
+        assert_eq!(*levels.lock().expect("levels lock"), vec![false, false]);
+        assert!(gate.is_open(), "gate must be open after the second boot");
     }
 }

@@ -734,6 +734,9 @@ async fn concurrent_backpressure_blocks_processor_when_saturated() {
 
     controller.add_route(route).await.unwrap();
     controller.start_route("rt-b2").await.unwrap();
+    // rc-jxkj: fresh controller → cohort gate closed; this test exercises
+    // backpressure, not the barrier, so open the gate for dispatch.
+    controller.cohort.open();
 
     // Small yield for pipeline task to start polling
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1425,6 +1428,8 @@ async fn aggregate_force_completion_on_stop_emits_pending_bucket_without_timeout
     .with_route_id("force-agg");
     controller.add_route(route).await.unwrap();
     controller.start_route("force-agg").await.unwrap();
+    // rc-jxkj: fresh controller → cohort gate closed; open for dispatch.
+    controller.cohort.open();
 
     tokio::time::sleep(Duration::from_millis(80)).await;
     controller.stop_route("force-agg").await.unwrap();
@@ -1778,6 +1783,8 @@ async fn aggregate_force_completion_on_natural_consumer_completion_emits_pending
     .with_route_id("natural-force-agg");
     controller.add_route(route).await.unwrap();
     controller.start_route("natural-force-agg").await.unwrap();
+    // rc-jxkj: fresh controller → cohort gate closed; open for dispatch.
+    controller.cohort.open();
 
     let sink = mock
         .get_endpoint("natural-sink")
@@ -4810,6 +4817,9 @@ mod dispatch_enforcement {
             .start_route("dispatch-deny-probe")
             .await
             .expect("start_route");
+        // rc-jxkj: fresh controller → cohort gate closed; the denial this
+        // test asserts happens after the gate, so open it.
+        controller.cohort.open();
 
         // The probe's carrier-less Exchange is denied BEFORE the pipeline.
         let result = probe_outcome(&outcome).await;
@@ -4899,6 +4909,8 @@ mod dispatch_enforcement {
             .start_route("dispatch-grant-probe")
             .await
             .expect("start_route");
+        // rc-jxkj: fresh controller → cohort gate closed; open for dispatch.
+        controller.cohort.open();
 
         let result = probe_outcome(&outcome)
             .await
@@ -4942,5 +4954,280 @@ mod dispatch_enforcement {
                 carrier: self.carrier.clone(),
             }))
         }
+    }
+}
+
+/// rc-jxkj cohort gate — drain-loop parking tests. A fresh controller's
+/// gate is closed, so a started route parks envelope dispatch until
+/// `controller.cohort.open()` (the test stand-in for the startup cohort's
+/// activate step wired in Task 1.4).
+mod drain_gate {
+    use super::*;
+    use camel_api::CamelError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Dispatch observer: counts pipeline invocations.
+    fn counting_processor(count: Arc<AtomicUsize>) -> BoxProcessor {
+        BoxProcessor::from_fn(move |exchange: Exchange| {
+            let count = count.clone();
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(exchange)
+            })
+        })
+    }
+
+    /// Timer route whose consumer never fires inside the test window
+    /// (backpressure-test idiom): only manually injected envelopes reach
+    /// the drain loop.
+    fn parked_route(route_id: &str, count: &Arc<AtomicUsize>) -> RouteDefinition {
+        RouteDefinition::new(
+            "timer:tick?period=10000&delay=10000",
+            vec![BuilderStep::Processor(OpaqueProcessor(counting_processor(
+                Arc::clone(count),
+            )))],
+        )
+        .with_route_id(route_id)
+    }
+
+    /// Aggregate variant of `parked_route` (force-agg idiom): the
+    /// force-completion config makes the route aggregate-split, so
+    /// start/restart dispatch through `start_aggregate_route` and
+    /// injected envelopes park at the aggregate drain gate (the
+    /// `envelope_opt` arm). The counter sits before the Aggregate step
+    /// because a parked exchange (complete_when_size unreachable) never
+    /// reaches steps after the aggregator.
+    fn aggregate_parked_route(route_id: &str, count: &Arc<AtomicUsize>) -> RouteDefinition {
+        let agg_config = camel_api::AggregatorConfig::correlate_by("key")
+            .complete_when_size(10)
+            .force_completion_on_stop(true)
+            .build()
+            .unwrap();
+        RouteDefinition::new(
+            "timer:tick?period=10000&delay=10000",
+            vec![
+                BuilderStep::DeclarativeSetHeader {
+                    key: "key".into(),
+                    value: camel_api::ValueSourceDef::Literal(camel_api::Value::String(
+                        "order-1".into(),
+                    )),
+                },
+                BuilderStep::Processor(OpaqueProcessor(counting_processor(Arc::clone(count)))),
+                BuilderStep::Aggregate { config: agg_config },
+            ],
+        )
+        .with_route_id(route_id)
+    }
+
+    fn sender_for(
+        controller: &DefaultRouteController,
+        route_id: &str,
+    ) -> tokio::sync::mpsc::Sender<ExchangeEnvelope> {
+        controller
+            .routes
+            .get(route_id)
+            .and_then(|r| r.channel_sender.clone())
+            .expect("channel sender should exist after start")
+    }
+
+    async fn yield_pump() {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    /// Polls until the counting processor observes a dispatch, failing
+    /// past the deadline (the gate is already open when this is called).
+    async fn await_dispatch(count: &Arc<AtomicUsize>, topology: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while count.load(Ordering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dispatch did not occur after gate open ({topology})"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_gate_concurrent_parks_until_activation() {
+        let mut controller = build_controller_with_components();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let route = parked_route("rt-gate-conc", &count)
+            .with_concurrency(ConcurrencyModel::Concurrent { max: Some(2) });
+        controller.add_route(route).await.unwrap();
+        controller.start_route("rt-gate-conc").await.unwrap();
+        yield_pump().await;
+
+        sender_for(&controller, "rt-gate-conc")
+            .send(ExchangeEnvelope {
+                exchange: Exchange::new(Message::new("A")),
+                reply_tx: None,
+            })
+            .await
+            .unwrap();
+
+        yield_pump().await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "concurrent drain must park the envelope while the gate is closed"
+        );
+
+        controller.cohort.open();
+        await_dispatch(&count, "concurrent").await;
+
+        controller.stop_route("rt-gate-conc").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drain_gate_sequential_parks_until_activation() {
+        let mut controller = build_controller_with_components();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let route = parked_route("rt-gate-seq", &count);
+        controller.add_route(route).await.unwrap();
+        controller.start_route("rt-gate-seq").await.unwrap();
+        yield_pump().await;
+
+        sender_for(&controller, "rt-gate-seq")
+            .send(ExchangeEnvelope {
+                exchange: Exchange::new(Message::new("A")),
+                reply_tx: None,
+            })
+            .await
+            .unwrap();
+
+        yield_pump().await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "sequential drain must park the envelope while the gate is closed"
+        );
+
+        controller.cohort.open();
+        await_dispatch(&count, "sequential").await;
+
+        controller.stop_route("rt-gate-seq").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drain_gate_restart_parks_until_activation() {
+        let mut controller = build_controller_with_components();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        // Aggregate topology: start/restart dispatch through
+        // start_aggregate_route, so the restart leg exercises the
+        // aggregate drain gate rather than a second pass over the
+        // Sequential site.
+        let route = aggregate_parked_route("rt-gate-restart", &count);
+        controller.add_route(route).await.unwrap();
+        controller.start_route("rt-gate-restart").await.unwrap();
+        yield_pump().await;
+
+        // First start parks the envelope at the aggregate gate; stop
+        // cancels the pipeline token, which drops it (reply_tx is None —
+        // nothing to resolve) and runs the cancel-arm cleanup
+        // (force_complete_all + late drain).
+        sender_for(&controller, "rt-gate-restart")
+            .send(ExchangeEnvelope {
+                exchange: Exchange::new(Message::new("A")),
+                reply_tx: None,
+            })
+            .await
+            .unwrap();
+        yield_pump().await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "first start must park the envelope while the gate is closed"
+        );
+
+        controller.stop_route("rt-gate-restart").await.unwrap();
+
+        // Restart with the gate still held closed: the fresh aggregate
+        // drain loop must park again.
+        controller.start_route("rt-gate-restart").await.unwrap();
+        yield_pump().await;
+        sender_for(&controller, "rt-gate-restart")
+            .send(ExchangeEnvelope {
+                exchange: Exchange::new(Message::new("B")),
+                reply_tx: None,
+            })
+            .await
+            .unwrap();
+        yield_pump().await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "restarted aggregate drain must park the envelope while the gate is held closed"
+        );
+
+        controller.cohort.open();
+        await_dispatch(&count, "restart").await;
+
+        controller.stop_route("rt-gate-restart").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drain_gate_parked_exits_on_cancel() {
+        let mut controller = build_controller_with_components();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let route = parked_route("rt-gate-cancel", &count);
+        controller.add_route(route).await.unwrap();
+        controller.start_route("rt-gate-cancel").await.unwrap();
+        yield_pump().await;
+
+        // InOut-style envelope: the waiter keeps the reply receiver.
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        sender_for(&controller, "rt-gate-cancel")
+            .send(ExchangeEnvelope {
+                exchange: Exchange::new(Message::new("A")),
+                reply_tx: Some(reply_tx),
+            })
+            .await
+            .unwrap();
+        yield_pump().await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "envelope must be parked (no dispatch) before cancel"
+        );
+
+        // Cancel the managed pipeline token (parent of the drain loop's
+        // child token) and take the drain task's JoinHandle (stop_route
+        // tolerates the missing handle — handle_is_running falls back to
+        // the still-running consumer task).
+        let (pipeline_cancel, pipeline_handle) = {
+            let r = controller
+                .routes
+                .get_mut("rt-gate-cancel")
+                .expect("route exists while started");
+            (
+                r.pipeline_cancel_token.clone(),
+                r.pipeline_handle
+                    .take()
+                    .expect("pipeline handle while started"),
+            )
+        };
+        pipeline_cancel.cancel();
+
+        tokio::time::timeout(Duration::from_secs(2), pipeline_handle)
+            .await
+            .expect("parked drain task must exit after pipeline cancel")
+            .expect("drain task must not panic");
+
+        // send_and_wait semantics: dropping the parked envelope's reply_tx
+        // resolves the waiter with ChannelClosed — existing mapping, no new
+        // error variant.
+        let reply = tokio::time::timeout(Duration::from_secs(2), reply_rx)
+            .await
+            .expect("reply must resolve after the drain task drops the envelope")
+            .map_err(|_| CamelError::ChannelClosed)
+            .unwrap_err();
+        assert!(matches!(reply, CamelError::ChannelClosed));
+
+        controller.stop_route("rt-gate-cancel").await.unwrap();
     }
 }

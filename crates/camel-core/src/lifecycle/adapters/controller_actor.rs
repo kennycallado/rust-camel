@@ -21,6 +21,10 @@ pub fn spawn_controller_actor(
     controller: DefaultRouteController,
 ) -> (RouteControllerHandle, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<RouteControllerCommand>(256);
+    // Clone the cohort gate into the handle BEFORE the controller moves
+    // into the actor task. Reset/activate bypass the actor entirely (they
+    // act on the shared gate), so the handle needs its own Arc.
+    let cohort = Arc::clone(&controller.cohort);
     // Hold a clone of tx so the spawned task can send StartRoute back through
     // the same channel after the 100ms restart sleep, without moving the
     // original tx (which we still need to return as RouteControllerHandle).
@@ -376,7 +380,7 @@ pub fn spawn_controller_actor(
             }
         }
     });
-    (RouteControllerHandle { tx }, handle)
+    (RouteControllerHandle { tx, cohort }, handle)
 }
 
 pub fn spawn_supervision_task(
@@ -450,6 +454,7 @@ mod tests {
         RouteControllerCommand, RouteControllerHandle, spawn_controller_actor,
         spawn_supervision_task,
     };
+    use crate::lifecycle::CohortActivationGate;
     use crate::lifecycle::adapters::route_controller::DefaultRouteController;
     use crate::lifecycle::adapters::route_helpers::CrashNotification;
     use crate::lifecycle::application::route_definition::RouteDefinition;
@@ -606,7 +611,10 @@ mod tests {
     #[tokio::test]
     async fn start_route_sends_command_and_returns_reply() {
         let (tx, mut rx) = mpsc::channel(1);
-        let handle = RouteControllerHandle { tx };
+        let handle = RouteControllerHandle {
+            tx,
+            cohort: Arc::new(CohortActivationGate::new_closed()),
+        };
 
         let task = tokio::spawn(async move { handle.start_route("route-a").await });
 
@@ -628,7 +636,10 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
 
-        let handle = RouteControllerHandle { tx };
+        let handle = RouteControllerHandle {
+            tx,
+            cohort: Arc::new(CohortActivationGate::new_closed()),
+        };
         let result = handle.start_route("route-a").await;
 
         assert!(matches!(result, Err(CamelError::ProcessorError(_))));
@@ -875,7 +886,10 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
 
-        let handle = RouteControllerHandle { tx };
+        let handle = RouteControllerHandle {
+            tx,
+            cohort: Arc::new(CohortActivationGate::new_closed()),
+        };
         let result = handle.shutdown().await;
 
         assert!(matches!(result, Err(CamelError::ProcessorError(_))));
@@ -884,7 +898,10 @@ mod tests {
     #[tokio::test]
     async fn handle_methods_send_expected_commands_and_receive_replies() {
         let (tx, mut rx) = mpsc::channel(16);
-        let handle = RouteControllerHandle { tx };
+        let handle = RouteControllerHandle {
+            tx,
+            cohort: Arc::new(CohortActivationGate::new_closed()),
+        };
 
         let stop_task = tokio::spawn({
             let h = handle.clone();
@@ -932,7 +949,10 @@ mod tests {
     #[tokio::test]
     async fn handle_methods_error_on_dropped_reply_channel() {
         let (tx, mut rx) = mpsc::channel(16);
-        let handle = RouteControllerHandle { tx };
+        let handle = RouteControllerHandle {
+            tx,
+            cohort: Arc::new(CohortActivationGate::new_closed()),
+        };
 
         let count_task = tokio::spawn({
             let h = handle.clone();
@@ -979,7 +999,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         tx.try_send(RouteControllerCommand::Shutdown)
             .expect("fill mailbox");
-        let handle = RouteControllerHandle { tx };
+        let handle = RouteControllerHandle {
+            tx,
+            cohort: Arc::new(CohortActivationGate::new_closed()),
+        };
 
         let result = handle.try_set_function_invoker(Arc::new(NoopInvoker));
         assert!(matches!(result, Err(CamelError::ProcessorError(_))));

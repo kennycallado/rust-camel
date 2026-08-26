@@ -22,4 +22,13 @@ pub trait RouteOrderingPort: Send + Sync {
     /// Return the route IDs the controller would stop on shutdown, in the
     /// controller's shutdown order.
     async fn shutdown_route_ids(&self) -> Result<Vec<String>, CamelError>;
+
+    /// Close the cohort activation gate so the next startup cohort's first
+    /// consumer dispatches park until `activate_cohort` runs. Closing an
+    /// already-closed gate is a no-op (level-triggered re-arm).
+    async fn reset_cohort(&self);
+
+    /// Open the cohort activation gate, releasing parked first dispatches.
+    /// Opening an already-open gate is a no-op.
+    async fn activate_cohort(&self);
 }

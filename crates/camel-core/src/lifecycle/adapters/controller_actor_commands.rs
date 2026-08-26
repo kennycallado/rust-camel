@@ -12,6 +12,7 @@ use camel_api::{BoxProcessor, CamelError, FunctionInvoker, RuntimeHandle, StepLi
 use tokio::sync::{mpsc, oneshot};
 
 use crate::intercept::InterceptRules;
+use crate::lifecycle::CohortActivationGate;
 use crate::lifecycle::application::route_definition::RouteDefinition;
 use crate::lifecycle::domain::CompiledPipeline;
 use crate::lifecycle::domain::route_compilation::PreparedRoute;
@@ -187,9 +188,22 @@ pub(crate) enum RouteControllerCommand {
 #[derive(Clone)]
 pub struct RouteControllerHandle {
     pub(crate) tx: mpsc::Sender<RouteControllerCommand>,
+    /// Startup-cohort activation barrier shared with the controller inside
+    /// the actor. Reset/activate act on this gate directly (no actor
+    /// round-trip), so the handle carries the Arc itself. Read by the
+    /// `RouteOrderingPort` impl (start_context) and cohort_gate().
+    pub(crate) cohort: Arc<CohortActivationGate>,
 }
 
 impl RouteControllerHandle {
+    /// The cohort activation gate shared with the controller actor's
+    /// controller. Subscribe for level changes; reset/activate go through
+    /// the `RouteOrderingPort`.
+    #[cfg(test)]
+    pub(crate) fn cohort_gate(&self) -> Arc<CohortActivationGate> {
+        Arc::clone(&self.cohort)
+    }
+
     pub async fn start_route(&self, route_id: impl Into<String>) -> Result<(), CamelError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
