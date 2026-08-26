@@ -3,9 +3,10 @@
 //! First-class MCP support (scheme `mcp:`) with dual roles: the Consumer
 //! (server) role — a shared Streamable-HTTP listener serving tool and resource
 //! routes — and the Producer (client) role — `mcp:call` / `mcp:read` dispatch
-//! to remote MCP servers. Protocol baseline is `2026-07-28` (stateless: no
-//! `initialize` handshake, no sessions, per-request `_meta`). The rmcp SDK is
-//! confined to `src/adapter/` (ADR-0020 pattern).
+//! to remote MCP servers. Protocol baseline is `2026-07-28` (stateless
+//! Discover lifecycle: no sessions, no `Mcp-Session-Id`; a legacy `initialize`
+//! offer is answered fail-closed with `-32022` unless it offers the baseline
+//! version). The rmcp SDK is confined to `src/adapter/` (ADR-0020 pattern).
 
 pub mod adapter;
 pub mod bundle;

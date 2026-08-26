@@ -98,6 +98,10 @@ the LLM `ProviderMap` (ADR-0020). No MCP-shaped type leaves the crate
 lifecycle; an incompatible remote fails fast at producer start (ADR-0060).
 The server overrides `supported_protocol_versions()` to the single baseline;
 rmcp's inline guard rejects other peers with JSON-RPC `-32022`.
+The adapter answers a legacy `initialize` offer with `-32022` and fails closed
+without falling back to the server default. The `tools/list` and
+`resources/list` results carry SEP-2549 cache metadata (`ttlMs: 0`,
+`cacheScope: "private"`) and are not cacheable.
 
 Exclusions: Prompts (duplicates `camel-template`, ADR-0047), stdio transport,
 legacy SSE transport (excluded at the Cargo level), resource subscriptions.

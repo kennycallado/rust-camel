@@ -16,7 +16,7 @@
 //!
 //! # Version-rejection seam (documented deviation from design.md)
 //!
-//! Pre-`2026-07-28` rejection is rmcp 3.1.2's inline guard: the blanket
+//! Pre-`2026-07-28` rejection is rmcp 3.1.4's inline guard: the blanket
 //! `Service<RoleServer> for H` impl validates each request's `_meta`
 //! protocol version against `supported_protocol_versions()` BEFORE any
 //! handler method runs, answering JSON-RPC `-32022` with
@@ -28,10 +28,12 @@
 //! inspects JSON replies for `-32022` and emits exactly one `warn!` naming
 //! the peer (axum `ConnectInfo`) and the rejected version (`data.requested`).
 //!
-//! The legacy lifecycle never runs: the mount disables
-//! `legacy_session_mode`, so every POST routes statelessly, no
-//! `initialize`/session routing happens, and `Mcp-Session-Id` is never read
-//! or required (`on_initialized` keeps its no-op default).
+//! The mount disables `legacy_session_mode`, so every POST routes statelessly.
+//! `initialize` requests are routed to the adapter, which answers them
+//! fail-closed: non-`2026-07-28` offers receive `-32022`
+//! (`UnsupportedProtocolVersionError` naming the baseline), while the
+//! baseline version receives the server info. There is no session,
+//! `Mcp-Session-Id`, or fallback-to-server-default path.
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
@@ -50,11 +52,12 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use rmcp::ErrorData;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, DiscoverResult,
-    ErrorCode, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
-    PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
-    ReadResourceResult, Resource, ResourceContents, ResourcesCapability, ServerCapabilities,
-    ServerInfo, SubscribeRequestParams, Tool, ToolsCapability,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    DiscoverResult, ErrorCode, Implementation, InitializeRequestParams, InitializeResult,
+    ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+    ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ResourceContents, ResourcesCapability, ServerCapabilities, ServerInfo, SubscribeRequestParams,
+    Tool, ToolsCapability,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
@@ -71,6 +74,10 @@ use camel_auth::{extract_token_multi, kernel_authenticate};
 
 /// The sole protocol version this server speaks (spec: baseline 2026-07-28).
 const SUPPORTED_VERSIONS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
+
+/// SEP-2549 non-cacheable list result: catalog is dynamic under readiness
+/// gating, so clients must not reuse list responses.
+const LIST_RESULT_TTL_MS: u64 = 0;
 
 /// JSON-RPC code rmcp's inline guard answers unsupported versions with.
 const UNSUPPORTED_PROTOCOL_VERSION_CODE: i64 = -32022;
@@ -136,6 +143,22 @@ impl rmcp::ServerHandler for McpServerAdapter {
         ))
     }
 
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, ErrorData> {
+        if !SUPPORTED_VERSIONS.contains(&request.protocol_version) {
+            return Err(ErrorData::unsupported_protocol_version(
+                request.protocol_version,
+                SUPPORTED_VERSIONS,
+            ));
+        }
+
+        context.peer.set_peer_info(request);
+        Ok(self.get_info())
+    }
+
     // ── Tool dispatch (Task 2.6) ──────────────────────────────────────────
 
     async fn list_tools(
@@ -157,7 +180,9 @@ impl rmcp::ServerHandler for McpServerAdapter {
                 tool
             })
             .collect();
-        Ok(ListToolsResult::with_all_items(tools))
+        Ok(ListToolsResult::with_all_items(tools)
+            .with_ttl_ms(LIST_RESULT_TTL_MS)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn call_tool(
@@ -240,7 +265,9 @@ impl rmcp::ServerHandler for McpServerAdapter {
             .into_iter()
             .map(|uri| Resource::new(uri.clone(), uri))
             .collect();
-        Ok(ListResourcesResult::with_all_items(resources))
+        Ok(ListResourcesResult::with_all_items(resources)
+            .with_ttl_ms(LIST_RESULT_TTL_MS)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn read_resource(
@@ -563,9 +590,12 @@ fn capabilities() -> ServerCapabilities {
 
 /// Build the axum service mounted by `McpServerRegistry::get_or_spawn`:
 /// the rmcp Streamable-HTTP service over [`McpServerAdapter`], stateless
-/// (`NeverSessionManager`, `legacy_session_mode(false)` — no sessions, no
-/// legacy `initialize` routing), plain-JSON replies, plus the rejection
-/// warn layer.
+/// (`NeverSessionManager`, `legacy_session_mode(false)` — `initialize` routes
+/// to the adapter and receives fail-closed answers: non-`2026-07-28` offers
+/// get `-32022` (`UnsupportedProtocolVersionError` naming the baseline), and
+/// the baseline gets the server info; there are no sessions,
+/// `Mcp-Session-Id`, or fallback-to-server-default path), plain-JSON replies,
+/// plus the rejection warn layer.
 pub(crate) fn mcp_router(
     tools: Arc<McpToolRegistry>,
     resources: Arc<McpResourceRegistry>,

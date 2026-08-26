@@ -19,6 +19,7 @@ use camel_component_mcp::adapter::RmcpClient;
 use camel_component_mcp::client::McpClient;
 use camel_component_mcp::config::{McpRemoteConfig, McpServerConfig, McpTransport};
 use camel_component_mcp::error::McpError;
+use camel_component_mcp::types::{McpResourceRead, McpToolInvocation};
 use rmcp::ClientLifecycleMode;
 use rmcp::model::{ClientCapabilities, ProtocolVersion, RequestMetaObject};
 use rmcp::service::ClientServiceExt;
@@ -285,6 +286,63 @@ async fn legacy_initialize_does_not_open_session() {
 }
 
 #[tokio::test]
+async fn legacy_initialize_rejected_fail_closed() {
+    let addr = spawn_server("127.0.0.9:0").await;
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "test-client", "version": "0.0.1"}
+        }
+    });
+
+    let response = raw_json_rpc_post(addr, &initialize, &[]).await;
+    let value: serde_json::Value =
+        serde_json::from_str(&response.body).expect("reply must be JSON");
+    assert_eq!(value["error"]["code"], serde_json::json!(-32022));
+    assert_eq!(
+        value["error"]["data"]["supported"],
+        serde_json::json!(["2026-07-28"])
+    );
+    assert_eq!(
+        value["error"]["data"]["requested"],
+        serde_json::json!("2025-11-25")
+    );
+    assert!(
+        !value
+            .as_object()
+            .expect("reply must be an object")
+            .contains_key("result")
+    );
+}
+
+#[tokio::test]
+async fn initialize_with_baseline_version_succeeds() {
+    let addr = spawn_server("127.0.0.10:0").await;
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2026-07-28",
+            "capabilities": {},
+            "clientInfo": {"name": "test-client", "version": "0.0.1"}
+        }
+    });
+
+    let response = raw_json_rpc_post(addr, &initialize, &[]).await;
+    let value: serde_json::Value =
+        serde_json::from_str(&response.body).expect("reply must be JSON");
+    assert_eq!(
+        value["result"]["protocolVersion"],
+        serde_json::json!("2026-07-28")
+    );
+}
+
+#[tokio::test]
 async fn session_header_not_required() {
     let addr = spawn_server("127.0.0.5:0").await;
     // RmcpClient's discover lifecycle never sends `Mcp-Session-Id`: the
@@ -314,6 +372,91 @@ async fn session_header_not_required() {
     );
 }
 
+#[tokio::test]
+async fn tools_list_carries_cache_metadata() {
+    let bind = "127.0.0.6:0";
+    let addr = spawn_server(bind).await;
+    let handle = McpServerRegistry::global()
+        .get_or_spawn(bind, &server_cfg(bind))
+        .await
+        .expect("listener must spawn");
+    let (tx, _rx) = tokio::sync::mpsc::channel::<McpToolInvocation>(8);
+    handle
+        .tool_registry
+        .register(
+            "lookup".to_string(),
+            "cache-metadata-route".to_string(),
+            tx,
+            serde_json::json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {"id": {"type": "string"}}
+            }),
+        )
+        .expect("tool must register");
+    handle.tool_registry.mark_ready("lookup");
+
+    let (request, headers) = list_request("tools/list");
+    let response = raw_json_rpc_post(addr, &request, &headers).await;
+    let value: serde_json::Value =
+        serde_json::from_str(&response.body).expect("reply must be JSON");
+    assert_eq!(value["result"]["ttlMs"], serde_json::json!(0));
+    assert_eq!(value["result"]["cacheScope"], serde_json::json!("private"));
+    assert!(
+        value["result"]["tools"]
+            .as_array()
+            .expect("tools must be an array")
+            .iter()
+            .any(|tool| tool["name"] == "lookup")
+    );
+}
+
+#[tokio::test]
+async fn resources_list_carries_cache_metadata() {
+    let bind = "127.0.0.7:0";
+    let addr = spawn_server(bind).await;
+    let handle = McpServerRegistry::global()
+        .get_or_spawn(bind, &server_cfg(bind))
+        .await
+        .expect("listener must spawn");
+    let (rtx, _rrx) = tokio::sync::mpsc::channel::<McpResourceRead>(8);
+    handle
+        .resource_registry
+        .register(
+            "crm://customers".to_string(),
+            "cache-metadata-route".to_string(),
+            rtx,
+        )
+        .expect("resource must register");
+    handle.resource_registry.mark_ready("crm://customers");
+
+    let (request, headers) = list_request("resources/list");
+    let response = raw_json_rpc_post(addr, &request, &headers).await;
+    let value: serde_json::Value =
+        serde_json::from_str(&response.body).expect("reply must be JSON");
+    assert_eq!(value["result"]["ttlMs"], serde_json::json!(0));
+    assert_eq!(value["result"]["cacheScope"], serde_json::json!("private"));
+    assert!(
+        value["result"]["resources"]
+            .as_array()
+            .expect("resources must be an array")
+            .iter()
+            .any(|resource| resource["uri"] == "crm://customers")
+    );
+}
+
+#[tokio::test]
+async fn tools_list_empty_catalog_still_carries_cache_metadata() {
+    let addr = spawn_server("127.0.0.8:0").await;
+    let (request, headers) = list_request("tools/list");
+    let response = raw_json_rpc_post(addr, &request, &headers).await;
+    let value: serde_json::Value =
+        serde_json::from_str(&response.body).expect("reply must be JSON");
+    assert_eq!(value["result"]["tools"], serde_json::json!([]));
+    assert_eq!(value["result"]["ttlMs"], serde_json::json!(0));
+    assert_eq!(value["result"]["cacheScope"], serde_json::json!("private"));
+}
+
 /// A `server/discover` JSON-RPC request (no `_meta` — discover is the
 /// stateless opener, so its routing does not require per-request metadata).
 fn discover_request() -> serde_json::Value {
@@ -322,6 +465,28 @@ fn discover_request() -> serde_json::Value {
         "id": 1,
         "method": "server/discover"
     })
+}
+
+/// The body carries both `_meta` keys (protocol version and client
+/// capabilities), and the headers pair `MCP-Protocol-Version` with
+/// `Mcp-Method` (SEP-2243 is required at version >= `2026-07-28`); stripping
+/// either silently changes what these tests exercise.
+fn list_request(method: &'static str) -> (serde_json::Value, [(&'static str, &'static str); 2]) {
+    (
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": method,
+            "params": {"_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }}
+        }),
+        [
+            ("MCP-Protocol-Version", "2026-07-28"),
+            ("Mcp-Method", method),
+        ],
+    )
 }
 
 #[tokio::test]

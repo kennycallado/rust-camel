@@ -23,7 +23,9 @@ with `is_error: false`.
 
 External MCP hosts can also reach the server directly at
 `http://127.0.0.1:9100/mcp` (Streamable HTTP, protocol baseline `2026-07-28`,
-stateless: no `initialize`, no sessions).
+stateless Discover lifecycle: no sessions or `Mcp-Session-Id`; a legacy
+`initialize` offer is answered fail-closed with `-32022` unless it offers the
+baseline version).
 
 ## Files
 
