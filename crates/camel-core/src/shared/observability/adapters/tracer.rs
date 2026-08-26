@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use opentelemetry::trace::{SpanKind, SpanRef, Status, TraceContextExt, Tracer};
-use opentelemetry::{Context as OtelContext, KeyValue, global};
+use opentelemetry::{Context as OtelContext, InstrumentationScope, KeyValue, global};
 use tower::Service;
 use tracing::Instrument;
 
@@ -97,7 +97,11 @@ impl Service<Exchange> for TracingProcessor {
         let span_name = self.span_name.clone();
 
         // Get the global tracer (noop if no provider is configured)
-        let tracer = global::tracer("camel-core");
+        let tracer = global::tracer_with_scope(
+            InstrumentationScope::builder("camel-core")
+                .with_version(env!("CARGO_PKG_VERSION"))
+                .build(),
+        );
 
         // Extract parent context from exchange.otel_context
         let parent_cx = exchange.otel_context.clone();

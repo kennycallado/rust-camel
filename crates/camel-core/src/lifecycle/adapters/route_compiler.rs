@@ -22,7 +22,7 @@ use camel_processor::{
     CircuitBreakerDecision, CircuitBreakerGate, RouteErrorHandler, invoke_processor,
 };
 use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer};
-use opentelemetry::{Context as OtelContext, KeyValue, global};
+use opentelemetry::{Context as OtelContext, InstrumentationScope, KeyValue, global};
 use tracing::Instrument;
 
 use crate::lifecycle::adapters::body_coercing::wrap_if_needed;
@@ -237,25 +237,17 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
         return compose_pipeline_with_contracts(processors, handler, ctx);
     }
 
-    let wrapped: Vec<CompiledStep> = processors
+    let coerced: Vec<CompiledStep> = processors
         .into_iter()
-        .enumerate()
-        .map(|(idx, step)| match step {
+        .map(|step| match step {
             CompiledStep::Process {
                 processor,
                 body_contract,
                 lifecycle,
             } => {
-                let coerced = wrap_if_needed(processor, body_contract);
-                let traced = BoxProcessor::new(TracingProcessor::new(
-                    coerced,
-                    route_id.to_string(),
-                    idx,
-                    detail_level.clone(),
-                    metrics.clone(),
-                ));
+                let processor = wrap_if_needed(processor, body_contract);
                 CompiledStep::Process {
-                    processor: traced,
+                    processor,
                     body_contract: None,
                     lifecycle,
                 }
@@ -265,12 +257,15 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
         })
         .collect();
 
-    BoxProcessor::new(TracedPipeline {
-        steps: SharedSnapshot(wrapped.into()),
-        route_id: route_id.to_string(),
+    compose_traced_pipeline(
+        coerced,
+        route_id,
+        trace_enabled,
+        detail_level,
+        metrics,
         handler,
         ctx,
-    })
+    )
 }
 
 /// A service that executes a sequence of CompiledSteps in order.
@@ -374,7 +369,11 @@ impl Service<Exchange> for TracedPipeline {
         let handler = self.handler.clone();
         let ctx = self.ctx.clone();
         Box::pin(async move {
-            let tracer = global::tracer("camel-core");
+            let tracer = global::tracer_with_scope(
+                InstrumentationScope::builder("camel-core")
+                    .with_version(env!("CARGO_PKG_VERSION"))
+                    .build(),
+            );
             let entry_cx = exchange.otel_context.clone();
             let root_span = tracer
                 .span_builder(route_id.clone())
@@ -686,7 +685,11 @@ impl camel_api::error_handler::RetryableStep for TracedSegmentStep {
         mut exchange: Exchange,
     ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
         Box::pin(async move {
-            let tracer = global::tracer("camel-core");
+            let tracer = global::tracer_with_scope(
+                InstrumentationScope::builder("camel-core")
+                    .with_version(env!("CARGO_PKG_VERSION"))
+                    .build(),
+            );
             let entry_cx = exchange.otel_context.clone();
             let span = segment_span(
                 &tracer,
