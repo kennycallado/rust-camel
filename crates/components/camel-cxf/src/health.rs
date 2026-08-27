@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use camel_component_api::{AsyncHealthCheck, CamelError, CheckResult};
 use tracing::warn;
 
-use crate::pool::{BridgeState, CxfBridgePool};
-use crate::proto::{HealthRequest, cxf_bridge_client::CxfBridgeClient};
+use crate::pool::{BridgeState, CxfBridgePool, cxf_bridge_client};
+use crate::proto::HealthRequest;
 
 // ── CxfBridgeHealthProbe ─────────────────────────────────────────────────────
 
@@ -69,7 +69,7 @@ impl CxfBridgeHealthProbe for CxfBridgeProbe {
                 }
             };
 
-            let mut client = CxfBridgeClient::new(channel);
+            let mut client = cxf_bridge_client(channel);
             let resp = client
                 .health(HealthRequest {})
                 .await

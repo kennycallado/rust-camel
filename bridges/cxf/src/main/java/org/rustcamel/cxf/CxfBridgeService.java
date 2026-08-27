@@ -76,7 +76,9 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
         var fault = sfe.getFault();
         String code = fault != null && fault.getFaultCode() != null ? fault.getFaultCode() : "";
         String reason =
-            fault != null && fault.getFaultString() != null ? fault.getFaultString() : sfe.getMessage();
+            fault != null && fault.getFaultString() != null
+                ? fault.getFaultString()
+                : sfe.getMessage();
         SoapResponse faultResp =
             SoapResponse.newBuilder()
                 .setFault(true)

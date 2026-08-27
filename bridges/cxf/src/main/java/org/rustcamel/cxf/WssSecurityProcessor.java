@@ -11,10 +11,12 @@ import javax.crypto.SecretKey;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.transform.dom.DOMSource;
+import org.apache.wss4j.common.WSEncryptionPart;
 import org.apache.wss4j.common.cache.MemoryReplayCache;
 import org.apache.wss4j.common.cache.ReplayCache;
 import org.apache.wss4j.common.ext.WSSecurityException;
 import org.apache.wss4j.dom.WSConstants;
+import org.apache.wss4j.dom.WSDataRef;
 import org.apache.wss4j.dom.engine.WSSecurityEngine;
 import org.apache.wss4j.dom.engine.WSSecurityEngineResult;
 import org.apache.wss4j.dom.handler.RequestData;
@@ -24,6 +26,8 @@ import org.apache.wss4j.dom.message.WSSecHeader;
 import org.apache.wss4j.dom.message.WSSecSignature;
 import org.apache.wss4j.dom.message.WSSecTimestamp;
 import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 
 /**
  * Applies WS-Security processing to SOAP envelopes using WSS4J DOM engine directly. Plain class
@@ -74,6 +78,17 @@ public class WssSecurityProcessor {
           hasText(profile.sigPassword()) ? profile.sigPassword() : profile.keystorePassword();
       sign.setUserInfo(profile.sigUsername(), keyPass);
       sign.setKeyIdentifierType(WSConstants.BST_DIRECT_REFERENCE);
+      // Cover Body + Timestamp explicitly so a rewritten Timestamp cannot be processed as
+      // fresh. WSS4J 4.0 has no setParts: build() appends the default Body part only when the
+      // live getParts() list is empty, so both parts must be added here.
+      if (containsAction(actions, "Timestamp")) {
+        List<WSEncryptionPart> parts = sign.getParts();
+        // The envelope root NS is the SOAP NS — never hardcode SOAP 1.1 here, or SOAP 1.2
+        // envelopes fail part resolution at sign time.
+        parts.add(
+            new WSEncryptionPart("Body", doc.getDocumentElement().getNamespaceURI(), "Content"));
+        parts.add(new WSEncryptionPart("Timestamp", WSConstants.WSU_NS, ""));
+      }
       sign.build(profile.getSignatureCrypto());
     }
 
@@ -115,6 +130,13 @@ public class WssSecurityProcessor {
     String requiredActions = profile.resolveActionsIn();
     enforceRequiredActions(results, requiredActions);
 
+    // WSS4J 4.0 has no required-parts hook on RequestData, so timestamp signature coverage
+    // is enforced here against the verified references.
+    if (containsAction(requiredActions, "Timestamp")
+        && containsAction(requiredActions, "Signature")) {
+      verifyTimestampSignatureCoverage(doc, results);
+    }
+
     return domToString(doc);
   }
 
@@ -153,6 +175,52 @@ public class WssSecurityProcessor {
             new Object[] {"Required Encrypt action not found in message"});
       }
     }
+    if (containsAction(requiredActions, "Timestamp")) {
+      boolean timestampFound = foundActions.contains(WSConstants.TS);
+      if (!timestampFound) {
+        throw new WSSecurityException(
+            WSSecurityException.ErrorCode.FAILED_CHECK,
+            "noSecurity",
+            new Object[] {"Required Timestamp action not found in message"});
+      }
+    }
+  }
+
+  /**
+   * Fails when the wsu:Timestamp element is absent or not covered by the verified signature. A
+   * Timestamp rewritten after signing breaks its digest reference and never reaches this check, but
+   * a stripped or unsigned Timestamp would otherwise validate.
+   */
+  private void verifyTimestampSignatureCoverage(Document doc, List<WSSecurityEngineResult> results)
+      throws WSSecurityException {
+    NodeList timestampNodes = doc.getElementsByTagNameNS(WSConstants.WSU_NS, "Timestamp");
+    if (timestampNodes.getLength() == 0) {
+      throw new WSSecurityException(
+          WSSecurityException.ErrorCode.FAILED_CHECK,
+          "noSecurity",
+          new Object[] {"Required wsu:Timestamp element not found in message"});
+    }
+
+    Element timestamp = (Element) timestampNodes.item(0);
+    String timestampId = timestamp.getAttributeNS(WSConstants.WSU_NS, "Id");
+
+    for (WSSecurityEngineResult result : results) {
+      Integer action = (Integer) result.get(WSSecurityEngineResult.TAG_ACTION);
+      if (action == null || action != WSConstants.SIGN) continue;
+      Object refsObj = result.get(WSSecurityEngineResult.TAG_DATA_REF_URIS);
+      if (!(refsObj instanceof List<?>)) continue;
+      for (Object obj : (List<?>) refsObj) {
+        if (!(obj instanceof WSDataRef ref)) continue;
+        String signedWsuId = ref.getWsuId();
+        if (hasText(signedWsuId) && signedWsuId.equals(timestampId)) return;
+        Element protectedElement = ref.getProtectedElement();
+        if (protectedElement != null && protectedElement.isSameNode(timestamp)) return;
+      }
+    }
+    throw new WSSecurityException(
+        WSSecurityException.ErrorCode.FAILED_CHECK,
+        "noSecurity",
+        new Object[] {"wsu:Timestamp is not covered by the message signature"});
   }
 
   private static boolean containsAction(String actions, String token) {

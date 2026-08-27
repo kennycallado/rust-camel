@@ -13,11 +13,12 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::component::{
-    BRIDGE_TRANSPORT_ERROR_PREFIX, BridgeState, JmsBridgePool, is_bridge_transport_error,
+    BRIDGE_TRANSPORT_ERROR_PREFIX, BridgeState, JmsBridgePool, bridge_service_client,
+    is_bridge_transport_error,
 };
 use crate::config::{DestinationType, ExchangePattern, JmsEndpointConfig, JmsTransactionMode};
 use crate::headers::apply_jms_headers;
-use crate::proto::{JmsMessage, SubscribeRequest, bridge_service_client::BridgeServiceClient};
+use crate::proto::{JmsMessage, SubscribeRequest};
 
 pub struct JmsConsumer {
     pool: Arc<JmsBridgePool>,
@@ -205,7 +206,7 @@ async fn consumer_loop(
             }
         };
 
-        let mut client = BridgeServiceClient::new(channel);
+        let mut client = bridge_service_client(channel);
         let mut stream = match client
             .subscribe(SubscribeRequest {
                 destination: destination.clone(),

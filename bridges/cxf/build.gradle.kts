@@ -1,10 +1,10 @@
 plugins {
     java
-    id("io.quarkus") version "3.20.0"
+    id("io.quarkus") version "3.39.1"
     id("com.diffplug.spotless") version "6.25.0"
 }
 
-version = project.findProperty("version")?.toString() ?: "0.5.0"
+version = project.findProperty("version")?.toString() ?: "0.6.0"
 
 repositories {
     mavenCentral()
@@ -13,8 +13,8 @@ repositories {
     }
 }
 
-val quarkusVersion = "3.20.0"
-val cxfVersion = "4.1.1"
+val quarkusVersion = "3.39.1"
+val cxfVersion = "4.1.8"
 
 dependencies {
     implementation(enforcedPlatform("io.quarkus.platform:quarkus-bom:$quarkusVersion"))

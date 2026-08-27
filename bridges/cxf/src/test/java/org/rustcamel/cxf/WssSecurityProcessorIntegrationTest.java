@@ -3,12 +3,24 @@ package org.rustcamel.cxf;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
+import java.util.HashSet;
+import java.util.Set;
+import javax.xml.parsers.DocumentBuilderFactory;
 import org.apache.wss4j.common.ext.WSSecurityException;
+import org.apache.wss4j.dom.WSConstants;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 
 /**
  * Integration tests for WssSecurityProcessor using a real JKS keystore. Exercises the actual WSS4J
@@ -282,6 +294,136 @@ class WssSecurityProcessorIntegrationTest {
         WSSecurityException.class,
         () -> processor.processInbound(signed),
         "Replayed signed message must be rejected at processor level");
+  }
+
+  @Test
+  void timestampRewriteCannotMintFreshCacheKey() throws Exception {
+    WssSecurityProcessor processor =
+        createProcessorWithActions(
+            keystorePath,
+            "changeit",
+            "alice",
+            "changeit",
+            "alice",
+            "Timestamp Signature",
+            "Timestamp Signature");
+
+    String plainEnvelope =
+        """
+        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+          <soapenv:Header/>
+          <soapenv:Body><test:Hello xmlns:test="http://test.example.com">World</test:Hello></soapenv:Body>
+        </soapenv:Envelope>
+        """;
+
+    String signed = processor.processOutbound(plainEnvelope);
+
+    // Action A: the original signed bytes verify normally
+    assertDoesNotThrow(() -> processor.processInbound(signed));
+
+    // Action B: rewrite Created/Expires to fresh values — breaks the signature over the Timestamp.
+    // The rewritten unsigned timestamp must NOT be processed as fresh.
+    String rewritten = rewriteTimestampFresh(signed);
+    assertThrows(
+        WSSecurityException.class,
+        () -> processor.processInbound(rewritten),
+        "Rewritten unsigned timestamp must fail signature validation");
+
+    // Action C: re-deliver the original bytes again — replay cache hit
+    assertThrows(
+        WSSecurityException.class,
+        () -> processor.processInbound(signed),
+        "Original bytes must hit the replay cache after first delivery");
+  }
+
+  @Test
+  void soap12OutboundInboundRoundtrip() throws Exception {
+    WssSecurityProcessor processor =
+        createProcessorWithActions(
+            keystorePath,
+            "changeit",
+            "alice",
+            "changeit",
+            "alice",
+            "Timestamp Signature",
+            "Timestamp Signature");
+
+    String soap12Xml =
+        """
+        <soapenv:Envelope xmlns:soapenv="http://www.w3.org/2003/05/soap-envelope">
+          <soapenv:Header/>
+          <soapenv:Body><test:Hello xmlns:test="http://test.example.com">World</test:Hello></soapenv:Body>
+        </soapenv:Envelope>
+        """;
+
+    String signed = processor.processOutbound(soap12Xml);
+
+    // The signature must cover exactly the SOAP 1.2 Body and the wsu:Timestamp — the Body
+    // reference carries the envelope's own namespace, not a hardcoded SOAP 1.1 one.
+    Document signedDoc = parseNamespaced(signed);
+    Set<String> coveredIds = new HashSet<>();
+    coveredIds.add(requireWsuId(soleElement(signedDoc, SOAP12_NS, "Body")));
+    coveredIds.add(requireWsuId(soleElement(signedDoc, WSConstants.WSU_NS, "Timestamp")));
+
+    NodeList refs = signedDoc.getElementsByTagName("ds:Reference");
+    assertEquals(2, refs.getLength(), "Signature should carry exactly two references");
+    for (int i = 0; i < refs.getLength(); i++) {
+      String uri = ((Element) refs.item(i)).getAttribute("URI");
+      assertTrue(uri.startsWith("#"), "Reference URI must be a local id");
+      coveredIds.remove(uri.substring(1));
+    }
+    assertTrue(coveredIds.isEmpty(), "Signature must cover the 1.2 Body and Timestamp");
+
+    // One inbound pass verifies cleanly (a second would trip the replay cache).
+    String verified = processor.processInbound(signed);
+    assertTrue(
+        verified.contains("Hello") && verified.contains("World"),
+        "Verified envelope should still contain original body content");
+  }
+
+  // --- XML helpers for signature-coverage assertions ---
+
+  private static final String SOAP12_NS = "http://www.w3.org/2003/05/soap-envelope";
+
+  /** Parses XML with namespace awareness so coverage assertions can look parts up by NS. */
+  private static Document parseNamespaced(String xml) throws Exception {
+    DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+    dbf.setNamespaceAware(true);
+    return dbf.newDocumentBuilder()
+        .parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+  }
+
+  private static Element soleElement(Document doc, String ns, String localName) {
+    NodeList nodes = doc.getElementsByTagNameNS(ns, localName);
+    assertEquals(1, nodes.getLength(), "Expected exactly one <" + localName + "> element");
+    return (Element) nodes.item(0);
+  }
+
+  private static String requireWsuId(Element element) {
+    String id = element.getAttributeNS(WSConstants.WSU_NS, "Id");
+    assertFalse(id.isBlank(), "Signed part must carry a wsu:Id");
+    return id;
+  }
+
+  // --- Timestamp rewrite helpers ---
+
+  /** Replaces the Created/Expires text of the wsu:Timestamp with fresh values. */
+  private static String rewriteTimestampFresh(String xml) {
+    Instant now = Instant.now();
+    DateTimeFormatter fmt = DateTimeFormatter.ISO_INSTANT;
+    xml = replaceTimestampNodeText(xml, "Created", fmt.format(now.truncatedTo(ChronoUnit.MILLIS)));
+    return replaceTimestampNodeText(
+        xml, "Expires", fmt.format(now.plusSeconds(300).truncatedTo(ChronoUnit.MILLIS)));
+  }
+
+  private static String replaceTimestampNodeText(String xml, String localName, String newValue) {
+    String open = "<wsu:" + localName + ">";
+    int valueStart = xml.indexOf(open);
+    assertTrue(valueStart >= 0, "Expected element <wsu:" + localName + "> in envelope");
+    valueStart += open.length();
+    int valueEnd = xml.indexOf("</wsu:" + localName + ">", valueStart);
+    assertTrue(valueEnd > valueStart, "Expected closing </wsu:" + localName + ">");
+    return xml.substring(0, valueStart) + newValue + xml.substring(valueEnd);
   }
 
   // --- Helper ---

@@ -46,6 +46,23 @@ pub fn validate_profile_name(name: &str) -> Result<(), camel_component_api::Came
     Ok(())
 }
 
+/// Validates the consumer-side bind address forwarded to the bridge as the
+/// `CXF_ADDRESS` env var. Only plain `http` is accepted: the bridge process
+/// does not expose a TLS listener yet.
+pub(crate) fn validate_consumer_address(
+    address: &str,
+) -> Result<(), camel_component_api::CamelError> {
+    let scheme = address.split_once(':').map(|(s, _)| s);
+    if matches!(scheme, Some(s) if s.eq_ignore_ascii_case("http")) {
+        return Ok(());
+    }
+    let shown = scheme.unwrap_or("<missing scheme>");
+    Err(camel_component_api::CamelError::Config(format!(
+        "cxf.bind_address scheme '{shown}' is not supported: \
+         TLS listener support is not yet available; use http://"
+    )))
+}
+
 #[derive(Clone, Default, serde::Deserialize)]
 pub struct CxfSecurityFields {
     pub keystore_path: Option<String>,
@@ -195,6 +212,9 @@ impl CxfPoolConfig {
             return Err(camel_component_api::CamelError::Config(
                 "cxf.health_check_interval_ms must be greater than 0".into(),
             ));
+        }
+        if let Some(address) = self.bind_address.as_deref() {
+            validate_consumer_address(address)?;
         }
         Ok(())
     }
@@ -706,6 +726,50 @@ mod tests {
     fn pool_config_validate_rejects_zero_health_check_interval() {
         let err = toml::from_str::<CxfPoolConfig>("health_check_interval_ms = 0").unwrap_err();
         assert!(err.to_string().contains("health_check_interval_ms"));
+    }
+
+    // ── Consumer bind address scheme gate (bridge-lockstep-hardening 1.2) ──
+
+    #[test]
+    fn consumer_address_https_rejected() {
+        let cfg = CxfPoolConfig {
+            bind_address: Some("https://0.0.0.0:9000/soap".to_string()),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("TLS listener support is not yet available")
+        );
+    }
+
+    #[test]
+    fn consumer_address_http_accepted() {
+        let cfg = CxfPoolConfig {
+            bind_address: Some("http://localhost:9000/soap".to_string()),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn consumer_address_missing_scheme_rejected() {
+        assert!(validate_consumer_address("0.0.0.0:9000/soap").is_err());
+    }
+
+    #[test]
+    fn consumer_address_uppercase_http_accepted() {
+        assert!(validate_consumer_address("HTTP://localhost:9000/soap").is_ok());
+    }
+
+    #[test]
+    fn pool_config_validate_rejects_https_bind_address() {
+        let toml_str = r#"bind_address = "https://0.0.0.0:9000/soap""#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("TLS listener support is not yet available")
+        );
     }
 
     #[test]

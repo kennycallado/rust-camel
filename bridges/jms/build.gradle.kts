@@ -1,16 +1,16 @@
 plugins {
     java
-    id("io.quarkus") version "3.20.0"
+    id("io.quarkus") version "3.39.1"
     id("com.diffplug.spotless") version "6.25.0"
 }
 
-version = project.findProperty("version")?.toString() ?: "0.5.0"
+version = project.findProperty("version")?.toString() ?: "0.6.0"
 
 repositories {
     mavenCentral()
 }
 
-val quarkusVersion = "3.20.0"
+val quarkusVersion = "3.39.1"
 
 dependencies {
     implementation(enforcedPlatform("io.quarkus.platform:quarkus-bom:$quarkusVersion"))
@@ -19,8 +19,8 @@ dependencies {
     implementation("io.quarkus:quarkus-config-yaml")
 
     // ActiveMQ Classic (OpenWire)
-    implementation("org.apache.activemq:activemq-client:5.18.3")
-    implementation("org.apache.activemq:activemq-pool:5.18.3")
+    implementation("org.apache.activemq:activemq-client:5.19.10")
+    implementation("org.apache.activemq:activemq-pool:5.19.10")
 
     // Artemis AMQP/JMS client
     implementation("org.apache.activemq:artemis-jms-client-all:2.36.0")
@@ -29,9 +29,10 @@ dependencies {
     implementation("org.messaginghub:pooled-jms:2.0.8")
 
     // log4j-api needed at native-image build time (Log4J2LogImpl in artemis-jms-client-all)
-    runtimeOnly("org.apache.logging.log4j:log4j-api:2.24.3")
+    runtimeOnly("org.apache.logging.log4j:log4j-api:2.26.1")
 
     testImplementation("io.quarkus:quarkus-junit5")
+    testImplementation("org.mockito:mockito-core:5.12.0")
 }
 
 java {

@@ -36,7 +36,7 @@ pub use config::{
 pub use health::JmsHealthCheck;
 
 /// Version of the Java bridge binary this crate is compatible with.
-pub const BRIDGE_VERSION: &str = "0.5.0";
+pub const BRIDGE_VERSION: &str = "0.6.0";
 
 /// Serializes tests that mutate `CAMEL_JMS_BRIDGE_BINARY_PATH` via
 /// `std::env::set_var`. Process-global env vars race under parallel test
@@ -47,6 +47,9 @@ pub const BRIDGE_VERSION: &str = "0.5.0";
 /// because the guard is safe to hold across `.await` in test scope.
 #[cfg(test)]
 pub(crate) static BRIDGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod bridge_client_test;
 
 pub mod proto {
     tonic::include_proto!("jms_bridge");

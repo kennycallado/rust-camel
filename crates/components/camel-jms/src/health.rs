@@ -1,5 +1,5 @@
-use crate::component::{BridgeState, JmsBridgePool};
-use crate::proto::{HealthRequest, bridge_service_client::BridgeServiceClient};
+use crate::component::{BridgeState, JmsBridgePool, bridge_service_client};
+use crate::proto::HealthRequest;
 use async_trait::async_trait;
 use camel_api::{AsyncHealthCheck, CheckResult};
 use camel_component_api::CamelError;
@@ -16,7 +16,7 @@ trait BridgeHealthProbe: Send + Sync {
 }
 
 /// Real probe that reaches into the bridge pool, extracts the channel from a
-/// Ready slot, and issues a gRPC `HealthRequest` via `BridgeServiceClient`.
+/// Ready slot, and issues a gRPC `HealthRequest` via `bridge_service_client`.
 struct JmsBridgeHealthProbe {
     pool: Arc<JmsBridgePool>,
     broker_name: String,
@@ -51,7 +51,7 @@ impl BridgeHealthProbe for JmsBridgeHealthProbe {
                 }
             };
 
-            let mut client = BridgeServiceClient::new(channel);
+            let mut client = bridge_service_client(channel);
             let resp = client.health(HealthRequest {}).await.map_err(|e| {
                 CamelError::ProcessorError(format!(
                     "JMS bridge health RPC failed for broker '{}': {}",

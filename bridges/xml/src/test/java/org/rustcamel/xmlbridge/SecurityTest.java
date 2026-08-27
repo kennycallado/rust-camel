@@ -250,10 +250,10 @@ class SecurityTest {
 
       var compileResp =
           xslt.compileStylesheet(
-              CompileStylesheetRequest.newBuilder()
-                  .setStylesheetId("deny-unparsed-text")
-                  .setStylesheet(bytes(stylesheet))
-                  .build())
+                  CompileStylesheetRequest.newBuilder()
+                      .setStylesheetId("deny-unparsed-text")
+                      .setStylesheet(bytes(stylesheet))
+                      .build())
               .await()
               .indefinitely();
 
@@ -345,7 +345,8 @@ class SecurityTest {
   }
 
   @Test
-  void resultDocumentFileWriteRejected(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+  void resultDocumentFileWriteRejected(@org.junit.jupiter.api.io.TempDir Path tmp)
+      throws Exception {
     var canary = tmp.resolve("canary.txt");
     var stylesheet =
         """

@@ -2,6 +2,10 @@ quarkus:
   grpc:
     server:
       port: 9090
+      # must exceed CXF_MAX_BODY_BYTES (ceiling 17 MiB) + protobuf envelope
+      # overhead — 17 MiB + 1 MiB headroom. Ordering: cap <= 17 MiB ceiling
+      # (SoapEndpointPublisher.parseCap) < 18 MiB Rust decode limit.
+      max-inbound-message-size: 18874368
       use-separate-server: false
       plain-text: false
   http:

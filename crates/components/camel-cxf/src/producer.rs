@@ -11,8 +11,8 @@ use tower::Service;
 use tracing::debug;
 
 use crate::error::CxfError;
-use crate::pool::{BridgeState, CxfBridgePool};
-use crate::proto::{SoapRequest, cxf_bridge_client::CxfBridgeClient};
+use crate::pool::{BridgeState, CxfBridgePool, cxf_bridge_client};
+use crate::proto::SoapRequest;
 
 fn is_transport_error(status: &tonic::Status) -> bool {
     match status.code() {
@@ -305,7 +305,7 @@ impl Service<Exchange> for CxfProducer {
                 security_profile: profile_name.clone(),
             };
 
-            let mut client = CxfBridgeClient::new(channel);
+            let mut client = cxf_bridge_client(channel);
             let response = match client.invoke(request.clone()).await {
                 Ok(r) => r.into_inner(),
                 Err(status) if is_transport_error(&status) => {
@@ -320,7 +320,7 @@ impl Service<Exchange> for CxfProducer {
                     let refreshed = pool.get_channel().await.map_err(|e| {
                         CamelError::ProcessorError(format!("CXF channel refresh error: {e}"))
                     })?;
-                    let mut retry_client = CxfBridgeClient::new(refreshed);
+                    let mut retry_client = cxf_bridge_client(refreshed);
                     retry_client
                         .invoke(request)
                         .await

@@ -18,7 +18,10 @@ pub use config::{SchemaType, ValidatorConfig};
 pub use resolver::{FilesystemResolver, ResourceResolver};
 
 /// Version of the Java XML bridge binary this crate is compatible with.
-pub const BRIDGE_VERSION: &str = "0.5.0";
+pub const BRIDGE_VERSION: &str = "0.6.0";
+
+#[cfg(test)]
+mod bridge_client_test;
 
 pub mod proto {
     tonic::include_proto!("xml_bridge");

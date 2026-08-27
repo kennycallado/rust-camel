@@ -40,6 +40,7 @@ tempfile = { workspace = true }
 camel-core.workspace = true
 camel-dsl.workspace = true
 camel-component-direct.workspace = true
+tokio-stream = { workspace = true }
 
 [lints]
 workspace = true

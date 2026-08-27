@@ -38,6 +38,32 @@ use crate::proto::{HealthRequest, bridge_service_client::BridgeServiceClient};
 pub const BRIDGE_TRANSPORT_ERROR_PREFIX: &str = "JMS gRPC ";
 const MAX_RESTART_ATTEMPTS: u32 = 10;
 
+// ── Bridge gRPC decode limit ─────────────────────────────────────────────────
+
+/// Maximum inbound gRPC message size accepted when decoding Java bridge
+/// responses.
+///
+/// The Java side caps request bodies at 16 MiB; the extra headroom covers the
+/// protobuf envelope and headers around a maximal body. Without this, tonic's
+/// 4 MiB default rejects legal maximal `JmsMessage`s mid-stream.
+pub(crate) const BRIDGE_MAX_DECODING_MESSAGE_SIZE: usize = 20 * 1024 * 1024;
+
+pub(crate) fn bridge_decode_limit() -> usize {
+    BRIDGE_MAX_DECODING_MESSAGE_SIZE
+}
+
+/// Production-path constructor for bridge gRPC clients.
+///
+/// Applies [`bridge_decode_limit`] to every RPC issued through this client.
+/// All `BridgeServiceClient` construction sites must go through this helper
+/// rather than calling `BridgeServiceClient::new` directly, so a channel
+/// handed over by the pool always decodes maximal legal messages.
+pub(crate) fn bridge_service_client(
+    channel: Channel,
+) -> crate::proto::bridge_service_client::BridgeServiceClient<Channel> {
+    BridgeServiceClient::new(channel).max_decoding_message_size(bridge_decode_limit())
+}
+
 // ── BridgeState ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -398,7 +424,7 @@ impl JmsBridgePool {
                     }
                     BridgeState::Ready { ref channel } => {
                         tokio::time::sleep(Duration::from_millis(health_interval)).await;
-                        let mut client = BridgeServiceClient::new(channel.clone());
+                        let mut client = bridge_service_client(channel.clone());
                         let health_timeout = Duration::from_secs(3);
                         match tokio::time::timeout(health_timeout, client.health(HealthRequest {}))
                             .await
@@ -571,7 +597,7 @@ impl JmsBridgePool {
                 .map_err(|e| CamelError::ProcessorError(format!("JMS bridge start failed: {e}")))?;
 
             wait_for_health(&channel, Duration::from_secs(10), |ch| {
-                let mut client = BridgeServiceClient::new(ch);
+                let mut client = bridge_service_client(ch);
                 async move {
                     let resp = client.health(HealthRequest {}).await?;
                     Ok(resp.into_inner().healthy)
@@ -697,7 +723,7 @@ impl JmsComponent {
                 )));
             }
         };
-        let mut client = BridgeServiceClient::new(channel);
+        let mut client = bridge_service_client(channel);
         let r = client
             .send(crate::proto::SendRequest {
                 destination: destination.to_string(),

@@ -26,6 +26,36 @@ use crate::proto::{
 
 pub type SchemaId = String;
 
+// ── Bridge gRPC decode limit ─────────────────────────────────────────────────
+
+/// Maximum inbound gRPC message size accepted when decoding Java bridge
+/// responses.
+///
+/// The xml-bridge accepts documents up to 16 MiB by default (see
+/// `bridges/xml/src/main/resources/application.yml`); the extra headroom
+/// covers the protobuf envelope around a maximal response. Without this,
+/// tonic's 4 MiB default rejects legal responses and surfaces a broken or
+/// oversized bridge reply as an opaque transport error instead of a domain
+/// error.
+pub(crate) const XSD_BRIDGE_MAX_DECODING_MESSAGE_SIZE: usize = 17 * 1024 * 1024;
+
+pub(crate) fn xsd_bridge_decode_limit() -> usize {
+    XSD_BRIDGE_MAX_DECODING_MESSAGE_SIZE
+}
+
+/// Production-path constructor for bridge gRPC clients.
+///
+/// Applies [`xsd_bridge_decode_limit`] to every RPC issued through this
+/// client. All `XsdValidatorClient` construction sites must go through this
+/// helper rather than calling `XsdValidatorClient::new` directly, so a
+/// channel handed over by the backend always decodes maximal legal messages.
+pub(crate) fn xsd_bridge_client(
+    channel: Channel,
+) -> proto::xsd_validator_client::XsdValidatorClient<Channel> {
+    proto::xsd_validator_client::XsdValidatorClient::new(channel)
+        .max_decoding_message_size(xsd_bridge_decode_limit())
+}
+
 #[derive(Debug, Clone)]
 pub enum BridgeState {
     Starting,
@@ -78,7 +108,7 @@ impl XsdBridgeRpc for GrpcXsdBridgeRpc {
         channel: Channel,
         request: RegisterSchemaRequest,
     ) -> Result<RegisterSchemaResponse, ValidatorError> {
-        let mut client = proto::xsd_validator_client::XsdValidatorClient::new(channel);
+        let mut client = xsd_bridge_client(channel);
         let response = client.register_schema(request).await.map_err(|e| {
             ValidatorError::transport_with_source("xml-bridge register_schema RPC failed", e)
         })?;
@@ -90,7 +120,7 @@ impl XsdBridgeRpc for GrpcXsdBridgeRpc {
         channel: Channel,
         request: ValidateWithRequest,
     ) -> Result<ValidateResponse, ValidatorError> {
-        let mut client = proto::xsd_validator_client::XsdValidatorClient::new(channel);
+        let mut client = xsd_bridge_client(channel);
         let response = client.validate_with(request).await.map_err(|e| {
             ValidatorError::transport_with_source("xml-bridge validate_with RPC failed", e)
         })?;

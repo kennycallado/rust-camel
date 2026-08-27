@@ -11,10 +11,10 @@ use tonic::transport::Channel;
 use tower::Service;
 use tracing::debug;
 
-use crate::component::BRIDGE_TRANSPORT_ERROR_PREFIX;
+use crate::component::{BRIDGE_TRANSPORT_ERROR_PREFIX, bridge_service_client};
 use crate::config::{DestinationType, JmsEndpointConfig};
 use crate::headers::extract_send_headers;
-use crate::proto::{SendRequest, bridge_service_client::BridgeServiceClient};
+use crate::proto::SendRequest;
 
 /// Default concurrency limit for JMS producer backpressure.
 const DEFAULT_CONCURRENCY_LIMIT: usize = 128;
@@ -175,7 +175,7 @@ impl Service<Exchange> for JmsProducer {
                 ),
             );
 
-            let mut client = BridgeServiceClient::new(channel);
+            let mut client = bridge_service_client(channel);
             let request = SendRequest {
                 destination,
                 body,

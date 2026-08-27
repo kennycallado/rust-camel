@@ -135,16 +135,20 @@ class SoapEndpointPublisherTest {
         ArgumentCaptor.forClass(Handler.class);
     verify(httpServer).requestHandler(requestHandlerCaptor.capture());
 
-    // Capture body handler before triggering request handler
+    // Capture bounded stream handlers before triggering request handler
     @SuppressWarnings("unchecked")
-    ArgumentCaptor<Handler<Buffer>> bodyHandlerCaptor = ArgumentCaptor.forClass(Handler.class);
-    when(httpRequest.bodyHandler(bodyHandlerCaptor.capture())).thenReturn(httpRequest);
+    ArgumentCaptor<Handler<Buffer>> chunkCaptor = ArgumentCaptor.forClass(Handler.class);
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<Void>> endCaptor = ArgumentCaptor.forClass(Handler.class);
+    when(httpRequest.handler(chunkCaptor.capture())).thenReturn(httpRequest);
+    when(httpRequest.endHandler(endCaptor.capture())).thenReturn(httpRequest);
 
-    // Trigger request handler → sets body handler
+    // Trigger request handler → registers bounded accumulation handlers
     requestHandlerCaptor.getValue().handle(httpRequest);
 
-    // Trigger body handler → calls executeBlocking → captures callable
-    bodyHandlerCaptor.getValue().handle(bodyBuffer);
+    // Feed one chunk + end-of-stream → executeBlocking captured
+    chunkCaptor.getValue().handle(Buffer.buffer(requestXml.getBytes(StandardCharsets.UTF_8)));
+    endCaptor.getValue().handle((Void) null);
 
     // Execute the callable directly
     @SuppressWarnings("unchecked")
@@ -249,11 +253,15 @@ class SoapEndpointPublisherTest {
     verify(httpServer).requestHandler(requestHandlerCaptor.capture());
 
     @SuppressWarnings("unchecked")
-    ArgumentCaptor<Handler<Buffer>> bodyHandlerCaptor = ArgumentCaptor.forClass(Handler.class);
-    when(httpRequest.bodyHandler(bodyHandlerCaptor.capture())).thenReturn(httpRequest);
+    ArgumentCaptor<Handler<Buffer>> chunkCaptor = ArgumentCaptor.forClass(Handler.class);
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<Void>> endCaptor = ArgumentCaptor.forClass(Handler.class);
+    when(httpRequest.handler(chunkCaptor.capture())).thenReturn(httpRequest);
+    when(httpRequest.endHandler(endCaptor.capture())).thenReturn(httpRequest);
 
     requestHandlerCaptor.getValue().handle(httpRequest);
-    bodyHandlerCaptor.getValue().handle(bodyBuffer);
+    chunkCaptor.getValue().handle(Buffer.buffer(requestXml.getBytes(StandardCharsets.UTF_8)));
+    endCaptor.getValue().handle((Void) null);
 
     @SuppressWarnings("unchecked")
     Callable<String> callable = callableCaptor.getValue();
@@ -336,12 +344,18 @@ class SoapEndpointPublisherTest {
     verify(httpServer).requestHandler(requestHandlerCaptor.capture());
 
     @SuppressWarnings("unchecked")
-    ArgumentCaptor<Handler<Buffer>> bodyHandlerCaptor = ArgumentCaptor.forClass(Handler.class);
-    when(httpRequest.bodyHandler(bodyHandlerCaptor.capture())).thenReturn(httpRequest);
+    ArgumentCaptor<Handler<Buffer>> chunkCaptor = ArgumentCaptor.forClass(Handler.class);
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<Void>> endCaptor = ArgumentCaptor.forClass(Handler.class);
+    when(httpRequest.handler(chunkCaptor.capture())).thenReturn(httpRequest);
+    when(httpRequest.endHandler(endCaptor.capture())).thenReturn(httpRequest);
 
     // --- First POST: signed body accepted ---
+    io.vertx.core.buffer.Buffer signedBuffer =
+        Buffer.buffer(signedBody.getBytes(StandardCharsets.UTF_8));
     requestHandlerCaptor.getValue().handle(httpRequest);
-    bodyHandlerCaptor.getAllValues().get(0).handle(bodyBuffer);
+    chunkCaptor.getAllValues().get(0).handle(signedBuffer);
+    endCaptor.getAllValues().get(0).handle((Void) null);
 
     @SuppressWarnings("unchecked")
     Callable<String> firstCallable = callableCaptor.getAllValues().get(0);
@@ -354,7 +368,8 @@ class SoapEndpointPublisherTest {
 
     // --- Second POST: identical bytes must be rejected as a WSS replay ---
     requestHandlerCaptor.getValue().handle(httpRequest);
-    bodyHandlerCaptor.getAllValues().get(1).handle(bodyBuffer);
+    chunkCaptor.getAllValues().get(1).handle(signedBuffer);
+    endCaptor.getAllValues().get(1).handle((Void) null);
 
     @SuppressWarnings("unchecked")
     Callable<String> secondCallable = callableCaptor.getAllValues().get(1);
@@ -369,5 +384,55 @@ class SoapEndpointPublisherTest {
     assertTrue(
         endedBody.contains("soap:Client"),
         "Failure branch must emit a soap:Client fault for WSS replay rejection");
+  }
+
+  @Test
+  void httpsAddressFailsStartup() {
+    when(bridgeConfig.address()).thenReturn("https://0.0.0.0:9000/soap");
+
+    IllegalStateException ex = assertThrows(IllegalStateException.class, () -> publisher.publish());
+
+    assertTrue(ex.getMessage().contains("scheme not supported"), ex.getMessage());
+    assertTrue(ex.getMessage().contains("https"), ex.getMessage());
+    verify(vertx, never()).createHttpServer(any());
+  }
+
+  @Test
+  void addressWithoutSchemeFailsStartup() {
+    when(bridgeConfig.address()).thenReturn("//0.0.0.0:9000/soap");
+
+    IllegalStateException ex = assertThrows(IllegalStateException.class, () -> publisher.publish());
+
+    assertTrue(ex.getMessage().contains("scheme not supported"), ex.getMessage());
+    assertTrue(ex.getMessage().contains("(missing)"), ex.getMessage());
+    verify(vertx, never()).createHttpServer(any());
+  }
+
+  @Test
+  void httpAddressStillBinds() {
+    when(bridgeConfig.address()).thenReturn("http://127.0.0.1:0/soap");
+
+    doAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Handler<AsyncResult<HttpServer>> handler = invocation.getArgument(2);
+              handler.handle(Future.succeededFuture(httpServer));
+              return null;
+            })
+        .when(httpServer)
+        .listen(anyInt(), anyString(), any());
+    doAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Handler<AsyncResult<Void>> handler = invocation.getArgument(0);
+              handler.handle(Future.succeededFuture());
+              return null;
+            })
+        .when(httpServer)
+        .close(any());
+
+    assertDoesNotThrow(() -> publisher.publish());
+    verify(httpServer).listen(eq(0), eq("127.0.0.1"), any());
+    publisher.stop();
   }
 }

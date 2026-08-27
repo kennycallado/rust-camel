@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
-use crate::pool::{BridgeState, CxfBridgePool};
-use crate::proto::{ConsumerRequest, ConsumerResponse, cxf_bridge_client::CxfBridgeClient};
+use crate::pool::{BridgeState, CxfBridgePool, cxf_bridge_client};
+use crate::proto::{ConsumerRequest, ConsumerResponse};
 
 pub struct CxfConsumer {
     pool: Arc<CxfBridgePool>,
@@ -221,7 +221,7 @@ impl Consumer for CxfConsumer {
                     }
                 };
 
-                let mut client = CxfBridgeClient::new(channel);
+                let mut client = cxf_bridge_client(channel);
                 let (response_tx, response_rx) = mpsc::channel::<ConsumerResponse>(32);
                 let response_stream = ReceiverStream::new(response_rx);
 

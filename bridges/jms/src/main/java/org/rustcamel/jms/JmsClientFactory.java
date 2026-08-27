@@ -4,6 +4,8 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -24,6 +26,12 @@ import org.messaginghub.pooled.jms.JmsPoolConnectionFactory;
 @ApplicationScoped
 public class JmsClientFactory {
   @Inject BridgeConfig config;
+
+  // Broker-facing TLS material contract (PKCS12, operator-provided). Distinct
+  // from the IPC mTLS PEM pair used for gRPC transport security.
+  private static final String KEYSTORE_PATH_ENV = "BRIDGE_BROKER_KEYSTORE_PATH";
+  private static final String TRUSTSTORE_PATH_ENV = "BRIDGE_BROKER_TRUSTSTORE_PATH";
+  private static final String KEYSTORE_PASSWORD_ENV = "BRIDGE_BROKER_KEYSTORE_PASSWORD";
 
   private static final AtomicBoolean NATIVE_INIT_DONE = new AtomicBoolean(false);
 
@@ -173,21 +181,36 @@ public class JmsClientFactory {
   }
 
   /**
-   * Builds an Artemis connection factory by constructing TransportConfiguration directly, bypassing
-   * URI parsing and BeanSupport.
+   * Builds the Netty connector transport config for {@code brokerUri}, mapping the URI scheme
+   * honestly onto TLS: only {@code ssl://}/{@code wss://} activate SSL properties, sourced from the
+   * BRIDGE_BROKER_* env contract. Plaintext schemes ({@code tcp}/{@code nio}/{@code ws}) and an
+   * outer {@code failover:} scheme get no SSL properties.
    *
-   * <p>BeanSupport uses commons-beanutils which triggers Class.forName() chains that fail in
-   * GraalVM native image. By constructing the transport config manually from the URL, we eliminate
-   * that dependency.
-   *
-   * <p>Key native-image considerations: - useEpoll/useKQueue forced to false (Epoll not supported
-   * in SubstrateVM) - reconnectAttempts set to allow retries on transient failures
+   * <p>This is the production entry point: it reads System.getenv() and BridgeConfig directly.
+   * Tests use the explicit-values overload below because System.getenv() is immutable.
    */
-  private static org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory
-      buildArtemisFactory(String url, String user, String pass) {
-    URI uri = URI.create(url);
-    String host = uri.getHost() != null ? uri.getHost() : "localhost";
-    int port = uri.getPort() > 0 ? uri.getPort() : 61616;
+  static Map<String, Object> transportConfig(URI brokerUri) {
+    return transportConfig(
+        brokerUri,
+        System.getenv(KEYSTORE_PATH_ENV),
+        System.getenv(TRUSTSTORE_PATH_ENV),
+        System.getenv(KEYSTORE_PASSWORD_ENV),
+        // Direct instantiation is safe: BridgeConfig is stateless (env-backed accessors only).
+        new BridgeConfig().brokerType());
+  }
+
+  /**
+   * Testability seam for {@link #transportConfig(URI)} — explicit values instead of env reads
+   * (mirrors how task 1.3's pinnedMaxBodyBytes keeps config testable).
+   */
+  static Map<String, Object> transportConfig(
+      URI brokerUri,
+      String keystorePath,
+      String truststorePath,
+      String keystorePassword,
+      String brokerType) {
+    String host = brokerUri.getHost() != null ? brokerUri.getHost() : "localhost";
+    int port = brokerUri.getPort() > 0 ? brokerUri.getPort() : 61616;
 
     Map<String, Object> params = new HashMap<>();
     params.put(TransportConstants.HOST_PROP_NAME, host);
@@ -202,6 +225,99 @@ public class JmsClientFactory {
     // means 5ms (not 5s) and causes connection setup to fail repeatedly.
     params.put(TransportConstants.HANDSHAKE_TIMEOUT, 5_000); // ms (int)
     params.put(TransportConstants.NETTY_CONNECT_TIMEOUT, 5_000); // ms (int)
+
+    String scheme = brokerUri.getScheme();
+    boolean secure = "ssl".equals(scheme) || "wss".equals(scheme);
+    if (!secure) {
+      return params;
+    }
+
+    // Fail-loud before any locator/factory construction: secure scheme without
+    // complete, real material must abort startup, never fall back to plaintext.
+    requireMaterial(scheme, KEYSTORE_PATH_ENV, keystorePath);
+    requireMaterial(scheme, TRUSTSTORE_PATH_ENV, truststorePath);
+    if (keystorePassword == null || keystorePassword.isBlank()) {
+      throw new IllegalStateException(
+          "Secure scheme '" + scheme + "' requires TLS material: set " + KEYSTORE_PASSWORD_ENV);
+    }
+    // Broker-type guard: the Classic path passes URLs to ActiveMQConnectionFactory
+    // outside this contract, so a secure scheme under any non-Artemis broker type
+    // would silently produce a plaintext connection.
+    if (!"artemis".equals(brokerType)) {
+      throw new IllegalStateException(
+          "Secure scheme '"
+              + scheme
+              + "' requires broker_type 'artemis' but found broker_type '"
+              + brokerType
+              + "' which does not implement the "
+              + KEYSTORE_PATH_ENV
+              + "/"
+              + TRUSTSTORE_PATH_ENV
+              + " TLS contract");
+    }
+
+    params.put(TransportConstants.SSL_ENABLED_PROP_NAME, true);
+    // Artemis 2.36 names these without the SSL_ prefix ("sslEnabled" gates them).
+    params.put(TransportConstants.KEYSTORE_PATH_PROP_NAME, keystorePath);
+    params.put(TransportConstants.TRUSTSTORE_PATH_PROP_NAME, truststorePath);
+    params.put(TransportConstants.KEYSTORE_PASSWORD_PROP_NAME, keystorePassword);
+    return params;
+  }
+
+  /**
+   * Fail-closed material validation mirroring PortAnnouncer's placeholder guard: paths carrying the
+   * {@code placeholder-} marker are rejected even when the file exists.
+   */
+  private static void requireMaterial(String scheme, String envName, String value) {
+    if (value == null || value.isBlank()) {
+      throw new IllegalStateException(
+          "Secure scheme '"
+              + scheme
+              + "' requires TLS material: set "
+              + envName
+              + " (PKCS12 path)");
+    }
+    if (value.contains("placeholder-")) {
+      throw new IllegalStateException(
+          "Secure scheme '"
+              + scheme
+              + "' started with placeholder TLS material: "
+              + envName
+              + "="
+              + value
+              + ". Aborting startup.");
+    }
+    if (!Files.exists(Path.of(value))) {
+      throw new IllegalStateException(
+          "Secure scheme '"
+              + scheme
+              + "' TLS material does not exist: "
+              + envName
+              + "="
+              + value
+              + ". Aborting startup.");
+    }
+  }
+
+  /**
+   * Builds an Artemis connection factory by constructing TransportConfiguration directly, bypassing
+   * URI parsing and BeanSupport.
+   *
+   * <p>BeanSupport uses commons-beanutils which triggers Class.forName() chains that fail in
+   * GraalVM native image. By constructing the transport config manually from the URL, we eliminate
+   * that dependency.
+   *
+   * <p>The connector parameters come from {@link #transportConfig(URI)} so the URI scheme is never
+   * discarded: ssl/wss URLs actually enable SSL.
+   *
+   * <p>Key native-image considerations: - useEpoll/useKQueue forced to false (Epoll not supported
+   * in SubstrateVM) - reconnectAttempts set to allow retries on transient failures
+   */
+  private static org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory
+      buildArtemisFactory(String url, String user, String pass) {
+    URI uri = URI.create(url);
+
+    Map<String, Object> params = transportConfig(uri);
 
     TransportConfiguration tc =
         new TransportConfiguration(NettyConnectorFactory.class.getName(), params);

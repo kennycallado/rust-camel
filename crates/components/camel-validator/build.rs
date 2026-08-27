@@ -3,9 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
     }
 
-    tonic_prost_build::configure()
-        .build_server(false)
-        .compile_protos(&["proto/xml_bridge.proto"], &["proto"])?;
+    tonic_prost_build::configure().compile_protos(&["proto/xml_bridge.proto"], &["proto"])?;
 
     println!("cargo:rerun-if-changed=proto/xml_bridge.proto");
     Ok(())

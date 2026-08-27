@@ -20,6 +20,34 @@ use crate::config::{CxfPoolConfig, validate_profile_name};
 use crate::error::CxfError;
 use crate::proto::{HealthRequest, cxf_bridge_client::CxfBridgeClient};
 
+// ── Bridge gRPC decode limit ─────────────────────────────────────────────────
+
+/// Maximum inbound gRPC message size accepted when decoding Java CXF bridge
+/// messages.
+///
+/// The Java side caps listener request bodies at 16 MiB by default and rejects
+/// configured caps above a 17 MiB ceiling (see
+/// `SoapEndpointPublisher.parseCap`); the extra headroom covers the protobuf
+/// envelope and headers around a maximal body. Without this, tonic's 4 MiB
+/// default rejects legal maximal `ConsumerRequest`s mid-stream.
+pub(crate) const CXF_BRIDGE_MAX_DECODING_MESSAGE_SIZE: usize = 18 * 1024 * 1024;
+
+pub(crate) fn cxf_bridge_decode_limit() -> usize {
+    CXF_BRIDGE_MAX_DECODING_MESSAGE_SIZE
+}
+
+/// Production-path constructor for bridge gRPC clients.
+///
+/// Applies [`cxf_bridge_decode_limit`] to every RPC issued through
+/// this client. All `CxfBridgeClient` construction sites must go through this
+/// helper rather than calling `CxfBridgeClient::new` directly, so a channel
+/// handed over by the pool always decodes maximal legal messages.
+pub(crate) fn cxf_bridge_client(
+    channel: Channel,
+) -> crate::proto::cxf_bridge_client::CxfBridgeClient<Channel> {
+    CxfBridgeClient::new(channel).max_decoding_message_size(cxf_bridge_decode_limit())
+}
+
 // ── BridgeState ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -290,7 +318,7 @@ impl CxfBridgePool {
                     })?;
 
             wait_for_health(&channel, Duration::from_secs(10), |ch| {
-                let mut client = CxfBridgeClient::new(ch);
+                let mut client = cxf_bridge_client(ch);
                 async move {
                     let resp = client.health(HealthRequest {}).await?;
                     Ok(resp.into_inner().healthy)
@@ -334,7 +362,7 @@ impl CxfBridgePool {
                     }
                     BridgeState::Ready { ref channel } => {
                         tokio::time::sleep(Duration::from_millis(health_interval)).await;
-                        let mut client = CxfBridgeClient::new(channel.clone());
+                        let mut client = cxf_bridge_client(channel.clone());
                         let health_timeout = Duration::from_secs(3);
                         match tokio::time::timeout(health_timeout, client.health(HealthRequest {}))
                             .await
@@ -510,7 +538,7 @@ impl CxfBridgePool {
                                 })?;
 
                             wait_for_health(&channel, Duration::from_secs(10), |ch| {
-                                let mut client = CxfBridgeClient::new(ch);
+                                let mut client = cxf_bridge_client(ch);
                                 async move {
                                     let resp = client.health(HealthRequest {}).await?;
                                     Ok(resp.into_inner().healthy)

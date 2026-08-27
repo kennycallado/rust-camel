@@ -22,7 +22,7 @@ The CXF bridge supports WS-Security (signing, encryption, verification, and decr
 | `cxf.security.signature.algorithm`        | _(WSS4J default)_ | Signature algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#rsa-sha1` for legacy, `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` for modern). |
 | `cxf.security.signature.digest.algorithm` | _(WSS4J default)_ | Digest algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#sha1` or `http://www.w3.org/2001/04/xmlenc#sha256`).                                      |
 | `cxf.security.signature.c14n.algorithm`   | _(WSS4J default)_ | Canonicalization algorithm URI.                                                                                                                         |
-| `cxf.security.signature.parts`            | _(WSS4J default)_ | SOAP parts to sign in `{Element}{namespace}LocalName` format. Example: `{Element}{http://www.w3.org/2003/05/soap-envelope}Body`.                        |
+| `cxf.security.signature.parts`            | _(not applied)_   | Currently parsed but NOT applied (dead config, tracked as rc-0xze). Effective signed parts: Body, plus `wsu:Timestamp` when the Timestamp action is declared. |
 | `cxf.security.username`                   | _(none)_          | Username for basic authentication.                                                                                                                      |
 | `cxf.security.password`                   | _(none)_          | Password for basic authentication.                                                                                                                      |
 
@@ -59,8 +59,11 @@ cxf.security.actions.out=Signature
 cxf.security.actions.in=Signature
 cxf.security.signature.algorithm=http://www.w3.org/2000/09/xmldsig#rsa-sha1
 cxf.security.signature.digest.algorithm=http://www.w3.org/2000/09/xmldsig#sha1
-cxf.security.signature.parts={Element}{http://www.w3.org/2003/05/soap-envelope}Body
 ```
+
+### Timestamp behavior
+
+Profiles that declare the `Timestamp` action emit a signed `wsu:Timestamp` element. The timestamp is signed together with the SOAP Body, so a rewritten or stripped timestamp fails signature verification. Inbound processing enforces the same rule: when the required inbound actions include both `Timestamp` and `Signature`, the verified signature must cover the timestamp.
 
 ### Startup logging
 
@@ -75,3 +78,20 @@ or
 ```
 WS-Security: DISABLED (no keystore configured)
 ```
+
+## Listener
+
+Consumer addresses accept plain `http://` only. The bridge does not expose a TLS listener yet, so any other scheme (`https://`, and anything else) fails loud:
+
+- At Rust route-build time: `CxfPoolConfig.bind_address` validation rejects the URI before the bridge process starts.
+- At bridge startup: the endpoint publisher rejects the address again before any socket binds.
+
+The default listener address is `http://0.0.0.0:9000/cxf`.
+
+## Environment Variables
+
+| Variable              | Default              | Description                                                                                                                                               |
+| --------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CXF_MAX_BODY_BYTES`  | `16777216` (16 MiB)  | Listener request-body cap in bytes. Oversized request bodies are rejected with HTTP 413.                                                                   |
+
+A malformed, non-positive, or above-ceiling value aborts startup. The ceiling is 17 MiB. Operators must respect the ordering constraint: the cap stays at or below 17 MiB, and the Rust gRPC decode limit is 18 MiB. A body accepted by the listener is therefore always decodable on the Rust side.

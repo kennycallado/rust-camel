@@ -2,6 +2,15 @@ quarkus:
   grpc:
     server:
       port: 9090
+      # control-plane gRPC requests from the Rust runtime. This bridge has no
+      # listener body cap, so 16 MiB is the plain cap. The Rust clients
+      # (camel-xslt, camel-component-validator) decode responses with a
+      # 17 MiB limit (XSLT_BRIDGE_MAX_DECODING_MESSAGE_SIZE /
+      # XSD_BRIDGE_MAX_DECODING_MESSAGE_SIZE) that bounds transform
+      # OUTPUTS, not inputs plus envelope: outputs beyond 17 MiB fail
+      # with a decode error (documented limit; strict improvement over
+      # the old 4 MiB default). If you change this value, update both
+      # Rust constants to stay in lockstep.
       max-inbound-message-size: 16777216
       use-separate-server: false
       plain-text: false

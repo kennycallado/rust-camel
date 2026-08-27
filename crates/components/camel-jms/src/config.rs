@@ -728,6 +728,31 @@ mod tests {
         assert!(cfg.validate().is_ok());
     }
 
+    // ── Bridge lockstep: scheme-only validation, TLS material left to sidecar ──
+
+    /// A secure-scheme URL passes config validation even though the component
+    /// holds no TLS material (truststore/keystore options do not exist here).
+    /// Missing TLS material is the Java sidecar's fail-loud concern
+    /// (BRIDGE_BROKER_* contract), not the Rust config layer's. Artemis is
+    /// the only broker type the Java sidecar accepts with a secure scheme
+    /// (broker-type guard in JmsClientFactory).
+    #[test]
+    fn secure_scheme_passes_through_without_material() {
+        let cfg = JmsPoolConfig::single_broker("ssl://broker:61617", BrokerType::Artemis);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn unknown_scheme_rejected() {
+        let cfg = JmsPoolConfig::single_broker("stomp://broker:61613", BrokerType::ActiveMq);
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("invalid broker_url"),
+            "got: {}",
+            err
+        );
+    }
+
     // ── JMS-005/JMS-009/JMS-010/JMS-011/JMS-012/JMS-013/JMS-018: endpoint config ──
 
     #[test]

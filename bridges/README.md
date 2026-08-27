@@ -12,6 +12,31 @@ Language-specific bridge processes for Apache Camel components that require non-
 
 ---
 
+## Environment Variables
+
+Each bridge reads its configuration from environment variables at startup. Malformed values fail loud before the bridge accepts traffic (ADR-0033). Per-bridge semantics: [`cxf/`](cxf/README.md), [`jms/`](jms/README.md).
+
+### cxf bridge
+
+| Variable             | Default             | Description                                                                                    |
+| -------------------- | ------------------- | ---------------------------------------------------------------------------------------------- |
+| `CXF_MAX_BODY_BYTES` | `16777216` (16 MiB) | Listener request-body cap. Ceiling 17 MiB, below the 18 MiB Rust gRPC decode limit. Oversized bodies get HTTP 413. |
+
+The cxf listener accepts `http://` consumer addresses only; TLS listener support is not yet available.
+
+### jms bridge
+
+| Variable                        | Default             | Description                                                                                     |
+| ------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------- |
+| `JMS_MAX_BODY_BYTES`            | `16777216` (16 MiB) | Message body cap. Ceiling 19 MiB, below the 20 MiB Rust IPC decode limit.                        |
+| `BRIDGE_BROKER_URL`             | `tcp://localhost:61616` | Broker connection URL.                                                                       |
+| `BRIDGE_BROKER_TYPE`            | `activemq`          | Broker adapter type. Valid values: `activemq`, `artemis`.                                        |
+| `BRIDGE_BROKER_KEYSTORE_PATH`   | _(none)_            | PKCS12 keystore for secure broker schemes (`ssl://`, `wss://`).                                  |
+| `BRIDGE_BROKER_TRUSTSTORE_PATH` | _(none)_            | PKCS12 truststore for secure broker schemes.                                                     |
+| `BRIDGE_BROKER_KEYSTORE_PASSWORD` | _(none)_          | Keystore password. Required for secure broker schemes.                                           |
+
+---
+
 ## Running Tests
 
 The bridges require a Java 21 toolchain with GraalVM CE for native compilation. In environments where Java is not installed (e.g. NixOS with Rust-only toolchain), use the official Quarkus builder image via Docker.

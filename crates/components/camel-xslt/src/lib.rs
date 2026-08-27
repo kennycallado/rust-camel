@@ -18,13 +18,16 @@ pub mod health;
 pub(crate) mod metadata;
 mod producer;
 
-pub const BRIDGE_VERSION: &str = "0.5.0";
+pub const BRIDGE_VERSION: &str = "0.6.0";
 
 pub use client::{BridgeState, StylesheetId, XsltBridgeClient, XsltTransformBackend};
 pub use component::{XsltBridgeRuntime, XsltComponent};
 pub use config::{XsltComponentConfig, XsltEndpointConfig};
 pub use error::XsltError;
 pub use health::XsltHealthCheck;
+
+#[cfg(test)]
+mod bridge_client_test;
 
 pub mod proto {
     tonic::include_proto!("xml_bridge");

@@ -2,6 +2,9 @@ quarkus:
   grpc:
     server:
       port: 9090
+      # must exceed JMS_MAX_BODY_BYTES (ceiling 19 MiB) + protobuf envelope
+      # overhead (destination/headers/content_type) — 19 MiB + 1 MiB headroom
+      max-inbound-message-size: 20971520
       use-separate-server: false
       plain-text: false
   http:

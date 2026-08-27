@@ -68,51 +68,48 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
     AtomicBoolean finished = new AtomicBoolean(false);
 
     if (responseObserver instanceof ServerCallStreamObserver<JmsMessage> serverObs) {
-      serverObs.setOnCancelHandler(
-          () -> {
-            if (finished.compareAndSet(false, true)) {
-              consumer.stop();
-              activeConsumers.remove(subId);
-              consumerFactory.destroy(consumer);
-            }
-          });
+      serverObs.setOnCancelHandler(() -> cleanupSubscription(consumer, subId, finished));
     }
 
-    consumer.subscribe(
-        request.getDestination(),
-        subId,
-        new StreamObserver<>() {
-          @Override
-          public void onNext(JmsMessage msg) {
-            if (!finished.get()) {
-              try {
-                responseObserver.onNext(msg);
-              } catch (Exception ignored) {
+    try {
+      consumer.subscribe(
+          request.getDestination(),
+          subId,
+          new StreamObserver<>() {
+            @Override
+            public void onNext(JmsMessage msg) {
+              if (!finished.get()) {
+                try {
+                  responseObserver.onNext(msg);
+                } catch (Exception ignored) {
+                }
               }
             }
-          }
 
-          @Override
-          public void onError(Throwable t) {
-            if (finished.compareAndSet(false, true)) {
-              consumer.stop();
-              activeConsumers.remove(subId);
-              consumerFactory.destroy(consumer);
-              safeRespond(responseObserver, t);
+            @Override
+            public void onError(Throwable t) {
+              if (cleanupSubscription(consumer, subId, finished)) {
+                safeRespond(responseObserver, t);
+              }
             }
-          }
 
-          @Override
-          public void onCompleted() {
-            if (finished.compareAndSet(false, true)) {
-              consumer.stop();
-              activeConsumers.remove(subId);
-              consumerFactory.destroy(consumer);
-              safeComplete(responseObserver);
+            @Override
+            public void onCompleted() {
+              if (cleanupSubscription(consumer, subId, finished)) {
+                safeComplete(responseObserver);
+              }
             }
-          }
-        },
-        finished);
+          },
+          finished);
+    } catch (IllegalStateException e) {
+      // Startup validation failed (ADR-0033): a malformed JMS_MAX_BODY_BYTES must fail loud here,
+      // not escape as grpc UNKNOWN — and without leaving this consumer in activeConsumers.
+      if (cleanupSubscription(consumer, subId, finished)) {
+        LOG.error("JMS subscribe failed for subscription '" + subId + "': " + e.getMessage(), e);
+        responseObserver.onError(
+            Status.FAILED_PRECONDITION.withDescription(e.getMessage()).asException());
+      }
+    }
   }
 
   @Override
@@ -143,6 +140,22 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
             .setMessage(lastHealthMessage)
             .build());
     responseObserver.onCompleted();
+  }
+
+  /**
+   * Exactly-once teardown for a subscription: wins the {@code finished} race at most once and, on
+   * winning, stops the consumer, removes it from the active map, and destroys it. Returns whether
+   * this call won (and therefore performed the cleanup) so callers can gate their follow-up stream
+   * response.
+   */
+  private boolean cleanupSubscription(JmsConsumer consumer, String subId, AtomicBoolean finished) {
+    if (!finished.compareAndSet(false, true)) {
+      return false;
+    }
+    consumer.stop();
+    activeConsumers.remove(subId);
+    consumerFactory.destroy(consumer);
+    return true;
   }
 
   @PreDestroy

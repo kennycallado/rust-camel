@@ -19,6 +19,16 @@ import org.jboss.logging.Logger;
 @Dependent
 public class JmsConsumer {
   private static final Logger LOG = Logger.getLogger(JmsConsumer.class);
+  private static final String MAX_BODY_BYTES_ENV = "JMS_MAX_BODY_BYTES";
+  private static final long DEFAULT_MAX_BODY_BYTES = 16L * 1024 * 1024;
+
+  /**
+   * Hard ceiling for {@code JMS_MAX_BODY_BYTES}: the Rust IPC decode limit is 20 MiB, so a
+   * configured cap above 19 MiB would let bodies pass this gate only to fail decode on the Rust
+   * side. The headroom absorbs IPC framing overhead.
+   */
+  static final long MAX_BODY_BYTES_CEILING = 19L * 1024 * 1024;
+
   @Inject JmsClientFactory factory;
 
   private volatile Connection connection;
@@ -26,6 +36,55 @@ public class JmsConsumer {
   private volatile MessageConsumer consumer;
   private volatile boolean running = false;
   private final AtomicBoolean resourcesClosed = new AtomicBoolean(false);
+
+  /**
+   * Test seam: pins the body cap deterministically. {@code -1} (production) resolves the cap from
+   * {@link #maxBodyBytes()} per message.
+   */
+  long pinnedMaxBodyBytes = -1;
+
+  private long resolveMaxBodyBytes() {
+    return pinnedMaxBodyBytes > 0 ? pinnedMaxBodyBytes : maxBodyBytes();
+  }
+
+  /**
+   * Reads the consumer body cap from {@code JMS_MAX_BODY_BYTES} in bytes. Fails loud on a malformed
+   * or non-positive value so a typo never silently disables the cap.
+   */
+  static long maxBodyBytes() {
+    String raw = System.getenv(MAX_BODY_BYTES_ENV);
+    if (raw == null || raw.isBlank()) {
+      return DEFAULT_MAX_BODY_BYTES;
+    }
+    return parseCap(raw);
+  }
+
+  /**
+   * Parses one {@code JMS_MAX_BODY_BYTES} value, failing loud with the env name on malformed,
+   * non-positive, or above-ceiling input.
+   */
+  static long parseCap(String raw) {
+    try {
+      long parsed = Long.parseLong(raw.trim());
+      if (parsed <= 0) {
+        throw new IllegalStateException(
+            MAX_BODY_BYTES_ENV + " must be a positive byte count: " + raw);
+      }
+      if (parsed > MAX_BODY_BYTES_CEILING) {
+        throw new IllegalStateException(
+            MAX_BODY_BYTES_ENV
+                + " exceeds its "
+                + MAX_BODY_BYTES_CEILING
+                + "-byte ceiling: "
+                + parsed
+                + "; caps above 19 MiB invert the decode-limit ordering, bodies pass this"
+                + " Java cap only to fail at the 20 MiB Rust IPC limit");
+      }
+      return parsed;
+    } catch (NumberFormatException e) {
+      throw new IllegalStateException(MAX_BODY_BYTES_ENV + " invalid: " + raw, e);
+    }
+  }
 
   /**
    * Subscribe to a JMS destination and forward messages to the gRPC stream.
@@ -49,6 +108,10 @@ public class JmsConsumer {
       String subscriptionId,
       StreamObserver<JmsMessage> observer,
       AtomicBoolean finished) {
+    // Startup validation (ADR-0033): a malformed JMS_MAX_BODY_BYTES must fail loud before any
+    // broker connection is created.
+    maxBodyBytes();
+
     running = true;
     resourcesClosed.set(false);
 
@@ -157,11 +220,45 @@ public class JmsConsumer {
     b.setDestination(destination);
 
     if (msg instanceof BytesMessage bm) {
-      byte[] buf = new byte[(int) bm.getBodyLength()];
+      long len = bm.getBodyLength();
+      long cap = resolveMaxBodyBytes();
+      if (len < 0 || len > cap) {
+        String diagnostic =
+            MAX_BODY_BYTES_ENV
+                + ": rejecting message body of "
+                + len
+                + " bytes (cap "
+                + cap
+                + " bytes); message not forwarded";
+        // Handler-contract boundary (ADR-0012): the consumer logs at warn and forwards the error
+        // outcome; the route owns the operational signal.
+        LOG.warn(diagnostic);
+        throw new JMSException(diagnostic);
+      }
+      byte[] buf = new byte[(int) len];
       bm.readBytes(buf);
       b.setBody(ByteString.copyFrom(buf));
     } else if (msg instanceof TextMessage tm) {
-      b.setBody(ByteString.copyFromUtf8(tm.getText() != null ? tm.getText() : ""));
+      // TextMessage exposes no pre-read length, so the cap lands after getText(): the string is
+      // materialized by the JMS client either way, but oversized text never reaches the protobuf
+      // body or the stream.
+      String text = tm.getText();
+      int len = text != null ? text.length() : 0;
+      long cap = resolveMaxBodyBytes();
+      if (len > cap) {
+        String diagnostic =
+            MAX_BODY_BYTES_ENV
+                + ": rejecting message body of "
+                + len
+                + " chars (cap "
+                + cap
+                + " bytes); message not forwarded";
+        // Handler-contract boundary (ADR-0012): the consumer logs at warn and forwards the error
+        // outcome; the route owns the operational signal.
+        LOG.warn(diagnostic);
+        throw new JMSException(diagnostic);
+      }
+      b.setBody(ByteString.copyFromUtf8(text != null ? text : ""));
       b.setContentType("text/plain");
     }
 

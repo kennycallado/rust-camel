@@ -18,6 +18,35 @@ pub type StylesheetId = String;
 
 const DEFAULT_MAX_CACHE_ENTRIES: usize = 256;
 
+// ── Bridge gRPC decode limit ─────────────────────────────────────────────────
+
+/// Maximum inbound gRPC message size accepted when decoding Java bridge
+/// responses.
+///
+/// The xml-bridge accepts `TransformRequest` documents up to 16 MiB by
+/// default (see `bridges/xml/src/main/resources/application.yml`); the extra
+/// headroom covers the protobuf envelope around a maximal transform output.
+/// Without this, tonic's 4 MiB default rejects legal maximal
+/// `TransformResponse`s.
+pub(crate) const XSLT_BRIDGE_MAX_DECODING_MESSAGE_SIZE: usize = 17 * 1024 * 1024;
+
+pub(crate) fn xslt_bridge_decode_limit() -> usize {
+    XSLT_BRIDGE_MAX_DECODING_MESSAGE_SIZE
+}
+
+/// Production-path constructor for bridge gRPC clients.
+///
+/// Applies [`xslt_bridge_decode_limit`] to every RPC issued through this
+/// client. All `XsltTransformerClient` construction sites must go through
+/// this helper rather than calling `XsltTransformerClient::new` directly, so
+/// a channel handed over by the bridge runtime always decodes maximal legal
+/// messages.
+pub(crate) fn xslt_transformer_client(
+    channel: Channel,
+) -> crate::proto::xslt_transformer_client::XsltTransformerClient<Channel> {
+    XsltTransformerClient::new(channel).max_decoding_message_size(xslt_bridge_decode_limit())
+}
+
 #[derive(Debug)]
 struct StylesheetCache {
     inner: Mutex<StylesheetCacheInner>,
@@ -135,7 +164,7 @@ impl XsltTransformBackend for GrpcXsltBackend {
         stylesheet_id: StylesheetId,
         stylesheet: Vec<u8>,
     ) -> Result<Option<String>, XsltError> {
-        let mut client = XsltTransformerClient::new(channel);
+        let mut client = xslt_transformer_client(channel);
         let response = client
             .compile_stylesheet(CompileStylesheetRequest {
                 stylesheet_id,
@@ -156,7 +185,7 @@ impl XsltTransformBackend for GrpcXsltBackend {
         parameters: HashMap<String, String>,
         output_method: String,
     ) -> Result<(Vec<u8>, Option<String>), XsltError> {
-        let mut client = XsltTransformerClient::new(channel);
+        let mut client = xslt_transformer_client(channel);
         let mut request = tonic::Request::new(TransformRequest {
             stylesheet_id,
             document,

@@ -30,7 +30,10 @@ pub use error::CxfError;
 pub use health::CxfHealthCheck;
 pub use pool::{BridgeSlot, BridgeState, CxfBridgePool};
 
-pub const BRIDGE_VERSION: &str = "0.5.0";
+pub const BRIDGE_VERSION: &str = "0.6.0";
+
+#[cfg(test)]
+mod bridge_client_test;
 
 pub mod proto {
     tonic::include_proto!("cxf_bridge");

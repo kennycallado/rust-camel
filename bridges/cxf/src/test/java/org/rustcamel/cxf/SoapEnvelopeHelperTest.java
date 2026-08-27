@@ -2,8 +2,8 @@ package org.rustcamel.cxf;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.StringReader;
@@ -91,8 +91,7 @@ class SoapEnvelopeHelperTest {
     assertTrue(dbf.getFeature("http://apache.org/xml/features/disallow-doctype-decl"));
     assertFalse(dbf.getFeature("http://xml.org/sax/features/external-general-entities"));
     assertFalse(dbf.getFeature("http://xml.org/sax/features/external-parameter-entities"));
-    assertFalse(
-        dbf.getFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd"));
+    assertFalse(dbf.getFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd"));
     assertFalse(dbf.isXIncludeAware());
     assertTrue(dbf.isNamespaceAware());
   }
