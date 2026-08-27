@@ -52,13 +52,13 @@ pub enum CompiledStep {
         lifecycle: Option<Arc<dyn StepLifecycle>>,
         /// Stable span name (e.g. `to:direct`, `split`), stamped by
         /// `StepCompilerRegistry::compile_step` from
-        /// [`BuilderStep::span_label`]. `None` for anonymous steps — spans
+        /// `BuilderStep::span_label`. `None` for anonymous steps — spans
         /// fall back to the positional `step-{index}` name. Read by
         /// `compose_traced_pipeline` / `segment_span` in route_compiler.rs.
         label: Option<Arc<str>>,
         /// Span kind for this step's step span, stamped by
         /// `StepCompilerRegistry::compile_step` from
-        /// [`BuilderStep::span_kind_hint`]. `Internal` for steps built
+        /// `BuilderStep::span_kind_hint`. `Internal` for steps built
         /// outside the registry. Read by `compose_traced_pipeline` in
         /// route_compiler.rs.
         kind_hint: SpanKindHint,
