@@ -254,10 +254,14 @@ pub(crate) async fn resolve_initial_url_for_ssrf(
 /// 2. Rewrites method for 303/301/302 (POST → GET)
 /// 3. Strips Authorization/Cookie on cross-origin redirects
 /// 4. Resolves the target hostname and validates all IPs against SSRF blocklist
-/// 5. Builds a per-hop client with `resolve_to_addrs` to pin the validated IPs
+/// 5. Builds the per-hop client with `resolve_to_addrs` from the endpoint's
+///    pinned-client cache (hostname targets) or reuses the shared unpinned
+///    client (IP-literal targets)
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_with_ssrf_safe_redirects(
     initial_client: &reqwest::Client,
+    shared_client: &reqwest::Client,
+    pinned_cache: &crate::client_cache::PinnedClientCache,
     http_config: &HttpConfig,
     endpoint_config: &HttpEndpointConfig,
     method: reqwest::Method,
@@ -267,8 +271,6 @@ pub(crate) async fn send_with_ssrf_safe_redirects(
     max_redirects: usize,
     response_timeout: Option<std::time::Duration>,
 ) -> Result<reqwest::Response, CamelError> {
-    use std::net::SocketAddr;
-
     let mut current_client = initial_client.clone();
     let mut current_method = method;
     let mut current_url = initial_url.to_string();
@@ -369,10 +371,19 @@ pub(crate) async fn send_with_ssrf_safe_redirects(
             validate_redirect_target_for_ssrf(&redirect_url, endpoint_config.allow_internal)
                 .await?;
 
-        // Build a per-hop client with DNS pinning
+        // Build the per-hop client with DNS pinning: hostname targets build
+        // through the endpoint's pinned-client cache; IP-literal targets
+        // reuse the shared unpinned client and never enter the cache.
         let redirect_host = redirect_url.host_str().unwrap_or("");
-        let resolved_slice: &[SocketAddr] = &resolved_addrs;
-        current_client = build_client(http_config, Some((redirect_host, resolved_slice)));
+        if redirect_host.parse::<std::net::IpAddr>().is_ok() {
+            current_client = shared_client.clone();
+        } else {
+            current_client = pinned_cache
+                .get_or_build(redirect_host, &resolved_addrs, || {
+                    build_client(http_config, Some((redirect_host, &resolved_addrs)))
+                })
+                .await;
+        }
 
         current_method = new_method;
         current_url = redirect_url.to_string();
@@ -387,6 +398,7 @@ pub(crate) async fn send_with_ssrf_safe_redirects(
 mod tests {
     use super::*;
     use crate::HttpEndpointConfig;
+    use crate::{PINNED_CLIENT_MAX_ENTRIES, PINNED_CLIENT_TTL, PinnedClientCache};
     use camel_component_api::UriConfig;
 
     #[test]
@@ -526,5 +538,145 @@ mod tests {
             "example.com should resolve to at least one addr for pinning"
         );
         assert_eq!(host, "example.com", "should return the hostname unchanged");
+    }
+
+    /// Local responder that accepts any number of HTTP/1.1 connections on an
+    /// ephemeral 127.0.0.1 port and answers each with a minimal 302 redirect
+    /// to `location`. Returns `(base_url, JoinHandle)`.
+    async fn spawn_302_responder(location: String) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral 127.0.0.1 listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let base_url = format!("http://localhost:{port}");
+        let response =
+            format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n");
+        let handle = tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                let _ = conn.write_all(response.as_bytes()).await;
+                let _ = conn.shutdown().await;
+            }
+        });
+        (base_url, handle)
+    }
+
+    /// Local responder that accepts any number of HTTP/1.1 connections on an
+    /// ephemeral 127.0.0.1 port and answers each with a fixed 200 OK.
+    /// Returns `(base_url, JoinHandle)`.
+    async fn spawn_200_responder() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral 127.0.0.1 listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let base_url = format!("http://localhost:{port}");
+        let handle = tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                let _ = conn
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await;
+                let _ = conn.shutdown().await;
+            }
+        });
+        (base_url, handle)
+    }
+
+    /// Port of a responder base URL, for tests that must target a different
+    /// authority on the same kind of listener.
+    fn responder_port(base_url: &str) -> u16 {
+        url::Url::parse(base_url)
+            .expect("responder base URL parses")
+            .port()
+            .expect("responder base URL carries an explicit port")
+    }
+
+    /// Redirect hops to a hostname target build one pinned client through
+    /// the endpoint's cache and reuse it on subsequent calls; the hostname
+    /// initial request itself goes through `initial_client` untouched and
+    /// never enters the cache.
+    #[tokio::test]
+    async fn redirect_hostname_target_reuses_cached_client() {
+        let (hop_base, _hop_handle) = spawn_200_responder().await;
+        let hop_port = responder_port(&hop_base);
+        let (entry_base, _entry_handle) =
+            spawn_302_responder(format!("http://localhost:{hop_port}/hop")).await;
+        let entry_port = responder_port(&entry_base);
+
+        let cache = PinnedClientCache::new(PINNED_CLIENT_TTL, PINNED_CLIENT_MAX_ENTRIES);
+        // build_client sets redirect Policy::none(); a bare reqwest::Client
+        // would auto-follow the 302 before the manual loop sees it.
+        let shared = build_client(&HttpConfig::default(), None);
+        let endpoint_config = HttpEndpointConfig::from_uri("http://localhost/?allowInternal=true")
+            .expect("endpoint config parses");
+
+        for _ in 0..2 {
+            let response = send_with_ssrf_safe_redirects(
+                &shared,
+                &shared,
+                &cache,
+                &HttpConfig::default(),
+                &endpoint_config,
+                reqwest::Method::GET,
+                &format!("http://localhost:{entry_port}/start"),
+                vec![],
+                None,
+                3,
+                None,
+            )
+            .await
+            .expect("redirect-following request succeeds");
+            assert_eq!(response.status(), 200);
+            assert_eq!(
+                cache.build_count(),
+                1,
+                "only the localhost:{hop_port} hop enters the pinned \
+                 cache — the initial request uses initial_client \
+                 untouched, and the second call must reuse the hop entry"
+            );
+        }
+    }
+
+    /// A redirect hop to an IP-literal target bypasses the pinned cache and
+    /// reuses the shared unpinned client; an IP-literal initial request
+    /// likewise never enters the cache.
+    #[tokio::test]
+    async fn redirect_ip_literal_target_bypasses_cache() {
+        let (hop_base, _hop_handle) = spawn_200_responder().await;
+        let hop_port = responder_port(&hop_base);
+        let (entry_base, _entry_handle) =
+            spawn_302_responder(format!("http://127.0.0.1:{hop_port}/hop")).await;
+        let entry_port = responder_port(&entry_base);
+
+        let cache = PinnedClientCache::new(PINNED_CLIENT_TTL, PINNED_CLIENT_MAX_ENTRIES);
+        let shared = build_client(&HttpConfig::default(), None);
+        let endpoint_config = HttpEndpointConfig::from_uri("http://localhost/?allowInternal=true")
+            .expect("endpoint config parses");
+
+        let response = send_with_ssrf_safe_redirects(
+            &shared,
+            &shared,
+            &cache,
+            &HttpConfig::default(),
+            &endpoint_config,
+            reqwest::Method::GET,
+            &format!("http://127.0.0.1:{entry_port}/start"),
+            vec![],
+            None,
+            3,
+            None,
+        )
+        .await
+        .expect("redirect-following request succeeds");
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            cache.build_count(),
+            0,
+            "neither the literal initial request nor the literal hop may \
+             enter the pinned cache"
+        );
     }
 }

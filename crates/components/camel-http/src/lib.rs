@@ -1,4 +1,5 @@
 pub mod bundle;
+pub(crate) mod client_cache;
 pub mod config;
 mod header_policy;
 pub mod health;
@@ -12,6 +13,7 @@ pub(crate) mod tls_reload;
 use crate::config::parse_ok_status_code_range;
 pub use bundle::HttpBundle;
 pub use bundle::HttpStaticBundle;
+pub(crate) use client_cache::{PINNED_CLIENT_MAX_ENTRIES, PINNED_CLIENT_TTL, PinnedClientCache};
 pub use config::HttpConfig;
 pub use health::HttpHealthCheck;
 pub use registry::HttpRouteRegistry;
@@ -1897,6 +1899,10 @@ impl Component for HttpComponent {
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
         let client = build_client(&self.config, None);
+        let pinned_cache = std::sync::Arc::new(PinnedClientCache::new(
+            PINNED_CLIENT_TTL,
+            PINNED_CLIENT_MAX_ENTRIES,
+        ));
         ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
             server_config.host.clone(),
             server_config.port,
@@ -1906,6 +1912,7 @@ impl Component for HttpComponent {
             config,
             server_config,
             client,
+            pinned_cache,
             http_config: self.config.clone(),
         }))
     }
@@ -1962,6 +1969,10 @@ impl Component for HttpsComponent {
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
         let client = build_client(&self.config, None);
+        let pinned_cache = std::sync::Arc::new(PinnedClientCache::new(
+            PINNED_CLIENT_TTL,
+            PINNED_CLIENT_MAX_ENTRIES,
+        ));
         ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
             server_config.host.clone(),
             server_config.port,
@@ -1971,6 +1982,7 @@ impl Component for HttpsComponent {
             config,
             server_config,
             client,
+            pinned_cache,
             http_config: self.config.clone(),
         }))
     }
@@ -1985,6 +1997,7 @@ struct HttpEndpoint {
     config: HttpEndpointConfig,
     server_config: HttpServerConfig,
     client: reqwest::Client,
+    pinned_cache: std::sync::Arc<PinnedClientCache>,
     http_config: HttpConfig,
 }
 
@@ -2023,6 +2036,7 @@ impl Endpoint for HttpEndpoint {
         let producer = HttpProducer {
             config: Arc::new(self.config.clone()),
             client: self.client.clone(),
+            pinned_cache: std::sync::Arc::clone(&self.pinned_cache),
             http_config: Arc::new(self.http_config.clone()),
         };
         if let Some(ref provider) = self.config.token_provider {
@@ -2042,6 +2056,7 @@ impl Endpoint for HttpEndpoint {
 struct HttpProducer {
     config: Arc<HttpEndpointConfig>,
     client: reqwest::Client,
+    pinned_cache: std::sync::Arc<PinnedClientCache>,
     http_config: Arc<HttpConfig>,
 }
 
@@ -2163,7 +2178,8 @@ impl Service<Exchange> for HttpProducer {
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let config = self.config.clone();
-        let client = self.client.clone();
+        let shared_client = self.client.clone();
+        let pinned_cache = std::sync::Arc::clone(&self.pinned_cache);
         let http_config = self.http_config.clone();
 
         Box::pin(async move {
@@ -2180,13 +2196,20 @@ impl Service<Exchange> for HttpProducer {
 
             // Resolve hostname and pin validated IPs to prevent DNS-rebinding TOCTOU
             // (L-H2). When the URL uses a domain name and SSRF protection is active,
-            // build a per-request client with resolve_to_addrs so reqwest connects
-            // directly to the validated addresses without re-resolving DNS.
+            // reuse the endpoint's cached DNS-pinned client for that validated
+            // (host, addrs) pair — built once with resolve_to_addrs, then shared so
+            // repeated requests keep one connection pool without re-resolving DNS.
+            // Per-request SSRF validation and DNS pinning are unchanged. IP-literal
+            // URLs use the endpoint's unpinned shared client.
             let resolved = ssrf::resolve_initial_url_for_ssrf(&url, config.allow_internal).await?;
             let client: reqwest::Client = if let Some((ref host, ref addrs)) = resolved {
-                build_client(&http_config, Some((host.as_str(), addrs)))
+                pinned_cache
+                    .get_or_build(host.as_str(), addrs, || {
+                        build_client(&http_config, Some((host.as_str(), addrs)))
+                    })
+                    .await
             } else {
-                client
+                shared_client.clone()
             };
 
             debug!(
@@ -2327,9 +2350,15 @@ impl Service<Exchange> for HttpProducer {
             };
 
             let response = if config.follow_redirects && !is_stream_body {
-                // Use manual redirect loop with per-hop SSRF validation
+                // Use manual redirect loop with per-hop SSRF validation.
+                // `client` is the pinned-or-shared binding for the initial
+                // request (a hostname initial request keeps its DNS-pinned
+                // client); `shared_client` is the unpinned endpoint client
+                // reused by IP-literal redirect hops.
                 ssrf::send_with_ssrf_safe_redirects(
                     &client,
+                    &shared_client,
+                    &pinned_cache,
                     &http_config,
                     &config,
                     method,
@@ -7681,6 +7710,10 @@ mod tests {
             config: HttpEndpointConfig::from_uri("https://0.0.0.0:8443/api").unwrap(),
             server_config: HttpServerConfig::from_uri("https://0.0.0.0:8443/api").unwrap(),
             client: reqwest::Client::new(),
+            pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+                PINNED_CLIENT_TTL,
+                PINNED_CLIENT_MAX_ENTRIES,
+            )),
             http_config: HttpConfig::default(),
         };
         let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
@@ -7702,6 +7735,10 @@ mod tests {
             )
             .unwrap(),
             client: reqwest::Client::new(),
+            pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+                PINNED_CLIENT_TTL,
+                PINNED_CLIENT_MAX_ENTRIES,
+            )),
             http_config: HttpConfig::default(),
         };
         let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
@@ -7729,6 +7766,10 @@ mod tests {
                 .unwrap(),
             server_config,
             client: reqwest::Client::new(),
+            pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+                PINNED_CLIENT_TTL,
+                PINNED_CLIENT_MAX_ENTRIES,
+            )),
             http_config: HttpConfig::default(),
         };
         let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
@@ -8359,6 +8400,160 @@ mod tests {
         assert!(
             !captured_logs_contain(SENTINEL_BAD_1),
             "error logs must not render the credential value"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pinned-client-cache producer-path behavioral tests
+    // (openspec/changes/http-pinned-client-cache — scenarios: producers share
+    // the endpoint cache, hostname requests build one client while the entry
+    // stays retrievable, IP-literal requests bypass the cache)
+    // -----------------------------------------------------------------------
+
+    /// Local responder that accepts any number of HTTP/1.1 connections on an
+    /// ephemeral 127.0.0.1 port and answers each with a fixed 200 response.
+    /// Unlike [`start_host_capturing_destination`], which serves exactly one
+    /// connection, this loop keeps accepting so cache-reuse tests can drive
+    /// several requests through one destination. Returns
+    /// `(base_url, JoinHandle)`.
+    async fn spawn_multi_accept_200() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral 127.0.0.1 listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let base_url = format!("http://localhost:{port}");
+        let handle = tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                let _ = conn
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await;
+                let _ = conn.shutdown().await;
+            }
+        });
+        (base_url, handle)
+    }
+
+    /// Port of a [`spawn_multi_accept_200`] base URL, for tests that must
+    /// target a different authority (the 127.0.0.1 literal) on the same
+    /// listener.
+    fn responder_port(base_url: &str) -> u16 {
+        url::Url::parse(base_url)
+            .expect("responder base URL parses")
+            .port()
+            .expect("responder base URL carries an explicit port")
+    }
+
+    /// Build an endpoint literal whose outbound config points at
+    /// `base_url` (with `allowInternal=true` so the SSRF resolver permits
+    /// loopback) and whose pinned-client cache is the caller-owned Arc, so
+    /// build counts stay observable across producers.
+    fn endpoint_with_shared_cache(
+        base_url: &str,
+        pinned_cache: &Arc<PinnedClientCache>,
+    ) -> HttpEndpoint {
+        let uri = format!("{base_url}?allowInternal=true");
+        HttpEndpoint {
+            uri: uri.clone(),
+            config: HttpEndpointConfig::from_uri(&uri).expect("producer endpoint config parses"),
+            server_config: HttpServerConfig::from_uri(&uri).expect("server config parses"),
+            client: reqwest::Client::new(),
+            pinned_cache: Arc::clone(pinned_cache),
+            http_config: HttpConfig::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn producers_share_endpoint_cache() {
+        use tower::ServiceExt;
+
+        let (base_url, _handle) = spawn_multi_accept_200().await;
+        let pinned_cache = Arc::new(PinnedClientCache::new(
+            PINNED_CLIENT_TTL,
+            PINNED_CLIENT_MAX_ENTRIES,
+        ));
+
+        let ctx = test_producer_ctx();
+        let endpoint = endpoint_with_shared_cache(&format!("{base_url}/"), &pinned_cache);
+        let producer_a = endpoint.create_producer(rt(), &ctx);
+        let producer_b = endpoint.create_producer(rt(), &ctx);
+
+        // Each producer sends one exchange whose resolved URL is the
+        // endpoint's localhost base URL (a domain name → pinned-client path).
+        for producer in [producer_a, producer_b] {
+            let producer = producer.expect("create producer");
+            let exchange = Exchange::new(Message::default());
+            let reply = producer.oneshot(exchange).await;
+            assert!(reply.is_ok(), "producer call failed: {:?}", reply);
+        }
+
+        assert_eq!(
+            pinned_cache.build_count(),
+            1,
+            "both producers must hit the same shared cache entry; a second \
+             build means sharing is broken"
+        );
+    }
+
+    #[tokio::test]
+    async fn producer_repeated_hostname_requests_build_one_client() {
+        use tower::ServiceExt;
+
+        let (base_url, _handle) = spawn_multi_accept_200().await;
+        let pinned_cache = Arc::new(PinnedClientCache::new(
+            PINNED_CLIENT_TTL,
+            PINNED_CLIENT_MAX_ENTRIES,
+        ));
+        let ctx = test_producer_ctx();
+        let endpoint = endpoint_with_shared_cache(&format!("{base_url}/"), &pinned_cache);
+        let producer = endpoint
+            .create_producer(rt(), &ctx)
+            .expect("create producer");
+
+        // Two sequential hostname requests — the cached pinned client stays
+        // retrievable between them, so no second build may happen.
+        for i in 0..2 {
+            let exchange = Exchange::new(Message::default());
+            let reply = producer.clone().oneshot(exchange).await;
+            assert!(reply.is_ok(), "request {i} failed: {:?}", reply);
+        }
+
+        assert_eq!(
+            pinned_cache.build_count(),
+            1,
+            "repeated hostname requests must reuse the one pinned client; \
+             0 builds means the producer bypassed the cache, more than 1 \
+             means the entry was dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn ip_literal_request_never_enters_cache() {
+        use tower::ServiceExt;
+
+        let (base_url, _handle) = spawn_multi_accept_200().await;
+        let pinned_cache = Arc::new(PinnedClientCache::new(
+            PINNED_CLIENT_TTL,
+            PINNED_CLIENT_MAX_ENTRIES,
+        ));
+
+        let ctx = test_producer_ctx();
+        let destination = format!("http://127.0.0.1:{}/ping", responder_port(&base_url));
+        let endpoint = endpoint_with_shared_cache(&destination, &pinned_cache);
+        let producer = endpoint
+            .create_producer(rt(), &ctx)
+            .expect("create producer");
+
+        let exchange = Exchange::new(Message::default());
+        let reply = producer.oneshot(exchange).await;
+        assert!(reply.is_ok(), "producer call failed: {:?}", reply);
+
+        assert_eq!(
+            pinned_cache.build_count(),
+            0,
+            "an IP-literal URL must use the shared unpinned client and \
+             never enter the pinned cache"
         );
     }
 }
