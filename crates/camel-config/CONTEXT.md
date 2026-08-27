@@ -104,6 +104,19 @@ component grows a genuine credential leaf, the principle says extend
 `PropertiesResolver` (properties.rs) is a legacy `{{...}}` public API
 retained for compatibility; it is OFF the load path.
 
+**Include entries are never interpolated.**
+The loader strips all `include` keys from the raw tree pre-placeholder and resolves those entries as plain filesystem paths before any merge or interpolation: stripping sits in `fn extract_includes` (`config.rs:2242`), loading in `fn load_includes`, path resolution in `fn resolve_include_path` (`include.rs:12`).
+`${env:}` expansion runs only post-merge and only on leaf VALUES (`fn resolve_tree_placeholders`, invoked post-merge at `config.rs:2585`).
+An entry like `include = ["${env:CAMEL_INCLUDE_CONF}"]` therefore fails with "included file not found": the raw marker is treated as the filename.
+Recursive includes are unsupported in V1: `fn load_includes` drops a nested `include` key with a warning (`include.rs:91`).
+
+**Switching cache backend between profiles requires a complete section.**
+Profile merges are additive: overlay scalars replace while omitted base keys survive, and TOML offers no remove-key sentinel (`fn merge_toml_values`, `config.rs:1623`).
+`CamelConfig::validate` rejects every cross-backend key — the redis branch rejects `path`, `cache_size`, `sweep_interval`, `max_entries`, `max_capacity` (`config.rs:2056`), while the redb branch rejects `url` and its siblings (`config.rs:1977`) — so a partial profile overlay cannot switch backends.
+It fails validation instead, e.g. `cache_repo.path does not apply to the "redis" backend`.
+The supported pattern: define the complete `[<profile>.cache_repo]` table inside each profile and keep `cache_repo` out of `[default]`.
+A table absent from the base inserts whole at merge, so absence swaps the table instead of deep-merging into it.
+
 **Route discovery delegation.**
 `discovery.rs` delegates to `camel_dsl` and wraps its error as `DiscoveryError::Dsl`. This
 crate implements no EIPs and no route steps (L7 N/A).
