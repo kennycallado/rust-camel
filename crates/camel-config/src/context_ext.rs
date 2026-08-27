@@ -608,8 +608,19 @@ impl CamelConfig {
             ctx = ctx.with_lifecycle(otel_service);
         }
 
-        // Enable tracer pipeline when OTel is active (spans + metrics per route)
-        let final_tracer_config = effective_tracer_config(tracer_config, otel_enabled);
+        // Enable tracer pipeline when OTel or Prometheus is active (spans +
+        // metrics per route), unless tracing was set explicitly — explicit wins
+        let tracing_explicitly_set = tracer_config.tracing_enabled_explicit;
+        let final_tracer_config = effective_tracer_config(
+            tracer_config,
+            otel_enabled,
+            config
+                .observability
+                .prometheus
+                .as_ref()
+                .is_some_and(|p| p.enabled),
+            tracing_explicitly_set,
+        );
         ctx = ctx.with_tracer_config(final_tracer_config).await;
 
         if let Some(ref prom) = config.observability.prometheus
@@ -940,8 +951,17 @@ impl CamelConfig {
     }
 }
 
-fn effective_tracer_config(mut tracer_config: TracerConfig, otel_enabled: bool) -> TracerConfig {
-    if otel_enabled {
+fn effective_tracer_config(
+    mut tracer_config: TracerConfig,
+    otel_enabled: bool,
+    prometheus_enabled: bool,
+    tracing_explicitly_set: bool,
+) -> TracerConfig {
+    // Explicit value wins in both directions: never overridden, never forced on.
+    if tracing_explicitly_set {
+        return tracer_config;
+    }
+    if otel_enabled || prometheus_enabled {
         tracer_config.enabled = true;
     }
     tracer_config
@@ -1194,25 +1214,73 @@ type = "kubernetes"
     }
 
     #[test]
-    fn effective_tracer_config_enables_tracing_when_otel_is_enabled() {
-        let cfg = TracerConfig {
-            enabled: false,
-            ..Default::default()
-        };
+    fn effective_tracer_config_truth_table() {
+        // (otel, prometheus, tracing_explicitly_set, input_enabled) -> expected enabled
+        let table: &[(bool, bool, bool, bool, bool)] = &[
+            // otel implies the tracer pipeline
+            (true, false, false, false, true),
+            (true, true, false, false, true),
+            // prometheus implies the tracer pipeline
+            (false, true, false, false, true),
+            (false, true, false, true, true),
+            // nothing implies: config passes through unchanged
+            (false, false, false, false, false),
+            (false, false, false, true, true),
+            // explicit value wins in both directions — even against otel/prometheus.
+            // The (true, *, true, false) -> false row is an intentional change:
+            // old behavior forced enabled=true whenever otel was on.
+            (true, false, true, false, false),
+            (true, true, true, false, false),
+            (false, true, true, false, false),
+            (false, false, true, true, true),
+            (true, false, true, true, true),
+        ];
 
-        let out = effective_tracer_config(cfg, true);
-        assert!(out.enabled);
+        for (i, &(otel, prom, explicit, input, expected)) in table.iter().enumerate() {
+            let cfg = TracerConfig {
+                enabled: input,
+                ..Default::default()
+            };
+            let out = effective_tracer_config(cfg, otel, prom, explicit);
+            assert_eq!(
+                out.enabled, expected,
+                "row {i}: (otel={otel}, prom={prom}, explicit={explicit}, input={input})"
+            );
+        }
     }
 
     #[test]
-    fn effective_tracer_config_preserves_tracing_when_otel_is_disabled() {
-        let cfg = TracerConfig {
-            enabled: false,
-            ..Default::default()
-        };
+    fn serde_boundary_sets_explicit_flag() {
+        // `enabled` key present: explicit flag set, value preserved
+        let cfg: CamelConfig = config::Config::builder()
+            .add_source(config::File::from_str(
+                "[observability.tracer]\nenabled = false\n",
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        let tracer = cfg.observability.tracer;
+        assert!(tracer.tracing_enabled_explicit, "explicit flag must be set");
+        assert!(!tracer.enabled, "explicit false must be preserved");
 
-        let out = effective_tracer_config(cfg, false);
-        assert!(!out.enabled);
+        // `enabled` key absent: flag unset, default false
+        let cfg: CamelConfig = config::Config::builder()
+            .add_source(config::File::from_str(
+                "[observability.tracer]\n",
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        let tracer = cfg.observability.tracer;
+        assert!(
+            !tracer.tracing_enabled_explicit,
+            "absent key must leave flag unset"
+        );
+        assert!(!tracer.enabled);
     }
 
     #[tokio::test]

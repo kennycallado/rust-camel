@@ -9,9 +9,9 @@ use camel_api::StepLifecycle;
 use camel_api::component_metadata::ComponentMetadata;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    CamelError, FunctionInvoker, HealthReport, Lifecycle, MetricsCollector, PlatformIdentity,
-    PlatformService, ReadinessGate, RouteTemplateSpec, RuntimeCommandBus, RuntimeQueryBus,
-    TemplateInstanceRecord,
+    CamelError, FunctionInvoker, HealthReport, Lifecycle, MetricsCollector, MetricsHandle,
+    PlatformIdentity, PlatformService, ReadinessGate, RouteTemplateSpec, RuntimeCommandBus,
+    RuntimeQueryBus, TemplateInstanceRecord,
 };
 use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
 use camel_language_api::Language;
@@ -46,7 +46,11 @@ pub struct CamelContext {
     supervision_join: Option<tokio::task::JoinHandle<()>>,
     runtime: Arc<RuntimeBus>,
     cancel_token: CancellationToken,
-    metrics: Arc<dyn MetricsCollector>,
+    /// Shared late-bound metrics cell (rc-hrm1.3): the SAME handle instance
+    /// seeds the route controller's `tracer_metrics` and the RuntimeBus
+    /// collector, so a collector registered at any time — including after
+    /// routes are added — is observed by all subsequent emission calls.
+    metrics: Arc<MetricsHandle>,
     // Platform ports
     platform_service: Arc<dyn PlatformService>,
     languages: SharedLanguageRegistry,
@@ -74,7 +78,7 @@ pub(crate) struct FromParts {
     pub(crate) supervision_join: Option<tokio::task::JoinHandle<()>>,
     pub(crate) runtime: Arc<RuntimeBus>,
     pub(crate) cancel_token: CancellationToken,
-    pub(crate) metrics: Arc<dyn MetricsCollector>,
+    pub(crate) metrics: Arc<MetricsHandle>,
     pub(crate) platform_service: Arc<dyn PlatformService>,
     pub(crate) languages: SharedLanguageRegistry,
     pub(crate) shutdown_timeout: std::time::Duration,
@@ -470,16 +474,6 @@ impl CamelContext {
 
     /// Configure tracing with full config.
     pub async fn set_tracer_config(&mut self, config: TracerConfig) {
-        // Inject metrics collector if not already set
-        let config = if config.metrics_collector.is_none() {
-            TracerConfig {
-                metrics_collector: Some(Arc::clone(&self.metrics)),
-                ..config
-            }
-        } else {
-            config
-        };
-
         let _ = self.route_controller.set_tracer_config(config).await;
     }
 
@@ -507,7 +501,10 @@ impl CamelContext {
     /// the invoker at build time before any routes are added.
     pub fn with_lifecycle<L: Lifecycle + 'static>(mut self, service: L) -> Self {
         if let Some(collector) = service.as_metrics_collector() {
-            self.metrics = collector;
+            // Late-bound registration (compose, never replace): the shared
+            // handle fans the collector into every emission path seeded at
+            // build time — context slot, controller tracer path, RuntimeBus.
+            self.metrics.register(collector);
         }
         if let Some(invoker) = service.as_function_invoker() {
             self.function_invoker = Some(invoker.clone());
@@ -625,9 +622,9 @@ impl CamelContext {
         }
     }
 
-    /// Get the metrics collector.
+    /// Get the metrics collector (the shared late-bound handle).
     pub fn metrics(&self) -> Arc<dyn MetricsCollector> {
-        Arc::clone(&self.metrics)
+        Arc::clone(&self.metrics) as Arc<dyn MetricsCollector>
     }
 
     /// Get the platform service.
@@ -949,7 +946,7 @@ impl ComponentContext for CamelContext {
     }
 
     fn metrics(&self) -> Arc<dyn MetricsCollector> {
-        Arc::clone(&self.metrics)
+        Arc::clone(&self.metrics) as Arc<dyn MetricsCollector>
     }
 
     fn health(&self) -> Arc<dyn camel_component_api::HealthCheckRegistry> {

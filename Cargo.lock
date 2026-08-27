@@ -1200,6 +1200,7 @@ dependencies = [
 name = "camel-api"
 version = "0.36.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "blake3",
  "bytes",

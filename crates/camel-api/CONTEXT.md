@@ -14,13 +14,13 @@ execution engine, no registries, no lifecycle implementation.
 ## `#[non_exhaustive]` posture
 
 ADR-0049 places this contract crate in its mandatory scope: every `pub enum` is
-`#[non_exhaustive]` or carries an `exhaustive-by-contract` exception note. The 57 `pub enum`s
+`#[non_exhaustive]` or carries an `exhaustive-by-contract` exception note. The 61 `pub enum`s
 split into:
 
 | Category | Count | Posture |
 |---|---|---|
-| `#[non_exhaustive]` | 60 | 55 attributed; pre-existing exceptions include `CamelError`, `ConfigValidationError`, `TemplateError`. |
-| `exhaustive-by-contract` exception | 5 | `PipelineOutcome` (the ADR-0024 outcome algebra), `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy), `ContentType` (the closed 4-variant cache content-type set matched by out-of-crate CacheService), `CredentialSource` (the closed credential-source set; out-of-crate camel-auth extraction matches all variants), and `AccessMode` (the closed kernel access-mode set; out-of-crate camel-auth enforcement matches all variants). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
+| `#[non_exhaustive]` | 55 | 55 attributed; pre-existing exceptions include `CamelError`, `ConfigValidationError`, `TemplateError`. |
+| `exhaustive-by-contract` exception | 6 | `PipelineOutcome` (the ADR-0024 outcome algebra), `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy), `ContentType` (the closed 4-variant cache content-type set matched by out-of-crate CacheService), `TransportId` (the closed security transport set; out-of-crate enforcement matches all variants), `CredentialSource` (the closed credential-source set; out-of-crate camel-auth extraction matches all variants), and `AccessMode` (the closed kernel access-mode set; out-of-crate camel-auth enforcement matches all variants). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
 
 New contract enums use `#[non_exhaustive]` from birth; a closed-set exception needs a
 `/// exhaustive-by-contract: <rationale>` note. ADR-0049 Rule 3 governs public structs (out of
@@ -189,6 +189,34 @@ _Avoid_: URI wrapper (vague), parsed URL (implies full RFC 3986 semantics)
 **EndpointUriError**:
 Typed error for `EndpointUri` construction: `DuplicateKey`, `MissingScheme`, `EmptyQueryKey`, `InvalidParamKey`. Converts into `CamelError::EndpointUri`.
 _Avoid_: stringly Config errors for URI merge failures
+
+**MetricsCollector**:
+The metrics emission contract (`metrics.rs`): five exchange-lifecycle methods
+(duration, errors, exchanges, queue depth, circuit-breaker transitions) plus two
+defaulted label-passing methods (histogram, counter). Implementations integrate
+Prometheus, OpenTelemetry, or test recorders. Emission sites hold this trait
+object; they never hold a concrete backend.
+_Avoid_: metrics sink, metrics interface (vague)
+
+**MetricsHandle**:
+Late-bound swap-cell collector (`metrics.rs`), one per context: it seeds itself
+with `NoOpMetrics` and implements `MetricsCollector` by delegating to whatever
+is currently stored, so emission sites can hold it before any real collector
+exists. `MetricsHandle::register` composes the new collector over the stored
+one — never replaces — and registering the same collector Arc twice is a no-op
+(pointer-equality membership check), so wiring one collector through two
+builder paths cannot double-count. camel-core seeds a single shared handle into
+the context slot, the route controller tracer path, and the RuntimeBus; late
+registrations flow through it without re-snapshotting.
+_Avoid_: metrics registry, metrics slot, metrics service handle
+
+**CompositeMetricsCollector**:
+A `MetricsCollector` that fans every observation out to its member collectors in
+registration order (`metrics.rs`). Built by `MetricsHandle::register`: the
+second registration stores a composite of `[first, second]`, and a third
+composes over that composite — ordering and prior observation are preserved
+(composition, not replacement).
+_Avoid_: metrics multiplexer, chained collector, collector list
 
 ## Example dialogue
 

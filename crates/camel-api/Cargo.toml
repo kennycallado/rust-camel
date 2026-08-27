@@ -12,6 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+arc-swap.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 chrono = { workspace = true }

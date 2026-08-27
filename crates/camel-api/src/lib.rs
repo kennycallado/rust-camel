@@ -108,7 +108,7 @@ pub use idempotent::IdempotentRepository;
 pub use lifecycle::{HealthStatus, Lifecycle, ServiceStatus};
 pub use load_balancer::{LoadBalanceStrategy, LoadBalancerConfig};
 pub use message::Message;
-pub use metrics::{MetricsCollector, NoOpMetrics};
+pub use metrics::{CompositeMetricsCollector, MetricsCollector, MetricsHandle, NoOpMetrics};
 pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};
 pub use outcome_pipeline::OutcomePipeline;
 pub use outcome_segment::OutcomeSegment;

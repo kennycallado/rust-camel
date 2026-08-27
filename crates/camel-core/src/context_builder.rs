@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use camel_api::{
-    CamelError, FunctionInvoker, Lifecycle, MetricsCollector, NoOpMetrics, NoopPlatformService,
+    CamelError, FunctionInvoker, Lifecycle, MetricsCollector, MetricsHandle, NoopPlatformService,
     PlatformService, SupervisionConfig,
 };
 use camel_language_api::Language;
@@ -210,7 +210,16 @@ impl CamelContextBuilder {
             .lock()
             .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
             .insert("simple".to_string(), simple_with_resolver);
-        let metrics = self.metrics.unwrap_or_else(|| Arc::new(NoOpMetrics));
+        // The shared late-bound metrics cell (rc-hrm1.3): created ONCE here,
+        // seeded NoOp, and the SAME Arc seeds the route controller's
+        // `tracer_metrics`, the RuntimeBus collector, and the CamelContext
+        // slot. Collectors pre-registered via the builder (`.metrics()` or
+        // `with_lifecycle`) compose into it; later registrations flow through
+        // `CamelContext::with_lifecycle` without re-snapshotting.
+        let metrics_handle = Arc::new(MetricsHandle::new());
+        if let Some(collector) = self.metrics {
+            metrics_handle.register(collector);
+        }
         let platform_service = self
             .platform_service
             .unwrap_or_else(|| Arc::new(NoopPlatformService::default()));
@@ -277,12 +286,14 @@ impl CamelContextBuilder {
                 controller_impl.set_claim_check_repositories(Arc::clone(&claim_check_repositories));
                 controller_impl.set_cache_repositories(Arc::clone(&cache_repositories));
                 controller_impl.set_health_registry(Arc::clone(&health_registry));
+                controller_impl
+                    .set_tracer_metrics(Arc::clone(&metrics_handle) as Arc<dyn MetricsCollector>);
                 controller_impl.set_crash_notifier(crash_tx);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 let supervision_join = spawn_supervision_task(
                     controller.clone(),
                     config,
-                    Some(Arc::clone(&metrics)),
+                    Some(Arc::clone(&metrics_handle) as Arc<dyn MetricsCollector>),
                     crash_rx,
                 );
                 (controller, actor_join, Some(supervision_join))
@@ -311,6 +322,8 @@ impl CamelContextBuilder {
                 controller_impl.set_claim_check_repositories(Arc::clone(&claim_check_repositories));
                 controller_impl.set_cache_repositories(Arc::clone(&cache_repositories));
                 controller_impl.set_health_registry(Arc::clone(&health_registry));
+                controller_impl
+                    .set_tracer_metrics(Arc::clone(&metrics_handle) as Arc<dyn MetricsCollector>);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 (controller, actor_join, None)
             };
@@ -321,7 +334,7 @@ impl CamelContextBuilder {
             store,
             self.execution_factory,
             Arc::clone(&health_registry),
-            Arc::clone(&metrics),
+            Arc::clone(&metrics_handle) as Arc<dyn MetricsCollector>,
         );
         let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
         controller
@@ -339,7 +352,7 @@ impl CamelContextBuilder {
             supervision_join,
             runtime,
             cancel_token: CancellationToken::new(),
-            metrics,
+            metrics: metrics_handle,
             platform_service,
             languages,
             shutdown_timeout: self.shutdown_timeout,

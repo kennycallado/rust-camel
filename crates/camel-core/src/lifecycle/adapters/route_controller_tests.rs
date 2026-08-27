@@ -5343,3 +5343,349 @@ mod drain_gate {
         controller.stop_route("rt-gate-cancel").await.unwrap();
     }
 }
+
+// ============================================================================
+// rc-hrm1.3: controller-path metrics wiring regression tests
+//
+// The route controller hands components their collector through
+// `ControllerComponentContext` (see `resolve_steps`/`build_managed_route` in
+// route_controller.rs), seeded from `tracer_metrics`. These tests pin that
+// the controller path resolves the REGISTERED collector — the shared
+// late-bound `MetricsHandle` built by `CamelContextBuilder::build()` —
+// instead of the `NoOpMetrics` fallback a pre-wiring build leaves behind.
+// ============================================================================
+
+/// Records every `MetricsCollector` call as a `"method:primary-arg"` string.
+struct RecordingCollector {
+    calls: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl MetricsCollector for RecordingCollector {
+    fn record_exchange_duration(&self, route_id: &str, _duration: Duration) {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push(format!("record_exchange_duration:{route_id}"));
+    }
+    fn increment_errors(&self, route_id: &str, _error_type: &str) {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push(format!("increment_errors:{route_id}"));
+    }
+    fn increment_exchanges(&self, route_id: &str) {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push(format!("increment_exchanges:{route_id}"));
+    }
+    fn set_queue_depth(&self, route_id: &str, _depth: usize) {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push(format!("set_queue_depth:{route_id}"));
+    }
+    fn record_circuit_breaker_change(&self, route_id: &str, _from: &str, _to: &str) {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push(format!("record_circuit_breaker_change:{route_id}"));
+    }
+    fn record_histogram(&self, name: &str, _value: f64, _labels: &[(&str, &str)]) {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push(format!("record_histogram:{name}"));
+    }
+    fn record_counter(&self, name: &str, _value: f64, _labels: &[(&str, &str)]) {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push(format!("record_counter:{name}"));
+    }
+}
+
+/// Lifecycle service exposing the [`RecordingCollector`] through
+/// `as_metrics_collector`, mirroring how otel/prometheus services register.
+struct RecordingLifecycle {
+    calls: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl camel_api::Lifecycle for RecordingLifecycle {
+    fn name(&self) -> &str {
+        "recording-lifecycle"
+    }
+    async fn start(&mut self) -> Result<(), CamelError> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> Result<(), CamelError> {
+        Ok(())
+    }
+    fn as_metrics_collector(&self) -> Option<Arc<dyn MetricsCollector>> {
+        Some(Arc::new(RecordingCollector {
+            calls: Arc::clone(&self.calls),
+        }))
+    }
+}
+
+/// Shared slot where the probe component stores the collector it resolved at
+/// step-resolution time through its `RuntimeObservability`.
+type CapturedCollector = Arc<std::sync::Mutex<Option<Arc<dyn MetricsCollector>>>>;
+
+fn recording_has(calls: &Arc<std::sync::Mutex<Vec<String>>>, entry: &str) -> bool {
+    calls.lock().expect("calls lock").iter().any(|e| e == entry)
+}
+
+/// Pass-through producer that counts the exchanges it processes.
+#[derive(Clone)]
+struct CountingPassthrough {
+    seen: Arc<AtomicU64>,
+}
+
+impl tower::Service<Exchange> for CountingPassthrough {
+    type Response = Exchange;
+    type Error = CamelError;
+    type Future =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), CamelError>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, exchange: Exchange) -> Self::Future {
+        self.seen.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move { Ok(exchange) })
+    }
+}
+
+/// Endpoint whose producer activation captures the collector supplied via
+/// `RuntimeObservability` — the exact path a real component uses.
+struct ProbeEndpoint {
+    slot: CapturedCollector,
+    seen: Arc<AtomicU64>,
+}
+
+impl Endpoint for ProbeEndpoint {
+    fn uri(&self) -> &str {
+        "probe:sink"
+    }
+
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Err(CamelError::ProcessorError(
+            "probe does not support consumers".into(),
+        ))
+    }
+
+    fn create_producer(
+        &self,
+        rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
+        *self.slot.lock().expect("probe slot lock") = Some(rt.metrics());
+        Ok(BoxProcessor::new(CountingPassthrough {
+            seen: Arc::clone(&self.seen),
+        }))
+    }
+}
+
+/// Minimal test component vending [`ProbeEndpoint`] under the `probe` scheme.
+struct ProbeComponent {
+    slot: CapturedCollector,
+    seen: Arc<AtomicU64>,
+}
+
+impl Component for ProbeComponent {
+    fn scheme(&self) -> &str {
+        "probe"
+    }
+
+    fn create_endpoint(
+        &self,
+        _uri: &str,
+        _ctx: &dyn ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        Ok(Box::new(ProbeEndpoint {
+            slot: Arc::clone(&self.slot),
+            seen: Arc::clone(&self.seen),
+        }))
+    }
+}
+
+/// Enable the tracer pipeline at the CONTROLLER level (actor handle).
+///
+/// `CamelContext::set_tracer_config` is deliberately avoided: pre-change it
+/// reverse-injects the context's own collector snapshot into the config,
+/// which would hand the controller a live collector even without the shared
+/// handle wiring these regressions pin — invalidating the red state.
+async fn enable_tracer_pipeline_at_controller(ctx: &crate::context::CamelContext) {
+    ctx.runtime_execution_handle()
+        .controller
+        .set_tracer_config(TracerConfig {
+            enabled: true,
+            ..Default::default()
+        })
+        .await
+        .expect("enable tracer pipeline");
+}
+
+/// rc-hrm1.3 (compile-level): `TracerConfig` constructs with no collector
+/// reference, and its plain derived Debug needs no redaction. Lives here,
+/// not in config.rs, so the deleted field's identifier has zero textual
+/// presence in the config source.
+#[test]
+fn tracer_config_carries_no_collector_field() {
+    let tracer_config = TracerConfig {
+        enabled: true,
+        tracing_enabled_explicit: false,
+        detail_level: DetailLevel::default(),
+        outputs: crate::shared::observability::domain::TracerOutputs::default(),
+    };
+    let dbg = format!("{tracer_config:?}");
+    assert!(dbg.contains("TracerConfig"));
+    assert!(!dbg.contains("metrics_collector"));
+}
+
+/// Drive a timer→probe route through a built context until the probe producer
+/// has processed its single exchange.
+async fn run_probe_route_once(_ctx: &crate::context::CamelContext, seen: &Arc<AtomicU64>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while seen.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "probe producer never received an exchange"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn controller_path_receives_registered_collector() {
+    let calls: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let slot: CapturedCollector = Arc::default();
+    let seen = Arc::new(AtomicU64::new(0));
+
+    let mut ctx = crate::context::CamelContext::builder()
+        .with_lifecycle(RecordingLifecycle {
+            calls: Arc::clone(&calls),
+        })
+        .build()
+        .await
+        .expect("build context");
+    ctx.register_component(ProbeComponent {
+        slot: Arc::clone(&slot),
+        seen: Arc::clone(&seen),
+    });
+    ctx.register_component(camel_component_timer::TimerComponent::new());
+
+    enable_tracer_pipeline_at_controller(&ctx).await;
+
+    ctx.add_route_definition(
+        RouteDefinition::new(
+            "timer:tick?period=10&repeatCount=1",
+            vec![BuilderStep::To("probe:sink".into())],
+        )
+        .with_route_id("probe-route"),
+    )
+    .await
+    .expect("add route");
+
+    ctx.start().await.expect("start context");
+    run_probe_route_once(&ctx, &seen).await;
+
+    // THE rc-hrm1.3 gate: the collector captured through the controller path
+    // must reach the REGISTERED RecordingCollector. Pre-wiring the captured
+    // collector is the NoOp fallback — the write goes into the void and the
+    // recording list does not grow.
+    let captured = slot
+        .lock()
+        .expect("probe slot lock")
+        .clone()
+        .expect("probe producer must capture a collector at resolution");
+    let before = calls.lock().expect("calls lock").len();
+    captured.increment_exchanges("probe");
+    {
+        let recorded = calls.lock().expect("calls lock");
+        assert!(
+            recorded.len() > before,
+            "captured collector wrote into the void; recorded: {recorded:?}"
+        );
+    }
+
+    // The same captured path must also carry the real per-exchange emissions
+    // of the enabled tracer pipeline (the tracer records after the wrapped
+    // producer future resolves, so poll briefly).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !recording_has(&calls, "increment_exchanges:probe-route")
+        || !recording_has(&calls, "record_exchange_duration:probe-route")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "tracer exchange emissions never reached the recording collector; \
+             recorded: {:?}",
+            calls.lock().expect("calls lock")
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let _ = ctx.stop().await;
+}
+
+#[tokio::test]
+async fn late_registration_after_build_observed() {
+    let calls: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let seen = Arc::new(AtomicU64::new(0));
+
+    // Built with NO metrics service anywhere near the builder — the
+    // collector registers on the BUILT context, after construction.
+    let mut ctx = crate::context::CamelContext::builder()
+        .build()
+        .await
+        .expect("build context");
+    ctx.register_component(ProbeComponent {
+        slot: Arc::default(),
+        seen: Arc::clone(&seen),
+    });
+    ctx.register_component(camel_component_timer::TimerComponent::new());
+
+    // Late registration on the built context.
+    ctx = ctx.with_lifecycle(RecordingLifecycle {
+        calls: Arc::clone(&calls),
+    });
+
+    enable_tracer_pipeline_at_controller(&ctx).await;
+
+    ctx.add_route_definition(
+        RouteDefinition::new(
+            "timer:tick?period=10&repeatCount=1",
+            vec![BuilderStep::To("probe:sink".into())],
+        )
+        .with_route_id("late-route"),
+    )
+    .await
+    .expect("add route");
+
+    ctx.start().await.expect("start context");
+    run_probe_route_once(&ctx, &seen).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !recording_has(&calls, "increment_exchanges:late-route")
+        || !recording_has(&calls, "record_exchange_duration:late-route")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "late-registered collector never observed the exchange; \
+             recorded: {:?}",
+            calls.lock().expect("calls lock")
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let _ = ctx.stop().await;
+}

@@ -1,43 +1,57 @@
-use std::fmt;
-use std::sync::Arc;
-
-use serde::Deserialize;
-
-use camel_api::metrics::MetricsCollector;
+use serde::{Deserialize, Deserializer};
 
 /// Configuration for the Tracer EIP (Enterprise Integration Pattern).
 ///
 /// This struct defines how message tracing should be performed throughout
 /// Camel routes. Use `CamelContext::set_tracer_config` to apply configuration
 /// programmatically, or configure via `Camel.toml` as shown in the module documentation.
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct TracerConfig {
-    #[serde(default)]
     pub enabled: bool,
 
-    #[serde(default = "default_detail_level")]
+    /// Whether `enabled` was explicitly present at the serde boundary.
+    ///
+    /// Not read from input keys: the custom `Deserialize` impl below sets it
+    /// from the presence/absence of the `enabled` key, so it is skipped by
+    /// every serde path. Explicit values win over the "otel/prometheus imply
+    /// tracing" rule in `effective_tracer_config` (camel-config), in both
+    /// directions.
+    pub tracing_enabled_explicit: bool,
+
     pub detail_level: DetailLevel,
 
-    #[serde(default)]
     pub outputs: TracerOutputs,
-
-    /// Metrics collector for recording route-level metrics.
-    /// Not serializable - injected at runtime.
-    #[serde(skip)]
-    pub metrics_collector: Option<Arc<dyn MetricsCollector>>,
 }
 
-impl fmt::Debug for TracerConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TracerConfig")
-            .field("enabled", &self.enabled)
-            .field("detail_level", &self.detail_level)
-            .field("outputs", &self.outputs)
-            .field(
-                "metrics_collector",
-                &self.metrics_collector.as_ref().map(|_| "MetricsCollector"),
-            )
-            .finish()
+/// Deserializes `TracerConfig` with serde-boundary detection for `enabled`:
+/// an absent key means "not explicitly set" (`enabled = false`,
+/// `tracing_enabled_explicit = false`), while any explicit `enabled` value
+/// keeps the flag set so callers can honor it over implied enabling.
+///
+/// The intermediate `Raw` struct mirrors the public field set and its serde
+/// attributes (`#[serde(default)]` behavior on other fields is unchanged).
+impl<'de> Deserialize<'de> for TracerConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            enabled: Option<bool>,
+            #[serde(default = "default_detail_level")]
+            detail_level: DetailLevel,
+            #[serde(default)]
+            outputs: TracerOutputs,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self {
+            enabled: raw.enabled.unwrap_or(false),
+            tracing_enabled_explicit: raw.enabled.is_some(),
+            detail_level: raw.detail_level,
+            outputs: raw.outputs,
+        })
     }
 }
 
@@ -125,7 +139,6 @@ mod tests {
         assert!(cfg.outputs.stdout.enabled);
         assert!(matches!(cfg.outputs.stdout.format, OutputFormat::Json));
         assert!(cfg.outputs.file.is_none());
-        assert!(cfg.metrics_collector.is_none());
     }
 
     #[test]
@@ -147,12 +160,5 @@ mod tests {
         assert!(!cfg.outputs.stdout.enabled);
         assert!(matches!(cfg.outputs.stdout.format, OutputFormat::Plain));
         assert_eq!(cfg.outputs.file.as_ref().unwrap().path, "/tmp/trace.log");
-    }
-
-    #[test]
-    fn tracer_config_debug_redacts_metrics_collector() {
-        let dbg = format!("{:?}", TracerConfig::default());
-        assert!(dbg.contains("TracerConfig"));
-        assert!(dbg.contains("metrics_collector"));
     }
 }

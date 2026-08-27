@@ -411,7 +411,16 @@ impl DefaultRouteController {
     pub fn set_tracer_config(&mut self, config: &TracerConfig) {
         self.tracing_enabled = config.enabled;
         self.tracer_detail_level = config.detail_level.clone();
-        self.tracer_metrics = config.metrics_collector.clone();
+    }
+
+    /// Seed the tracer metrics collector — the shared late-bound
+    /// `MetricsHandle` built once by `CamelContextBuilder::build()`.
+    ///
+    /// Replaces the deleted `TracerConfig.metrics_collector` snapshot
+    /// injection: the collector is wired here, at construction, and late
+    /// registrations flow through the handle without re-snapshotting.
+    pub fn set_tracer_metrics(&mut self, metrics: Arc<dyn MetricsCollector>) {
+        self.tracer_metrics = Some(metrics);
     }
 
     fn build_producer_context(&self, route_id: &str) -> Result<ProducerContext, CamelError> {
