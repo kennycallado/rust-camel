@@ -75,7 +75,7 @@ Control-plane recovery outcome recorded when a lifecycle side effect fails after
 _Avoid_: rollback, undo
 
 **Cohort Activation Barrier**:
-The context-lifecycle barrier gates the first consumer-envelope dispatch at three drain sites. These are the Concurrent trait branch, the Sequential `_` branch, and the restart aggregate envelope branch. The late aggregator branch is ungated. Its output is post-dispatch by construction. The `reset_cohort` and `activate_cohort` port methods call the shared `Arc` directly. They do not use an actor round-trip. The runtime activates the cohort on every return from boot. A boot failure therefore keeps today's partial-up semantics.
+The context-lifecycle barrier gates the first consumer-envelope dispatch at three drain sites. These are the Concurrent trait branch, the Sequential `_` branch, and the restart aggregate envelope branch. The late aggregator branch is ungated. Its output is post-dispatch by construction. The `reset_cohort` and `activate_cohort` port methods call the shared `Arc` directly. They do not use an actor round-trip. The runtime activates the cohort on every return from boot. A boot failure therefore keeps today's partial-up semantics. Consumers that drive a bare `DefaultRouteController` outside a full context open the same gate through `DefaultRouteController::activate_cohort`; the port methods serve the context path.
 
 **ErrorHandlerConfig**:
 Runtime representation of an ErrorHandler — the compiled form of the DSL `ErrorHandler` declaration.

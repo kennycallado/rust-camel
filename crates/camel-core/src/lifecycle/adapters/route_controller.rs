@@ -111,6 +111,18 @@ pub struct DefaultRouteController {
 }
 
 impl DefaultRouteController {
+    /// Open the startup-cohort activation barrier (rc-jxkj).
+    ///
+    /// The CamelContext lifecycle opens this automatically once the startup
+    /// cohort completes. Consumers that drive a bare `DefaultRouteController`
+    /// (outside a full context) must call this before dispatching
+    /// (typically after starting routes), or pipeline dispatch parks
+    /// every envelope until the caller's call timeout surfaces as a
+    /// failure.
+    pub fn activate_cohort(&self) {
+        self.cohort.open();
+    }
+
     pub(super) fn health_registry(&self) -> Arc<HealthCheckRegistry> {
         self.health_registry.clone().unwrap_or_else(|| {
             debug!("health_registry not configured — creating isolated fallback");

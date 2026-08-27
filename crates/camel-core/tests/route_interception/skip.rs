@@ -286,6 +286,8 @@ async fn recompiled_pipelines_keep_the_same_rules() {
         .start_route("recompile-route")
         .await
         .expect("route must start");
+    controller.activate_cohort(); // bare-controller: open the rc-jxkj barrier
+    controller.activate_cohort(); // idempotent: second call is a no-op
 
     // Recompile the same definition and atomically swap the pipeline in.
     let recompiled = controller
