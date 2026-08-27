@@ -168,6 +168,13 @@ impl EnvVarGuard {
         unsafe { std::env::remove_var(key) };
         Self { key, prior }
     }
+
+    fn set(key: &'static str, value: &str) -> Self {
+        let prior = std::env::var(key).ok();
+        // SAFETY: test-scoped; the guard restores the prior value on drop.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, prior }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -183,6 +190,31 @@ impl Drop for EnvVarGuard {
             }
         }
     }
+}
+
+/// Env-override activation: `camel run`'s loader must apply allowlisted
+/// `CAMEL_*` overrides on top of the loaded file, not only on route
+/// discovery. `camel-cli` has no env-lock convention (unlike camel-config's
+/// `ENV_OVERRIDE_LOCK`), so this follows the crate's existing guard-only
+/// pattern: the guard restores the prior value even on panic, and the other
+/// `run_tests` tests that assert `timeout_ms` do so on the missing-file
+/// defaults path, which never reads `CAMEL_TIMEOUT_MS`. The residual
+/// cross-test window (a concurrent config load observing this var) is
+/// accepted by the existing convention.
+#[test]
+fn env_override_applies_to_loaded_config() {
+    let _guard = EnvVarGuard::set("CAMEL_TIMEOUT_MS", "12345");
+
+    let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+    let path = dir.path().join("Camel.toml");
+    std::fs::write(&path, "timeout_ms = 1000\n").expect("write Camel.toml"); // allow-unwrap
+
+    let config =
+        load_config_or_default(&path.display().to_string()).expect("existing file must load"); // allow-unwrap
+    assert_eq!(
+        config.timeout_ms, 12345,
+        "CAMEL_TIMEOUT_MS must override the file's timeout_ms in the run loader"
+    );
 }
 
 #[test]

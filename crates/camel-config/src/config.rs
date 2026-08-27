@@ -636,6 +636,25 @@ impl std::fmt::Debug for IdempotentRepoConfig {
     }
 }
 
+impl IdempotentRepoConfig {
+    /// Normalize expanded-but-empty redis topology fields to absent.
+    ///
+    /// Thin delegate to [`normalize_empty_topology_fields`], which owns the
+    /// shared contract with `validate_redis_topology_fields`.
+    pub(crate) fn normalize_empty_topology(&mut self) {
+        normalize_empty_topology_fields(
+            &mut self.url,
+            &mut self.sentinel_nodes,
+            &mut self.master_name,
+            &mut self.username,
+            &mut self.sentinel_username,
+            &mut self.key_prefix,
+            &mut self.password,
+            &mut self.sentinel_password,
+        );
+    }
+}
+
 /// Configuration for the cache repository.
 ///
 /// Supports three backends: `"memory"` (in-process, bounded by
@@ -819,6 +838,23 @@ impl CacheRepoConfig {
             .unwrap_or(DEFAULT_MAX_TTL);
         (sweep, max_ttl)
     }
+
+    /// Normalize expanded-but-empty redis topology fields to absent.
+    ///
+    /// Thin delegate to [`normalize_empty_topology_fields`], which owns the
+    /// shared contract with `validate_redis_topology_fields`.
+    pub(crate) fn normalize_empty_topology(&mut self) {
+        normalize_empty_topology_fields(
+            &mut self.url,
+            &mut self.sentinel_nodes,
+            &mut self.master_name,
+            &mut self.username,
+            &mut self.sentinel_username,
+            &mut self.key_prefix,
+            &mut self.password,
+            &mut self.sentinel_password,
+        );
+    }
 }
 
 /// Parse a human-readable byte size (used by `cache_repo.cache_size`).
@@ -968,6 +1004,55 @@ pub(crate) fn validate_redis_topology_fields(
         )?;
     }
     Ok(())
+}
+
+/// Normalize empty redis topology values to absent, shared by `cache_repo`
+/// and `idempotent_repo` (FR1 of deployment-resolvable-cache-repo-topology).
+///
+/// Shared contract with [`validate_redis_topology_fields`]: the normalizer
+/// removes exactly the values the validator would treat as present-but-empty,
+/// so its `Option::is_some()` predicates see clean absence after
+/// `${env:}` expansion. Keeping the two functions adjacent prevents them
+/// drifting — a field added to the validator's topology matrix must be
+/// considered here too. Rules: a `Some(s)` string becomes `None` when
+/// `s` is whitespace-only; `sentinel_nodes` becomes `None` when the array is
+/// empty or every entry trims empty. Mixed blank/non-blank arrays stay
+/// untouched — the validator rejects them loudly. Passwords follow the same
+/// blank-to-absent rule as the other string fields: a blank string is not a
+/// credential — an expanded-empty `${env:PW:-}` placeholder means "unset" —
+/// and leaving it in place would wrongly trip the validator's
+/// `only applies when sentinel_nodes is set` checks. Non-blank credentials
+/// are never dropped. `db` remains deliberately not a parameter: it is
+/// typed (`Option<u16>`) so it cannot carry an empty value.
+#[allow(clippy::too_many_arguments)] // flat field list mirrors the config surface
+fn normalize_empty_topology_fields(
+    url: &mut Option<String>,
+    sentinel_nodes: &mut Option<Vec<String>>,
+    master_name: &mut Option<String>,
+    username: &mut Option<String>,
+    sentinel_username: &mut Option<String>,
+    key_prefix: &mut Option<String>,
+    password: &mut Option<String>,
+    sentinel_password: &mut Option<String>,
+) {
+    for field in [
+        url,
+        master_name,
+        username,
+        sentinel_username,
+        key_prefix,
+        password,
+        sentinel_password,
+    ] {
+        if field.as_deref().is_some_and(|v| v.trim().is_empty()) {
+            *field = None;
+        }
+    }
+    if let Some(nodes) = sentinel_nodes
+        && (nodes.is_empty() || nodes.iter().all(|n| n.trim().is_empty()))
+    {
+        *sentinel_nodes = None;
+    }
 }
 
 /// Canonical redis database identity for the cross-repository
@@ -2271,7 +2356,9 @@ impl CamelConfig {
     pub fn from_env_or_default() -> Result<Self, ConfigError> {
         let path = env::var("CAMEL_CONFIG_FILE").unwrap_or_else(|_| "Camel.toml".to_string());
 
-        Self::from_file(&path)
+        // from_file_with_env applies the allowlisted CAMEL_* env overrides
+        // on top of the loaded file, matching `camel run`'s loader.
+        Self::from_file_with_env(&path)
     }
 
     /// Async version of [`Self::from_file`] — uses `tokio::fs` to avoid blocking the executor.
@@ -2345,6 +2432,18 @@ fn parse_env_value(val: &str) -> serde_json::Value {
     }
 }
 
+/// Split a CSV env override value into trimmed, non-empty entries for the
+/// list-typed overrides in [`CSV_ENV_OVERRIDES`]. Empty (or all-blank) input
+/// yields an empty Vec — the caller turns that into an empty JSON array,
+/// which replaces the file value.
+fn parse_env_csv_list(val: &str) -> Vec<String> {
+    val.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Allowlisted env vars that can override config fields (L-C2 security hardening).
 ///
 /// Only these `CAMEL_*` vars are read as config overrides via the
@@ -2376,8 +2475,65 @@ const ALLOWED_ENV_OVERRIDES: &[&str] = &[
     "CAMEL_CACHE_REPO_MAX_CAPACITY",
     "CAMEL_CACHE_REPO_STALE_RETENTION",
     "CAMEL_CACHE_REPO_MAX_ENTRIES",
+    "CAMEL_CACHE_REPO_PAYLOAD",
+    "CAMEL_CACHE_REPO_PAYLOAD_DIR",
+    "CAMEL_CACHE_REPO_CACHE_SIZE",
+    "CAMEL_CACHE_REPO_SWEEP_INTERVAL",
+    "CAMEL_CACHE_REPO_MASTER_NAME",
+    "CAMEL_CACHE_REPO_KEY_PREFIX",
+    "CAMEL_CACHE_REPO_DB",
+    "CAMEL_CACHE_REPO_SENTINEL_NODES",
     "CAMEL_SUPERVISION_INITIAL_DELAY_MS",
     "CAMEL_SUPERVISION_MAX_ATTEMPTS",
+];
+
+/// Env override vars whose raw value is a comma-separated list. This is the
+/// ONLY list-typed override in the allowlist: entries are split on `,`,
+/// trimmed, and blanks dropped; empty input yields an EMPTY array. The empty
+/// array REPLACES the file value (unlike the scalar empty-skip in
+/// [`EMPTY_SCALAR_ENV_OVERRIDES`]) — for `sentinel_nodes` it is then
+/// normalized to absent, so operators can force-unset the field.
+const CSV_ENV_OVERRIDES: &[&str] = &["CAMEL_CACHE_REPO_SENTINEL_NODES"];
+
+/// Env override vars whose raw value must reach deserialization as a JSON
+/// string, verbatim — no numeric/bool coercion. These cache_repo fields are
+/// String-typed in the config shape, and strict deserialization rejects a
+/// JSON integer where the file format carries a string:
+/// `CAMEL_CACHE_REPO_CACHE_SIZE=268435456` (the documented bare-bytes form)
+/// must deserialize as `Some("268435456")`, not fail with
+/// "invalid type: integer" on `Option<String>`. The same applies to
+/// leading-zero values (`KEY_PREFIX=007` must not collapse to integer `7`).
+/// `CAMEL_CACHE_REPO_PAYLOAD` is included even though `PayloadMode` is an
+/// enum: it deserializes FROM a string (`"inline"`/`"disk"`), so its raw
+/// value must pass through un-coerced — [`parse_env_value`]'s string
+/// fallback would cover that only incidentally (valid mode names are never
+/// numeric-like); here the passthrough is the contract. Empty values never
+/// reach this arm: all six vars are also in [`EMPTY_SCALAR_ENV_OVERRIDES`],
+/// and the empty-skip dispatch runs first.
+const STRING_ENV_OVERRIDES: &[&str] = &[
+    "CAMEL_CACHE_REPO_PAYLOAD",
+    "CAMEL_CACHE_REPO_PAYLOAD_DIR",
+    "CAMEL_CACHE_REPO_CACHE_SIZE",
+    "CAMEL_CACHE_REPO_SWEEP_INTERVAL",
+    "CAMEL_CACHE_REPO_MASTER_NAME",
+    "CAMEL_CACHE_REPO_KEY_PREFIX",
+];
+
+/// The ONLY vars for which an empty raw value (`""`) is skipped by the merge
+/// loop. Deliberately scoped to the new cache_repo scalars so every
+/// pre-existing allowlisted var keeps its exact current behavior (e.g.
+/// `CAMEL_TIMEOUT_MS=""` still fails typed deserialization loudly instead of
+/// being silently ignored). An empty string must never reach these vars'
+/// typed deserialization (`Option<u16>` for `db` would hard-fail on `""`);
+/// skipping lets the file/profile value stay effective.
+const EMPTY_SCALAR_ENV_OVERRIDES: &[&str] = &[
+    "CAMEL_CACHE_REPO_PAYLOAD",
+    "CAMEL_CACHE_REPO_PAYLOAD_DIR",
+    "CAMEL_CACHE_REPO_CACHE_SIZE",
+    "CAMEL_CACHE_REPO_SWEEP_INTERVAL",
+    "CAMEL_CACHE_REPO_MASTER_NAME",
+    "CAMEL_CACHE_REPO_KEY_PREFIX",
+    "CAMEL_CACHE_REPO_DB",
 ];
 
 /// `CAMEL_*` vars handled OUTSIDE the allowlist merge, so the "ignored" warn
@@ -2532,8 +2688,31 @@ fn build_from_toml_value_inner(
                     continue;
                 };
                 let key = key.to_lowercase();
+                // Four-way kind dispatch (FR2
+                // deployment-resolvable-cache-repo-topology): (a) empty
+                // scalar override → skip entirely (file/profile value stays
+                // effective; "" must never reach typed deserialization);
+                // (b) CSV override → JSON array of trimmed non-empty entries
+                // (empty input → empty array, which replaces the file list);
+                // (c) string-kind override → verbatim JSON string (no
+                // numeric/bool guessing — see [`STRING_ENV_OVERRIDES`]);
+                // (d) everything else → unchanged typed coercion.
+                if EMPTY_SCALAR_ENV_OVERRIDES.contains(var) && val.is_empty() {
+                    continue;
+                }
+                let parsed = if CSV_ENV_OVERRIDES.contains(var) {
+                    serde_json::Value::Array(
+                        parse_env_csv_list(&val)
+                            .into_iter()
+                            .map(serde_json::Value::String)
+                            .collect(),
+                    )
+                } else if STRING_ENV_OVERRIDES.contains(var) {
+                    serde_json::Value::String(val)
+                } else {
+                    parse_env_value(&val)
+                };
                 // Handle nested keys (e.g., supervision_initial_delay_ms → supervision.initial_delay_ms)
-                let parsed = parse_env_value(&val);
                 if let Some(nested_key) = key.strip_prefix("supervision_") {
                     let sup = env_map
                         .entry("supervision".to_string())
@@ -2588,9 +2767,26 @@ fn build_from_toml_value_inner(
     // `toml::Value::try_into` rejects type mismatches (e.g. a quoted numeric
     // on a numeric field). This swap is intentional and pinned by
     // `placeholder_e2e::quoted_numeric_root_field_is_rejected_after_materialization`.
-    let config: CamelConfig = merged_tree
+    let mut config: CamelConfig = merged_tree
         .try_into()
         .map_err(|e| ConfigError::Message(format!("Failed to deserialize merged config: {e}")))?;
+    // FR1 (deployment-resolvable-cache-repo-topology): topology values that
+    // expanded empty (e.g. `url = "${env:REDIS_URL:-}"` with the var unset,
+    // or a literal `""`) become absent before validation selects the
+    // topology. Gated on backend == "redis": unconditional normalization
+    // would legitimize `url = ""` on memory/redb sections that cross-backend
+    // validation rejects today. Blank passwords normalize to unset too
+    // (non-blank credentials are never dropped); only `db` stays untouched.
+    if let Some(repo) = config.cache_repo.as_mut()
+        && repo.backend == "redis"
+    {
+        repo.normalize_empty_topology();
+    }
+    if let Some(repo) = config.idempotent_repo.as_mut()
+        && repo.backend == "redis"
+    {
+        repo.normalize_empty_topology();
+    }
     config
         .validate()
         .map_err(|e| ConfigError::Message(e.to_string()))?;
@@ -3575,6 +3771,11 @@ durability = "eventual"
     fn from_env_or_default_uses_camel_config_file_env() {
         use std::io::Write;
 
+        // from_env_or_default reads the full CAMEL_* override allowlist, so
+        // this test must serialize against the other env-touching tests or
+        // a concurrent allowlist mutation leaks into its assertions.
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(
             br#"
@@ -3594,6 +3795,28 @@ timeout_ms = 111
 
         assert!(cfg.watch);
         assert_eq!(cfg.timeout_ms, 111);
+    }
+
+    #[test]
+    fn from_env_or_default_applies_env_overrides() {
+        // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(br#"timeout_ms = 222"#).unwrap();
+
+        super::set_env("CAMEL_CONFIG_FILE", file.path().to_str().unwrap());
+        super::set_env("CAMEL_TIMEOUT_MS", "12345");
+        let loaded = CamelConfig::from_env_or_default();
+        super::unset_env("CAMEL_CONFIG_FILE");
+        super::unset_env("CAMEL_TIMEOUT_MS");
+
+        let cfg = loaded.expect("from_env_or_default should load the fixture");
+        assert_eq!(
+            cfg.timeout_ms, 12345,
+            "from_env_or_default must apply allowlisted CAMEL_* overrides on top of the file"
+        );
     }
 
     #[test]
@@ -5405,5 +5628,872 @@ log_level = "warn"
                 "{handled} is honored by its own consumer and must NOT be flagged as ignored: {warns:?}"
             );
         }
+    }
+}
+
+/// FR1 of deployment-resolvable-cache-repo-topology: empty redis topology
+/// values (`""`, whitespace-only, all-blank sentinel arrays — typically from
+/// `${env:VAR:-}` expanding with the var unset) normalize to absent after
+/// placeholder expansion and before validation, so deployments can express
+/// "unset" through environment-driven templates without tripping mutual
+/// exclusion or topology-required errors.
+#[cfg(test)]
+mod empty_topology_normalization_tests {
+    use super::*;
+
+    fn write_temp_config(contents: &str) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        f.write_all(contents.as_bytes()).expect("write config");
+        f
+    }
+
+    #[test]
+    fn normalize_blank_string_topology_fields_to_none() {
+        let mut repo = CacheRepoConfig {
+            url: Some(String::new()),
+            master_name: Some("   ".to_string()),
+            username: Some(String::new()),
+            sentinel_username: Some("\t".to_string()),
+            key_prefix: Some(String::new()),
+            sentinel_nodes: Some(Vec::new()),
+            password: Some(String::new()),
+            sentinel_password: Some("  ".to_string()),
+            ..CacheRepoConfig::default()
+        };
+        repo.normalize_empty_topology();
+        assert!(repo.url.is_none(), "empty url must normalize to None");
+        assert!(
+            repo.master_name.is_none(),
+            "whitespace-only master_name must normalize to None"
+        );
+        assert!(repo.username.is_none());
+        assert!(repo.sentinel_username.is_none());
+        assert!(repo.key_prefix.is_none());
+        assert!(
+            repo.sentinel_nodes.is_none(),
+            "empty sentinel array must normalize to None"
+        );
+        // Blank passwords are not credentials: an expanded-empty
+        // `${env:PW:-}` placeholder means "unset".
+        assert!(
+            repo.password.is_none(),
+            "blank password must normalize to None"
+        );
+        assert!(
+            repo.sentinel_password.is_none(),
+            "whitespace-only sentinel_password must normalize to None"
+        );
+        // Non-blank credentials are never dropped.
+        repo.password = Some("real".to_string());
+        repo.sentinel_password = Some("real-sentinel".to_string());
+        repo.normalize_empty_topology();
+        assert_eq!(repo.password.as_deref(), Some("real"));
+        assert_eq!(repo.sentinel_password.as_deref(), Some("real-sentinel"));
+    }
+
+    #[test]
+    fn normalize_all_blank_sentinel_array_to_none() {
+        let mut repo = CacheRepoConfig {
+            sentinel_nodes: Some(vec![" ".to_string(), String::new()]),
+            ..CacheRepoConfig::default()
+        };
+        repo.normalize_empty_topology();
+        assert!(
+            repo.sentinel_nodes.is_none(),
+            "all-blank sentinel array must normalize to None"
+        );
+    }
+
+    #[test]
+    fn mixed_blank_sentinel_array_not_normalized() {
+        let mut repo = CacheRepoConfig {
+            backend: "redis".to_string(),
+            sentinel_nodes: Some(vec!["redis-a:26379".to_string(), " ".to_string()]),
+            master_name: Some("m".to_string()),
+            ..CacheRepoConfig::default()
+        };
+        repo.normalize_empty_topology();
+        let nodes = repo
+            .sentinel_nodes
+            .as_ref()
+            .expect("mixed blank/non-blank array must stay Some");
+        assert_eq!(nodes.len(), 2);
+        let config = CamelConfig {
+            cache_repo: Some(repo),
+            ..CamelConfig::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("mixed array must keep failing validation loudly");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sentinel node entries must be non-empty"),
+            "expected the non-empty-entry sentinel message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mixed_blank_entries_fail_through_loader() {
+        // Loader-level guard for design Decision 2: normalization removes
+        // only ALL-blank sentinel arrays; a mixed array must still fail the
+        // full from_file pipeline (loaded and validated), never be masked.
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+sentinel_nodes = ["redis-a:26379", " "]
+master_name = "m"
+"#,
+        );
+        let err = CamelConfig::from_file(file.path().to_str().unwrap())
+            .err()
+            .expect("mixed blank/non-blank sentinel array must fail through the loader");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sentinel node entries must be non-empty"),
+            "expected the non-empty-entry sentinel message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn idempotent_repo_normalize_parity() {
+        // Unit: same normalization rules as cache_repo.
+        let mut repo = IdempotentRepoConfig {
+            backend: "redis".to_string(),
+            path: None,
+            durability: None,
+            url: Some(String::new()),
+            sentinel_nodes: Some(vec!["idem-node-a:26379".to_string()]),
+            master_name: Some("mymaster".to_string()),
+            sentinel_username: None,
+            sentinel_password: None,
+            password: None,
+            username: None,
+            db: None,
+            key_prefix: None,
+        };
+        repo.normalize_empty_topology();
+        assert!(repo.url.is_none());
+        assert_eq!(
+            repo.sentinel_nodes,
+            Some(vec!["idem-node-a:26379".to_string()])
+        );
+
+        // Pipeline: an env-expanded-empty url alongside populated sentinel
+        // fields loads and validates as a sentinel topology.
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("RC_TEST_IDEM_URL");
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.idempotent_repo]
+backend = "redis"
+url = "${env:RC_TEST_IDEM_URL:-}"
+sentinel_nodes = ["idem-node-b:26379"]
+master_name = "mymaster"
+"#,
+        );
+        let cfg =
+            CamelConfig::from_file(file.path().to_str().unwrap()).expect("config should load");
+        let repo = cfg.idempotent_repo.expect("idempotent_repo section");
+        assert!(repo.url.is_none(), "expanded-empty url must be absent");
+        assert_eq!(repo.master_name.as_deref(), Some("mymaster"));
+    }
+
+    #[test]
+    fn blank_key_prefix_selects_default() {
+        // Pipeline: `${env:...:-}` expanding empty normalizes away so the
+        // repository default prefix applies.
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("RC_TEST_PREFIX");
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+url = "redis://localhost:6379"
+key_prefix = "${env:RC_TEST_PREFIX:-}"
+"#,
+        );
+        let cfg =
+            CamelConfig::from_file(file.path().to_str().unwrap()).expect("config should load");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert!(
+            repo.key_prefix.is_none(),
+            "blank key_prefix must select the default prefix"
+        );
+
+        // Unit: a non-blank prefix value is never normalized away — even an
+        // invalid one (rejection stays keyspace validation's job).
+        let mut repo = CacheRepoConfig {
+            key_prefix: Some("bad*prefix".to_string()),
+            ..CacheRepoConfig::default()
+        };
+        repo.normalize_empty_topology();
+        assert_eq!(repo.key_prefix.as_deref(), Some("bad*prefix"));
+    }
+
+    #[test]
+    fn invalid_key_prefix_still_rejected_by_keyspace() {
+        // Pins scenario 7's second THEN clause: a non-blank prefix survives
+        // normalization untouched (normalization is not a validator) and the
+        // namespace-token check inside the redis topology validator rejects
+        // the glob metacharacter.
+        let repo = CacheRepoConfig {
+            backend: "redis".to_string(),
+            sentinel_nodes: Some(vec!["redis-a:26379".to_string()]),
+            master_name: Some("m".to_string()),
+            key_prefix: Some("bad*prefix".to_string()),
+            ..CacheRepoConfig::default()
+        };
+        let config = CamelConfig {
+            cache_repo: Some(repo),
+            ..CamelConfig::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("glob metacharacter in key_prefix must stay rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cache_repo.key_prefix")
+                && msg.contains("glob metacharacters are forbidden"),
+            "expected the namespace-token rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn sentinel_topology_selected_by_empty_expanded_url() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("RC_TEST_REDIS_URL");
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+url = "${env:RC_TEST_REDIS_URL:-}"
+sentinel_nodes = ["node-a:26379"]
+master_name = "m"
+"#,
+        );
+        let cfg = CamelConfig::from_file(file.path().to_str().unwrap())
+            .expect("sentinel topology must validate when url expands empty");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert!(repo.url.is_none());
+        assert_eq!(repo.sentinel_nodes, Some(vec!["node-a:26379".to_string()]));
+        super::unset_env("RC_TEST_REDIS_URL");
+    }
+
+    #[test]
+    fn standalone_topology_selected_by_populated_url() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::set_env("RC_TEST_REDIS_URL", "redis://host:6379");
+        super::unset_env("RC_TEST_NODES_0");
+        super::unset_env("RC_TEST_MASTER");
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+url = "${env:RC_TEST_REDIS_URL:-}"
+sentinel_nodes = ["${env:RC_TEST_NODES_0:-}"]
+master_name = "${env:RC_TEST_MASTER:-}"
+"#,
+        );
+        let cfg = CamelConfig::from_file(file.path().to_str().unwrap())
+            .expect("standalone topology must validate");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert_eq!(repo.url.as_deref(), Some("redis://host:6379"));
+        assert!(
+            repo.sentinel_nodes.is_none(),
+            "all-blank sentinel array from env expansion must normalize to None"
+        );
+        assert!(
+            repo.master_name.is_none(),
+            "expanded-empty master_name must normalize to None"
+        );
+        super::unset_env("RC_TEST_REDIS_URL");
+        super::unset_env("RC_TEST_NODES_0");
+        super::unset_env("RC_TEST_MASTER");
+    }
+
+    #[test]
+    fn blank_password_placeholder_selecting_standalone_validates() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::set_env("RC_TEST_REDIS_URL", "redis://host:6379");
+        super::unset_env("RC_TEST_PW");
+        super::unset_env("RC_TEST_NODES_0");
+        super::unset_env("RC_TEST_MASTER");
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+url = "${env:RC_TEST_REDIS_URL:-}"
+password = "${env:RC_TEST_PW:-}"
+sentinel_password = "${env:RC_TEST_PW:-}"
+sentinel_nodes = ["${env:RC_TEST_NODES_0:-}"]
+master_name = "${env:RC_TEST_MASTER:-}"
+"#,
+        );
+        let cfg = CamelConfig::from_file(file.path().to_str().unwrap())
+            .expect("blank password placeholders must not fail standalone selection");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert!(
+            repo.password.is_none(),
+            "expanded-empty password must normalize to None"
+        );
+        assert!(
+            repo.sentinel_password.is_none(),
+            "expanded-empty sentinel_password must normalize to None"
+        );
+        assert!(cfg.validate().is_ok(), "standalone topology must validate");
+        super::unset_env("RC_TEST_REDIS_URL");
+        super::unset_env("RC_TEST_PW");
+        super::unset_env("RC_TEST_NODES_0");
+        super::unset_env("RC_TEST_MASTER");
+    }
+
+    #[test]
+    fn literal_empty_url_in_file_treated_as_unset() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+url = ""
+sentinel_nodes = ["node-a:26379"]
+master_name = "m"
+"#,
+        );
+        let cfg = CamelConfig::from_file(file.path().to_str().unwrap())
+            .expect("literal empty url must behave like an unset key");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert!(repo.url.is_none());
+        assert_eq!(repo.sentinel_nodes, Some(vec!["node-a:26379".to_string()]));
+    }
+
+    #[test]
+    fn both_topologies_absent_still_fails() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("RC_TEST_MISSING");
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+url = "${env:RC_TEST_MISSING:-}"
+"#,
+        );
+        let err = CamelConfig::from_file(file.path().to_str().unwrap())
+            .err()
+            .expect("a redis section without any topology must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("requires a topology"),
+            "expected the requires-a-topology error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn memory_backend_empty_url_still_rejected() {
+        // Normalization is backend-gated to redis: an empty literal url on a
+        // memory section keeps today's cross-backend rejection instead of
+        // being silently legitimized as absent.
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "memory"
+url = ""
+"#,
+        );
+        let err = CamelConfig::from_file(file.path().to_str().unwrap())
+            .err()
+            .expect("url must stay rejected on the memory backend");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(r#"cache_repo.url does not apply to the "memory" backend"#),
+            "expected the cross-backend rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn redb_backend_empty_url_still_rejected() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_path = dir.path().join("cache.redb");
+        let idem_path = dir.path().join("idem.redb");
+
+        // cache_repo: empty literal url keeps today's cross-backend rejection.
+        let file = write_temp_config(&format!(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redb"
+path = "{}"
+cache_size = "64MiB"
+url = ""
+"#,
+            cache_path.display()
+        ));
+        let err = CamelConfig::from_file(file.path().to_str().unwrap())
+            .err()
+            .expect("url must stay rejected on the redb cache backend");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(r#"cache_repo.url does not apply to the "redb" backend"#),
+            "expected the cache_repo cross-backend rejection, got: {msg}"
+        );
+
+        // idempotent_repo: identical parity for the shared topology shape.
+        let file = write_temp_config(&format!(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.idempotent_repo]
+backend = "redb"
+path = "{}"
+url = ""
+"#,
+            idem_path.display()
+        ));
+        let err = CamelConfig::from_file(file.path().to_str().unwrap())
+            .err()
+            .expect("url must stay rejected on the redb idempotent backend");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(r#"idempotent_repo.url does not apply to the "redb" backend"#),
+            "expected the idempotent_repo cross-backend rejection, got: {msg}"
+        );
+    }
+}
+
+/// FR2 of deployment-resolvable-cache-repo-topology: non-credential
+/// `cache_repo` fields become overridable per deployment via
+/// `CAMEL_CACHE_REPO_*` env vars. Scalars coerce as today; `SENTINEL_NODES`
+/// is the only CSV (list-typed) override; an EMPTY scalar override is a no-op
+/// while an EMPTY CSV override clears the field. Credential vars stay denied
+/// by the allowlist.
+#[cfg(test)]
+mod cache_repo_env_override_tests {
+    use super::*;
+    use crate::config::log_capture::capture_warns;
+
+    fn write_temp_config(contents: &str) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        f.write_all(contents.as_bytes()).expect("write config");
+        f
+    }
+
+    #[test]
+    fn scalar_override_db_applied() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("CAMEL_PROFILE");
+        super::unset_env("CAMEL_CACHE_REPO_DB");
+        set_env("CAMEL_CACHE_REPO_DB", "3");
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+sentinel_nodes = ["n:26379"]
+master_name = "m"
+db = 0
+"#,
+        );
+
+        let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
+        unset_env("CAMEL_CACHE_REPO_DB");
+
+        let cfg = loaded.expect("config should load with the db override");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert_eq!(repo.db, Some(3), "env override must replace the file db");
+        assert!(cfg.validate().is_ok(), "overridden config must validate");
+    }
+
+    #[test]
+    fn empty_scalar_override_preserves_file_value() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("CAMEL_PROFILE");
+        super::unset_env("CAMEL_CACHE_REPO_DB");
+        set_env("CAMEL_CACHE_REPO_DB", "");
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+sentinel_nodes = ["n:26379"]
+master_name = "m"
+db = 5
+"#,
+        );
+
+        let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
+        unset_env("CAMEL_CACHE_REPO_DB");
+
+        // The empty override is skipped before type coercion, so the file
+        // value stays effective and `Option<u16>` never sees "".
+        let cfg = loaded.expect("empty scalar override must not fail the load");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert_eq!(
+            repo.db,
+            Some(5),
+            "empty scalar override must preserve the file value"
+        );
+    }
+
+    #[test]
+    fn csv_override_builds_trimmed_node_list() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("CAMEL_PROFILE");
+        super::unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
+        set_env(
+            "CAMEL_CACHE_REPO_SENTINEL_NODES",
+            "node-a:26379, node-b:26379",
+        );
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+master_name = "m"
+"#,
+        );
+
+        let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
+        unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
+
+        let cfg = loaded.expect("config should load with the CSV override");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert_eq!(
+            repo.sentinel_nodes,
+            Some(vec!["node-a:26379".to_string(), "node-b:26379".to_string()]),
+            "CSV override must build a trimmed node list"
+        );
+        assert!(cfg.validate().is_ok(), "overridden config must validate");
+    }
+
+    #[test]
+    fn csv_override_plus_master_name_validates_sentinel() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("CAMEL_PROFILE");
+        super::unset_env("RC_TEST_MASTER");
+        super::unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
+        set_env(
+            "CAMEL_CACHE_REPO_SENTINEL_NODES",
+            "node-a:26379,node-b:26379",
+        );
+        set_env("RC_TEST_MASTER", "mymaster");
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+master_name = "${env:RC_TEST_MASTER:-}"
+"#,
+        );
+
+        let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
+        unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
+        unset_env("RC_TEST_MASTER");
+
+        // CSV override composes with the placeholder-expanded master_name
+        // into a sentinel topology that loads AND validates.
+        let cfg = loaded.expect("CSV override + master_name must validate as sentinel");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert_eq!(repo.master_name.as_deref(), Some("mymaster"));
+        assert!(repo.sentinel_nodes.is_some());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn bare_bytes_cache_size_override_deserializes() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("CAMEL_PROFILE");
+        super::unset_env("CAMEL_CACHE_REPO_CACHE_SIZE");
+        set_env("CAMEL_CACHE_REPO_CACHE_SIZE", "268435456");
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redb"
+path = "cache.redb"
+"#,
+        );
+
+        let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
+        unset_env("CAMEL_CACHE_REPO_CACHE_SIZE");
+
+        // The bare-bytes form is documented for cache_size; the override
+        // must stay a JSON string so `Option<String>` deserialization
+        // succeeds instead of failing with "invalid type: integer".
+        // (redb fixture: cache_size only applies to the redb backend, so
+        // this is the topology where validate() can pass with it set.)
+        let cfg = loaded.expect("bare-bytes cache_size override must deserialize as a string");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert_eq!(
+            repo.cache_size.as_deref(),
+            Some("268435456"),
+            "numeric-like override must stay a string, not coerce to an integer"
+        );
+        assert!(cfg.validate().is_ok(), "overridden config must validate");
+    }
+
+    #[test]
+    fn numeric_like_key_prefix_stays_string() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("CAMEL_PROFILE");
+        super::unset_env("CAMEL_CACHE_REPO_KEY_PREFIX");
+        set_env("CAMEL_CACHE_REPO_KEY_PREFIX", "007");
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+sentinel_nodes = ["n:26379"]
+master_name = "m"
+"#,
+        );
+
+        let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
+        unset_env("CAMEL_CACHE_REPO_KEY_PREFIX");
+
+        let cfg = loaded.expect("numeric-like key_prefix override must deserialize as a string");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert_eq!(
+            repo.key_prefix.as_deref(),
+            Some("007"),
+            "leading-zero prefix must stay verbatim (string, not integer 7)"
+        );
+        assert!(cfg.validate().is_ok(), "overridden config must validate");
+    }
+
+    #[test]
+    fn empty_csv_override_clears_populated_file_value() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("CAMEL_PROFILE");
+        super::unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
+        set_env("CAMEL_CACHE_REPO_SENTINEL_NODES", "");
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+sentinel_nodes = ["file-node:26379"]
+url = "redis://s:6379"
+"#,
+        );
+
+        let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
+        unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
+
+        // The empty CSV override replaces the populated file list with [],
+        // which the FR1 normalization then resolves to absent — the config
+        // validates as a standalone topology.
+        let cfg = loaded.expect("empty CSV override must clear the file list, not clash");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert!(
+            repo.sentinel_nodes.is_none(),
+            "empty CSV override must clear the populated file value via normalization"
+        );
+        assert!(cfg.validate().is_ok(), "standalone topology must validate");
+    }
+
+    #[test]
+    fn credential_vars_stay_denied() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("CAMEL_PROFILE");
+        super::unset_env("CAMEL_CACHE_REPO_URL");
+        super::unset_env("CAMEL_CACHE_REPO_USERNAME");
+        set_env("CAMEL_CACHE_REPO_URL", "redis://evil:6379");
+        set_env("CAMEL_CACHE_REPO_USERNAME", "attacker");
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.cache_repo]
+backend = "redis"
+sentinel_nodes = ["n:26379"]
+master_name = "m"
+"#,
+        );
+
+        let (loaded, warns) =
+            capture_warns(|| CamelConfig::from_file_with_env(file.path().to_str().unwrap()));
+        unset_env("CAMEL_CACHE_REPO_URL");
+        unset_env("CAMEL_CACHE_REPO_USERNAME");
+
+        let cfg = loaded.expect("config must still load (credential vars are ignored)");
+        let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
+        assert!(repo.url.is_none(), "credential var must not inject a url");
+        assert!(
+            repo.username.is_none(),
+            "credential var must not inject a username"
+        );
+        // Separate deny records, each naming its var via the structured
+        // `var` field (rendered unquoted by the capture visitor) and
+        // carrying the allowlist fragment.
+        for var in ["CAMEL_CACHE_REPO_URL", "CAMEL_CACHE_REPO_USERNAME"] {
+            let needle = format!("var={var}");
+            let hits: Vec<&String> = warns.iter().filter(|w| w.contains(&needle)).collect();
+            assert_eq!(
+                hits.len(),
+                1,
+                "exactly one deny record expected for {var}, got {hits:?} in {warns:?}"
+            );
+            assert!(
+                hits[0].contains("env var not in config override allowlist; ignored"),
+                "deny record for {var} must carry the allowlist fragment: {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allowlist_completeness_pinned() {
+        // The 8 non-credential overrides must be allowlisted...
+        for var in [
+            "CAMEL_CACHE_REPO_PAYLOAD",
+            "CAMEL_CACHE_REPO_PAYLOAD_DIR",
+            "CAMEL_CACHE_REPO_CACHE_SIZE",
+            "CAMEL_CACHE_REPO_SWEEP_INTERVAL",
+            "CAMEL_CACHE_REPO_MASTER_NAME",
+            "CAMEL_CACHE_REPO_KEY_PREFIX",
+            "CAMEL_CACHE_REPO_DB",
+            "CAMEL_CACHE_REPO_SENTINEL_NODES",
+        ] {
+            assert!(
+                ALLOWED_ENV_OVERRIDES.contains(&var),
+                "{var} must be an allowlisted override"
+            );
+        }
+        // ...and the 5 credential vars must NEVER appear in any override list.
+        for var in [
+            "CAMEL_CACHE_REPO_URL",
+            "CAMEL_CACHE_REPO_USERNAME",
+            "CAMEL_CACHE_REPO_PASSWORD",
+            "CAMEL_CACHE_REPO_SENTINEL_USERNAME",
+            "CAMEL_CACHE_REPO_SENTINEL_PASSWORD",
+        ] {
+            assert!(
+                !ALLOWED_ENV_OVERRIDES.contains(&var),
+                "credential var {var} must never be allowlisted"
+            );
+            assert!(
+                !CSV_ENV_OVERRIDES.contains(&var),
+                "credential var {var} must never be a CSV override"
+            );
+            assert!(
+                !EMPTY_SCALAR_ENV_OVERRIDES.contains(&var),
+                "credential var {var} must never be an empty-scalar override"
+            );
+            assert!(
+                !STRING_ENV_OVERRIDES.contains(&var),
+                "credential var {var} must never be a string-kind override"
+            );
+        }
+        // Kind-const invariants. STRING ∩ CSV and EMPTY ∩ CSV must be
+        // disjoint: a var listed in two dispatch arms would make the merge
+        // order silently pick one kind's semantics, breaking the
+        // empty-scalar-preserves vs empty-CSV-clears asymmetry (and verbatim
+        // string passthrough). STRING ∩ EMPTY is deliberately NOT disjoint —
+        // every string-kind var MUST also be an empty-scalar var (an empty
+        // "" must never reach typed deserialization; the skip arm runs
+        // first) — so that relationship is pinned as a subset instead.
+        assert!(
+            CSV_ENV_OVERRIDES
+                .iter()
+                .all(|v| !EMPTY_SCALAR_ENV_OVERRIDES.contains(v)),
+            "CSV_ENV_OVERRIDES and EMPTY_SCALAR_ENV_OVERRIDES must be disjoint"
+        );
+        assert!(
+            STRING_ENV_OVERRIDES
+                .iter()
+                .all(|v| !CSV_ENV_OVERRIDES.contains(v)),
+            "STRING_ENV_OVERRIDES and CSV_ENV_OVERRIDES must be disjoint"
+        );
+        assert!(
+            STRING_ENV_OVERRIDES
+                .iter()
+                .all(|v| EMPTY_SCALAR_ENV_OVERRIDES.contains(v)),
+            "every STRING_ENV_OVERRIDES var must also be an EMPTY_SCALAR_ENV_OVERRIDES var"
+        );
+    }
+
+    #[test]
+    fn empty_preexisting_typed_override_still_fails() {
+        // Regression pin: the empty-scalar skip is scoped to the NEW vars.
+        // CAMEL_TIMEOUT_MS is a pre-existing allowlisted var, so an empty
+        // value keeps today's loud typed-deserialization failure instead of
+        // being silently skipped.
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        super::unset_env("CAMEL_PROFILE");
+        set_env("CAMEL_TIMEOUT_MS", "");
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+"#,
+        );
+
+        let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
+        unset_env("CAMEL_TIMEOUT_MS");
+
+        let err = loaded.expect_err("empty pre-existing typed override must still fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("timeout_ms"),
+            "failure should name the overridden field, got: {msg}"
+        );
     }
 }

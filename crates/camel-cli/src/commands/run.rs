@@ -68,9 +68,14 @@ fn load_config_or_default(
         Err(e) => Err(camel_api::CamelError::Config(format!(
             "failed to check config path {config_path}: {e}"
         ))),
-        Ok(true) => camel_config::config::CamelConfig::from_file(config_path).map_err(|e| {
-            camel_api::CamelError::Config(format!("failed to load {config_path}: {e}"))
-        }),
+        Ok(true) => {
+            // from_file_with_env applies the allowlisted CAMEL_* env
+            // overrides on top of the loaded file; the default-fallback
+            // decision above is unaffected.
+            camel_config::config::CamelConfig::from_file_with_env(config_path).map_err(|e| {
+                camel_api::CamelError::Config(format!("failed to load {config_path}: {e}"))
+            })
+        }
     }
 }
 
