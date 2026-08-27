@@ -1964,13 +1964,14 @@ mod tests {
             .expect("watcher must complete") // allow-unwrap: test-only
             .expect("watcher task must join"); // allow-unwrap: test-only
 
-        let commands = recorder.lock().expect("recorder lock"); // allow-unwrap: test-only
-        assert_eq!(commands.len(), 1);
-        assert!(matches!(
-            &commands[0],
-            RuntimeCommand::FailRoute { error, .. } if error.contains("terminated abnormally")
-        ));
-        drop(commands);
+        {
+            let commands = recorder.lock().expect("recorder lock"); // allow-unwrap: test-only
+            assert_eq!(commands.len(), 1);
+            assert!(matches!(
+                &commands[0],
+                RuntimeCommand::FailRoute { error, .. } if error.contains("terminated abnormally")
+            ));
+        }
         let notification = tokio::time::timeout(Duration::from_secs(2), crash_rx.recv())
             .await
             .expect("crash notification must arrive") // allow-unwrap: test-only
