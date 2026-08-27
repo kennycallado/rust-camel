@@ -102,7 +102,12 @@ credential-bearing `Debug` output.
 - `FakeStaticTopology` feeds a fixed address to connection construction.
 - Live coverage runs in `crates/camel-test/tests/redis_repositories_test.rs`
   under the `integration-tests` feature (testcontainers, no `#[ignore]`
-  attributes, ADR-0054).
+  attributes, ADR-0054). The suite covers named-user ACL authentication,
+  non-zero db selection on a sentinel-selected repository, and failover
+  recovery with auth and db active. After a promote, the repository
+  re-authenticates and runs `SELECT` again. Sentinel-topology tests
+  serialize on a suite-wide lock because fixed ports and stale-container
+  removal would otherwise kill each other's containers (bd rc-q3mb).
 
 ## Dependency boundary
 
