@@ -8,7 +8,7 @@ use std::process::Command;
 
 use clap::{Parser, Subcommand};
 
-const GRAALVM_IMAGE: &str = "quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21";
+const GRAALVM_IMAGE: &str = "quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-25";
 const EXPECTED_BINARY: &str = "build/native/jms-bridge";
 const EXPECTED_BINARY_XML: &str = "build/native/xml-bridge";
 const EXPECTED_BINARY_CXF: &str = "build/native/cxf-bridge";

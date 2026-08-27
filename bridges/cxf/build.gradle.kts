@@ -48,7 +48,7 @@ java {
 spotless {
     java {
         target("src/**/*.java")
-        googleJavaFormat("1.24.0")
+        googleJavaFormat("1.34.1")
     }
 }
 
