@@ -1801,12 +1801,21 @@ impl Consumer for HttpConsumer {
 pub struct HttpComponent {
     config: HttpConfig,
     pinned_cache: std::sync::Arc<PinnedClientCache>,
+    client: reqwest::Client,
+}
+
+#[cfg(test)]
+thread_local! {
+    static BUILD_CLIENT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub(crate) fn build_client(
     config: &HttpConfig,
     resolve_override: Option<(&str, &[std::net::SocketAddr])>,
 ) -> reqwest::Client {
+    #[cfg(test)]
+    BUILD_CLIENT_CALLS.with(|c| c.set(c.get() + 1));
+
     let mut builder = reqwest::Client::builder()
         .no_proxy() // CRITICAL: env proxies bypass resolve_to_addrs
         .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
@@ -1858,10 +1867,16 @@ pub(crate) fn build_client(
         .expect("reqwest::Client::build() with valid config should not fail") // allow-unwrap
 }
 
+#[cfg(test)]
+pub(crate) fn build_client_call_count() -> u64 {
+    BUILD_CLIENT_CALLS.with(|c| c.get())
+}
+
 impl HttpComponent {
     pub fn new() -> Self {
         let config = HttpConfig::default();
         Self {
+            client: build_client(&config, None),
             config,
             pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
@@ -1872,6 +1887,7 @@ impl HttpComponent {
 
     pub fn with_config(config: HttpConfig) -> Self {
         Self {
+            client: build_client(&config, None),
             config,
             pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
@@ -1911,7 +1927,6 @@ impl Component for HttpComponent {
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
-        let client = build_client(&self.config, None);
         ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
             server_config.host.clone(),
             server_config.port,
@@ -1920,7 +1935,7 @@ impl Component for HttpComponent {
             uri: uri.to_string(),
             config,
             server_config,
-            client,
+            client: self.client.clone(),
             pinned_cache: std::sync::Arc::clone(&self.pinned_cache),
             http_config: self.config.clone(),
         }))
@@ -1930,12 +1945,14 @@ impl Component for HttpComponent {
 pub struct HttpsComponent {
     config: HttpConfig,
     pinned_cache: std::sync::Arc<PinnedClientCache>,
+    client: reqwest::Client,
 }
 
 impl HttpsComponent {
     pub fn new() -> Self {
         let config = HttpConfig::default();
         Self {
+            client: build_client(&config, None),
             config,
             pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
@@ -1946,6 +1963,7 @@ impl HttpsComponent {
 
     pub fn with_config(config: HttpConfig) -> Self {
         Self {
+            client: build_client(&config, None),
             config,
             pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
@@ -1990,7 +2008,6 @@ impl Component for HttpsComponent {
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
-        let client = build_client(&self.config, None);
         ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
             server_config.host.clone(),
             server_config.port,
@@ -1999,7 +2016,7 @@ impl Component for HttpsComponent {
             uri: uri.to_string(),
             config,
             server_config,
-            client,
+            client: self.client.clone(),
             pinned_cache: std::sync::Arc::clone(&self.pinned_cache),
             http_config: self.config.clone(),
         }))
@@ -8673,6 +8690,76 @@ mod tests {
             https.pinned_cache.build_count(),
             0,
             "endpoint creation must not build a pinned client"
+        );
+    }
+
+    #[test]
+    fn test_component_constructor_builds_one_unpinned_client() {
+        let baseline = build_client_call_count();
+
+        let _http = HttpComponent::new();
+        assert_eq!(
+            build_client_call_count() - baseline,
+            1,
+            "HttpComponent::new() must build exactly one shared unpinned client"
+        );
+
+        let _https = HttpsComponent::new();
+        assert_eq!(
+            build_client_call_count() - baseline,
+            2,
+            "HttpsComponent::new() must build exactly one more shared unpinned client"
+        );
+    }
+
+    #[test]
+    fn test_component_endpoints_share_unpinned_client() {
+        let component = HttpComponent::new();
+        let baseline = build_client_call_count();
+
+        let endpoint_ctx = NoOpComponentContext;
+        for uri in [
+            "http://localhost:1/a?allowInternal=true",
+            "http://localhost:1/b?allowInternal=true",
+        ] {
+            let _endpoint = component
+                .create_endpoint(uri, &endpoint_ctx)
+                .expect("create endpoint");
+        }
+
+        assert_eq!(
+            build_client_call_count() - baseline,
+            0,
+            "create_endpoint must clone the component's shared unpinned client, \
+             never build a fresh one"
+        );
+    }
+
+    #[test]
+    fn test_dynamic_resolution_adds_no_unpinned_client_builds() {
+        let component = HttpComponent::new();
+        let baseline = build_client_call_count();
+
+        let ctx = test_producer_ctx();
+        let endpoint_ctx = NoOpComponentContext;
+        for i in 0..3 {
+            let endpoint = component
+                .create_endpoint(
+                    &format!("http://localhost:1/r{i}?allowInternal=true&k={i}"),
+                    &endpoint_ctx,
+                )
+                .expect("create endpoint");
+            let _producer = endpoint
+                .create_producer(rt(), &ctx)
+                .expect("create producer");
+        }
+
+        assert_eq!(
+            build_client_call_count() - baseline,
+            0,
+            "a dynamic-resolution sequence (fresh endpoint+producer per URI) \
+             must reuse the component's shared unpinned client and build \
+             no additional clients"
         );
     }
 }

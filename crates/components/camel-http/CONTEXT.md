@@ -52,7 +52,8 @@ live for a `PINNED_CLIENT_TTL` (60 s) window. Each cached client serves one
 `(host, address set)` pair. It holds up to `pool_max_idle_per_host`
 (default 100) idle connections for that host until `pool_idle_timeout_ms`
 (default 90 s) closes them. Worst case is 64 clients times 100 idle
-connections per component instance.
+connections per component instance. The shared unpinned client also holds up
+to `pool_max_idle_per_host` idle connections for each of its hosts.
 
 ## Credential sources
 
