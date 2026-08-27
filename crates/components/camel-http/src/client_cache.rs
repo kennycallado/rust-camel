@@ -166,19 +166,16 @@ mod tests {
 
     #[tokio::test]
     async fn changed_addr_set_builds_new_entry() {
-        // Bind two listeners on DISTINCT loopback IPs sharing one port, so
-        // the routing assertion is independent of whether reqwest dials the
-        // port from the URL or from the pinned addresses.
-        let (listener_a, listener_b, port) = loop {
-            let a = TcpListener::bind("127.0.0.2:0")
-                .await
-                .expect("bind 127.0.0.2");
-            let port = a.local_addr().expect("local addr").port();
-            match TcpListener::bind(SocketAddr::from(([127, 0, 0, 3], port))).await {
-                Ok(b) => break (a, b, port),
-                Err(_) => drop(a), // shared port raced; pick a fresh one
-            }
-        };
+        // Bind two listeners on 127.0.0.1 with DISTINCT ports. Distinct
+        // loopback IPs (127.0.0.2/.3) only exist on Linux — macOS exposes
+        // 127.0.0.1 alone and fails with AddrNotAvailable (rc-dwmd). The
+        // cache key is the address SET, so different ports distinguish
+        // entries exactly like different IPs did.
+        let listener_a = TcpListener::bind("127.0.0.1:0").await.expect("bind a");
+        let listener_b = TcpListener::bind("127.0.0.1:0").await.expect("bind b");
+        let addr_a = listener_a.local_addr().expect("local addr a");
+        let addr_b = listener_b.local_addr().expect("local addr b");
+        let port = addr_b.port();
 
         let hits_a = Arc::new(AtomicBool::new(false));
         let hits_b = Arc::new(AtomicBool::new(false));
@@ -186,9 +183,6 @@ mod tests {
         spawn_recorder(listener_b, Arc::clone(&hits_b));
 
         let cache = PinnedClientCache::new(PINNED_CLIENT_TTL, PINNED_CLIENT_MAX_ENTRIES);
-        let addr_a = SocketAddr::from(([127, 0, 0, 2], port));
-        let addr_b = SocketAddr::from(([127, 0, 0, 3], port));
-
         let _client_a = cache
             .get_or_build("localhost", &[addr_a], || {
                 crate::build_client(&HttpConfig::default(), Some(("localhost", &[addr_a])))
@@ -213,11 +207,11 @@ mod tests {
         assert_eq!(cache.entry_count(), 2);
         assert!(
             !hits_a.load(Ordering::Relaxed),
-            "connection must not reach 127.0.0.2"
+            "connection must not reach listener a ({addr_a})"
         );
         assert!(
             hits_b.load(Ordering::Relaxed),
-            "connection must reach 127.0.0.3"
+            "connection must reach listener b ({addr_b})"
         );
     }
 
