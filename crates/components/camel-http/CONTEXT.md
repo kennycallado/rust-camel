@@ -46,6 +46,14 @@ one `warn!` when a non-empty body (or any stream body) is dropped. The body
 stays consumed. No configuration override exists (Apache Camel
 `HttpMethods.isEntityEnclosing` parity).
 
+The pinned-client cache is shared across all endpoints of one component
+instance. It retains at most `PINNED_CLIENT_MAX_ENTRIES` (64) clients, each
+live for a `PINNED_CLIENT_TTL` (60 s) window. Each cached client serves one
+`(host, address set)` pair. It holds up to `pool_max_idle_per_host`
+(default 100) idle connections for that host until `pool_idle_timeout_ms`
+(default 90 s) closes them. Worst case is 64 clients times 100 idle
+connections per component instance.
+
 ## Credential sources
 
 A `security_policy` block on a `from: http://` route may declare a

@@ -1800,6 +1800,7 @@ impl Consumer for HttpConsumer {
 
 pub struct HttpComponent {
     config: HttpConfig,
+    pinned_cache: std::sync::Arc<PinnedClientCache>,
 }
 
 pub(crate) fn build_client(
@@ -1860,11 +1861,23 @@ pub(crate) fn build_client(
 impl HttpComponent {
     pub fn new() -> Self {
         let config = HttpConfig::default();
-        Self { config }
+        Self {
+            config,
+            pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+                PINNED_CLIENT_TTL,
+                PINNED_CLIENT_MAX_ENTRIES,
+            )),
+        }
     }
 
     pub fn with_config(config: HttpConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+                PINNED_CLIENT_TTL,
+                PINNED_CLIENT_MAX_ENTRIES,
+            )),
+        }
     }
 
     pub fn with_optional_config(config: Option<HttpConfig>) -> Self {
@@ -1899,10 +1912,6 @@ impl Component for HttpComponent {
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
         let client = build_client(&self.config, None);
-        let pinned_cache = std::sync::Arc::new(PinnedClientCache::new(
-            PINNED_CLIENT_TTL,
-            PINNED_CLIENT_MAX_ENTRIES,
-        ));
         ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
             server_config.host.clone(),
             server_config.port,
@@ -1912,7 +1921,7 @@ impl Component for HttpComponent {
             config,
             server_config,
             client,
-            pinned_cache,
+            pinned_cache: std::sync::Arc::clone(&self.pinned_cache),
             http_config: self.config.clone(),
         }))
     }
@@ -1920,16 +1929,29 @@ impl Component for HttpComponent {
 
 pub struct HttpsComponent {
     config: HttpConfig,
+    pinned_cache: std::sync::Arc<PinnedClientCache>,
 }
 
 impl HttpsComponent {
     pub fn new() -> Self {
         let config = HttpConfig::default();
-        Self { config }
+        Self {
+            config,
+            pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+                PINNED_CLIENT_TTL,
+                PINNED_CLIENT_MAX_ENTRIES,
+            )),
+        }
     }
 
     pub fn with_config(config: HttpConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+                PINNED_CLIENT_TTL,
+                PINNED_CLIENT_MAX_ENTRIES,
+            )),
+        }
     }
 
     pub fn with_optional_config(config: Option<HttpConfig>) -> Self {
@@ -1969,10 +1991,6 @@ impl Component for HttpsComponent {
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
         let client = build_client(&self.config, None);
-        let pinned_cache = std::sync::Arc::new(PinnedClientCache::new(
-            PINNED_CLIENT_TTL,
-            PINNED_CLIENT_MAX_ENTRIES,
-        ));
         ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
             server_config.host.clone(),
             server_config.port,
@@ -1982,7 +2000,7 @@ impl Component for HttpsComponent {
             config,
             server_config,
             client,
-            pinned_cache,
+            pinned_cache: std::sync::Arc::clone(&self.pinned_cache),
             http_config: self.config.clone(),
         }))
     }
@@ -8556,6 +8574,105 @@ mod tests {
             0,
             "an IP-literal URL must use the shared unpinned client and \
              never enter the pinned cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_component_endpoints_share_pinned_cache() {
+        use tower::ServiceExt;
+
+        let component = HttpComponent::new();
+        let (base_url, _handle) = spawn_multi_accept_200().await;
+        let baseline = component.pinned_cache.build_count();
+
+        let ctx = test_producer_ctx();
+        let endpoint_ctx = NoOpComponentContext;
+        for uri in [
+            format!("{base_url}/a?allowInternal=true&k=a"),
+            format!("{base_url}/b?allowInternal=true&k=b"),
+        ] {
+            let endpoint = component
+                .create_endpoint(&uri, &endpoint_ctx)
+                .expect("create endpoint");
+            let producer = endpoint
+                .create_producer(rt(), &ctx)
+                .expect("create producer");
+            let exchange = Exchange::new(Message::default());
+            let reply = producer.oneshot(exchange).await;
+            assert!(reply.is_ok(), "producer call failed: {:?}", reply);
+        }
+
+        assert_eq!(
+            component.pinned_cache.build_count() - baseline,
+            1,
+            "endpoints created by one component must share its pinned cache; \
+             0 builds means the endpoints bypassed it, more than 1 means \
+             per-endpoint caches came back"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_resolution_sequence_hits_shared_cache() {
+        use tower::ServiceExt;
+
+        let component = HttpComponent::new();
+        let (base_url, _handle) = spawn_multi_accept_200().await;
+        let baseline = component.pinned_cache.build_count();
+
+        let ctx = test_producer_ctx();
+        let endpoint_ctx = NoOpComponentContext;
+        for i in 0..3 {
+            let endpoint = component
+                .create_endpoint(
+                    &format!("{base_url}/r{i}?allowInternal=true&k={i}"),
+                    &endpoint_ctx,
+                )
+                .expect("create endpoint");
+            let producer = endpoint
+                .create_producer(rt(), &ctx)
+                .expect("create producer");
+            let exchange = Exchange::new(Message::default());
+            let reply = producer.oneshot(exchange).await;
+            assert!(reply.is_ok(), "request {i} failed: {:?}", reply);
+        }
+
+        assert_eq!(
+            component.pinned_cache.build_count() - baseline,
+            1,
+            "a dynamic-resolution sequence (fresh endpoint+producer per URI) \
+             must reuse the component's one pinned cache entry; 0 builds \
+             means the endpoints bypassed it, more than 1 means \
+             per-endpoint caches came back"
+        );
+    }
+
+    #[test]
+    fn test_https_component_owns_distinct_cache() {
+        let http = HttpComponent::new();
+        let https = HttpsComponent::new();
+
+        assert!(
+            !Arc::ptr_eq(&http.pinned_cache, &https.pinned_cache),
+            "http and https components must each own their own pinned cache"
+        );
+
+        let endpoint_ctx = NoOpComponentContext;
+        let _ = http
+            .create_endpoint("http://localhost:1/?allowInternal=true", &endpoint_ctx)
+            .expect("http endpoint");
+        let _ = https
+            .create_endpoint("https://localhost:1/?allowInternal=true", &endpoint_ctx)
+            .expect("https endpoint");
+
+        assert_eq!(
+            http.pinned_cache.build_count(),
+            0,
+            "endpoint creation must not build a pinned client"
+        );
+        assert_eq!(
+            https.pinned_cache.build_count(),
+            0,
+            "endpoint creation must not build a pinned client"
         );
     }
 }
