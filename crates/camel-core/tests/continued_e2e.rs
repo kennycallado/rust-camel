@@ -4,6 +4,7 @@
 //! `onException(ProcessorError, continued=true)` continues to subsequent steps
 //! after a failing step, rather than propagating the error.
 
+use camel_api::SpanKindHint;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -57,18 +58,21 @@ async fn continued_e2e_step3_executes_after_step2_failure() {
     let pipeline = compose_pipeline_with_handler(
         vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: step1,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: step2,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: step3,
                 body_contract: None,
                 lifecycle: None,
@@ -169,18 +173,21 @@ async fn continued_e2e_route_channel_service_with_cb_gate() {
     let pipeline = compose_pipeline_with_handler(
         vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: step1,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: step2,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: step3,
                 body_contract: None,
                 lifecycle: None,

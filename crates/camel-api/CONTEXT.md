@@ -14,12 +14,12 @@ execution engine, no registries, no lifecycle implementation.
 ## `#[non_exhaustive]` posture
 
 ADR-0049 places this contract crate in its mandatory scope: every `pub enum` is
-`#[non_exhaustive]` or carries an `exhaustive-by-contract` exception note. The 56 `pub enum`s
+`#[non_exhaustive]` or carries an `exhaustive-by-contract` exception note. The 57 `pub enum`s
 split into:
 
 | Category | Count | Posture |
 |---|---|---|
-| `#[non_exhaustive]` | 59 | 54 attributed; pre-existing exceptions include `CamelError`, `ConfigValidationError`, `TemplateError`. |
+| `#[non_exhaustive]` | 60 | 55 attributed; pre-existing exceptions include `CamelError`, `ConfigValidationError`, `TemplateError`. |
 | `exhaustive-by-contract` exception | 5 | `PipelineOutcome` (the ADR-0024 outcome algebra), `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy), `ContentType` (the closed 4-variant cache content-type set matched by out-of-crate CacheService), `CredentialSource` (the closed credential-source set; out-of-crate camel-auth extraction matches all variants), and `AccessMode` (the closed kernel access-mode set; out-of-crate camel-auth enforcement matches all variants). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
 
 New contract enums use `#[non_exhaustive]` from birth; a closed-set exception needs a
@@ -27,6 +27,15 @@ New contract enums use `#[non_exhaustive]` from birth; a closed-set exception ne
 the enum mandate). Compliance is enforced by `cargo xtask lint-non-exhaustive`.
 
 ## Language
+
+**SpanKindHint**:
+Compile-time hint for the OTel `SpanKind` of a step span (`span_kind.rs`).
+`#[non_exhaustive]` contract enum, `Default = Internal`; unknown future
+variants degrade to `Internal` at the consumption site (per ADR-0049).
+Set by the route compiler from the authored `.to` URI scheme: messaging
+brokers → `Producer`, request/response + database → `Client`, everything
+else → `Internal`.
+_Avoid_: span kind (the OTel type), kind
 
 **Exchange**:
 The canonical data envelope (`exchange.rs`). Carries an input `Message`, an optional output

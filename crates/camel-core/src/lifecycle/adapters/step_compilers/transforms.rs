@@ -3,6 +3,7 @@
 //! These steps enrich or transform the exchange by resolving external data
 //! through producers or polling consumers.
 
+use camel_api::SpanKindHint;
 use std::time::Duration;
 
 use camel_api::{BoxProcessor, CamelError};
@@ -33,6 +34,7 @@ impl StepCompiler for TransformsCompiler {
                 let strategy_arc = resolve_enrichment_strategy(strategy)?;
                 let svc = EnrichService::new(producer, strategy_arc);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -62,6 +64,7 @@ impl StepCompiler for TransformsCompiler {
                 let strategy_arc = resolve_enrichment_strategy(strategy)?;
                 let svc = PollEnrichService::new(poller, timeout, strategy_arc);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,

@@ -10,7 +10,7 @@ use camel_api::loop_eip::LoopConfig;
 use camel_api::security_policy::SecurityPolicyConfig;
 use camel_api::{
     AggregatorConfig, FilterPredicate, MulticastConfig, OpaqueProcessor, ResequencePolicyConfig,
-    SplitterConfig,
+    SpanKindHint, SplitterConfig,
 };
 use camel_auth::TokenAuthenticator;
 use camel_component_api::ConcurrencyModel;
@@ -401,6 +401,57 @@ impl BuilderStep {
             Self::Resequence { .. } => Some("resequence".into()),
         }
     }
+
+    /// Span kind hint for this step's step span (span-kind-hint, task 1.2).
+    ///
+    /// `To` classifies the AUTHORED URI scheme — the text before the first
+    /// `:`, compared with `eq_ignore_ascii_case`, no endpoint resolution —
+    /// so a `SkipTo` interception never rewrites the kind. Messaging broker
+    /// schemes map to `Producer` (async, one-way send) and synchronous
+    /// outbound protocols to `Client`; every other scheme, scheme-less URIs,
+    /// and every non-`To` variant stay `Internal` route processing. The
+    /// catch-all sits after the `To` arm so it can never swallow it.
+    pub(crate) fn span_kind_hint(&self) -> SpanKindHint {
+        /// Broker-style destinations: an async, one-way send.
+        const PRODUCER_SCHEMES: [&str; 5] = ["kafka", "jms", "activemq", "artemis", "mqtt"];
+        /// Synchronous outbound request/response protocols.
+        const CLIENT_SCHEMES: [&str; 12] = [
+            "http",
+            "https",
+            "grpc",
+            "grpcs",
+            "ws",
+            "redis",
+            "opensearch",
+            "sql",
+            "surrealdb",
+            "cxf",
+            "llm",
+            "mcp",
+        ];
+
+        match self {
+            Self::To(uri) => {
+                // Scheme of the authored URI. Scheme-less URIs match no
+                // known scheme and stay Internal — the kind is never guessed.
+                let scheme = uri.split(':').next().unwrap_or_default();
+                if PRODUCER_SCHEMES
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(scheme))
+                {
+                    SpanKindHint::Producer
+                } else if CLIENT_SCHEMES
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(scheme))
+                {
+                    SpanKindHint::Client
+                } else {
+                    SpanKindHint::Internal
+                }
+            }
+            _ => SpanKindHint::Internal,
+        }
+    }
 }
 
 /// An unresolved route definition. "to" URIs have not been resolved to producers yet.
@@ -781,6 +832,76 @@ mod tests {
             BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(IdentityProcessor)))
                 .span_label(),
             None
+        );
+    }
+
+    /// Task 1.2 (span-kind-hint): `BuilderStep::span_kind_hint` mapping.
+    ///
+    /// `To` classifies the AUTHORED URI scheme (text before the first `:`,
+    /// compared case-insensitively, no endpoint resolution): messaging
+    /// brokers map to `Producer`, synchronous outbound protocols to
+    /// `Client`. Every other scheme, scheme-less URIs, and every non-`To`
+    /// variant stay `Internal` route processing.
+    #[test]
+    fn builder_step_span_kind_hint_mapping() {
+        use camel_api::splitter::split_body_lines;
+        use camel_api::{Exchange, FilterPredicate, SpanKindHint};
+
+        let kind = |uri: &str| BuilderStep::To(uri.into()).span_kind_hint();
+
+        // Messaging brokers → Producer.
+        assert_eq!(kind("kafka:orders"), SpanKindHint::Producer);
+        assert_eq!(kind("jms:q"), SpanKindHint::Producer);
+        assert_eq!(kind("activemq:q"), SpanKindHint::Producer);
+        assert_eq!(kind("artemis:q"), SpanKindHint::Producer);
+        assert_eq!(kind("mqtt:t"), SpanKindHint::Producer);
+        // Scheme comparison is case-insensitive.
+        assert_eq!(kind("KAFKA:orders"), SpanKindHint::Producer);
+
+        // Synchronous outbound protocols → Client.
+        assert_eq!(kind("http://x"), SpanKindHint::Client);
+        assert_eq!(kind("https://x"), SpanKindHint::Client);
+        assert_eq!(kind("grpc://x"), SpanKindHint::Client);
+        assert_eq!(kind("grpcs://x"), SpanKindHint::Client);
+        assert_eq!(kind("ws://x"), SpanKindHint::Client);
+        assert_eq!(kind("redis://x"), SpanKindHint::Client);
+        assert_eq!(kind("opensearch://x"), SpanKindHint::Client);
+        assert_eq!(kind("sql:db"), SpanKindHint::Client);
+        assert_eq!(kind("surrealdb://x"), SpanKindHint::Client);
+        assert_eq!(kind("cxf://x"), SpanKindHint::Client);
+        assert_eq!(kind("llm://x"), SpanKindHint::Client);
+        assert_eq!(kind("mcp://x"), SpanKindHint::Client);
+
+        // In-process and unknown schemes → Internal.
+        assert_eq!(kind("direct:y"), SpanKindHint::Internal);
+        assert_eq!(kind("timer:z"), SpanKindHint::Internal);
+        // Scheme-less URI: the kind is never guessed.
+        assert_eq!(kind("garbage"), SpanKindHint::Internal);
+
+        // Non-`To` variants are internal route processing.
+        assert_eq!(
+            BuilderStep::Log {
+                level: camel_processor::LogLevel::Info,
+                message: "m".into(),
+            }
+            .span_kind_hint(),
+            SpanKindHint::Internal
+        );
+        assert_eq!(
+            BuilderStep::Filter {
+                predicate: FilterPredicate::new(|_: &Exchange| true),
+                steps: vec![BuilderStep::Stop],
+            }
+            .span_kind_hint(),
+            SpanKindHint::Internal
+        );
+        assert_eq!(
+            BuilderStep::Split {
+                config: camel_api::splitter::SplitterConfig::new(split_body_lines()),
+                steps: vec![BuilderStep::Stop],
+            }
+            .span_kind_hint(),
+            SpanKindHint::Internal
         );
     }
 

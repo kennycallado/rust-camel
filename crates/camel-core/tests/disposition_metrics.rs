@@ -15,6 +15,7 @@
 //!
 //! [`run_steps`]: crate::lifecycle::adapters::route_compiler::run_steps
 
+use camel_api::SpanKindHint;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -81,6 +82,7 @@ fn ctx_with(metrics: Arc<RecMetrics>) -> PipelineRuntimeCtx {
 
 fn failing_step() -> CompiledStep {
     CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor: BoxProcessor::from_fn(|_| {
             Box::pin(async {
                 Err::<Exchange, CamelError>(CamelError::ProcessorError("boom".into()))
@@ -94,6 +96,7 @@ fn failing_step() -> CompiledStep {
 
 fn pass_through_step() -> CompiledStep {
     CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor: BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
         body_contract: None,
         lifecycle: None,

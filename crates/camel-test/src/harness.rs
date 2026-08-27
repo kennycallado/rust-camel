@@ -302,6 +302,7 @@ impl CamelTestContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::SpanKindHint;
     use camel_builder::{RouteBuilder, StepAccumulator};
     use std::time::Duration;
 
@@ -433,6 +434,7 @@ mod tests {
 
         let pipeline = compose_pipeline(
             vec![CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor,
                 body_contract: None,
                 lifecycle: None,
@@ -569,12 +571,14 @@ mod tests {
         let pipeline = compose_pipeline(
             vec![
                 CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: step1,
                     body_contract: None,
                     lifecycle: None,
                     label: None,
                 },
                 CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: step2,
                     body_contract: None,
                     lifecycle: None,

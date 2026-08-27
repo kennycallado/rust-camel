@@ -2,6 +2,7 @@
 //!
 //! Steps that route exchanges to multiple destinations using endpoint resolvers.
 
+use camel_api::SpanKindHint;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
@@ -37,6 +38,7 @@ impl StepCompiler for RoutingCompiler {
                 let svc =
                     camel_processor::dynamic_router::DynamicRouterService::new(config, resolver);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -77,6 +79,7 @@ impl StepCompiler for RoutingCompiler {
                 let svc =
                     camel_processor::dynamic_router::DynamicRouterService::new(config, resolver);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -93,6 +96,7 @@ impl StepCompiler for RoutingCompiler {
                 );
                 let svc = camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -130,6 +134,7 @@ impl StepCompiler for RoutingCompiler {
                 );
                 let svc = camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -147,6 +152,7 @@ impl StepCompiler for RoutingCompiler {
                 let svc =
                     camel_processor::recipient_list::RecipientListService::new(config, resolver)?;
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -192,6 +198,7 @@ impl StepCompiler for RoutingCompiler {
                 let svc =
                     camel_processor::recipient_list::RecipientListService::new(config, resolver)?;
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,

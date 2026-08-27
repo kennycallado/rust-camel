@@ -1,4 +1,5 @@
 use super::*;
+use camel_api::SpanKindHint;
 use camel_api::error_handler::{BoundaryKind, PolicyId, RetryOutcome, StepDisposition};
 use camel_api::{Body, BoxProcessorExt, CircuitBreakerConfig, Message, Value};
 use camel_processor::RouteErrorHandler;
@@ -135,6 +136,7 @@ fn test_pipeline_poll_ready_delegates_to_first_step() {
     let boxed = BoxProcessor::new(inner);
     let mut pipeline = SequentialPipeline {
         steps: SharedSnapshot(Arc::from(vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: boxed,
             body_contract: None,
             lifecycle: None,
@@ -171,6 +173,7 @@ async fn test_pipeline_stop_returns_ok_with_exchange() {
     let after_called = Arc::new(AtomicBool::new(false));
     let after_called_clone = after_called.clone();
     let after_step = CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor: BoxProcessor::from_fn(move |ex| {
             after_called_clone.store(true, Ordering::SeqCst);
             Box::pin(async move { Ok(ex) })
@@ -204,6 +207,7 @@ async fn test_run_steps_stop_produces_pipeline_outcome_stopped() {
     let steps = vec![
         CompiledStep::Stop,
         CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
             body_contract: None,
             lifecycle: None,
@@ -322,6 +326,7 @@ async fn test_compose_traced_pipeline_enabled() {
     let step = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
     let pipeline = compose_traced_pipeline(
         vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: step,
             body_contract: None,
             lifecycle: None,
@@ -361,6 +366,7 @@ async fn test_compose_pipeline_with_contracts_coerces_before_inner_processor() {
 
     let pipeline = compose_pipeline_with_contracts(
         vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: inner,
             body_contract: Some(camel_api::BodyType::Text),
             lifecycle: None,
@@ -383,12 +389,14 @@ async fn test_compose_pipeline_with_contracts_coerces_before_inner_processor() {
 #[tokio::test]
 async fn test_run_steps_continued_skips_failed_step() {
     let step1 = CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor: BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
         body_contract: None,
         lifecycle: None,
         label: None,
     };
     let step2 = CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor: BoxProcessor::from_fn(|_ex| {
             Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
         }),
@@ -399,6 +407,7 @@ async fn test_run_steps_continued_skips_failed_step() {
     let step3_hit = Arc::new(AtomicBool::new(false));
     let hit = step3_hit.clone();
     let step3 = CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor: BoxProcessor::from_fn(move |ex| {
             let hit = hit.clone();
             Box::pin(async move {
@@ -437,6 +446,7 @@ async fn test_run_steps_failed_without_handler_returns_failed() {
     // Optimized path: a failing step + handler=None → short-circuit to
     // PipelineOutcome::Failed without attempting retry/recovery.
     let steps = vec![CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor: BoxProcessor::from_fn(|_ex| {
             Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
         }),
@@ -479,6 +489,7 @@ async fn test_route_channel_pipeline_propagate_returns_err() {
     });
     let pipeline = compose_pipeline_with_handler(
         vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: failing_step,
             body_contract: None,
             lifecycle: None,
@@ -674,12 +685,14 @@ async fn test_use_original_message_stash_survives_full_route_channel() {
     let pipeline = compose_pipeline_with_handler(
         vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: mutating_step,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: failing_step,
                 body_contract: None,
                 lifecycle: None,
@@ -752,12 +765,14 @@ async fn test_use_original_message_wholesale_exchange_replacement() {
     let pipeline = compose_pipeline_with_handler(
         vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: replace_step,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: failing_step,
                 body_contract: None,
                 lifecycle: None,
@@ -819,12 +834,14 @@ async fn test_sampling_drop_stops_following_process_step() {
 
     let steps = vec![
         CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: BoxProcessor::new(SamplingService::new(2)),
             body_contract: None,
             lifecycle: None,
             label: None,
         },
         CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: BoxProcessor::from_fn(move |mut ex: Exchange| {
                 let cap = captured1.clone();
                 Box::pin(async move {
@@ -1264,6 +1281,7 @@ mod cancellation_tests {
 
     fn pass_through() -> CompiledStep {
         CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) })),
             body_contract: None,
             lifecycle: None,
@@ -1297,6 +1315,7 @@ mod cancellation_tests {
         let cancel_in_step = cancel.clone();
 
         let step1 = CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: BoxProcessor::from_fn(move |ex: Exchange| {
                 let c = cancel_in_step.clone();
                 Box::pin(async move {

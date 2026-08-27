@@ -2,6 +2,7 @@
 //!
 //! These steps split exchanges into fragments or aggregate them back together.
 
+use camel_api::SpanKindHint;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -333,6 +334,7 @@ impl StepCompiler for SplittingCompiler {
                     camel_processor::AggregatorService::new(config, late_tx, registry, cancel);
                 let lifecycle: Arc<dyn StepLifecycle> = Arc::new(svc.clone());
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: Some(lifecycle),

@@ -1755,6 +1755,7 @@ impl StepAccumulator for LoadBalancerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::SpanKindHint;
     use camel_api::error_handler::ErrorHandlerConfig;
     use camel_api::load_balancer::LoadBalanceStrategy;
     use camel_api::{Exchange, Message};
@@ -2064,6 +2065,7 @@ mod tests {
 
         let processors = vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: BoxProcessor::new(SetHeader::new(
                     IdentityProcessor,
                     "step",
@@ -2074,6 +2076,7 @@ mod tests {
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: BoxProcessor::new(MapBody::new(IdentityProcessor, |body: Body| {
                     if let Some(text) = body.as_text() {
                         Body::Text(format!("{}-processed", text))
@@ -2489,6 +2492,7 @@ mod tests {
                     }
                 })
                 .map(|p| CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: p,
                     body_contract: None,
                     lifecycle: None,
@@ -2523,6 +2527,7 @@ mod tests {
                     }
                 })
                 .map(|p| CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: p,
                     body_contract: None,
                     lifecycle: None,
@@ -2561,6 +2566,7 @@ mod tests {
                     }
                 })
                 .map(|p| CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: p,
                     body_contract: None,
                     lifecycle: None,

@@ -1,6 +1,7 @@
 use super::*;
 use crate::lifecycle::application::route_definition::BuilderStep;
 use crate::shared::observability::adapters::span_test_util::{finish, test_spans};
+use camel_api::SpanKindHint;
 use camel_api::fragment_exchange;
 use camel_api::{ExceptionPolicy, OutcomePipeline, OutcomeSegment, RedeliveryPolicy};
 use opentelemetry::baggage::BaggageExt;
@@ -11,6 +12,7 @@ use std::sync::atomic::AtomicUsize;
 /// A pass-through step: IdentityProcessor wrapped as a CompiledStep.
 fn identity_step() -> CompiledStep {
     CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor: BoxProcessor::new(IdentityProcessor),
         body_contract: None,
         lifecycle: None,
@@ -110,6 +112,7 @@ async fn compose_threads_label_to_span_name() {
     let label = BuilderStep::To("direct:y".into()).span_label();
     let mut pipeline = compose_traced_pipeline(
         vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: BoxProcessor::new(IdentityProcessor),
             body_contract: None,
             lifecycle: None,
@@ -291,6 +294,7 @@ async fn traced_pipeline_failed_root_records_exception() {
     let spans = test_spans().await;
     let mut pipeline = compose_traced_pipeline(
         vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: BoxProcessor::new(ErrProcessor),
             body_contract: None,
             lifecycle: None,
@@ -701,5 +705,223 @@ async fn untraced_segment_emits_no_span() {
     assert!(
         all.iter().all(|s| s.name != "srt:step-0"),
         "untraced segment step must not emit a span"
+    );
+}
+
+// ── Kind hints threaded into step spans (span-kind-hint 1.3) ──
+//
+// These tests compile a `To` step through the REAL step-compiler registry
+// (stub `ComponentContext` + `CompilationContext`, the pattern proven in
+// `step_compilers/endpoints.rs`) so the returned `CompiledStep` carries the
+// registry-stamped label and kind hint exactly as route compilation does.
+// `compose_traced_pipeline` must thread that hint into the exported span's
+// OTel kind.
+
+use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
+use crate::lifecycle::adapters::step_compilers::{CompilationContext, build_registry};
+use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
+use crate::{CacheRegistry, ClaimCheckRegistry, IdempotentRegistry};
+use async_trait::async_trait;
+use camel_api::{BoxProcessorExt, StepLifecycle};
+use camel_bean::BeanRegistry;
+use camel_component_api::test_support::NoopRuntimeObservability;
+use camel_component_api::{
+    Component, ComponentContext, Endpoint, ProducerContext, RuntimeObservability,
+};
+use std::collections::HashMap;
+
+/// Identity endpoint double: vends a pass-through producer. The stamped kind
+/// depends only on the AUTHORED URI scheme (`BuilderStep::span_kind_hint`),
+/// so the endpoint body is irrelevant here.
+struct SchemeStubEndpoint {
+    uri: String,
+}
+
+impl Endpoint for SchemeStubEndpoint {
+    fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
+        Err(CamelError::EndpointCreationFailed("not a consumer".into()))
+    }
+
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
+        Ok(BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })))
+    }
+
+    fn lifecycle(&self) -> Option<Arc<dyn StepLifecycle>> {
+        None
+    }
+}
+
+/// Component double that vends [`SchemeStubEndpoint`] for one scheme.
+struct SchemeStubComponent {
+    scheme: &'static str,
+}
+
+#[async_trait]
+impl Component for SchemeStubComponent {
+    fn scheme(&self) -> &str {
+        self.scheme
+    }
+
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        Ok(Box::new(SchemeStubEndpoint {
+            uri: uri.to_string(),
+        }))
+    }
+}
+
+/// `ComponentContext` double that resolves only the stubbed scheme.
+struct SchemeStubContext {
+    scheme: &'static str,
+}
+
+impl ComponentContext for SchemeStubContext {
+    fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn Component>> {
+        if scheme == self.scheme {
+            Some(Arc::new(SchemeStubComponent {
+                scheme: self.scheme,
+            }))
+        } else {
+            None
+        }
+    }
+    fn resolve_language(&self, _name: &str) -> Option<Arc<dyn camel_language_api::Language>> {
+        None
+    }
+    fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+        Arc::new(NoOpMetrics)
+    }
+    fn platform_service(&self) -> Arc<dyn camel_api::PlatformService> {
+        Arc::new(camel_api::NoopPlatformService::default())
+    }
+    fn register_route_health_check(
+        &self,
+        _route_id: &str,
+        _check: Arc<dyn camel_api::AsyncHealthCheck>,
+    ) {
+    }
+    fn unregister_route_health_check(&self, _route_id: &str) {}
+}
+
+/// Compile `BuilderStep::To(uri)` through the real step-compiler registry
+/// with a stub component registered under `scheme`, so the returned step
+/// carries the registry-stamped label and kind hint.
+fn compile_to_via_registry(uri: &str, scheme: &'static str) -> CompiledStep {
+    let pc = ProducerContext::default();
+    let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+    let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+    let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+    let component_ctx: Arc<dyn ComponentContext> = Arc::new(SchemeStubContext { scheme });
+    let staging = FunctionStagingMode::DirectAdd;
+    let idempotent_repositories = IdempotentRegistry::new();
+    let claim_check_repositories = ClaimCheckRegistry::new();
+    let cache_repositories = CacheRegistry::new();
+
+    let ctx = CompilationContext {
+        producer_ctx: &pc,
+        rt,
+        languages: &languages,
+        beans: &beans,
+        function_invoker: None,
+        component_ctx,
+        route_id: None,
+        staging_mode: &staging,
+        idempotent_repositories: &idempotent_repositories,
+        claim_check_repositories: &claim_check_repositories,
+        cache_repositories: &cache_repositories,
+        intercept: crate::intercept::InterceptRules::default(),
+    };
+
+    build_registry()
+        .compile_step(BuilderStep::To(uri.to_string()), 0, &ctx)
+        .expect("To step compiles through the real registry")
+        .expect("a compiler handles the To variant")
+}
+
+/// Task 1.3 (span-kind-hint): a `To("http://…")` step compiled through the
+/// real registry is stamped `Client`; `compose_traced_pipeline` threads that
+/// hint into the step span's OTel kind.
+#[tokio::test]
+async fn compose_threads_kind_client_http() {
+    let spans = test_spans().await;
+    let step = compile_to_via_registry("http://stub/x", "http");
+    let mut pipeline = compose_traced_pipeline(
+        vec![step],
+        "rt",
+        true,
+        DetailLevel::Minimal,
+        None,
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+    let exchange = Exchange::new(Message::default());
+    pipeline
+        .ready()
+        .await
+        .expect("pipeline ready")
+        .call(exchange)
+        .await
+        .expect("pipeline call succeeds");
+
+    let all = finish(spans);
+    let step_span = all
+        .iter()
+        .find(|s| s.name == "rt:to:http")
+        .expect("step span exported with name rt:to:http");
+    assert_eq!(
+        step_span.span_kind,
+        SpanKind::Client,
+        "http To step span must be Client"
+    );
+}
+
+/// Task 1.3 (span-kind-hint): a `To("kafka:…")` step compiled through the
+/// real registry is stamped `Producer`; `compose_traced_pipeline` threads
+/// that hint into the step span's OTel kind.
+#[tokio::test]
+async fn compose_threads_kind_producer_kafka() {
+    let spans = test_spans().await;
+    let step = compile_to_via_registry("kafka:stub-topic", "kafka");
+    let mut pipeline = compose_traced_pipeline(
+        vec![step],
+        "rt",
+        true,
+        DetailLevel::Minimal,
+        None,
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+    let exchange = Exchange::new(Message::default());
+    pipeline
+        .ready()
+        .await
+        .expect("pipeline ready")
+        .call(exchange)
+        .await
+        .expect("pipeline call succeeds");
+
+    let all = finish(spans);
+    let step_span = all
+        .iter()
+        .find(|s| s.name == "rt:to:kafka")
+        .expect("step span exported with name rt:to:kafka");
+    assert_eq!(
+        step_span.span_kind,
+        SpanKind::Producer,
+        "kafka To step span must be Producer"
     );
 }

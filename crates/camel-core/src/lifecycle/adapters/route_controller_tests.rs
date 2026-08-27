@@ -4,6 +4,7 @@ use crate::lifecycle::adapters::route_helpers::runtime_failure_command;
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
 use crate::shared::components::domain::Registry;
 use arc_swap::ArcSwap;
+use camel_api::SpanKindHint;
 use camel_api::function::PrepareToken;
 use camel_api::security_policy::{
     AuthContext, AuthorizationDecision, CredentialSource, Principal, SecurityPolicy,
@@ -1542,6 +1543,7 @@ fn four_layer_identity_pipeline() -> camel_api::BoxProcessor {
     use crate::lifecycle::adapters::step_compilers::CompiledStep;
 
     let identity_step = || CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor: camel_api::BoxProcessor::new(camel_api::IdentityProcessor),
         body_contract: None,
         lifecycle: None,
@@ -1688,6 +1690,7 @@ async fn pipeline_swap_during_concurrent_acquisition_is_coherent() {
                     async move { Ok(ex) }
                 });
                 let identity_step = || CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: camel_api::BoxProcessor::new(camel_api::IdentityProcessor),
                     body_contract: None,
                     lifecycle: None,
@@ -1696,6 +1699,7 @@ async fn pipeline_swap_during_concurrent_acquisition_is_coherent() {
                 let stack = compose_pipeline(
                     vec![
                         CompiledStep::Process {
+                            kind_hint: SpanKindHint::Internal,
                             processor: marker,
                             body_contract: None,
                             lifecycle: None,

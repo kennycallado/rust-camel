@@ -1,3 +1,4 @@
+use camel_api::SpanKindHint;
 use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message};
 use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 use camel_processor::{ChoiceService, FilterService, LogLevel, LogProcessor, WhenClause};
@@ -25,18 +26,21 @@ fn build_throughput_pipeline() -> BoxProcessor {
     compose_pipeline(
         vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: filter,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: choice,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: log,
                 body_contract: None,
                 lifecycle: None,

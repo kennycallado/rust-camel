@@ -5,6 +5,7 @@
 //! `Arc<ArcSwap<SyncBoxProcessor>>` — the same pattern as the production
 //! `SharedPipeline` (which wraps `SyncBoxProcessor` inside `PipelineAssembly`).
 
+use camel_api::SpanKindHint;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -19,6 +20,7 @@ use tower::Service;
 /// Build a pass-through CompiledStep that returns the exchange unchanged.
 fn pass_through() -> CompiledStep {
     CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor: BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) })),
         body_contract: None,
         lifecycle: None,
@@ -37,6 +39,7 @@ async fn concurrent_swap_and_call_no_invalid_state() {
     // S0: first step sets "phase: s0" marker, remainder pass-through.
     let s0 = compose_pipeline(
         std::iter::once(CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: BoxProcessor::from_fn(|mut ex: Exchange| {
                 ex.input.set_header("phase", Value::String("s0".into()));
                 async move { Ok(ex) }
@@ -53,6 +56,7 @@ async fn concurrent_swap_and_call_no_invalid_state() {
     // S1: first step sets "phase: s1" marker, remainder pass-through.
     let s1 = compose_pipeline(
         std::iter::once(CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: BoxProcessor::from_fn(|mut ex: Exchange| {
                 ex.input.set_header("phase", Value::String("s1".into()));
                 async move { Ok(ex) }
@@ -177,6 +181,7 @@ async fn in_flight_call_completes_on_old_snapshot_after_swap() {
     });
     let s0 = compose_pipeline(
         vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: s0_proc,
             body_contract: None,
             lifecycle: None,
@@ -193,6 +198,7 @@ async fn in_flight_call_completes_on_old_snapshot_after_swap() {
     });
     let s1 = compose_pipeline(
         vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: s1_proc,
             body_contract: None,
             lifecycle: None,

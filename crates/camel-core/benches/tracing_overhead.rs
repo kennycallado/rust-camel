@@ -1,3 +1,4 @@
+use camel_api::SpanKindHint;
 use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, Message};
 use camel_core::DetailLevel;
 use camel_core::route::{
@@ -8,6 +9,7 @@ use tower::Service;
 
 fn pass_through() -> CompiledStep {
     CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor: BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) })),
         body_contract: None,
         lifecycle: None,

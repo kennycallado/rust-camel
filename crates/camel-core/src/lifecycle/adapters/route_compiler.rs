@@ -156,13 +156,14 @@ pub fn compose_traced_pipeline(
         .into_iter()
         .enumerate()
         .map(|(idx, step)| {
-            let (p, c, lc, lbl) = match step {
+            let (p, c, lc, lbl, kh) = match step {
                 CompiledStep::Process {
                     processor,
                     body_contract,
                     lifecycle,
                     label,
-                } => (processor, body_contract, lifecycle, label),
+                    kind_hint,
+                } => (processor, body_contract, lifecycle, label, kind_hint),
                 CompiledStep::Stop => return CompiledStep::Stop,
                 CompiledStep::Segment { .. } => return step,
             };
@@ -173,12 +174,18 @@ pub fn compose_traced_pipeline(
                 detail_level.clone(),
                 metrics.clone(),
                 lbl.clone(),
+                // Thread the registry-stamped kind hint (span-kind-hint
+                // 1.3) so `to:http` steps export Client spans and broker
+                // sends export Producer spans; unlabeled/non-To steps keep
+                // the Internal default.
+                kh,
             ));
             CompiledStep::Process {
                 processor: traced,
                 body_contract: c,
                 lifecycle: lc,
                 label: lbl,
+                kind_hint: kh,
             }
         })
         .collect();
@@ -209,6 +216,7 @@ pub fn compose_pipeline_with_contracts(
                 body_contract,
                 lifecycle,
                 label,
+                kind_hint,
             } => {
                 let coerced = wrap_if_needed(processor, body_contract);
                 CompiledStep::Process {
@@ -216,6 +224,7 @@ pub fn compose_pipeline_with_contracts(
                     body_contract: None,
                     lifecycle,
                     label,
+                    kind_hint,
                 }
             }
             CompiledStep::Stop => CompiledStep::Stop,
@@ -253,6 +262,7 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
                 body_contract,
                 lifecycle,
                 label,
+                kind_hint,
             } => {
                 let processor = wrap_if_needed(processor, body_contract);
                 CompiledStep::Process {
@@ -260,6 +270,7 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
                     body_contract: None,
                     lifecycle,
                     label,
+                    kind_hint,
                 }
             }
             CompiledStep::Stop => CompiledStep::Stop,

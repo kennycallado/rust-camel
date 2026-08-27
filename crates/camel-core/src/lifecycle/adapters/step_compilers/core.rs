@@ -2,6 +2,7 @@
 //!
 //! These are the simplest compilers — none recursively compile child steps.
 
+use camel_api::SpanKindHint;
 use std::sync::Arc;
 
 use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, Value, body::Body};
@@ -41,6 +42,7 @@ impl StepCompiler for CoreCompiler {
         match step {
             // ── Pre-built processor ──
             BuilderStep::Processor(op) => Ok(CompileOutcome::Matched(CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: op.0,
                 body_contract: None,
                 lifecycle: None,
@@ -59,6 +61,7 @@ impl StepCompiler for CoreCompiler {
             BuilderStep::Delay { config } => {
                 let svc = camel_processor::delayer::DelayerService::new(config);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -75,6 +78,7 @@ impl StepCompiler for CoreCompiler {
                     expression_source,
                 );
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None, // Validate is stateless
@@ -292,6 +296,7 @@ impl StepCompiler for CoreCompiler {
             BuilderStep::Log { level, message } => {
                 let svc = LogProcessor::new(level, message);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -322,6 +327,7 @@ impl StepCompiler for CoreCompiler {
                         .to_string()
                     });
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -334,6 +340,7 @@ impl StepCompiler for CoreCompiler {
                 ValueSourceDef::Literal(value) => {
                     let svc = camel_processor::SetHeader::new(IdentityProcessor, key, value);
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
+                        kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -348,6 +355,7 @@ impl StepCompiler for CoreCompiler {
                         move |exchange: &Exchange| await_eval(&expression, exchange),
                     );
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
+                        kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -361,6 +369,7 @@ impl StepCompiler for CoreCompiler {
             BuilderStep::DeclarativeRemoveHeader { key } => {
                 let svc = camel_processor::RemoveHeader::new(IdentityProcessor, key);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -374,6 +383,7 @@ impl StepCompiler for CoreCompiler {
                     let svc =
                         camel_processor::SetHeaderIfAbsent::new(IdentityProcessor, key, value);
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
+                        kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -388,6 +398,7 @@ impl StepCompiler for CoreCompiler {
                         move |exchange: &Exchange| await_eval(&expression, exchange),
                     );
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
+                        kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -402,6 +413,7 @@ impl StepCompiler for CoreCompiler {
                 ValueSourceDef::Literal(value) => {
                     let svc = set_property::SetProperty::new(IdentityProcessor, key, value);
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
+                        kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -416,6 +428,7 @@ impl StepCompiler for CoreCompiler {
                         move |exchange: &Exchange| await_eval(&expression, exchange),
                     );
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
+                        kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -434,6 +447,7 @@ impl StepCompiler for CoreCompiler {
                         move |_exchange: &Exchange| body.clone(),
                     );
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
+                        kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -450,6 +464,7 @@ impl StepCompiler for CoreCompiler {
                         },
                     );
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
+                        kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -464,6 +479,7 @@ impl StepCompiler for CoreCompiler {
                 let lang = resolve_language(ctx.languages, &expression.language)?;
                 match lang.create_mutating_expression(&expression.source) {
                     Ok(mut_expr) => Ok(CompileOutcome::Matched(CompiledStep::Process {
+                        kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
                         body_contract: None,
                         lifecycle: None,
@@ -480,6 +496,7 @@ impl StepCompiler for CoreCompiler {
                             },
                         );
                         Ok(CompileOutcome::Matched(CompiledStep::Process {
+                            kind_hint: SpanKindHint::Internal,
                             processor: BoxProcessor::new(svc),
                             body_contract: None,
                             lifecycle: None,
@@ -514,6 +531,7 @@ impl StepCompiler for CoreCompiler {
                 }
                 let step = crate::step::function_step::FunctionStep::new(invoker, definition);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(step),
                     body_contract: None,
                     lifecycle: None,
@@ -545,6 +563,7 @@ impl StepCompiler for CoreCompiler {
                     }
                 });
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(processor),
                     body_contract: None,
                     lifecycle: None,
@@ -557,6 +576,7 @@ impl StepCompiler for CoreCompiler {
                 let lang = resolve_language(ctx.languages, &language)?;
                 match lang.create_mutating_expression(&script) {
                     Ok(mut_expr) => Ok(CompileOutcome::Matched(CompiledStep::Process {
+                        kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
                         body_contract: None,
                         lifecycle: None,
@@ -617,6 +637,7 @@ impl StepCompiler for CoreCompiler {
                     svc = svc.with_filter(f);
                 }
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -628,6 +649,7 @@ impl StepCompiler for CoreCompiler {
             BuilderStep::Sampling { period } => {
                 let svc = camel_processor::SamplingService::new(period);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -643,6 +665,7 @@ impl StepCompiler for CoreCompiler {
                 let sort_expr = compile_sort_expression(ctx.languages, &expression)?;
                 let svc = camel_processor::SortService::new(sort_expr, reverse);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,

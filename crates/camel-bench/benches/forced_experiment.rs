@@ -8,6 +8,7 @@
 //   4. Deep pipeline — 10 steps of concrete processors to amplify per-step overhead
 //   5. Expression pipeline — SimpleLanguage expression evaluation per request
 
+use camel_api::SpanKindHint;
 use std::sync::Arc;
 
 use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, IdentityProcessor, Message, Value};
@@ -27,12 +28,14 @@ fn pure_closure_pipeline() -> BoxProcessor {
     compose_pipeline(
         vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) })),
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: BoxProcessor::from_fn(|mut ex: Exchange| {
                     let _body = Body::Text("response".into());
                     ex.input.body = Body::Text("response".into());
@@ -43,6 +46,7 @@ fn pure_closure_pipeline() -> BoxProcessor {
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: BoxProcessor::from_fn(|mut ex: Exchange| {
                     Box::pin(async move {
                         ex.input
@@ -84,18 +88,21 @@ fn concrete_processor_pipeline() -> BoxProcessor {
     compose_pipeline(
         vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: noop,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: set_body,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: set_header,
                 body_contract: None,
                 lifecycle: None,
@@ -128,18 +135,21 @@ fn identity_wrapped_pipeline() -> BoxProcessor {
     compose_pipeline(
         vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: noop,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: set_body,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: set_header,
                 body_contract: None,
                 lifecycle: None,
@@ -174,6 +184,7 @@ fn deep_pipeline() -> BoxProcessor {
             ))
         };
         steps.push(CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: step,
             body_contract: None,
             lifecycle: None,
@@ -206,18 +217,21 @@ fn expression_pipeline() -> BoxProcessor {
     compose_pipeline(
         vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: noop.clone(),
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: eval_step,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: noop,
                 body_contract: None,
                 lifecycle: None,

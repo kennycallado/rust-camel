@@ -11,6 +11,7 @@
 //! See `crate::lifecycle::adapters::route_compiler::run_steps` for the
 //! hot path under test.
 
+use camel_api::SpanKindHint;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -54,6 +55,7 @@ fn build_three_step_pipeline() -> camel_api::BoxProcessor {
 
     let processors: Vec<CompiledStep> = (0..3)
         .map(|_| CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: passthrough(),
             body_contract: None,
             lifecycle: None,

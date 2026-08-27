@@ -1,3 +1,4 @@
+use camel_api::SpanKindHint;
 use std::time::Duration;
 
 const DEFAULT_FUNCTION_TIMEOUT_MS: u64 = 5000;
@@ -835,6 +836,7 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
                         processors
                             .into_iter()
                             .map(|p| CompiledStep::Process {
+                                kind_hint: SpanKindHint::Internal,
                                 processor: p,
                                 body_contract: None,
                                 lifecycle: None,

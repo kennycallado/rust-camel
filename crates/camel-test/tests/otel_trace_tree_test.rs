@@ -36,7 +36,7 @@ use camel_api::{CamelError, Exchange, Message};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_test::CamelTestContext;
 use opentelemetry::global;
-use opentelemetry::trace::SpanId;
+use opentelemetry::trace::{SpanId, SpanKind};
 use opentelemetry_sdk::trace::{
     InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor, SpanData,
 };
@@ -405,6 +405,97 @@ async fn split_fragments_nest_under_segment_span_one_trace() {
         assert_eq!(
             sub.parent_span_id, segment_span_id,
             "fragment tree-sub root must nest under tree-split:split"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression guard: direct-only routes keep every span Internal
+// ---------------------------------------------------------------------------
+
+/// Task 1.3 (span-kind-hint): `direct:` steps (and every other non-hinted
+/// step) map `Internal`; kind threading must never leak a hinted kind into
+/// route root spans or the split segment span. Runs BOTH tree scenarios in
+/// one trace-free sweep and asserts the kinds: every route root, every step
+/// span, and the split segment span report `SpanKind::Internal`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_and_segment_stay_internal() {
+    let spans = test_spans().await;
+    let h = CamelTestContext::builder().with_direct().build().await;
+    h.ctx().lock().await.set_tracing(true).await;
+
+    h.add_route(tree_main_route()).await.expect("add tree-main");
+    h.add_route(tree_sub_route()).await.expect("add tree-sub");
+    h.add_route(tree_split_route())
+        .await
+        .expect("add tree-split");
+    h.start().await;
+    wait_for_started(&h, &["tree-main", "tree-sub", "tree-split"]).await;
+
+    // Scenario 1 (tree 1): direct hop tree-main -> tree-sub.
+    let reply = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_direct_in_out(&h, "direct:tree-main", "hello", Duration::from_secs(4)),
+    )
+    .await
+    .expect("exchange through tree-main timed out")
+    .expect("exchange through tree-main failed");
+    assert_eq!(reply.input.body.as_text(), Some("hello"));
+
+    // Scenario 2 (tree 2): split tree-split -> one tree-sub per fragment.
+    let _reply = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_direct_in_out(
+            &h,
+            "direct:tree-split",
+            "alpha\nbeta",
+            Duration::from_secs(4),
+        ),
+    )
+    .await
+    .expect("exchange through tree-split timed out")
+    .expect("exchange through tree-split failed");
+
+    h.stop().await;
+    let all = finish(spans);
+
+    // Named anchors from both scenarios: route roots, closure step spans,
+    // the labeled dispatch step, and the split segment span.
+    for name in [
+        "tree-main",
+        "tree-main:step-0",
+        "tree-main:to:direct",
+        "tree-main:step-2",
+        "tree-split",
+        "tree-split:split",
+    ] {
+        assert_eq!(
+            span(&all, name).span_kind,
+            SpanKind::Internal,
+            "{name} must stay Internal"
+        );
+    }
+
+    // tree-sub roots: one from the tree-1 hop plus one per split fragment.
+    let subs = spans_named(&all, "tree-sub");
+    assert_eq!(subs.len(), 3, "one tree-sub root per hop/fragment");
+    for sub in &subs {
+        assert_eq!(
+            sub.span_kind,
+            SpanKind::Internal,
+            "tree-sub route root must stay Internal"
+        );
+    }
+
+    // Blanket: direct-only routes never hint a kind, so every exported
+    // span of both scenarios — roots, steps, segment span alike — stays
+    // Internal.
+    for s in &all {
+        assert_eq!(
+            s.span_kind,
+            SpanKind::Internal,
+            "span {} must stay Internal for direct-only routes",
+            s.name
         );
     }
 }

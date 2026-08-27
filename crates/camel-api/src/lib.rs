@@ -47,6 +47,7 @@ pub mod route_controller;
 pub mod routing_slip;
 pub mod runtime;
 pub mod security_policy;
+pub mod span_kind;
 pub mod splitter;
 pub mod ssrf;
 pub mod step_lifecycle;
@@ -87,6 +88,7 @@ pub use security_policy::{
     PRINCIPAL_ROLES_KEY, PRINCIPAL_SCOPES_KEY, PRINCIPAL_SUBJECT_KEY, Principal, RouteSecurityPlan,
     SecurityPolicy, SecurityPolicyConfig, TransportId, store_principal_properties,
 };
+pub use span_kind::SpanKindHint;
 // Backwards compatibility re-export (deprecated)
 pub use claim_check::ClaimCheckRepository;
 #[allow(deprecated)]

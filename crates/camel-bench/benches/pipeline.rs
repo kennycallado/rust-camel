@@ -1,3 +1,4 @@
+use camel_api::SpanKindHint;
 use camel_api::{
     AggregationStrategy, Body, BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message,
     SplitterConfig, Value, split_body,
@@ -52,24 +53,28 @@ fn build_pipeline() -> BoxProcessor {
     compose_pipeline(
         vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: filter,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: choice,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: splitter,
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: log,
                 body_contract: None,
                 lifecycle: None,

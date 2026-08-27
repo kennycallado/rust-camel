@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use camel_api::{
-    BodyType, BoxProcessor, CamelError, FunctionInvoker, ProducerContext, StepLifecycle,
+    BodyType, BoxProcessor, CamelError, FunctionInvoker, ProducerContext, SpanKindHint,
+    StepLifecycle,
 };
 use camel_component_api::{ComponentContext, RuntimeObservability};
 use camel_endpoint::parse_uri;
@@ -55,6 +56,12 @@ pub enum CompiledStep {
         /// fall back to the positional `step-{index}` name. Read by
         /// `compose_traced_pipeline` / `segment_span` in route_compiler.rs.
         label: Option<Arc<str>>,
+        /// Span kind for this step's step span, stamped by
+        /// `StepCompilerRegistry::compile_step` from
+        /// [`BuilderStep::span_kind_hint`]. `Internal` for steps built
+        /// outside the registry. Read by `compose_traced_pipeline` in
+        /// route_compiler.rs.
+        kind_hint: SpanKindHint,
     },
     /// Stop EIP marker. `run_steps` produces `PipelineOutcome::Stopped(ex)`
     /// without invoking a Tower service. Replaces `StopService` (Task 7).
@@ -87,6 +94,18 @@ impl CompiledStep {
                 *slot = label;
             }
             CompiledStep::Stop => {}
+        }
+    }
+
+    /// Overwrite the span kind hint of a `Process` step; no-op on `Stop` and
+    /// `Segment` (neither produces an individual step span, so neither
+    /// carries a kind hint).
+    pub(crate) fn set_kind_hint(&mut self, hint: SpanKindHint) {
+        match self {
+            CompiledStep::Process {
+                kind_hint: slot, ..
+            } => *slot = hint,
+            CompiledStep::Stop | CompiledStep::Segment { .. } => {}
         }
     }
 }
@@ -185,6 +204,7 @@ impl<'a> CompilationContext<'a> {
                     body_contract,
                     lifecycle,
                     label: _,
+                    kind_hint: _,
                 } => {
                     if let Some(lc) = lifecycle {
                         lifecycle_handles.push(lc);
@@ -250,13 +270,16 @@ impl StepCompilerRegistry {
         step_index: usize,
         ctx: &CompilationContext,
     ) -> Result<Option<CompiledStep>, CamelError> {
-        // Capture the span label BEFORE the dispatch loop moves the step.
+        // Capture the span label and kind hint BEFORE the dispatch loop
+        // moves the step.
         let label = step.span_label();
+        let kind_hint = step.span_kind_hint();
         let mut step = step;
         for compiler in &self.compilers {
             match compiler.compile(step, step_index, ctx, self)? {
                 CompileOutcome::Matched(mut s) => {
                     s.set_label(label);
+                    s.set_kind_hint(kind_hint);
                     return Ok(Some(s));
                 }
                 CompileOutcome::NotHandled(s) => step = s,
@@ -500,6 +523,7 @@ mod segment_tests {
                     body_contract: None,
                     lifecycle: Some(self.handle.clone()),
                     label: None,
+                    kind_hint: SpanKindHint::Internal,
                 })),
                 other => Ok(CompileOutcome::NotHandled(other)),
             }
@@ -908,9 +932,29 @@ mod dispatch_tests {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    kind_hint: SpanKindHint::Internal,
                 })),
                 other => Ok(CompileOutcome::NotHandled(other)),
             }
+        }
+    }
+
+    /// Minimal outcome pipeline for building `Segment` fixtures in tests.
+    #[derive(Clone)]
+    struct NoopPipeline;
+
+    impl camel_api::OutcomePipeline for NoopPipeline {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(NoopPipeline)
+        }
+
+        fn run<'a>(
+            &'a mut self,
+            exchange: camel_api::Exchange,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = camel_api::PipelineOutcome> + Send + 'a>,
+        > {
+            Box::pin(async move { camel_api::PipelineOutcome::Completed(exchange) })
         }
     }
 
@@ -1050,6 +1094,84 @@ mod dispatch_tests {
         match result {
             CompiledStep::Process { label, .. } => {
                 assert_eq!(label.as_deref(), Some("to:direct"));
+            }
+            other => panic!("expected Process, got {other:?}"),
+        }
+    }
+
+    /// Task 1.2 (span-kind-hint): `set_kind_hint` is a no-op on `Stop` and
+    /// `Segment` — only `Process` carries a kind hint, and a Segment's label
+    /// must survive the call untouched.
+    #[test]
+    fn set_kind_hint_noop_on_stop_and_segment() {
+        use camel_api::SpanKindHint;
+
+        // Stop: the marker produces no step span, so it carries no kind.
+        let mut step = CompiledStep::Stop;
+        step.set_kind_hint(SpanKindHint::Client);
+        assert!(
+            matches!(step, CompiledStep::Stop),
+            "set_kind_hint must not change a Stop step, got {step:?}"
+        );
+
+        // Segment: no kind_hint field; its label is unchanged.
+        let mut step = CompiledStep::Segment {
+            segment: camel_api::OutcomeSegment::new(Box::new(NoopPipeline)),
+            body_contract: None,
+            lifecycle: None,
+            label: Some("seg".into()),
+        };
+        step.set_kind_hint(SpanKindHint::Client);
+        match step {
+            CompiledStep::Segment { label, .. } => {
+                assert_eq!(label.as_deref(), Some("seg"));
+            }
+            other => panic!("expected Segment to stay a Segment, got {other:?}"),
+        }
+    }
+
+    /// Task 1.2 (span-kind-hint): `compile_step` stamps the outcome with the
+    /// step's `span_kind_hint` (here `kafka` → Producer) alongside the label.
+    #[test]
+    fn compile_step_stamps_kind_hint() {
+        use camel_api::SpanKindHint;
+
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let context = ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(ToProcessCompiler));
+
+        let result = reg
+            .compile_step(BuilderStep::To("kafka:orders".into()), 0, &context)
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        match result {
+            CompiledStep::Process {
+                kind_hint, label, ..
+            } => {
+                assert_eq!(kind_hint, SpanKindHint::Producer);
+                assert_eq!(label.as_deref(), Some("to:kafka"));
             }
             other => panic!("expected Process, got {other:?}"),
         }

@@ -7127,6 +7127,7 @@ mod tests {
 
         // Pipeline: set_body("nope") + set CamelHttpResponseCode=409 + Stop.
         let set_body_step = CompiledStep::Process {
+            kind_hint: camel_api::SpanKindHint::Internal,
             processor: BoxProcessor::from_fn(|mut ex: Exchange| {
                 ex.input.body = Body::Text("nope".into());
                 Box::pin(async move { Ok(ex) })
@@ -7136,6 +7137,7 @@ mod tests {
             label: None,
         };
         let set_status_step = CompiledStep::Process {
+            kind_hint: camel_api::SpanKindHint::Internal,
             processor: BoxProcessor::from_fn(|mut ex: Exchange| {
                 ex.input.set_header(
                     "CamelHttpResponseCode",

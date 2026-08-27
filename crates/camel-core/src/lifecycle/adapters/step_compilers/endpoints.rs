@@ -2,6 +2,7 @@
 //!
 //! These steps create producers from URIs at compile time.
 
+use camel_api::SpanKindHint;
 use std::sync::Arc;
 
 use camel_api::{BoxProcessor, CamelError, StepLifecycle};
@@ -39,6 +40,7 @@ fn compile_to(
         (Err(e), Some(target)) => Err(enrich_intercept_error(e, target)),
         (Err(e), None) => Err(e),
         (Ok(resolved), _) => Ok(CompileOutcome::Matched(CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: resolved.producer,
             body_contract: resolved.body_contract,
             lifecycle: resolved.lifecycle,
@@ -90,6 +92,7 @@ fn compile_divert(
     let lifecycle = Some(Arc::new(CompositeStepLifecycle::new(children)) as Arc<dyn StepLifecycle>);
 
     Ok(CompileOutcome::Matched(CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
         processor,
         body_contract: real.body_contract,
         lifecycle,
@@ -146,6 +149,7 @@ impl StepCompiler for EndpointsCompiler {
                     None => Some(wiretap_lifecycle),
                 };
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle,

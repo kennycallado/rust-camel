@@ -1,3 +1,4 @@
+use camel_api::SpanKindHint;
 use camel_api::{Body, BodyType, BoxProcessor, BoxProcessorExt, Exchange, Message, Value};
 use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline_with_contracts};
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -15,6 +16,7 @@ fn bench_body_coercion(c: &mut Criterion) {
 
     let single_contract = compose_pipeline_with_contracts(
         vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: noop(),
             body_contract: Some(BodyType::Text),
             lifecycle: None,
@@ -33,6 +35,7 @@ fn bench_body_coercion(c: &mut Criterion) {
 
     let no_contracts = compose_pipeline_with_contracts(
         vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
             processor: noop(),
             body_contract: None,
             lifecycle: None,
@@ -52,18 +55,21 @@ fn bench_body_coercion(c: &mut Criterion) {
     let mixed_contracts = compose_pipeline_with_contracts(
         vec![
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: noop(),
                 body_contract: Some(BodyType::Text),
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: noop(),
                 body_contract: None,
                 lifecycle: None,
                 label: None,
             },
             CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: noop(),
                 body_contract: None,
                 lifecycle: None,

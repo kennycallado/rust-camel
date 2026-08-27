@@ -6,6 +6,7 @@
 //! public free functions so that [`DefaultRouteController`] can call them without
 //! duplicating the implementations.
 
+use camel_api::SpanKindHint;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Weak};
 
@@ -624,6 +625,7 @@ impl RouteCompilerExt<'_> {
             // Main pipeline: pre + resequencer (last step)
             let mut all_steps = pre_compiled;
             all_steps.push(CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
                 processor: BoxProcessor::new(resequencer_svc),
                 body_contract: None,
                 lifecycle: Some(resequencer_lifecycle),

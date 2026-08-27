@@ -15,7 +15,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use camel_api::exchange::Exchange;
 use camel_api::message::Message;
-use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, IdentityProcessor};
+use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, IdentityProcessor, SpanKindHint};
 use camel_core::DetailLevel;
 use camel_core::TracingProcessor;
 use camel_otel::propagation::{
@@ -221,6 +221,7 @@ async fn test_tracing_processor_records_span() {
         DetailLevel::Minimal,
         None,
         None,
+        SpanKindHint::Internal,
     );
 
     // Process the exchange
@@ -437,6 +438,7 @@ async fn test_tracing_processor_chain_preserves_trace_id() {
         DetailLevel::Minimal,
         None,
         None,
+        SpanKindHint::Internal,
     );
 
     let processor2 = BoxProcessor::new(IdentityProcessor);
@@ -447,6 +449,7 @@ async fn test_tracing_processor_chain_preserves_trace_id() {
         DetailLevel::Minimal,
         None,
         None,
+        SpanKindHint::Internal,
     );
 
     // Process through chain
@@ -509,6 +512,7 @@ async fn span_status_success_and_error_exported() {
         DetailLevel::Minimal,
         None,
         None,
+        SpanKindHint::Internal,
     );
 
     let exchange = Exchange::new(Message::new("ok"));
@@ -539,6 +543,7 @@ async fn span_status_success_and_error_exported() {
         DetailLevel::Minimal,
         None,
         None,
+        SpanKindHint::Internal,
     );
 
     let exchange = Exchange::new(Message::new("err"));
