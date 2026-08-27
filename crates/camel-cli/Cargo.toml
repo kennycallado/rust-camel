@@ -22,7 +22,7 @@ path = "src/main.rs"
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "env"] }
 config.workspace = true
 glob.workspace = true
 humantime.workspace = true

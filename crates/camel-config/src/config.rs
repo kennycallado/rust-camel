@@ -92,6 +92,10 @@ pub struct CamelConfig {
     /// Catch-all for extra keys injected by config sources (e.g. CAMEL_* env vars)
     /// or unknown fields in TOML. Nested structs use `deny_unknown_fields` to
     /// catch typos in sections like `[observability.health]`.
+    ///
+    /// When adding or removing top-level fields here, update
+    /// [`KNOWN_TOP_LEVEL_KEYS`] in the same change: a new field missing from the
+    /// const silently false-warns as an "unselected profile".
     #[serde(flatten)]
     pub _extra: HashMap<String, toml::Value>,
 }
@@ -2210,9 +2214,7 @@ impl CamelConfig {
     ) -> Result<Self, ConfigError> {
         let content = read_capped(path, MAX_CONFIG_FILE_SIZE)?;
 
-        let base_dir = std::path::Path::new(path)
-            .parent()
-            .unwrap_or(std::path::Path::new("."));
+        let base_dir = &include_base_dir(path);
 
         let mut root_value: toml::Value = toml::from_str(&content)
             .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
@@ -2284,10 +2286,7 @@ impl CamelConfig {
     ) -> Result<Self, ConfigError> {
         let content = read_capped_async(path, MAX_CONFIG_FILE_SIZE).await?;
 
-        let base_dir_owned = std::path::Path::new(path)
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .to_path_buf();
+        let base_dir_owned = include_base_dir(path);
 
         let mut root_value: toml::Value = toml::from_str(&content)
             .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
@@ -2315,10 +2314,7 @@ impl CamelConfig {
     ) -> Result<Self, ConfigError> {
         let content = read_capped_async(path, MAX_CONFIG_FILE_SIZE).await?;
 
-        let base_dir_owned = std::path::Path::new(path)
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .to_path_buf();
+        let base_dir_owned = include_base_dir(path);
 
         let mut root_value: toml::Value = toml::from_str(&content)
             .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
@@ -2384,6 +2380,64 @@ const ALLOWED_ENV_OVERRIDES: &[&str] = &[
     "CAMEL_SUPERVISION_MAX_ATTEMPTS",
 ];
 
+/// `CAMEL_*` vars handled OUTSIDE the allowlist merge, so the "ignored" warn
+/// must stay silent for them (rc-6gqy): each has its own consumer and is
+/// honored, not ignored.
+///
+/// - `CAMEL_CONFIG_FILE` — selects the config file itself (clap `env` on
+///   `camel run --config`, plus `from_env_or_default()`).
+/// - `CAMEL_PROFILE` — selects the active profile (read at the top of
+///   `build_from_toml_value_inner` and during include extraction).
+const HANDLED_ELSEWHERE_ENV_VARS: &[&str] = &["CAMEL_CONFIG_FILE", "CAMEL_PROFILE"];
+
+/// Directory used to resolve `include` paths from a config file path.
+///
+/// A bare filename (`"root.toml"`) yields an EMPTY parent from
+/// [`std::path::Path::parent`] — NOT `None` — so `unwrap_or(".")`
+/// fallbacks never fire and an empty base canonicalizes to ENOENT.
+/// Map that case to `.` so bare relative filenames resolve against the
+/// current directory (rc-k5bz).
+fn include_base_dir(path: &str) -> std::path::PathBuf {
+    let parent = std::path::Path::new(path).parent();
+    parent
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Top-level CamelConfig keys recognized by serde deserialization, used to
+/// tell real config sections apart from profile-like tables (`[<name>]`) when
+/// warning about an unset `CAMEL_PROFILE` (rc-cflo).
+///
+/// MUST mirror [`CamelConfig`]'s serde field names. Structural keys with their
+/// own consumers (`default` for profiles, `include` for file composition) are
+/// excluded at the check site instead. The
+/// `config_ergonomics_tests::known_top_level_keys_*` tripwires guard drift:
+/// a name here that stops being a real field fails `_extra`; a new CamelConfig
+/// field missing from this list makes its section warn like an unselected
+/// profile.
+const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
+    "routes",
+    "watch",
+    "runtime_journal",
+    "idempotent_repo",
+    "cache_repo",
+    "log_level",
+    "timeout_ms",
+    "drain_timeout_ms",
+    "watch_debounce_ms",
+    "components",
+    "observability",
+    "supervision",
+    "platform",
+    "stream_caching",
+    "beans",
+    "languages",
+    "security",
+    "binds",
+    "datasources",
+];
+
 /// Core config builder. Accepts a pre-parsed (and `include`-stripped) `toml::Value`
 /// so callers do not need to re-parse the content.
 fn build_from_toml_value_inner(
@@ -2397,6 +2451,33 @@ fn build_from_toml_value_inner(
     // TOML sections to merge.
     let env_profile = env::var("CAMEL_PROFILE").ok();
     let profile = profile.or(env_profile.as_deref());
+
+    // rc-cflo operator feedback: with no active profile and profile structure
+    // present ([default]), apply_profile keeps ONLY [default] — any other
+    // section silently vanishes and the process may start without routes/cache.
+    // Warn only then: without [default] there is no profile structure and the
+    // lenient path drops NOTHING, so unknown sections are not a hazard.
+    if profile.is_none()
+        && let toml::Value::Table(ref table) = config_value
+        && table.contains_key("default")
+    {
+        let profile_like: Vec<&str> = table
+            .iter()
+            .filter(|(k, v)| {
+                v.is_table()
+                    && k.as_str() != "default"
+                    && k.as_str() != "include"
+                    && !KNOWN_TOP_LEVEL_KEYS.contains(&k.as_str())
+            })
+            .map(|(k, _)| k.as_str())
+            .collect();
+        if !profile_like.is_empty() {
+            tracing::warn!(
+                sections = %profile_like.join(", "),
+                "top-level sections look like unselected profiles; only [default] applies — set CAMEL_PROFILE to activate one"
+            );
+        }
+    }
 
     // Defensively strip `include` in case callers forgot — it is not a CamelConfig field.
     if let toml::Value::Table(ref mut table) = config_value {
@@ -2437,7 +2518,9 @@ fn build_from_toml_value_inner(
         // L-C2: Only allowlisted env vars override config (security hardening).
         // Warn about non-allowlisted CAMEL_* vars (operator feedback for typos/stale vars).
         for (key, _) in std::env::vars().filter(|(k, _)| {
-            k.starts_with("CAMEL_") && !ALLOWED_ENV_OVERRIDES.contains(&k.as_str())
+            k.starts_with("CAMEL_")
+                && !ALLOWED_ENV_OVERRIDES.contains(&k.as_str())
+                && !HANDLED_ELSEWHERE_ENV_VARS.contains(&k.as_str())
         }) {
             tracing::warn!(var = %key, "CAMEL_* env var not in config override allowlist; ignored");
         }
@@ -2714,6 +2797,109 @@ fn set_env(key: &str, value: &str) {
 fn unset_env(key: &str) {
     // SAFETY: serialized against every other env-touching test via ENV_OVERRIDE_LOCK.
     unsafe { std::env::remove_var(key) }
+}
+
+/// Serializes tests that change the process working directory (include
+/// resolution tests resolve bare filenames against the cwd).
+///
+/// Acquire BEFORE [`ENV_OVERRIDE_LOCK`]-using code paths that also chdir to
+/// keep lock ordering consistent across tests.
+#[cfg(test)]
+static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII restore of the process working directory. Declare it after reading the
+/// original cwd and before `set_current_dir` into a tempdir; dropping restores,
+/// including on panic unwind, so the tempdir's own `Drop` never runs while cwd
+/// is inside the directory it deletes.
+#[cfg(test)]
+struct CwdGuard(std::path::PathBuf);
+
+#[cfg(test)]
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        // Cannot report errors from Drop; callers hold CWD_LOCK for the whole span.
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
+/// Test-only log capture: installs a minimal subscriber via
+/// `tracing::subscriber::with_default` for the duration of one closure and
+/// records WARN-level event messages. No global state — safe under parallel
+/// test threads.
+#[cfg(test)]
+pub(crate) mod log_capture {
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Record};
+    use tracing::{Event, Id, Level, Metadata, Subscriber};
+
+    type Sink = Arc<Mutex<Vec<String>>>;
+
+    struct Recorder {
+        warnings: Sink,
+        next_span_id: std::sync::atomic::AtomicU64,
+    }
+
+    struct MessageVisitor(String);
+
+    impl Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            if !self.0.is_empty() {
+                self.0.push(' ');
+            }
+            let _ = fmt::write(&mut self.0, format_args!("{}={:?}", field.name(), value));
+        }
+    }
+
+    impl Subscriber for Recorder {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _attrs: &Attributes<'_>) -> Id {
+            let id = self
+                .next_span_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            Id::from_u64(id)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            if *event.metadata().level() >= Level::WARN {
+                let mut visitor = MessageVisitor(String::new());
+                event.record(&mut visitor);
+                if let Ok(mut slot) = self.warnings.lock() {
+                    slot.push(visitor.0);
+                }
+            }
+        }
+
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
+    }
+
+    /// Runs `f` with a capturing subscriber installed and returns
+    /// `(f's result, captured warn/error messages)` in emission order.
+    /// Messages are rendered as `field="value"` pairs joined by spaces, with
+    /// the human-readable text under the standard `message` field.
+    pub(crate) fn capture_warns<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+        let sink: Sink = Default::default();
+        let recorder = Recorder {
+            warnings: Arc::clone(&sink),
+            next_span_id: Default::default(),
+        };
+        let out = tracing::subscriber::with_default(recorder, f);
+        let collected = sink
+            .lock()
+            .ok()
+            .map(|slot| slot.clone())
+            .unwrap_or_default();
+        (out, collected)
+    }
 }
 
 #[cfg(test)]
@@ -4963,5 +5149,261 @@ mod oversized_file_tests {
         let result =
             CamelConfig::from_file_with_profile(f.path().to_str().unwrap(), Some("default"));
         assert!(result.is_err(), "oversized config file must be rejected");
+    }
+}
+
+/// Config ergonomics batch (rc-k5bz / rc-6gqy / rc-cflo): bare-filename
+/// include resolution, handled-elsewhere env var exemptions, and the
+/// unset-CAMEL_PROFILE warn.
+#[cfg(test)]
+mod config_ergonomics_tests {
+    use super::*;
+    use crate::config::log_capture::capture_warns;
+
+    fn parse_table(toml_str: &str) -> toml::Value {
+        toml::from_str(toml_str).expect("fixture must be valid TOML")
+    }
+
+    // --- rc-k5bz: include base-dir for bare relative filenames ---
+
+    #[test]
+    fn include_base_dir_maps_bare_filename_to_current_dir() {
+        assert_eq!(include_base_dir("root.toml"), std::path::PathBuf::from("."));
+        assert_eq!(
+            include_base_dir("nested/root.toml"),
+            std::path::PathBuf::from("nested")
+        );
+        assert_eq!(
+            include_base_dir("/root.toml"),
+            std::path::PathBuf::from("/")
+        );
+    }
+
+    /// Bare filenames historically produced an empty base dir, whose
+    /// canonicalize() fails with ENOENT ("failed to canonicalize base dir :").
+    /// Requires chdir into a temp fixture dir; serialized via CWD_LOCK.
+    #[test]
+    fn from_file_bare_relative_filename_resolves_includes() {
+        let _cwd_guard = CWD_LOCK.lock().unwrap();
+        let _env_guard = ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("CAMEL_PROFILE");
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("root.toml"), "include = [\"x.toml\"]\n").unwrap();
+        std::fs::write(dir.path().join("x.toml"), "watch = true\n").unwrap();
+
+        let original = std::env::current_dir().unwrap();
+        let _restore_cwd = CwdGuard(original);
+        std::env::set_current_dir(dir.path()).unwrap();
+        let result = CamelConfig::from_file_with_profile("root.toml", None);
+
+        let cfg = result.expect("bare relative filename with include must load");
+        assert!(cfg.watch, "included file value must merge");
+    }
+
+    #[test]
+    fn from_file_async_bare_relative_filename_resolves_includes() {
+        let _cwd_guard = CWD_LOCK.lock().unwrap();
+        let _env_guard = ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("CAMEL_PROFILE");
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("root.toml"), "include = [\"x.toml\"]\n").unwrap();
+        std::fs::write(dir.path().join("x.toml"), "watch = true\n").unwrap();
+
+        let original = std::env::current_dir().unwrap();
+        let _restore_cwd = CwdGuard(original);
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let result = rt.block_on(async {
+            CamelConfig::from_file_async_with_profile_and_env("root.toml", None).await
+        });
+        drop(rt);
+
+        let cfg = result.expect("bare relative filename with include must load (async)");
+        assert!(cfg.watch, "included file value must merge");
+    }
+
+    // --- rc-cflo tripwires: KNOWN_TOP_LEVEL_KEYS vs serde reality ---
+    //
+    // CamelConfig absorbs unknown top-level keys into `_extra`, so these tests
+    // check that every name in the warning's exclusion list is genuinely a
+    // serde-known field (never lands in `_extra`) and that profile-like names
+    // DO land there.
+
+    #[test]
+    fn known_top_level_keys_are_all_serde_fields() {
+        let composite = r#"
+routes = []
+watch = false
+log_level = "debug"
+timeout_ms = 1000
+drain_timeout_ms = 1000
+watch_debounce_ms = 300
+platform = { type = "noop" }
+runtime_journal = { path = "tripwire.db" }
+idempotent_repo = {}
+cache_repo = {}
+beans = {}
+binds = {}
+datasources = {}
+
+[components]
+
+[observability]
+
+[supervision]
+
+[stream_caching]
+threshold = 64
+
+[security]
+
+[languages]
+"#;
+        let cfg: CamelConfig = toml::from_str(composite)
+            .expect("every KNOWN_TOP_LEVEL_KEYS entry must deserialize as a real field");
+        assert!(
+            cfg._extra.is_empty(),
+            "KNOWN_TOP_LEVEL_KEYS contains non-field names; landed in _extra: {:?}",
+            cfg._extra
+        );
+    }
+
+    #[test]
+    fn unknown_top_level_table_lands_in_extra() {
+        let probe: CamelConfig = toml::from_str("[staging]\nunused = true\n").expect("parses");
+        assert!(
+            probe._extra.contains_key("staging"),
+            "mechanism behind the rc-cflo heuristic broke: unknown top-level tables must land in _extra"
+        );
+    }
+
+    // --- rc-cflo: warn when CAMEL_PROFILE is unset but sections look like profiles ---
+
+    #[test]
+    fn unset_camel_profile_with_profile_like_sections_warns_once() {
+        let _env_guard = ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("CAMEL_PROFILE");
+
+        let tree = parse_table(
+            r#"
+[default]
+log_level = "info"
+
+[staging]
+log_level = "warn"
+"#,
+        );
+
+        let (_result, warns) =
+            capture_warns(|| build_from_toml_value_inner(tree, None, false, Vec::new()));
+
+        let hits: Vec<&String> = warns
+            .iter()
+            .filter(|w| w.contains("staging") && w.contains("CAMEL_PROFILE"))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "exactly one profile-section warn expected, got {hits:?} in {warns:?}"
+        );
+    }
+
+    #[test]
+    fn no_default_section_means_no_profile_structure_no_warn() {
+        let _env_guard = ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("CAMEL_PROFILE");
+
+        // Profile-like top-level section WITHOUT [default]: nothing can be
+        // dropped (apply_profile_lenient keeps everything), so warning would
+        // be a false positive.
+        let tree = parse_table(
+            r#"
+log_level = "info"
+
+[staging]
+log_level = "warn"
+"#,
+        );
+
+        let (_result, warns) =
+            capture_warns(|| build_from_toml_value_inner(tree, None, false, Vec::new()));
+
+        let hits: Vec<&String> = warns
+            .iter()
+            .filter(|w| w.contains("staging") && w.contains("CAMEL_PROFILE"))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            0,
+            "no profile-section warn without [default]; got {hits:?} in {warns:?}"
+        );
+    }
+
+    #[test]
+    fn active_camel_profile_suppresses_section_warn() {
+        let _env_guard = ENV_OVERRIDE_LOCK.lock().unwrap();
+        set_env("CAMEL_PROFILE", "staging");
+
+        let tree = parse_table(
+            r#"
+[default]
+log_level = "info"
+
+[staging]
+log_level = "warn"
+"#,
+        );
+
+        let (result, warns) =
+            capture_warns(|| build_from_toml_value_inner(tree, None, false, Vec::new()));
+
+        unset_env("CAMEL_PROFILE");
+        let cfg = result.expect("staging profile must load");
+        drop(cfg);
+        drop(_env_guard);
+
+        assert!(
+            !warns.iter().any(|w| w.contains("CAMEL_PROFILE")),
+            "no profile-section warn when CAMEL_PROFILE is active; got {warns:?}"
+        );
+    }
+
+    // --- rc-6gqy(b): handled-elsewhere vars never reported as ignored ---
+
+    #[test]
+    fn camel_profile_and_config_file_never_reported_as_ignored() {
+        let _env_guard = ENV_OVERRIDE_LOCK.lock().unwrap();
+        set_env("CAMEL_PROFILE", "qa"); // flat tree → lenient keep-as-is
+        set_env("CAMEL_CONFIG_FILE", "/nonexistent/tripwire-path.toml");
+        set_env("CAMEL_ERGONOMICS_TYPO_PROBE", "1"); // positive control
+
+        let tree = parse_table("log_level = \"debug\"");
+        let (_, warns) =
+            capture_warns(|| build_from_toml_value_inner(tree, None, true, Vec::new()));
+
+        // unset_env requires ENV_OVERRIDE_LOCK to be held: restore env while
+        // the guard is alive, only then release it.
+        unset_env("CAMEL_PROFILE");
+        unset_env("CAMEL_CONFIG_FILE");
+        unset_env("CAMEL_ERGONOMICS_TYPO_PROBE");
+        drop(_env_guard);
+
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("CAMEL_ERGONOMICS_TYPO_PROBE")),
+            "positive control failed — typo-var warn not emitted: {warns:?}"
+        );
+        for handled in ["CAMEL_PROFILE", "CAMEL_CONFIG_FILE"] {
+            assert!(
+                !warns.iter().any(|w| w.contains(handled)),
+                "{handled} is honored by its own consumer and must NOT be flagged as ignored: {warns:?}"
+            );
+        }
     }
 }

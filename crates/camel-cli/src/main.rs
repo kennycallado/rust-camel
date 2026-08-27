@@ -34,8 +34,16 @@ enum Commands {
         #[arg(long, value_name = "GLOB")]
         routes: Option<String>,
 
-        /// Path to Camel.toml config file
-        #[arg(long, value_name = "FILE", default_value = "Camel.toml")]
+        /// Path to Camel.toml config file.
+        ///
+        /// Also read from `CAMEL_CONFIG_FILE` (rc-6gqy), matching
+        /// `from_env_or_default()`; explicit `--config` wins over env.
+        #[arg(
+            long,
+            value_name = "FILE",
+            default_value = "Camel.toml",
+            env = "CAMEL_CONFIG_FILE"
+        )]
         config: String,
 
         /// Enable file-watcher hot-reload (overrides Camel.toml watch setting)
@@ -182,5 +190,50 @@ async fn main() {
             let summary = commands::test::run_tests_full(&config, &mut out, &mut err).await;
             std::process::exit(summary.exit_code);
         }
+    }
+}
+
+#[cfg(test)]
+mod run_config_env_tests {
+    use super::Cli;
+    use clap::CommandFactory as _;
+
+    /// rc-6gqy: `camel run` must honor CAMEL_CONFIG_FILE while keeping the
+    /// Camel.toml default when the env var is unset. Both phases live in ONE
+    /// test because they mutate shared process env.
+    #[test]
+    fn run_config_arg_honors_camel_config_file_env() {
+        // SAFETY: single-threaded interaction via this one env-touching test
+        // in this target; restored below before returning.
+        unsafe { std::env::set_var("CAMEL_CONFIG_FILE", "EnvSelected.toml") };
+
+        let parsed = Cli::command()
+            .try_get_matches_from(["camel", "run"])
+            .expect("run parses without explicit --config");
+
+        // Restore process state before asserting on captured values.
+        unsafe { std::env::remove_var("CAMEL_CONFIG_FILE") }
+
+        let run_matches = parsed
+            .subcommand_matches("run")
+            .expect("run subcommand matched");
+
+        assert_eq!(
+            run_matches.get_one::<String>("config").map(String::as_str),
+            Some("EnvSelected.toml"),
+            "--config must pick up CAMEL_CONFIG_FILE"
+        );
+
+        let defaulted_parsed = Cli::command()
+            .try_get_matches_from(["camel", "run"])
+            .expect("run parses when env unset");
+        let defaulted = defaulted_parsed
+            .subcommand_matches("run")
+            .expect("run subcommand matched");
+        assert_eq!(
+            defaulted.get_one::<String>("config").map(String::as_str),
+            Some("Camel.toml"),
+            "default_value must stay intact when CAMEL_CONFIG_FILE is unset"
+        );
     }
 }
