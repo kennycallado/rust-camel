@@ -15,6 +15,23 @@ use async_trait::async_trait;
 #[derive(Clone, Default)]
 struct InMemoryTestRepo {
     routes: Arc<Mutex<HashMap<String, RouteRuntimeAggregate>>>,
+    recovered: Arc<Mutex<std::collections::HashSet<String>>>,
+}
+
+impl InMemoryTestRepo {
+    /// Seed an aggregate as if it had been reconstructed by journal replay at
+    /// boot: present in the store and flagged recovered (adoptable once).
+    fn seed_recovered(&self, aggregate: RouteRuntimeAggregate) {
+        let route_id = aggregate.route_id().to_string();
+        self.routes
+            .lock()
+            .expect("lock test routes")
+            .insert(route_id.clone(), aggregate);
+        self.recovered
+            .lock()
+            .expect("lock recovered")
+            .insert(route_id);
+    }
 }
 
 struct AlwaysHealthyCheck {
@@ -87,6 +104,14 @@ impl RouteRepositoryPort for InMemoryTestRepo {
             .expect("lock test routes")
             .remove(route_id);
         Ok(())
+    }
+
+    async fn take_recovered(&self, route_id: &str) -> Result<bool, DomainError> {
+        Ok(self
+            .recovered
+            .lock()
+            .expect("lock recovered")
+            .remove(route_id))
     }
 }
 
@@ -488,6 +513,48 @@ async fn duplicate_route_id_is_rejected() {
     let result = handle_register_internal(&deps, def2).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("already exists"));
+}
+
+#[tokio::test]
+async fn recovered_route_is_adopted_on_declarative_reregister() {
+    // Simulate a durable-journal restart: the aggregate for "route-r" survived
+    // the previous run in a non-transient state (Started) and was reconstructed
+    // by journal replay at boot (flagged recovered).
+    let repo = Arc::new(InMemoryTestRepo::default());
+    repo.seed_recovered(RouteRuntimeAggregate::from_snapshot(
+        "route-r",
+        RouteRuntimeState::Started,
+        3,
+    ));
+    let deps = CommandDeps {
+        repo: repo.clone(),
+        projections: Arc::new(InMemoryTestProjectionStore::default()),
+        events: Arc::new(InMemoryTestEventPublisher::default()),
+        uow: None,
+        execution: None,
+        health_registry: None,
+    };
+
+    // Declarative boot re-registers the same route_id from the same config.
+    let def = RouteDefinition::new("timer:test", vec![]).with_route_id("route-r");
+    let result = handle_register_internal(&deps, def).await;
+    assert!(
+        result.is_ok(),
+        "declarative re-registration must adopt a journal-recovered route, got {result:?}"
+    );
+
+    // Adopted → reset to a clean Registered baseline so auto_startup drives it
+    // up exactly as on first boot (rather than a stale Started that would make
+    // StartRoute a silent no-op with no live consumer).
+    let aggregate = deps.repo.load("route-r").await.unwrap().unwrap();
+    assert_eq!(aggregate.state(), &RouteRuntimeState::Registered);
+
+    // The recovery marker is consumed: a second registration of the same id in
+    // this session is a genuine hot duplicate and is still rejected.
+    let def2 = RouteDefinition::new("timer:test", vec![]).with_route_id("route-r");
+    let dup = handle_register_internal(&deps, def2).await;
+    assert!(dup.is_err());
+    assert!(dup.unwrap_err().to_string().contains("already exists"));
 }
 
 #[test]

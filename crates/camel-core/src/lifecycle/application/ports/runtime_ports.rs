@@ -27,6 +27,21 @@ pub trait RouteRepositoryPort: Send + Sync {
         expected_version: u64,
     ) -> Result<(), DomainError>;
     async fn delete(&self, route_id: &str) -> Result<(), DomainError>;
+
+    /// Consume the "recovered from journal" marker for `route_id`.
+    ///
+    /// Returns `true` exactly once for a route that was reconstructed by
+    /// journal replay at boot and has not yet been re-registered in this
+    /// process. This lets declarative-boot registration adopt a persisted
+    /// aggregate (same `route_id`, same config source) instead of rejecting
+    /// it, while a genuine same-session duplicate registration still returns
+    /// `false` and is rejected as `AlreadyExists`.
+    ///
+    /// Default implementation returns `false` (no durable recovery — behaves
+    /// exactly as before this capability existed).
+    async fn take_recovered(&self, _route_id: &str) -> Result<bool, DomainError> {
+        Ok(false)
+    }
 }
 
 #[async_trait]

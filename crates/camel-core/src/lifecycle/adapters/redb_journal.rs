@@ -30,6 +30,23 @@ use crate::lifecycle::domain::{DomainError, RuntimeEvent};
 const EVENTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("events");
 const COMMAND_IDS_TABLE: TableDefinition<&str, ()> = TableDefinition::new("command_ids");
 
+/// Max attempts to acquire the redb file lock on open. Covers the Kubernetes
+/// ReadWriteOnce PVC handover window where a terminating pod has not yet
+/// released the lock when the replacement pod starts.
+const OPEN_LOCK_MAX_ATTEMPTS: u32 = 40;
+/// Delay between open attempts (40 × 250ms ≈ 10s total handover budget).
+const OPEN_LOCK_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// True when a redb open error is the "another handle holds the lock" case,
+/// which is transient during pod handover and worth retrying. Matched on the
+/// Display text to stay independent of the redb error-enum shape across versions.
+fn is_lock_contention(err: &redb::DatabaseError) -> bool {
+    matches!(err, redb::DatabaseError::DatabaseAlreadyOpen) || {
+        let msg = err.to_string().to_ascii_lowercase();
+        msg.contains("already open") || msg.contains("acquire lock")
+    }
+}
+
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// Durability mode for journal writes.
@@ -106,12 +123,30 @@ impl RedbRuntimeEventJournal {
                     ))
                 })?;
             }
-            let db = Database::create(&path).map_err(|e| {
-                CamelError::Io(format!(
-                    "failed to open journal at '{}': {e}",
-                    path.display()
-                ))
-            })?;
+            // Retry on transient lock contention (k8s RWO PVC pod handover):
+            // the old pod may still hold the file lock when the new one opens.
+            let mut attempt: u32 = 0;
+            let db = loop {
+                attempt += 1;
+                match Database::create(&path) {
+                    Ok(db) => break db,
+                    Err(e) if is_lock_contention(&e) && attempt < OPEN_LOCK_MAX_ATTEMPTS => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            attempt,
+                            max_attempts = OPEN_LOCK_MAX_ATTEMPTS,
+                            "journal file locked by another handle (pod handover?), retrying"
+                        );
+                        std::thread::sleep(OPEN_LOCK_RETRY_BACKOFF);
+                    }
+                    Err(e) => {
+                        return Err(CamelError::Io(format!(
+                            "failed to open journal at '{}': {e}",
+                            path.display()
+                        )));
+                    }
+                }
+            };
             // Initialise tables so they exist before any reads.
             let tx = db
                 .begin_write()
@@ -226,7 +261,17 @@ impl RedbRuntimeEventJournal {
             .map_err(|e| CamelError::Io(format!("redb len: {e}")))
     }
 
-    /// Compact the events table: remove events for routes that have been fully removed.
+    /// Compact the events table by dropping events that no longer affect replay.
+    ///
+    /// Two provably replay-equivalent rules run together, per route id:
+    /// - **Removal cutoff:** every event with `seq <= last RouteRemoved seq` is
+    ///   dropped — a removed route contributes nothing until it is re-registered.
+    /// - **Register checkpoint:** every event with `seq < last RouteRegistered
+    ///   seq` is dropped. Replaying a RouteRegistered resets the aggregate to a
+    ///   fresh `Registered` v0 (see `apply_replayed_event`), so all prior history
+    ///   for that route is redundant. This bounds journal growth under
+    ///   adopt-on-recovery, where declarative routes re-append their
+    ///   `[Registered, StartRequested, Started]` generation on every boot.
     fn compact(&self) -> Result<(), CamelError> {
         let tx = self
             .db
@@ -237,8 +282,10 @@ impl RedbRuntimeEventJournal {
                 .open_table(EVENTS_TABLE)
                 .map_err(|e| CamelError::Io(format!("redb open events: {e}")))?;
 
-            // Pass 1: read all events in key order, find last RouteRemoved seq per route.
+            // Pass 1: find the last RouteRemoved and last RouteRegistered seq per route.
             let mut last_removed_seq: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            let mut last_registered_seq: std::collections::HashMap<String, u64> =
                 std::collections::HashMap::new();
             for result in table
                 .iter()
@@ -248,19 +295,25 @@ impl RedbRuntimeEventJournal {
                 let seq = k.value();
                 let entry: JournalEntry = serde_json::from_slice(v.value())
                     .map_err(|e| CamelError::Io(format!("journal deserialize: {e}")))?;
-                if matches!(entry.event, RuntimeEvent::RouteRemoved { .. }) {
-                    last_removed_seq.insert(entry.event.route_id().to_string(), seq);
+                match entry.event {
+                    RuntimeEvent::RouteRemoved { .. } => {
+                        last_removed_seq.insert(entry.event.route_id().to_string(), seq);
+                    }
+                    RuntimeEvent::RouteRegistered { .. } => {
+                        last_registered_seq.insert(entry.event.route_id().to_string(), seq);
+                    }
+                    _ => {}
                 }
             }
 
-            if last_removed_seq.is_empty() {
+            if last_removed_seq.is_empty() && last_registered_seq.is_empty() {
                 drop(table);
                 tx.commit()
                     .map_err(|e| CamelError::Io(format!("redb commit compact: {e}")))?;
                 return Ok(());
             }
 
-            // Pass 2: collect seqs to delete.
+            // Pass 2: collect seqs to delete under either rule.
             let mut to_delete: Vec<u64> = Vec::new();
             for result in table
                 .iter()
@@ -271,9 +324,13 @@ impl RedbRuntimeEventJournal {
                 let entry: JournalEntry = serde_json::from_slice(v.value())
                     .map_err(|e| CamelError::Io(format!("journal deserialize: {e}")))?;
                 let route_id = entry.event.route_id().to_string();
-                if let Some(&cutoff) = last_removed_seq.get(&route_id)
-                    && seq <= cutoff
-                {
+                let removed = last_removed_seq
+                    .get(&route_id)
+                    .is_some_and(|&cutoff| seq <= cutoff);
+                let superseded = last_registered_seq
+                    .get(&route_id)
+                    .is_some_and(|&checkpoint| seq < checkpoint);
+                if removed || superseded {
                     to_delete.push(seq);
                 }
             }
@@ -1029,6 +1086,150 @@ mod tests {
                 |e| matches!(e, RuntimeEvent::RouteRegistered { route_id } if route_id == "kept")
             ),
             "kept route must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_collapses_redundant_generations_at_last_registered() {
+        // adopt-on-recovery re-appends [Registered, StartRequested, Started]
+        // for the same declarative route on every boot. Because replay of a
+        // RouteRegistered resets the aggregate to v0, every event before the
+        // route's LAST RouteRegistered is redundant and must be compacted so
+        // the durable journal does not grow without bound across restarts.
+        let dir = tempdir().unwrap();
+        let journal = RedbRuntimeEventJournal::new(
+            dir.path().join("generations.db"),
+            RedbJournalOptions {
+                durability: JournalDurability::Eventual,
+                // Keep compaction from firing until the whole history is written,
+                // so the test asserts the compaction rule, not append timing.
+                compaction_threshold_events: 1_000,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Three boot generations for the same route.
+        for _ in 0..3 {
+            journal
+                .append_batch(&[
+                    RuntimeEvent::RouteRegistered {
+                        route_id: "declarative".to_string(),
+                    },
+                    RuntimeEvent::RouteStartRequested {
+                        route_id: "declarative".to_string(),
+                    },
+                    RuntimeEvent::RouteStarted {
+                        route_id: "declarative".to_string(),
+                    },
+                ])
+                .await
+                .unwrap();
+        }
+        assert_eq!(journal.load_all().await.unwrap().len(), 9);
+
+        journal.compact().unwrap();
+
+        // Only the last generation survives, and it still replays to Started.
+        let loaded = journal.load_all().await.unwrap();
+        assert_eq!(
+            loaded.len(),
+            3,
+            "history before the last RouteRegistered must be compacted, got {loaded:?}"
+        );
+        assert!(matches!(
+            loaded.first(),
+            Some(RuntimeEvent::RouteRegistered { route_id }) if route_id == "declarative"
+        ));
+        assert!(matches!(
+            loaded.last(),
+            Some(RuntimeEvent::RouteStarted { route_id }) if route_id == "declarative"
+        ));
+    }
+
+    #[tokio::test]
+    async fn compaction_keeps_single_generation_intact() {
+        // Regression guard: a route with a single generation (one
+        // RouteRegistered) must keep its full post-register history — the
+        // checkpoint rule only drops events strictly before the LAST register.
+        let dir = tempdir().unwrap();
+        let journal = RedbRuntimeEventJournal::new(
+            dir.path().join("single_gen.db"),
+            RedbJournalOptions {
+                durability: JournalDurability::Eventual,
+                compaction_threshold_events: 1_000,
+            },
+        )
+        .await
+        .unwrap();
+
+        journal
+            .append_batch(&[
+                RuntimeEvent::RouteRegistered {
+                    route_id: "r".to_string(),
+                },
+                RuntimeEvent::RouteStartRequested {
+                    route_id: "r".to_string(),
+                },
+                RuntimeEvent::RouteStarted {
+                    route_id: "r".to_string(),
+                },
+                RuntimeEvent::RouteStopped {
+                    route_id: "r".to_string(),
+                },
+            ])
+            .await
+            .unwrap();
+
+        journal.compact().unwrap();
+
+        assert_eq!(journal.load_all().await.unwrap().len(), 4);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_retries_until_lock_released() {
+        // Simulates the k8s RWO PVC handover: a second open of the same journal
+        // file is blocked by the first handle's lock, then succeeds once that
+        // handle is dropped — instead of crashing with "Database already open".
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("locked.db");
+
+        let first = RedbRuntimeEventJournal::new(path.clone(), RedbJournalOptions::default())
+            .await
+            .unwrap();
+
+        let path2 = path.clone();
+        let opener = tokio::spawn(async move {
+            RedbRuntimeEventJournal::new(path2, RedbJournalOptions::default()).await
+        });
+
+        // Hold the lock across at least one retry backoff, then release it.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        drop(first);
+
+        let second = opener.await.unwrap();
+        assert!(
+            second.is_ok(),
+            "second open must succeed after the lock is released, got err: {:?}",
+            second.err().map(|e| e.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn open_fails_fast_on_non_lock_error() {
+        // A genuine bad path (parent is a file, not a directory) is not lock
+        // contention and must surface immediately, not spin the retry loop.
+        let dir = tempdir().unwrap();
+        let file_as_parent = dir.path().join("iamafile");
+        std::fs::write(&file_as_parent, b"x").unwrap();
+        let bogus = file_as_parent.join("journal.db");
+
+        let start = std::time::Instant::now();
+        let result = RedbRuntimeEventJournal::new(bogus, RedbJournalOptions::default()).await;
+        assert!(result.is_err());
+        assert!(
+            start.elapsed() < OPEN_LOCK_RETRY_BACKOFF,
+            "non-lock error must fail fast without retrying"
         );
     }
 }

@@ -112,7 +112,13 @@ async fn handle_register(
     spec.validate_contract()?;
     let route_id = spec.route_id.clone();
 
-    if deps.repo.load(&route_id).await?.is_some() {
+    // Adopt-on-recovery: a route reconstructed by journal replay at boot is
+    // adopted by the first (declarative) re-registration of the same id — the
+    // runtime side-effect below rebuilds the in-memory pipeline and the persist
+    // overwrites the stale aggregate with a fresh Registered baseline so
+    // auto_startup drives it up as on first boot. Only a genuine same-session
+    // duplicate (marker absent / already consumed) is rejected.
+    if deps.repo.load(&route_id).await?.is_some() && !deps.repo.take_recovered(&route_id).await? {
         return Err(DomainError::AlreadyExists(route_id).into());
     }
 
@@ -234,7 +240,11 @@ pub(crate) async fn handle_register_internal(
 ) -> Result<RuntimeCommandResult, CamelError> {
     let route_id = def.route_id().to_string();
 
-    if deps.repo.load(&route_id).await?.is_some() {
+    // Adopt-on-recovery: see `handle_register`. A journal-recovered aggregate is
+    // adopted by the first declarative re-registration (runtime reinstalled +
+    // aggregate reset to Registered below); a true same-session duplicate is
+    // still rejected.
+    if deps.repo.load(&route_id).await?.is_some() && !deps.repo.take_recovered(&route_id).await? {
         return Err(DomainError::AlreadyExists(route_id).into());
     }
 

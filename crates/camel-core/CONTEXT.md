@@ -74,6 +74,14 @@ _Avoid_: controller state, live route state
 Control-plane recovery outcome recorded when a lifecycle side effect fails after intent or state was persisted. The Route is marked `Failed` rather than silently rolling back accepted history.
 _Avoid_: rollback, undo
 
+**Adopt-on-recovery**:
+Registration policy that lets the first re-registration of a Route id adopt an aggregate reconstructed by journal replay at boot, instead of rejecting it as a duplicate. `recover_from_journal` flags every replayed Route id as adoptable; `take_recovered` drains that flag exactly once. In `handle_register` and `handle_register_internal`, an existing aggregate whose flag is still set is adopted — the runtime side effect rebuilds the in-memory Pipeline and the persist overwrites the stale aggregate with a fresh `Registered` baseline, so `auto_startup` drives the Route up as on first boot. Without this policy a durable `runtime_journal` turns every restart after the first into an `AlreadyExists` failure for every declarative Route. A same-session duplicate (flag absent or already drained) is still rejected as `AlreadyExists`.
+_Avoid_: duplicate route, upsert route
+
+**Journal register-checkpoint compaction**:
+Durable `runtime_journal` compaction rule that bounds file growth under Adopt-on-recovery. `RedbRuntimeEventJournal::compact` drops, per route id, every event with a `seq` below that route's last `RouteRegistered` — replaying a `RouteRegistered` resets the aggregate to a fresh `Registered` v0, so all earlier history is redundant. It runs together with the removed-route rule (drop everything up to the last `RouteRemoved`). Without it, a declarative route re-appends its `[Registered, StartRequested, Started]` generation on every boot and the journal grows without bound. The redb open path also retries on lock contention (`DatabaseAlreadyOpen`) to ride out a Kubernetes ReadWriteOnce PVC pod handover instead of crashing.
+_Avoid_: log truncation, snapshotting
+
 **Cohort Activation Barrier**:
 The context-lifecycle barrier gates the first consumer-envelope dispatch at three drain sites. These are the Concurrent trait branch, the Sequential `_` branch, and the restart aggregate envelope branch. The late aggregator branch is ungated. Its output is post-dispatch by construction. The `reset_cohort` and `activate_cohort` port methods call the shared `Arc` directly. They do not use an actor round-trip. The runtime activates the cohort on every return from boot. A boot failure therefore keeps today's partial-up semantics. Consumers that drive a bare `DefaultRouteController` outside a full context open the same gate through `DefaultRouteController::activate_cohort`; the port methods serve the context path.
 
@@ -141,7 +149,7 @@ Wraps an `OutcomeSegment` — a structural EIP sub-pipeline (Filter, Choice, Loo
 
 | File | Line | Category | Reason |
 |------|------|----------|--------|
-| `src/lifecycle/application/commands.rs` | 161 | `system-broken` | Control-plane inconsistency — persist + rollback both failed |
+| `src/lifecycle/application/commands.rs` | 166 | `system-broken` | Control-plane inconsistency — persist + rollback both failed |
 
 ## Example dialogue
 

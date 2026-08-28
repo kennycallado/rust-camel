@@ -145,6 +145,11 @@ struct RuntimeStoreState {
     statuses: HashMap<String, RouteStatusProjection>,
     events: Vec<RuntimeEvent>,
     seen: HashSet<String>,
+    /// Route ids reconstructed by the most recent journal replay that have not
+    /// yet been re-registered in this process. Drained by `take_recovered` so
+    /// the first declarative-boot registration adopts the persisted aggregate
+    /// while a later same-session duplicate is still rejected.
+    recovered: HashSet<String>,
 }
 
 impl InMemoryRuntimeStore {
@@ -298,7 +303,13 @@ impl RouteRepositoryPort for InMemoryRuntimeStore {
     async fn delete(&self, route_id: &str) -> Result<(), DomainError> {
         let mut guard = self.inner.lock().await;
         guard.routes.remove(route_id);
+        guard.recovered.remove(route_id);
         Ok(())
+    }
+
+    async fn take_recovered(&self, route_id: &str) -> Result<bool, DomainError> {
+        let mut guard = self.inner.lock().await;
+        Ok(guard.recovered.remove(route_id))
     }
 }
 
@@ -437,10 +448,15 @@ impl RuntimeUnitOfWorkPort for InMemoryRuntimeStore {
         guard.statuses.clear();
         guard.events.clear();
         guard.seen.clear();
+        guard.recovered.clear();
 
         for event in &replayed_events {
             apply_replayed_event(&mut guard, event);
         }
+        // Every aggregate that survived replay is adoptable exactly once by the
+        // first re-registration of its id (declarative boot), so a durable
+        // journal no longer turns a clean restart into an AlreadyExists storm.
+        guard.recovered = guard.routes.keys().cloned().collect();
         guard.events = replayed_events;
         for command_id in replayed_command_ids {
             guard.seen.insert(command_id);
@@ -649,5 +665,49 @@ mod tests {
 
         assert_eq!(aggregate.state(), &RouteRuntimeState::Started);
         assert_eq!(aggregate.version(), 1);
+    }
+
+    #[tokio::test]
+    async fn recover_from_journal_marks_replayed_routes_adoptable_once() {
+        let store = InMemoryRuntimeStore::default().with_journal(Arc::new(ReplayJournal {
+            events: vec![
+                RuntimeEvent::RouteRegistered {
+                    route_id: "replay-r3".to_string(),
+                },
+                RuntimeEvent::RouteStarted {
+                    route_id: "replay-r3".to_string(),
+                },
+            ],
+        }));
+
+        store.recover_from_journal().await.unwrap();
+
+        // First re-registration adopts the recovered aggregate.
+        assert!(store.take_recovered("replay-r3").await.unwrap());
+        // Marker is consumed: a same-session duplicate is no longer adoptable.
+        assert!(!store.take_recovered("replay-r3").await.unwrap());
+        // A route that never existed in the journal is never adoptable.
+        assert!(!store.take_recovered("never-seen").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn recover_from_journal_leaves_no_marker_for_removed_routes() {
+        let store = InMemoryRuntimeStore::default().with_journal(Arc::new(ReplayJournal {
+            events: vec![
+                RuntimeEvent::RouteRegistered {
+                    route_id: "replay-r4".to_string(),
+                },
+                RuntimeEvent::RouteRemoved {
+                    route_id: "replay-r4".to_string(),
+                },
+            ],
+        }));
+
+        store.recover_from_journal().await.unwrap();
+
+        // A route removed before the restart is gone from the store and thus
+        // not adoptable — a fresh registration proceeds as first-time.
+        assert!(store.load("replay-r4").await.unwrap().is_none());
+        assert!(!store.take_recovered("replay-r4").await.unwrap());
     }
 }
