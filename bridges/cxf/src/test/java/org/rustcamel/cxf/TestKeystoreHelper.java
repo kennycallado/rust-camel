@@ -16,11 +16,24 @@ class TestKeystoreHelper {
 
   /**
    * Creates a temporary JKS keystore with a self-signed RSA 2048 keypair via keytool. The file is
-   * marked for deletion on JVM exit.
+   * marked for deletion on JVM exit. Keystore and key passwords are both {@link
+   * #KEYSTORE_PASSWORD}.
    *
    * @return path to the generated keystore file
    */
   static Path createTestKeystore() throws Exception {
+    return createTestKeystore(KEYSTORE_PASSWORD, KEYSTORE_PASSWORD);
+  }
+
+  /**
+   * Creates a temporary JKS keystore with a self-signed RSA 2048 keypair via keytool. The file is
+   * marked for deletion on JVM exit.
+   *
+   * @param storePassword keystore password ({@code -storepass})
+   * @param keyPassword private-key password ({@code -keypass}), may differ from the store password
+   * @return path to the generated keystore file
+   */
+  static Path createTestKeystore(String storePassword, String keyPassword) throws Exception {
     Path ksPath = Files.createTempFile("test-keystore-", ".jks");
     ksPath.toFile().deleteOnExit();
     Files.delete(ksPath); // keytool refuses to write to an existing (even empty) file
@@ -46,9 +59,9 @@ class TestKeystoreHelper {
             "-storetype",
             "JKS",
             "-storepass",
-            KEYSTORE_PASSWORD,
+            storePassword,
             "-keypass",
-            KEYSTORE_PASSWORD,
+            keyPassword,
             "-noprompt");
 
     ProcessBuilder pb = new ProcessBuilder(cmd);

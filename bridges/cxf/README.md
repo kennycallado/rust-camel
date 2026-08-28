@@ -17,7 +17,7 @@ The CXF bridge supports WS-Security (signing, encryption, verification, and decr
 | `cxf.sig.username`                        | `clientkey`       | Alias of the key entry in the keystore used for signing.                                                                                                |
 | `cxf.sig.password`                        | _(none)_          | Password for the private key entry.                                                                                                                     |
 | `cxf.enc.username`                        | `serverkey`       | Alias used for encryption (recipient's public key).                                                                                                     |
-| `cxf.security.actions.out`                | _(empty)_         | Space-separated WSS4J action tokens for outbound messages (e.g. `Signature`, `Signature Encrypt`).                                                      |
+| `cxf.security.actions.out`                | _(empty)_         | Space-separated WSS4J action tokens for outbound messages (e.g. `Signature`, `Signature Encrypt`, `Signature Timestamp`; see Timestamp behavior for constraints and build-time rejections).                                                      |
 | `cxf.security.actions.in`                 | _(empty)_         | Space-separated WSS4J action tokens for inbound messages.                                                                                               |
 | `CXF_PROFILE_<N>_SIGNATURE_ALGORITHM` (`cxf.security.signature.algorithm`) | _(WSS4J default)_ | Signature algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#rsa-sha1` for legacy, `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` for modern). Applied on BOTH producer requests and consumer signed responses. |
 | `CXF_PROFILE_<N>_SIGNATURE_DIGEST_ALGORITHM` (`cxf.security.signature.digest.algorithm`) | _(WSS4J default)_ | Digest algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#sha1` or `http://www.w3.org/2001/04/xmlenc#sha256`). Applied on BOTH paths. |
@@ -103,7 +103,34 @@ startup and fail loud:
 
 ### Timestamp behavior
 
-Profiles that declare the `Timestamp` action emit a signed `wsu:Timestamp` element. The timestamp is signed together with the SOAP Body, so a rewritten or stripped timestamp fails signature verification. Inbound processing enforces the same rule: when the required inbound actions include both `Timestamp` and `Signature`, the verified signature must cover the timestamp.
+When the outbound actions include `Timestamp`, the producer emits a
+`wsu:Timestamp` element. The Timestamp action runs before Signature, so
+signature part resolution sees the materialized element.
+
+When the outbound actions include `Timestamp` and `Signature`, and
+`SIGNATURE_PARTS` is not set, the producer signs the SOAP Body and the
+timestamp together: it sets `SIGNATURE_PARTS` to
+`Body;{}{http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd}Timestamp`.
+A rewritten or stripped timestamp then fails signature verification.
+
+When `SIGNATURE_PARTS` is set, the producer applies its value verbatim. The
+timestamp is then covered only if the value names it. Covering the timestamp
+is the operator's responsibility in that case.
+
+Inbound processing enforces the same rule: when the required inbound actions
+include both `Timestamp` and `Signature`, the verified signature must cover
+the timestamp.
+
+Two rules fail loud at profile construction. They read the configured
+outbound actions; blank or unset actions are exempt.
+
+- Timestamp requires Signature. Configured outbound actions that contain
+  `Timestamp` but not `Signature` are rejected: a timestamp emitted outside
+  the signature is not tamper-evident.
+- Signing material is required. Configured outbound actions that contain
+  `Signature`, `Encrypt`, or `Timestamp` require a keystore. The composition
+  rule is checked first; the keystore check runs only for a valid
+  composition.
 
 ### Startup logging
 

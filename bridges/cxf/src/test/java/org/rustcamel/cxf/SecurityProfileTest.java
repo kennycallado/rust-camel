@@ -2,14 +2,32 @@ package org.rustcamel.cxf;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.Properties;
 import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 @DisplayName("SecurityProfile")
 class SecurityProfileTest {
+
+  private static Path keystorePath;
+
+  @BeforeAll
+  static void setUp() throws Exception {
+    keystorePath = TestKeystoreHelper.createTestKeystore();
+  }
+
+  @AfterAll
+  static void tearDown() throws Exception {
+    if (keystorePath != null) {
+      Files.deleteIfExists(keystorePath);
+    }
+  }
 
   @Test
   @DisplayName("builder creates minimal profile with name only, all defaults")
@@ -184,7 +202,11 @@ class SecurityProfileTest {
   @Test
   @DisplayName("resolveActionsOut returns explicit value when set")
   void resolveActionsOutReturnsExplicit() {
-    SecurityProfile p = SecurityProfile.builder("test").actionsOut("Signature Encrypt").build();
+    SecurityProfile p =
+        SecurityProfile.builder("test")
+            .keystore("/ks.jks", "pass")
+            .actionsOut("Signature Encrypt")
+            .build();
     assertEquals("Signature Encrypt", p.resolveActionsOut());
   }
 
@@ -279,8 +301,9 @@ class SecurityProfileTest {
   @DisplayName("signature knob set without a signing keystore is rejected")
   void knobWithoutKeystoreIsRejected() {
     assertBuildRejectedNaming(
+        // No explicit out-actions: raw actions are exempt from the outbound-action rules and the
+        // knob path resolves the default "Signature", so the knob check is what fires here.
         SecurityProfile.builder("no-keystore")
-            .actionsOut("Signature")
             .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha384"),
         "SIGNATURE_DIGEST_ALGORITHM");
   }
@@ -429,6 +452,146 @@ class SecurityProfileTest {
     } finally {
       java.nio.file.Files.deleteIfExists(ksPath);
     }
+  }
+
+  @Test
+  @DisplayName("Timestamp out-action emits Timestamp before Signature in ACTION")
+  void timestampTokenYieldsOrderedActions() throws Exception {
+    SecurityProfile p =
+        SecurityProfile.builder("ts-order")
+            .keystore(keystorePath.toString(), "changeit")
+            .actionsOut("Signature Timestamp")
+            .build();
+    var interceptor = assertInstanceOf(WSS4JOutInterceptor.class, p.createOutInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    // wss4j 4.0.1: WSHandlerConstants.TIMESTAMP resolves to "Timestamp" (inherited from
+    // ConfigurationConstants); the action string order is Timestamp then Signature so
+    // signature part resolution sees the materialized wsu:Timestamp element.
+    assertEquals("Timestamp Signature", props.get("action"));
+  }
+
+  @Test
+  @DisplayName("Timestamp+Signature without SIGNATURE_PARTS defaults to Body+Timestamp coverage")
+  void defaultPartsCoverBodyAndTimestamp() throws Exception {
+    SecurityProfile p =
+        SecurityProfile.builder("ts-default-parts")
+            .keystore(keystorePath.toString(), "changeit")
+            .actionsOut("Signature Timestamp")
+            .build();
+    var interceptor = assertInstanceOf(WSS4JOutInterceptor.class, p.createOutInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    // wss4j 4.0.1 WSHandler.splitEncParts: entries split on ';'; a bare keyword resolves
+    // against the SOAP envelope namespace in Content mode, so the wsu:Timestamp entry must
+    // carry the WSU namespace explicitly.
+    assertEquals(
+        "Body;{}{http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd}Timestamp",
+        props.get("signatureParts"));
+  }
+
+  @Test
+  @DisplayName("explicit SIGNATURE_PARTS applied verbatim, no injected Timestamp")
+  void explicitPartsVerbatim() throws Exception {
+    SecurityProfile p =
+        SecurityProfile.builder("ts-explicit-parts")
+            .keystore(keystorePath.toString(), "changeit")
+            .actionsOut("Signature Timestamp")
+            .signatureParts("Body")
+            .build();
+    var interceptor = assertInstanceOf(WSS4JOutInterceptor.class, p.createOutInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    assertEquals("Body", props.get("signatureParts"));
+  }
+
+  @Test
+  @DisplayName("timestamp-free profile keeps ACTION and omits SIGNATURE_PARTS")
+  void timestampFreeProfileUnchanged() throws Exception {
+    SecurityProfile p =
+        SecurityProfile.builder("no-ts")
+            .keystore(keystorePath.toString(), "changeit")
+            .actionsOut("Signature")
+            .build();
+    var interceptor = assertInstanceOf(WSS4JOutInterceptor.class, p.createOutInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    assertEquals("Signature", props.get("action"));
+    assertFalse(props.containsKey("signatureParts"));
+  }
+
+  @Test
+  @DisplayName("Timestamp out-action without Signature is rejected")
+  void timestampWithoutSignatureRejected() throws Exception {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                SecurityProfile.builder("ts-no-sig")
+                    .keystore(keystorePath.toString(), "changeit")
+                    .actionsOut("Timestamp")
+                    .build(),
+            "expected build() to reject Timestamp without Signature");
+    String msg = ex.getMessage();
+    assertTrue(msg.contains("Timestamp"), "expected message naming Timestamp: " + msg);
+    assertTrue(msg.contains("Signature"), "expected message naming Signature: " + msg);
+  }
+
+  @Test
+  @DisplayName("Signature out-action without a keystore is rejected")
+  void signatureWithoutKeystoreRejected() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SecurityProfile.builder("sig-no-ks").actionsOut("Signature").build(),
+            "expected build() to reject Signature without a keystore");
+    assertTrue(
+        ex.getMessage().contains("keystore"),
+        "expected message naming the keystore: " + ex.getMessage());
+  }
+
+  @Test
+  @DisplayName("Encrypt out-action without a keystore is rejected")
+  void encryptWithoutKeystoreRejected() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SecurityProfile.builder("enc-no-ks").actionsOut("Encrypt").build(),
+            "expected build() to reject Encrypt without a keystore");
+    assertTrue(
+        ex.getMessage().contains("keystore"),
+        "expected message naming the keystore: " + ex.getMessage());
+  }
+
+  @Test
+  @DisplayName("valid Signature+Timestamp composition still requires a keystore")
+  void composedWithoutKeystorePrecedence() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                SecurityProfile.builder("composed-no-ks").actionsOut("Signature Timestamp").build(),
+            "expected build() to reject a valid composition without a keystore");
+    assertTrue(
+        ex.getMessage().contains("keystore"),
+        "expected the material rule (keystore) to fire: " + ex.getMessage());
+  }
+
+  @Test
+  @DisplayName("both rules violated: composition rejection wins over keystore rejection")
+  void timestampWithoutKeystoreCompositionFirst() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SecurityProfile.builder("ts-no-sig-no-ks").actionsOut("Timestamp").build(),
+            "expected build() to reject Timestamp without Signature and without keystore");
+    String msg = ex.getMessage();
+    assertTrue(msg.contains("Timestamp"), "expected message naming Timestamp: " + msg);
+    assertTrue(msg.contains("Signature"), "expected message naming Signature: " + msg);
+    assertFalse(msg.contains("keystore"), "composition rule must fire first: " + msg);
+  }
+
+  @Test
+  @DisplayName("blank out-actions stay raw-exempt: build succeeds, no out-interceptor")
+  void blankActionsUnaffected() {
+    SecurityProfile p = SecurityProfile.builder("blank-actions").actionsOut("   ").build();
+    assertNull(p.createOutInterceptor());
   }
 
   private static void assertBuildRejectedNaming(SecurityProfile.Builder builder, String envVar) {

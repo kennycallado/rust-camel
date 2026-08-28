@@ -18,6 +18,7 @@ import org.apache.wss4j.common.crypto.Crypto;
 import org.apache.wss4j.common.crypto.CryptoFactory;
 import org.apache.wss4j.common.ext.WSPasswordCallback;
 import org.apache.wss4j.common.ext.WSSecurityException;
+import org.apache.wss4j.dom.WSConstants;
 import org.apache.wss4j.dom.engine.WSSConfig;
 import org.apache.wss4j.dom.handler.WSHandlerConstants;
 
@@ -28,6 +29,25 @@ import org.apache.wss4j.dom.handler.WSHandlerConstants;
  */
 public class SecurityProfile {
   private static final Logger LOG = Logger.getLogger(SecurityProfile.class.getName());
+
+  /**
+   * Default SIGNATURE_PARTS when both Timestamp and Signature are active and the operator did not
+   * configure parts. Grammar jar-verified against wss4j-ws-security-dom 4.0.1:
+   * WSHandler.splitEncParts splits entries on ';' and resolves a bare keyword against the SOAP
+   * envelope namespace in Content mode, so Body stays bare (SOAP 1.1/1.2 safe) while Timestamp must
+   * carry the WSU namespace explicitly.
+   */
+  private static final String DEFAULT_SIGNATURE_PARTS =
+      "Body;{}{" + WSConstants.WSU_NS + "}Timestamp";
+
+  /**
+   * Option keys under which the in-memory crypto {@link Properties} objects live. WSS4J resolves
+   * crypto by ref-id string: SIG_PROP_REF_ID / ENC_PROP_REF_ID name a key whose value WSS4J looks
+   * up as the Properties object itself (WSHandler#getString + loadCrypto).
+   */
+  private static final String SIG_CRYPTO_REF_ID = "sigCryptoProperties";
+
+  private static final String ENC_CRYPTO_REF_ID = "encCryptoProperties";
 
   static {
     WSSConfig.init();
@@ -203,16 +223,25 @@ public class SecurityProfile {
     Map<String, Object> props = new HashMap<>();
     List<String> actions = new ArrayList<>();
     List<String> signatureKnobs = new ArrayList<>();
+    String effectiveParts = null;
 
     if (hasText(keystorePath)) {
       String outActions = resolveActionsOut();
+      boolean timestampActive = containsAction(outActions, "Timestamp");
+      // Timestamp precedes Signature so signature part resolution sees the materialized
+      // wsu:Timestamp element (same order as the manual consumer path).
+      if (timestampActive) {
+        actions.add(WSHandlerConstants.TIMESTAMP);
+      }
       if (containsAction(outActions, "Signature")) {
         actions.add(WSHandlerConstants.SIGNATURE);
-        props.put(
-            ConfigurationConstants.SIG_PROP_REF_ID,
-            createCryptoProperties(keystorePath, keystorePassword));
+        props.put(ConfigurationConstants.SIG_PROP_REF_ID, SIG_CRYPTO_REF_ID);
+        props.put(SIG_CRYPTO_REF_ID, createCryptoProperties(keystorePath, keystorePassword));
         props.put(WSHandlerConstants.USER, sigUsername);
         props.put(WSHandlerConstants.SIG_KEY_ID, "DirectReference");
+        // WSS4J obtains the signing key password only via callback: ProfilePasswordCallback
+        // prefers sigPassword for SIGNATURE usage and falls back to the keystore password.
+        props.put(WSHandlerConstants.PW_CALLBACK_REF, createPasswordCallback());
         if (hasText(signatureAlgorithm)) {
           props.put(ConfigurationConstants.SIG_ALGO, signatureAlgorithm);
           signatureKnobs.add("signatureAlgorithm");
@@ -226,15 +255,20 @@ public class SecurityProfile {
           signatureKnobs.add("signatureC14nAlgorithm");
         }
         if (hasText(signatureParts)) {
-          props.put(ConfigurationConstants.SIGNATURE_PARTS, signatureParts);
+          effectiveParts = signatureParts;
+          props.put(ConfigurationConstants.SIGNATURE_PARTS, effectiveParts);
           signatureKnobs.add("signatureParts");
+        } else if (timestampActive) {
+          effectiveParts = DEFAULT_SIGNATURE_PARTS;
+          props.put(ConfigurationConstants.SIGNATURE_PARTS, effectiveParts);
         }
       }
       if (containsAction(outActions, "Encrypt")) {
         actions.add(WSHandlerConstants.ENCRYPT);
         String encPath = hasText(truststorePath) ? truststorePath : keystorePath;
         String encPass = hasText(truststorePassword) ? truststorePassword : keystorePassword;
-        props.put(ConfigurationConstants.ENC_PROP_REF_ID, createCryptoProperties(encPath, encPass));
+        props.put(ConfigurationConstants.ENC_PROP_REF_ID, ENC_CRYPTO_REF_ID);
+        props.put(ENC_CRYPTO_REF_ID, createCryptoProperties(encPath, encPass));
         props.put(ConfigurationConstants.ENCRYPTION_USER, encUsername);
         props.put(
             WSHandlerConstants.ENC_KEY_TRANSPORT,
@@ -252,7 +286,9 @@ public class SecurityProfile {
             + "': actions="
             + actions
             + ", signatureKnobs="
-            + signatureKnobs);
+            + signatureKnobs
+            + ", signatureParts="
+            + (effectiveParts == null ? "none" : effectiveParts));
     return new WSS4JOutInterceptor(props);
   }
 
@@ -435,8 +471,36 @@ public class SecurityProfile {
     }
 
     public SecurityProfile build() {
+      validateOutboundActions();
       validateSignatureKnobs();
       return new SecurityProfile(this);
+    }
+
+    /**
+     * Fail-loud checks on the RAW configured outbound actions. Blank/unset actions are raw-exempt:
+     * the runtime default ("Signature") is resolved later and validated by {@link
+     * #validateSignatureKnobs()}. Composition first: Timestamp outside a signature is not
+     * tamper-evident, so Timestamp requires Signature. Material second: Signature, Encrypt, and
+     * Timestamp all need crypto material, so a keystore is required.
+     */
+    private void validateOutboundActions() {
+      String raw = securityActionsOut;
+      if (!hasText(raw)) return;
+      if (containsAction(raw, "Timestamp") && !containsAction(raw, "Signature")) {
+        throw new IllegalArgumentException(
+            "out-actions include Timestamp but not Signature: '"
+                + raw
+                + "'. A Timestamp emitted outside the signature is not tamper-evident");
+      }
+      if ((containsAction(raw, "Signature")
+              || containsAction(raw, "Encrypt")
+              || containsAction(raw, "Timestamp"))
+          && !hasText(keystorePath)) {
+        throw new IllegalArgumentException(
+            "out-actions include Signature/Encrypt/Timestamp but no keystore is configured: '"
+                + raw
+                + "'");
+      }
     }
 
     /**
