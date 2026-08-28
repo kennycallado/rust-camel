@@ -51,18 +51,11 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
       String port = request.getPortName().isBlank() ? profile.portName() : request.getPortName();
       String address = request.getAddress().isBlank() ? profile.address() : request.getAddress();
 
+      long normalizedTimeout =
+          request.getTimeoutMs() > 0 ? request.getTimeoutMs() : bridgeConfig.connectionTimeoutMs();
       var dispatch =
           clientManager.getDispatch(
-              wsdl, address, service, port, request.getOperation(), profileName);
-
-      int timeout =
-          request.getTimeoutMs() > 0 ? request.getTimeoutMs() : bridgeConfig.connectionTimeoutMs();
-      dispatch
-          .getRequestContext()
-          .put("jakarta.xml.ws.client.connectionTimeout", String.valueOf(timeout));
-      dispatch
-          .getRequestContext()
-          .put("jakarta.xml.ws.client.receiveTimeout", String.valueOf(timeout));
+              wsdl, address, service, port, request.getOperation(), profileName, normalizedTimeout);
 
       String payload = request.getPayload().toStringUtf8();
       String soapVersion = request.getHeadersOrDefault("soap-version", "1.1");

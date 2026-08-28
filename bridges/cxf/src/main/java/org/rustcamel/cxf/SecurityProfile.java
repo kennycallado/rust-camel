@@ -1,5 +1,6 @@
 package org.rustcamel.cxf;
 
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -178,12 +179,20 @@ public class SecurityProfile {
 
   // --- Action resolution ---
 
+  /**
+   * Single source for the default action list. Shared by runtime resolution and Builder validation
+   * so the validated action set can never diverge from the applied one.
+   */
+  static String resolveActionsOrDefault(String raw) {
+    return hasText(raw) ? raw : "Signature";
+  }
+
   public String resolveActionsOut() {
-    return hasText(securityActionsOut) ? securityActionsOut : "Signature";
+    return resolveActionsOrDefault(securityActionsOut);
   }
 
   public String resolveActionsIn() {
-    return hasText(securityActionsIn) ? securityActionsIn : "Signature";
+    return resolveActionsOrDefault(securityActionsIn);
   }
 
   // --- WSS4J Interceptor factories ---
@@ -193,6 +202,7 @@ public class SecurityProfile {
 
     Map<String, Object> props = new HashMap<>();
     List<String> actions = new ArrayList<>();
+    List<String> signatureKnobs = new ArrayList<>();
 
     if (hasText(keystorePath)) {
       String outActions = resolveActionsOut();
@@ -203,6 +213,22 @@ public class SecurityProfile {
             createCryptoProperties(keystorePath, keystorePassword));
         props.put(WSHandlerConstants.USER, sigUsername);
         props.put(WSHandlerConstants.SIG_KEY_ID, "DirectReference");
+        if (hasText(signatureAlgorithm)) {
+          props.put(ConfigurationConstants.SIG_ALGO, signatureAlgorithm);
+          signatureKnobs.add("signatureAlgorithm");
+        }
+        if (hasText(signatureDigestAlgorithm)) {
+          props.put(ConfigurationConstants.SIG_DIGEST_ALGO, signatureDigestAlgorithm);
+          signatureKnobs.add("signatureDigestAlgorithm");
+        }
+        if (hasText(signatureC14nAlgorithm)) {
+          props.put(ConfigurationConstants.SIG_C14N_ALGO, signatureC14nAlgorithm);
+          signatureKnobs.add("signatureC14nAlgorithm");
+        }
+        if (hasText(signatureParts)) {
+          props.put(ConfigurationConstants.SIGNATURE_PARTS, signatureParts);
+          signatureKnobs.add("signatureParts");
+        }
       }
       if (containsAction(outActions, "Encrypt")) {
         actions.add(WSHandlerConstants.ENCRYPT);
@@ -220,7 +246,13 @@ public class SecurityProfile {
     if (actions.isEmpty()) return null;
 
     props.put(WSHandlerConstants.ACTION, String.join(" ", actions));
-    LOG.info("WS-Security outbound enabled for profile '" + name + "': actions=" + actions);
+    LOG.info(
+        "WS-Security outbound enabled for profile '"
+            + name
+            + "': actions="
+            + actions
+            + ", signatureKnobs="
+            + signatureKnobs);
     return new WSS4JOutInterceptor(props);
   }
 
@@ -403,7 +435,52 @@ public class SecurityProfile {
     }
 
     public SecurityProfile build() {
+      validateSignatureKnobs();
       return new SecurityProfile(this);
+    }
+
+    /**
+     * Rejects SIGNATURE_* knobs that would otherwise be dead configuration: they require a
+     * Signature out-action, a signing keystore, a valid parts grammar, and absolute-URI algorithms.
+     */
+    private void validateSignatureKnobs() {
+      String knobEnvVar = firstSignatureKnobEnvVar();
+      if (knobEnvVar == null) return;
+
+      String outActions = resolveActionsOrDefault(securityActionsOut);
+      if (!containsAction(outActions, "Signature")) {
+        throw new IllegalArgumentException(
+            knobEnvVar + " is set but out-actions do not include Signature: '" + outActions + "'");
+      }
+      if (!hasText(keystorePath)) {
+        throw new IllegalArgumentException(
+            knobEnvVar + " is set but no signing keystore is configured");
+      }
+      if (hasText(signatureAlgorithm) && !isAbsoluteUri(signatureAlgorithm)) {
+        throw new IllegalArgumentException(
+            "SIGNATURE_ALGORITHM is not an absolute URI: '" + signatureAlgorithm + "'");
+      }
+      if (hasText(signatureDigestAlgorithm) && !isAbsoluteUri(signatureDigestAlgorithm)) {
+        throw new IllegalArgumentException(
+            "SIGNATURE_DIGEST_ALGORITHM is not an absolute URI: '"
+                + signatureDigestAlgorithm
+                + "'");
+      }
+      if (hasText(signatureC14nAlgorithm) && !isAbsoluteUri(signatureC14nAlgorithm)) {
+        throw new IllegalArgumentException(
+            "SIGNATURE_C14N_ALGORITHM is not an absolute URI: '" + signatureC14nAlgorithm + "'");
+      }
+      if (hasText(signatureParts)) {
+        validateSignaturePartsSyntax(signatureParts);
+      }
+    }
+
+    private String firstSignatureKnobEnvVar() {
+      if (hasText(signatureAlgorithm)) return "SIGNATURE_ALGORITHM";
+      if (hasText(signatureDigestAlgorithm)) return "SIGNATURE_DIGEST_ALGORITHM";
+      if (hasText(signatureC14nAlgorithm)) return "SIGNATURE_C14N_ALGORITHM";
+      if (hasText(signatureParts)) return "SIGNATURE_PARTS";
+      return null;
     }
   }
 
@@ -421,6 +498,62 @@ public class SecurityProfile {
 
   private static boolean hasText(String v) {
     return v != null && !v.isBlank();
+  }
+
+  /**
+   * Validates SIGNATURE_PARTS grammar: ';'-separated segments, each a bare non-empty localName or
+   * {@code {modifier}{namespace}localName} with modifier empty or exactly {@code Element}/{@code
+   * Content}, namespace possibly empty, and a non-empty localName.
+   *
+   * @throws IllegalArgumentException naming SIGNATURE_PARTS on the first malformed segment
+   */
+  static void validateSignaturePartsSyntax(String parts) {
+    for (String segment : parts.split(";", -1)) {
+      if (!isWellFormedPartSegment(segment)) {
+        throw new IllegalArgumentException(
+            "SIGNATURE_PARTS has a malformed segment '"
+                + segment
+                + "': expected 'localName' or '{Element|Content}{namespace}localName'"
+                + " segments separated by ';'");
+      }
+    }
+  }
+
+  private static boolean isWellFormedPartSegment(String segment) {
+    if (!hasText(segment)) return false;
+    // Untrimmed or whitespace-carrying segments would pass through to WSS4J
+    // verbatim and fail at first invoke, not at construction — reject here.
+    if (!segment.equals(segment.trim())) return false;
+    String s = segment;
+    if (!s.contains("{") && !s.contains("}"))
+      return !s.chars().anyMatch(Character::isWhitespace); // bare localName
+    if (!s.startsWith("{")) return false;
+    int modifierEnd = s.indexOf('}');
+    if (modifierEnd < 0) return false;
+    String modifier = s.substring(1, modifierEnd);
+    if (!modifier.isEmpty() && !modifier.equals("Element") && !modifier.equals("Content")) {
+      return false;
+    }
+    String rest = s.substring(modifierEnd + 1);
+    if (!rest.startsWith("{")) return false;
+    int namespaceEnd = rest.indexOf('}');
+    if (namespaceEnd < 0) return false;
+    String namespace = rest.substring(1, namespaceEnd);
+    String localName = rest.substring(namespaceEnd + 1);
+    // wss4j splits segments on EVERY '}', so stray braces inside namespace or localName
+    // shift fragment boundaries and fail at SIGNING time ("wrong part definition").
+    if (namespace.indexOf('{') >= 0 || namespace.indexOf('}') >= 0) return false;
+    if (localName.indexOf('{') >= 0 || localName.indexOf('}') >= 0) return false;
+    if (localName.chars().anyMatch(Character::isWhitespace)) return false;
+    return !localName.isEmpty(); // non-empty localName
+  }
+
+  private static boolean isAbsoluteUri(String value) {
+    try {
+      return URI.create(value).isAbsolute();
+    } catch (IllegalArgumentException e) {
+      return false;
+    }
   }
 
   private static boolean containsAction(String actions, String token) {

@@ -89,6 +89,21 @@ impl Endpoint for CxfEndpoint {
         rt: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Result<Box<dyn Consumer>, CamelError> {
         let profile = self.resolve_profile()?;
+        // SIGNATURE_PARTS applies to the producer path only. Consumer coverage (Body +
+        // Timestamp) is the fixed replay-defense invariant and must not be narrowed.
+        if let Some(parts) = profile
+            .security
+            .signature_parts
+            .as_ref()
+            .filter(|p| !p.is_empty())
+        {
+            return Err(CamelError::ProcessorError(format!(
+                "profile '{}' sets security.signature_parts ('{parts}') but SIGNATURE_PARTS \
+                 cannot serve a consumer endpoint: consumer coverage is the fixed \
+                 Body+Timestamp replay invariant",
+                profile.name
+            )));
+        }
         Ok(Box::new(CxfConsumer::new(
             Arc::clone(&self.pool),
             profile.name.clone(),
@@ -135,7 +150,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::config::{CxfPoolConfig, CxfProfileConfig};
+    use crate::config::{CxfPoolConfig, CxfProfileConfig, CxfSecurityFields};
     use camel_component_api::NetworkRetryPolicy;
 
     fn test_pool_with_profiles() -> Arc<CxfBridgePool> {
@@ -241,6 +256,51 @@ mod tests {
             .unwrap();
         let result = endpoint.create_consumer(rt());
         assert!(result.is_ok(), "got: {:?}", result.err());
+    }
+
+    #[test]
+    fn create_consumer_rejects_parts_profile() {
+        let pool = Arc::new(
+            CxfBridgePool::from_config(CxfPoolConfig {
+                profiles: vec![CxfProfileConfig {
+                    name: "test".to_string(),
+                    address: Some("http://host:8080/service".to_string()),
+                    wsdl_path: "/wsdl/hello.wsdl".to_string(),
+                    service_name: "HelloService".to_string(),
+                    port_name: "HelloPort".to_string(),
+                    security: CxfSecurityFields {
+                        signature_parts: Some("Body".to_string()),
+                        ..Default::default()
+                    },
+                }],
+                max_bridges: 1,
+                bridge_start_timeout_ms: 5_000,
+                health_check_interval_ms: 5_000,
+                bridge_cache_dir: None,
+                version: "0.1.0".to_string(),
+                bind_address: None,
+                reconnect: NetworkRetryPolicy::default(),
+            })
+            .unwrap(),
+        );
+        let component = CxfComponent::new(pool);
+        let endpoint = component
+            .create_endpoint(
+                "cxf://http://host:8080/service?wsdl=/wsdl/hello.wsdl&service=HelloService&port=HelloPort&profile=test",
+                &camel_component_api::NoOpComponentContext,
+            )
+            .unwrap();
+        let err = endpoint
+            .create_consumer(rt())
+            .err()
+            .expect("consumer construction must reject a SIGNATURE_PARTS profile");
+        let msg = err.to_string();
+        assert!(msg.contains("signature_parts"), "got: {msg}");
+        assert!(msg.contains("SIGNATURE_PARTS"), "got: {msg}");
+        assert!(
+            msg.contains("Body+Timestamp replay invariant"),
+            "got: {msg}"
+        );
     }
 
     #[test]

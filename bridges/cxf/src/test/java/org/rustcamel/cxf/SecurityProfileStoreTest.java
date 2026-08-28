@@ -126,9 +126,12 @@ class SecurityProfileStoreTest {
     env.put("CXF_PROFILE_FULL_SERVICE_NAME", "TestService");
     env.put("CXF_PROFILE_FULL_PORT_NAME", "TestPort");
     env.put("CXF_PROFILE_FULL_ADDRESS", "http://localhost:8080/svc");
-    env.put("CXF_PROFILE_FULL_SIGNATURE_ALGORITHM", "rsa-sha256");
-    env.put("CXF_PROFILE_FULL_SIGNATURE_DIGEST_ALGORITHM", "sha256");
-    env.put("CXF_PROFILE_FULL_SIGNATURE_C14N_ALGORITHM", "exc-c14n");
+    env.put(
+        "CXF_PROFILE_FULL_SIGNATURE_ALGORITHM",
+        "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256");
+    env.put(
+        "CXF_PROFILE_FULL_SIGNATURE_DIGEST_ALGORITHM", "http://www.w3.org/2001/04/xmlenc#sha256");
+    env.put("CXF_PROFILE_FULL_SIGNATURE_C14N_ALGORITHM", "http://www.w3.org/2001/10/xml-exc-c14n#");
     env.put("CXF_PROFILE_FULL_SIGNATURE_PARTS", "Body");
 
     SecurityProfileStore store = createStore(env);
@@ -147,9 +150,9 @@ class SecurityProfileStoreTest {
     assertEquals("TestService", p.serviceName());
     assertEquals("TestPort", p.portName());
     assertEquals("http://localhost:8080/svc", p.address());
-    assertEquals("rsa-sha256", p.signatureAlgorithm());
-    assertEquals("sha256", p.signatureDigestAlgorithm());
-    assertEquals("exc-c14n", p.signatureC14nAlgorithm());
+    assertEquals("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256", p.signatureAlgorithm());
+    assertEquals("http://www.w3.org/2001/04/xmlenc#sha256", p.signatureDigestAlgorithm());
+    assertEquals("http://www.w3.org/2001/10/xml-exc-c14n#", p.signatureC14nAlgorithm());
     assertEquals("Body", p.signatureParts());
   }
 
@@ -290,5 +293,19 @@ class SecurityProfileStoreTest {
     IllegalStateException ex = assertThrows(IllegalStateException.class, () -> createStore(env));
     assertTrue(ex.getMessage().contains("Keystore file not found"));
     assertTrue(ex.getMessage().contains("broken"));
+  }
+
+  @Test
+  @DisplayName("invalid signature knob env var aborts store construction naming the variable")
+  void invalidSignatureKnobEnvVarFailsConstruction() {
+    Map<String, String> env = new HashMap<>();
+    env.put("CXF_PROFILES", "bad");
+    env.put("CXF_PROFILE_BAD_KEYSTORE_PATH", ksFile.toString());
+    env.put("CXF_PROFILE_BAD_SECURITY_ACTIONS_OUT", "Encrypt");
+    env.put("CXF_PROFILE_BAD_SIGNATURE_ALGORITHM", "not a uri");
+
+    IllegalArgumentException ex =
+        assertThrows(IllegalArgumentException.class, () -> createStore(env));
+    assertTrue(ex.getMessage().contains("SIGNATURE_ALGORITHM"), ex.getMessage());
   }
 }

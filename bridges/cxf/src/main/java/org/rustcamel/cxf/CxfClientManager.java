@@ -20,9 +20,17 @@ import org.apache.cxf.jaxws.DispatchImpl;
 @ApplicationScoped
 public class CxfClientManager {
   private static final Logger LOG = Logger.getLogger(CxfClientManager.class.getName());
-  private final Map<String, Dispatch<Source>> dispatches = new ConcurrentHashMap<>();
 
-  @Inject BridgeConfig bridgeConfig;
+  private record DispatchKey(
+      String wsdl,
+      String address,
+      String service,
+      String port,
+      String profile,
+      String operation,
+      long timeoutMs) {}
+
+  private final Map<DispatchKey, Dispatch<Source>> dispatches = new ConcurrentHashMap<>();
 
   @Inject SecurityProfileStore profileStore;
 
@@ -45,19 +53,19 @@ public class CxfClientManager {
       String service,
       String port,
       String operation,
-      String profileName)
+      String profileName,
+      long timeoutMs)
       throws Exception {
     SecurityProfile profile = profileStore.getProfile(profileName);
-    String key = wsdl + "#" + address + "#" + service + "#" + port + "#" + profileName;
+    String normalizedOperation = operation == null || operation.isBlank() ? "" : operation;
+    DispatchKey key =
+        new DispatchKey(wsdl, address, service, port, profileName, normalizedOperation, timeoutMs);
     try {
-      Dispatch<Source> dispatch =
-          dispatches.computeIfAbsent(
-              key, k -> createDispatch(wsdl, address, service, port, profile));
-      if (operation != null && !operation.isBlank()) {
-        dispatch.getRequestContext().put("jakarta.xml.ws.soap.http.soapaction.use", Boolean.TRUE);
-        dispatch.getRequestContext().put("jakarta.xml.ws.soap.http.soapaction.uri", operation);
-      }
-      return dispatch;
+      return dispatches.computeIfAbsent(
+          key,
+          k ->
+              createDispatch(
+                  wsdl, address, service, port, profile, normalizedOperation, k.timeoutMs()));
     } catch (RuntimeException ex) {
       if (ex.getCause() instanceof Exception nested) {
         throw nested;
@@ -71,7 +79,13 @@ public class CxfClientManager {
   }
 
   private Dispatch<Source> createDispatch(
-      String wsdl, String address, String service, String port, SecurityProfile profile) {
+      String wsdl,
+      String address,
+      String service,
+      String port,
+      SecurityProfile profile,
+      String operation,
+      long timeoutMs) {
     try {
       QName serviceQName = service.startsWith("{") ? QName.valueOf(service) : new QName(service);
       QName portQName = port.startsWith("{") ? QName.valueOf(port) : new QName(port);
@@ -84,9 +98,14 @@ public class CxfClientManager {
         dispatch.getRequestContext().put("jakarta.xml.ws.service.endpoint.address", address);
       }
 
-      String timeout = String.valueOf(bridgeConfig.connectionTimeoutMs());
+      String timeout = String.valueOf(timeoutMs);
       dispatch.getRequestContext().put("jakarta.xml.ws.client.connectionTimeout", timeout);
       dispatch.getRequestContext().put("jakarta.xml.ws.client.receiveTimeout", timeout);
+
+      if (operation != null && !operation.isBlank()) {
+        dispatch.getRequestContext().put("jakarta.xml.ws.soap.http.soapaction.use", Boolean.TRUE);
+        dispatch.getRequestContext().put("jakarta.xml.ws.soap.http.soapaction.uri", operation);
+      }
 
       if (profile.hasSecurity() && dispatch instanceof DispatchImpl<Source> cxfDispatch) {
         var out = profile.createOutInterceptor();

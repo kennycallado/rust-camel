@@ -381,6 +381,162 @@ class WssSecurityProcessorIntegrationTest {
         "Verified envelope should still contain original body content");
   }
 
+  // --- Consumer-path signature knob application ---
+
+  private static final String SOAP11_NS = "http://schemas.xmlsoap.org/soap/envelope/";
+  private static final String DS_NS = "http://www.w3.org/2000/09/xmldsig#";
+  // sha-384 lives in the xmldsig-more namespace — the xmlenc namespace has no sha384 digest
+  // registration in Santuario, so the xmlenc#sha384 form would fail digest resolution.
+  private static final String SHA384_DIGEST_URI = "http://www.w3.org/2001/04/xmldsig-more#sha384";
+  private static final String RSA_SHA384_URI = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha384";
+  // exc-c14n WITHOUT comments is WSS4J's default c14n — using it here could not go RED.
+  // The WithComments variant is a distinct non-default URI, so a dropped knob call fails.
+  private static final String EXC_C14N_URI = "http://www.w3.org/2001/10/xml-exc-c14n#";
+  private static final String EXC_C14N_WITH_COMMENTS_URI =
+      "http://www.w3.org/2001/10/xml-exc-c14n#WithComments";
+
+  /** SOAP 1.1 envelope signed by the consumer-path knob tests. */
+  private static String soap11Envelope() {
+    return """
+        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+          <soapenv:Header/>
+          <soapenv:Body>
+            <test:Hello xmlns:test="http://test.example.com">World</test:Hello>
+          </soapenv:Body>
+        </soapenv:Envelope>
+        """;
+  }
+
+  /** Consumer signed-response profile: keystore plus "Signature Timestamp" out-actions. */
+  private SecurityProfile.Builder consumerSigningProfileBuilder() {
+    return SecurityProfile.builder("test")
+        .keystore(keystorePath.toString(), "changeit")
+        .truststore(keystorePath.toString(), "changeit")
+        .sigUser("alice", "changeit")
+        .encUser("alice")
+        .actionsOut("Signature Timestamp")
+        .actionsIn("Signature");
+  }
+
+  /** Collects the URI attribute of every ds:Reference, stripping the leading '#'. */
+  private static Set<String> signedReferenceIds(Document doc) {
+    Set<String> ids = new HashSet<>();
+    NodeList refs = doc.getElementsByTagNameNS(DS_NS, "Reference");
+    for (int i = 0; i < refs.getLength(); i++) {
+      Element ref = (Element) refs.item(i);
+      ids.add(ref.getAttribute("URI").replaceFirst("^#", ""));
+    }
+    return ids;
+  }
+
+  /** Asserts the signature references cover both the SOAP 1.1 Body and the Timestamp. */
+  private static void assertCoversBodyAndTimestamp(Document doc) {
+    Set<String> signedIds = signedReferenceIds(doc);
+    assertTrue(
+        signedIds.contains(requireWsuId(soleElement(doc, SOAP11_NS, "Body"))),
+        "Signature must reference the envelope Body");
+    assertTrue(
+        signedIds.contains(requireWsuId(soleElement(doc, WSConstants.WSU_NS, "Timestamp"))),
+        "Signature must reference the Timestamp");
+  }
+
+  @Test
+  void consumerAppliesDigestAlgorithm() throws Exception {
+    WssSecurityProcessor processor =
+        new WssSecurityProcessor(
+            consumerSigningProfileBuilder().signatureDigestAlgorithm(SHA384_DIGEST_URI).build());
+
+    Document doc = parseNamespaced(processor.processOutbound(soap11Envelope()));
+
+    NodeList digestMethods = doc.getElementsByTagNameNS(DS_NS, "DigestMethod");
+    assertTrue(digestMethods.getLength() > 0, "Signature must carry DigestMethod elements");
+    for (int i = 0; i < digestMethods.getLength(); i++) {
+      assertEquals(
+          SHA384_DIGEST_URI,
+          ((Element) digestMethods.item(i)).getAttribute("Algorithm"),
+          "Every DigestMethod must use the configured digest");
+    }
+    assertCoversBodyAndTimestamp(doc);
+  }
+
+  @Test
+  void consumerAppliesSignatureAlgorithm() throws Exception {
+    WssSecurityProcessor processor =
+        new WssSecurityProcessor(
+            consumerSigningProfileBuilder().signatureAlgorithm(RSA_SHA384_URI).build());
+
+    Document doc = parseNamespaced(processor.processOutbound(soap11Envelope()));
+
+    assertEquals(
+        RSA_SHA384_URI,
+        soleElement(doc, DS_NS, "SignatureMethod").getAttribute("Algorithm"),
+        "SignatureMethod must use the configured signature algorithm");
+  }
+
+  @Test
+  void consumerAppliesCanonicalizationAlgorithm() throws Exception {
+    WssSecurityProcessor processor =
+        new WssSecurityProcessor(
+            consumerSigningProfileBuilder()
+                .signatureC14nAlgorithm(EXC_C14N_WITH_COMMENTS_URI)
+                .build());
+
+    Document doc = parseNamespaced(processor.processOutbound(soap11Envelope()));
+
+    assertEquals(
+        EXC_C14N_WITH_COMMENTS_URI,
+        soleElement(doc, DS_NS, "CanonicalizationMethod").getAttribute("Algorithm"),
+        "CanonicalizationMethod must use the configured c14n algorithm");
+  }
+
+  @Test
+  void consumerDefaultsUnchangedWithoutKnobs() throws Exception {
+    WssSecurityProcessor processor =
+        new WssSecurityProcessor(consumerSigningProfileBuilder().build());
+
+    Document doc = parseNamespaced(processor.processOutbound(soap11Envelope()));
+
+    assertEquals(
+        WSConstants.RSA_SHA1,
+        soleElement(doc, DS_NS, "SignatureMethod").getAttribute("Algorithm"),
+        "No knobs configured — the pre-change default signature algorithm must stay rsa-sha1");
+
+    NodeList digestMethods = doc.getElementsByTagNameNS(DS_NS, "DigestMethod");
+    assertTrue(digestMethods.getLength() > 0, "Signature must carry DigestMethod elements");
+    for (int i = 0; i < digestMethods.getLength(); i++) {
+      assertEquals(
+          WSConstants.SHA1,
+          ((Element) digestMethods.item(i)).getAttribute("Algorithm"),
+          "No knobs configured — the pre-change default digest must stay sha-1");
+    }
+
+    assertEquals(
+        EXC_C14N_URI,
+        soleElement(doc, DS_NS, "CanonicalizationMethod").getAttribute("Algorithm"),
+        "No knobs configured — the pre-change default c14n must stay exclusive c14n");
+    assertCoversBodyAndTimestamp(doc);
+  }
+
+  @Test
+  void consumerRefusesPartsProfile() {
+    // "Body" is valid PARTS syntax with a keystore and a Signature action — the builder
+    // accepts it; refusal happens on the consumer path because coverage is path-fixed.
+    SecurityProfile profile =
+        SecurityProfile.builder("test")
+            .keystore(keystorePath.toString(), "changeit")
+            .sigUser("alice", "changeit")
+            .encUser("alice")
+            .actionsOut("Signature")
+            .actionsIn("Signature")
+            .signatureParts("Body")
+            .build();
+
+    IllegalStateException ex =
+        assertThrows(IllegalStateException.class, () -> new WssSecurityProcessor(profile));
+    assertTrue(ex.getMessage().contains("SIGNATURE_PARTS"), "Message must name SIGNATURE_PARTS");
+    assertTrue(ex.getMessage().contains("Body+Timestamp"), "Message must name Body+Timestamp");
+  }
+
   // --- XML helpers for signature-coverage assertions ---
 
   private static final String SOAP12_NS = "http://www.w3.org/2003/05/soap-envelope";

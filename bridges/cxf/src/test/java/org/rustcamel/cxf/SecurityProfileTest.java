@@ -2,7 +2,9 @@ package org.rustcamel.cxf;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.util.Map;
 import java.util.Properties;
+import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -242,5 +244,199 @@ class SecurityProfileTest {
       java.nio.file.Files.deleteIfExists(ksPath);
       java.nio.file.Files.deleteIfExists(tsPath);
     }
+  }
+
+  @Test
+  @DisplayName("signature knob set while out-actions omit Signature is rejected")
+  void knobWithoutSignatureActionIsRejected() {
+    assertBuildRejectedNaming(
+        SecurityProfile.builder("no-action")
+            .keystore("/ks.jks", "pass")
+            .actionsOut("Encrypt")
+            .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha384"),
+        "SIGNATURE_ALGORITHM");
+    assertBuildRejectedNaming(
+        SecurityProfile.builder("no-action")
+            .keystore("/ks.jks", "pass")
+            .actionsOut("Encrypt")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha384"),
+        "SIGNATURE_DIGEST_ALGORITHM");
+    assertBuildRejectedNaming(
+        SecurityProfile.builder("no-action")
+            .keystore("/ks.jks", "pass")
+            .actionsOut("Encrypt")
+            .signatureC14nAlgorithm("http://www.w3.org/2001/10/xml-exc-c14n#"),
+        "SIGNATURE_C14N_ALGORITHM");
+    assertBuildRejectedNaming(
+        SecurityProfile.builder("no-action")
+            .keystore("/ks.jks", "pass")
+            .actionsOut("Encrypt")
+            .signatureParts("Body"),
+        "SIGNATURE_PARTS");
+  }
+
+  @Test
+  @DisplayName("signature knob set without a signing keystore is rejected")
+  void knobWithoutKeystoreIsRejected() {
+    assertBuildRejectedNaming(
+        SecurityProfile.builder("no-keystore")
+            .actionsOut("Signature")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha384"),
+        "SIGNATURE_DIGEST_ALGORITHM");
+  }
+
+  @Test
+  @DisplayName("malformed SIGNATURE_PARTS segments are rejected")
+  void malformedPartsSegmentIsRejected() throws Exception {
+    java.nio.file.Path ksPath = TestKeystoreHelper.createTestKeystore();
+    try {
+      String[] malformed = {
+        "{}{http://x}",
+        "{Bogus}{http://x}Body",
+        "{Content}{http://x}",
+        "{Content}http://x}Body",
+        "{Content}{http://x}}Body",
+        "{Content}{http://{x}Body",
+      };
+      for (String parts : malformed) {
+        assertBuildRejectedNaming(
+            SecurityProfile.builder("bad-parts")
+                .keystore(ksPath.toString(), "changeit")
+                .actionsOut("Signature")
+                .signatureParts(parts),
+            "SIGNATURE_PARTS");
+      }
+    } finally {
+      java.nio.file.Files.deleteIfExists(ksPath);
+    }
+  }
+
+  @Test
+  @DisplayName("validateSignaturePartsSyntax direct edge matrix")
+  void validateSignaturePartsSyntaxDirectMatrix() {
+    String[] invalid = {
+      "Body;;Other", "Body;", "{Content}{http://x}}Body", "{Content}{http://{x}Body",
+    };
+    for (String parts : invalid) {
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> SecurityProfile.validateSignaturePartsSyntax(parts),
+          "expected rejection of '" + parts + "'");
+    }
+    String[] valid = {
+      "Body",
+      "{Content}{http://x}Body",
+      "{Element}{}Timestamp",
+      "{}{}Timestamp",
+      "Body;{}{http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd}Timestamp",
+    };
+    for (String parts : valid) {
+      assertDoesNotThrow(
+          () -> SecurityProfile.validateSignaturePartsSyntax(parts),
+          "expected acceptance of '" + parts + "'");
+    }
+  }
+
+  @Test
+  @DisplayName("signature algorithm that is not an absolute URI is rejected")
+  void nonUriAlgorithmIsRejected() throws Exception {
+    java.nio.file.Path ksPath = TestKeystoreHelper.createTestKeystore();
+    try {
+      assertBuildRejectedNaming(
+          SecurityProfile.builder("bad-algo")
+              .keystore(ksPath.toString(), "changeit")
+              .actionsOut("Signature")
+              .signatureAlgorithm("not a uri"),
+          "SIGNATURE_ALGORITHM");
+    } finally {
+      java.nio.file.Files.deleteIfExists(ksPath);
+    }
+  }
+
+  @Test
+  @DisplayName("well-formed SIGNATURE_PARTS forms are accepted and preserved verbatim")
+  void validPartsFormsAreAccepted() throws Exception {
+    java.nio.file.Path ksPath = TestKeystoreHelper.createTestKeystore();
+    try {
+      String[] valid = {
+        "Body",
+        "{Content}{http://schemas.xmlsoap.org/soap/envelope/}Body",
+        "{}{http://x}Body",
+        "{}{}Timestamp",
+        "Body;{}{http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd}Timestamp",
+      };
+      for (String parts : valid) {
+        SecurityProfile p =
+            SecurityProfile.builder("good-parts")
+                .keystore(ksPath.toString(), "changeit")
+                .actionsOut("Signature")
+                .signatureParts(parts)
+                .build();
+        assertEquals(parts, p.signatureParts());
+      }
+    } finally {
+      java.nio.file.Files.deleteIfExists(ksPath);
+    }
+  }
+
+  @Test
+  @DisplayName("producer out-interceptor carries configured knobs under literal WSS4J keys")
+  void producerInterceptorAppliesSignatureKnobs() throws Exception {
+    java.nio.file.Path ksPath = TestKeystoreHelper.createTestKeystore();
+    try {
+      String algo = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha384";
+      String digest = "http://www.w3.org/2001/04/xmlenc#sha384";
+      String c14n = "http://www.w3.org/2001/10/xml-exc-c14n#";
+      String parts = "{Content}{http://x}Body";
+      SecurityProfile p =
+          SecurityProfile.builder("producer")
+              .keystore(ksPath.toString(), "changeit")
+              .actionsOut("Signature")
+              .signatureAlgorithm(algo)
+              .signatureDigestAlgorithm(digest)
+              .signatureC14nAlgorithm(c14n)
+              .signatureParts(parts)
+              .build();
+      var interceptor = assertInstanceOf(WSS4JOutInterceptor.class, p.createOutInterceptor());
+      Map<String, Object> props = interceptor.getProperties();
+      assertEquals(algo, props.get("signatureAlgorithm"));
+      assertEquals(digest, props.get("signatureDigestAlgorithm"));
+      // wss4j 4.0.1: SIG_C14N_ALGO's runtime value is "signatureC14nAlgorithm", not the
+      // legacy long form "signatureCanonicalizationAlgorithm"
+      assertEquals(c14n, props.get("signatureC14nAlgorithm"));
+      assertEquals(parts, props.get("signatureParts"));
+    } finally {
+      java.nio.file.Files.deleteIfExists(ksPath);
+    }
+  }
+
+  @Test
+  @DisplayName("producer out-interceptor omits signature knob keys when no knobs are set")
+  void producerInterceptorOmitsUnsetKnobs() throws Exception {
+    java.nio.file.Path ksPath = TestKeystoreHelper.createTestKeystore();
+    try {
+      SecurityProfile p =
+          SecurityProfile.builder("producer")
+              .keystore(ksPath.toString(), "changeit")
+              .actionsOut("Signature")
+              .build();
+      var interceptor = assertInstanceOf(WSS4JOutInterceptor.class, p.createOutInterceptor());
+      Map<String, Object> props = interceptor.getProperties();
+      assertFalse(props.containsKey("signatureAlgorithm"));
+      assertFalse(props.containsKey("signatureDigestAlgorithm"));
+      assertFalse(props.containsKey("signatureC14nAlgorithm"));
+      assertFalse(props.containsKey("signatureParts"));
+    } finally {
+      java.nio.file.Files.deleteIfExists(ksPath);
+    }
+  }
+
+  private static void assertBuildRejectedNaming(SecurityProfile.Builder builder, String envVar) {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class, builder::build, "expected build() to reject " + envVar);
+    assertTrue(
+        ex.getMessage().contains(envVar),
+        "expected message naming " + envVar + " but was: " + ex.getMessage());
   }
 }

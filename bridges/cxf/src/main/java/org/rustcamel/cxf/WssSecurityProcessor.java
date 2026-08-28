@@ -41,6 +41,14 @@ public class WssSecurityProcessor {
   private final ReplayCache replayCache = new MemoryReplayCache();
 
   public WssSecurityProcessor(SecurityProfile profile) {
+    // Defense-in-depth: the validated Rust path already refuses such profiles at endpoint
+    // construction. Consumer coverage is the fixed replay-defense invariant and cannot be
+    // narrowed via SIGNATURE_PARTS.
+    if (profile.signatureParts() != null && !profile.signatureParts().isBlank()) {
+      throw new IllegalStateException(
+          "SIGNATURE_PARTS is not supported on the consumer path: consumer coverage is fixed"
+              + " to Body+Timestamp for replay defense");
+    }
     this.profile = profile;
   }
 
@@ -88,6 +96,18 @@ public class WssSecurityProcessor {
         parts.add(
             new WSEncryptionPart("Body", doc.getDocumentElement().getNamespaceURI(), "Content"));
         parts.add(new WSEncryptionPart("Timestamp", WSConstants.WSU_NS, ""));
+      }
+      // Signature algorithm knobs apply on this consumer signed-response path exactly as on
+      // the producer out-interceptor. WSS4J 4.x WSSecSignature setter names: setDigestAlgo,
+      // setSigCanonicalization (no setDigestAlgorithm/setCanonicalizationAlgorithm).
+      if (hasText(profile.signatureAlgorithm())) {
+        sign.setSignatureAlgorithm(profile.signatureAlgorithm());
+      }
+      if (hasText(profile.signatureDigestAlgorithm())) {
+        sign.setDigestAlgo(profile.signatureDigestAlgorithm());
+      }
+      if (hasText(profile.signatureC14nAlgorithm())) {
+        sign.setSigCanonicalization(profile.signatureC14nAlgorithm());
       }
       sign.build(profile.getSignatureCrypto());
     }
