@@ -105,6 +105,39 @@ class XsdValidationIntegrationTest {
     assertTrue(resp.getError().getMessage().contains("SCHEMA_PARSE_ERROR"));
   }
 
+  @Test
+  void externalSchemaImportDenied() {
+    var schemaWithExternalImport =
+        """
+        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                   xmlns:ext="http://127.0.0.1:9/external.xsd">
+          <xs:import namespace="http://127.0.0.1:9/external.xsd"
+                     schemaLocation="http://127.0.0.1:9/external.xsd"/>
+          <xs:element name="note" type="ext:SomeType"/>
+        </xs:schema>
+        """;
+    var xml = "<note>ok</note>";
+
+    var resp =
+        xsd.validate(
+                ValidateRequest.newBuilder()
+                    .setSchema(bytes(schemaWithExternalImport))
+                    .setDocument(bytes(xml))
+                    .build())
+            .await()
+            .indefinitely();
+
+    assertFalse(resp.getValid());
+    assertTrue(resp.hasError());
+    assertEquals(BridgeError.Kind.COMPILATION_FAILED, resp.getError().getKind());
+    assertTrue(resp.getError().getMessage().contains("SCHEMA_PARSE_ERROR"));
+    // Deny-all ACCESS_EXTERNAL_SCHEMA prevents the fetch entirely: the external
+    // namespace is never loaded, so the reference fails to resolve. If a fetch
+    // were attempted (deny-all absent), Xerces would instead report
+    // "schema_reference.4: Failed to read schema document ...".
+    assertTrue(resp.getError().getMessage().contains("ext:SomeType"));
+  }
+
   private static ByteString bytes(String value) {
     return ByteString.copyFrom(value, StandardCharsets.UTF_8);
   }

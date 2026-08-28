@@ -145,3 +145,122 @@ routes:
         "unexpected error message: {msg}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn xsd_validation_xml11_invalid_document_diagnosed() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_xml_bridge_binary();
+
+    let xsd = write_xsd();
+    let validator_uri = format!("validator:{}?type=xml", xsd.path().display());
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(ValidatorComponent::new())
+        .build()
+        .await;
+
+    let yaml = format!(
+        r#"
+routes:
+  - id: "xml-bridge-validator-xml11"
+    from: "direct:start"
+    steps:
+      - to: "{validator_uri}"
+      - to: "mock:validated"
+"#
+    );
+
+    for route in parse_yaml(&yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+
+    h.start().await;
+
+    // XML 1.1 declaration: XIncludeAwareParserConfiguration eagerly loads the
+    // XML 1.1 datatype validator factory (XML11DTDDVFactoryImpl) on version
+    // detection. Without native registration that load fails with
+    // "Provider ... cannot be found" and the error text would leak the
+    // regression signature.
+    let exchange = Exchange::new(Message::new(Body::Xml(
+        "<?xml version=\"1.1\"?><order></order>".to_string(),
+    )));
+    let err = send_to_direct(&h, "direct:start", exchange)
+        .await
+        .expect_err("invalid XML 1.1 document should fail XSD validation");
+
+    h.stop().await;
+
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("resource bundle"),
+        "error message must not contain the missing-resource-bundle regression signature: {msg}"
+    );
+    assert!(
+        !msg.contains("Provider"),
+        "error message must not contain the missing-native-factory regression signature: {msg}"
+    );
+    assert!(
+        msg.contains("validation failed")
+            || msg.contains("XSD validation failed")
+            || msg.contains("VALIDATION_ERROR"),
+        "unexpected error message: {msg}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn xsd_validation_doctype_rejected() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_xml_bridge_binary();
+
+    let xsd = write_xsd();
+    let validator_uri = format!("validator:{}?type=xml", xsd.path().display());
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(ValidatorComponent::new())
+        .build()
+        .await;
+
+    let yaml = format!(
+        r#"
+routes:
+  - id: "xml-bridge-validator-doctype"
+    from: "direct:start"
+    steps:
+      - to: "{validator_uri}"
+      - to: "mock:validated"
+"#
+    );
+
+    for route in parse_yaml(&yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+
+    h.start().await;
+
+    let exchange = Exchange::new(Message::new(Body::Xml(
+        r#"<!DOCTYPE order [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<order><id>&xxe;</id></order>"#
+            .to_string(),
+    )));
+    let err = send_to_direct(&h, "direct:start", exchange)
+        .await
+        .expect_err("DOCTYPE with external entity should be rejected");
+
+    h.stop().await;
+
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("resource bundle"),
+        "error message must not contain the missing-resource-bundle regression signature: {msg}"
+    );
+    assert!(
+        msg.contains("DOCTYPE") || msg.contains("doctype") || msg.contains("disallow"),
+        "unexpected error message: {msg}"
+    );
+}

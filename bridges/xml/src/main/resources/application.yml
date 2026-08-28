@@ -34,10 +34,14 @@ quarkus:
   native:
     resources:
       includes:
+        # Xerces 2.12.2 keeps all message bundles as direct children of
+        # org/apache/xerces/impl/msg/ — re-verify the glob on a xercesImpl bump.
+        - org/apache/xerces/impl/msg/*
         - application.yml
         - tls/placeholder-ca.pem
         - tls/placeholder-server.pem
         - tls/placeholder-server.key
+        - org/apache/xerces/impl/msg/*
     # NOTE: quarkus.native.additional-build-args is intentionally NOT set here.
     # It is provided solely via the QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS env var
     # in build-native.sh. Setting it in BOTH places makes SmallRye prioritize the

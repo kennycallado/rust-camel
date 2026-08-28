@@ -208,9 +208,11 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
         return existing;
       }
 
-      // Use JAXP discovery — Quarkus puts xerces on the classpath.
-      // Do NOT specify a classloader: Quarkus augmentation handles JAXP SPI properly.
-      var factory = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI);
+      // Construct the Xerces-J schema factory directly. JAXP discovery is
+      // non-deterministic under native-image: GraalVM 25 falls back to the
+      // JDK-internal Xerces, whose message bundles are absent from the image.
+      // Direct construction always resolves to the classpath Xerces.
+      var factory = new org.apache.xerces.jaxp.validation.XMLSchemaFactory();
       factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
       // Block external DTD/schema access (JAXP 1.5+)
       trySetProperty(factory, XMLConstants.ACCESS_EXTERNAL_DTD, "");
@@ -233,8 +235,11 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
   }
 
   private static Source secureSaxSource(byte[] xmlBytes) throws Exception {
-    // Use default JAXP factory — Quarkus class loading finds the right impl.
-    var spf = SAXParserFactory.newInstance();
+    // Construct the Xerces-J SAX parser factory directly. JAXP discovery is
+    // non-deterministic under native-image: GraalVM 25 falls back to the
+    // JDK-internal Xerces, whose message bundles are absent from the image.
+    // Direct construction always resolves to the classpath Xerces.
+    var spf = new org.apache.xerces.jaxp.SAXParserFactoryImpl();
     spf.setNamespaceAware(true);
     spf.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
     // Block external entity loading (standard JAXP)

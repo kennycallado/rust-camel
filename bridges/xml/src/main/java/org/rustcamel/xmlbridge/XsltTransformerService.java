@@ -13,7 +13,6 @@ import java.util.HexFormat;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.xml.XMLConstants;
-import javax.xml.parsers.SAXParserFactory;
 import javax.xml.transform.Templates;
 import javax.xml.transform.sax.SAXSource;
 import javax.xml.transform.stream.StreamResult;
@@ -207,7 +206,11 @@ public class XsltTransformerService extends MutinyXsltTransformerGrpc.XsltTransf
   }
 
   private static SAXSource secureSaxSource(byte[] xmlBytes) throws Exception {
-    var spf = SAXParserFactory.newInstance();
+    // Construct the Xerces-J SAX parser factory directly. JAXP discovery is
+    // non-deterministic under native-image: GraalVM 25 falls back to the
+    // JDK-internal Xerces, whose message bundles are absent from the image.
+    // Direct construction always resolves to the classpath Xerces.
+    var spf = new org.apache.xerces.jaxp.SAXParserFactoryImpl();
     spf.setNamespaceAware(true);
     spf.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
     spf.setFeature(FEATURE_LOAD_EXTERNAL_DTD, false);

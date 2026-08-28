@@ -176,3 +176,59 @@ routes:
         "unexpected error message: {msg}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn xslt_malformed_input_document_returns_parser_error() {
+    init_tracing();
+    install_crypto_provider();
+    let binary_path = require_xml_bridge_binary();
+
+    let xslt = write_xslt();
+    let xslt_uri = format!("xslt:{}", xslt.path().display());
+
+    let component = XsltComponent::new(XsltComponentConfig {
+        bridge_binary_path: Some(binary_path),
+        ..XsltComponentConfig::default()
+    });
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(component)
+        .build()
+        .await;
+
+    let yaml = format!(
+        r#"
+routes:
+  - id: "xml-bridge-xslt-malformed-input"
+    from: "direct:start"
+    steps:
+      - to: "{xslt_uri}"
+      - to: "mock:result"
+"#
+    );
+
+    for route in parse_yaml(&yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+
+    h.start().await;
+
+    let exchange = Exchange::new(Message::new(Body::Xml("<not-xml".to_string())));
+    let err = send_to_direct(&h, "direct:start", exchange)
+        .await
+        .expect_err("malformed XML should fail XSLT transform");
+
+    h.stop().await;
+
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("resource bundle"),
+        "error message must not contain the missing-resource-bundle regression signature: {msg}"
+    );
+    assert!(
+        msg.contains("Premature end of file") || msg.contains("parse") || msg.contains("PARSE"),
+        "unexpected error message: {msg}"
+    );
+}
