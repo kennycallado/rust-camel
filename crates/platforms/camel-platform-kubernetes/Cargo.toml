@@ -24,6 +24,10 @@ rustls = { version = "0.23", features = ["ring"] }
 [dev-dependencies]
 camel-core = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
+# Fake in-process Kubernetes API for the leadership-loop wiring test.
+tower.workspace = true
+http.workspace = true
 
 [lints]
 workspace = true

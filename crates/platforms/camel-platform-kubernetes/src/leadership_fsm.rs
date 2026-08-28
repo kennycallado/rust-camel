@@ -1,9 +1,10 @@
 //! Pure leadership decision module.
 //!
 //! Owns the verdict vocabulary produced by lease reconciliation. The verdict
-//! refines the design.md §1 sketch: `Renewed` carries `Option<u64>` to
-//! preserve today's only-if-`Some` defensive epoch update; the decision-table
-//! semantics are unchanged.
+//! refines the design.md §1 sketch: `Renewed` carries `Option<u64>` to keep
+//! the defensive epoch update only-if-`Some` — and that update is also
+//! monotonic (`clamp_epoch`): an observed term below the stored epoch never
+//! regresses it while leading. The decision-table semantics are unchanged.
 
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -54,6 +55,30 @@ pub(crate) fn budget_exhausted(
     )
 }
 
+/// What the renewal path should do with an observed leader-term.
+#[derive(Debug)]
+pub(crate) enum EpochUpdate {
+    /// Leave the stored fencing epoch unchanged.
+    Keep,
+    /// Replace the stored fencing epoch with this value.
+    Store(u64),
+}
+
+/// Decide what a renewal-observed leader-term means for the stored
+/// fencing epoch.
+///
+/// `None` (server stripped the annotation) keeps the current epoch;
+/// `Some(term)` is adopted only when strictly greater than `current` —
+/// the stored epoch never regresses while leading, even if a Lease was
+/// deleted and recreated at a lower term. Logging the ignored regression
+/// is the caller's job (`platform_service::note_renewal_epoch`).
+pub(crate) fn clamp_epoch(current: u64, observed: Option<u64>) -> EpochUpdate {
+    match observed {
+        Some(term) if term > current => EpochUpdate::Store(term),
+        _ => EpochUpdate::Keep,
+    }
+}
+
 /// Why the loop gave up leadership.
 #[derive(Debug)]
 pub(crate) enum StepDownReason {
@@ -67,8 +92,10 @@ pub(crate) enum CycleAction {
     /// Transition to leader: store the epoch, set `is_leader`, emit
     /// `StartedLeading`, set `last_success`.
     BecomeLeader { term: u64, sleep: Duration },
-    /// Keep leading: defensively update the stored epoch when `term` is
-    /// `Some`; no leadership event.
+    /// Keep leading: update the stored epoch when `term` is `Some`,
+    /// clamped monotonic (`clamp_epoch`) — an observed term below the
+    /// stored epoch is ignored and logged by the caller; no leadership
+    /// event.
     ContinueLeading { term: Option<u64>, sleep: Duration },
     /// Drop leadership: clear `is_leader`, emit `StoppedLeading`, clear
     /// `last_success`.
@@ -454,5 +481,25 @@ mod tests {
         let result = bound_attempt(async { Err(err) }, Duration::from_secs(10)).await;
 
         assert!(matches!(result, Err(AttemptFailure::Transport(_))));
+    }
+
+    #[test]
+    fn clamp_epoch_none_keeps() {
+        assert!(matches!(clamp_epoch(7, None), EpochUpdate::Keep));
+    }
+
+    #[test]
+    fn clamp_epoch_equal_keeps() {
+        assert!(matches!(clamp_epoch(7, Some(7)), EpochUpdate::Keep));
+    }
+
+    #[test]
+    fn clamp_epoch_increase_stores() {
+        assert!(matches!(clamp_epoch(7, Some(9)), EpochUpdate::Store(9)));
+    }
+
+    #[test]
+    fn clamp_epoch_regression_keeps() {
+        assert!(matches!(clamp_epoch(7, Some(1)), EpochUpdate::Keep));
     }
 }

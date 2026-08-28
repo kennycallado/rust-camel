@@ -2408,6 +2408,7 @@ dependencies = [
  "camel-api",
  "camel-core",
  "hostname",
+ "http",
  "k8s-openapi",
  "kube",
  "rand 0.10.2",
@@ -2416,7 +2417,9 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "tower 0.5.3",
  "tracing",
+ "tracing-test",
 ]
 
 [[package]]

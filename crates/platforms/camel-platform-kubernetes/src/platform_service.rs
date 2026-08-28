@@ -27,8 +27,8 @@ use tracing::{error, warn};
 
 use crate::identity::KubernetesPlatformIdentity;
 use crate::leadership_fsm::{
-    AttemptFailure, CycleAction, CycleOutcome, LoopState, ReconcileVerdict, StepDownReason,
-    bound_attempt, budget_exhausted, decide, remaining_budget,
+    AttemptFailure, CycleAction, CycleOutcome, EpochUpdate, LoopState, ReconcileVerdict,
+    StepDownReason, bound_attempt, budget_exhausted, clamp_epoch, decide, remaining_budget,
 };
 
 #[derive(Debug, Clone)]
@@ -261,21 +261,15 @@ impl LeadershipService for KubernetesLeadershipService {
                         sleep
                     }
                     CycleAction::ContinueLeading { term, sleep } => {
-                        // Renewal (still leader) — the server should return
-                        // the same term; update defensively if it ever
-                        // differs. Epoch policy for the stripped-annotation
-                        // edge: the follower-path fallback to 1 for a
-                        // missing term lives in
-                        // `leadership_fsm::decide`'s BecomeLeader arm
-                        // (ADR-0035); this defensive update stores what the
-                        // server reports — accepted behavior for a
-                        // non-conforming server, matching the blessed
-                        // decision table.
-                        if let Some(term) = term
-                            && term != leader_epoch_task.load(Ordering::Acquire)
-                        {
-                            leader_epoch_task.store(term, Ordering::Release);
-                        }
+                        // Renewal (still leader) — the stored epoch is
+                        // clamped monotonic (`clamp_epoch`): a higher term
+                        // is adopted, a lower one (deleted/recreated Lease)
+                        // is ignored and logged in `note_renewal_epoch`.
+                        // The stripped-annotation edge keeps the local
+                        // epoch; the follower-path fallback to 1 for a
+                        // missing term lives in `leadership_fsm::decide`'s
+                        // BecomeLeader arm (ADR-0035).
+                        note_renewal_epoch(&leader_epoch_task, term, &lease_name);
                         sleep
                     }
                     CycleAction::StepDown { reason } => {
@@ -430,6 +424,42 @@ fn jittered_duration(base: Duration, jitter_factor: f64) -> Duration {
     }
     let jitter = capped_ms * jitter_factor * (rand::random::<f64>() * 2.0 - 1.0);
     Duration::from_millis((capped_ms + jitter).max(0.0) as u64)
+}
+
+/// Apply a renewal-observed leader-term to the stored fencing epoch.
+///
+/// Loads the stored value, decides via `leadership_fsm::clamp_epoch`,
+/// conditionally stores, and returns the prior value. Logging-free —
+/// `note_renewal_epoch` owns the log surface.
+/// Single-writer: only the per-lock leadership loop task may store;
+/// readers load-only.
+fn apply_renewal_epoch(leader_epoch: &AtomicU64, observed: Option<u64>) -> u64 {
+    let prior = leader_epoch.load(Ordering::Acquire);
+    if let EpochUpdate::Store(term) = clamp_epoch(prior, observed) {
+        leader_epoch.store(term, Ordering::Release);
+    }
+    prior
+}
+
+/// Renewal-path epoch update: apply the clamp, then surface an observed
+/// regression to the log.
+///
+/// A lower observed term proves the Lease was deleted and recreated (an
+/// operator action); following it would regress the fencing epoch and
+/// let a fenced writer pass the guard. Leadership itself is healthy, so
+/// this is `warn!`, not an error.
+fn note_renewal_epoch(leader_epoch: &AtomicU64, observed: Option<u64>, lease_name: &str) {
+    let prior = apply_renewal_epoch(leader_epoch, observed);
+    if let Some(term) = observed
+        && term < prior
+    {
+        warn!(
+            lease_name = %lease_name,
+            prior_epoch = prior,
+            observed_term = term,
+            "ignoring epoch regression"
+        );
+    }
 }
 
 pub struct KubernetesPlatformService {
@@ -812,10 +842,14 @@ fn is_not_found(err: &kube::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
     use super::*;
     use kube::core::Status;
     use kube::core::response::StatusSummary;
+    use tracing_test::traced_test;
 
     #[test]
     fn default_config_leaves_namespace_empty_to_enable_fallback_chain() {
@@ -1004,5 +1038,379 @@ mod tests {
         assert!(!holder_matches(&spec, "default/pod-a"));
         assert!(!holder_matches(&spec, "pod-a"));
         assert!(!holder_matches(&spec, ""));
+    }
+
+    // --- renewal-path epoch monotonicity (k8s-lease-epoch) ---
+
+    #[test]
+    fn apply_renewal_epoch_none_keeps() {
+        let epoch = AtomicU64::new(7);
+
+        let prior = apply_renewal_epoch(&epoch, None);
+
+        assert_eq!(prior, 7);
+        assert_eq!(epoch.load(Ordering::Acquire), 7);
+    }
+
+    #[test]
+    fn apply_renewal_epoch_equal_keeps() {
+        let epoch = AtomicU64::new(7);
+
+        let prior = apply_renewal_epoch(&epoch, Some(7));
+
+        assert_eq!(prior, 7);
+        assert_eq!(epoch.load(Ordering::Acquire), 7);
+    }
+
+    #[test]
+    fn apply_renewal_epoch_increase_stores() {
+        let epoch = AtomicU64::new(7);
+
+        let prior = apply_renewal_epoch(&epoch, Some(9));
+
+        assert_eq!(prior, 7);
+        assert_eq!(epoch.load(Ordering::Acquire), 9);
+    }
+
+    #[test]
+    fn apply_renewal_epoch_regression_keeps() {
+        let epoch = AtomicU64::new(7);
+
+        let prior = apply_renewal_epoch(&epoch, Some(1));
+
+        assert_eq!(prior, 7);
+        assert_eq!(epoch.load(Ordering::Acquire), 7);
+    }
+
+    /// Serializes the captured-log tests: `tracing-test`'s global buffer
+    /// is process-wide and is not cleared between tests, so concurrent
+    /// emission would make the zero-record assertion racy.
+    static LOG_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_log_capture() -> std::sync::MutexGuard<'static, ()> {
+        // Poison-resilient: a failed assertion in one log test must not
+        // cascade a PoisonError into its sibling.
+        LOG_CAPTURE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn clear_captured_logs() {
+        let mut buf = tracing_test::internal::global_buf()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        buf.clear();
+    }
+
+    /// Return the captured log record lines whose message contains every
+    /// needle. `#[traced_test]` writes each record as one line into the
+    /// shared global buffer, so line matching approximates per-record
+    /// message matching. Each returned line carries the level (e.g. ` WARN `)
+    /// and the structured `key=value` fields, so callers can pin both.
+    fn captured_records_containing(needles: &[&str]) -> Vec<String> {
+        let buf = tracing_test::internal::global_buf()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .filter(|line| needles.iter().all(|needle| line.contains(needle)))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[traced_test]
+    #[test]
+    fn note_renewal_epoch_regression_logs_warning() {
+        let _guard = lock_log_capture();
+        clear_captured_logs();
+
+        let epoch = AtomicU64::new(7);
+        note_renewal_epoch(&epoch, Some(1), "test-lease");
+
+        assert_eq!(epoch.load(Ordering::Acquire), 7);
+        let records = captured_records_containing(&["ignoring epoch regression"]);
+        assert_eq!(records.len(), 1, "expected exactly one regression record");
+        let record = &records[0];
+        // Level pin: the emission must stay a warning — demoting it to
+        // `info!` fails here because the captured line carries the level.
+        assert!(
+            record.contains(" WARN "),
+            "regression record is not WARN level: {record}"
+        );
+        // Structured-field pin: the record must carry the regression
+        // context as `key=value` fields, not just in its message text.
+        assert!(
+            record.contains("prior_epoch=7"),
+            "missing prior_epoch=7 field: {record}"
+        );
+        assert!(
+            record.contains("observed_term=1"),
+            "missing observed_term=1 field: {record}"
+        );
+        assert!(
+            record.contains("lease_name=test-lease"),
+            "missing lease_name=test-lease field: {record}"
+        );
+    }
+
+    #[traced_test]
+    #[test]
+    fn note_renewal_epoch_equal_and_none_emit_no_epoch_log() {
+        let _guard = lock_log_capture();
+        clear_captured_logs();
+
+        let epoch = AtomicU64::new(7);
+        note_renewal_epoch(&epoch, Some(7), "test-lease");
+        note_renewal_epoch(&epoch, None, "test-lease");
+
+        assert_eq!(epoch.load(Ordering::Acquire), 7);
+        let regressions = captured_records_containing(&["ignoring epoch regression"]);
+        assert_eq!(regressions.len(), 0);
+        // Spec predicate: zero records whose message contains both
+        // "test-lease" and "epoch" — no epoch-update, no regression log.
+        let epoch_records = captured_records_containing(&["test-lease", "epoch"]);
+        assert_eq!(epoch_records.len(), 0);
+    }
+
+    // --- wiring harness: in-process fake Kubernetes API (k8s-lease-epoch) ---
+
+    type FakeApiResponse = http::Response<kube::client::Body>;
+
+    /// Minimal in-memory coordination.k8s.io API server. Serves exactly the
+    /// operations `reconcile_lease` / `release_lease` issue against
+    /// `Api<Lease>` (GET item, POST collection, PUT item), so the REAL
+    /// leadership-loop task spawned by `start` can be driven end-to-end
+    /// without a cluster.
+    #[derive(Clone, Default)]
+    struct FakeLeaseApi {
+        cluster: Arc<Mutex<FakeCluster>>,
+    }
+
+    #[derive(Default)]
+    struct FakeCluster {
+        lease: Option<Lease>,
+        resource_version: u64,
+        method_paths: Vec<String>,
+    }
+
+    impl FakeCluster {
+        /// Store `lease` with a fresh resourceVersion, mirroring the
+        /// apiserver's write path, and return the stored object.
+        fn store(&mut self, mut lease: Lease) -> Lease {
+            self.resource_version += 1;
+            lease.metadata.resource_version = Some(self.resource_version.to_string());
+            self.lease = Some(lease.clone());
+            lease
+        }
+
+        fn route(&mut self, method: &str, path: &str, body: &[u8]) -> FakeApiResponse {
+            self.method_paths.push(format!("{method} {path}"));
+            let is_item = path.contains("/leases/");
+            match method {
+                "GET" if is_item => match &self.lease {
+                    Some(lease) => fake_json_response(200, lease),
+                    None => fake_status_response(404),
+                },
+                "POST" if !is_item => {
+                    let lease: Lease = serde_json::from_slice(body)
+                        .expect("fake api: create body parses as Lease");
+                    let stored = self.store(lease);
+                    fake_json_response(201, &stored)
+                }
+                "PUT" if is_item => {
+                    let lease: Lease = serde_json::from_slice(body)
+                        .expect("fake api: replace body parses as Lease");
+                    let stored = self.store(lease);
+                    fake_json_response(200, &stored)
+                }
+                _ => fake_status_response(404),
+            }
+        }
+    }
+
+    fn fake_json_response(status: u16, lease: &Lease) -> FakeApiResponse {
+        let body = serde_json::to_vec(lease).expect("lease serializes");
+        http::Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(kube::client::Body::from(body))
+            .expect("static response parts")
+    }
+
+    fn fake_status_response(status: u16) -> FakeApiResponse {
+        // Shapes a real apiserver 404 Status so `get_opt` maps it to `None`.
+        let body: &[u8] = br#"{
+            "kind": "Status",
+            "apiVersion": "v1",
+            "metadata": {},
+            "status": "Failure",
+            "message": "lease not found",
+            "reason": "NotFound",
+            "code": 404
+        }"#;
+        http::Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(kube::client::Body::from(body.to_vec()))
+            .expect("static response parts")
+    }
+
+    impl tower::Service<http::Request<kube::client::Body>> for FakeLeaseApi {
+        type Response = FakeApiResponse;
+        type Error = tower::BoxError;
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: http::Request<kube::client::Body>) -> Self::Future {
+            let cluster = Arc::clone(&self.cluster);
+            Box::pin(async move {
+                let method = req.method().clone();
+                let path = req.uri().path().to_string();
+                let body = req
+                    .into_body()
+                    .collect_bytes()
+                    .await
+                    .map_err(tower::BoxError::from)?;
+                let mut cluster = cluster
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                Ok(cluster.route(method.as_str(), &path, &body))
+            })
+        }
+    }
+
+    impl FakeLeaseApi {
+        /// Operator action: rewrite `camel.io/leader-term` on the stored
+        /// Lease (fleet history this pod did not observe directly).
+        fn operator_set_leader_term(&self, term: u64) {
+            let mut cluster = self
+                .cluster
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lease = cluster
+                .lease
+                .as_mut()
+                .expect("operator_set_leader_term: no lease stored");
+            let annotations = lease.metadata.annotations.get_or_insert_with(BTreeMap::new);
+            annotations.insert(LEADER_TERM_ANNOTATION.to_string(), term.to_string());
+            cluster.resource_version += 1;
+        }
+
+        /// Operator action: delete the Lease outright — the delete/recreate
+        /// regression source this change guards against.
+        fn operator_delete_lease(&self) {
+            let mut cluster = self
+                .cluster
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cluster.lease = None;
+        }
+
+        fn request_count(&self, method: &str) -> usize {
+            let cluster = self
+                .cluster
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cluster
+                .method_paths
+                .iter()
+                .filter(|entry| entry.starts_with(method))
+                .count()
+        }
+    }
+
+    /// Poll `cond` until true or `timeout` elapses (5 ms cadence).
+    async fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while !cond() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "condition not met within {timeout:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Wiring test through the REAL leadership loop (`start`'s spawned task
+    /// and `apply_action`'s `ContinueLeading` arm): a still-leading pod that
+    /// recreates a deleted Lease at a lower term must not regress its
+    /// fencing epoch, and the ignored regression must be warned.
+    // The capture lock is a std mutex held for the whole async test on
+    // purpose: it serializes the leadership loop's log emission against the
+    // sibling captured-log tests (same pattern as route_controller_tests).
+    #[allow(clippy::await_holding_lock)]
+    #[traced_test]
+    #[tokio::test]
+    async fn recreate_after_delete_does_not_regress_term() {
+        let _guard = lock_log_capture();
+
+        let config = KubernetesPlatformConfig {
+            namespace: "epoch-test".to_string(),
+            lease_name_prefix: "camel-".to_string(),
+            lease_duration: Duration::from_secs(15),
+            renew_deadline: Duration::from_secs(10),
+            retry_period: Duration::from_millis(20),
+            jitter_factor: 0.0,
+        };
+        let fake = FakeLeaseApi::default();
+        let client = kube::Client::new(fake.clone(), "epoch-test");
+        let identity = PlatformIdentity::local("node-a");
+        let service =
+            KubernetesLeadershipService::new(client, identity, config).expect("leadership config");
+        let handle = service.start("orders").await.expect("leadership handle");
+
+        // Arrange: first-time acquire at term 1, then the fleet term jumps
+        // to 7 and the next renewal adopts it (clamp_epoch increase).
+        wait_until(Duration::from_secs(5), || {
+            handle.is_leader() && handle.leader_epoch() == 1
+        })
+        .await;
+        fake.operator_set_leader_term(7);
+        wait_until(Duration::from_secs(5), || handle.leader_epoch() == 7).await;
+
+        // From here on only the regression emission may reach the capture
+        // buffer: renewals at term 7 are silent, the regression warns.
+        clear_captured_logs();
+        let creates_before_delete = fake.request_count("POST");
+
+        // Act: operator deletes the Lease; the still-leading pod recreates
+        // it at camel.io/leader-term=1 in its next cycle.
+        fake.operator_delete_lease();
+        wait_until(Duration::from_secs(5), || {
+            fake.request_count("POST") > creates_before_delete
+        })
+        .await;
+        // Let the recreation cycle land (ContinueLeading{Some(1)}) and at
+        // least one renewal at term 1 run afterwards.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Assert: the epoch handle never regressed below 7 and the ignored
+        // regression was captured as a WARN with its structured fields.
+        assert_eq!(
+            handle.leader_epoch(),
+            7,
+            "fencing epoch must not regress after delete/recreate"
+        );
+        assert!(handle.is_leader(), "leadership must survive the regression");
+        let records = captured_records_containing(&["ignoring epoch regression"]);
+        assert!(
+            !records.is_empty(),
+            "expected at least one epoch-regression warning after recreate"
+        );
+        assert!(
+            records.iter().all(|record| record.contains(" WARN ")),
+            "every regression record must be WARN level: {records:?}"
+        );
+        assert!(
+            records.iter().any(
+                |record| record.contains("prior_epoch=7") && record.contains("observed_term=1")
+            ),
+            "regression record must carry prior_epoch=7 and observed_term=1: {records:?}"
+        );
+
+        handle.step_down().await.expect("step down");
     }
 }

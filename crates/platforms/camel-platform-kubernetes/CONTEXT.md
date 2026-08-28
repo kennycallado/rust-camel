@@ -18,7 +18,14 @@ the budget, `Failed` and `Conflict` outcomes keep leadership and retry at a
 jittered `retry_period`, with the sleep clamped to the remaining budget.
 Config validation rejects `renew_deadline >= lease_duration`, so the holder
 fences itself before the lease can legally expire for peers (modulo clock
-skew on Lease timestamps).
+skew on Lease timestamps). While leading, the stored epoch is clamped
+monotonic (ADR-0035); an observed regression (deleted/recreated Lease) is
+ignored and logged. The clamp bounds only the LOCAL pin: after a
+fleet-wide term reset the local epoch stays pinned at the old maximum
+until this pod next enters leadership fresh (`BecomeLeader` on
+step-down-and-reacquire, or restart). GLOBAL fencing recovers only when
+the server term exceeds the pre-reset maximum — until then a stale
+pre-reset epoch can outrank the current leader's writes.
 
 ## Dependency boundary
 
