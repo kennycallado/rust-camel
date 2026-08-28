@@ -18,7 +18,7 @@ The CXF bridge supports WS-Security (signing, encryption, verification, and decr
 | `cxf.sig.password`                        | _(none)_          | Password for the private key entry.                                                                                                                     |
 | `cxf.enc.username`                        | `serverkey`       | Alias used for encryption (recipient's public key).                                                                                                     |
 | `cxf.security.actions.out`                | _(empty)_         | Space-separated WSS4J action tokens for outbound messages (e.g. `Signature`, `Signature Encrypt`, `Signature Timestamp`; see Timestamp behavior for constraints and build-time rejections).                                                      |
-| `cxf.security.actions.in`                 | _(empty)_         | Space-separated WSS4J action tokens for inbound messages.                                                                                               |
+| `cxf.security.actions.in`                 | _(empty)_         | Space-separated WSS4J action tokens for inbound messages. Blank/unset keeps the default (`Signature`), which the in-interceptor materializes only when a truststore is present. Explicit `Signature` requires `cxf.truststore.path`; explicit `Encrypt` requires `cxf.keystore.path`; the build fails otherwise. The keystore fallback applies only to the manual consumer path, and the truststore may point at the same JKS as the keystore. |
 | `CXF_PROFILE_<N>_SIGNATURE_ALGORITHM` (`cxf.security.signature.algorithm`) | _(WSS4J default)_ | Signature algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#rsa-sha1` for legacy, `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` for modern). Applied on BOTH producer requests and consumer signed responses. |
 | `CXF_PROFILE_<N>_SIGNATURE_DIGEST_ALGORITHM` (`cxf.security.signature.digest.algorithm`) | _(WSS4J default)_ | Digest algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#sha1` or `http://www.w3.org/2001/04/xmlenc#sha256`). Applied on BOTH paths. |
 | `CXF_PROFILE_<N>_SIGNATURE_C14N_ALGORITHM` (`cxf.security.signature.c14n.algorithm`) | _(WSS4J default)_ | Canonicalization algorithm URI (e.g. `http://www.w3.org/2001/10/xml-exc-c14n#`). Applied on BOTH paths. |
@@ -52,6 +52,7 @@ cxf.security.actions.in=Signature Encrypt
 
 ```properties
 cxf.keystore.path=/etc/camel/keystore.jks
+cxf.truststore.path=/etc/camel/keystore.jks
 cxf.keystore.password=changeit
 cxf.sig.username=myalias
 cxf.sig.password=changeit
@@ -63,15 +64,20 @@ cxf.security.signature.digest.algorithm=http://www.w3.org/2000/09/xmldsig#sha1
 
 ### Inbound security
 
-The `cxf.security.actions.in` property gates inbound processing: only the listed
-actions run on received messages. Both inbound paths are functional. `Signature`
-verification checks the received signature against the truststore
-(`cxf.truststore.path`, which the in-interceptor requires; the keystore
-fallback applies to the manual consumer path only); `Encrypt` decryption
-unwraps the message with the keystore private key, taking the keystore password
-via the WSS4J password callback. See the `cxf.security.actions.in`,
-`cxf.truststore.path`, and `cxf.truststore.password` rows in the Properties
-table above.
+The `cxf.security.actions.in` property gates inbound processing: only
+`Signature` and `Encrypt` are materialized on received messages (other
+tokens are not — see the validator contract below). Both inbound paths are
+functional. Blank or
+unset keeps the default (`Signature`), which the in-interceptor materializes
+only when a truststore is present. Explicit `Signature` requires
+`cxf.truststore.path` — the build fails otherwise. The keystore fallback
+applies only to the manual consumer path, and the truststore may point at the
+same JKS as the keystore. Explicit `Encrypt` requires `cxf.keystore.path`.
+`Signature` verification checks the received signature against the truststore;
+`Encrypt` decryption unwraps the message with the keystore private key, taking
+the keystore password via the WSS4J password callback. See the
+`cxf.security.actions.in`, `cxf.truststore.path`, and `cxf.truststore.password`
+rows in the Properties table above.
 
 ### Signature knobs
 

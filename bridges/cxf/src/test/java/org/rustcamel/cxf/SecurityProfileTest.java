@@ -132,8 +132,9 @@ class SecurityProfileTest {
   @Test
   @DisplayName("canVerifyInbound returns true when actionsIn set")
   void canVerifyInboundReturnsTrueWhenActionsInSet() {
+    // Encrypt is the keystore-legal inbound action: explicit Signature would require a truststore.
     SecurityProfile p =
-        SecurityProfile.builder("test").keystore("/ks.jks", "pass").actionsIn("Signature").build();
+        SecurityProfile.builder("test").keystore("/ks.jks", "pass").actionsIn("Encrypt").build();
     assertTrue(p.canVerifyInbound());
   }
 
@@ -215,7 +216,13 @@ class SecurityProfileTest {
   @Test
   @DisplayName("resolveActionsIn returns explicit value when set")
   void resolveActionsInReturnsExplicit() {
-    SecurityProfile p = SecurityProfile.builder("test").actionsIn("Encrypt Signature").build();
+    // Build-time contract: explicit Signature needs a truststore, explicit Encrypt a keystore.
+    SecurityProfile p =
+        SecurityProfile.builder("test")
+            .keystore("/ks.jks", "pass")
+            .truststore("/ts.jks", "pass")
+            .actionsIn("Encrypt Signature")
+            .build();
     assertEquals("Encrypt Signature", p.resolveActionsIn());
   }
 
@@ -626,6 +633,100 @@ class SecurityProfileTest {
   void blankActionsUnaffected() {
     SecurityProfile p = SecurityProfile.builder("blank-actions").actionsOut("   ").build();
     assertNull(p.createOutInterceptor());
+  }
+
+  @Test
+  @DisplayName("inbound Signature action without a truststore is rejected")
+  void actionsInSignatureWithoutTruststoreIsRejected() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                SecurityProfile.builder("in-sig-no-ts")
+                    .keystore(keystorePath.toString(), "changeit")
+                    .actionsIn("Signature")
+                    .build(),
+            "expected build() to reject inbound Signature without a truststore");
+    String msg = ex.getMessage();
+    assertTrue(
+        msg.contains("cxf.truststore.path"), "expected message naming cxf.truststore.path: " + msg);
+    assertTrue(
+        msg.contains("manual consumer"),
+        "expected message stating the keystore fallback is manual-consumer-only: " + msg);
+    assertTrue(
+        msg.contains("same JKS"),
+        "expected message stating the truststore may point at the same JKS: " + msg);
+  }
+
+  @Test
+  @DisplayName("inbound Encrypt action without a keystore is rejected")
+  void actionsInEncryptWithoutKeystoreIsRejected() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                SecurityProfile.builder("in-enc-no-ks")
+                    .truststore(keystorePath.toString(), "changeit")
+                    .actionsIn("Encrypt")
+                    .build(),
+            "expected build() to reject inbound Encrypt without a keystore");
+    assertTrue(
+        ex.getMessage().contains("cxf.keystore.path"),
+        "expected message naming cxf.keystore.path: " + ex.getMessage());
+  }
+
+  @Test
+  @DisplayName("blank in-actions stay raw-exempt: build succeeds, no in-interceptor")
+  void blankActionsInIsExempt() {
+    SecurityProfile p = SecurityProfile.builder("blank-in").build();
+    assertNull(p.createInInterceptor());
+  }
+
+  @Test
+  @DisplayName("whitespace-only in-actions stay raw-exempt: build succeeds, no in-interceptor")
+  void whitespaceActionsInIsExempt() {
+    SecurityProfile p = SecurityProfile.builder("blank-in-ws").actionsIn("   ").build();
+    assertNull(p.createInInterceptor());
+  }
+
+  @Test
+  @DisplayName("inbound Signature with truststore builds interceptor with action=Signature")
+  void actionsInSignatureOnlyWithTruststoreBuilds() {
+    SecurityProfile p =
+        SecurityProfile.builder("in-sig")
+            .truststore(keystorePath.toString(), "changeit")
+            .actionsIn("Signature")
+            .build();
+    var interceptor = assertInstanceOf(WSS4JInInterceptor.class, p.createInInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    assertEquals("Signature", props.get("action"));
+  }
+
+  @Test
+  @DisplayName("inbound Encrypt with keystore builds interceptor with action=Encrypt")
+  void actionsInEncryptOnlyWithKeystoreBuilds() {
+    SecurityProfile p =
+        SecurityProfile.builder("in-enc")
+            .keystore(keystorePath.toString(), "changeit")
+            .actionsIn("Encrypt")
+            .build();
+    var interceptor = assertInstanceOf(WSS4JInInterceptor.class, p.createInInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    assertEquals("Encrypt", props.get("action"));
+  }
+
+  @Test
+  @DisplayName("inbound Signature Encrypt with both materials builds both actions")
+  void actionsInBothWithBothMaterialsBuilds() {
+    SecurityProfile p =
+        SecurityProfile.builder("in-both")
+            .keystore(keystorePath.toString(), "changeit")
+            .truststore(keystorePath.toString(), "changeit")
+            .actionsIn("Signature Encrypt")
+            .build();
+    var interceptor = assertInstanceOf(WSS4JInInterceptor.class, p.createInInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    assertEquals("Signature Encrypt", props.get("action"));
   }
 
   private static void assertBuildRejectedNaming(SecurityProfile.Builder builder, String envVar) {

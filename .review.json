@@ -2,18 +2,18 @@
  "verdict": "APPROVE-WITH-FINDINGS",
  "reviewer": "reviewers/r_glm",
  "scope": "holistic",
- "impl_range": "330c0976..4cfa6d90",
  "findings": {
-  "minor_1_table_row": "closed by conductor",
-  "minor_2_timestamp_sentence": "closed by conductor"
+  "f1_unknown_tokens": "README narrowed + bd rc-nxtb (P2) filed for both-validator whitelist",
+  "f2_tasks_filelist": "fixed",
+  "f3_password_fallback": "fixed"
  },
- "suite": "135/135 + spotlessCheck, harness-verified twice + empirical RED-PROOF (CCE reproduced against pre-fix)",
- "rust_gates": "N/A - no .rs/Cargo.toml in diff",
+ "suite": "142/142 + spotlessCheck harness-verified",
+ "rust_gates": "N/A - no .rs/Cargo.toml",
  "papal_blessing": {
   "expert": "experts/e_opus",
   "verdict": "BLESS",
   "rounds": 1,
   "conditions": [],
-  "notes": "own mutation test: wrong-anchor keystore aborts chain -> test fails (non-vacuity proven empirically); fences judged honest; rc-es1t deferral sound sequencing"
+  "notes": "own mutation test: validateInboundActions no-op'd -> exactly the 2 rejection tests fail, 5 others stay green; shared-knob verified at source; CAT112 example passes build; rc-nxtb deferral sound"
  }
 }

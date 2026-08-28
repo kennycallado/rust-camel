@@ -479,9 +479,38 @@ public class SecurityProfile {
     }
 
     public SecurityProfile build() {
+      validateInboundActions();
       validateOutboundActions();
       validateSignatureKnobs();
       return new SecurityProfile(this);
+    }
+
+    /**
+     * Fail-loud checks on the RAW configured inbound actions — same discipline as {@link
+     * #validateOutboundActions()}: blank/unset actions are raw-exempt (the runtime default
+     * "Signature" is only materialized when a truststore exists, and the manual consumer path keeps
+     * the keystore fallback). Explicit actions are material-checked individually: Signature needs
+     * verification anchors, which live in the truststore; Encrypt needs decryption keys, which live
+     * in the keystore. Without these checks createInInterceptor() silently drops the unmatched
+     * action, so the endpoint would skip inbound verification or decryption without any error.
+     */
+    private void validateInboundActions() {
+      String raw = securityActionsIn;
+      if (!hasText(raw)) return;
+      if (containsAction(raw, "Signature") && !hasText(truststorePath)) {
+        throw new IllegalArgumentException(
+            "in-actions include Signature but no truststore is configured: '"
+                + raw
+                + "'. Verification anchors live in the truststore (cxf.truststore.path); the"
+                + " keystore fallback applies only to the manual consumer path; the truststore"
+                + " may point at the same JKS as the keystore");
+      }
+      if (containsAction(raw, "Encrypt") && !hasText(keystorePath)) {
+        throw new IllegalArgumentException(
+            "in-actions include Encrypt but no keystore is configured: '"
+                + raw
+                + "'. Decryption keys live in the keystore (cxf.keystore.path)");
+      }
     }
 
     /**
@@ -489,7 +518,9 @@ public class SecurityProfile {
      * the runtime default ("Signature") is resolved later and validated by {@link
      * #validateSignatureKnobs()}. Composition first: Timestamp outside a signature is not
      * tamper-evident, so Timestamp requires Signature. Material second: Signature, Encrypt, and
-     * Timestamp all need crypto material, so a keystore is required.
+     * Timestamp all need crypto material, so a keystore is required. Inbound counterpart: {@link
+     * #validateInboundActions()} applies the same raw-exempt, material-per-action discipline to
+     * actions.in — together the two validators form one build-time security contract.
      */
     private void validateOutboundActions() {
       String raw = securityActionsOut;

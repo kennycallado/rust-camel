@@ -519,11 +519,13 @@ class WssSecurityProcessorIntegrationTest {
 
   @Test
   void consumerRefusesPartsProfile() {
-    // "Body" is valid PARTS syntax with a keystore and a Signature action — the builder
-    // accepts it; refusal happens on the consumer path because coverage is path-fixed.
+    // "Body" is valid PARTS syntax with a keystore, a truststore, and a Signature action — the
+    // builder accepts it; refusal happens on the consumer path because coverage is path-fixed.
+    // The truststore is required: inbound Signature needs verification anchors at build time.
     SecurityProfile profile =
         SecurityProfile.builder("test")
             .keystore(keystorePath.toString(), "changeit")
+            .truststore(keystorePath.toString(), "changeit")
             .sigUser("alice", "changeit")
             .encUser("alice")
             .actionsOut("Signature")
