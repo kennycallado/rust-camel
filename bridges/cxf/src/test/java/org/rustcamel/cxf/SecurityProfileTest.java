@@ -6,7 +6,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Properties;
+import org.apache.cxf.ws.security.wss4j.WSS4JInInterceptor;
 import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor;
+import org.apache.wss4j.common.ConfigurationConstants;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -514,6 +516,38 @@ class SecurityProfileTest {
     Map<String, Object> props = interceptor.getProperties();
     assertEquals("Signature", props.get("action"));
     assertFalse(props.containsKey("signatureParts"));
+  }
+
+  @Test
+  @DisplayName("inbound Signature action references sig crypto properties by ref-id")
+  void inboundSigCryptoUsesRefIdShape() {
+    SecurityProfile p =
+        SecurityProfile.builder("in-sig")
+            .truststore(keystorePath.toString(), "changeit")
+            .actionsIn("Signature")
+            .build();
+    var interceptor = assertInstanceOf(WSS4JInInterceptor.class, p.createInInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    // WSHandler.getString casts the SIG_PROP_REF_ID value to String; a direct Properties
+    // value would ClassCastException at first secured peer response.
+    Object sigRefId = props.get(ConfigurationConstants.SIG_PROP_REF_ID);
+    assertEquals("sigCryptoProperties", sigRefId);
+    assertInstanceOf(Properties.class, props.get(sigRefId));
+  }
+
+  @Test
+  @DisplayName("inbound Encrypt action references dec crypto properties by ref-id")
+  void inboundDecCryptoUsesRefIdShape() {
+    SecurityProfile p =
+        SecurityProfile.builder("in-enc")
+            .keystore(keystorePath.toString(), "changeit")
+            .actionsIn("Encrypt")
+            .build();
+    var interceptor = assertInstanceOf(WSS4JInInterceptor.class, p.createInInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    Object decRefId = props.get(ConfigurationConstants.DEC_PROP_REF_ID);
+    assertEquals("decCryptoProperties", decRefId);
+    assertInstanceOf(Properties.class, props.get(decRefId));
   }
 
   @Test

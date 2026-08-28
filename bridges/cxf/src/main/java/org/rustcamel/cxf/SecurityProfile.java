@@ -42,12 +42,14 @@ public class SecurityProfile {
 
   /**
    * Option keys under which the in-memory crypto {@link Properties} objects live. WSS4J resolves
-   * crypto by ref-id string: SIG_PROP_REF_ID / ENC_PROP_REF_ID name a key whose value WSS4J looks
-   * up as the Properties object itself (WSHandler#getString + loadCrypto).
+   * crypto by ref-id string: SIG_PROP_REF_ID / ENC_PROP_REF_ID / DEC_PROP_REF_ID name a key whose
+   * value WSS4J looks up as the Properties object itself (WSHandler#getString + loadCrypto).
    */
   private static final String SIG_CRYPTO_REF_ID = "sigCryptoProperties";
 
   private static final String ENC_CRYPTO_REF_ID = "encCryptoProperties";
+
+  private static final String DEC_CRYPTO_REF_ID = "decCryptoProperties";
 
   static {
     WSSConfig.init();
@@ -301,22 +303,28 @@ public class SecurityProfile {
     String inActions = resolveActionsIn();
     if (hasText(truststorePath) && containsAction(inActions, "Signature")) {
       actions.add(WSHandlerConstants.SIGNATURE);
-      props.put(
-          ConfigurationConstants.SIG_PROP_REF_ID,
-          createCryptoProperties(truststorePath, truststorePassword));
+      props.put(ConfigurationConstants.SIG_PROP_REF_ID, SIG_CRYPTO_REF_ID);
+      props.put(SIG_CRYPTO_REF_ID, createCryptoProperties(truststorePath, truststorePassword));
     }
     if (containsAction(inActions, "Encrypt")) {
       actions.add(WSHandlerConstants.ENCRYPT);
-      props.put(
-          ConfigurationConstants.DEC_PROP_REF_ID,
-          createCryptoProperties(keystorePath, keystorePassword));
+      props.put(ConfigurationConstants.DEC_PROP_REF_ID, DEC_CRYPTO_REF_ID);
+      props.put(DEC_CRYPTO_REF_ID, createCryptoProperties(keystorePath, keystorePassword));
       props.put(WSHandlerConstants.PW_CALLBACK_REF, callbackWithPassword(keystorePassword));
     }
 
     if (actions.isEmpty()) return null;
 
     props.put(WSHandlerConstants.ACTION, String.join(" ", actions));
-    LOG.info("WS-Security inbound enabled for profile '" + name + "': actions=" + actions);
+    LOG.info(
+        "WS-Security inbound enabled for profile '"
+            + name
+            + "': actions="
+            + actions
+            + ", sigCryptoRefId="
+            + (actions.contains(WSHandlerConstants.SIGNATURE) ? SIG_CRYPTO_REF_ID : "none")
+            + ", decCryptoRefId="
+            + (actions.contains(WSHandlerConstants.ENCRYPT) ? DEC_CRYPTO_REF_ID : "none"));
     return new WSS4JInInterceptor(props);
   }
 

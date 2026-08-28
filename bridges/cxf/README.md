@@ -12,7 +12,7 @@ The CXF bridge supports WS-Security (signing, encryption, verification, and decr
 | ----------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cxf.keystore.path`                       | _(none)_          | Path to the JKS keystore file. When set, WS-Security processing is enabled.                                                                             |
 | `cxf.keystore.password`                   | _(none)_          | Password to the keystore.                                                                                                                               |
-| `cxf.truststore.path`                     | _(none)_          | Path to the truststore for signature verification. Falls back to keystore if not set.                                                                   |
+| `cxf.truststore.path`                     | _(none)_          | Path to the truststore for signature verification. Falls back to keystore for the manual consumer path; the producer in-interceptor requires this.                                                                   |
 | `cxf.truststore.password`                 | _(none)_          | Password to the truststore.                                                                                                                             |
 | `cxf.sig.username`                        | `clientkey`       | Alias of the key entry in the keystore used for signing.                                                                                                |
 | `cxf.sig.password`                        | _(none)_          | Password for the private key entry.                                                                                                                     |
@@ -60,6 +60,18 @@ cxf.security.actions.in=Signature
 cxf.security.signature.algorithm=http://www.w3.org/2000/09/xmldsig#rsa-sha1
 cxf.security.signature.digest.algorithm=http://www.w3.org/2000/09/xmldsig#sha1
 ```
+
+### Inbound security
+
+The `cxf.security.actions.in` property gates inbound processing: only the listed
+actions run on received messages. Both inbound paths are functional. `Signature`
+verification checks the received signature against the truststore
+(`cxf.truststore.path`, which the in-interceptor requires; the keystore
+fallback applies to the manual consumer path only); `Encrypt` decryption
+unwraps the message with the keystore private key, taking the keystore password
+via the WSS4J password callback. See the `cxf.security.actions.in`,
+`cxf.truststore.path`, and `cxf.truststore.password` rows in the Properties
+table above.
 
 ### Signature knobs
 
@@ -117,7 +129,7 @@ When `SIGNATURE_PARTS` is set, the producer applies its value verbatim. The
 timestamp is then covered only if the value names it. Covering the timestamp
 is the operator's responsibility in that case.
 
-Inbound processing enforces the same rule: when the required inbound actions
+The manual consumer's inbound processing enforces the same rule: when the required inbound actions
 include both `Timestamp` and `Signature`, the verified signature must cover
 the timestamp.
 
