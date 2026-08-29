@@ -102,14 +102,13 @@ bridge README SHALL document that the TextMessage cap counts UTF-8 bytes.
 - **WHEN** the consumer converts the message
 - **THEN** the message is forwarded with the full body intact
 
-#### Scenario: oversized BytesMessage is rejected without full allocation
+#### Scenario: oversized BytesMessage rejected without full allocation
 
-- **GIVEN** a `BytesMessage` whose body length exceeds the cap
-- **WHEN** the consumer converts the message
-- **THEN** conversion throws a `JMSException` naming the body length and
-  the cap, and the message is not forwarded
-- **AND** the full body buffer is never allocated (the pre-read length
-  gate fires first)
+- **GIVEN** a consumer with `JMS_MAX_BODY_BYTES=1024` and a mocked
+  `BytesMessage` whose `getBodyLength()` reports 4096
+- **WHEN** the message is consumed
+- **THEN** no allocation of 4096 bytes occurs, the exchange carries the
+  error outcome, and a `warn`-level log names the cap
 
 ## ADDED Requirements
 
