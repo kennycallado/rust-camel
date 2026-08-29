@@ -64,6 +64,17 @@ cxf remainder) SHALL emit this family for errors at minimum.
 - **THEN** the failure is observable on the component's error-family
   emission despite the lever being off
 
+#### Scenario: registry context honors the components lever
+
+- **GIVEN** a `RegistryComponentContext` constructed with the lever
+  snapshot on and a wired collector
+- **WHEN** `component_metrics_enabled()` is queried and the facade is
+  built through `component_metrics()`
+- **THEN** the lever reports on and the facade emits the
+  component-operations family through the wired collector
+- **AND** constructed with the lever off, the family is suppressed
+  while the error family still flows
+
 ### Requirement: Label values are closed sets
 
 Metric label values emitted through `record_counter` and
