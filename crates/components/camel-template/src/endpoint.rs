@@ -9,9 +9,7 @@
 //! - the per-route render limits ([`MinijinjaLimitsConfig`]) applied at
 //!   render time,
 //! - the shared compiled-set [`SharedTemplates`] cell (seeded empty and
-//!   filled by the lifecycle `start()` in Task 4.4),
-//! - the `Arc<dyn RuntimeObservability>` stashed at `create_producer` so
-//!   the lifecycle handle can later reach metrics/health surfaces.
+//!   filled by the lifecycle `start()` in Task 4.4).
 //!
 //! `create_consumer` is rejected: the `template:` scheme is producer-only.
 //! The lifecycle handle is wired in [`Endpoint::lifecycle`] and is a stub
@@ -40,7 +38,6 @@ pub(crate) struct TemplateEndpoint {
     render_limits: MinijinjaLimitsConfig,
     route_id: String,
     shared: SharedTemplates,
-    rt: Mutex<Option<Arc<dyn RuntimeObservability>>>,
 }
 
 impl TemplateEndpoint {
@@ -62,7 +59,6 @@ impl TemplateEndpoint {
             render_limits,
             route_id,
             shared: Arc::new(ArcSwap::from_pointee(TemplateSet::empty())),
-            rt: Mutex::new(None),
         }
     }
 }
@@ -87,17 +83,12 @@ impl Endpoint for TemplateEndpoint {
 
     fn create_producer(
         &self,
-        rt: Arc<dyn RuntimeObservability>,
+        _rt: Arc<dyn RuntimeObservability>,
         _ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
-        // Stash the runtime observability handle so the lifecycle (Task 4.4)
-        // can read metrics/health on its own thread.
-        *self.rt.lock().expect("rt cell poisoned") = Some(Arc::clone(&rt)); // allow-unwrap
         Ok(BoxProcessor::new(TemplateProducer::new(
             Arc::clone(&self.shared),
             ResolvedLimits::from_config(&self.render_limits),
-            Some(rt),
-            self.route_id.clone(),
         )))
     }
 
@@ -105,18 +96,11 @@ impl Endpoint for TemplateEndpoint {
     /// returned handle is a stub until Task 4.4 implements the real
     /// `start()` (open root → build snapshot → compile → seed `shared`).
     fn lifecycle(&self) -> Option<Arc<dyn StepLifecycle>> {
-        let rt = self
-            .rt
-            .lock()
-            .expect("rt cell poisoned") // allow-unwrap
-            .as_ref()
-            .map(Arc::clone);
         Some(Arc::new(StartupBuildHandle {
             shared: Arc::clone(&self.shared),
             entry_abs_path: self.entry_abs_path.clone(),
             render_limits: self.render_limits.clone(),
             limits: self.limits,
-            rt,
             route_id: self.route_id.clone(),
             handler: Mutex::new(None),
             guard: Mutex::new(None),

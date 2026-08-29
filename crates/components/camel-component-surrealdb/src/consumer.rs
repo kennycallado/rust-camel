@@ -212,7 +212,7 @@ impl Consumer for SurrealDbConsumer {
                                 // wait for the result. Pipeline errors are
                                 // handler-owned (b' taxonomy), logged at warn!.
                                 if let Err(e) = context.send_and_wait(exchange).await {
-                                    // ADR-0012: b-prime — log-policy: handler-owned, métrica required
+                                    // b-prime: locally terminal notification-send failure (wired at the increment_errors site below)
                                     runtime_for_task
                                         .metrics()
                                         .increment_errors(&route_id_for_task, "b-prime:surrealdb:notification");

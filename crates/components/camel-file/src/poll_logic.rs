@@ -21,7 +21,8 @@ use tracing::{debug, warn};
 use crate::{SortField, SortSpec};
 
 use camel_component_api::{
-    Body, CamelError, ConsumerContext, Exchange, Message, StreamBody, StreamMetadata,
+    Body, CamelError, ConsumerContext, Exchange, Message, RuntimeObservability, StreamBody,
+    StreamMetadata,
 };
 
 // ---------------------------------------------------------------------------
@@ -568,6 +569,7 @@ pub(crate) async fn poll_one_file(
 pub(crate) async fn poll_directory(
     config: &crate::FileConfig,
     context: &ConsumerContext,
+    runtime: &Arc<dyn RuntimeObservability>,
     filters: &crate::CompiledFilters,
     seen: &mut HashSet<PathBuf>,
     in_process_locks: &Arc<DashMap<PathBuf, ()>>,
@@ -603,6 +605,12 @@ pub(crate) async fn poll_directory(
         .await?
         {
             if context.send(exchange).await.is_err() {
+                // b-prime: locally terminal dispatch-send failure; the poll
+                // loop absorbs it (lib.rs warn consumer) — nothing reaches
+                // supervision.
+                runtime
+                    .metrics()
+                    .increment_errors(context.route_id(), "b-prime:file:poll-send");
                 return Err(CamelError::ChannelClosed);
             }
             processed_ok += 1;

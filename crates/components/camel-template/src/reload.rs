@@ -5,7 +5,7 @@
 //! adds the staged-set type ([`StagedSet`]) and the `build` /
 //! `current_generation` / `commit` triad. Task 5.3 wires this into the
 //! [`camel_component_api::template_reload::TemplateReloadTarget`] trait and the
-//! process-global registry; Task 5.4 records `template_reloads_total`.
+//! process-global registry.
 //!
 //! **Build / commit split (Critical 4):** the synchronous FS read + compile
 //! run inside `tokio::task::spawn_blocking`, which CANNOT be interrupted by
@@ -21,7 +21,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use camel_api::CamelError;
-use camel_component_api::RuntimeObservability;
 use camel_component_api::template_reload::{TemplateReloadStaged, TemplateReloadTarget};
 use camel_language_api::MinijinjaLimitsConfig;
 
@@ -37,8 +36,7 @@ use crate::template_set::{SharedTemplates, TemplateSet};
 /// swap `shared`.
 ///
 /// Task 5.1 (this commit) adds [`StagedSet`] + `build` / `current_generation`
-/// / `commit`. The reload loop and registry registration land in Task 5.3;
-/// `template_reloads_total` recording lands in Task 5.4.
+/// / `commit`. The reload loop and registry registration land in Task 5.3.
 pub(crate) struct ReloadHandler {
     /// Compiled-set swap cell shared with the endpoint and the producer.
     pub(crate) shared: SharedTemplates,
@@ -60,11 +58,7 @@ pub(crate) struct ReloadHandler {
     /// reloads re-acquire snapshots against the same anchor without a second
     /// root open.
     pub(crate) root: Arc<OwnedHandle>,
-    /// Runtime observability handle (used for `metrics().increment_errors`).
-    // Phase-5 reload-loop seam: read in 5.4.
-    pub(crate) rt: Option<Arc<dyn RuntimeObservability>>,
     /// Owning route id (used for log labels and metrics).
-    // Phase-5 reload-loop seam: read in 5.3 / 5.4.
     pub(crate) route_id: String,
 }
 
@@ -74,7 +68,6 @@ impl std::fmt::Debug for ReloadHandler {
             .field("entry_abs_path", &self.entry_abs_path)
             .field("route_id", &self.route_id)
             .field("generation", &self.generation)
-            .field("rt_set", &self.rt.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -184,10 +177,6 @@ impl ReloadHandler {
     /// generation, so all-or-nothing holds structurally. The downcast is safe
     /// because the ONLY producer of a `StagedSet` is this handler's
     /// [`Self::build`], and the ONLY consumer is this `commit`.
-    ///
-    /// Does NOT record `template_reloads_total`: deferred — the RuntimeBus
-    /// holds no metrics handle (mirrors ReloadTlsCerts, which records none
-    /// either). Tracked jointly in bd rc-d3pj.
     pub fn commit(&self, staged: Box<dyn TemplateReloadStaged>) {
         let concrete = staged
             .into_any()
@@ -300,7 +289,6 @@ mod tests {
             limits: default_limits(),
             generation: Mutex::new(0),
             root: Arc::clone(&root),
-            rt: None,
             route_id: "test-reload".to_string(),
         });
         (dir, handler, shared, entry)

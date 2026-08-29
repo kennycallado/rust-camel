@@ -1029,7 +1029,6 @@ struct FileConsumer {
     seen: HashSet<PathBuf>,
     in_process_locks: std::sync::Arc<DashMap<PathBuf, ()>>,
     idempotent_repo: std::sync::Arc<tokio::sync::Mutex<HashSet<String>>>,
-    #[allow(dead_code)]
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
@@ -1097,6 +1096,7 @@ impl Consumer for FileConsumer {
                     if let Err(e) = poll_directory(
                         &config,
                         &context,
+                        &self.runtime,
                         &self.filters,
                         &mut self.seen,
                         &self.in_process_locks,
@@ -1672,6 +1672,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
+            &rt(),
             &filters,
             &mut seen,
             &in_process_locks,
@@ -1685,6 +1686,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
+            &rt(),
             &filters,
             &mut seen,
             &in_process_locks,
@@ -1721,6 +1723,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
+            &rt(),
             &filters,
             &mut seen,
             &in_process_locks,
@@ -1736,6 +1739,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
+            &rt(),
             &filters,
             &mut seen,
             &in_process_locks,
@@ -1854,6 +1858,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
+            &rt(),
             &filters,
             &mut seen,
             &in_process_locks,
@@ -3836,6 +3841,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
+            &rt(),
             &filters,
             &mut seen,
             &in_process_locks,
@@ -3872,6 +3878,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
+            &rt(),
             &filters,
             &mut seen,
             &in_process_locks,
@@ -3907,6 +3914,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
+            &rt(),
             &filters,
             &mut seen,
             &in_process_locks,
@@ -3926,5 +3934,128 @@ mod tests {
             31,
             "FileUriConfig #[uri_param] count drifted from parser"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Recording metrics collector for testing increment_errors calls
+    // (pattern: camel-direct tests::RecordingMetrics)
+    // -------------------------------------------------------------------------
+
+    struct RecordingMetrics {
+        errors: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl camel_api::MetricsCollector for RecordingMetrics {
+        fn record_exchange_duration(&self, _: &str, _: Duration) {}
+        fn increment_errors(&self, route_id: &str, error_type: &str) {
+            self.errors
+                .lock()
+                .unwrap()
+                .push((route_id.to_string(), error_type.to_string()));
+        }
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    struct RecordingRuntime {
+        metrics_collector: Arc<RecordingMetrics>,
+    }
+
+    impl RecordingRuntime {
+        fn new(errors: Arc<std::sync::Mutex<Vec<(String, String)>>>) -> Self {
+            Self {
+                metrics_collector: Arc::new(RecordingMetrics { errors }),
+            }
+        }
+    }
+
+    impl camel_component_api::RuntimeObservability for RecordingRuntime {
+        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+            self.metrics_collector.clone() as Arc<dyn camel_api::MetricsCollector>
+        }
+        fn health(&self) -> Arc<dyn camel_component_api::HealthCheckRegistry> {
+            panic!("RecordingRuntime::health not used in this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn file_poll_send_failure_counts_b_prime() {
+        // Positive: a poll whose pipeline send fails (receiver dropped) counts
+        // exactly one `b-prime:file:poll-send` emission and propagates
+        // ChannelClosed.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        std::fs::write(base.join("data.txt"), b"payload").unwrap();
+
+        let config = FileConfig::from_uri(&format!("file:{}", base.display())).unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let in_process_locks = std::sync::Arc::new(DashMap::new());
+        let idempotent_repo = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        drop(rx); // pipeline receiver gone → context.send fails
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token, "file-test-route".to_string());
+
+        let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn camel_component_api::RuntimeObservability> =
+            Arc::new(RecordingRuntime::new(Arc::clone(&errors)));
+
+        let result = poll_directory(
+            &config,
+            &ctx,
+            &runtime,
+            &filters,
+            &mut seen,
+            &in_process_locks,
+            &idempotent_repo,
+        )
+        .await;
+
+        assert!(matches!(result, Err(CamelError::ChannelClosed)));
+        let recorded = errors.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![(
+                "file-test-route".to_string(),
+                "b-prime:file:poll-send".to_string()
+            )]
+        );
+
+        // Negative: a scan failure (directory gone) must NOT emit the
+        // poll-send label — the failure is not a dispatch send.
+        let gone = tempfile::tempdir().unwrap();
+        let gone_path = gone.path().to_path_buf();
+        let scan_config = FileConfig::from_uri(&format!("file:{}", gone_path.display())).unwrap();
+        let scan_filters = CompiledFilters::compile(&scan_config).unwrap();
+        drop(gone); // directory no longer exists → scan_candidates fails
+
+        let mut scan_seen = HashSet::new();
+        let scan_errors = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let scan_runtime: Arc<dyn camel_component_api::RuntimeObservability> =
+            Arc::new(RecordingRuntime::new(Arc::clone(&scan_errors)));
+        let (scan_tx, mut scan_rx) = tokio::sync::mpsc::channel(16);
+        let scan_token = CancellationToken::new();
+        let scan_ctx = ConsumerContext::new(scan_tx, scan_token, "file-test-route".to_string());
+
+        let scan_result = poll_directory(
+            &scan_config,
+            &scan_ctx,
+            &scan_runtime,
+            &scan_filters,
+            &mut scan_seen,
+            &in_process_locks,
+            &idempotent_repo,
+        )
+        .await;
+
+        assert!(scan_result.is_err());
+        assert!(
+            scan_errors.lock().unwrap().is_empty(),
+            "scan failure must not emit b-prime:file:poll-send"
+        );
+        assert!(scan_rx.try_recv().is_err());
     }
 }

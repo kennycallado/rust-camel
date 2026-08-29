@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use camel_api::{CamelError, StepLifecycle, StepShutdownReason};
-use camel_component_api::RuntimeObservability;
 use camel_component_api::template_reload::{
     RegistrationGuard, TemplateReloadRegistry, TemplateReloadTarget,
 };
@@ -44,9 +43,6 @@ pub(crate) struct StartupBuildHandle {
     pub(crate) render_limits: MinijinjaLimitsConfig,
     /// Operator-resolved acquisition limits (consumed at build time).
     pub(crate) limits: ResolvedExternalTemplateLimits,
-    /// Runtime observability handle stashed at `create_producer` time.
-    /// None until the producer is built.
-    pub(crate) rt: Option<Arc<dyn RuntimeObservability>>,
     /// Owning route id (used for log labels and metrics).
     pub(crate) route_id: String,
     /// Reload handler installed after a successful build. None until
@@ -66,7 +62,6 @@ impl std::fmt::Debug for StartupBuildHandle {
         f.debug_struct("StartupBuildHandle")
             .field("entry_abs_path", &self.entry_abs_path)
             .field("route_id", &self.route_id)
-            .field("rt_set", &self.rt.is_some())
             .field(
                 "handler_set",
                 &self.handler.lock().expect("poisoned").is_some(), // allow-unwrap
@@ -133,7 +128,6 @@ impl StepLifecycle for StartupBuildHandle {
             limits: self.limits,
             generation: Mutex::new(0),
             root: Arc::clone(&root),
-            rt: self.rt.clone(),
             route_id: self.route_id.clone(),
         });
         *self.handler.lock().expect("handler cell poisoned") = Some(Arc::clone(&handler)); // allow-unwrap
@@ -211,7 +205,6 @@ mod tests {
             entry_abs_path: entry,
             render_limits: MinijinjaLimitsConfig::default(),
             limits: default_limits(),
-            rt: None,
             route_id: "test-route".to_string(),
             handler: Mutex::new(None),
             guard: Mutex::new(None),
@@ -242,7 +235,6 @@ mod tests {
             entry_abs_path: entry,
             render_limits: MinijinjaLimitsConfig::default(),
             limits: default_limits(),
-            rt: None,
             route_id: "test-route".to_string(),
             handler: Mutex::new(None),
             guard: Mutex::new(None),
@@ -285,7 +277,6 @@ mod tests {
             entry_abs_path: entry,
             render_limits: MinijinjaLimitsConfig::default(),
             limits: default_limits(),
-            rt: None,
             route_id: route.to_string(),
             handler: Mutex::new(None),
             guard: Mutex::new(None),

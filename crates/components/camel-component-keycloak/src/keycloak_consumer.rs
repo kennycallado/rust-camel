@@ -68,8 +68,9 @@ fn set_opt(msg: &mut Message, key: &str, val: Option<&String>) {
 
 pub struct KeycloakEventConsumer {
     config: EventsEndpointConfig,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    /// Feeds `increment_errors` (`b-prime:keycloak:send`,
+    /// `e:keycloak:auth-material`) and
+    /// `rt.health().force_unhealthy_for_route(...)` per ADR-0012.
     runtime: Arc<dyn RuntimeObservability>,
 }
 
@@ -173,7 +174,7 @@ impl KeycloakEventConsumer {
             if context.send(exchange).await.is_err() {
                 runtime
                     .metrics()
-                    .increment_errors(context.route_id(), "b-prime:keycloak:response-body");
+                    .increment_errors(context.route_id(), "b-prime:keycloak:send");
                 // log-policy: outside-contract
                 error!(error = "failed to send exchange, channel closed");
                 return BatchOutcome::ChannelClosed;
@@ -349,5 +350,101 @@ impl Consumer for KeycloakEventConsumer {
     async fn stop(&mut self) -> Result<(), CamelError> {
         debug!("keycloak event consumer stopped");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camel_component_api::HealthCheckRegistry;
+    use std::sync::Mutex;
+
+    // -------------------------------------------------------------------------
+    // Recording metrics collector for testing increment_errors calls
+    // (pattern: camel-direct tests::RecordingMetrics)
+    // -------------------------------------------------------------------------
+
+    struct RecordingMetrics {
+        errors: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl camel_api::MetricsCollector for RecordingMetrics {
+        fn record_exchange_duration(&self, _: &str, _: std::time::Duration) {}
+        fn increment_errors(&self, route_id: &str, error_type: &str) {
+            self.errors
+                .lock()
+                .unwrap()
+                .push((route_id.to_string(), error_type.to_string()));
+        }
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    struct RecordingRuntime {
+        metrics_collector: Arc<RecordingMetrics>,
+    }
+
+    impl RuntimeObservability for RecordingRuntime {
+        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+            self.metrics_collector.clone() as Arc<dyn camel_api::MetricsCollector>
+        }
+        fn health(&self) -> Arc<dyn HealthCheckRegistry> {
+            panic!("RecordingRuntime::health not used in this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn keycloak_send_label_renamed() {
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let runtime = RecordingRuntime {
+            metrics_collector: Arc::new(RecordingMetrics {
+                errors: Arc::clone(&errors),
+            }),
+        };
+
+        // Closed pipeline channel: the receiver is dropped, so context.send
+        // fails and the channel-closed dispatch arm runs.
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        drop(rx);
+        let token = tokio_util::sync::CancellationToken::new();
+        let context = ConsumerContext::new(tx, token, "kc-test-route".to_string());
+
+        let event = EventRepresentation {
+            id: Some("evt-1".to_string()),
+            time: Some(1),
+            event_type: None,
+            realmId: None,
+            clientId: None,
+            userId: None,
+            sessionId: None,
+            ipAddress: None,
+            error: None,
+            details: None,
+        };
+        let events = vec![event];
+        let mut seen_ids = IndexSet::new();
+
+        let outcome = KeycloakEventConsumer::process_event_batch(
+            &events,
+            "user",
+            KeycloakEventConsumer::build_user_event_exchange,
+            &mut seen_ids,
+            16,
+            &runtime,
+            &context,
+            0,
+        )
+        .await;
+
+        assert!(matches!(outcome, BatchOutcome::ChannelClosed));
+        let recorded = errors.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![(
+                "kc-test-route".to_string(),
+                "b-prime:keycloak:send".to_string()
+            )]
+        );
     }
 }

@@ -17,11 +17,9 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use camel_api::{Body, CamelError, Exchange};
-use camel_component_api::RuntimeObservability;
 use camel_language_minijinja::ResolvedLimits;
 use camel_language_minijinja::engine::build_context_bounded;
 use tower::Service;
@@ -50,41 +48,19 @@ use crate::template_set::SharedTemplates;
 /// exchange is ever consulted to choose the entry, the root, or the
 /// template source. The `producer_ignores_override_header` test pins this
 /// property.
-//
-// ponytail: rt/route_id deferred to bd rc-d3pj (RuntimeBus metrics port).
-// In this final state the producer stores rt/route_id but never reads them on
-// the render hot path; rc-d3pj wires them into the per-route failure
-// counter. The struct + new() stay as-is so the constructor signature in
-// endpoint.rs is not churned; only the read-side remains pending.
 #[derive(Clone)]
 pub(crate) struct TemplateProducer {
     templates: SharedTemplates,
     render_limits: ResolvedLimits,
-    /// Runtime observability handle for Phase-5 metrics (deferred to
-    /// bd rc-d3pj). Stored now, read later.
-    #[allow(dead_code)] // read in rc-d3pj — see ponytail note above
-    rt: Option<Arc<dyn RuntimeObservability>>,
-    /// Route id for Phase-5 metrics (deferred to bd rc-d3pj).
-    #[allow(dead_code)] // read in rc-d3pj — see ponytail note above
-    route_id: String,
 }
 
 impl TemplateProducer {
     /// Build a producer bound to the operator-configured compiled set and
-    /// the resolved render limits. The `rt`/`route_id` are reserved for
-    /// Phase 5 metrics emission (bd rc-d3pj).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        templates: SharedTemplates,
-        render_limits: ResolvedLimits,
-        rt: Option<Arc<dyn RuntimeObservability>>,
-        route_id: impl Into<String>,
-    ) -> Self {
+    /// the resolved render limits.
+    pub(crate) fn new(templates: SharedTemplates, render_limits: ResolvedLimits) -> Self {
         Self {
             templates,
             render_limits,
-            rt,
-            route_id: route_id.into(),
         }
     }
 }
@@ -109,9 +85,7 @@ impl Service<Exchange> for TemplateProducer {
         // The producer is `Clone`; cloning moves an owned copy into
         // the future so the async work holds its own data (`'static`)
         // and does not need to borrow `&mut self` for the duration of
-        // the await. The clone preserves every field — including
-        // `rt` and `route_id` — so Phase 5 metrics wiring does not
-        // silently observe `None` / `""` on the hot path.
+        // the await.
         let producer = self.clone();
         Box::pin(async move {
             producer.render_into(&mut exchange).await?;
@@ -229,8 +203,7 @@ mod tests {
             "echo.html",
             r#"{% autoescape "none" %}body={{body}}{% endautoescape %}"#,
         );
-        let mut producer =
-            TemplateProducer::new(templates, ResolvedLimits::default(), None, "test-route");
+        let mut producer = TemplateProducer::new(templates, ResolvedLimits::default());
 
         let exchange = make_exchange_with_body("hello");
         let result = producer.call(exchange).await.expect("call ok");
@@ -258,8 +231,7 @@ mod tests {
             "boom.html",
             r#"{% autoescape "none" %}{{undefined_var}}{% endautoescape %}"#,
         );
-        let producer =
-            TemplateProducer::new(templates, ResolvedLimits::default(), None, "test-route");
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
 
         // Mutable exchange so the test can observe that the body is
         // byte-identical after the failed render.
@@ -323,7 +295,7 @@ mod tests {
             "echo.html",
             r#"{% autoescape "none" %}{{body}}{% endautoescape %}"#,
         );
-        let producer = TemplateProducer::new(templates, small_limits, None, "test-route");
+        let producer = TemplateProducer::new(templates, small_limits);
 
         // 64 bytes of payload — well above the 16-byte context bound.
         // The S9 bound (or the LimitedWriter measurement pass) trips
@@ -371,12 +343,7 @@ mod tests {
             "echo.html",
             r#"{% autoescape "none" %}user={{body}}{% endautoescape %}"#,
         );
-        let producer = TemplateProducer::new(
-            templates,
-            ResolvedLimits::default(),
-            None,
-            "test-concurrent-route",
-        );
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
 
         // 20 tasks is well above the 10 Apache Camel uses; on this
         // hardware it's enough to keep all 4 worker threads busy
@@ -435,8 +402,7 @@ mod tests {
             "op-entry",
             r#"{% autoescape "none" %}{{body}}{% endautoescape %}"#,
         );
-        let mut producer =
-            TemplateProducer::new(templates, ResolvedLimits::default(), None, "test-route");
+        let mut producer = TemplateProducer::new(templates, ResolvedLimits::default());
 
         let mut exchange = make_exchange_with_body("op-output");
         // Adversarial header — must be ignored entirely.
@@ -494,7 +460,7 @@ mod tests {
         // LimitedWriter trips, not fuel or recursion.
         let source = r#"{% autoescape "none" %}{% for i in range(0, 10000) %}x{% endfor %}{% endautoescape %}"#;
         let templates = make_templates("flood.html", source);
-        let producer = TemplateProducer::new(templates, tight_limits, None, "test-output-cap");
+        let producer = TemplateProducer::new(templates, tight_limits);
 
         let original_body = "original-payload".to_string();
         let mut exchange = Exchange::new(Message::new(Body::from(original_body.clone())));
@@ -548,8 +514,7 @@ mod tests {
             "dom.html",
             r#"{% autoescape "none" %}{{ body.first }} {{ body.last }}{% endautoescape %}"#,
         );
-        let producer =
-            TemplateProducer::new(templates, ResolvedLimits::default(), None, "test-route");
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
 
         let mut exchange = Exchange::new(Message::new(Body::Json(json!({
             "first": "Claus",
@@ -581,8 +546,7 @@ mod tests {
             "static.html",
             r#"{% autoescape "none" %}static-only, no body ref{% endautoescape %}"#,
         );
-        let producer =
-            TemplateProducer::new(templates, ResolvedLimits::default(), None, "test-route");
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
 
         let mut exchange = Exchange::new(Message::new(Body::Empty));
 
@@ -618,8 +582,7 @@ mod tests {
             "echo.html",
             r#"{% autoescape "none" %}{{ body }}{% endautoescape %}"#,
         );
-        let producer =
-            TemplateProducer::new(templates, ResolvedLimits::default(), None, "test-route");
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
 
         let mut exchange = Exchange::new(Message::new(Body::Empty));
 
@@ -649,8 +612,7 @@ mod tests {
             "echo.html",
             r#"{% autoescape "none" %}{{ body }}{% endautoescape %}"#,
         );
-        let producer =
-            TemplateProducer::new(templates, ResolvedLimits::default(), None, "test-route");
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
 
         let mut exchange = Exchange::new(Message::new(Body::Bytes(
             "héllo".as_bytes().to_vec().into(),
@@ -696,8 +658,7 @@ mod tests {
             "prop.html",
             r#"{% autoescape "none" %}{{ exchangeProperty.item }}{% endautoescape %}"#,
         );
-        let producer =
-            TemplateProducer::new(templates, ResolvedLimits::default(), None, "test-route");
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
 
         let mut exchange = Exchange::new(Message::new(Body::Empty));
         exchange.set_property("item", Value::String("7".into()));
@@ -731,8 +692,7 @@ mod tests {
             "evil.html",
             r#"{% autoescape "none" %}{{ evil_global_function() }}{% endautoescape %}"#,
         );
-        let producer =
-            TemplateProducer::new(templates, ResolvedLimits::default(), None, "test-route");
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
 
         let original_body = "original-payload".to_string();
         let mut exchange = Exchange::new(Message::new(Body::from(original_body.clone())));

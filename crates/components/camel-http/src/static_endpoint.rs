@@ -114,9 +114,10 @@ impl Endpoint for HttpStaticEndpoint {
 /// - Unregisters the mount from the registry.
 pub struct HttpStaticConsumer {
     config: HttpStaticConfig,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// Feeds `ServerRegistry::get_or_spawn` — the runtime source of the
+    /// wired `e:http:accept` / `e:http:accept-tls` /
+    /// `e:http:server-task-exited` metrics. Also held for
     /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
     runtime: Arc<dyn RuntimeObservability>,
 }
 

@@ -27,8 +27,8 @@ pub struct JmsConsumer {
     reconnect: NetworkRetryPolicy,
     cancel_token: Option<CancellationToken>,
     task_handles: Vec<JoinHandle<Result<(), CamelError>>>,
-    /// Phase C ADR-0012: used for `metrics().increment_errors(…)` at
-    /// consumer-send failure sites.
+    /// Used for `metrics().increment_errors(…)` at consumer-send failure
+    /// sites (`b-prime:jms:consumer-send`).
     runtime: Arc<dyn RuntimeObservability>,
 }
 

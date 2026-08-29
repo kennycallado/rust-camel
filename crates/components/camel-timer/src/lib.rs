@@ -173,11 +173,12 @@ impl Endpoint for TimerEndpoint {
 
     fn create_consumer(
         &self,
-        _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+        rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(TimerConsumer {
             config: self.config.clone(),
             started: AtomicBool::new(false),
+            runtime: rt,
         }))
     }
 
@@ -200,6 +201,9 @@ pub struct TimerConsumer {
     config: TimerConfig,
     /// Guard against double-start (TIMER-003).
     started: AtomicBool,
+    /// Used for `rt.metrics().increment_errors(...)` calls per ADR-0012
+    /// (`b-prime:timer:fire-send` on tick fire-send failure).
+    runtime: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 #[async_trait]
@@ -287,6 +291,12 @@ impl Consumer for TimerConsumer {
                     }
 
                     if context.send(exchange).await.is_err() {
+                        // (category b′ per ADR-0012: locally terminal fire
+                        // send — the route channel is closed and the loop
+                        // exits, so this is the only signal.)
+                        self.runtime
+                            .metrics()
+                            .increment_errors(context.route_id(), "b-prime:timer:fire-send");
                         // Channel closed, route was stopped
                         break;
                     }
@@ -326,6 +336,8 @@ impl TimerConsumer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use camel_component_api::test_support::PanicRuntimeObservability;
     fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
         std::sync::Arc::new(PanicRuntimeObservability)
@@ -471,6 +483,7 @@ mod tests {
         let mut consumer = TimerConsumer {
             config: TimerConfig::from_uri("timer:infinite-test?period=20").unwrap(),
             started: AtomicBool::new(false),
+            runtime: rt(),
         };
 
         let handle = tokio::spawn(async move {
@@ -547,6 +560,7 @@ mod tests {
         let mut consumer = TimerConsumer {
             config: TimerConfig::from_uri("timer:cancel-test?period=50").unwrap(),
             started: AtomicBool::new(false),
+            runtime: rt(),
         };
 
         let handle = tokio::spawn(async move {
@@ -643,6 +657,7 @@ mod tests {
                 include_metadata: true,
             },
             started: AtomicBool::new(false),
+            runtime: rt(),
         };
 
         // Simulate the consumer already being started by setting the flag.
@@ -843,5 +858,84 @@ mod tests {
             .create_endpoint("timer:pub-test", &NoOpComponentContext)
             .unwrap();
         assert_eq!(endpoint.uri(), "timer:pub-test");
+    }
+
+    // -------------------------------------------------------------------
+    // Recording metrics collector for testing increment_errors calls
+    // (pattern: camel-direct tests::RecordingMetrics)
+    // -------------------------------------------------------------------
+
+    struct RecordingMetrics {
+        errors: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl camel_api::MetricsCollector for RecordingMetrics {
+        fn record_exchange_duration(&self, _: &str, _: Duration) {}
+        fn increment_errors(&self, route_id: &str, error_type: &str) {
+            self.errors
+                .lock()
+                .unwrap()
+                .push((route_id.to_string(), error_type.to_string()));
+        }
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    struct RecordingRuntime {
+        metrics_collector: Arc<RecordingMetrics>,
+    }
+
+    impl RecordingRuntime {
+        fn new(errors: Arc<Mutex<Vec<(String, String)>>>) -> Self {
+            Self {
+                metrics_collector: Arc::new(RecordingMetrics { errors }),
+            }
+        }
+    }
+
+    impl camel_component_api::RuntimeObservability for RecordingRuntime {
+        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+            Arc::clone(&self.metrics_collector) as Arc<dyn camel_api::MetricsCollector>
+        }
+        fn health(&self) -> Arc<dyn camel_component_api::HealthCheckRegistry> {
+            panic!("RecordingRuntime::health not used in this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn timer_fire_send_failure_counts_b_prime() {
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let component = TimerComponent::new();
+        let endpoint = component
+            .create_endpoint("timer:fire-send?period=20", &NoOpComponentContext)
+            .unwrap();
+
+        // Recording runtime through the same seam the other tests fill with
+        // the Panic helper (`rt()`).
+        let mut consumer = endpoint
+            .create_consumer(Arc::new(RecordingRuntime::new(Arc::clone(&errors))))
+            .unwrap();
+        // Receiver dropped: every fire send fails with `ChannelClosed`.
+        let (tx, _) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+            "timer-test-route".to_string(),
+        );
+
+        // First tick fails the send; the consumer records it and exits its loop.
+        consumer.start(ctx).await.unwrap();
+
+        let recorded = errors.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![(
+                "timer-test-route".to_string(),
+                "b-prime:timer:fire-send".to_string()
+            )]
+        );
+
+        consumer.stop().await.unwrap();
     }
 }

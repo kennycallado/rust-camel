@@ -1157,9 +1157,17 @@ impl Consumer for WsConsumer {
         global_registries().insert(registry_key.clone(), Arc::clone(&self.registry));
 
         let sender = ctx.sender();
+        let route_id = ctx.route_id().to_string();
+        let runtime = Arc::clone(&self.runtime);
         let forward_task: JoinHandle<Result<(), CamelError>> = tokio::spawn(async move {
             while let Some(envelope) = env_rx.recv().await {
                 if sender.send(envelope).await.is_err() {
+                    // (category b′ per ADR-0012: locally terminal message
+                    // dispatch — the pipeline receiver is gone and the loop
+                    // exits, so this is the only signal.)
+                    runtime
+                        .metrics()
+                        .increment_errors(&route_id, "b-prime:ws:message-dispatch");
                     break;
                 }
             }
@@ -3457,5 +3465,112 @@ mod tests {
         let err = CamelError::Unauthenticated("bad".into());
         let resp = ws_upgrade_auth_error(&err).into_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // -------------------------------------------------------------------
+    // Recording metrics collector for testing increment_errors calls
+    // (pattern: camel-direct tests::RecordingMetrics)
+    // -------------------------------------------------------------------
+
+    struct RecordingMetrics {
+        errors: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl camel_api::MetricsCollector for RecordingMetrics {
+        fn record_exchange_duration(&self, _: &str, _: Duration) {}
+        fn increment_errors(&self, route_id: &str, error_type: &str) {
+            self.errors
+                .lock()
+                .expect("recording collector lock")
+                .push((route_id.to_string(), error_type.to_string()));
+        }
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    struct RecordingRuntime {
+        metrics_collector: Arc<RecordingMetrics>,
+    }
+
+    impl RecordingRuntime {
+        fn new(errors: Arc<Mutex<Vec<(String, String)>>>) -> Self {
+            Self {
+                metrics_collector: Arc::new(RecordingMetrics { errors }),
+            }
+        }
+    }
+
+    impl camel_component_api::RuntimeObservability for RecordingRuntime {
+        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+            Arc::clone(&self.metrics_collector) as Arc<dyn camel_api::MetricsCollector>
+        }
+        fn health(&self) -> Arc<dyn camel_component_api::HealthCheckRegistry> {
+            panic!("RecordingRuntime::health not used in this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_message_dispatch_failure_counts_b_prime() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let errors: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let port = free_port();
+        let uri = format!("ws://127.0.0.1:{port}/dispatch");
+        let endpoint = WsComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .unwrap();
+
+        // Recording runtime through the same seam the other tests fill with
+        // the Panic helper (`test_rt()`).
+        let mut consumer = endpoint
+            .create_consumer(Arc::new(RecordingRuntime::new(Arc::clone(&errors))))
+            .unwrap();
+
+        // Pipeline receiver dropped up front: every forward-task dispatch
+        // send fails with `ChannelClosed`.
+        let (route_tx, route_rx) = mpsc::channel(16);
+        drop(route_rx);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
+        consumer.start(ctx).await.unwrap();
+
+        let url = format!("ws://127.0.0.1:{port}/dispatch");
+        let (mut client, _) = loop {
+            match connect_async(&url).await {
+                Ok(ok) => break ok,
+                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+            }
+        };
+        client
+            .send(ClientMessage::Text("lost dispatch".into()))
+            .await
+            .unwrap();
+
+        // Forward tick: let the dispatch reach the forward task and fail
+        // the pipeline send.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                if !errors.lock().expect("recording collector lock").is_empty() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("forward task never recorded the message-dispatch failure");
+
+        let recorded = errors.lock().expect("recording collector lock").clone();
+        assert_eq!(
+            recorded,
+            vec![(
+                "ws-test-route".to_string(),
+                "b-prime:ws:message-dispatch".to_string()
+            )]
+        );
+
+        consumer.stop().await.unwrap();
     }
 }

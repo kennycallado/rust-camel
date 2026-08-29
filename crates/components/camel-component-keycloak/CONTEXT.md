@@ -4,7 +4,7 @@ Per ADR-0012, this component's `error!` sites are categorized as:
 
 - **outside-contract** (`fn process_event_batch`, channel-closed arm): a
   channel-closed `context.send()` failure. Calls
-  `runtime.metrics().increment_errors(context.route_id(), "b-prime:keycloak:response-body")`
+  `runtime.metrics().increment_errors(context.route_id(), "b-prime:keycloak:send")`
   before the `error!`. The metric is the operator signal. The `error!` provides
   loud log visibility. Both stay. The caller passes the Runtime from `start()`.
 

@@ -41,7 +41,6 @@ pub struct CxfProducer {
     mtom_enabled: bool,
     attachment_content_type: Option<String>,
     semaphore: Arc<Semaphore>,
-    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 impl Clone for CxfProducer {
@@ -58,7 +57,6 @@ impl Clone for CxfProducer {
             mtom_enabled: self.mtom_enabled,
             attachment_content_type: self.attachment_content_type.clone(),
             semaphore: Arc::clone(&self.semaphore),
-            runtime: Arc::clone(&self.runtime),
         }
     }
 }
@@ -76,7 +74,7 @@ impl CxfProducer {
         default_timeout_ms: Option<u64>,
         mtom_enabled: bool,
         attachment_content_type: Option<String>,
-        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+        _runtime: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Self {
         Self {
             pool,
@@ -90,7 +88,6 @@ impl CxfProducer {
             mtom_enabled,
             attachment_content_type,
             semaphore: Arc::new(Semaphore::new(1)),
-            runtime,
         }
     }
 
@@ -124,7 +121,7 @@ impl CxfProducer {
         address: Option<String>,
         operation: String,
         default_timeout_ms: Option<u64>,
-        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+        _runtime: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Self {
         use crate::config::CxfPoolConfig;
         use crate::pool::{BridgeSlot, BridgeState};
@@ -171,7 +168,6 @@ impl CxfProducer {
             mtom_enabled: false,
             attachment_content_type: None,
             semaphore: Arc::new(Semaphore::new(1)),
-            runtime,
         }
     }
 }

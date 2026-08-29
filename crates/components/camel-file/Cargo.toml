@@ -33,6 +33,7 @@ toml.workspace = true
 dashmap.workspace = true
 
 [dev-dependencies]
+camel-api.workspace = true
 camel-component-api = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 filetime = "0.2"
