@@ -78,7 +78,8 @@ pub struct WasmProducer {
     state_store: crate::state_store::StateStore,
     init_failed: Arc<AtomicBool>,
     sem: Arc<Semaphore>,
-    /// `Arc<dyn RuntimeObservability>` for Phase B metric/health calls.
+    /// Observability handle powering the uniform `wasm:invoke`
+    /// emission via `component_metrics()` (dashboard-observability 4.2).
     /// Named `observability` (not `runtime`) to avoid collision with the
     /// existing `runtime: Arc<Mutex<Option<Arc<WasmRuntime>>>>` field above
     /// which holds the WASM runtime instance, not the observability surface.
@@ -185,98 +186,108 @@ impl Service<Exchange> for WasmProducer {
         let cancel_root = self.cancel.clone();
         let max_bytes = self.max_bytes;
         let no_progress_timeout = self.no_progress_timeout;
+        let observability = Arc::clone(&self.observability);
         Box::pin(async move {
-            tracing::debug!(component = "wasm", "wasm call started");
-            // Acquire the concurrency permit inside call()'s future: the
-            // permit is held only while this one exchange is in flight,
-            // and permit contention must not consume readiness for other
-            // callers. A closed semaphore maps to ProcessorError.
-            let permit = sem
-                .acquire_owned()
-                .await
-                .map_err(|_| CamelError::ProcessorError("wasm producer semaphore closed".into()))?;
+            let component_metrics = observability.component_metrics();
+            // The invoke operation covers the whole producer call
+            // (runtime init + guest invocation): failures ALWAYS reach
+            // the error family as `e:wasm:invoke`, the component series
+            // only with the lever on (dashboard-observability 4.2).
+            let outcome: Result<Exchange, CamelError> = async {
+                tracing::debug!(component = "wasm", "wasm call started");
+                // Acquire the concurrency permit inside call()'s future: the
+                // permit is held only while this one exchange is in flight,
+                // and permit contention must not consume readiness for other
+                // callers. A closed semaphore maps to ProcessorError.
+                let permit = sem.acquire_owned().await.map_err(|_| {
+                    CamelError::ProcessorError("wasm producer semaphore closed".into())
+                })?;
 
-            let runtime = match ensure_runtime_fn(
-                module_path.clone(),
-                config,
-                registry,
-                runtime_store,
-                state_store,
-            )
-            .await
-            {
-                Ok(rt) => {
-                    init_failed.store(false, Ordering::Relaxed);
-                    rt
-                }
-                Err(e) => {
-                    init_failed.store(true, Ordering::Relaxed);
-                    warn!(
-                        module = %module_path.display(),
-                        error = %e,
-                        "Failed to initialize WASM runtime"
-                    );
-                    return Err(e);
-                }
-            };
-
-            // All plugin calls go through `process_streaming_exchange`, which
-            // handles both stream and non-stream inputs (its `make_drive`
-            // closure extracts the stream if present, otherwise uses the
-            // pre-converted non-stream body) AND drains return streams via
-            // `take_stream`. This closes the hole where a non-stream-input
-            // plugin returning a `WasmBody::Stream` was dropped by
-            // `wasm_to_body`'s Stream arm.
-            let mut out = exchange.clone();
-            let cancel = cancel_root.child_token();
-            let mut guard = crate::cancel_guard::InvokeCancelGuard::new(cancel.clone());
-            let result = runtime
-                .process_streaming_exchange(
-                    registry2,
-                    exchange.properties.clone(),
-                    state_store2,
-                    exchange,
-                    permit,
-                    cancel,
-                    max_bytes,
-                    no_progress_timeout,
+                let runtime = match ensure_runtime_fn(
+                    module_path.clone(),
+                    config,
+                    registry,
+                    runtime_store,
+                    state_store,
                 )
-                .await;
-
-            match result {
-                Ok(streaming_result) => {
-                    wasm_to_exchange(streaming_result.exchange, &mut out);
-                    if let Some(drain_rx) = streaming_result.drain_rx {
-                        out.output
-                            .as_mut()
-                            .expect("output present") // allow-unwrap
-                            .body = Body::Stream(StreamBody {
-                            stream: Arc::new(tokio::sync::Mutex::new(Some(
-                                crate::return_stream::receiver_to_body_stream(drain_rx),
-                            ))),
-                            metadata: streaming_result.metadata.clone(),
-                        });
+                .await
+                {
+                    Ok(rt) => {
+                        init_failed.store(false, Ordering::Relaxed);
+                        rt
                     }
-                    guard.complete();
-                    debug!(
-                        module = %module_path.display(),
-                        "WASM producer completed successfully"
-                    );
-                    Ok(out)
-                }
-                Err(e) => {
-                    // log-policy: handler-owned
-                    warn!(
-                        component = "wasm",
-                        error = %e,
-                        "wasm call failed"
-                    );
-                    // guard drops here without complete() — fires cancel on the
-                    // child token. Benign: the work already failed, and the
-                    // drain task observes the cancel via its select! branch.
-                    Err(e.into())
+                    Err(e) => {
+                        init_failed.store(true, Ordering::Relaxed);
+                        warn!(
+                            module = %module_path.display(),
+                            error = %e,
+                            "Failed to initialize WASM runtime"
+                        );
+                        return Err(e);
+                    }
+                };
+
+                // All plugin calls go through `process_streaming_exchange`, which
+                // handles both stream and non-stream inputs (its `make_drive`
+                // closure extracts the stream if present, otherwise uses the
+                // pre-converted non-stream body) AND drains return streams via
+                // `take_stream`. This closes the hole where a non-stream-input
+                // plugin returning a `WasmBody::Stream` was dropped by
+                // `wasm_to_body`'s Stream arm.
+                let mut out = exchange.clone();
+                let cancel = cancel_root.child_token();
+                let mut guard = crate::cancel_guard::InvokeCancelGuard::new(cancel.clone());
+                let result = runtime
+                    .process_streaming_exchange(
+                        registry2,
+                        exchange.properties.clone(),
+                        state_store2,
+                        exchange,
+                        permit,
+                        cancel,
+                        max_bytes,
+                        no_progress_timeout,
+                    )
+                    .await;
+
+                match result {
+                    Ok(streaming_result) => {
+                        wasm_to_exchange(streaming_result.exchange, &mut out);
+                        if let Some(drain_rx) = streaming_result.drain_rx {
+                            out.output
+                                .as_mut()
+                                .expect("output present") // allow-unwrap
+                                .body = Body::Stream(StreamBody {
+                                stream: Arc::new(tokio::sync::Mutex::new(Some(
+                                    crate::return_stream::receiver_to_body_stream(drain_rx),
+                                ))),
+                                metadata: streaming_result.metadata.clone(),
+                            });
+                        }
+                        guard.complete();
+                        debug!(
+                            module = %module_path.display(),
+                            "WASM producer completed successfully"
+                        );
+                        Ok(out)
+                    }
+                    Err(e) => {
+                        // log-policy: handler-owned
+                        warn!(
+                            component = "wasm",
+                            error = %e,
+                            "wasm call failed"
+                        );
+                        // guard drops here without complete() — fires cancel on the
+                        // child token. Benign: the work already failed, and the
+                        // drain task observes the cancel via its select! branch.
+                        Err(e.into())
+                    }
                 }
             }
+            .await;
+            component_metrics.observe("wasm", "invoke", outcome.is_err());
+            outcome
         })
     }
 }
@@ -285,9 +296,12 @@ impl Service<Exchange> for WasmProducer {
 mod tests {
     use super::*;
     use crate::config::WasmConfig;
-    use camel_component_api::test_support::PanicRuntimeObservability;
+    use camel_component_api::test_support::NoopRuntimeObservability;
+    // Noop (not Panic) double: since dashboard-observability Task 4.2 the
+    // producer legitimately calls `component_metrics()` on every call —
+    // the old "never touches observability" panic contract no longer holds.
     fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
-        std::sync::Arc::new(PanicRuntimeObservability)
+        std::sync::Arc::new(NoopRuntimeObservability)
     }
 
     #[test]

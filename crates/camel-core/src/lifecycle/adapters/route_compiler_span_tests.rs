@@ -925,3 +925,58 @@ async fn compose_threads_kind_producer_kafka() {
         "kafka To step span must be Producer"
     );
 }
+
+/// Minimal local double: counts `increment_exchanges` calls.
+struct ExchangesCounter(std::sync::Mutex<u32>);
+
+impl camel_api::MetricsCollector for ExchangesCounter {
+    fn increment_exchanges(&self, _route_id: &str) {
+        *self.0.lock().expect("counter lock") += 1; // allow-unwrap
+    }
+    fn increment_errors(&self, _route_id: &str, _error_type: &str) {}
+    fn record_exchange_duration(&self, _route_id: &str, _seconds: std::time::Duration) {}
+    fn set_queue_depth(&self, _queue: &str, _depth: usize) {}
+    fn record_circuit_breaker_change(&self, _route: &str, _from: &str, _to: &str) {}
+}
+
+/// Task 2.1 follow-up (inter-phase review): the spans-off composition
+/// branch (`!gating.spans_enabled` → plain SequentialPipeline over the
+/// metrics-emitting wrappers) is executed here, not just compiled —
+/// metrics flow, no spans are created.
+#[tokio::test]
+async fn spans_off_composition_records_metrics_without_spans() {
+    let spans = test_spans().await;
+    let collector = Arc::new(ExchangesCounter(std::sync::Mutex::new(0)));
+    let mut pipeline = compose_traced_pipeline(
+        vec![identity_step(), identity_step()],
+        "rt",
+        crate::lifecycle::adapters::route_compiler::TracerPipelineGating {
+            pipeline_enabled: true,
+            spans_enabled: false,
+            levers: crate::shared::observability::domain::MetricsLeversConfig::default(),
+        },
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn camel_api::MetricsCollector>),
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+    pipeline
+        .ready()
+        .await
+        .expect("pipeline ready")
+        .call(Exchange::new(Message::default()))
+        .await
+        .expect("pipeline call succeeds");
+
+    let all = finish(spans);
+    assert!(
+        all.is_empty(),
+        "spans-off composition must export no spans, got {all:?}"
+    );
+    assert_eq!(
+        *collector.0.lock().expect("counter lock"),
+        2,
+        "exchange metrics must still flow through the per-step wrappers \
+         (one per step, matching the traced pipeline's wrapper semantics)"
+    );
+}

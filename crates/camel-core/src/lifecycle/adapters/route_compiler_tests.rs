@@ -527,12 +527,16 @@ async fn test_route_channel_security_error_calls_boundary() {
 #[tokio::test]
 async fn test_route_channel_cb_reject_calls_boundary() {
     let handler: Arc<dyn RouteErrorHandler> = Arc::new(PropagateHandler);
-    let cb_gate = CircuitBreakerGate::new(CircuitBreakerConfig {
-        failure_threshold: 1,
-        open_duration: Duration::from_secs(60),
-        success_threshold: 1,
-        fallback: None,
-    });
+    let cb_gate = CircuitBreakerGate::new(
+        CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 1,
+            fallback: None,
+        },
+        Arc::from("test"),
+        None,
+    );
     cb_gate.after_result(&Err(CamelError::ProcessorError("force open".into())));
     let pipeline = compose_pipeline_with_handler(
         vec![],
@@ -557,12 +561,16 @@ async fn test_route_channel_cb_fallback_executes_fallback() {
             Ok(ex)
         })
     });
-    let cb_gate = CircuitBreakerGate::new(CircuitBreakerConfig {
-        failure_threshold: 1,
-        open_duration: Duration::from_secs(60),
-        success_threshold: 1,
-        fallback: Some(fallback),
-    });
+    let cb_gate = CircuitBreakerGate::new(
+        CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 1,
+            fallback: Some(fallback),
+        },
+        Arc::from("test"),
+        None,
+    );
     cb_gate.after_result(&Err(CamelError::ProcessorError("force open".into())));
     let pipeline = compose_pipeline_with_handler(
         vec![],
@@ -587,12 +595,16 @@ async fn test_route_channel_cb_fallback_failure_calls_boundary() {
     let failing_fallback = BoxProcessor::from_fn(|_ex| {
         Box::pin(async { Err(CamelError::ProcessorError("fallback broken".into())) })
     });
-    let cb_gate = CircuitBreakerGate::new(CircuitBreakerConfig {
-        failure_threshold: 1,
-        open_duration: Duration::from_secs(60),
-        success_threshold: 1,
-        fallback: Some(failing_fallback),
-    });
+    let cb_gate = CircuitBreakerGate::new(
+        CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 1,
+            fallback: Some(failing_fallback),
+        },
+        Arc::from("test"),
+        None,
+    );
     cb_gate.after_result(&Err(CamelError::ProcessorError("force open".into())));
 
     let pipeline = compose_pipeline_with_handler(
@@ -617,12 +629,16 @@ async fn test_route_channel_cb_counts_stopped_as_success() {
     // Tower boundary. RouteChannelService::call invokes cb.after_result(&result)
     // where result = Ok(ex) for Stop. The CB must NOT trip.
     let handler: Arc<dyn RouteErrorHandler> = Arc::new(PropagateHandler);
-    let cb_gate = CircuitBreakerGate::new(CircuitBreakerConfig {
-        failure_threshold: 2,
-        open_duration: Duration::from_secs(60),
-        success_threshold: 1,
-        fallback: None,
-    });
+    let cb_gate = CircuitBreakerGate::new(
+        CircuitBreakerConfig {
+            failure_threshold: 2,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 1,
+            fallback: None,
+        },
+        Arc::from("test"),
+        None,
+    );
     let cb_clone = cb_gate.clone();
 
     // Pipeline emits Stop as the only step — top-level maps Stop to Ok(ex).

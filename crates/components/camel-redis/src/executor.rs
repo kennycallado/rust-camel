@@ -682,7 +682,8 @@ mod tests {
 
         let result = retry_async::<(), _, _, _, CamelError>(
             &policy,
-            None,
+            "t",
+            "op",
             || {
                 let c = attempts_clone.clone();
                 async move {
@@ -695,6 +696,7 @@ mod tests {
                 }
             },
             |_| true,
+            None,
         )
         .await;
 

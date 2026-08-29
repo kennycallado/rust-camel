@@ -166,6 +166,13 @@ pub enum CamelError {
     EndpointUri(EndpointUriError),
 }
 
+/// Classification marker for `CamelError::CircuitOpen`.
+///
+/// Shared named constant so the pipeline tracer's circuit-open exclusion
+/// (skip `increment_errors` — the breaker already recorded the rejection)
+/// and `classify` itself cannot drift apart (dashboard-observability D2).
+pub const CIRCUIT_OPEN: &str = "circuit_open";
+
 impl CamelError {
     pub fn classify(&self) -> &'static str {
         #[allow(unreachable_patterns)]
@@ -180,7 +187,7 @@ impl CamelError {
             Self::TypeConversionFailed(_) | Self::AlreadyConsumed => "type_conversion",
             Self::Io(_) => "io",
             Self::RouteError(_) => "route",
-            Self::CircuitOpen(_) => "circuit_open",
+            Self::CircuitOpen(_) => CIRCUIT_OPEN,
             Self::HttpOperationFailed { .. } => "http",
             Self::Config(_) | Self::ConfigValidation(_) => "config",
             Self::DeadLetterChannelFailed(_) => "dead_letter",
@@ -439,6 +446,18 @@ mod tests {
         let err2 = CamelError::Unauthorized("test".to_string());
         let cloned2 = err2.clone();
         assert!(matches!(cloned2, CamelError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn classification_unchanged_for_callers() {
+        // Pins the contract the pipeline-tracer circuit_open exclusion
+        // relies on (dashboard-observability D2): CircuitOpen must keep
+        // classifying as "circuit_open" — callers and the tracer skip
+        // branch match on exactly this literal.
+        assert_eq!(
+            CamelError::CircuitOpen("breaker open".into()).classify(),
+            "circuit_open"
+        );
     }
 
     #[test]

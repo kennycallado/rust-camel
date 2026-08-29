@@ -330,8 +330,14 @@ impl StepCompiler for SplittingCompiler {
                 let registry: SharedLanguageRegistry =
                     Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
                 let cancel = CancellationToken::new();
-                let svc =
+                let mut svc =
                     camel_processor::AggregatorService::new(config, late_tx, registry, cancel);
+                // Queue-depth visibility: the TTL-sweep pass reports the
+                // buffered group count under `aggregator:<route>`.
+                if let Some(route_id) = ctx.route_id {
+                    svc =
+                        svc.with_queue_metrics(ctx.rt.metrics(), format!("aggregator:{route_id}"));
+                }
                 let lifecycle: Arc<dyn StepLifecycle> = Arc::new(svc.clone());
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
                     kind_hint: SpanKindHint::Internal,

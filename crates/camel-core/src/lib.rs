@@ -81,8 +81,8 @@ pub mod template;
 #[cfg(feature = "export-internal-adapters")]
 pub mod route {
     pub use crate::lifecycle::adapters::route_compiler::{
-        PipelineRuntimeCtx, RouteChannelService, compose_pipeline, compose_pipeline_with_contracts,
-        compose_pipeline_with_handler, compose_traced_pipeline,
+        PipelineRuntimeCtx, RouteChannelService, TracerPipelineGating, compose_pipeline,
+        compose_pipeline_with_contracts, compose_pipeline_with_handler, compose_traced_pipeline,
     };
     pub use crate::lifecycle::adapters::route_types::Route;
     pub use crate::lifecycle::adapters::step_compilers::CompiledStep;
@@ -150,7 +150,8 @@ pub use crate::shared::components::domain::Registry;
 pub use crate::shared::components::domain::RegistryComponentContext;
 pub use crate::shared::observability::adapters::TracingProcessor;
 pub use crate::shared::observability::domain::{
-    DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
+    DetailLevel, FileOutput, MetricsLeversConfig, OutputFormat, StdoutOutput, TracerConfig,
+    TracerOutputs,
 };
 pub use context::CamelContext;
 pub use language_registry::from_config as languages_from_config;

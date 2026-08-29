@@ -15,8 +15,11 @@ pub trait MetricsCollector: Send + Sync {
     /// Increment exchange counter
     fn increment_exchanges(&self, route_id: &str);
 
-    /// Update queue depth
-    fn set_queue_depth(&self, route_id: &str, depth: usize);
+    /// Update the depth of a buffered stage's queue
+    /// (`camel_queue_depth{queue}`). The `queue` label is a closed set of
+    /// component-declared identifiers (`seda:<endpoint-name>`,
+    /// `aggregator:<route>`, `resequencer:<route>`).
+    fn set_queue_depth(&self, queue: &str, depth: usize);
 
     /// Record circuit breaker state change
     fn record_circuit_breaker_change(&self, route_id: &str, from: &str, to: &str);
@@ -28,6 +31,47 @@ pub trait MetricsCollector: Send + Sync {
     /// Record a monotonically-increasing counter (e.g. `foo_total`).
     /// Default: no-op (backward-compatible).
     fn record_counter(&self, _name: &str, _value: f64, _labels: &[(&str, &str)]) {}
+
+    /// Increment the per-attempt retry counter (`camel_retry_attempts_total`,
+    /// labels scheme+operation). Called once per retry attempt, including the
+    /// first. Default: no-op (backward-compatible).
+    fn increment_retry_attempt(&self, _scheme: &str, _operation: &str) {}
+
+    /// Increment the circuit-breaker rejection counter
+    /// (`camel_circuit_breaker_rejections_total`, label route). Open-breaker
+    /// fast-fails count here, not as errors. Default: no-op
+    /// (backward-compatible).
+    fn increment_circuit_breaker_rejection(&self, _route: &str) {}
+
+    /// Publish a route lifecycle-state transition (`camel_route_state`,
+    /// labels route+state). `state` is the projection's state label — a
+    /// closed set by construction (`Registered`, `Starting`, `Started`,
+    /// `Suspended`, `Stopping`, `Stopped`, `Failed`). Implementations keep
+    /// the route's last-published state so a transition sets the new series
+    /// to 1 and zeroes the previous one. Default: no-op
+    /// (backward-compatible).
+    fn set_route_state(&self, _route: &str, _state: &str) {}
+
+    /// Drop a route's state series (route removed/undeployed) so a
+    /// scrape reflects only routes that exist.
+    fn clear_route_state(&self, _route: &str) {}
+
+    /// Publish build identification (`camel_build_info{git_sha,version}`,
+    /// value 1). Called once when the context is built. Default: no-op
+    /// (backward-compatible).
+    fn record_build_info(&self, _version: &str, _git_sha: &str) {}
+
+    /// Publish process uptime in seconds (`camel_uptime_seconds`),
+    /// refreshed periodically by the runtime. Default: no-op
+    /// (backward-compatible).
+    fn record_uptime(&self, _seconds: f64) {}
+
+    /// Increment the uniform component-operations counter
+    /// (`camel_component_operations_total`, labels component+operation+
+    /// outcome). `outcome` is a closed set — "success" or "failure"
+    /// only; callers derive it from a bool (see `ComponentMetrics`),
+    /// never pass free text. Default: no-op (backward-compatible).
+    fn record_component_operation(&self, _component: &str, _operation: &str, _outcome: &str) {}
 }
 
 /// No-op metrics collector for default behavior
@@ -37,7 +81,7 @@ impl MetricsCollector for NoOpMetrics {
     fn record_exchange_duration(&self, _route_id: &str, _duration: Duration) {}
     fn increment_errors(&self, _route_id: &str, _error_type: &str) {}
     fn increment_exchanges(&self, _route_id: &str) {}
-    fn set_queue_depth(&self, _route_id: &str, _depth: usize) {}
+    fn set_queue_depth(&self, _queue: &str, _depth: usize) {}
     fn record_circuit_breaker_change(&self, _route_id: &str, _from: &str, _to: &str) {}
 }
 
@@ -130,8 +174,8 @@ impl MetricsCollector for MetricsHandle {
         self.inner.load().0.increment_exchanges(route_id)
     }
 
-    fn set_queue_depth(&self, route_id: &str, depth: usize) {
-        self.inner.load().0.set_queue_depth(route_id, depth)
+    fn set_queue_depth(&self, queue: &str, depth: usize) {
+        self.inner.load().0.set_queue_depth(queue, depth)
     }
 
     fn record_circuit_breaker_change(&self, route_id: &str, from: &str, to: &str) {
@@ -147,6 +191,43 @@ impl MetricsCollector for MetricsHandle {
 
     fn record_counter(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
         self.inner.load().0.record_counter(name, value, labels)
+    }
+
+    fn increment_retry_attempt(&self, scheme: &str, operation: &str) {
+        self.inner
+            .load()
+            .0
+            .increment_retry_attempt(scheme, operation)
+    }
+
+    fn increment_circuit_breaker_rejection(&self, route: &str) {
+        self.inner
+            .load()
+            .0
+            .increment_circuit_breaker_rejection(route)
+    }
+
+    fn set_route_state(&self, route: &str, state: &str) {
+        self.inner.load().0.set_route_state(route, state)
+    }
+
+    fn clear_route_state(&self, route: &str) {
+        self.inner.load().0.clear_route_state(route)
+    }
+
+    fn record_build_info(&self, version: &str, git_sha: &str) {
+        self.inner.load().0.record_build_info(version, git_sha)
+    }
+
+    fn record_uptime(&self, seconds: f64) {
+        self.inner.load().0.record_uptime(seconds)
+    }
+
+    fn record_component_operation(&self, component: &str, operation: &str, outcome: &str) {
+        self.inner
+            .load()
+            .0
+            .record_component_operation(component, operation, outcome)
     }
 }
 
@@ -186,9 +267,9 @@ impl MetricsCollector for CompositeMetricsCollector {
         }
     }
 
-    fn set_queue_depth(&self, route_id: &str, depth: usize) {
+    fn set_queue_depth(&self, queue: &str, depth: usize) {
         for collector in &self.collectors {
-            collector.set_queue_depth(route_id, depth);
+            collector.set_queue_depth(queue, depth);
         }
     }
 
@@ -209,6 +290,48 @@ impl MetricsCollector for CompositeMetricsCollector {
             collector.record_counter(name, value, labels);
         }
     }
+
+    fn increment_retry_attempt(&self, scheme: &str, operation: &str) {
+        for collector in &self.collectors {
+            collector.increment_retry_attempt(scheme, operation);
+        }
+    }
+
+    fn increment_circuit_breaker_rejection(&self, route: &str) {
+        for collector in &self.collectors {
+            collector.increment_circuit_breaker_rejection(route);
+        }
+    }
+
+    fn set_route_state(&self, route: &str, state: &str) {
+        for collector in &self.collectors {
+            collector.set_route_state(route, state);
+        }
+    }
+
+    fn clear_route_state(&self, route: &str) {
+        for collector in &self.collectors {
+            collector.clear_route_state(route);
+        }
+    }
+
+    fn record_build_info(&self, version: &str, git_sha: &str) {
+        for collector in &self.collectors {
+            collector.record_build_info(version, git_sha);
+        }
+    }
+
+    fn record_uptime(&self, seconds: f64) {
+        for collector in &self.collectors {
+            collector.record_uptime(seconds);
+        }
+    }
+
+    fn record_component_operation(&self, component: &str, operation: &str, outcome: &str) {
+        for collector in &self.collectors {
+            collector.record_component_operation(component, operation, outcome);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -221,6 +344,8 @@ mod tests {
         durations: Mutex<Vec<(String, Duration)>>,
         errors: Mutex<Vec<(String, String)>>,
         exchanges: Mutex<Vec<String>>,
+        retries: Mutex<Vec<(String, String)>>,
+        rejections: Mutex<Vec<String>>,
     }
 
     impl RecordingMetrics {
@@ -229,6 +354,8 @@ mod tests {
                 durations: Mutex::new(Vec::new()),
                 errors: Mutex::new(Vec::new()),
                 exchanges: Mutex::new(Vec::new()),
+                retries: Mutex::new(Vec::new()),
+                rejections: Mutex::new(Vec::new()),
             }
         }
     }
@@ -255,9 +382,87 @@ mod tests {
                 .push(route_id.to_string());
         }
 
-        fn set_queue_depth(&self, _route_id: &str, _depth: usize) {}
+        fn set_queue_depth(&self, _queue: &str, _depth: usize) {}
 
         fn record_circuit_breaker_change(&self, _route_id: &str, _from: &str, _to: &str) {}
+
+        fn increment_retry_attempt(&self, scheme: &str, operation: &str) {
+            self.retries
+                .lock()
+                .expect("retries lock")
+                .push((scheme.to_string(), operation.to_string()));
+        }
+
+        fn increment_circuit_breaker_rejection(&self, route: &str) {
+            self.rejections
+                .lock()
+                .expect("rejections lock")
+                .push(route.to_string());
+        }
+    }
+
+    /// Test double that tags every trait-method call by name, for
+    /// delegation-parity assertions over the full `MetricsCollector` surface.
+    struct SurfaceProbe {
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    impl SurfaceProbe {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn tag(&self, name: &'static str) {
+            self.calls.lock().expect("calls lock").push(name);
+        }
+    }
+
+    impl MetricsCollector for SurfaceProbe {
+        fn record_exchange_duration(&self, _route_id: &str, _duration: Duration) {
+            self.tag("record_exchange_duration");
+        }
+        fn increment_errors(&self, _route_id: &str, _error_type: &str) {
+            self.tag("increment_errors");
+        }
+        fn increment_exchanges(&self, _route_id: &str) {
+            self.tag("increment_exchanges");
+        }
+        fn set_queue_depth(&self, _queue: &str, _depth: usize) {
+            self.tag("set_queue_depth");
+        }
+        fn record_circuit_breaker_change(&self, _route_id: &str, _from: &str, _to: &str) {
+            self.tag("record_circuit_breaker_change");
+        }
+        fn record_histogram(&self, _name: &str, _value: f64, _labels: &[(&str, &str)]) {
+            self.tag("record_histogram");
+        }
+        fn record_counter(&self, _name: &str, _value: f64, _labels: &[(&str, &str)]) {
+            self.tag("record_counter");
+        }
+        fn increment_retry_attempt(&self, _scheme: &str, _operation: &str) {
+            self.tag("increment_retry_attempt");
+        }
+        fn increment_circuit_breaker_rejection(&self, _route: &str) {
+            self.tag("increment_circuit_breaker_rejection");
+        }
+        fn set_route_state(&self, _route: &str, _state: &str) {
+            self.tag("set_route_state");
+        }
+
+        fn clear_route_state(&self, _route: &str) {
+            self.tag("clear_route_state");
+        }
+        fn record_build_info(&self, _version: &str, _git_sha: &str) {
+            self.tag("record_build_info");
+        }
+        fn record_uptime(&self, _seconds: f64) {
+            self.tag("record_uptime");
+        }
+        fn record_component_operation(&self, _component: &str, _operation: &str, _outcome: &str) {
+            self.tag("record_component_operation");
+        }
     }
 
     #[test]
@@ -297,9 +502,9 @@ mod tests {
                 println!("Route {} processed exchange", route_id);
             }
 
-            fn set_queue_depth(&self, route_id: &str, depth: usize) {
+            fn set_queue_depth(&self, queue: &str, depth: usize) {
                 // In a real implementation, this would update a gauge
-                println!("Route {} queue depth: {}", route_id, depth);
+                println!("Queue {queue} depth: {depth}");
             }
 
             fn record_circuit_breaker_change(&self, route_id: &str, from: &str, to: &str) {
@@ -375,5 +580,85 @@ mod tests {
         handle.record_circuit_breaker_change("r", "closed", "open");
         handle.record_histogram("h", 1.0, &[("k", "v")]);
         handle.record_counter("c", 1.0, &[("k", "v")]);
+    }
+
+    #[test]
+    fn composite_delegates_retry_and_rejection() {
+        let a = Arc::new(RecordingMetrics::new());
+        let b = Arc::new(RecordingMetrics::new());
+        let composite = CompositeMetricsCollector::new(vec![
+            Arc::clone(&a) as Arc<dyn MetricsCollector>,
+            Arc::clone(&b) as Arc<dyn MetricsCollector>,
+        ]);
+
+        composite.increment_retry_attempt("kafka", "connect");
+        composite.increment_circuit_breaker_rejection("r1");
+
+        for member in [&a, &b] {
+            assert_eq!(
+                member.retries.lock().expect("retries lock").clone(),
+                vec![("kafka".to_string(), "connect".to_string())]
+            );
+            assert_eq!(
+                member.rejections.lock().expect("rejections lock").clone(),
+                vec!["r1".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn noop_defaults_compile_and_do_nothing() {
+        let collector: Arc<dyn MetricsCollector> = Arc::new(NoOpMetrics);
+        // Both new methods must exist as no-op defaults: compile + no panic.
+        collector.increment_retry_attempt("kafka", "connect");
+        collector.increment_circuit_breaker_rejection("r1");
+    }
+
+    /// Delegation parity: the composite fans the full `MetricsCollector`
+    /// surface out to every member.
+    #[test]
+    fn composite_delegates_full_trait_surface() {
+        let a = Arc::new(SurfaceProbe::new());
+        let b = Arc::new(SurfaceProbe::new());
+        let composite = CompositeMetricsCollector::new(vec![
+            Arc::clone(&a) as Arc<dyn MetricsCollector>,
+            Arc::clone(&b) as Arc<dyn MetricsCollector>,
+        ]);
+
+        composite.record_exchange_duration("r", Duration::from_millis(1));
+        composite.increment_errors("r", "x");
+        composite.increment_exchanges("r");
+        composite.set_queue_depth("r", 1);
+        composite.record_circuit_breaker_change("r", "closed", "open");
+        composite.record_histogram("h", 1.0, &[("k", "v")]);
+        composite.record_counter("c", 1.0, &[("k", "v")]);
+        composite.increment_retry_attempt("kafka", "connect");
+        composite.increment_circuit_breaker_rejection("r1");
+        composite.set_route_state("r", "Started");
+        composite.clear_route_state("r");
+        composite.record_build_info("1.2.3", "abc1234");
+        composite.record_uptime(0.5);
+        composite.record_component_operation("redis", "command", "success");
+
+        let expected = vec![
+            "record_exchange_duration",
+            "increment_errors",
+            "increment_exchanges",
+            "set_queue_depth",
+            "record_circuit_breaker_change",
+            "record_histogram",
+            "record_counter",
+            "increment_retry_attempt",
+            "increment_circuit_breaker_rejection",
+            "set_route_state",
+            "clear_route_state",
+            "record_build_info",
+            "record_uptime",
+            "record_component_operation",
+        ];
+        for member in [&a, &b] {
+            let calls = member.calls.lock().expect("calls lock").clone();
+            assert_eq!(calls, expected, "member missed part of the trait surface");
+        }
     }
 }

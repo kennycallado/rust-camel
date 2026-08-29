@@ -1,4 +1,4 @@
-use camel_component_api::{Body, CamelError, Exchange};
+use camel_component_api::{Body, CamelError, Exchange, RuntimeObservability};
 use rdkafka::config::ClientConfig;
 #[cfg(feature = "otel")]
 use rdkafka::message::{Header, OwnedHeaders};
@@ -24,6 +24,11 @@ pub struct KafkaProducer {
     /// Used by `poll_ready` to reject calls when the producer is unusable.
     stopped: Arc<AtomicBool>,
     semaphore: Arc<Semaphore>,
+    /// Runtime observability handle powering the component-ops facade at
+    /// the produce boundary (`("kafka","produce")`, dashboard-observability
+    /// Task 4.3). The producer previously emitted nothing, so no retained
+    /// label collides with `e:kafka:produce`.
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl Clone for KafkaProducer {
@@ -33,12 +38,16 @@ impl Clone for KafkaProducer {
             producer: self.producer.clone(),
             stopped: self.stopped.clone(),
             semaphore: self.semaphore.clone(),
+            runtime: self.runtime.clone(),
         }
     }
 }
 
 impl KafkaProducer {
-    pub fn new(config: ResolvedKafkaEndpointConfig) -> Result<Self, CamelError> {
+    pub fn new(
+        config: ResolvedKafkaEndpointConfig,
+        runtime: Arc<dyn RuntimeObservability>,
+    ) -> Result<Self, CamelError> {
         let mut cc = ClientConfig::new();
         cc.set("bootstrap.servers", &config.brokers)
             .set("message.timeout.ms", config.request_timeout_ms.to_string())
@@ -57,6 +66,7 @@ impl KafkaProducer {
             config,
             producer: Arc::new(producer),
             stopped: Arc::new(AtomicBool::new(false)),
+            runtime,
         })
     }
 
@@ -180,85 +190,97 @@ impl Service<Exchange> for KafkaProducer {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, mut exchange: Exchange) -> Self::Future {
+    fn call(&mut self, exchange: Exchange) -> Self::Future {
         let config = self.config.clone();
         let producer = self.producer.clone();
         let semaphore = Arc::clone(&self.semaphore);
+        let component_metrics = self.runtime.component_metrics();
 
         Box::pin(async move {
-            // Acquire the concurrency permit inside call()'s future: the
-            // permit is held only while this one exchange is in flight,
-            // and permit contention must not consume readiness for other
-            // callers. A closed semaphore maps to ChannelClosed.
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .map_err(|_| CamelError::ChannelClosed)?;
+            let mut exchange = exchange;
+            let outcome = async {
+                // Acquire the concurrency permit inside call()'s future: the
+                // permit is held only while this one exchange is in flight,
+                // and permit contention must not consume readiness for other
+                // callers. A closed semaphore maps to ChannelClosed.
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| CamelError::ChannelClosed)?;
 
-            let topic = Self::resolve_topic(&exchange, &config)?.to_string();
-            let payload = Self::body_to_bytes(&exchange.input.body)?;
+                let topic = Self::resolve_topic(&exchange, &config)?.to_string();
+                let payload = Self::body_to_bytes(&exchange.input.body)?;
 
-            let key = Self::resolve_record_key(&exchange);
-            let partition = Self::resolve_record_partition(&exchange);
-            let timeout = Self::resolve_request_timeout(&config);
+                let key = Self::resolve_record_key(&exchange);
+                let partition = Self::resolve_record_partition(&exchange);
+                let timeout = Self::resolve_request_timeout(&config);
 
-            // Inject W3C TraceContext headers for distributed tracing (otel feature only)
-            #[cfg(feature = "otel")]
-            let otel_headers = {
-                let mut headers_map = std::collections::HashMap::new();
-                camel_otel::inject_from_exchange(&exchange, &mut headers_map);
-                headers_map
-            };
-
-            let delivery_result = {
-                let mut record = FutureRecord::to(&topic).payload(&payload);
-                if let Some(ref k) = key {
-                    record = record.key(k.as_str());
-                }
-                if let Some(p) = partition {
-                    record = record.partition(p);
-                }
+                // Inject W3C TraceContext headers for distributed tracing (otel feature only)
                 #[cfg(feature = "otel")]
-                {
-                    let mut owned_headers = OwnedHeaders::new();
-                    for (key, value) in &otel_headers {
-                        owned_headers = owned_headers.insert(Header {
-                            key,
-                            value: Some(value.as_bytes()),
-                        });
-                    }
-                    record = record.headers(owned_headers);
-                }
-                producer.send(record, timeout).await
-            };
+                let otel_headers = {
+                    let mut headers_map = std::collections::HashMap::new();
+                    camel_otel::inject_from_exchange(&exchange, &mut headers_map);
+                    headers_map
+                };
 
-            match delivery_result {
-                Ok((partition_out, offset_out)) => {
-                    debug!(
-                        topic = %topic,
-                        partition = partition_out,
-                        offset = offset_out,
-                        "Kafka message delivered"
-                    );
-                    exchange.input.set_header(
-                        "CamelKafkaRecordMetadata",
-                        json!({
-                            "topic": topic,
-                            "partition": partition_out,
-                            "offset": offset_out,
-                        }),
-                    );
-                    Ok(exchange)
-                }
-                Err((e, _)) => {
-                    // log-policy: handler-owned
-                    warn!(error = %e, topic = %topic, "Kafka delivery failed");
-                    Err(CamelError::ProcessorError(format!(
-                        "Kafka delivery failed to topic '{}': {}",
-                        topic, e
-                    )))
+                let delivery_result = {
+                    let mut record = FutureRecord::to(&topic).payload(&payload);
+                    if let Some(ref k) = key {
+                        record = record.key(k.as_str());
+                    }
+                    if let Some(p) = partition {
+                        record = record.partition(p);
+                    }
+                    #[cfg(feature = "otel")]
+                    {
+                        let mut owned_headers = OwnedHeaders::new();
+                        for (key, value) in &otel_headers {
+                            owned_headers = owned_headers.insert(Header {
+                                key,
+                                value: Some(value.as_bytes()),
+                            });
+                        }
+                        record = record.headers(owned_headers);
+                    }
+                    producer.send(record, timeout).await
+                };
+
+                match delivery_result {
+                    Ok((partition_out, offset_out)) => {
+                        debug!(
+                            topic = %topic,
+                            partition = partition_out,
+                            offset = offset_out,
+                            "Kafka message delivered"
+                        );
+                        exchange.input.set_header(
+                            "CamelKafkaRecordMetadata",
+                            json!({
+                                "topic": topic,
+                                "partition": partition_out,
+                                "offset": offset_out,
+                            }),
+                        );
+                        Ok(exchange)
+                    }
+                    Err((e, _)) => {
+                        // log-policy: handler-owned
+                        warn!(error = %e, topic = %topic, "Kafka delivery failed");
+                        Err(CamelError::ProcessorError(format!(
+                            "Kafka delivery failed to topic '{}': {}",
+                            topic, e
+                        )))
+                    }
                 }
             }
+            .await;
+            // ("kafka","produce") facade (dashboard-observability 4.3): the
+            // produce boundary is the full delivery attempt — permit,
+            // topic/key resolution, serialization, broker ack. kafka runs no
+            // retry_async on this path and previously emitted nothing, so no
+            // label collides with e:kafka:produce.
+            component_metrics.observe("kafka", "produce", outcome.is_err());
+            outcome
         })
     }
 }
@@ -266,6 +288,12 @@ impl Service<Exchange> for KafkaProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::test_support::NoopRuntimeObservability;
+
+    fn test_rt() -> std::sync::Arc<dyn RuntimeObservability> {
+        std::sync::Arc::new(NoopRuntimeObservability)
+    }
+
     use crate::config::KafkaEndpointConfig;
     use bytes::Bytes;
     use camel_component_api::Message;
@@ -390,7 +418,7 @@ mod tests {
         let mut config = make_resolved_config();
         config.topic.clear();
 
-        let mut producer = KafkaProducer::new(config).expect("producer should build");
+        let mut producer = KafkaProducer::new(config, test_rt()).expect("producer should build");
         let exchange = Exchange::new(Message::new(Body::Text("hello".to_string())));
 
         let err = producer
@@ -406,7 +434,7 @@ mod tests {
     #[tokio::test]
     async fn test_call_fails_fast_for_stream_body() {
         let config = make_resolved_config();
-        let mut producer = KafkaProducer::new(config).expect("producer should build");
+        let mut producer = KafkaProducer::new(config, test_rt()).expect("producer should build");
 
         let stream = stream::iter(vec![Ok(Bytes::from("chunk"))]);
         let body = Body::Stream(StreamBody {
@@ -477,7 +505,7 @@ mod tests {
     #[test]
     fn poll_ready_stopped_returns_error() {
         let config = make_resolved_config();
-        let producer = KafkaProducer::new(config).expect("producer should build");
+        let producer = KafkaProducer::new(config, test_rt()).expect("producer should build");
 
         // Before stop, poll_ready should be ready
         let mut producer = producer.clone();
@@ -504,7 +532,7 @@ mod tests {
     fn poll_ready_running_returns_ok_without_permit() {
         let config = make_resolved_config();
         let expected_permits = config.max_poll_records as usize;
-        let mut producer = KafkaProducer::new(config).expect("producer should build");
+        let mut producer = KafkaProducer::new(config, test_rt()).expect("producer should build");
 
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         assert!(
@@ -521,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn call_blocks_on_semaphore_until_release() {
         let config = make_resolved_config();
-        let mut producer = KafkaProducer::new(config).expect("producer should build");
+        let mut producer = KafkaProducer::new(config, test_rt()).expect("producer should build");
 
         // Drain every permit the config sized: the call future must not be
         // able to acquire one until they are released.
@@ -555,7 +583,7 @@ mod tests {
     #[test]
     fn test_stop_state_shared_across_clones() {
         let config = make_resolved_config();
-        let producer = KafkaProducer::new(config).expect("producer should build");
+        let producer = KafkaProducer::new(config, test_rt()).expect("producer should build");
         let clone = producer.clone();
 
         // Stop the original

@@ -49,6 +49,34 @@ pub struct CamelContextBuilder {
     intercept_rules: Option<InterceptRules>,
 }
 
+/// Push `camel_uptime_seconds` onto the collector every 60s.
+///
+/// The Prometheus endpoint is pull-based — no periodic path in
+/// camel-prometheus reaches the collector — so the runtime pushes the
+/// gauge itself. The task exits when `shutdown` (the context's token)
+/// fires; uptime is anchored at `started` (context build time), so the
+/// first scrape after a restart reads near zero.
+fn spawn_uptime_refresh(
+    metrics: Arc<dyn MetricsCollector>,
+    shutdown: CancellationToken,
+    started: std::time::Instant,
+) {
+    tokio::spawn(async move {
+        // The interval's first tick fires immediately; uptime was already
+        // recorded once at build, so consume it and refresh every 60s after.
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    metrics.record_uptime(started.elapsed().as_secs_f64());
+                }
+            }
+        }
+    });
+}
+
 impl CamelContextBuilder {
     pub fn new() -> Self {
         Self {
@@ -176,6 +204,12 @@ impl CamelContextBuilder {
         } else {
             Arc::new(RuntimeExecutionAdapter::new(controller))
         };
+        // The store is the single choke point every RouteStatusProjection
+        // write flows through (both the UoW persist path and the
+        // projection-store upsert path), so seeding it with the SAME shared
+        // late-bound handle keeps `camel_route_state` emission on every
+        // lifecycle transition. No new collector instances.
+        let store = store.with_metrics(Arc::clone(&metrics));
         Arc::new(
             RuntimeBus::new(
                 Arc::new(store.clone()),
@@ -220,6 +254,22 @@ impl CamelContextBuilder {
         if let Some(collector) = self.metrics {
             metrics_handle.register(collector);
         }
+        // Build + uptime info (dashboard-observability T3.2): emitted on the
+        // shared handle so every registered collector observes them. There is
+        // no vergen build script yet, so git_sha falls back to "unknown"
+        // (accepted trade-off; an optional build.rs is a follow-up, not part
+        // of this change).
+        metrics_handle.record_build_info(
+            env!("CARGO_PKG_VERSION"),
+            option_env!("VERGEN_GIT_SHA").unwrap_or("unknown"),
+        );
+        let started_at = std::time::Instant::now();
+        let cancel_token = CancellationToken::new();
+        spawn_uptime_refresh(
+            Arc::clone(&metrics_handle) as Arc<dyn MetricsCollector>,
+            cancel_token.clone(),
+            started_at,
+        );
         let platform_service = self
             .platform_service
             .unwrap_or_else(|| Arc::new(NoopPlatformService::default()));
@@ -351,7 +401,7 @@ impl CamelContextBuilder {
             _actor_join: actor_join,
             supervision_join,
             runtime,
-            cancel_token: CancellationToken::new(),
+            cancel_token,
             metrics: metrics_handle,
             platform_service,
             languages,
@@ -365,6 +415,9 @@ impl CamelContextBuilder {
             claim_check_repositories,
             cache_repositories,
             startup_checks: Vec::<Box<dyn ConfigCheck>>::new(),
+            build_version: env!("CARGO_PKG_VERSION"),
+            build_git_sha: option_env!("VERGEN_GIT_SHA").unwrap_or("unknown"),
+            build_started_at: started_at,
         }))
     }
 }

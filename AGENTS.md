@@ -61,6 +61,8 @@
   run: cargo xtask lint-component-deps
 - name: lint-context-citations
   run: cargo xtask lint-context-citations
+- name: lint-metric-labels
+  run: cargo xtask lint-metric-labels
 - name: schema-check
   run: cargo xtask schema --check
 - name: cargo-audit

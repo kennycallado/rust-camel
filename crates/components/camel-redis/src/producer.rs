@@ -1,9 +1,8 @@
 use crate::config::{RedisCommand, RedisEndpointConfig, is_idempotent_command};
 use crate::executor::{MultiplexedExecutor, execute_with_retry};
-use camel_component_api::{CamelError, Exchange};
+use camel_component_api::{CamelError, Exchange, RuntimeObservability};
 use std::future::Future;
 use std::pin::Pin;
-#[cfg(test)]
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tower::Service;
@@ -18,6 +17,11 @@ use tower::Service;
 pub struct RedisProducer {
     config: RedisEndpointConfig,
     executor: MultiplexedExecutor,
+    /// Runtime observability handle powering the component-ops facade at
+    /// the command boundary (`("redis","command")`, dashboard-observability
+    /// Task 4.3). `execute_with_retry` is a custom loop (not retry_async)
+    /// and never wires metrics, so nothing collides with `e:redis:command`.
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl RedisProducer {
@@ -26,10 +30,17 @@ impl RedisProducer {
     /// Builds the topology from `config` (standalone, sentinel, or cluster) and
     /// wraps it in a [`MultiplexedExecutor`]. The connection is not established
     /// until the first call to `call()`.
-    pub fn new(config: RedisEndpointConfig) -> Result<Self, CamelError> {
+    pub fn new(
+        config: RedisEndpointConfig,
+        runtime: Arc<dyn RuntimeObservability>,
+    ) -> Result<Self, CamelError> {
         let topology = crate::topology::topology_from_config(&config)?;
         let executor = MultiplexedExecutor::new(config.clone(), topology);
-        Ok(Self { config, executor })
+        Ok(Self {
+            config,
+            executor,
+            runtime,
+        })
     }
 
     /// Resolves the command to execute.
@@ -107,6 +118,7 @@ impl Service<Exchange> for RedisProducer {
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let config = self.config.clone();
         let mut executor = self.executor.clone();
+        let component_metrics = self.runtime.component_metrics();
 
         Box::pin(async move {
             // 1. Resolve command from header or config
@@ -118,14 +130,20 @@ impl Service<Exchange> for RedisProducer {
 
             // 3. Execute with retry on transient errors. The executor reconnects
             //    (re-resolving the master through the topology) before each retry.
-            execute_with_retry(
+            // ("redis","command") facade (dashboard-observability 4.3): the
+            // command boundary observes the final outcome AFTER the retry
+            // loop settles — one observe per exchange, not per attempt (the
+            // custom loop in execute_with_retry never wires metrics).
+            let command_outcome = execute_with_retry(
                 &mut executor,
                 &cmd,
                 &mut exchange,
                 is_idempotent_command(&cmd),
                 &config.reconnect,
             )
-            .await?;
+            .await;
+            component_metrics.observe("redis", "command", command_outcome.is_err());
+            command_outcome?;
 
             Ok(exchange)
         })
@@ -135,11 +153,17 @@ impl Service<Exchange> for RedisProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::test_support::NoopRuntimeObservability;
+
+    fn test_rt() -> Arc<dyn RuntimeObservability> {
+        Arc::new(NoopRuntimeObservability)
+    }
+
     use camel_component_api::Message;
     #[test]
     fn test_producer_new() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config).unwrap();
+        let producer = RedisProducer::new(config, test_rt()).unwrap();
         // conn_arc() returns a clone, so the executor's reference + this one = 2.
         let conn = producer.executor.conn_arc();
         assert_eq!(Arc::strong_count(&conn), 2);
@@ -148,7 +172,7 @@ mod tests {
     #[test]
     fn test_producer_clone_shares_connection() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config).unwrap();
+        let producer = RedisProducer::new(config, test_rt()).unwrap();
         let producer2 = producer.clone();
 
         // Both producers share the same connection Arc (via the executor)
@@ -264,7 +288,7 @@ mod tests {
     #[tokio::test]
     async fn test_poll_ready_always_returns_ready() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let mut producer = RedisProducer::new(config).unwrap();
+        let mut producer = RedisProducer::new(config, test_rt()).unwrap();
         let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));
@@ -301,7 +325,7 @@ mod tests {
     #[test]
     fn test_producer_clone_is_independent_for_async_state() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config).unwrap();
+        let producer = RedisProducer::new(config, test_rt()).unwrap();
         let producer2 = producer.clone();
 
         // Both share the same connection Arc (via the executor)
@@ -317,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn test_producer_connection_is_none_initially() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config).unwrap();
+        let producer = RedisProducer::new(config, test_rt()).unwrap();
 
         let conn = producer.executor.conn_arc();
         let guard = conn.lock().await;
@@ -327,7 +351,7 @@ mod tests {
     #[test]
     fn test_producer_clone_increments_arc_count() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config).unwrap();
+        let producer = RedisProducer::new(config, test_rt()).unwrap();
         // conn_arc() returns a clone, so the executor's reference + this one = 2.
         let conn = producer.executor.conn_arc();
         assert_eq!(Arc::strong_count(&conn), 2);
@@ -342,7 +366,7 @@ mod tests {
         // This test requires a real Redis server, so we mark it as a pattern test
         // In CI, this would be skipped unless Redis is available
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config).unwrap();
+        let producer = RedisProducer::new(config, test_rt()).unwrap();
 
         // Connection should be None initially
         {
@@ -359,7 +383,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_connection_fails_without_redis() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:9933").unwrap();
-        let producer = RedisProducer::new(config).unwrap();
+        let producer = RedisProducer::new(config, test_rt()).unwrap();
         let result = producer.check_connection().await;
         // Without a Redis on port 9933, this should fail
         // The error may come from connection failure or PING failure
@@ -373,7 +397,7 @@ mod tests {
     #[test]
     fn test_check_connection_available_on_clone() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config).unwrap();
+        let producer = RedisProducer::new(config, test_rt()).unwrap();
         let _clone = producer.clone();
         // Verify the method exists and compiles — actual call requires live Redis
     }

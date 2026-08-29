@@ -100,6 +100,8 @@ jobs:
         run: cargo test -p camel-test --features integration-tests --test container_test
       - name: Kafka integration tests (testcontainers)
         run: cargo test -p camel-test --features integration-tests --test kafka_test
+      - name: Component emission integration tests (testcontainers)
+        run: cargo test -p camel-test --features integration-tests --test component_emission_test
       - name: Redis integration tests (testcontainers)
         run: cargo test -p camel-test --features integration-tests --test redis_test
       - name: Redis repositories integration tests (testcontainers)
@@ -246,6 +248,8 @@ jobs:
         run: cargo xtask lint-ignore
       - name: lint-context-citations
         run: cargo xtask lint-context-citations
+      - name: lint-metric-labels
+        run: cargo xtask lint-metric-labels
       - name: lint-commits
         # Fail if any commit in the PR range mentions breaking in prose
         # without the conventional `!:` subject marker. Default checkout

@@ -288,6 +288,7 @@ impl ExecProducer {
 
     fn metric_denied(&self, reason: &'static str) {
         if let Some(rt) = &self.rt {
+            // allow-open-label rc-xl5k rc-gm6s (route; reason bounded by caller literals)
             rt.metrics().record_counter(
                 "exec_policy_denials_total",
                 1.0,
@@ -304,6 +305,7 @@ impl ExecProducer {
         dur: Duration,
     ) {
         let Some(rt) = &self.rt else { return };
+        // allow-open-label rc-xl5k (route label: user-defined route id)
         rt.metrics().record_histogram(
             "exec_duration_secs",
             dur.as_secs_f64(),
@@ -311,6 +313,7 @@ impl ExecProducer {
         );
         if let Some(c) = exit_code {
             let code_str = c.to_string();
+            // allow-open-label rc-xl5k rc-gm6s (route; exit code bounded 0-255)
             rt.metrics().record_counter(
                 "exec_exit_code",
                 1.0,
@@ -318,10 +321,12 @@ impl ExecProducer {
             );
         }
         if timed_out {
+            // allow-open-label rc-xl5k (route label: user-defined route id)
             rt.metrics()
                 .record_counter("exec_timeouts_total", 1.0, &[("route", &self.route_id)]);
         }
         if stdout_truncated {
+            // allow-open-label rc-xl5k (route label: user-defined route id)
             rt.metrics().record_counter(
                 "exec_stdout_truncated_total",
                 1.0,

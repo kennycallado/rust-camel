@@ -12,7 +12,7 @@ use tower::Service;
 
 use async_trait::async_trait;
 use camel_api::{
-    CamelError, StepLifecycle, StepShutdownReason,
+    CamelError, MetricsCollector, StepLifecycle, StepShutdownReason,
     aggregator::{
         AggregationStrategy, AggregatorConfig, CompletionCondition, CompletionMode,
         CompletionReason, CorrelationStrategy,
@@ -24,6 +24,11 @@ use camel_api::{
 use camel_language_api::Language;
 
 pub type SharedLanguageRegistry = Arc<std::sync::Mutex<HashMap<String, Arc<dyn Language>>>>;
+
+/// Sampling cadence for the metrics-only sweep (no `bucket_ttl` configured):
+/// matches the 250ms cadence of the other dashboard-observability T3.3
+/// queue-depth samplers.
+const QUEUE_DEPTH_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
 pub const CAMEL_AGGREGATOR_PENDING: &str = "CamelAggregatorPending";
 pub const CAMEL_AGGREGATED_SIZE: &str = "CamelAggregatedSize";
@@ -63,18 +68,29 @@ pub struct AggregatorService {
     late_tx: mpsc::Sender<Exchange>,
     language_registry: SharedLanguageRegistry,
     /// Swappable cell holding the cancellation token for the background
-    /// TTL-sweep task. `StepLifecycle::start` replaces this with a fresh token
+    /// maintenance sweep task. `StepLifecycle::start` replaces this with a fresh token
     /// so the sweep respawns on the next `poll_ready`; `shutdown` cancels the
     /// current token to terminate the task. The value is initially seeded from
     /// the route token — cancelling the route token cancels the sweep (the
     /// primary shutdown path). This replaces the plain `route_cancel` field.
     sweep_cancel: Arc<Mutex<CancellationToken>>,
-    /// Handle to the background TTL-sweep task. `None` when `config.bucket_ttl`
-    /// is `None` (no TTL → no sweep). Populated lazily on the first
-    /// `poll_ready`. The task binds to the current `sweep_cancel` token via
+    /// Handle to the background maintenance sweep task. `None` until the
+    /// first `poll_ready`. The sweep exists when `bucket_ttl` OR
+    /// `queue_metrics` is configured (TTL eviction and/or queue-depth
+    /// sampling); with neither set there is nothing to sweep and no task is
+    /// spawned. The task binds to the current `sweep_cancel` token via
     /// `select!`; `StepLifecycle::start` clears this to `None` (aborting the
     /// old task) so `poll_ready` respawns with the fresh token.
     sweep_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Queue-depth reporting (collector + `aggregator:<route>` label). When
+    /// set, the background maintenance sweep publishes the buffered group
+    /// count as `camel_queue_depth{queue}` — with or without a
+    /// `bucket_ttl`. `None` when no collector was injected at compile time.
+    queue_metrics: Option<(Arc<dyn MetricsCollector>, String)>,
+    /// Strong-count cell backing the last-owner check in [`Drop`]: transient
+    /// clones (the pipeline clones the service per `poll_ready`) must not
+    /// abort the shared sweep task; only the final owner's drop may.
+    clone_guard: Arc<()>,
 }
 
 impl std::fmt::Debug for AggregatorService {
@@ -90,6 +106,13 @@ impl Drop for AggregatorService {
         // primary shutdown path is now `StepLifecycle::shutdown` which
         // cancels `sweep_cancel` and aborts `sweep_handle`. `abort()` on an
         // already-finished task is a no-op.
+        //
+        // Last-owner guard: `Clone` shares this cell, so a transient clone
+        // dropping (the pipeline clones the service on every `poll_ready`)
+        // does NOT abort the sweep — only the final owner's drop does.
+        if Arc::strong_count(&self.clone_guard) > 1 {
+            return;
+        }
         if let Some(handle) = self
             .sweep_handle
             .lock()
@@ -106,8 +129,9 @@ impl AggregatorService {
     /// route's cancellation token and wrapped in a swappable `Arc<Mutex<...>>`
     /// cell. `StepLifecycle::start` replaces it with a fresh token so the
     /// sweep respawns after a restart. Construction is runtime-free (no
-    /// `tokio::spawn` here). When `config.bucket_ttl` is `Some`, the TTL-sweep
-    /// task is spawned LAZILY on the first `poll_ready` and bound to the
+    /// `tokio::spawn` here). The maintenance sweep task (TTL eviction when
+    /// `bucket_ttl` is set, queue-depth sampling when `queue_metrics` is
+    /// set) is spawned LAZILY on the first `poll_ready` and bound to the
     /// current `sweep_cancel` token via `select!`.
     /// The route owner MUST call `shutdown` to cancel it;
     /// `Drop` also aborts it as defense-in-depth.
@@ -157,7 +181,22 @@ impl AggregatorService {
             language_registry,
             sweep_cancel: Arc::new(Mutex::new(route_cancel)),
             sweep_handle: Arc::new(Mutex::new(None)),
+            queue_metrics: None,
+            clone_guard: Arc::new(()),
         }
+    }
+
+    /// Inject queue-depth reporting: the TTL-sweep maintenance pass publishes
+    /// the buffered group count (open correlation buckets) as
+    /// `camel_queue_depth{queue = label}`. `label` is the route-scoped
+    /// closed-set identifier (`aggregator:<route>`).
+    pub fn with_queue_metrics(
+        mut self,
+        metrics: Arc<dyn MetricsCollector>,
+        label: impl Into<String>,
+    ) -> Self {
+        self.queue_metrics = Some((metrics, label.into()));
+        self
     }
 
     pub fn config(&self) -> &AggregatorConfig {
@@ -314,32 +353,50 @@ impl Service<Exchange> for AggregatorService {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
-        // R3-C1: lazily spawn the TTL-sweep on the first readiness poll. A
-        // tokio runtime is guaranteed here (the runtime driving the service),
-        // unlike at construction. Single-spawn via the lock + is_none check.
-        if let Some(ttl) = self.config.bucket_ttl {
-            let mut g = self.sweep_handle.lock().unwrap_or_else(|e| e.into_inner());
-            if g.is_none() {
-                let interval = std::cmp::max(ttl / 2, Duration::from_millis(50));
-                let buckets = Arc::clone(&self.buckets);
-                let cancel = self
-                    .sweep_cancel
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                *g = Some(tokio::spawn(async move {
-                    loop {
-                        tokio::select! {
-                            _ = cancel.cancelled() => break,
-                            _ = tokio::time::sleep(interval) => {
-                                let mut guard =
-                                    buckets.lock().unwrap_or_else(|e| e.into_inner());
+        // R3-C1: lazily spawn the maintenance sweep on the first readiness
+        // poll. A tokio runtime is guaranteed here (the runtime driving the
+        // service), unlike at construction. Single-spawn via the lock +
+        // is_none check. The sweep exists when EITHER release mechanism is
+        // configured: `bucket_ttl` drives eviction, `queue_metrics` drives
+        // queue-depth sampling — a size-only aggregator (bucket_ttl = None)
+        // still samples (T3.3 review F2); eviction itself stays gated on
+        // the TTL.
+        let ttl = self.config.bucket_ttl;
+        if ttl.is_none() && self.queue_metrics.is_none() {
+            return Poll::Ready(Ok(()));
+        }
+        let mut g = self.sweep_handle.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_none() {
+            let interval = match ttl {
+                Some(ttl) => std::cmp::max(ttl / 2, Duration::from_millis(50)),
+                None => QUEUE_DEPTH_SAMPLE_INTERVAL,
+            };
+            let buckets = Arc::clone(&self.buckets);
+            let cancel = self
+                .sweep_cancel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let queue_metrics = self.queue_metrics.clone();
+            *g = Some(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(interval) => {
+                            let mut guard =
+                                buckets.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(ttl) = ttl {
                                 guard.retain(|_, b| !b.is_expired(ttl));
+                            }
+                            // Maintenance-pass sampling: publish the
+                            // buffered group count after eviction.
+                            if let Some((metrics, label)) = queue_metrics.as_ref() {
+                                metrics.set_queue_depth(label, guard.len());
                             }
                         }
                     }
-                }));
-            }
+                }
+            }));
         }
         Poll::Ready(Ok(()))
     }
@@ -1731,6 +1788,183 @@ mod tests {
         cancel.cancel();
         // Give the task a moment to observe the cancel.
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    /// Shared `MetricsCollector` double that logs every `set_queue_depth`
+    /// call (queue label, depth). Used by the queue-depth sampling tests.
+    struct QueueDepthRecorder(Mutex<Vec<(String, usize)>>);
+    impl MetricsCollector for QueueDepthRecorder {
+        fn record_exchange_duration(&self, _: &str, _: std::time::Duration) {}
+        fn increment_errors(&self, _: &str, _: &str) {}
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, queue: &str, depth: usize) {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((queue.to_string(), depth));
+        }
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    /// Poll the recorder until a sample for `label` matches `pred`, or fail
+    /// after `deadline`. Keeps the sampling tests scheduling-tolerant.
+    async fn await_depth_sample(
+        recorder: &QueueDepthRecorder,
+        label: &str,
+        pred: impl Fn(usize) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let matched = recorder
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|(q, d)| q == label && pred(*d));
+            if matched {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no queue-depth sample for '{label}' matched within 2s"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Queue-depth sampling (dashboard-observability T3.3): when
+    /// `with_queue_metrics` is set, the TTL-sweep maintenance pass publishes
+    /// the buffered group count, and the count returns to zero once the
+    /// group completes.
+    #[tokio::test]
+    async fn test_sweep_reports_queue_depth() {
+        let config = AggregatorConfig::correlate_by("orderId")
+            .complete_when_size(3)
+            // Short TTL keeps the sweep interval at its 50ms floor so the
+            // test observes samples quickly; the bucket is completed well
+            // before eviction.
+            .bucket_ttl(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(8);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let recorder = Arc::new(QueueDepthRecorder(Mutex::new(Vec::new())));
+        let mut svc = AggregatorService::new(config, tx, registry, cancel).with_queue_metrics(
+            Arc::clone(&recorder) as Arc<dyn MetricsCollector>,
+            "aggregator:t",
+        );
+
+        // Spawn the sweep via the first readiness poll.
+        let _ = svc.ready().await.unwrap();
+
+        // Partial group: 1 of 3 messages.
+        let ex = make_exchange("orderId", "g1", "partial");
+        let _ = svc.ready().await.unwrap().call(ex).await;
+
+        await_depth_sample(&recorder, "aggregator:t", |d| d > 0).await;
+
+        // Complete the group; the sweep must report zero again.
+        let ex = make_exchange("orderId", "g1", "b");
+        let _ = svc.ready().await.unwrap().call(ex).await;
+        let ex = make_exchange("orderId", "g1", "c");
+        let _ = svc.ready().await.unwrap().call(ex).await;
+
+        await_depth_sample(&recorder, "aggregator:t", |d| d == 0).await;
+
+        svc.shutdown(StepShutdownReason::RouteStop).await.unwrap();
+    }
+
+    /// F2 (T3.3 review): a no-TTL aggregator (size-only completion,
+    /// `bucket_ttl = None`) with `queue_metrics` set must still sample —
+    /// the sweep used to live entirely inside the TTL branch and never ran.
+    /// Eviction stays TTL-gated; only sampling runs.
+    #[tokio::test]
+    async fn test_no_ttl_aggregator_reports_queue_depth() {
+        use camel_api::aggregator::CorrelationStrategy;
+
+        let config = AggregatorConfig {
+            header_name: "orderId".into(),
+            completion: CompletionMode::Single(CompletionCondition::Size(3)),
+            correlation: CorrelationStrategy::HeaderName("orderId".into()),
+            strategy: AggregationStrategy::CollectAll,
+            max_buckets: Some(100),
+            bucket_ttl: None,
+            force_completion_on_stop: false,
+            discard_on_timeout: false,
+            max_timeout_tasks: 64,
+        };
+        let cancel = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(8);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let recorder = Arc::new(QueueDepthRecorder(Mutex::new(Vec::new())));
+        let mut svc = AggregatorService::new(config, tx, registry, cancel).with_queue_metrics(
+            Arc::clone(&recorder) as Arc<dyn MetricsCollector>,
+            "aggregator:nottl",
+        );
+
+        let _ = svc.ready().await.unwrap();
+        assert!(
+            svc.sweep_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
+            "metrics-only config (bucket_ttl = None) must still spawn the sweep"
+        );
+
+        // Partial group: 1 of 3 messages — depth must publish > 0.
+        let ex = make_exchange("orderId", "g1", "partial");
+        let _ = svc.ready().await.unwrap().call(ex).await;
+        await_depth_sample(&recorder, "aggregator:nottl", |d| d > 0).await;
+
+        // Complete the group; depth must publish 0 again.
+        let ex = make_exchange("orderId", "g1", "b");
+        let _ = svc.ready().await.unwrap().call(ex).await;
+        let ex = make_exchange("orderId", "g1", "c");
+        let _ = svc.ready().await.unwrap().call(ex).await;
+        await_depth_sample(&recorder, "aggregator:nottl", |d| d == 0).await;
+
+        svc.shutdown(StepShutdownReason::RouteStop).await.unwrap();
+    }
+
+    /// F3 (T3.3 review): the last-owner guard — the pipeline clones the
+    /// service on every `poll_ready`; a transient clone dropping must NOT
+    /// abort the shared sweep. The sweep keeps ticking (depth still
+    /// published) until the final owner drops.
+    #[tokio::test]
+    async fn test_transient_clone_drop_keeps_sweep_sampling() {
+        let config = AggregatorConfig::correlate_by("orderId")
+            .complete_when_size(3)
+            .bucket_ttl(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(8);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let recorder = Arc::new(QueueDepthRecorder(Mutex::new(Vec::new())));
+        let mut svc = AggregatorService::new(config, tx, registry, cancel).with_queue_metrics(
+            Arc::clone(&recorder) as Arc<dyn MetricsCollector>,
+            "aggregator:clone",
+        );
+
+        let _ = svc.ready().await.unwrap();
+
+        // Transient clone drops (as the pipeline does per poll_ready).
+        drop(svc.clone());
+        assert!(
+            svc.sweep_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
+            "transient clone drop must not abort the shared sweep"
+        );
+
+        // The sweep still ticks: a partial group produces depth samples.
+        let ex = make_exchange("orderId", "g1", "partial");
+        let _ = svc.ready().await.unwrap().call(ex).await;
+        await_depth_sample(&recorder, "aggregator:clone", |d| d > 0).await;
+
+        svc.shutdown(StepShutdownReason::RouteStop).await.unwrap();
     }
 
     // ── R3-M3: bounded timeout-task spawn ─────────────────────────────

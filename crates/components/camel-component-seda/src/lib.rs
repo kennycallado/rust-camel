@@ -6,16 +6,19 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 #[cfg(test)]
-use camel_component_api::test_support::PanicRuntimeObservability;
+use camel_component_api::test_support::NoopRuntimeObservability;
 #[cfg(test)]
 fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
-    std::sync::Arc::new(PanicRuntimeObservability)
+    // The consumer reports queue depth through `rt.metrics()` on its
+    // forwarder/sampler loop, so tests need the permissive double (the
+    // panicking double is for components that must not touch observability).
+    std::sync::Arc::new(NoopRuntimeObservability)
 }
 
 use async_trait::async_trait;
@@ -32,6 +35,12 @@ use camel_component_api::{
     Consumer, ConsumerContext, Endpoint, Exchange, ExchangeEnvelope, ProducerContext,
 };
 use tracing::{info, warn};
+
+/// Queue-depth sampling cadence for the per-endpoint
+/// `camel_queue_depth{queue="seda:<name>"}` gauge (dashboard-observability
+/// T3.3). Short enough that a scrape between ticks never misses a backlog,
+/// long enough that the len() read is negligible.
+const QUEUE_DEPTH_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -381,6 +390,26 @@ enum SedaMode {
 struct SedaEndpointState {
     config: SedaConfig,
     mode: SedaMode,
+    /// Lock-free queue-depth counter backing the per-endpoint
+    /// `camel_queue_depth{queue="seda:<name>"}` gauge (dashboard-observability
+    /// T3.3). ONE counter per endpoint, shared by producers and every
+    /// forwarder (hoisted out of `SedaMode` so both modes use it).
+    ///
+    /// Semantics: Single counts each envelope once from producer send until
+    /// the forwarder finishes forwarding it. Fanout is broadcast — each
+    /// produced exchange is cloned to every subscriber — so the honest
+    /// shared-label metric counts each *undelivered copy*: the producer adds
+    /// one per reserved subscriber and each forwarder subtracts one when its
+    /// copy leaves the endpoint. (Per-subscriber `rx.len()` publishes under
+    /// the shared label — the scheme this replaces — let an idle subscriber
+    /// clobber a busy subscriber's backlog with intermittent false zeros.)
+    ///
+    /// The forwarder holds the shared-receiver mutex while parked in
+    /// `recv()` (Single), so a sampler cannot take that lock; producers
+    /// count an envelope in before sending and forwarders count it out via
+    /// the RAII [`DepthGuard`]. Reads are exact once sends settle (transient
+    /// over-count only, never negative).
+    depth: Arc<AtomicUsize>,
 }
 
 impl SedaEndpointState {
@@ -400,6 +429,7 @@ impl SedaEndpointState {
         Self {
             config: config.clone(),
             mode,
+            depth: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -416,6 +446,86 @@ impl SedaEndpointState {
                 .is_empty(),
         }
     }
+}
+
+/// RAII pairing for the per-endpoint [`SedaEndpointState::depth`] counter:
+/// every counted-in envelope (or fanout copy) must be counted out exactly
+/// once, including on panic unwind and forwarder task abort (review F4).
+///
+/// - Producers create the guard with [`DepthGuard::count_in`] after reserving
+///   channel capacity and [`DepthGuard::commit`] it once the envelope(s) are
+///   handed to the channel — any early return, panic, or abort before the
+///   commit drops the guard and rolls the count back.
+/// - Forwarders create it with [`DepthGuard::claim`] immediately after
+///   receiving an envelope; normal completion of `forward_envelope`, a panic
+///   inside it, and a task abort at one of its await points all drop the
+///   guard, counting the envelope out. Until then the envelope counts as
+///   in-flight through the endpoint (queued or being forwarded).
+struct DepthGuard {
+    depth: Arc<AtomicUsize>,
+    count: usize,
+}
+
+impl DepthGuard {
+    /// Producer side: count `count` envelopes in; dropping rolls back.
+    fn count_in(depth: &Arc<AtomicUsize>, count: usize) -> Self {
+        depth.fetch_add(count, Ordering::AcqRel);
+        Self {
+            depth: Arc::clone(depth),
+            count,
+        }
+    }
+
+    /// Forwarder side: take ownership of one already-counted-in envelope
+    /// (no increment); dropping counts it out.
+    fn claim(depth: &Arc<AtomicUsize>) -> Self {
+        Self {
+            depth: Arc::clone(depth),
+            count: 1,
+        }
+    }
+
+    /// Producer commit: the count now belongs to envelopes inside the
+    /// channel; abandon the rollback.
+    fn commit(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        self.depth.fetch_sub(self.count, Ordering::AcqRel);
+    }
+}
+
+/// Spawn the detached per-endpoint queue-depth sampler (T3.3). A forwarder
+/// parked inside a blocked pipeline (or parked in `recv()` holding the
+/// shared-receiver mutex) cannot publish loop-edge samples, so a fixed-tick
+/// task reads the lock-free `depth` counter instead. Detached by design —
+/// it exits on the consumer's cancel token (stop()) and is not a forwarder,
+/// so it stays out of `forwarder_handles`.
+///
+/// Fanout consumers each spawn one; every sampler publishes the SAME shared
+/// atomic, so concurrent ticks are idempotent and an idle subscriber can
+/// never clobber a busy subscriber's backlog with a false zero (the
+/// per-subscriber `rx.len()` publish this replaces did exactly that).
+fn spawn_queue_depth_sampler(
+    metrics: Arc<dyn camel_api::MetricsCollector>,
+    label: String,
+    depth: Arc<AtomicUsize>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(QUEUE_DEPTH_SAMPLE_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tick.tick() => {
+                    metrics.set_queue_depth(&label, depth.load(Ordering::Acquire));
+                }
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -560,13 +670,15 @@ struct SedaConsumer {
     started: bool,
     cancel_token: CancellationToken,
     forwarder_handles: Vec<JoinHandle<Result<(), CamelError>>>,
-    /// Handle to the forwarder-shared receiver for Single mode. Set on start,
-    /// `None` for Fanout. Used by `stop()` to restore the receiver into the
-    /// endpoint state so a later consumer can start again.
+    /// Handle to the forwarder-shared receiver. Set on start for BOTH
+    /// modes (Single: shared by the concurrent forwarders; Fanout: owned by
+    /// the single forwarder). Used by `stop()` — Single restores the
+    /// receiver into the endpoint state so a later consumer can start
+    /// again; Fanout takes it back to return the discarded backlog's
+    /// queue-depth counts.
     shared_rx: Option<Arc<AsyncMutex<Option<mpsc::Receiver<ExchangeEnvelope>>>>>,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
+    /// Runtime observability handle: `metrics()` powers the per-endpoint
+    /// `camel_queue_depth{queue="seda:<name>"}` gauge on the forwarder loop.
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
@@ -623,34 +735,57 @@ impl Consumer for SedaConsumer {
                 let shared_rx = Arc::new(AsyncMutex::new(Some(receiver)));
                 self.shared_rx = Some(Arc::clone(&shared_rx));
                 let concurrent = self.state.config.concurrent_consumers;
+                let queue_metrics = self.runtime.metrics();
+                let queue_label = format!("seda:{}", self.state.config.name);
+                let depth = Arc::clone(&self.state.depth);
 
                 for _ in 0..concurrent {
                     let shared_rx = Arc::clone(&shared_rx);
                     let cancel = self.cancel_token.clone();
                     let ctx = ctx.clone();
+                    let depth = Arc::clone(&depth);
+                    let component_metrics = self.runtime.component_metrics();
                     let handle = tokio::spawn(async move {
                         loop {
                             let envelope = {
                                 let mut guard = shared_rx.lock().await;
-                                match guard.as_mut() {
-                                    Some(rx) => {
-                                        tokio::select! {
-                                            env = rx.recv() => env,
-                                            _ = cancel.cancelled() => return Ok(()),
-                                        }
-                                    }
+                                let Some(rx) = guard.as_mut() else {
                                     // Stop took the receiver back; exit cleanly.
-                                    None => return Ok(()),
-                                }
+                                    return Ok(());
+                                };
+                                let env = tokio::select! {
+                                    env = rx.recv() => env,
+                                    _ = cancel.cancelled() => return Ok(()),
+                                };
+                                env
                             };
                             let Some(envelope) = envelope else {
                                 return Ok(());
                             };
-                            forward_envelope(&ctx, envelope).await;
+                            // Own the counted-in envelope until it leaves the
+                            // endpoint: the claim's Drop counts it out when
+                            // forwarding completes, panics, or the task is
+                            // aborted at an await point.
+                            let _claim = DepthGuard::claim(&depth);
+                            forward_envelope(&ctx, &component_metrics, envelope).await;
                         }
                     });
                     self.forwarder_handles.push(handle);
                 }
+
+                // Periodic queue-depth sampler: a forwarder parked inside a
+                // blocked pipeline (or parked in `recv()` holding the
+                // shared-receiver mutex) cannot publish loop-edge samples,
+                // so the consumer reports the lock-free depth counter on a
+                // fixed tick instead. Detached by design — it exits on the
+                // consumer's cancel token (stop()) and is not a forwarder,
+                // so it stays out of `forwarder_handles`.
+                spawn_queue_depth_sampler(
+                    queue_metrics,
+                    queue_label,
+                    depth,
+                    self.cancel_token.clone(),
+                );
             }
             SedaMode::Fanout { subscribers } => {
                 let (tx, rx) = mpsc::channel(self.state.config.size);
@@ -660,20 +795,51 @@ impl Consumer for SedaConsumer {
                     .insert(self.consumer_id.clone(), tx);
 
                 let cancel = self.cancel_token.clone();
+                let queue_metrics = self.runtime.metrics();
+                let queue_label = format!("seda:{}", self.state.config.name);
+                let depth = Arc::clone(&self.state.depth);
+                let sampler_depth = Arc::clone(&depth);
+                let shared_rx = Arc::new(AsyncMutex::new(Some(rx)));
+                self.shared_rx = Some(Arc::clone(&shared_rx));
+                let forwarder_rx = Arc::clone(&shared_rx);
+                let component_metrics = self.runtime.component_metrics();
                 let handle = tokio::spawn(async move {
-                    let mut rx = rx;
                     loop {
-                        tokio::select! {
-                            envelope = rx.recv() => {
-                                let Some(envelope) = envelope else { break };
-                                forward_envelope(&ctx, envelope).await;
-                            }
-                            _ = cancel.cancelled() => break,
-                        }
+                        let envelope = {
+                            let mut guard = forwarder_rx.lock().await;
+                            let Some(rx) = guard.as_mut() else {
+                                // Stop took the receiver back; exit cleanly.
+                                return Ok(());
+                            };
+                            let env = tokio::select! {
+                                env = rx.recv() => env,
+                                _ = cancel.cancelled() => return Ok(()),
+                            };
+                            env
+                        };
+                        let Some(envelope) = envelope else {
+                            break;
+                        };
+                        // Fanout copy: counted in by the producer (one per
+                        // reserved subscriber); the claim counts it out when
+                        // forwarding finishes, panics, or the task is aborted.
+                        let _claim = DepthGuard::claim(&depth);
+                        forward_envelope(&ctx, &component_metrics, envelope).await;
                     }
                     Ok(())
                 });
                 self.forwarder_handles.push(handle);
+
+                // Shared-atomic sampler (see `spawn_queue_depth_sampler`):
+                // replaces per-subscriber `rx.len()` publishes under the
+                // same label, which let an idle subscriber clobber a busy
+                // subscriber's backlog with false zeros.
+                spawn_queue_depth_sampler(
+                    queue_metrics,
+                    queue_label,
+                    sampler_depth,
+                    self.cancel_token.clone(),
+                );
             }
         }
 
@@ -714,6 +880,26 @@ impl Consumer for SedaConsumer {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&self.consumer_id);
+                // The aborted forwarder leaves its backlog in the
+                // subscriber channel; those copies are discarded with the
+                // subscription, so return their queue-depth counts —
+                // otherwise the shared gauge stays inflated forever. The
+                // mutex is free once the aborted task is dropped, so this
+                // is deterministic even when the abort raced the cancel
+                // branch. (Narrow residual race, accepted: a producer that
+                // reserved a permit on this subscriber just before removal
+                // still sends into the discarded channel, leaking +1.)
+                if let Some(shared_rx) = self.shared_rx.take()
+                    && let Some(mut rx) = shared_rx.lock().await.take()
+                {
+                    let mut discarded = 0;
+                    while rx.try_recv().is_ok() {
+                        discarded += 1;
+                    }
+                    if discarded > 0 {
+                        self.state.depth.fetch_sub(discarded, Ordering::AcqRel);
+                    }
+                }
             }
         }
         self.started = false;
@@ -746,14 +932,25 @@ impl Consumer for SedaConsumer {
 /// `send_and_wait()` to route the pipeline result back to the producer.
 /// This handles both InOut and `waitForTaskToComplete=Always` cases.
 /// If no `reply_tx`, use fire-and-forget `send()`.
-async fn forward_envelope(ctx: &ConsumerContext, envelope: ExchangeEnvelope) {
+///
+/// The consume operation is observed through the uniform
+/// component-operations facade (dashboard-observability Task 4.2):
+/// failures ALWAYS reach the error family as `e:seda:consume`, the
+/// component series only with the lever on.
+async fn forward_envelope(
+    ctx: &ConsumerContext,
+    component_metrics: &camel_api::ComponentMetrics,
+    envelope: ExchangeEnvelope,
+) {
     if let Some(reply_tx) = envelope.reply_tx {
         let result = ctx.send_and_wait(envelope.exchange).await;
+        component_metrics.observe("seda", "consume", result.is_err());
         let _ = reply_tx.send(result);
+    } else if let Err(e) = ctx.send(envelope.exchange).await {
+        component_metrics.observe("seda", "consume", true);
+        warn!(error = %e, "SEDA consumer send failed");
     } else {
-        if let Err(e) = ctx.send(envelope.exchange).await {
-            warn!(error = %e, "SEDA consumer send failed");
-        }
+        component_metrics.observe("seda", "consume", false);
     }
 }
 
@@ -765,9 +962,8 @@ async fn forward_envelope(ctx: &ConsumerContext, envelope: ExchangeEnvelope) {
 struct SedaProducer {
     state: Arc<SedaEndpointState>,
     producer_config: ProducerConfig,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
+    /// Observability handle: `component_metrics()` powers the uniform
+    /// `seda:produce` emission (dashboard-observability Task 4.2).
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
@@ -784,159 +980,187 @@ impl Service<Exchange> for SedaProducer {
         let state = Arc::clone(&self.state);
         let producer_config = self.producer_config.clone();
         let original = exchange.clone();
+        let component_metrics = self.runtime.component_metrics();
         Box::pin(async move {
-            if !state.has_active_consumers() {
-                if producer_config.discard_if_no_consumers {
-                    return Ok(exchange);
-                }
-                return Err(CamelError::EndpointCreationFailed(format!(
-                    "SEDA endpoint '{}' has no active consumers",
-                    state.config.name
-                )));
-            }
-
-            let should_wait = match producer_config.wait_for_task_to_complete {
-                WaitForTaskToComplete::Never => false,
-                WaitForTaskToComplete::Always => true,
-                WaitForTaskToComplete::IfReplyExpected => {
-                    state.config.exchange_pattern == ExchangePattern::InOut
-                }
-            };
-
-            if state.config.multiple_consumers && should_wait {
-                return Err(CamelError::EndpointCreationFailed(
-                    "multipleConsumers=true with waitForTaskToComplete != Never \
-                     is not supported — a single request cannot have N valid \
-                     replies without aggregator semantics"
-                        .to_string(),
-                ));
-            }
-
-            let (reply_tx, reply_rx) = if should_wait {
-                let (tx, rx) = oneshot::channel();
-                (Some(tx), Some(rx))
-            } else {
-                (None, None)
-            };
-
-            let envelope = ExchangeEnvelope { exchange, reply_tx };
-
-            match &state.mode {
-                SedaMode::Single { tx, .. } => {
-                    if producer_config.block_when_full {
-                        let result = tokio::time::timeout(
-                            Duration::from_millis(producer_config.timeout_ms),
-                            tx.send(envelope),
-                        )
-                        .await;
-                        match result {
-                            Ok(Ok(())) => {}
-                            Ok(Err(_)) => return Err(CamelError::ChannelClosed),
-                            Err(_) => {
-                                return Err(CamelError::EndpointCreationFailed(format!(
-                                    "SEDA producer timeout enqueueing on '{}' ({}ms)",
-                                    state.config.name, producer_config.timeout_ms
-                                )));
-                            }
-                        }
-                    } else {
-                        tx.try_send(envelope).map_err(|e| {
-                            if matches!(e, mpsc::error::TrySendError::Full(_)) {
-                                CamelError::EndpointCreationFailed(format!(
-                                    "SEDA queue '{}' is full (size={})",
-                                    state.config.name, state.config.size
-                                ))
-                            } else {
-                                CamelError::ChannelClosed
-                            }
-                        })?;
+            // The produce operation covers the whole enqueue outcome
+            // (no-consumers rejection, queue-full, timeout, reply wait):
+            // failures ALWAYS reach the error family as `e:seda:produce`,
+            // the component series only with the lever on.
+            let result: Result<Exchange, CamelError> = async {
+                    if !state.has_active_consumers() {
+                    if producer_config.discard_if_no_consumers {
+                        return Ok(exchange);
                     }
+                    return Err(CamelError::EndpointCreationFailed(format!(
+                        "SEDA endpoint '{}' has no active consumers",
+                        state.config.name
+                    )));
                 }
-                SedaMode::Fanout { subscribers } => {
-                    let sender_list: Vec<mpsc::Sender<ExchangeEnvelope>> = {
-                        let subs_guard = subscribers.lock().unwrap_or_else(|e| e.into_inner());
-                        if subs_guard.is_empty() {
-                            if producer_config.discard_if_no_consumers {
-                                return Ok(original);
-                            }
-                            return Err(CamelError::EndpointCreationFailed(format!(
-                                "SEDA endpoint '{}' has no active subscribers",
-                                state.config.name
-                            )));
-                        }
-                        subs_guard.values().cloned().collect()
-                    };
 
-                    if producer_config.block_when_full {
-                        let mut permits: Vec<mpsc::OwnedPermit<ExchangeEnvelope>> =
-                            Vec::with_capacity(sender_list.len());
-                        for sender in &sender_list {
+                let should_wait = match producer_config.wait_for_task_to_complete {
+                    WaitForTaskToComplete::Never => false,
+                    WaitForTaskToComplete::Always => true,
+                    WaitForTaskToComplete::IfReplyExpected => {
+                        state.config.exchange_pattern == ExchangePattern::InOut
+                    }
+                };
+
+                if state.config.multiple_consumers && should_wait {
+                    return Err(CamelError::EndpointCreationFailed(
+                        "multipleConsumers=true with waitForTaskToComplete != Never \
+                         is not supported — a single request cannot have N valid \
+                         replies without aggregator semantics"
+                            .to_string(),
+                    ));
+                }
+
+                let (reply_tx, reply_rx) = if should_wait {
+                    let (tx, rx) = oneshot::channel();
+                    (Some(tx), Some(rx))
+                } else {
+                    (None, None)
+                };
+
+                let envelope = ExchangeEnvelope { exchange, reply_tx };
+
+                match &state.mode {
+                    SedaMode::Single { tx, .. } => {
+                        // Count the envelope into the queue depth before it
+                        // enters the channel; the guard rolls the count back on
+                        // send failure, panic, or abort before the commit, so
+                        // the lock-free counter never under-reads or leaks.
+                        let guard = DepthGuard::count_in(&state.depth, 1);
+                        if producer_config.block_when_full {
                             let result = tokio::time::timeout(
                                 Duration::from_millis(producer_config.timeout_ms),
-                                sender.clone().reserve_owned(),
+                                tx.send(envelope),
                             )
                             .await;
                             match result {
-                                Ok(Ok(permit)) => permits.push(permit),
-                                Ok(Err(_)) => return Err(CamelError::ChannelClosed),
+                                Ok(Ok(())) => guard.commit(),
+                                Ok(Err(_)) => {
+                                    return Err(CamelError::ChannelClosed);
+                                }
                                 Err(_) => {
                                     return Err(CamelError::EndpointCreationFailed(format!(
-                                        "SEDA fanout timeout on '{}' ({}ms)",
+                                        "SEDA producer timeout enqueueing on '{}' ({}ms)",
                                         state.config.name, producer_config.timeout_ms
                                     )));
                                 }
                             }
-                        }
-                        for permit in permits {
-                            permit.send(ExchangeEnvelope {
-                                exchange: original.clone(),
-                                reply_tx: None,
-                            });
-                        }
-                    } else {
-                        let mut permits: Vec<mpsc::OwnedPermit<ExchangeEnvelope>> =
-                            Vec::with_capacity(sender_list.len());
-                        for sender in &sender_list {
-                            match sender.clone().try_reserve_owned() {
-                                Ok(permit) => permits.push(permit),
-                                Err(e) => {
-                                    if matches!(e, mpsc::error::TrySendError::Full(_)) {
-                                        return Err(CamelError::EndpointCreationFailed(format!(
-                                            "SEDA queue '{}' subscriber full during fanout (size={})",
+                        } else {
+                            if let Err(e) = tx.try_send(envelope) {
+                                return Err(match e {
+                                    mpsc::error::TrySendError::Full(_) => {
+                                        CamelError::EndpointCreationFailed(format!(
+                                            "SEDA queue '{}' is full (size={})",
                                             state.config.name, state.config.size
+                                        ))
+                                    }
+                                    _ => CamelError::ChannelClosed,
+                                });
+                            }
+                            guard.commit();
+                        }
+                    }
+                    SedaMode::Fanout { subscribers } => {
+                        let sender_list: Vec<mpsc::Sender<ExchangeEnvelope>> = {
+                            let subs_guard = subscribers.lock().unwrap_or_else(|e| e.into_inner());
+                            if subs_guard.is_empty() {
+                                if producer_config.discard_if_no_consumers {
+                                    return Ok(original);
+                                }
+                                return Err(CamelError::EndpointCreationFailed(format!(
+                                    "SEDA endpoint '{}' has no active subscribers",
+                                    state.config.name
+                                )));
+                            }
+                            subs_guard.values().cloned().collect()
+                        };
+
+                        if producer_config.block_when_full {
+                            let mut permits: Vec<mpsc::OwnedPermit<ExchangeEnvelope>> =
+                                Vec::with_capacity(sender_list.len());
+                            for sender in &sender_list {
+                                let result = tokio::time::timeout(
+                                    Duration::from_millis(producer_config.timeout_ms),
+                                    sender.clone().reserve_owned(),
+                                )
+                                .await;
+                                match result {
+                                    Ok(Ok(permit)) => permits.push(permit),
+                                    Ok(Err(_)) => return Err(CamelError::ChannelClosed),
+                                    Err(_) => {
+                                        return Err(CamelError::EndpointCreationFailed(format!(
+                                            "SEDA fanout timeout on '{}' ({}ms)",
+                                            state.config.name, producer_config.timeout_ms
                                         )));
-                                    } else {
-                                        return Err(CamelError::ChannelClosed);
                                     }
                                 }
                             }
-                        }
-                        for permit in permits {
-                            permit.send(ExchangeEnvelope {
-                                exchange: original.clone(),
-                                reply_tx: None,
-                            });
+                            // All copies reserved: count one in per subscriber
+                            // copy. The guard rolls back if anything between
+                            // here and the sends panics; commit afterwards.
+                            let guard = DepthGuard::count_in(&state.depth, permits.len());
+                            for permit in permits {
+                                permit.send(ExchangeEnvelope {
+                                    exchange: original.clone(),
+                                    reply_tx: None,
+                                });
+                            }
+                            guard.commit();
+                        } else {
+                            let mut permits: Vec<mpsc::OwnedPermit<ExchangeEnvelope>> =
+                                Vec::with_capacity(sender_list.len());
+                            for sender in &sender_list {
+                                match sender.clone().try_reserve_owned() {
+                                    Ok(permit) => permits.push(permit),
+                                    Err(e) => {
+                                        if matches!(e, mpsc::error::TrySendError::Full(_)) {
+                                            return Err(CamelError::EndpointCreationFailed(format!(
+                                                "SEDA queue '{}' subscriber full during fanout (size={})",
+                                                state.config.name, state.config.size
+                                            )));
+                                        } else {
+                                            return Err(CamelError::ChannelClosed);
+                                        }
+                                    }
+                                }
+                            }
+                            let guard = DepthGuard::count_in(&state.depth, permits.len());
+                            for permit in permits {
+                                permit.send(ExchangeEnvelope {
+                                    exchange: original.clone(),
+                                    reply_tx: None,
+                                });
+                            }
+                            guard.commit();
                         }
                     }
                 }
-            }
 
-            if !should_wait {
-                return Ok(original);
-            }
+                if !should_wait {
+                    return Ok(original);
+                }
 
-            let reply_rx = reply_rx.ok_or(CamelError::ChannelClosed)?;
-            let result =
-                tokio::time::timeout(Duration::from_millis(producer_config.timeout_ms), reply_rx)
-                    .await;
-            match result {
-                Ok(Ok(reply)) => reply,
-                Ok(Err(_)) => Err(CamelError::ChannelClosed),
-                Err(_) => Err(CamelError::EndpointCreationFailed(format!(
-                    "SEDA producer timeout waiting for reply on '{}' ({}ms)",
-                    state.config.name, producer_config.timeout_ms
-                ))),
+                let reply_rx = reply_rx.ok_or(CamelError::ChannelClosed)?;
+                let result =
+                    tokio::time::timeout(Duration::from_millis(producer_config.timeout_ms), reply_rx)
+                        .await;
+                match result {
+                    Ok(Ok(reply)) => reply,
+                    Ok(Err(_)) => Err(CamelError::ChannelClosed),
+                    Err(_) => Err(CamelError::EndpointCreationFailed(format!(
+                        "SEDA producer timeout waiting for reply on '{}' ({}ms)",
+                        state.config.name, producer_config.timeout_ms
+                    ))),
+                }
             }
+            .await;
+            // Uniform component-operations emission (Task 4.2): failures
+            // always reach the error family, component series lever-gated.
+            component_metrics.observe("seda", "produce", result.is_err());
+            result
         })
     }
 }
@@ -2191,5 +2415,249 @@ mod consumer_producer_tests {
         );
 
         b.stop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod queue_depth_tests {
+    use super::*;
+    use camel_api::MetricsCollector;
+    use camel_component_api::{
+        HealthCheckRegistry, Message, NoOpComponentContext, RuntimeObservability,
+    };
+    use tokio::time::Duration;
+    use tower::ServiceExt;
+
+    /// Shared queue-depth recorder: `metrics()` hands out clones that all
+    /// append to the same log.
+    #[derive(Clone, Default)]
+    struct QueueDepthRecorder(Arc<Mutex<Vec<(String, usize)>>>);
+
+    impl MetricsCollector for QueueDepthRecorder {
+        fn record_exchange_duration(&self, _: &str, _: std::time::Duration) {}
+        fn increment_errors(&self, _: &str, _: &str) {}
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, queue: &str, depth: usize) {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((queue.to_string(), depth));
+        }
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    struct RecordingObservability(QueueDepthRecorder);
+
+    impl RuntimeObservability for RecordingObservability {
+        fn metrics(&self) -> Arc<dyn MetricsCollector> {
+            Arc::new(self.0.clone())
+        }
+        fn health(&self) -> Arc<dyn HealthCheckRegistry> {
+            Arc::new(NoopRuntimeObservability)
+        }
+    }
+
+    fn recording_rt() -> (Arc<RecordingObservability>, QueueDepthRecorder) {
+        let rec = QueueDepthRecorder::default();
+        (Arc::new(RecordingObservability(rec.clone())), rec)
+    }
+
+    fn rt_handle(obs: &Arc<RecordingObservability>) -> Arc<dyn RuntimeObservability> {
+        Arc::clone(obs) as Arc<dyn RuntimeObservability>
+    }
+
+    /// F1: fanout subscribers must not clobber the shared
+    /// `camel_queue_depth{queue="seda:<name>"}` gauge. Two subscribers; one
+    /// is blocked (route channel capacity 1, never read) with a backlog
+    /// behind it, the other drains freely. While the blocked subscriber's
+    /// backlog exists, every gauge sample must stay > 0 — the old
+    /// per-subscriber `rx.len()` publishes let the idle subscriber write 0
+    /// over the busy subscriber's backlog.
+    #[tokio::test]
+    async fn fanout_gauge_stays_positive_while_blocked_subscriber_has_backlog() {
+        let comp = SedaComponent::new();
+        let ep = comp
+            .create_endpoint("seda:fq?multipleConsumers=true", &NoOpComponentContext)
+            .unwrap();
+        let (obs, recorder) = recording_rt();
+
+        // Subscriber A: blocked. Route channel capacity 1 and never read —
+        // the first copy is delivered, the forwarder then parks forwarding
+        // the second, and the rest queue behind it. Keeping the receiver
+        // alive (never read) makes this state permanent.
+        let mut consumer_a = ep.create_consumer(rt_handle(&obs)).unwrap();
+        let (tx_a, blocked_rx_a) = mpsc::channel::<ExchangeEnvelope>(1);
+        let ctx_a = ConsumerContext::new(tx_a, CancellationToken::new(), "route-a".to_string());
+        consumer_a.start(ctx_a).await.unwrap();
+
+        // Subscriber B: free-draining. A reader task consumes every copy.
+        let mut consumer_b = ep.create_consumer(rt_handle(&obs)).unwrap();
+        let (tx_b, mut rx_b) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx_b = ConsumerContext::new(tx_b, CancellationToken::new(), "route-b".to_string());
+        consumer_b.start(ctx_b).await.unwrap();
+        let b_drained = Arc::new(AtomicUsize::new(0));
+        let drained_clone = Arc::clone(&b_drained);
+        tokio::spawn(async move {
+            while let Some(env) = rx_b.recv().await {
+                drained_clone.fetch_add(1, Ordering::SeqCst);
+                let _ = env;
+            }
+        });
+
+        let producer = ep
+            .create_producer(rt_handle(&obs), &ProducerContext::default())
+            .unwrap();
+        for i in 0..4u32 {
+            producer
+                .clone()
+                .oneshot(Exchange::new(Message::new(format!("m{i}"))))
+                .await
+                .unwrap();
+        }
+
+        // B consumes all 4 copies (proves the endpoint delivers normally).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while b_drained.load(Ordering::SeqCst) < 4 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "subscriber B never drained its copies"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // From here on, the shared depth is deterministically >= 3 (A's
+        // one in-forward claim + two queued copies; the first copy's claim
+        // already dropped on delivery into A's route channel; A's claims
+        // cannot drop further because its route channel is never read).
+        // Any 0 sample after this settle point is a false zero — the F1
+        // bug.
+        let settled = recorder.0.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(900);
+        loop {
+            let post: Vec<usize> = {
+                let log = recorder.0.lock().unwrap_or_else(|e| e.into_inner());
+                log[settled..]
+                    .iter()
+                    .filter(|(q, _)| q == "seda:fq")
+                    .map(|(_, d)| *d)
+                    .collect()
+            };
+            if post.len() >= 3 {
+                assert!(
+                    post.iter().all(|d| *d > 0),
+                    "false-zero gauge samples while backlog exists: {post:?}"
+                );
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "sampler produced too few samples in 900ms: {post:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        drop(blocked_rx_a);
+        consumer_a.stop().await.unwrap();
+        consumer_b.stop().await.unwrap();
+    }
+
+    /// F4: the producer-side guard rolls its count back on drop.
+    #[test]
+    fn depth_guard_count_in_rolls_back_on_drop() {
+        let depth = Arc::new(AtomicUsize::new(0));
+        let guard = DepthGuard::count_in(&depth, 2);
+        assert_eq!(depth.load(Ordering::Acquire), 2);
+        drop(guard);
+        assert_eq!(depth.load(Ordering::Acquire), 0);
+    }
+
+    /// F4: `commit` keeps the count — it now belongs to envelopes inside
+    /// the channel.
+    #[test]
+    fn depth_guard_commit_keeps_count() {
+        let depth = Arc::new(AtomicUsize::new(0));
+        DepthGuard::count_in(&depth, 3).commit();
+        assert_eq!(depth.load(Ordering::Acquire), 3);
+    }
+
+    /// F4: the forwarder-side claim counts its envelope out even when the
+    /// code it guards panics — the unwind drops the guard.
+    #[test]
+    fn depth_guard_claim_decrements_on_panic_unwind() {
+        let depth = Arc::new(AtomicUsize::new(1)); // one envelope counted in
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _claim = DepthGuard::claim(&depth);
+            assert_eq!(depth.load(Ordering::Acquire), 1);
+            panic!("simulated forward_envelope panic");
+        }));
+        assert!(result.is_err());
+        assert_eq!(
+            depth.load(Ordering::Acquire),
+            0,
+            "unwind must count the claimed envelope out"
+        );
+    }
+
+    /// Stopping a fanout consumer with a backlog discards the queued
+    /// copies with the subscription — their queue-depth counts must be
+    /// returned so the shared gauge does not stay inflated forever.
+    #[tokio::test]
+    async fn fanout_stop_with_backlog_returns_depth_counts() {
+        let state = Arc::new(SedaEndpointState::new(
+            &SedaConfig::from_uri("seda:fqstop?multipleConsumers=true").unwrap(),
+        ));
+        let (obs, _recorder) = recording_rt();
+        let mut consumer =
+            SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt_handle(&obs));
+        // Blocked subscriber: route channel capacity 1, never read.
+        let (tx, blocked_rx) = mpsc::channel::<ExchangeEnvelope>(1);
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "route-blk".to_string());
+        consumer.start(ctx).await.unwrap();
+
+        // Produce 4 copies through the real producer (counted in per copy).
+        let ep = SedaEndpoint {
+            uri: "seda:fqstop?multipleConsumers=true".to_string(),
+            config: SedaConfig::from_uri("seda:fqstop?multipleConsumers=true").unwrap(),
+            state: Arc::clone(&state),
+        };
+        let producer = ep
+            .create_producer(rt_handle(&obs), &ProducerContext::default())
+            .unwrap();
+        for i in 0..4u32 {
+            producer
+                .clone()
+                .oneshot(Exchange::new(Message::new(format!("m{i}"))))
+                .await
+                .unwrap();
+        }
+
+        // Steady state: copy 1 delivered into the blocked route channel
+        // (claim dropped), copy 2 parked in the blocked forward (claim
+        // held), copies 3-4 queued in the subscriber channel.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while state.depth.load(Ordering::Acquire) != 3 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "depth never settled at 3 (got {})",
+                state.depth.load(Ordering::Acquire)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        consumer.stop().await.unwrap();
+
+        // The abort drops the parked claim and the stop drain returns the
+        // two queued copies; both land within milliseconds, poll for it.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while state.depth.load(Ordering::Acquire) != 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "stop must return the discarded backlog's counts (got {})",
+                state.depth.load(Ordering::Acquire)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        drop(blocked_rx);
     }
 }

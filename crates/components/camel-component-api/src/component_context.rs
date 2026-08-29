@@ -16,6 +16,16 @@ pub trait ComponentContext: Send + Sync {
     /// Access the active metrics collector.
     fn metrics(&self) -> Arc<dyn MetricsCollector>;
 
+    /// Snapshot of the `[observability.metrics].components` lever —
+    /// gates only the uniform component-operations family served through
+    /// `RuntimeObservability::component_metrics()`; error-family
+    /// emission is never lever-gated. Default false (opt-in);
+    /// `CamelContext` overrides this with its `MetricsLeversConfig`
+    /// snapshot.
+    fn component_metrics_enabled(&self) -> bool {
+        false
+    }
+
     /// Access the active health-check registry.
     ///
     /// Used by component code paths that need to pin a route Unhealthy

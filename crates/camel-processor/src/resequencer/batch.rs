@@ -336,6 +336,11 @@ impl ResequencePolicy for BatchPolicy {
         "batch-resequencer"
     }
 
+    fn buffered(&self) -> usize {
+        let buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        buckets.values().map(|b| b.exchanges.len()).sum()
+    }
+
     fn set_timeout_tx(&self, tx: tokio::sync::mpsc::Sender<Exchange>) {
         self.set_driver_tx(tx);
     }

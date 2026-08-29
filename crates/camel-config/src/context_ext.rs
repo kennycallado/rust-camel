@@ -608,19 +608,27 @@ impl CamelConfig {
             ctx = ctx.with_lifecycle(otel_service);
         }
 
-        // Enable tracer pipeline when OTel or Prometheus is active (spans +
-        // metrics per route), unless tracing was set explicitly — explicit wins
+        // Effective tracer assembly: the pipeline is implied by OTel or
+        // Prometheus (spans + metrics per route) even when tracing is
+        // explicitly off — explicit `tracer.enabled` gates SPAN creation
+        // only. The [observability.metrics] levers ride along on the same
+        // config; they gate individual non-error families at the adapter,
+        // never the pipeline itself.
         let tracing_explicitly_set = tracer_config.tracing_enabled_explicit;
-        let final_tracer_config = effective_tracer_config(
-            tracer_config,
-            otel_enabled,
-            config
-                .observability
-                .prometheus
-                .as_ref()
-                .is_some_and(|p| p.enabled),
-            tracing_explicitly_set,
-        );
+        let final_tracer_config = {
+            let mut effective = effective_tracer_config(
+                tracer_config,
+                otel_enabled,
+                config
+                    .observability
+                    .prometheus
+                    .as_ref()
+                    .is_some_and(|p| p.enabled),
+                tracing_explicitly_set,
+            );
+            effective.metrics_levers = config.observability.metrics.clone();
+            effective
+        };
         ctx = ctx.with_tracer_config(final_tracer_config).await;
 
         if let Some(ref prom) = config.observability.prometheus
@@ -957,11 +965,16 @@ fn effective_tracer_config(
     prometheus_enabled: bool,
     tracing_explicitly_set: bool,
 ) -> TracerConfig {
-    // Explicit value wins in both directions: never overridden, never forced on.
-    if tracing_explicitly_set {
-        return tracer_config;
-    }
-    if otel_enabled || prometheus_enabled {
+    // Pipeline wrapping — and with it metric export incl. the
+    // non-disableable error family — is implied by any active exporter or
+    // by tracing itself; the [observability.metrics] levers may suppress
+    // individual non-error families but never the pipeline
+    // (metrics-collection-wiring MODIFIED requirement).
+    tracer_config.pipeline_enabled = otel_enabled || prometheus_enabled || tracer_config.enabled;
+    // `enabled` gates SPAN creation only (metrics-configuration Req 1):
+    // explicit values win in both directions, never overridden, never
+    // forced on; exporters imply spans when not set explicitly.
+    if !tracing_explicitly_set && (otel_enabled || prometheus_enabled) {
         tracer_config.enabled = true;
     }
     tracer_config
@@ -1215,36 +1228,48 @@ type = "kubernetes"
 
     #[test]
     fn effective_tracer_config_truth_table() {
-        // (otel, prometheus, tracing_explicitly_set, input_enabled) -> expected enabled
-        let table: &[(bool, bool, bool, bool, bool)] = &[
+        // (otel, prometheus, tracing_explicitly_set, input_enabled)
+        //   -> (spans_enabled, pipeline_enabled)
+        let table: &[(bool, bool, bool, bool, bool, bool)] = &[
             // otel implies the tracer pipeline
-            (true, false, false, false, true),
-            (true, true, false, false, true),
+            (true, false, false, false, true, true),
+            (true, true, false, false, true, true),
             // prometheus implies the tracer pipeline
-            (false, true, false, false, true),
-            (false, true, false, true, true),
+            (false, true, false, false, true, true),
+            (false, true, false, true, true, true),
             // nothing implies: config passes through unchanged
-            (false, false, false, false, false),
-            (false, false, false, true, true),
-            // explicit value wins in both directions — even against otel/prometheus.
-            // The (true, *, true, false) -> false row is an intentional change:
+            (false, false, false, false, false, false),
+            (false, false, false, true, true, true),
+            // Explicit value wins in both directions — even against otel/prometheus.
+            // The (true, *, true, false) -> spans=false rows are an intentional change:
             // old behavior forced enabled=true whenever otel was on.
-            (true, false, true, false, false),
-            (true, true, true, false, false),
-            (false, true, true, false, false),
-            (false, false, true, true, true),
-            (true, false, true, true, true),
+            //
+            // Pipeline column (dashboard-observability D3, metrics-collection-wiring
+            // MODIFIED requirement): pipeline wrapping — and with it metric export
+            // incl. the non-disableable error family — stays on whenever an exporter
+            // is active, even with tracing explicitly off. Rows 7-9 moved from
+            // "fully off" to "pipeline on, spans off"; `tracer.enabled` gates spans
+            // ONLY (metrics-configuration Req 1).
+            (true, false, true, false, false, true),
+            (true, true, true, false, false, true),
+            (false, true, true, false, false, true),
+            (false, false, true, true, true, true),
+            (true, false, true, true, true, true),
         ];
 
-        for (i, &(otel, prom, explicit, input, expected)) in table.iter().enumerate() {
+        for (i, &(otel, prom, explicit, input, spans, pipeline)) in table.iter().enumerate() {
             let cfg = TracerConfig {
                 enabled: input,
                 ..Default::default()
             };
             let out = effective_tracer_config(cfg, otel, prom, explicit);
             assert_eq!(
-                out.enabled, expected,
-                "row {i}: (otel={otel}, prom={prom}, explicit={explicit}, input={input})"
+                out.enabled, spans,
+                "row {i} spans: (otel={otel}, prom={prom}, explicit={explicit}, input={input})"
+            );
+            assert_eq!(
+                out.pipeline_enabled, pipeline,
+                "row {i} pipeline: (otel={otel}, prom={prom}, explicit={explicit}, input={input})"
             );
         }
     }
@@ -1281,6 +1306,59 @@ type = "kubernetes"
             "absent key must leave flag unset"
         );
         assert!(!tracer.enabled);
+    }
+
+    #[test]
+    fn levers_parse_and_default() {
+        let cfg: CamelConfig = config::Config::builder()
+            .add_source(config::File::from_str(
+                "[observability.metrics]\nduration = false\n",
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        let metrics = cfg.observability.metrics;
+        assert!(metrics.enabled, "`enabled` defaults to true");
+        assert!(metrics.exchange, "`exchange` defaults to true");
+        assert!(
+            !metrics.duration,
+            "explicit `duration = false` parses false"
+        );
+        assert!(!metrics.components, "`components` defaults to false");
+    }
+
+    #[test]
+    fn absent_table_means_defaults() {
+        let cfg: CamelConfig = config::Config::builder()
+            .add_source(config::File::from_str("", FileFormat::Toml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        let metrics = cfg.observability.metrics;
+        assert!(metrics.enabled);
+        assert!(metrics.exchange);
+        assert!(metrics.duration);
+        assert!(!metrics.components);
+    }
+
+    #[test]
+    fn unknown_key_rejected() {
+        let built = config::Config::builder()
+            .add_source(config::File::from_str(
+                "[observability.metrics]\nbogus = true\n",
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>();
+        assert!(
+            built.is_err(),
+            "unknown keys under [observability.metrics] must be rejected (deny-unknown-keys, \
+             consistent with sibling tables); got {built:?}"
+        );
     }
 
     #[tokio::test]

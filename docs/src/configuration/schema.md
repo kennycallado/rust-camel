@@ -87,14 +87,31 @@ The runtime uses these knobs to restart a failed Consumer with capped exponentia
 
 ## [observability]
 
-The observability block holds four optional sub-tables. The `[observability.tracer]` block configures the built-in tracing layer. The other three activate optional exporters.
+The observability block holds five optional sub-tables. The `[observability.tracer]` block configures the built-in tracing layer, and `[observability.metrics]` gates its metric families. The other three activate optional exporters.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `tracer` | table | (built-in defaults) | Built-in tracing layer config. |
+| `metrics` | table | (built-in defaults) | Metric-family levers. Absent table means all defaults. |
 | `otel` | table | absent | OpenTelemetry exporter. Absent disables OTLP. |
 | `prometheus` | table | absent | Prometheus scrape endpoint. Absent disables the endpoint. |
 | `health` | table | absent | HTTP health/readiness endpoint. Absent disables the endpoint. |
+
+Span and metric enablement are independent:
+
+- `[observability.tracer] enabled` gates SPAN creation only. With Prometheus (or OTel) active, an explicit `enabled = false` still runs the tracer pipeline so metric families keep flowing; no spans are created.
+- The pipeline itself is turned off only when neither tracing nor any exporter is active. The `[observability.metrics]` levers below can suppress individual non-error families but never disable the pipeline.
+
+### [observability.metrics]
+
+Metric-family levers. Unknown keys fail at load, consistent with the sibling observability tables. There is no lever for the error family: `camel_errors_total` is structurally non-disableable and is exported regardless of any combination of these keys.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Master switch for the non-error metric families. `false` suppresses exchanges, duration, and component families; errors always flow. |
+| `exchange` | bool | `true` | Opt-out for the `camel_exchanges_total` family. Only takes effect when `enabled` is `true`. |
+| `duration` | bool | `true` | Opt-out for the `camel_exchange_duration_seconds` family. Only takes effect when `enabled` is `true`. |
+| `components` | bool | `false` | Opt-in for the component-operations metric family (`camel_component_operations_total`). |
 
 ### [observability.otel]
 

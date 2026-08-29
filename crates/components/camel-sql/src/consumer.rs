@@ -453,7 +453,8 @@ impl Consumer for SqlConsumer {
                 let retry_policy = &self.config.retry;
                 let pool = retry_async::<_, _, _, _, sqlx::Error>(
                     retry_policy,
-                    Some("sql-consumer"),
+                    "sql",
+                    "consumer-pool-init",
                     || {
                         async {
                             AnyPoolOptions::new()
@@ -466,6 +467,7 @@ impl Consumer for SqlConsumer {
                         }
                     },
                     is_retryable_sqlx_error,
+                    Some(self.runtime.metrics().as_ref()),
                 )
                 .await
                 .map_err(|e| {
@@ -906,7 +908,14 @@ mod tests {
         // Deliberately NOT calling resolve_defaults() — pool fields remain None
         assert!(config.max_connections.is_none());
 
-        let mut consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()), None, test_rt());
+        let mut consumer = SqlConsumer::new(
+            config,
+            Arc::new(OnceCell::new()),
+            None,
+            // Noop runtime: pool-init retries now record per-attempt
+            // telemetry by design, which the panic runtime would reject.
+            std::sync::Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
+        );
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
             while let Some(env) = rx.recv().await {

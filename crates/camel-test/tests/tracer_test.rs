@@ -77,6 +77,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
         watch_debounce_ms: 300,
         components: ComponentsConfig::default(),
         observability: ObservabilityConfig {
+            metrics: Default::default(),
             tracer: TracerConfig {
                 enabled: true,
                 detail_level: DetailLevel::Minimal,

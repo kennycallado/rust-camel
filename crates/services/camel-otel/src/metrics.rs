@@ -51,6 +51,9 @@ mod metric_names {
 mod attribute_keys {
     pub const ROUTE_ID: &str = "route.id";
     pub const ERROR_TYPE: &str = "error.type";
+    /// Buffered-stage identifier (`seda:<endpoint>`, `aggregator:<route>`,
+    /// `resequencer:<route>`) — the queue-depth series' dimension.
+    pub const QUEUE: &str = "queue";
 }
 
 struct MetricInstruments {
@@ -207,17 +210,14 @@ impl MetricsCollector for OtelMetrics {
         }
     }
 
-    fn set_queue_depth(&self, route_id: &str, depth: usize) {
+    fn set_queue_depth(&self, queue: &str, depth: usize) {
         let depth_i64 = depth as i64;
         let mut map = self.queue_depths.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = map.insert(route_id.to_string(), depth_i64).unwrap_or(0);
+        let prev = map.insert(queue.to_string(), depth_i64).unwrap_or(0);
         let delta = depth_i64 - prev;
         drop(map);
 
-        let attributes = [KeyValue::new(
-            attribute_keys::ROUTE_ID,
-            route_id.to_string(),
-        )];
+        let attributes = [KeyValue::new(attribute_keys::QUEUE, queue.to_string())];
         if let Some(inst) = self.instruments() {
             inst.queue_depth.add(delta, &attributes);
         }

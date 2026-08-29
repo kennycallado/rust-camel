@@ -1544,10 +1544,12 @@ impl ContainerConsumer {
         loop {
             let docker = match retry_async_cancelable(
                 &self.config.reconnect,
-                Some("container-events"),
+                "container",
+                "events-connect",
                 || async { self.config.connect_docker().await },
                 |_| true,
                 &cancel,
+                Some(self.runtime.metrics().as_ref()),
             )
             .await
             {
@@ -1557,9 +1559,8 @@ impl ContainerConsumer {
                     return Ok(());
                 }
                 Err(e) => {
-                    self.runtime
-                        .metrics()
-                        .increment_errors(context.route_id(), "e:container:events-connect");
+                    // Retry-exhaustion error accounting is owned by
+                    // retry_async_cancelable (e:container:events-connect).
                     // log-policy: outside-contract
                     tracing::error!(error = %e, "Container events consumer exhausted reconnect attempts");
                     return Err(e);
@@ -1631,10 +1632,12 @@ impl ContainerConsumer {
         loop {
             let docker = match retry_async_cancelable(
                 &self.config.reconnect,
-                Some("container-logs"),
+                "container",
+                "logs-connect",
                 || async { self.config.connect_docker().await },
                 |_| true,
                 &cancel,
+                Some(self.runtime.metrics().as_ref()),
             )
             .await
             {
@@ -1644,9 +1647,8 @@ impl ContainerConsumer {
                     return Ok(());
                 }
                 Err(e) => {
-                    self.runtime
-                        .metrics()
-                        .increment_errors(context.route_id(), "e:container:logs-connect");
+                    // Retry-exhaustion error accounting is owned by
+                    // retry_async_cancelable (e:container:logs-connect).
                     // log-policy: outside-contract
                     tracing::error!(error = %e, "Container logs consumer exhausted reconnect attempts");
                     return Err(e);
@@ -2598,9 +2600,14 @@ mod tests {
     async fn test_events_consumer_stops_immediately_when_cancelled() {
         use tokio::sync::mpsc;
 
+        // Noop runtime (not PanicRuntimeObservability): the retry helper now
+        // records per-attempt telemetry before observing cancellation, and a
+        // cancelled start is still a clean shutdown.
         let mut consumer = ContainerConsumer {
             config: ContainerConfig::from_uri("container:events").unwrap(),
-            runtime: test_rt(),
+            runtime: std::sync::Arc::new(
+                camel_component_api::test_support::NoopRuntimeObservability,
+            ),
         };
 
         let (tx, _rx) = mpsc::channel(4);
@@ -2688,10 +2695,12 @@ mod tests {
     // ADR-0012 (e) metric wiring regression tests
     // -----------------------------------------------------------------------
 
-    /// Regression: events-connect error path calls increment_errors with
-    /// correct route_id and label. Uses an unsupported tcp:// host to trigger
-    /// the error path WITHOUT needing a real Docker daemon (connect_docker_from_host
-    /// returns Err on non-unix/npipe schemes).
+    /// Regression: events-connect exhaustion records exactly one error via
+    /// the retry helper, with the `e:container:events-connect` label
+    /// (operation label first — the helper has no route scope). Uses an
+    /// unsupported tcp:// host to trigger the error path WITHOUT needing a
+    /// real Docker daemon (connect_docker_from_host returns Err on
+    /// non-unix/npipe schemes).
     #[tokio::test]
     async fn events_connect_error_increments_metrics() {
         use std::sync::Mutex;
@@ -2759,7 +2768,7 @@ mod tests {
             1,
             "expected exactly one increment_errors call"
         );
-        assert_eq!(errors[0].0, "events-test-route");
+        assert_eq!(errors[0].0, "events-connect");
         assert_eq!(errors[0].1, "e:container:events-connect");
     }
 

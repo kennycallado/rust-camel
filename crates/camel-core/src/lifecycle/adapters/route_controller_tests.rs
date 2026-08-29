@@ -5544,8 +5544,10 @@ fn tracer_config_carries_no_collector_field() {
     let tracer_config = TracerConfig {
         enabled: true,
         tracing_enabled_explicit: false,
+        pipeline_enabled: true,
         detail_level: DetailLevel::default(),
         outputs: crate::shared::observability::domain::TracerOutputs::default(),
+        metrics_levers: crate::shared::observability::domain::MetricsLeversConfig::default(),
     };
     let dbg = format!("{tracer_config:?}");
     assert!(dbg.contains("TracerConfig"));
@@ -5688,4 +5690,40 @@ async fn late_registration_after_build_observed() {
     }
 
     let _ = ctx.stop().await;
+}
+
+/// Task 2.1 follow-up (inter-phase review): pin the
+/// `set_tracer_config` → `tracer_gating` derivation — the sole bridge
+/// from the config truth table to runtime pipeline gating.
+#[test]
+fn set_tracer_config_derives_gating() {
+    let mut controller = build_controller();
+    assert!(!controller.tracer_gating.pipeline_enabled);
+    controller.set_tracer_config(&TracerConfig {
+        enabled: false,
+        pipeline_enabled: true, // exporter raised the pipeline (otel/prom on)
+        tracing_enabled_explicit: true,
+        detail_level: DetailLevel::default(),
+        outputs: crate::shared::observability::domain::TracerOutputs::default(),
+        metrics_levers: crate::shared::observability::domain::MetricsLeversConfig {
+            enabled: true,
+            exchange: false,
+            duration: false,
+            components: true,
+        },
+    });
+    assert!(
+        controller.tracer_gating.pipeline_enabled,
+        "pipeline follows enabled OR raised pipeline_enabled"
+    );
+    assert!(
+        !controller.tracer_gating.spans_enabled,
+        "spans follow enabled alone"
+    );
+    assert!(
+        !controller.tracer_gating.levers.exchange
+            && !controller.tracer_gating.levers.duration
+            && controller.tracer_gating.levers.components,
+        "levers snapshot verbatim"
+    );
 }

@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use camel_api::MetricsCollector;
+use camel_api::{ComponentMetrics, MetricsCollector};
 
 use crate::{ComponentContext, HealthCheckRegistry};
 
@@ -33,6 +33,23 @@ pub trait RuntimeObservability: Send + Sync {
     /// `force_unhealthy_for_route(route_id, name, reason)` per ADR-0012
     /// category (g).
     fn health(&self) -> Arc<dyn HealthCheckRegistry>;
+
+    /// Facade for the uniform component-operations family
+    /// (`camel_component_operations_total{component,operation,outcome}`,
+    /// dashboard-observability Task 4.1). The lever snapshot is baked in
+    /// at facade construction: the component series flow only with the
+    /// `[observability.metrics].components` lever on, while failures
+    /// always reach the non-disableable error family.
+    ///
+    /// Default: lever off — impls that do not override
+    /// `component_metrics_enabled()` (manual test runtimes AND any
+    /// context wired without a levers snapshot) keep the component
+    /// series suppressed and only forward errors. In production the
+    /// controller-path `ControllerComponentContext` overrides it with
+    /// the levers snapshot taken at pipeline assembly.
+    fn component_metrics(&self) -> ComponentMetrics {
+        ComponentMetrics::new(self.metrics(), false)
+    }
 }
 
 // Blanket impl: every ComponentContext is automatically a RuntimeObservability.
@@ -49,6 +66,13 @@ impl<T: ComponentContext> RuntimeObservability for T {
 
     fn health(&self) -> Arc<dyn HealthCheckRegistry> {
         <Self as ComponentContext>::health(self)
+    }
+
+    fn component_metrics(&self) -> ComponentMetrics {
+        ComponentMetrics::new(
+            <Self as ComponentContext>::metrics(self),
+            <Self as ComponentContext>::component_metrics_enabled(self),
+        )
     }
 }
 

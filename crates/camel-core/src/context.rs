@@ -25,7 +25,7 @@ use crate::lifecycle::application::route_definition::RouteDefinition;
 use crate::lifecycle::application::runtime_bus::RuntimeBus;
 use crate::registry::RegistryError;
 use crate::shared::components::domain::Registry;
-use crate::shared::observability::domain::TracerConfig;
+use crate::shared::observability::domain::{MetricsLeversConfig, TracerConfig};
 use crate::startup_validation::ConfigCheck;
 use crate::template::TemplateRegistry;
 
@@ -51,6 +51,12 @@ pub struct CamelContext {
     /// collector, so a collector registered at any time — including after
     /// routes are added — is observed by all subsequent emission calls.
     metrics: Arc<MetricsHandle>,
+    /// Snapshot of the metric-family levers from the last
+    /// `set_tracer_config` call (default: components off). Read
+    /// synchronously by `ComponentContext::component_metrics_enabled`
+    /// — the controller actor holds its own copy for pipeline gating,
+    /// which is not reachable from a sync context method.
+    metrics_levers: MetricsLeversConfig,
     // Platform ports
     platform_service: Arc<dyn PlatformService>,
     languages: SharedLanguageRegistry,
@@ -67,6 +73,13 @@ pub struct CamelContext {
     /// and executed synchronously at the head of [`start()`](Self::start) before
     /// any route consumer is started.
     startup_checks: Vec<Box<dyn ConfigCheck>>,
+    /// Build identity (dashboard-observability T3.2): re-published when a
+    /// metrics collector registers late, because the composite does not
+    /// replay past observations to new members.
+    build_version: &'static str,
+    build_git_sha: &'static str,
+    /// Anchor for `camel_uptime_seconds` (context build time).
+    build_started_at: std::time::Instant,
 }
 
 /// Parts bag used by [`CamelContextBuilder::build`] to construct a [`CamelContext`]
@@ -91,6 +104,9 @@ pub(crate) struct FromParts {
     pub(crate) claim_check_repositories: crate::registry::SharedClaimCheckRegistry,
     pub(crate) cache_repositories: crate::registry::SharedCacheRegistry,
     pub(crate) startup_checks: Vec<Box<dyn ConfigCheck>>,
+    pub(crate) build_version: &'static str,
+    pub(crate) build_git_sha: &'static str,
+    pub(crate) build_started_at: std::time::Instant,
 }
 
 impl CamelContext {
@@ -103,6 +119,7 @@ impl CamelContext {
             runtime: parts.runtime,
             cancel_token: parts.cancel_token,
             metrics: parts.metrics,
+            metrics_levers: MetricsLeversConfig::default(),
             platform_service: parts.platform_service,
             languages: parts.languages,
             shutdown_timeout: parts.shutdown_timeout,
@@ -115,6 +132,9 @@ impl CamelContext {
             claim_check_repositories: parts.claim_check_repositories,
             cache_repositories: parts.cache_repositories,
             startup_checks: parts.startup_checks,
+            build_version: parts.build_version,
+            build_git_sha: parts.build_git_sha,
+            build_started_at: parts.build_started_at,
         }
     }
 }
@@ -463,17 +483,21 @@ impl CamelContext {
 
     /// Enable or disable tracing globally.
     pub async fn set_tracing(&mut self, enabled: bool) {
-        let _ = self
-            .route_controller
-            .set_tracer_config(TracerConfig {
-                enabled,
-                ..Default::default()
-            })
-            .await;
+        let config = TracerConfig {
+            enabled,
+            ..Default::default()
+        };
+        // Keep the lever snapshot in lockstep with what is forwarded
+        // (this path resets the levers to their defaults).
+        self.metrics_levers = config.metrics_levers.clone();
+        let _ = self.route_controller.set_tracer_config(config).await;
     }
 
     /// Configure tracing with full config.
     pub async fn set_tracer_config(&mut self, config: TracerConfig) {
+        // Snapshot the levers for the sync `component_metrics_enabled`
+        // surface before the config moves into the controller actor.
+        self.metrics_levers = config.metrics_levers.clone();
         let _ = self.route_controller.set_tracer_config(config).await;
     }
 
@@ -505,6 +529,14 @@ impl CamelContext {
             // handle fans the collector into every emission path seeded at
             // build time — context slot, controller tracer path, RuntimeBus.
             self.metrics.register(collector);
+            // The composite does not replay past observations to a newly
+            // registered collector, so re-publish the identity gauges: a
+            // collector wired post-build (e.g. configure_context's
+            // PrometheusService) still reports build info and uptime.
+            self.metrics
+                .record_build_info(self.build_version, self.build_git_sha);
+            self.metrics
+                .record_uptime(self.build_started_at.elapsed().as_secs_f64());
         }
         if let Some(invoker) = service.as_function_invoker() {
             self.function_invoker = Some(invoker.clone());
@@ -947,6 +979,15 @@ impl ComponentContext for CamelContext {
 
     fn metrics(&self) -> Arc<dyn MetricsCollector> {
         Arc::clone(&self.metrics) as Arc<dyn MetricsCollector>
+    }
+
+    /// Snapshot of the `[observability.metrics].components` lever
+    /// (dashboard-observability Task 4.1): gates only the uniform
+    /// component-operations family offered through
+    /// `RuntimeObservability::component_metrics()`. Error-family
+    /// emission is never lever-gated, so it is not part of this flag.
+    fn component_metrics_enabled(&self) -> bool {
+        self.metrics_levers.components_enabled()
     }
 
     fn health(&self) -> Arc<dyn camel_component_api::HealthCheckRegistry> {

@@ -39,9 +39,9 @@ fn test_custom_metrics_collector() {
             println!("Route {} processed exchange", route_id);
         }
 
-        fn set_queue_depth(&self, route_id: &str, depth: usize) {
+        fn set_queue_depth(&self, queue: &str, depth: usize) {
             // In a real implementation, this would update a gauge
-            println!("Route {} queue depth: {}", route_id, depth);
+            println!("Queue {queue} depth: {depth}");
         }
 
         fn record_circuit_breaker_change(&self, route_id: &str, from: &str, to: &str) {

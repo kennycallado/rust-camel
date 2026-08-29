@@ -86,6 +86,30 @@ Roughly 116 `error!()` sites across `crates/`. Estimated ~25 relevelled, ~6 kept
 
 Two sites were initially mis-categorized as `b-bridged` and corrected after the second-expert review (see `docs/superpowers/reviews/2026-06-04-adr-0012-second-expert-review.md`): `camel-sql consumer.rs:205` (StreamList downstream `send_and_wait`) and `camel-direct lib.rs:296` (consumer `send_and_wait`). Both are **normal-data** sends whose `Err` means the failure was NOT absorbed by the route handler; they are categorized **(b′)** outside-contract and MUST keep `error!` (with `// log-policy: outside-contract` + `increment_errors` metric once `rc-mf3` lands).
 
+## Amendment 2026-08-28 — ADR-0066: error family non-disableable; retry and breaker accounting
+
+ADR-0066 amends this ADR in three ways.
+
+1. **The error family is the only non-disableable metric family.**
+   `MetricsCollector::increment_errors` (this ADR's signal-replacement
+   API) is always emitted. No `[observability.metrics]` lever can
+   disable it. The success-path families introduced by
+   dashboard-observability (rc-6s6h) are gateable.
+2. **Retry accounting.** One `increment_errors` per exhausted
+   `NetworkRetryPolicy` sequence, executed by the policy helpers
+   (`retry_async` / `retry_async_cancelable`). Call sites do not
+   increment on their own `Err` arm for attempts the helper retries.
+   Cancellation is not failure. Per-attempt telemetry lives on
+   `camel_retry_attempts_total{scheme,operation}`.
+3. **Breaker rejections are not errors.** Open-breaker fast-fails
+   (`CamelError::CircuitOpen`) count on
+   `camel_circuit_breaker_rejections_total{route}` and are excluded
+   from `camel_errors_total` in the pipeline tracer. The taxonomy
+   categories (a)-(h) and the signal-replacement rules above are
+   unchanged.
+
+See ADR-0066 for the full collector binding and lifetime contract.
+
 ## Cross-references
 
 - **ADR-0007** — Route-supervised consumer failure. CrashNotification path is system-broken category (c); retains `error!`.

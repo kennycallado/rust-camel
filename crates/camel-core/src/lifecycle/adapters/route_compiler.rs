@@ -31,7 +31,7 @@ use crate::shared::observability::adapters::TracingProcessor;
 use crate::shared::observability::adapters::tracer::{
     SpanEndGuard, capped_correlation_id, record_exception, step_id_for, step_span_attributes,
 };
-use crate::shared::observability::domain::DetailLevel;
+use crate::shared::observability::domain::{DetailLevel, MetricsLeversConfig};
 
 // Re-export outcome composition types so existing step_compiler import paths
 // (`route_compiler::BoxProcessorSegment`, etc.) continue to work.
@@ -129,6 +129,54 @@ pub fn compose_pipeline_with_handler(
     })
 }
 
+/// Effective span/metric gating for the traced pipeline, derived once from
+/// the effective tracer config (dashboard-observability D3).
+///
+/// `pipeline_enabled` decides whether routes are wrapped with the
+/// observability adapters at all; `spans_enabled` gates SPAN creation only
+/// (explicit `tracer.enabled = false` with an exporter on yields
+/// `pipeline_enabled && !spans_enabled`, so metric families — errors
+/// unconditionally — keep flowing); `levers` gate individual non-error
+/// families.
+#[derive(Clone, Debug)]
+pub struct TracerPipelineGating {
+    pub pipeline_enabled: bool,
+    pub spans_enabled: bool,
+    pub levers: MetricsLeversConfig,
+}
+
+impl TracerPipelineGating {
+    /// Fully traced pipeline with default levers (legacy `trace_enabled = true`).
+    pub fn traced() -> Self {
+        Self {
+            pipeline_enabled: true,
+            spans_enabled: true,
+            levers: MetricsLeversConfig::default(),
+        }
+    }
+
+    /// No observability wrapping (legacy `trace_enabled = false`).
+    pub fn off() -> Self {
+        Self {
+            pipeline_enabled: false,
+            spans_enabled: false,
+            levers: MetricsLeversConfig::default(),
+        }
+    }
+}
+
+/// Legacy bool call sites keep their meaning: `true` = fully traced,
+/// `false` = no wrapping.
+impl From<bool> for TracerPipelineGating {
+    fn from(trace_enabled: bool) -> Self {
+        if trace_enabled {
+            Self::traced()
+        } else {
+            Self::off()
+        }
+    }
+}
+
 /// Compose a list of CompiledSteps into a traced pipeline with Stop→Ok translation.
 ///
 /// Each processor is wrapped with TracingProcessor to emit spans for observability,
@@ -138,17 +186,20 @@ pub fn compose_pipeline_with_handler(
 /// `to:direct`, `split`); unlabeled steps fall back to the positional
 /// `{route_id}:step-{index}` name. Empty traced routes still return a
 /// `TracedPipeline` so the root span records the route invocation with zero steps.
-/// When tracing is disabled, falls back to [`compose_pipeline_with_handler`] with zero overhead.
+/// When the pipeline is disabled, falls back to [`compose_pipeline_with_handler`]
+/// with zero overhead; when only spans are disabled, steps are still wrapped for
+/// metric families but no route root span is opened.
 pub fn compose_traced_pipeline(
     processors: Vec<CompiledStep>,
     route_id: &str,
-    trace_enabled: bool,
+    gating: impl Into<TracerPipelineGating>,
     detail_level: DetailLevel,
     metrics: Option<Arc<dyn MetricsCollector>>,
     handler: Option<Arc<dyn RouteErrorHandler>>,
     ctx: PipelineRuntimeCtx,
 ) -> BoxProcessor {
-    if !trace_enabled {
+    let gating = gating.into();
+    if !gating.pipeline_enabled {
         return compose_pipeline_with_handler(processors, handler, ctx);
     }
 
@@ -167,19 +218,23 @@ pub fn compose_traced_pipeline(
                 CompiledStep::Stop => return CompiledStep::Stop,
                 CompiledStep::Segment { .. } => return step,
             };
-            let traced = BoxProcessor::new(TracingProcessor::new(
-                p,
-                route_id.to_string(),
-                idx,
-                detail_level.clone(),
-                metrics.clone(),
-                lbl.clone(),
-                // Thread the registry-stamped kind hint (span-kind-hint
-                // 1.3) so `to:http` steps export Client spans and broker
-                // sends export Producer spans; unlabeled/non-To steps keep
-                // the Internal default.
-                kh,
-            ));
+            let traced = BoxProcessor::new(
+                TracingProcessor::new(
+                    p,
+                    route_id.to_string(),
+                    idx,
+                    detail_level.clone(),
+                    metrics.clone(),
+                    lbl.clone(),
+                    // Thread the registry-stamped kind hint (span-kind-hint
+                    // 1.3) so `to:http` steps export Client spans and broker
+                    // sends export Producer spans; unlabeled/non-To steps keep
+                    // the Internal default.
+                    kh,
+                )
+                .with_spans_enabled(gating.spans_enabled)
+                .with_metric_levers(gating.levers.clone()),
+            );
             CompiledStep::Process {
                 processor: traced,
                 body_contract: c,
@@ -189,6 +244,16 @@ pub fn compose_traced_pipeline(
             }
         })
         .collect();
+
+    // Spans off: no route root span — a plain sequential pipeline over the
+    // metrics-emitting step wrappers.
+    if !gating.spans_enabled {
+        return BoxProcessor::new(SequentialPipeline {
+            steps: SharedSnapshot(wrapped.into()),
+            handler,
+            ctx,
+        });
+    }
 
     BoxProcessor::new(TracedPipeline {
         steps: SharedSnapshot(wrapped.into()),
@@ -234,23 +299,24 @@ pub fn compose_pipeline_with_contracts(
     compose_pipeline_with_handler(wrapped, handler, ctx)
 }
 
-/// Compose a list of `CompiledStep` items into a traced pipeline with body coercion.
+/// Compose a list of `CompiledStep` items into a single pipeline with body coercion.
 ///
 /// Applies body coercion contracts first, then wraps with `TracingProcessor`.
 /// The pipeline opens one Internal route root span per invocation (named after
 /// `route_id`); empty traced routes still return a `TracedPipeline` so the
 /// root span records the route invocation with zero steps.
-/// When tracing is disabled, falls back to [`compose_pipeline_with_contracts`].
+/// When the pipeline is disabled, falls back to [`compose_pipeline_with_contracts`].
 pub(crate) fn compose_traced_pipeline_with_contracts(
     processors: Vec<CompiledStep>,
     route_id: &str,
-    trace_enabled: bool,
+    gating: impl Into<TracerPipelineGating>,
     detail_level: DetailLevel,
     metrics: Option<Arc<dyn MetricsCollector>>,
     handler: Option<Arc<dyn RouteErrorHandler>>,
     ctx: PipelineRuntimeCtx,
 ) -> BoxProcessor {
-    if !trace_enabled {
+    let gating = gating.into();
+    if !gating.pipeline_enabled {
         return compose_pipeline_with_contracts(processors, handler, ctx);
     }
 
@@ -281,7 +347,7 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
     compose_traced_pipeline(
         coerced,
         route_id,
-        trace_enabled,
+        gating,
         detail_level,
         metrics,
         handler,
@@ -522,6 +588,7 @@ async fn run_steps(
                     .await
                 {
                     RetryOutcome::Recovered(exchange) => {
+                        // allow-open-label rc-xl5k (route label: user-defined route id, bounded by route count)
                         ctx.metrics.record_counter(
                             "pipeline_disposition",
                             1.0,
@@ -530,6 +597,7 @@ async fn run_steps(
                         ex = exchange;
                     }
                     RetryOutcome::Stopped(stopped_ex) => {
+                        // allow-open-label rc-xl5k (route label: user-defined route id, bounded by route count)
                         ctx.metrics.record_counter(
                             "pipeline_disposition",
                             1.0,
@@ -552,6 +620,7 @@ async fn run_steps(
                         };
                         match disposition {
                             Ok(StepDisposition::Propagate(e)) => {
+                                // allow-open-label rc-xl5k (route label: user-defined route id, bounded by route count)
                                 ctx.metrics.record_counter(
                                     "pipeline_disposition",
                                     1.0,
@@ -560,6 +629,7 @@ async fn run_steps(
                                 return PipelineOutcome::Failed(e);
                             }
                             Ok(StepDisposition::Handled(done)) => {
+                                // allow-open-label rc-xl5k (route label: user-defined route id, bounded by route count)
                                 ctx.metrics.record_counter(
                                     "pipeline_disposition",
                                     1.0,
@@ -568,6 +638,7 @@ async fn run_steps(
                                 return PipelineOutcome::Completed(done);
                             }
                             Ok(StepDisposition::Continued(next)) => {
+                                // allow-open-label rc-xl5k (route label: user-defined route id, bounded by route count)
                                 ctx.metrics.record_counter(
                                     "pipeline_disposition",
                                     1.0,
@@ -576,6 +647,7 @@ async fn run_steps(
                                 ex = next;
                             }
                             Err(e) => {
+                                // allow-open-label rc-xl5k (route label: user-defined route id, bounded by route count)
                                 ctx.metrics.record_counter(
                                     "pipeline_disposition",
                                     1.0,

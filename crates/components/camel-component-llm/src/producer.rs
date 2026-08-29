@@ -77,6 +77,7 @@ fn emit_cost_metric(
     cost: f64,
 ) {
     if let Some(rt) = rt {
+        // allow-open-label rc-ycts rc-xl5k (provider: configured provider id; route label)
         rt.metrics().record_histogram(
             "llm_request_cost_usd",
             cost,

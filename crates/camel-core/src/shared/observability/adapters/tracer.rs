@@ -9,9 +9,9 @@ use opentelemetry::{Context as OtelContext, InstrumentationScope, KeyValue, glob
 use tower::Service;
 use tracing::Instrument;
 
-use crate::shared::observability::domain::DetailLevel;
+use crate::shared::observability::domain::{DetailLevel, MetricsLeversConfig};
 use camel_api::metrics::MetricsCollector;
-use camel_api::{Body, BoxProcessor, CamelError, Exchange, SpanKindHint};
+use camel_api::{Body, BoxProcessor, CIRCUIT_OPEN, CamelError, Exchange, SpanKindHint};
 
 /// RAII guard that ensures an OTel span is ended when dropped.
 ///
@@ -56,6 +56,12 @@ pub struct TracingProcessor {
     metrics: Option<Arc<dyn MetricsCollector>>,
     /// OTel span kind precomputed from `SpanKindHint` at construction.
     span_kind: SpanKind,
+    /// Whether step spans are created. Gates SPANS only — metric families
+    /// (errors unconditionally) keep flowing when false
+    /// (metrics-configuration Req 1).
+    spans_enabled: bool,
+    /// Per-family metric levers; `increment_errors` is never gated.
+    metric_levers: MetricsLeversConfig,
 }
 
 /// Positional fallback span-name fragment for unlabeled steps. Shared by
@@ -101,6 +107,76 @@ impl TracingProcessor {
             detail_level,
             metrics,
             span_kind,
+            // Defaults preserve the fully-traced behavior for direct
+            // constructors; the pipeline composer overrides per the
+            // effective tracer config.
+            spans_enabled: true,
+            metric_levers: MetricsLeversConfig::default(),
+        }
+    }
+
+    /// Sets whether step spans are created (metrics still flow when off).
+    pub fn with_spans_enabled(mut self, enabled: bool) -> Self {
+        self.spans_enabled = enabled;
+        self
+    }
+
+    /// Sets the per-family metric levers. The error family ignores them.
+    pub fn with_metric_levers(mut self, levers: MetricsLeversConfig) -> Self {
+        self.metric_levers = levers;
+        self
+    }
+
+    /// Metrics-only fast path (`spans_enabled = false`): no OTel span, no
+    /// local tracing span, context passes through untouched; metric
+    /// families are recorded per the levers.
+    fn call_metrics_only(
+        &mut self,
+        exchange: Exchange,
+        start: Instant,
+    ) -> Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>> {
+        let fresh = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, fresh);
+        let metrics = self.metrics.clone();
+        let route_id = self.route_id.clone();
+        let levers = self.metric_levers.clone();
+        Box::pin(async move {
+            let result = inner.call(exchange).await;
+            record_step_metrics(
+                metrics.as_ref(),
+                &route_id,
+                &levers,
+                start.elapsed(),
+                &result,
+            );
+            result
+        })
+    }
+}
+
+/// Emits the step metric families per the levers: `record_exchange_duration`
+/// only when the duration family is enabled, `increment_exchanges` only when
+/// the exchange family is enabled, and `increment_errors` NEVER gated
+/// (metrics-configuration Req 2). Circuit-open rejections are excluded here
+/// as well (dashboard-observability D2): the breaker counts them.
+fn record_step_metrics(
+    metrics: Option<&Arc<dyn MetricsCollector>>,
+    route_id: &str,
+    levers: &MetricsLeversConfig,
+    duration: std::time::Duration,
+    result: &Result<Exchange, CamelError>,
+) {
+    let Some(metrics) = metrics else { return };
+    if levers.durations_enabled() {
+        metrics.record_exchange_duration(route_id, duration);
+    }
+    if levers.exchanges_enabled() {
+        metrics.increment_exchanges(route_id);
+    }
+    if let Err(e) = result {
+        let error_class = e.classify();
+        if error_class != CIRCUIT_OPEN {
+            metrics.increment_errors(route_id, error_class);
         }
     }
 }
@@ -116,6 +192,14 @@ impl Service<Exchange> for TracingProcessor {
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let start = Instant::now();
+
+        // Metrics-only mode (dashboard-observability D3): spans are gated by
+        // `tracer.enabled`, but the pipeline adapter still runs so metric
+        // families — errors unconditionally — keep flowing.
+        if !self.spans_enabled {
+            return self.call_metrics_only(exchange, start);
+        }
+
         let span_name = self.span_name.clone();
         let span_kind = self.span_kind.clone();
 
@@ -210,6 +294,7 @@ impl Service<Exchange> for TracingProcessor {
         let detail_level = self.detail_level.clone();
         let metrics = self.metrics.clone();
         let route_id = self.route_id.clone();
+        let levers = self.metric_levers.clone();
 
         Box::pin(
             async move {
@@ -226,15 +311,8 @@ impl Service<Exchange> for TracingProcessor {
                 let duration_ms = duration.as_millis() as u64;
                 tracing::Span::current().record("duration_ms", duration_ms);
 
-                // Record metrics if collector is present
-                if let Some(ref metrics) = metrics {
-                    metrics.record_exchange_duration(&route_id, duration);
-                    metrics.increment_exchanges(&route_id);
-
-                    if let Err(e) = &result {
-                        metrics.increment_errors(&route_id, e.classify());
-                    }
-                }
+                // Record metric families per the levers (errors never gated).
+                record_step_metrics(metrics.as_ref(), &route_id, &levers, duration, &result);
 
                 match result {
                     Ok(mut ex) => {
@@ -281,6 +359,8 @@ impl Clone for TracingProcessor {
             detail_level: self.detail_level.clone(),
             metrics: self.metrics.clone(),
             span_kind: self.span_kind.clone(),
+            spans_enabled: self.spans_enabled,
+            metric_levers: self.metric_levers.clone(),
         }
     }
 }

@@ -2065,7 +2065,7 @@ impl Endpoint for HttpEndpoint {
 
     fn create_producer(
         &self,
-        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
         _ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
         let producer = HttpProducer {
@@ -2073,6 +2073,7 @@ impl Endpoint for HttpEndpoint {
             client: self.client.clone(),
             pinned_cache: std::sync::Arc::clone(&self.pinned_cache),
             http_config: Arc::new(self.http_config.clone()),
+            runtime: rt,
         };
         if let Some(ref provider) = self.config.token_provider {
             let layer = BearerTokenLayer::new(Arc::clone(provider));
@@ -2093,6 +2094,12 @@ struct HttpProducer {
     client: reqwest::Client,
     pinned_cache: std::sync::Arc<PinnedClientCache>,
     http_config: Arc<HttpConfig>,
+    /// Runtime observability handle powering the component-ops facade at
+    /// the request boundary (`("http","request")`, dashboard-observability
+    /// Task 4.3). The retained `e:http:accept*` labels are consumer-side
+    /// (server accept loop) — different boundary, no collision with
+    /// `e:http:request`.
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl HttpProducer {
@@ -2211,328 +2218,345 @@ impl Service<Exchange> for HttpProducer {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, mut exchange: Exchange) -> Self::Future {
+    fn call(&mut self, exchange: Exchange) -> Self::Future {
         let config = self.config.clone();
         let shared_client = self.client.clone();
         let pinned_cache = std::sync::Arc::clone(&self.pinned_cache);
         let http_config = self.http_config.clone();
+        let component_metrics = self.runtime.component_metrics();
 
         Box::pin(async move {
-            let method_str = HttpProducer::resolve_method(&exchange, &config);
-            // Entity-enclosing gate (RFC 9110 §9.3.1/§9.3.2): only POST, PUT
-            // and PATCH may carry a request body. Any other resolved method
-            // drops the exchange body before the request is built (Apache
-            // Camel `HttpMethods` parity).
-            let suppress_body = !HttpProducer::is_entity_enclosing(&method_str);
-            let url = HttpProducer::resolve_url(&exchange, &config);
+            let mut exchange = exchange;
+            let outcome = async {
+                let method_str = HttpProducer::resolve_method(&exchange, &config);
+                // Entity-enclosing gate (RFC 9110 §9.3.1/§9.3.2): only POST, PUT
+                // and PATCH may carry a request body. Any other resolved method
+                // drops the exchange body before the request is built (Apache
+                // Camel `HttpMethods` parity).
+                let suppress_body = !HttpProducer::is_entity_enclosing(&method_str);
+                let url = HttpProducer::resolve_url(&exchange, &config);
 
-            // SECURITY: Validate URL for SSRF
-            ssrf::validate_url_for_ssrf(&url, &config)?;
+                // SECURITY: Validate URL for SSRF
+                ssrf::validate_url_for_ssrf(&url, &config)?;
 
-            // Resolve hostname and pin validated IPs to prevent DNS-rebinding TOCTOU
-            // (L-H2). When the URL uses a domain name and SSRF protection is active,
-            // reuse the endpoint's cached DNS-pinned client for that validated
-            // (host, addrs) pair — built once with resolve_to_addrs, then shared so
-            // repeated requests keep one connection pool without re-resolving DNS.
-            // Per-request SSRF validation and DNS pinning are unchanged. IP-literal
-            // URLs use the endpoint's unpinned shared client.
-            let resolved = ssrf::resolve_initial_url_for_ssrf(&url, config.allow_internal).await?;
-            let client: reqwest::Client = if let Some((ref host, ref addrs)) = resolved {
-                pinned_cache
-                    .get_or_build(host.as_str(), addrs, || {
-                        build_client(&http_config, Some((host.as_str(), addrs)))
-                    })
-                    .await
-            } else {
-                shared_client.clone()
-            };
+                // Resolve hostname and pin validated IPs to prevent DNS-rebinding TOCTOU
+                // (L-H2). When the URL uses a domain name and SSRF protection is active,
+                // reuse the endpoint's cached DNS-pinned client for that validated
+                // (host, addrs) pair — built once with resolve_to_addrs, then shared so
+                // repeated requests keep one connection pool without re-resolving DNS.
+                // Per-request SSRF validation and DNS pinning are unchanged. IP-literal
+                // URLs use the endpoint's unpinned shared client.
+                let resolved =
+                    ssrf::resolve_initial_url_for_ssrf(&url, config.allow_internal).await?;
+                let client: reqwest::Client = if let Some((ref host, ref addrs)) = resolved {
+                    pinned_cache
+                        .get_or_build(host.as_str(), addrs, || {
+                            build_client(&http_config, Some((host.as_str(), addrs)))
+                        })
+                        .await
+                } else {
+                    shared_client.clone()
+                };
 
-            debug!(
-                correlation_id = %exchange.correlation_id(),
-                method = %method_str,
-                url = %url,
-                "HTTP request"
-            );
+                debug!(
+                    correlation_id = %exchange.correlation_id(),
+                    method = %method_str,
+                    url = %url,
+                    "HTTP request"
+                );
 
-            let method = method_str.parse::<reqwest::Method>().map_err(|e| {
-                CamelError::ProcessorError(format!("Invalid HTTP method '{}': {}", method_str, e))
-            })?;
+                let method = method_str.parse::<reqwest::Method>().map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "Invalid HTTP method '{}': {}",
+                        method_str, e
+                    ))
+                })?;
 
-            // Collect headers for potential redirect replay
-            let mut collected_headers: Vec<(
-                reqwest::header::HeaderName,
-                reqwest::header::HeaderValue,
-            )> = Vec::new();
+                // Collect headers for potential redirect replay
+                let mut collected_headers: Vec<(
+                    reqwest::header::HeaderName,
+                    reqwest::header::HeaderValue,
+                )> = Vec::new();
 
-            if let Some(user_agent) = &config.user_agent
-                && !config.bridge_endpoint
-                && let Ok(val) = reqwest::header::HeaderValue::from_str(user_agent)
-            {
-                collected_headers.push((reqwest::header::USER_AGENT, val));
-            }
+                if let Some(user_agent) = &config.user_agent
+                    && !config.bridge_endpoint
+                    && let Ok(val) = reqwest::header::HeaderValue::from_str(user_agent)
+                {
+                    collected_headers.push((reqwest::header::USER_AGENT, val));
+                }
 
-            // Inject W3C TraceContext headers for distributed tracing (opt-in via "otel" feature)
-            #[cfg(feature = "otel")]
-            let should_inject_otel = !config.bridge_endpoint;
-            #[cfg(feature = "otel")]
-            if should_inject_otel {
-                let mut otel_headers = HashMap::new();
-                camel_otel::inject_from_exchange(&exchange, &mut otel_headers);
-                for (k, v) in otel_headers {
-                    if let (Ok(name), Ok(val)) = (
-                        reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-                        reqwest::header::HeaderValue::from_str(&v),
-                    ) {
+                // Inject W3C TraceContext headers for distributed tracing (opt-in via "otel" feature)
+                #[cfg(feature = "otel")]
+                let should_inject_otel = !config.bridge_endpoint;
+                #[cfg(feature = "otel")]
+                if should_inject_otel {
+                    let mut otel_headers = HashMap::new();
+                    camel_otel::inject_from_exchange(&exchange, &mut otel_headers);
+                    for (k, v) in otel_headers {
+                        if let (Ok(name), Ok(val)) = (
+                            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                            reqwest::header::HeaderValue::from_str(&v),
+                        ) {
+                            collected_headers.push((name, val));
+                        }
+                    }
+                }
+
+                let conn_tokens = header_policy::connection_tokens(
+                    exchange
+                        .input
+                        .headers
+                        .iter()
+                        .filter(|(k, _)| k.eq_ignore_ascii_case("connection"))
+                        .filter_map(|(_, v)| v.as_str()),
+                );
+
+                for (key, value) in &exchange.input.headers {
+                    if !key.starts_with("Camel")
+                        && !config
+                            .skip_request_headers
+                            .iter()
+                            .any(|h| h.eq_ignore_ascii_case(key))
+                        && !header_policy::excluded_outbound(key, &conn_tokens)
+                        && let Some(val_str) = value.as_str()
+                        && let (Ok(name), Ok(val)) = (
+                            reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                            reqwest::header::HeaderValue::from_str(val_str),
+                        )
+                    {
                         collected_headers.push((name, val));
                     }
                 }
-            }
 
-            let conn_tokens = header_policy::connection_tokens(
-                exchange
-                    .input
-                    .headers
-                    .iter()
-                    .filter(|(k, _)| k.eq_ignore_ascii_case("connection"))
-                    .filter_map(|(_, v)| v.as_str()),
-            );
-
-            for (key, value) in &exchange.input.headers {
-                if !key.starts_with("Camel")
-                    && !config
-                        .skip_request_headers
-                        .iter()
-                        .any(|h| h.eq_ignore_ascii_case(key))
-                    && !header_policy::excluded_outbound(key, &conn_tokens)
-                    && let Some(val_str) = value.as_str()
-                    && let (Ok(name), Ok(val)) = (
-                        reqwest::header::HeaderName::from_bytes(key.as_bytes()),
-                        reqwest::header::HeaderValue::from_str(val_str),
-                    )
-                {
-                    collected_headers.push((name, val));
-                }
-            }
-
-            // Auth headers
-            if !config.bridge_endpoint {
-                match &config.auth {
-                    HttpAuth::None => {}
-                    HttpAuth::Basic { username, password } => {
-                        use base64::Engine;
-                        // allow-secret: credentials combined for base64 Basic auth header
-                        let credentials = format!("{username}:{password}");
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
-                        if let Ok(val) =
-                            reqwest::header::HeaderValue::from_str(&format!("Basic {encoded}"))
-                        {
-                            collected_headers.push((reqwest::header::AUTHORIZATION, val));
+                // Auth headers
+                if !config.bridge_endpoint {
+                    match &config.auth {
+                        HttpAuth::None => {}
+                        HttpAuth::Basic { username, password } => {
+                            use base64::Engine;
+                            // allow-secret: credentials combined for base64 Basic auth header
+                            let credentials = format!("{username}:{password}");
+                            let encoded =
+                                base64::engine::general_purpose::STANDARD.encode(credentials);
+                            if let Ok(val) =
+                                reqwest::header::HeaderValue::from_str(&format!("Basic {encoded}"))
+                            {
+                                collected_headers.push((reqwest::header::AUTHORIZATION, val));
+                            }
+                        }
+                        HttpAuth::Bearer { token } => {
+                            // allow-secret: Bearer token in Authorization header
+                            let bearer = format!("Bearer {token}");
+                            if let Ok(val) = reqwest::header::HeaderValue::from_str(&bearer) {
+                                collected_headers.push((reqwest::header::AUTHORIZATION, val));
+                            }
                         }
                     }
-                    HttpAuth::Bearer { token } => {
-                        // allow-secret: Bearer token in Authorization header
-                        let bearer = format!("Bearer {token}");
-                        if let Ok(val) = reqwest::header::HeaderValue::from_str(&bearer) {
-                            collected_headers.push((reqwest::header::AUTHORIZATION, val));
-                        }
+
+                    if config.connection_close
+                        && let Ok(val) = reqwest::header::HeaderValue::from_str("close")
+                    {
+                        collected_headers.push((reqwest::header::CONNECTION, val));
                     }
                 }
 
-                if config.connection_close
-                    && let Ok(val) = reqwest::header::HeaderValue::from_str("close")
-                {
-                    collected_headers.push((reqwest::header::CONNECTION, val));
-                }
-            }
-
-            // Materialize body
-            let is_stream_body = matches!(exchange.input.body, Body::Stream(_));
-            let materialized_body: Option<Vec<u8>> = if is_stream_body {
-                if suppress_body {
-                    // A stream body dropped under a non-entity-enclosing
-                    // method always warns (its emptiness is unknowable) and
-                    // stays consumed (mem::take). The stream attach arm below
-                    // still runs its outer flag check, but the inner `if let
-                    // Body::Stream` re-match fails on the now-Empty body, so
-                    // no stream is attached and no AlreadyConsumed error can
-                    // fire.
-                    std::mem::take(&mut exchange.input.body);
-                    // log-policy: handler-owned
-                    tracing::warn!(
-                        correlation_id = %exchange.correlation_id(),
-                        method = %method_str,
-                        "dropping request body for non-entity-enclosing HTTP method"
-                    );
-                }
-                None // Streams can't be replayed on redirect
-            } else {
-                let body = std::mem::take(&mut exchange.input.body);
-                let bytes = body.into_bytes(config.max_body_size).await?;
-                if bytes.is_empty() {
-                    // Empty body: nothing to send and nothing to warn about.
-                    None
-                } else if suppress_body {
-                    // log-policy: handler-owned
-                    tracing::warn!(
-                        correlation_id = %exchange.correlation_id(),
-                        method = %method_str,
-                        "dropping request body for non-entity-enclosing HTTP method"
-                    );
-                    None
+                // Materialize body
+                let is_stream_body = matches!(exchange.input.body, Body::Stream(_));
+                let materialized_body: Option<Vec<u8>> = if is_stream_body {
+                    if suppress_body {
+                        // A stream body dropped under a non-entity-enclosing
+                        // method always warns (its emptiness is unknowable) and
+                        // stays consumed (mem::take). The stream attach arm below
+                        // still runs its outer flag check, but the inner `if let
+                        // Body::Stream` re-match fails on the now-Empty body, so
+                        // no stream is attached and no AlreadyConsumed error can
+                        // fire.
+                        std::mem::take(&mut exchange.input.body);
+                        // log-policy: handler-owned
+                        tracing::warn!(
+                            correlation_id = %exchange.correlation_id(),
+                            method = %method_str,
+                            "dropping request body for non-entity-enclosing HTTP method"
+                        );
+                    }
+                    None // Streams can't be replayed on redirect
                 } else {
-                    Some(bytes.to_vec())
-                }
-            };
-
-            let response = if config.follow_redirects && !is_stream_body {
-                // Use manual redirect loop with per-hop SSRF validation.
-                // `client` is the pinned-or-shared binding for the initial
-                // request (a hostname initial request keeps its DNS-pinned
-                // client); `shared_client` is the unpinned endpoint client
-                // reused by IP-literal redirect hops.
-                ssrf::send_with_ssrf_safe_redirects(
-                    &client,
-                    &shared_client,
-                    &pinned_cache,
-                    &http_config,
-                    &config,
-                    method,
-                    &url,
-                    collected_headers,
-                    materialized_body,
-                    config.max_redirects,
-                    config.response_timeout,
-                )
-                .await?
-            } else {
-                // Direct send (no redirect following, or streaming body)
-                let mut request = client.request(method, &url);
-
-                if let Some(timeout) = config.response_timeout {
-                    request = request.timeout(timeout);
-                }
-
-                for (name, value) in &collected_headers {
-                    request = request.header(name, value);
-                }
-
-                if is_stream_body {
-                    if let Body::Stream(ref s) = exchange.input.body {
-                        let mut stream_lock = s.stream.lock().await;
-                        if let Some(stream) = stream_lock.take() {
-                            request = request.body(reqwest::Body::wrap_stream(stream));
-                        } else {
-                            return Err(CamelError::AlreadyConsumed);
-                        }
+                    let body = std::mem::take(&mut exchange.input.body);
+                    let bytes = body.into_bytes(config.max_body_size).await?;
+                    if bytes.is_empty() {
+                        // Empty body: nothing to send and nothing to warn about.
+                        None
+                    } else if suppress_body {
+                        // log-policy: handler-owned
+                        tracing::warn!(
+                            correlation_id = %exchange.correlation_id(),
+                            method = %method_str,
+                            "dropping request body for non-entity-enclosing HTTP method"
+                        );
+                        None
+                    } else {
+                        Some(bytes.to_vec())
                     }
-                } else if let Some(ref body_bytes) = materialized_body {
-                    request = request.body(body_bytes.clone());
+                };
+
+                let response = if config.follow_redirects && !is_stream_body {
+                    // Use manual redirect loop with per-hop SSRF validation.
+                    // `client` is the pinned-or-shared binding for the initial
+                    // request (a hostname initial request keeps its DNS-pinned
+                    // client); `shared_client` is the unpinned endpoint client
+                    // reused by IP-literal redirect hops.
+                    ssrf::send_with_ssrf_safe_redirects(
+                        &client,
+                        &shared_client,
+                        &pinned_cache,
+                        &http_config,
+                        &config,
+                        method,
+                        &url,
+                        collected_headers,
+                        materialized_body,
+                        config.max_redirects,
+                        config.response_timeout,
+                    )
+                    .await?
+                } else {
+                    // Direct send (no redirect following, or streaming body)
+                    let mut request = client.request(method, &url);
+
+                    if let Some(timeout) = config.response_timeout {
+                        request = request.timeout(timeout);
+                    }
+
+                    for (name, value) in &collected_headers {
+                        request = request.header(name, value);
+                    }
+
+                    if is_stream_body {
+                        if let Body::Stream(ref s) = exchange.input.body {
+                            let mut stream_lock = s.stream.lock().await;
+                            if let Some(stream) = stream_lock.take() {
+                                request = request.body(reqwest::Body::wrap_stream(stream));
+                            } else {
+                                return Err(CamelError::AlreadyConsumed);
+                            }
+                        }
+                    } else if let Some(ref body_bytes) = materialized_body {
+                        request = request.body(body_bytes.clone());
+                    }
+
+                    request.send().await.map_err(|e| {
+                        CamelError::ProcessorError(format!("HTTP request failed: {e}"))
+                    })?
+                };
+
+                let status_code = response.status().as_u16();
+                let status_text = response
+                    .status()
+                    .canonical_reason()
+                    .unwrap_or("Unknown")
+                    .to_string();
+
+                for (key, value) in response.headers() {
+                    if config
+                        .skip_response_headers
+                        .iter()
+                        .any(|h| h.eq_ignore_ascii_case(key.as_str()))
+                    {
+                        continue;
+                    }
+                    if let Ok(val_str) = value.to_str() {
+                        exchange.input.set_header(
+                            title_case_header(key.as_str()),
+                            serde_json::Value::String(val_str.to_string()),
+                        );
+                    }
                 }
 
-                request
-                    .send()
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("HTTP request failed: {e}")))?
-            };
+                exchange.input.set_header(
+                    "CamelHttpResponseCode",
+                    serde_json::Value::Number(status_code.into()),
+                );
+                exchange.input.set_header(
+                    "CamelHttpResponseText",
+                    serde_json::Value::String(status_text.clone()),
+                );
 
-            let status_code = response.status().as_u16();
-            let status_text = response
-                .status()
-                .canonical_reason()
-                .unwrap_or("Unknown")
-                .to_string();
-
-            for (key, value) in response.headers() {
-                if config
-                    .skip_response_headers
-                    .iter()
-                    .any(|h| h.eq_ignore_ascii_case(key.as_str()))
-                {
-                    continue;
-                }
-                if let Ok(val_str) = value.to_str() {
-                    exchange.input.set_header(
-                        title_case_header(key.as_str()),
-                        serde_json::Value::String(val_str.to_string()),
-                    );
-                }
-            }
-
-            exchange.input.set_header(
-                "CamelHttpResponseCode",
-                serde_json::Value::Number(status_code.into()),
-            );
-            exchange.input.set_header(
-                "CamelHttpResponseText",
-                serde_json::Value::String(status_text.clone()),
-            );
-
-            // Read response body with timeout and size guard (HTTP-004, HTTP-005)
-            let read_timeout = Duration::from_millis(config.read_timeout_ms);
-            let response_body = tokio::time::timeout(read_timeout, async {
-                // Check Content-Length header before allocating
-                if let Some(content_len) = response.content_length()
-                    && content_len > config.max_response_bytes as u64
-                {
-                    return Err(CamelError::ProcessorError(format!(
-                        "Response body too large: {} bytes exceeds limit of {} bytes",
-                        content_len, config.max_response_bytes
-                    )));
-                }
-                // Use bytes_stream() for lazy streaming with size guard
-                use futures::TryStreamExt;
-                let mut stream = response.bytes_stream();
-                let mut total: usize = 0;
-                let mut collected = Vec::new();
-                while let Some(chunk) = stream.try_next().await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Failed to read response body: {e}"))
-                })? {
-                    total += chunk.len();
-                    if total > config.max_response_bytes {
+                // Read response body with timeout and size guard (HTTP-004, HTTP-005)
+                let read_timeout = Duration::from_millis(config.read_timeout_ms);
+                let response_body = tokio::time::timeout(read_timeout, async {
+                    // Check Content-Length header before allocating
+                    if let Some(content_len) = response.content_length()
+                        && content_len > config.max_response_bytes as u64
+                    {
                         return Err(CamelError::ProcessorError(format!(
                             "Response body too large: {} bytes exceeds limit of {} bytes",
-                            total, config.max_response_bytes
+                            content_len, config.max_response_bytes
                         )));
                     }
-                    collected.push(chunk);
+                    // Use bytes_stream() for lazy streaming with size guard
+                    use futures::TryStreamExt;
+                    let mut stream = response.bytes_stream();
+                    let mut total: usize = 0;
+                    let mut collected = Vec::new();
+                    while let Some(chunk) = stream.try_next().await.map_err(|e| {
+                        CamelError::ProcessorError(format!("Failed to read response body: {e}"))
+                    })? {
+                        total += chunk.len();
+                        if total > config.max_response_bytes {
+                            return Err(CamelError::ProcessorError(format!(
+                                "Response body too large: {} bytes exceeds limit of {} bytes",
+                                total, config.max_response_bytes
+                            )));
+                        }
+                        collected.push(chunk);
+                    }
+                    let mut result = bytes::BytesMut::with_capacity(total);
+                    for chunk in collected {
+                        result.extend_from_slice(&chunk);
+                    }
+                    Ok::<bytes::Bytes, CamelError>(result.freeze())
+                })
+                .await
+                .map_err(|_| {
+                    CamelError::ProcessorError(format!(
+                        "Read timeout after {}ms",
+                        config.read_timeout_ms
+                    ))
+                })??;
+
+                if config.throw_exception_on_failure
+                    && !HttpProducer::is_ok_status(status_code, config.ok_status_code_range)
+                {
+                    return Err(CamelError::HttpOperationFailed {
+                        method: method_str,
+                        url,
+                        status_code,
+                        status_text,
+                        response_body: Some(String::from_utf8_lossy(&response_body).to_string()),
+                    });
                 }
-                let mut result = bytes::BytesMut::with_capacity(total);
-                for chunk in collected {
-                    result.extend_from_slice(&chunk);
+
+                if !response_body.is_empty() {
+                    exchange.input.body = Body::Bytes(bytes::Bytes::from(response_body.to_vec()));
                 }
-                Ok::<bytes::Bytes, CamelError>(result.freeze())
-            })
-            .await
-            .map_err(|_| {
-                CamelError::ProcessorError(format!(
-                    "Read timeout after {}ms",
-                    config.read_timeout_ms
-                ))
-            })??;
 
-            if config.throw_exception_on_failure
-                && !HttpProducer::is_ok_status(status_code, config.ok_status_code_range)
-            {
-                return Err(CamelError::HttpOperationFailed {
-                    method: method_str,
-                    url,
-                    status_code,
-                    status_text,
-                    response_body: Some(String::from_utf8_lossy(&response_body).to_string()),
-                });
+                debug!(
+                    correlation_id = %exchange.correlation_id(),
+                    status = status_code,
+                    url = %url,
+                    "HTTP response"
+                );
+                Ok(exchange)
             }
-
-            if !response_body.is_empty() {
-                exchange.input.body = Body::Bytes(bytes::Bytes::from(response_body.to_vec()));
-            }
-
-            debug!(
-                correlation_id = %exchange.correlation_id(),
-                status = status_code,
-                url = %url,
-                "HTTP response"
-            );
-            Ok(exchange)
+            .await;
+            // ("http","request") facade (dashboard-observability 4.3): the
+            // request boundary is the full client round-trip — SSRF checks,
+            // send, response read, and (with throwExceptionOnFailure) the
+            // status gate. http runs no retry_async and the producer
+            // previously emitted nothing, so no label collides with
+            // e:http:request.
+            component_metrics.observe("http", "request", outcome.is_err());
+            outcome
         })
     }
 }
@@ -2654,12 +2678,16 @@ fn select_response_headers(
 
 #[cfg(test)]
 mod tests {
-    use camel_component_api::test_support::{NoopRuntimeObservability, PanicRuntimeObservability};
+    use camel_component_api::test_support::NoopRuntimeObservability;
+
+    // Producer/consumer tests drive the component-ops facade on every
+    // call (dashboard-observability 4.3), so even non-observability tests
+    // must supply a collector-returning runtime — Noop everywhere.
     fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
-        std::sync::Arc::new(PanicRuntimeObservability)
+        std::sync::Arc::new(NoopRuntimeObservability)
     }
     fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
-        std::sync::Arc::new(PanicRuntimeObservability)
+        std::sync::Arc::new(NoopRuntimeObservability)
     }
     fn noop_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
         std::sync::Arc::new(NoopRuntimeObservability)

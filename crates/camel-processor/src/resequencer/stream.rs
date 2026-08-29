@@ -399,6 +399,11 @@ impl ResequencePolicy for StreamPolicy {
         "stream-resequencer"
     }
 
+    fn buffered(&self) -> usize {
+        let queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.len()
+    }
+
     fn set_timeout_tx(&self, tx: mpsc::Sender<Exchange>) {
         self.set_driver_tx(tx);
     }

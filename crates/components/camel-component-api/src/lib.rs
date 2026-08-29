@@ -49,9 +49,9 @@ pub use test_support::{NoopRuntimeObservability, PanicRuntimeObservability};
 // Re-export camel-api types for component convenience
 pub use camel_api::{
     AsyncHealthCheck, Body, BodyType, BoxProcessor, CamelError, CheckResult, Exchange,
-    HealthStatus, Message, RouteAction, RouteStatus, RuntimeCommand, RuntimeCommandBus,
-    RuntimeCommandResult, RuntimeHandle, RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult,
-    StreamBody, StreamMetadata, Value,
+    HealthStatus, Message, MetricsCollector, RouteAction, RouteStatus, RuntimeCommand,
+    RuntimeCommandBus, RuntimeCommandResult, RuntimeHandle, RuntimeQuery, RuntimeQueryBus,
+    RuntimeQueryResult, StreamBody, StreamMetadata, Value,
 };
 
 // Re-export camel-endpoint types for component convenience

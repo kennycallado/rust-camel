@@ -20,6 +20,10 @@ pub(crate) struct ControllerComponentContext {
     platform_service: Arc<dyn PlatformService>,
     health_registry: Arc<HealthCheckRegistry>,
     route_id: Option<String>,
+    /// Snapshot of `[observability.metrics].components` at pipeline
+    /// assembly — the production seam for
+    /// [`RuntimeObservability::component_metrics`] (lever-gated family).
+    component_metrics_enabled: bool,
 }
 
 impl ControllerComponentContext {
@@ -30,6 +34,7 @@ impl ControllerComponentContext {
         platform_service: Arc<dyn PlatformService>,
         health_registry: Arc<HealthCheckRegistry>,
         route_id: Option<String>,
+        component_metrics_enabled: bool,
     ) -> Self {
         Self {
             registry,
@@ -38,6 +43,7 @@ impl ControllerComponentContext {
             platform_service,
             health_registry,
             route_id,
+            component_metrics_enabled,
         }
     }
 }
@@ -70,4 +76,12 @@ impl ComponentContext for ControllerComponentContext {
     fn route_id(&self) -> Option<&str> {
         self.route_id.as_deref()
     }
+
+    fn component_metrics_enabled(&self) -> bool {
+        self.component_metrics_enabled
+    }
 }
+
+#[cfg(test)]
+#[path = "controller_component_context_tests.rs"]
+mod tests;

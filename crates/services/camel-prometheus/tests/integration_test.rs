@@ -33,7 +33,7 @@ async fn test_full_integration() {
             .contains("camel_errors_total{error_type=\"connection_refused\",route=\"route-1\"} 1")
     );
     assert!(output.contains("camel_exchange_duration_seconds_count{route=\"route-1\"} 2"));
-    assert!(output.contains("camel_queue_depth{route=\"route-1\"} 5"));
+    assert!(output.contains("camel_queue_depth{queue=\"route-1\"} 5"));
     assert!(output.contains("camel_circuit_breaker_state{route=\"route-1\"} 1"));
     assert!(output.contains("camel_circuit_breaker_state{route=\"route-2\"} 2"));
 }

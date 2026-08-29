@@ -143,10 +143,13 @@ impl Endpoint for KafkaEndpoint {
 
     fn create_producer(
         &self,
-        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
         _ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
-        Ok(BoxProcessor::new(KafkaProducer::new(self.config.clone())?))
+        Ok(BoxProcessor::new(KafkaProducer::new(
+            self.config.clone(),
+            rt,
+        )?))
     }
 
     fn create_consumer(

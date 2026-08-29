@@ -91,6 +91,7 @@ pub(crate) fn emit_leadership_transition(
     route_id: &str,
     event: &str,
 ) {
+    // allow-open-label rc-ycts rc-xl5k rc-gm6s (lock: config name; route_id; event/reason: caller literals)
     metrics.record_counter(
         "master_leadership_transitions_total",
         1.0,
@@ -108,6 +109,7 @@ pub(crate) fn emit_lifecycle(
     event: &str,
     reason: &str,
 ) {
+    // allow-open-label rc-ycts rc-xl5k rc-gm6s (lock: config name; route_id; event/reason: caller literals)
     metrics.record_counter(
         "master_delegate_lifecycle_total",
         1.0,

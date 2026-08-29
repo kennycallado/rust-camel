@@ -1679,7 +1679,8 @@ where
     let url_owned = url.to_string();
     retry_async(
         reconnect_policy,
-        Some("ws-producer"),
+        "ws",
+        "connect",
         || {
             let r = request.clone();
             let url = url_owned.clone();
@@ -1696,6 +1697,7 @@ where
             }
         },
         is_retryable_ws_error,
+        None,
     )
     .await
 }
@@ -3145,10 +3147,10 @@ mod tests {
     }
 
     /// Regression for rc-1nm: the WS producer retry path must emit
-    /// `component=ws-producer` in retry log events so operators can
-    /// identify which component is retrying.
+    /// `scheme=ws` / `operation=connect` in retry log events so operators
+    /// can identify which component is retrying.
     ///
-    /// Drives `retry_async` directly with `Some("ws-producer")` and a
+    /// Drives `retry_async` directly with `("ws", "connect")` and a
     /// deterministic retryable error. An earlier version exercised the
     /// production `connect_ws_with_retry` helper against `ws://127.0.0.1:1`,
     /// but that was flaky under heavy workspace load: the thread-local
@@ -3180,13 +3182,15 @@ mod tests {
         // emitted and captured synchronously on this thread.
         let result: Result<(), CamelError> = retry_async(
             &policy,
-            Some("ws-producer"),
+            "ws",
+            "connect",
             || async {
                 Err(CamelError::ProcessorError(
                     "WebSocket connection refused: simulated".to_string(),
                 ))
             },
             is_retryable_ws_error,
+            None,
         )
         .await;
 
@@ -3198,8 +3202,12 @@ mod tests {
         );
         let first = &captured[0];
         assert!(
-            first.contains("component=ws-producer"),
-            "rc-1nm regression: expected 'component=ws-producer' in WS retry log, got: {first}"
+            first.contains("scheme=ws"),
+            "rc-1nm regression: expected 'scheme=ws' in WS retry log, got: {first}"
+        );
+        assert!(
+            first.contains("operation=connect"),
+            "rc-1nm regression: expected 'operation=connect' in WS retry log, got: {first}"
         );
     }
 

@@ -586,6 +586,7 @@ impl Service<Exchange> for OpenSearchProducer {
         let client = self.client.clone();
         let config = self.config.clone();
         let semaphore = Arc::clone(&self.semaphore);
+        let runtime = Arc::clone(&self.runtime);
 
         Box::pin(async move {
             let _permit = semaphore
@@ -607,7 +608,8 @@ impl Service<Exchange> for OpenSearchProducer {
 
             let result = retry_async::<_, _, _, _, ProducerError>(
                 &config.retry,
-                Some("opensearch-producer"),
+                "opensearch",
+                "execute",
                 || {
                     let op = operation.clone();
                     async {
@@ -653,8 +655,17 @@ impl Service<Exchange> for OpenSearchProducer {
                     }
                 },
                 is_retryable_producer_error,
+                None,
             )
             .await;
+            // The execute operation is the request-dispatch entrypoint
+            // (every OpenSearchOperation funnels through this retry
+            // boundary): failures ALWAYS reach the error family as
+            // `e:opensearch:execute`, the component series only with the
+            // lever on (dashboard-observability 4.2).
+            runtime
+                .component_metrics()
+                .observe("opensearch", "execute", result.is_err());
             let result = result.map_err(CamelError::from)?;
 
             Ok(Self::build_response(req, result))

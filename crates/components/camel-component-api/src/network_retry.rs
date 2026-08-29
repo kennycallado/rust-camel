@@ -5,18 +5,23 @@
 //! supervise external processes (JMS, xj, xslt) should use only
 //! [`NetworkRetryPolicy::delay_for`] inside their own supervision loops.
 //!
-//! Both [`retry_async`] and [`retry_async_cancelable`] accept an optional
-//! `label` for component identity in retry logs:
+//! Both [`retry_async`] and [`retry_async_cancelable`] identify the retrying
+//! component by `scheme`/`operation` in retry logs and metrics:
 //!
 //! ```rust,ignore
 //! use camel_component_api::retry_async;
 //!
-//! retry_async(&config.reconnect, Some("ws-producer"), op, is_retryable).await?;
+//! retry_async(&config.reconnect, "ws", "connect", op, is_retryable, metrics).await?;
 //! ```
 //!
-//! When a label is set, log messages include `"ws-producer: transient error
-//! — retrying"` with a `component` structured field that operators can filter
-//! with `component=ws-producer`.
+//! Retry log messages include `"ws/connect: transient error — retrying"` with
+//! `scheme` and `operation` structured fields that operators can filter with
+//! `scheme=ws operation=connect`. When `metrics` is `Some`, every attempt is
+//! recorded via `increment_retry_attempt(scheme, operation)` and an exhausted
+//! (or non-retryable) sequence records exactly one error via
+//! `increment_errors(operation, "e:{scheme}:{operation}")` — call sites must
+//! NOT double-count the same exhaustion in their Err arms. Cancellation is a
+//! clean shutdown and records no error.
 //!
 //! For location-specific context (URLs, endpoints), wrap the retry call in a
 //! [`tracing::span`](https://docs.rs/tracing/latest/tracing/macro.span.html)
@@ -25,7 +30,7 @@
 //! ```rust,ignore
 //! let span = tracing::info_span!("ws_connect", url = %url);
 //! let _guard = span.enter();
-//! retry_async(&config.reconnect, Some("ws-producer"), op, is_retryable).await?;
+//! retry_async(&config.reconnect, "ws", "connect", op, is_retryable, metrics).await?;
 //! ```
 
 use std::{future::Future, time::Duration};
@@ -35,6 +40,8 @@ use rand::distr::Uniform;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+
+use camel_api::MetricsCollector;
 
 use crate::CamelError;
 
@@ -198,10 +205,16 @@ impl NetworkRetryPolicy {
 
 /// Executes `op` with reconnect/backoff according to `policy`.
 ///
-/// `label`, if `Some`, is emitted as a structured `component` tracing field
-/// and in the retry log message text so operators can identify which component
-/// is retrying (e.g., `ws-producer: transient error — retrying`). Pass `None`
-/// for the pre-0.14 backwards-compatible unlabeled path.
+/// `scheme` and `operation` identify the retrying component in retry log
+/// messages (structured `scheme`/`operation` fields, e.g. `ws/connect:
+/// transient error — retrying`) and in metrics.
+///
+/// When `metrics` is `Some`, every attempt (the first included) is recorded
+/// via [`MetricsCollector::increment_retry_attempt`], and a final failure —
+/// attempts exhausted or a non-retryable first error — records exactly ONE
+/// error via `increment_errors(operation, "e:{scheme}:{operation}")` before
+/// returning it. Call sites must not also count the same exhaustion in their
+/// Err arms (one error per exhausted retry sequence).
 ///
 /// `is_retryable` classifies errors: retryable errors are retried, permanent
 /// errors are not.
@@ -222,16 +235,20 @@ impl NetworkRetryPolicy {
 /// ```rust,ignore
 /// let result = retry_async(
 ///     &config.reconnect,
-///     Some("ws-producer"),
+///     "ws",
+///     "connect",
 ///     || async move { connect_to_server().await },
 ///     |err: &CamelError| matches!(err, CamelError::Io(_)),
+///     metrics,
 /// ).await?;
 /// ```
 pub async fn retry_async<T, Op, Fut, IsRetryable, E>(
     policy: &NetworkRetryPolicy,
-    label: Option<&'static str>,
+    scheme: &'static str,
+    operation: &'static str,
     op: Op,
     is_retryable: IsRetryable,
+    metrics: Option<&dyn MetricsCollector>,
 ) -> Result<T, E>
 where
     Op: FnMut() -> Fut,
@@ -239,17 +256,19 @@ where
     IsRetryable: Fn(&E) -> bool,
     E: std::fmt::Display,
 {
-    retry_async_inner(policy, op, is_retryable, None, label).await
+    retry_async_inner(policy, scheme, operation, op, is_retryable, None, metrics).await
 }
 
 /// Shared private implementation used by both [`retry_async`] and
 /// [`retry_async_cancelable`].
 async fn retry_async_inner<T, Op, Fut, IsRetryable, E>(
     policy: &NetworkRetryPolicy,
+    scheme: &'static str,
+    operation: &'static str,
     mut op: Op,
     is_retryable: IsRetryable,
     cancel: Option<&CancellationToken>,
-    label: Option<&'static str>,
+    metrics: Option<&dyn MetricsCollector>,
 ) -> Result<T, E>
 where
     Op: FnMut() -> Fut,
@@ -259,29 +278,31 @@ where
 {
     let mut attempt = 0u32;
     loop {
+        if let Some(metrics) = metrics {
+            // allow-open-label rc-gm6s (scheme/operation: &'static str params, callers pass literals)
+            metrics.increment_retry_attempt(scheme, operation);
+        }
         match op().await {
             Ok(val) => return Ok(val),
             Err(err) => {
                 if !is_retryable(&err) || !policy.should_retry(attempt + 1) {
+                    // One error per exhausted retry sequence. Cancellation
+                    // below is NOT an exhaustion: it is a clean shutdown and
+                    // must not fire error alerts.
+                    if let Some(metrics) = metrics {
+                        metrics.increment_errors(operation, &format!("e:{scheme}:{operation}"));
+                    }
                     return Err(err);
                 }
                 let delay = policy.delay_for(attempt);
-                if let Some(component) = label {
-                    tracing::warn!(
-                        component,
-                        attempt,
-                        delay_ms = delay.as_millis(),
-                        error = %err,
-                        "{component}: transient error — retrying"
-                    );
-                } else {
-                    tracing::warn!(
-                        attempt,
-                        delay_ms = delay.as_millis(),
-                        error = %err,
-                        "transient error — retrying"
-                    );
-                }
+                tracing::warn!(
+                    scheme,
+                    operation,
+                    attempt,
+                    delay_ms = delay.as_millis(),
+                    error = %err,
+                    "{scheme}/{operation}: transient error — retrying"
+                );
                 // Honour cancellation only during inter-retry sleep, not
                 // during the operation itself (that is the caller's
                 // responsibility).
@@ -306,8 +327,10 @@ where
 /// between attempts, the function returns the last operation error immediately.
 /// Cancellation is **not** checked during the operation itself — the caller is
 /// responsible for making the operation itself cancellation-aware if needed.
+/// A cancelled sequence is a clean shutdown: no error is recorded with
+/// `metrics` even when the return value is `Err`.
 ///
-/// `label`, if `Some`, is emitted as a structured `component` tracing field
+/// `scheme`/`operation` are emitted as structured tracing fields
 /// (see [`retry_async`] for details).
 ///
 /// # Example
@@ -315,18 +338,22 @@ where
 /// let cancel = CancellationToken::new();
 /// let result = retry_async_cancelable(
 ///     &config.reconnect,
-///     Some("container-events"),
+///     "container",
+///     "events-connect",
 ///     || async move { make_network_call().await },
 ///     |err| is_transient(err),
 ///     &cancel,
+///     metrics,
 /// ).await;
 /// ```
 pub async fn retry_async_cancelable<T, Op, Fut, IsRetryable, E>(
     policy: &NetworkRetryPolicy,
-    label: Option<&'static str>,
+    scheme: &'static str,
+    operation: &'static str,
     op: Op,
     is_retryable: IsRetryable,
     cancel: &CancellationToken,
+    metrics: Option<&dyn MetricsCollector>,
 ) -> Result<T, E>
 where
     Op: FnMut() -> Fut,
@@ -334,7 +361,16 @@ where
     IsRetryable: Fn(&E) -> bool,
     E: std::fmt::Display,
 {
-    retry_async_inner(policy, op, is_retryable, Some(cancel), label).await
+    retry_async_inner(
+        policy,
+        scheme,
+        operation,
+        op,
+        is_retryable,
+        Some(cancel),
+        metrics,
+    )
+    .await
 }
 
 /// Classify a [`CamelError`] as retryable (transient network/IO errors).

@@ -31,6 +31,7 @@ use crate::health_registry::HealthCheckRegistry;
 use crate::intercept::InterceptRules;
 use crate::lifecycle::CohortActivationGate;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
+use crate::lifecycle::adapters::route_compiler::TracerPipelineGating;
 use crate::lifecycle::adapters::route_compiler_ext::{
     RouteCompilerExt, build_eh_config_pipeline, transport_from_uri,
 };
@@ -74,7 +75,7 @@ pub struct DefaultRouteController {
     /// Optional crash notifier for supervision.
     pub(super) crash_notifier: Option<mpsc::Sender<CrashNotification>>,
     /// Whether tracing is enabled for route pipelines.
-    pub(super) tracing_enabled: bool,
+    pub(super) tracer_gating: TracerPipelineGating,
     /// Detail level for tracing when enabled.
     pub(super) tracer_detail_level: DetailLevel,
     /// Metrics collector for tracing processor.
@@ -167,7 +168,7 @@ impl DefaultRouteController {
             runtime: None,
             global_error_handler: None,
             crash_notifier: None,
-            tracing_enabled: false,
+            tracer_gating: TracerPipelineGating::off(),
             tracer_detail_level: DetailLevel::Minimal,
             tracer_metrics: None,
             platform_service,
@@ -199,7 +200,7 @@ impl DefaultRouteController {
             runtime: None,
             global_error_handler: None,
             crash_notifier: None,
-            tracing_enabled: false,
+            tracer_gating: TracerPipelineGating::off(),
             tracer_detail_level: DetailLevel::Minimal,
             tracer_metrics: None,
             platform_service,
@@ -231,7 +232,7 @@ impl DefaultRouteController {
             runtime: None,
             global_error_handler: None,
             crash_notifier: None,
-            tracing_enabled: false,
+            tracer_gating: TracerPipelineGating::off(),
             tracer_detail_level: DetailLevel::Minimal,
             tracer_metrics: None,
             platform_service,
@@ -409,7 +410,13 @@ impl DefaultRouteController {
 
     /// Configure tracing for this route controller.
     pub fn set_tracer_config(&mut self, config: &TracerConfig) {
-        self.tracing_enabled = config.enabled;
+        // Pipeline wrapping follows tracing unless the effective assembly
+        // raised it (exporter active); spans follow `enabled` alone.
+        self.tracer_gating = TracerPipelineGating {
+            pipeline_enabled: config.enabled || config.pipeline_enabled,
+            spans_enabled: config.enabled,
+            levers: config.metrics_levers.clone(),
+        };
         self.tracer_detail_level = config.detail_level.clone();
     }
 
@@ -438,7 +445,7 @@ impl DefaultRouteController {
             languages: &self.languages,
             beans: &self.beans,
             function_invoker: &self.function_invoker,
-            tracing_enabled: self.tracing_enabled,
+            tracer_gating: self.tracer_gating.clone(),
             tracer_detail_level: &self.tracer_detail_level,
             tracer_metrics: &self.tracer_metrics,
             platform_service: &self.platform_service,
@@ -472,6 +479,7 @@ impl DefaultRouteController {
             Arc::clone(&self.platform_service),
             self.health_registry(),
             route_id.map(|s| s.to_string()),
+            self.tracer_gating.levers.components_enabled(),
         ));
         let rt: Arc<dyn camel_component_api::RuntimeObservability> =
             Arc::clone(&component_ctx) as Arc<_>;
@@ -628,7 +636,7 @@ impl DefaultRouteController {
             &route_id_for_tracing,
             &producer_ctx,
             processors_with_contracts,
-            self.tracing_enabled,
+            self.tracer_gating.clone(),
             self.tracer_detail_level.clone(),
             security_policy.clone(),
             transport,
@@ -645,6 +653,7 @@ impl DefaultRouteController {
                 Arc::clone(&self.platform_service),
                 self.health_registry(),
                 Some(route_id.clone()),
+                self.tracer_gating.levers.components_enabled(),
             ));
             let rt: Arc<dyn camel_component_api::RuntimeObservability> =
                 Arc::clone(&component_ctx) as Arc<_>;
@@ -1029,12 +1038,17 @@ impl DefaultRouteController {
         let (late_tx, late_rx) = mpsc::channel::<Exchange>(256);
 
         let route_cancel_clone = pipeline_cancel.clone();
-        let svc = AggregatorService::new(
+        let mut svc = AggregatorService::new(
             split.agg_config.clone(),
             late_tx,
             Arc::clone(&self.languages),
             route_cancel_clone,
         );
+        // Queue-depth visibility: the TTL-sweep pass reports the buffered
+        // group count as camel_queue_depth{queue="aggregator:<route>"}.
+        if let Some(metrics) = self.tracer_metrics.clone() {
+            svc = svc.with_queue_metrics(metrics, format!("aggregator:{route_id}"));
+        }
         let agg = Arc::new(svc);
 
         let pipeline_cancel_for_monitor = pipeline_cancel.clone();

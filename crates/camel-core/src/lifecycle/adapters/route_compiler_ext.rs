@@ -41,8 +41,8 @@ use crate::intercept::InterceptRules;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
 use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
 use crate::lifecycle::adapters::route_compiler::{
-    PipelineRuntimeCtx, RouteChannelService, compose_pipeline, compose_pipeline_with_contracts,
-    compose_traced_pipeline_with_contracts,
+    PipelineRuntimeCtx, RouteChannelService, TracerPipelineGating, compose_pipeline,
+    compose_pipeline_with_contracts, compose_traced_pipeline_with_contracts,
 };
 use crate::lifecycle::adapters::route_helpers::{
     AggregateSplitInfo, find_top_level_aggregate_requiring_split,
@@ -182,7 +182,7 @@ pub(crate) fn build_eh_config_pipeline(
     route_id: &str,
     producer_ctx: &ProducerContext,
     processors_with_contracts: Vec<CompiledStep>,
-    tracing_enabled: bool,
+    tracer_gating: TracerPipelineGating,
     tracer_detail_level: DetailLevel,
     security_policy: Option<SecurityPolicyConfig>,
     transport: TransportId,
@@ -199,6 +199,7 @@ pub(crate) fn build_eh_config_pipeline(
             platform_service,
             health_registry,
             Some(route_id.to_string()),
+            tracer_gating.levers.components_enabled(),
         ));
         let rt: Arc<dyn RuntimeObservability> = Arc::clone(&component_ctx) as Arc<_>;
         let handler = Arc::new(resolve_error_handler(
@@ -212,10 +213,15 @@ pub(crate) fn build_eh_config_pipeline(
         // route_id. The cancel token is per-start via task-local, not here.
         let pipeline_ctx = build_pipeline_ctx(&tracer_metrics, route_id);
 
+        // Breaker rejection accounting (D2): clone the collector Arc BEFORE
+        // compose_traced_pipeline_with_contracts moves it by value.
+        let breaker_metrics = tracer_metrics.clone();
+        let breaker_route_id: Arc<str> = Arc::from(route_id);
+
         let pipeline = compose_traced_pipeline_with_contracts(
             processors_with_contracts,
             route_id,
-            tracing_enabled,
+            tracer_gating.clone(),
             tracer_detail_level,
             tracer_metrics,
             Some(handler.clone()),
@@ -233,7 +239,9 @@ pub(crate) fn build_eh_config_pipeline(
         });
 
         // CircuitBreaker: explicit gate
-        let cb_gate = circuit_breaker.map(CircuitBreakerGate::new);
+        let cb_gate = circuit_breaker.map(|cfg| {
+            CircuitBreakerGate::new(cfg, Arc::clone(&breaker_route_id), breaker_metrics.clone())
+        });
 
         let channel = RouteChannelService::new(
             handler,
@@ -246,10 +254,13 @@ pub(crate) fn build_eh_config_pipeline(
     } else {
         // ── Old path: Tower layer wrapping (no error handler configured) ──
         let pipeline_ctx = build_pipeline_ctx(&tracer_metrics, route_id);
+        // Breaker rejection accounting (D2): clone BEFORE compose moves the
+        // collector Arc by value (same pattern as the new path above).
+        let breaker_metrics = tracer_metrics.clone();
         let mut pipeline = compose_traced_pipeline_with_contracts(
             processors_with_contracts,
             route_id,
-            tracing_enabled,
+            tracer_gating.clone(),
             tracer_detail_level,
             tracer_metrics,
             None,
@@ -257,7 +268,8 @@ pub(crate) fn build_eh_config_pipeline(
         );
 
         if let Some(cb_config) = circuit_breaker {
-            let cb_layer = CircuitBreakerLayer::new(cb_config);
+            let cb_layer =
+                CircuitBreakerLayer::new(cb_config, Arc::from(route_id), breaker_metrics.clone());
             pipeline = BoxProcessor::new(cb_layer.layer(pipeline));
         }
 
@@ -283,7 +295,7 @@ pub(crate) struct RouteCompilerExt<'a> {
     pub(crate) languages: &'a SharedLanguageRegistry,
     pub(crate) beans: &'a Arc<std::sync::Mutex<BeanRegistry>>,
     pub(crate) function_invoker: &'a Option<Arc<dyn FunctionInvoker>>,
-    pub(crate) tracing_enabled: bool,
+    pub(crate) tracer_gating: TracerPipelineGating,
     pub(crate) tracer_detail_level: &'a DetailLevel,
     pub(crate) tracer_metrics: &'a Option<Arc<dyn MetricsCollector>>,
     pub(crate) platform_service: &'a Arc<dyn PlatformService>,
@@ -331,6 +343,7 @@ impl RouteCompilerExt<'_> {
             Arc::clone(self.platform_service),
             self.health_registry(),
             route_id.map(|s| s.to_string()),
+            self.tracer_gating.levers.components_enabled(),
         ));
         let rt: Arc<dyn camel_component_api::RuntimeObservability> =
             Arc::clone(&component_ctx) as Arc<_>;
@@ -384,7 +397,7 @@ impl RouteCompilerExt<'_> {
         let fallback = compose_traced_pipeline_with_contracts(
             compiled,
             route_id,
-            self.tracing_enabled,
+            self.tracer_gating.clone(),
             self.tracer_detail_level.clone(),
             self.tracer_metrics.clone(),
             None,
@@ -714,7 +727,7 @@ impl RouteCompilerExt<'_> {
             &route_id,
             &producer_ctx,
             processors_with_contracts,
-            self.tracing_enabled,
+            self.tracer_gating.clone(),
             self.tracer_detail_level.clone(),
             def.security_policy,
             transport,
@@ -734,6 +747,7 @@ impl RouteCompilerExt<'_> {
                 Arc::clone(self.platform_service),
                 self.health_registry(),
                 Some(route_id.clone()),
+                self.tracer_gating.levers.components_enabled(),
             ));
             let rt: Arc<dyn camel_component_api::RuntimeObservability> =
                 Arc::clone(&component_ctx) as Arc<_>;

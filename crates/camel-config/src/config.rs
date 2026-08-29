@@ -1,5 +1,6 @@
 use camel_api::CamelError;
 use camel_api::datasource::DatasourceConfig;
+use camel_core::MetricsLeversConfig;
 use camel_core::TracerConfig;
 use config::{Config, ConfigError};
 use serde::{Deserialize, Serialize};
@@ -340,6 +341,11 @@ fn default_health_handler_timeout_ms() -> u64 {
 pub struct ObservabilityConfig {
     #[serde(default)]
     pub tracer: TracerConfig,
+
+    /// Metric-family levers (`[observability.metrics]`). Absent table means
+    /// all-default levers; the error family has no lever and is always on.
+    #[serde(default)]
+    pub metrics: MetricsLeversConfig,
 
     #[serde(default)]
     pub otel: Option<OtelCamelConfig>,
@@ -5751,8 +5757,7 @@ master_name = "m"
 "#,
         );
         let err = CamelConfig::from_file(file.path().to_str().unwrap())
-            .err()
-            .expect("mixed blank/non-blank sentinel array must fail through the loader");
+            .expect_err("mixed blank/non-blank sentinel array must fail through the loader");
         let msg = err.to_string();
         assert!(
             msg.contains("sentinel node entries must be non-empty"),
@@ -6005,8 +6010,7 @@ url = "${env:RC_TEST_MISSING:-}"
 "#,
         );
         let err = CamelConfig::from_file(file.path().to_str().unwrap())
-            .err()
-            .expect("a redis section without any topology must fail");
+            .expect_err("a redis section without any topology must fail");
         let msg = err.to_string();
         assert!(
             msg.contains("requires a topology"),
@@ -6031,8 +6035,7 @@ url = ""
 "#,
         );
         let err = CamelConfig::from_file(file.path().to_str().unwrap())
-            .err()
-            .expect("url must stay rejected on the memory backend");
+            .expect_err("url must stay rejected on the memory backend");
         let msg = err.to_string();
         assert!(
             msg.contains(r#"cache_repo.url does not apply to the "memory" backend"#),
@@ -6062,8 +6065,7 @@ url = ""
             cache_path.display()
         ));
         let err = CamelConfig::from_file(file.path().to_str().unwrap())
-            .err()
-            .expect("url must stay rejected on the redb cache backend");
+            .expect_err("url must stay rejected on the redb cache backend");
         let msg = err.to_string();
         assert!(
             msg.contains(r#"cache_repo.url does not apply to the "redb" backend"#),
@@ -6084,8 +6086,7 @@ url = ""
             idem_path.display()
         ));
         let err = CamelConfig::from_file(file.path().to_str().unwrap())
-            .err()
-            .expect("url must stay rejected on the redb idempotent backend");
+            .expect_err("url must stay rejected on the redb idempotent backend");
         let msg = err.to_string();
         assert!(
             msg.contains(r#"idempotent_repo.url does not apply to the "redb" backend"#),

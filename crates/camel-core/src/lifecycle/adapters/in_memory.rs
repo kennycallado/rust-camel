@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use camel_api::MetricsCollector;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::lifecycle::domain::DomainError;
@@ -137,6 +138,11 @@ impl CommandDedupPort for InMemoryCommandDedup {
 pub struct InMemoryRuntimeStore {
     inner: Arc<Mutex<RuntimeStoreState>>,
     journal: Option<Arc<dyn RuntimeEventJournalPort>>,
+    /// Shared late-bound metrics handle (dashboard-observability T3.1).
+    /// Seeded once by `CamelContextBuilder::build()` — never a fresh
+    /// collector — so every projection transition published through this
+    /// store emits `MetricsCollector::set_route_state`.
+    metrics: Option<Arc<dyn MetricsCollector>>,
 }
 
 #[derive(Default)]
@@ -156,6 +162,22 @@ impl InMemoryRuntimeStore {
     pub fn with_journal(mut self, journal: Arc<dyn RuntimeEventJournalPort>) -> Self {
         self.journal = Some(journal);
         self
+    }
+
+    /// Seed the shared late-bound metrics handle. Called from
+    /// `CamelContextBuilder::build()` with the same handle threaded to the
+    /// route controller and the runtime bus (no new collector instances).
+    pub fn with_metrics(mut self, metrics: Arc<dyn MetricsCollector>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Emit a route-state gauge transition for a projection write. `None`
+    /// handle (tests, standalone stores) = no-op.
+    fn emit_route_state(&self, route_id: &str, state: &str) {
+        if let Some(metrics) = &self.metrics {
+            metrics.set_route_state(route_id, state);
+        }
     }
 
     pub async fn snapshot_events(&self) -> Vec<RuntimeEvent> {
@@ -257,6 +279,7 @@ impl Default for InMemoryRuntimeStore {
         Self {
             inner: Arc::new(Mutex::new(RuntimeStoreState::default())),
             journal: None,
+            metrics: None,
         }
     }
 }
@@ -316,8 +339,11 @@ impl RouteRepositoryPort for InMemoryRuntimeStore {
 #[async_trait]
 impl ProjectionStorePort for InMemoryRuntimeStore {
     async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), DomainError> {
+        let route_id = status.route_id.clone();
+        let state = status.status.clone();
         let mut guard = self.inner.lock().await;
         guard.statuses.insert(status.route_id.clone(), status);
+        self.emit_route_state(&route_id, &state);
         Ok(())
     }
 
@@ -337,6 +363,11 @@ impl ProjectionStorePort for InMemoryRuntimeStore {
     async fn remove_status(&self, route_id: &str) -> Result<(), DomainError> {
         let mut guard = self.inner.lock().await;
         guard.statuses.remove(route_id);
+        // Undeployed route: drop its gauge series so a scrape reflects
+        // only routes that exist.
+        if let Some(metrics) = &self.metrics {
+            metrics.clear_route_state(route_id);
+        }
         Ok(())
     }
 }
@@ -413,10 +444,13 @@ impl RuntimeUnitOfWorkPort for InMemoryRuntimeStore {
         guard
             .routes
             .insert(aggregate.route_id().to_string(), aggregate);
+        let route_id = projection.route_id.clone();
+        let state = projection.status.clone();
         guard
             .statuses
             .insert(projection.route_id.clone(), projection);
         guard.events.extend(events.iter().cloned());
+        self.emit_route_state(&route_id, &state);
         Ok(())
     }
 
@@ -432,6 +466,9 @@ impl RuntimeUnitOfWorkPort for InMemoryRuntimeStore {
         guard.routes.remove(route_id);
         guard.statuses.remove(route_id);
         guard.events.extend(events.iter().cloned());
+        if let Some(metrics) = &self.metrics {
+            metrics.clear_route_state(route_id);
+        }
         Ok(())
     }
 
@@ -457,6 +494,13 @@ impl RuntimeUnitOfWorkPort for InMemoryRuntimeStore {
         // first re-registration of its id (declarative boot), so a durable
         // journal no longer turns a clean restart into an AlreadyExists storm.
         guard.recovered = guard.routes.keys().cloned().collect();
+        // Seed the route-state gauges from the recovered projections:
+        // replay writes statuses directly, bypassing the emit sites.
+        if let Some(metrics) = &self.metrics {
+            for status in guard.statuses.values() {
+                metrics.set_route_state(&status.route_id, &status.status);
+            }
+        }
         guard.events = replayed_events;
         for command_id in replayed_command_ids {
             guard.seen.insert(command_id);
@@ -709,5 +753,49 @@ mod tests {
         // not adoptable — a fresh registration proceeds as first-time.
         assert!(store.load("replay-r4").await.unwrap().is_none());
         assert!(!store.take_recovered("replay-r4").await.unwrap());
+    }
+
+    /// Task 3.1 follow-up (holistic review): journal recovery seeds the
+    /// route-state gauges from recovered projections — the replay loop
+    /// writes statuses directly, bypassing the emit sites, so the seed
+    /// after the loop is the only path a recovered route's series has.
+    #[tokio::test]
+    async fn recovery_seeds_route_state_gauges() {
+        struct StateRecorder(std::sync::Mutex<Vec<(String, String)>>);
+        impl MetricsCollector for StateRecorder {
+            fn increment_errors(&self, _r: &str, _e: &str) {}
+            fn record_exchange_duration(&self, _r: &str, _s: std::time::Duration) {}
+            fn set_route_state(&self, route: &str, state: &str) {
+                self.0
+                    .lock()
+                    .expect("states lock") // allow-unwrap
+                    .push((route.to_string(), state.to_string()));
+            }
+            fn increment_exchanges(&self, _r: &str) {}
+            fn set_queue_depth(&self, _q: &str, _d: usize) {}
+            fn record_circuit_breaker_change(&self, _r: &str, _f: &str, _t: &str) {}
+        }
+        let recorder = Arc::new(StateRecorder(std::sync::Mutex::new(Vec::new())));
+        let store = InMemoryRuntimeStore::default()
+            .with_metrics(recorder.clone() as Arc<dyn MetricsCollector>)
+            .with_journal(Arc::new(ReplayJournal {
+                events: vec![
+                    RuntimeEvent::RouteRegistered {
+                        route_id: "seed-r1".to_string(),
+                    },
+                    RuntimeEvent::RouteStarted {
+                        route_id: "seed-r1".to_string(),
+                    },
+                ],
+            }));
+
+        store.recover_from_journal().await.unwrap();
+
+        let states = recorder.0.lock().expect("states lock").clone();
+        assert_eq!(
+            states,
+            vec![("seed-r1".to_string(), "Started".to_string())],
+            "recovery must seed the route-state gauge for each recovered projection"
+        );
     }
 }

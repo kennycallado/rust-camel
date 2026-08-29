@@ -192,11 +192,25 @@ _Avoid_: stringly Config errors for URI merge failures
 
 **MetricsCollector**:
 The metrics emission contract (`metrics.rs`): five exchange-lifecycle methods
-(duration, errors, exchanges, queue depth, circuit-breaker transitions) plus two
-defaulted label-passing methods (histogram, counter). Implementations integrate
-Prometheus, OpenTelemetry, or test recorders. Emission sites hold this trait
-object; they never hold a concrete backend.
+(duration, errors, exchanges, queue depth, circuit-breaker transitions), two
+defaulted label-passing methods (histogram, counter), and seven defaulted
+observability-semantics methods — retry attempts, breaker rejections, route
+state (set/clear), build info, uptime, component operations — all defaulting
+to no-op so out-of-tree implementations keep compiling. Implementations
+integrate Prometheus, OpenTelemetry, or test recorders. Emission sites hold
+this trait object; they never hold a concrete backend. Ownership and
+double-count rules live in ADR-0066.
 _Avoid_: metrics sink, metrics interface (vague)
+
+**ComponentMetrics**:
+Lever-gated facade (`component_metrics.rs`) over a collector handle plus a
+`components_enabled` snapshot. `observe(component, operation, failed)` emits
+`camel_component_operations_total{component,operation,outcome}` only with the
+`[observability.metrics] components` lever on; failures ALWAYS forward to the
+non-disableable error family as `e:{component}:{operation}`. Components obtain
+it via `RuntimeObservability::component_metrics()`; wiring BOTH this facade
+and `retry_async(metrics=Some)` at one boundary is forbidden (ADR-0066).
+_Avoid_: component metrics helper, metrics facade (say ComponentMetrics)
 
 **MetricsHandle**:
 Late-bound swap-cell collector (`metrics.rs`), one per context: it seeds itself

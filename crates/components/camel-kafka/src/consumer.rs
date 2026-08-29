@@ -351,6 +351,15 @@ async fn auto_commit_step(
 /// Returns `Err` only for auto-commit failures that must terminate the consumer
 /// (pipeline reject or commit side-effect failure — at-least-once semantics);
 /// manual-commit dispatch failures are logged and swallowed as before.
+///
+/// Component-ops facade (dashboard-observability Task 4.3): this is the
+/// `("kafka","consume")` boundary — one observe per dispatched message in
+/// both commit modes. Ownership ruling: the facade owns the message-dispatch
+/// outcome; the retained Phase-1 label `e:kafka:recv-exhaustion`
+/// (run_consumer_loop) covers transport starvation on the consume leg — a
+/// different failure class landing on a different series, so both stay
+/// (family-wide sums may count one failure on two series; intended per
+/// design D5). The b-prime labels below layer on top unchanged.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_message(
     owned: OwnedMessage,
@@ -362,6 +371,7 @@ async fn dispatch_message(
     route_id: &str,
 ) -> Result<(), CamelError> {
     let mut exchange = build_exchange(&owned, &config.group_id)?;
+    let component_metrics = runtime.component_metrics();
 
     if let Some(tx) = commit_tx {
         // Manual commit mode: store handle in extensions, user commits.
@@ -372,7 +382,9 @@ async fn dispatch_message(
             tx.clone(),
         );
         exchange.set_extension("kafka.manual_commit", Arc::new(handle));
-        if let Err(e) = ctx.send(exchange).await {
+        let send_outcome = ctx.send(exchange).await;
+        component_metrics.observe("kafka", "consume", send_outcome.is_err());
+        if let Err(e) = send_outcome {
             runtime
                 .metrics()
                 .increment_errors(route_id, "b-prime:kafka:manual-commit-dispatch");
@@ -384,7 +396,7 @@ async fn dispatch_message(
         // Auto commit mode — Q1 success gate (ADR-0012 b'). Offset committed
         // ONLY after send_and_wait returns Ok; a pipeline failure returns Err,
         // terminating the consumer so supervision re-delivers (at-least-once).
-        auto_commit_step(
+        let step_outcome = auto_commit_step(
             ctx,
             exchange,
             owned.topic(),
@@ -394,7 +406,9 @@ async fn dispatch_message(
             runtime,
             route_id,
         )
-        .await
+        .await;
+        component_metrics.observe("kafka", "consume", step_outcome.is_err());
+        step_outcome
     }
 }
 
@@ -572,6 +586,9 @@ async fn run_consumer_loop(
                             tokio::time::sleep(delay).await;
                             attempt += 1;
                         } else {
+                            runtime
+                                .metrics()
+                                .increment_errors(&route_id, "e:kafka:recv-exhaustion");
                             // log-policy: system-broken
                             error!(attempt, max_attempts, error = %e, "Kafka consumer exhausted reconnect attempts");
                             break;

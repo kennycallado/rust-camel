@@ -315,6 +315,7 @@ impl OutcomePipeline for CacheService {
                 Err(e) => return PipelineOutcome::Failed(e),
                 Ok(Some(entry)) => {
                     // HIT: record metric, reconstruct body, skip on-miss sub-pipeline.
+                    // allow-open-label rc-ycts (repository: user-declared cache repository name)
                     self.rt.metrics().record_counter(
                         "camel.cache.hits",
                         1.0_f64,
@@ -331,6 +332,7 @@ impl OutcomePipeline for CacheService {
                 }
                 Ok(None) => {
                     // MISS: record metric, fall through to on-miss sub-pipeline.
+                    // allow-open-label rc-ycts (repository: user-declared cache repository name)
                     self.rt.metrics().record_counter(
                         "camel.cache.misses",
                         1.0_f64,
@@ -705,6 +707,7 @@ impl OutcomePipeline for CacheInvalidateService {
                     match self.repository.invalidate(&key).await {
                         Err(e) => PipelineOutcome::Failed(e),
                         Ok(()) => {
+                            // allow-open-label rc-ycts (repository: user-declared cache repository name)
                             self.rt.metrics().record_counter(
                                 "camel.cache.invalidations",
                                 1.0_f64,
@@ -727,6 +730,7 @@ impl OutcomePipeline for CacheInvalidateService {
                     match self.repository.invalidate_prefix(&prefix).await {
                         Err(e) => PipelineOutcome::Failed(e),
                         Ok(count) => {
+                            // allow-open-label rc-ycts (repository: user-declared cache repository name)
                             self.rt.metrics().record_counter(
                                 "camel.cache.invalidations",
                                 1.0_f64,
@@ -873,6 +877,7 @@ impl OutcomePipeline for CachePeekStaleService {
                 Err(e) => PipelineOutcome::Failed(e),
                 Ok(Some(entry)) => {
                     // Emit peek_stale_served (fresh or stale — both are serves).
+                    // allow-open-label rc-ycts (repository: user-declared cache repository name)
                     self.rt.metrics().record_counter(
                         "camel.cache.peek_stale_served",
                         1.0_f64,

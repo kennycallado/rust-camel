@@ -49,7 +49,8 @@ async fn retry_async_succeeds_on_first_attempt() {
     let count_clone = count.clone();
     let result = retry_async::<u32, _, _, _, CamelError>(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = count_clone.clone();
             async move {
@@ -58,6 +59,7 @@ async fn retry_async_succeeds_on_first_attempt() {
             }
         },
         |_| false,
+        None,
     )
     .await;
     assert_eq!(result.unwrap(), 42);
@@ -74,7 +76,8 @@ async fn retry_async_retries_on_transient_error() {
     let attempts_clone = attempts.clone();
     let result = retry_async::<u32, _, _, _, CamelError>(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = attempts_clone.clone();
             async move {
@@ -87,6 +90,7 @@ async fn retry_async_retries_on_transient_error() {
             }
         },
         |_| true, // all errors transient
+        None,
     )
     .await;
     assert_eq!(result.unwrap(), 99);
@@ -103,7 +107,8 @@ async fn retry_async_does_not_retry_permanent_error() {
     let attempts_clone = attempts.clone();
     let result = retry_async::<u32, _, _, _, CamelError>(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = attempts_clone.clone();
             async move {
@@ -112,6 +117,7 @@ async fn retry_async_does_not_retry_permanent_error() {
             }
         },
         |_| false, // no errors transient
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -130,7 +136,8 @@ async fn retry_async_exhausts_max_attempts() {
     let attempts_clone = attempts.clone();
     let result = retry_async::<u32, _, _, _, CamelError>(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = attempts_clone.clone();
             async move {
@@ -139,6 +146,7 @@ async fn retry_async_exhausts_max_attempts() {
             }
         },
         |_| true,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -169,7 +177,8 @@ async fn retry_async_does_not_retry_when_disabled() {
     let attempts_clone = attempts.clone();
     let result = retry_async::<u32, _, _, _, CamelError>(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = attempts_clone.clone();
             async move {
@@ -178,6 +187,7 @@ async fn retry_async_does_not_retry_when_disabled() {
             }
         },
         |_| true,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -237,7 +247,8 @@ async fn retry_async_works_with_custom_error_type() {
     let calls_clone = calls.clone();
     let result: Result<(), TestError> = retry_async(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = calls_clone.clone();
             async move {
@@ -246,6 +257,7 @@ async fn retry_async_works_with_custom_error_type() {
             }
         },
         |e: &TestError| e.0,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -266,7 +278,8 @@ async fn retry_async_custom_error_permanent_stops_immediately() {
     let calls_clone = calls.clone();
     let result: Result<(), TestError> = retry_async(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = calls_clone.clone();
             async move {
@@ -275,6 +288,7 @@ async fn retry_async_custom_error_permanent_stops_immediately() {
             }
         },
         |e: &TestError| e.0,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -336,7 +350,8 @@ async fn retry_async_stops_at_absolute_cap() {
     let attempts_clone = attempts.clone();
     let result = retry_async::<u32, _, _, _, CamelError>(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = attempts_clone.clone();
             async move {
@@ -345,6 +360,7 @@ async fn retry_async_stops_at_absolute_cap() {
             }
         },
         |_| true,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -366,7 +382,8 @@ async fn retry_async_absolute_default_none_allows_unlimited_retries_up_to_max_at
     let attempts_clone = attempts.clone();
     let result = retry_async::<u32, _, _, _, CamelError>(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = attempts_clone.clone();
             async move {
@@ -375,6 +392,7 @@ async fn retry_async_absolute_default_none_allows_unlimited_retries_up_to_max_at
             }
         },
         |_| true,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -442,7 +460,8 @@ async fn retry_async_with_is_retryable_camel_error_retries_on_io_error() {
     let calls_clone = calls.clone();
     let result = retry_async(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = calls_clone.clone();
             async move {
@@ -451,6 +470,7 @@ async fn retry_async_with_is_retryable_camel_error_retries_on_io_error() {
             }
         },
         is_retryable_camel_error,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -471,7 +491,8 @@ async fn retry_async_with_is_retryable_camel_error_stops_on_permanent_camel_erro
     let calls_clone = calls.clone();
     let result = retry_async(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = calls_clone.clone();
             async move {
@@ -480,6 +501,7 @@ async fn retry_async_with_is_retryable_camel_error_stops_on_permanent_camel_erro
             }
         },
         is_retryable_camel_error,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -504,7 +526,8 @@ async fn retry_async_cancelable_succeeds_without_cancellation() {
     let attempts_clone = attempts.clone();
     let result: Result<u32, CamelError> = retry_async_cancelable(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = attempts_clone.clone();
             async move {
@@ -518,6 +541,7 @@ async fn retry_async_cancelable_succeeds_without_cancellation() {
         },
         |_| true,
         &cancel,
+        None,
     )
     .await;
     assert_eq!(result.unwrap(), 99);
@@ -541,7 +565,8 @@ async fn retry_async_cancelable_exhausts_attempts_when_cancel_not_signaled() {
     let calls_clone = calls.clone();
     let result: Result<u32, CamelError> = retry_async_cancelable(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = calls_clone.clone();
             async move {
@@ -551,6 +576,7 @@ async fn retry_async_cancelable_exhausts_attempts_when_cancel_not_signaled() {
         },
         |_| true,
         &cancel,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -590,7 +616,8 @@ async fn retry_async_cancelable_returns_last_error_when_cancelled_during_sleep()
 
     let result: Result<u32, CamelError> = retry_async_cancelable(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = calls_clone.clone();
             let flag = op_ran.clone();
@@ -602,6 +629,7 @@ async fn retry_async_cancelable_returns_last_error_when_cancelled_during_sleep()
         },
         |_| true,
         &cancel,
+        None,
     )
     .await;
 
@@ -644,7 +672,8 @@ async fn retry_async_cancelable_honors_cancel_signalled_during_op_at_next_sleep(
 
     let result: Result<u32, CamelError> = retry_async_cancelable(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = calls_clone.clone();
             async move {
@@ -657,6 +686,7 @@ async fn retry_async_cancelable_honors_cancel_signalled_during_op_at_next_sleep(
         },
         |_| true,
         &cancel,
+        None,
     )
     .await;
 
@@ -690,7 +720,8 @@ async fn retry_async_cancelable_does_not_retry_permanent_error() {
     let calls_clone = calls.clone();
     let result: Result<u32, CamelError> = retry_async_cancelable(
         &policy,
-        None,
+        "t",
+        "op",
         || {
             let c = calls_clone.clone();
             async move {
@@ -700,6 +731,7 @@ async fn retry_async_cancelable_does_not_retry_permanent_error() {
         },
         |_| false, // no errors are retryable
         &cancel,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -774,9 +806,11 @@ async fn labeled_policy_emits_component_in_log_message() {
 
     let result = retry_async::<u32, _, _, _, CamelError>(
         &policy,
-        Some("ws-producer"),
+        "ws",
+        "connect",
         || async { Err(CamelError::Io("connection refused".to_string())) },
         |_| true,
+        None,
     )
     .await;
 
@@ -786,15 +820,19 @@ async fn labeled_policy_emits_component_in_log_message() {
         !captured.is_empty(),
         "expected at least one log event, got none"
     );
-    // The first (and only) retry should contain the component label
+    // The first (and only) retry should carry the scheme/operation identity
     let first = &captured[0];
     assert!(
-        first.contains("component=ws-producer"),
-        "expected 'component=ws-producer' in log event, got: {first}"
+        first.contains("scheme=ws"),
+        "expected 'scheme=ws' in log event, got: {first}"
     );
     assert!(
-        first.contains("ws-producer: transient error"),
-        "expected 'ws-producer: transient error' in log event, got: {first}"
+        first.contains("operation=connect"),
+        "expected 'operation=connect' in log event, got: {first}"
+    );
+    assert!(
+        first.contains("ws/connect: transient error"),
+        "expected 'ws/connect: transient error' in log event, got: {first}"
     );
 }
 
@@ -816,9 +854,11 @@ async fn labeled_policy_preserves_structured_fields() {
 
     let result = retry_async::<u32, _, _, _, CamelError>(
         &policy,
-        Some("sql-producer"),
+        "sql",
+        "producer",
         || async { Err(CamelError::Io("timeout".to_string())) },
         |_| true,
+        None,
     )
     .await;
 
@@ -832,8 +872,12 @@ async fn labeled_policy_preserves_structured_fields() {
         "expected 'attempt=0' field, got: {first}"
     );
     assert!(
-        first.contains("component=sql-producer"),
-        "expected 'component=sql-producer' field, got: {first}"
+        first.contains("scheme=sql"),
+        "expected 'scheme=sql' field, got: {first}"
+    );
+    assert!(
+        first.contains("operation=producer"),
+        "expected 'operation=producer' field, got: {first}"
     );
     assert!(
         first.contains("error=IO error: timeout"),
@@ -860,13 +904,15 @@ async fn unlabeled_policy_omits_component_field() {
         max_delay: Duration::from_millis(5),
         ..NetworkRetryPolicy::default()
     };
-    // Unlabeled path (label = None) — no component field emitted
-
+    // The old `component=` field is gone — identity now travels as
+    // scheme/operation fields.
     let result = retry_async::<u32, _, _, _, CamelError>(
         &policy,
-        None,
+        "t",
+        "op",
         || async { Err(CamelError::Io("connection refused".to_string())) },
         |_| true,
+        None,
     )
     .await;
 
@@ -882,4 +928,244 @@ async fn unlabeled_policy_omits_component_field() {
         first.contains("transient error — retrying"),
         "expected bare 'transient error — retrying' message, got: {first}"
     );
+}
+
+// ── Retry metrics accounting (one error per exhausted sequence) ──────
+
+/// Recording test double: captures `(scheme, operation)` retry-attempt
+/// calls and `(route_id, error_type)` error calls.
+struct RecordingMetrics {
+    attempts: Mutex<Vec<(String, String)>>,
+    errors: Mutex<Vec<(String, String)>>,
+}
+
+impl RecordingMetrics {
+    fn new() -> Self {
+        Self {
+            attempts: Mutex::new(Vec::new()),
+            errors: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl camel_api::MetricsCollector for RecordingMetrics {
+    fn record_exchange_duration(&self, _route_id: &str, _duration: std::time::Duration) {}
+    fn increment_errors(&self, route_id: &str, error_type: &str) {
+        self.errors
+            .lock()
+            .unwrap()
+            .push((route_id.to_string(), error_type.to_string()));
+    }
+    fn increment_exchanges(&self, _route_id: &str) {}
+    fn set_queue_depth(&self, _route_id: &str, _depth: usize) {}
+    fn record_circuit_breaker_change(&self, _route_id: &str, _from: &str, _to: &str) {}
+    fn increment_retry_attempt(&self, scheme: &str, operation: &str) {
+        self.attempts
+            .lock()
+            .unwrap()
+            .push((scheme.to_string(), operation.to_string()));
+    }
+}
+
+#[tokio::test]
+async fn attempts_counted_per_try() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let policy = NetworkRetryPolicy {
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(5),
+        ..NetworkRetryPolicy::default()
+    };
+    let metrics = RecordingMetrics::new();
+
+    let attempts = Arc::new(AtomicU32::new(0));
+    let attempts_clone = attempts.clone();
+    let result: Result<u32, CamelError> = retry_async(
+        &policy,
+        "t",
+        "op",
+        || {
+            let c = attempts_clone.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(CamelError::Io("transient".to_string()))
+                } else {
+                    Ok(1u32)
+                }
+            }
+        },
+        |_| true,
+        Some(&metrics),
+    )
+    .await;
+
+    assert_eq!(result.unwrap(), 1);
+    assert_eq!(
+        *metrics.attempts.lock().unwrap(),
+        vec![
+            ("t".to_string(), "op".to_string()),
+            ("t".to_string(), "op".to_string()),
+            ("t".to_string(), "op".to_string()),
+        ],
+        "every attempt (first included) must be recorded"
+    );
+    assert!(
+        metrics.errors.lock().unwrap().is_empty(),
+        "success after retries must record no errors"
+    );
+}
+
+#[tokio::test]
+async fn exhaustion_errors_once() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let policy = NetworkRetryPolicy {
+        max_attempts: 5,
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(5),
+        ..NetworkRetryPolicy::default()
+    };
+    let metrics = RecordingMetrics::new();
+
+    let attempts = Arc::new(AtomicU32::new(0));
+    let attempts_clone = attempts.clone();
+    let result: Result<u32, CamelError> = retry_async(
+        &policy,
+        "t",
+        "op",
+        || {
+            let c = attempts_clone.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err(CamelError::Io("always fails".to_string()))
+            }
+        },
+        |_| true,
+        Some(&metrics),
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(
+        metrics.attempts.lock().unwrap().len(),
+        5,
+        "all five attempts must be recorded"
+    );
+    assert_eq!(
+        *metrics.errors.lock().unwrap(),
+        vec![("op".to_string(), "e:t:op".to_string())],
+        "exhaustion must record exactly one error with operation label and e:scheme:operation type"
+    );
+}
+
+#[tokio::test]
+async fn non_retryable_errors_once_first_attempt() {
+    let policy = NetworkRetryPolicy {
+        max_attempts: 5,
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(5),
+        ..NetworkRetryPolicy::default()
+    };
+    let metrics = RecordingMetrics::new();
+
+    let result: Result<u32, CamelError> = retry_async(
+        &policy,
+        "t",
+        "op",
+        || async { Err(CamelError::Config("permanent".to_string())) },
+        |_| false,
+        Some(&metrics),
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(metrics.attempts.lock().unwrap().len(), 1);
+    assert_eq!(
+        *metrics.errors.lock().unwrap(),
+        vec![("op".to_string(), "e:t:op".to_string())],
+        "non-retryable first-fail must record exactly one error"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_mid_sequence_no_error() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    // Long delay so cancel fires during the inter-retry sleep.
+    let policy = NetworkRetryPolicy {
+        max_attempts: 5,
+        initial_delay: Duration::from_secs(60),
+        max_delay: Duration::from_secs(60),
+        multiplier: 1.0,
+        ..NetworkRetryPolicy::default()
+    };
+    let metrics = RecordingMetrics::new();
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    let calls = Arc::new(AtomicU32::new(0));
+    let calls_clone = calls.clone();
+    let op_ran = Arc::new(AtomicBool::new(false));
+    let op_ran_clone = op_ran.clone();
+    let cancel_clone = cancel.clone();
+
+    // Cancel after the first attempt signals it has run (op is pending in
+    // the 60s sleep when the token fires).
+    let cancel_task = tokio::spawn(async move {
+        while !op_ran_clone.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        cancel_clone.cancel();
+    });
+
+    let result: Result<u32, CamelError> = retry_async_cancelable(
+        &policy,
+        "t",
+        "op",
+        || {
+            let c = calls_clone.clone();
+            let flag = op_ran.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                flag.store(true, Ordering::SeqCst);
+                Err(CamelError::Io("transient".to_string()))
+            }
+        },
+        |_| true,
+        &cancel,
+        Some(&metrics),
+    )
+    .await;
+
+    cancel_task.await.ok();
+
+    assert!(result.is_err());
+    assert!(
+        metrics.errors.lock().unwrap().is_empty(),
+        "cancellation is a clean shutdown, not a failure"
+    );
+    assert_eq!(metrics.attempts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn none_metrics_is_fine() {
+    let policy = NetworkRetryPolicy {
+        max_attempts: 2,
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(5),
+        ..NetworkRetryPolicy::default()
+    };
+
+    let result: Result<u32, CamelError> = retry_async(
+        &policy,
+        "t",
+        "op",
+        || async { Err(CamelError::Io("always fails".to_string())) },
+        |_| true,
+        None,
+    )
+    .await;
+
+    assert!(result.is_err(), "error must be returned unchanged");
 }

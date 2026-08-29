@@ -199,7 +199,8 @@ impl Service<Exchange> for SqlProducer {
                     let retry_policy = &config.retry;
                     let pool = retry_async::<_, _, _, _, sqlx::Error>(
                         retry_policy,
-                        Some("sql-producer"),
+                        "sql",
+                        "producer-pool-init",
                         || {
                             async {
                                 PoolOptions::new()
@@ -212,6 +213,7 @@ impl Service<Exchange> for SqlProducer {
                             }
                         },
                         is_retryable_sqlx_error,
+                        Some(runtime.metrics().as_ref()),
                     )
                     .await
                     .map_err(|e| {
@@ -993,7 +995,9 @@ mod tests {
             config,
             Arc::new(OnceCell::new()),
             None,
-            test_rt(),
+            // Noop runtime: pool-init retries now record per-attempt
+            // telemetry by design, which the panic runtime would reject.
+            std::sync::Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             "sql-producer-test-route",
         );
         let exchange = Exchange::new(Message::default());

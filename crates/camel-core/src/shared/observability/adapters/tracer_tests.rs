@@ -13,6 +13,7 @@ use opentelemetry::baggage::BaggageExt;
 use opentelemetry::trace::{Span, SpanId, TraceId};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tower::Layer as _;
 use tower::ServiceExt;
 
 /// Local double whose `call` always fails with a processor error.
@@ -712,4 +713,366 @@ async fn tracing_processor_reusable_across_sequential_cycles() {
     .await
     .expect("second cycle timed out");
     assert!(outcome_b.is_ok());
+}
+
+// ── Circuit-open exclusion (dashboard-observability D2) ──────────────────
+
+/// Records every `MetricsCollector` observation as `method:route[:type]`.
+struct RecordingMetrics {
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingMetrics {
+    fn snapshot(&self) -> Vec<String> {
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn push(&self, method: &str, key: &str) {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(format!("{method}:{key}"));
+    }
+}
+
+impl MetricsCollector for RecordingMetrics {
+    fn record_exchange_duration(&self, route_id: &str, _duration: Duration) {
+        self.push("record_exchange_duration", route_id);
+    }
+    fn increment_errors(&self, route_id: &str, error_type: &str) {
+        self.push("increment_errors", &format!("{route_id}:{error_type}"));
+    }
+    fn increment_exchanges(&self, route_id: &str) {
+        self.push("increment_exchanges", route_id);
+    }
+    fn set_queue_depth(&self, _route_id: &str, _depth: usize) {}
+    fn record_circuit_breaker_change(&self, _route_id: &str, _from: &str, _to: &str) {}
+    fn increment_circuit_breaker_rejection(&self, route: &str) {
+        self.push("increment_circuit_breaker_rejection", route);
+    }
+}
+
+/// An open-breaker fast-fail observed through the tracer adapter counts as
+/// exactly one circuit-breaker rejection and never as `camel_errors_total`.
+///
+/// Production wiring for a no-error-handler route: the tracer wraps the
+/// breaker-wrapped pipeline. The trip exchange runs through an UNTRACED
+/// service (same layer → shared breaker state) so the only traced exchange
+/// is the fast-failed one; readiness-time rejections bypass the tracer's
+/// call path entirely, so the tracer must record neither errors nor
+/// exchanges for it — the breaker alone records the rejection.
+#[tokio::test]
+async fn rejection_counted_not_errored() {
+    let collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let config = camel_api::CircuitBreakerConfig::new()
+        .failure_threshold(1)
+        .open_duration(Duration::from_secs(60));
+    let layer = camel_processor::circuit_breaker::CircuitBreakerLayer::new(
+        config,
+        Arc::from("r"),
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+    );
+
+    // Trip the breaker (threshold 1) without the tracer in the path.
+    let failing = BoxProcessor::from_fn(|_ex: Exchange| {
+        Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
+    });
+    let mut tripper = layer.layer(failing);
+    let _ = tripper
+        .ready()
+        .await
+        .expect("closed breaker readies")
+        .call(Exchange::new(Message::new("trip")))
+        .await;
+
+    // Traced service over the SAME layer: state is shared, so the breaker
+    // is open and poll_ready fast-fails with CircuitOpen.
+    let failing = BoxProcessor::from_fn(|_ex: Exchange| {
+        Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
+    });
+    let mut traced = TracingProcessor::new(
+        BoxProcessor::new(layer.layer(failing)),
+        "r".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
+        SpanKindHint::Internal,
+    );
+    let outcome = traced.ready().await.err();
+    assert!(
+        matches!(outcome, Some(CamelError::CircuitOpen(_))),
+        "open breaker must fast-fail at readiness"
+    );
+
+    let calls = collector.snapshot();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_circuit_breaker_rejection"))
+            .count(),
+        1,
+        "exactly one rejection must be recorded, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_errors"))
+            .count(),
+        0,
+        "circuit-open rejection must not increment errors, got {calls:?}"
+    );
+}
+
+#[tokio::test]
+/// The tracer's circuit-open SKIP branch (tracer.rs: error_class !=
+/// CIRCUIT_OPEN gates increment_errors) pinned directly: a traced
+/// processor whose CALL returns CircuitOpen must count the exchange but
+/// not the error. Defense-in-depth today (breakers sit outside the
+/// traced pipeline and reject at readiness), load-bearing the day a
+/// breaker-as-step or error-handler rethrow routes CircuitOpen through
+/// a traced segment.
+async fn circuit_open_skip_branch_not_errored() {
+    let collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let rejecter = BoxProcessor::from_fn(|_ex: Exchange| {
+        Box::pin(async { Err(CamelError::CircuitOpen("cb-open".into())) })
+    });
+    let mut traced = TracingProcessor::new(
+        rejecter,
+        "r".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
+        SpanKindHint::Internal,
+    );
+    let outcome = traced
+        .ready()
+        .await
+        .expect("traced rejecter readies")
+        .call(Exchange::new(Message::new("x")))
+        .await;
+    assert!(
+        matches!(outcome, Err(CamelError::CircuitOpen(_))),
+        "call must surface CircuitOpen unchanged"
+    );
+    let calls = collector.snapshot();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_exchanges"))
+            .count(),
+        1,
+        "the exchange itself must be counted, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_errors"))
+            .count(),
+        0,
+        "circuit-open must skip increment_errors in the tracer, got {calls:?}"
+    );
+}
+
+// ── Tracer/metrics decoupling (dashboard-observability D3) ───────────────
+
+use crate::shared::observability::domain::MetricsLeversConfig;
+
+/// Spec metrics-configuration Req 1, "metrics on, tracer off": with the
+/// pipeline adapter running for metrics (prometheus on) but spans gated
+/// off by explicit `tracer.enabled = false`, one exchange records metric
+/// families and creates zero spans.
+#[tokio::test]
+async fn metrics_on_tracer_off() {
+    let spans = test_spans().await;
+    let collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut proc = TracingProcessor::new(
+        BoxProcessor::new(IdentityProcessor),
+        "m_on_t_off".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
+        SpanKindHint::Internal,
+    )
+    .with_spans_enabled(false);
+
+    let outcome = proc
+        .ready()
+        .await
+        .expect("service ready")
+        .call(Exchange::new(Message::default()))
+        .await;
+    outcome.expect("step call succeeds");
+
+    let all = finish(spans);
+    assert!(
+        all.is_empty(),
+        "tracer-off must create no spans, got {all:?}"
+    );
+    let calls = collector.snapshot();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_exchanges"))
+            .count(),
+        1,
+        "metric families must still flow, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("record_exchange_duration"))
+            .count(),
+        1,
+        "duration family must still flow, got {calls:?}"
+    );
+}
+
+/// Spec metrics-configuration Req 1, "metrics off, tracer on": with
+/// `metrics.enabled = false` and tracing on, spans are created, the
+/// failure still reaches `increment_errors` (non-disableable family), and
+/// `increment_exchanges` is suppressed.
+#[tokio::test]
+async fn metrics_off_tracer_on() {
+    let spans = test_spans().await;
+    let collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut proc = TracingProcessor::new(
+        BoxProcessor::new(ErrProcessor),
+        "m_off_t_on".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
+        SpanKindHint::Internal,
+    )
+    .with_metric_levers(MetricsLeversConfig {
+        enabled: false,
+        ..Default::default()
+    });
+
+    let outcome = proc
+        .ready()
+        .await
+        .expect("service ready")
+        .call(Exchange::new(Message::default()))
+        .await;
+    assert!(outcome.is_err(), "injected failure must surface");
+
+    let all = finish(spans);
+    assert!(
+        all.iter().any(|s| s.name == "m_off_t_on:step-0"),
+        "tracer-on must still create spans, got {all:?}"
+    );
+    let calls = collector.snapshot();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_errors"))
+            .count(),
+        1,
+        "error family is non-disableable, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_exchanges"))
+            .count(),
+        0,
+        "exchanges family must be suppressed by enabled=false, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("record_exchange_duration"))
+            .count(),
+        0,
+        "duration family must be suppressed by enabled=false, got {calls:?}"
+    );
+}
+
+/// Spec metrics-configuration Req 2, "duration family disabled": with
+/// `duration = false`, a success and a failure produce zero duration
+/// records, one error record, and exchanges per the (default-on) exchange
+/// lever.
+#[tokio::test]
+async fn duration_family_disabled_but_errors_survive() {
+    let collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let levers = MetricsLeversConfig {
+        duration: false,
+        ..Default::default()
+    };
+
+    let mut ok_proc = TracingProcessor::new(
+        BoxProcessor::new(IdentityProcessor),
+        "dur_off".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
+        SpanKindHint::Internal,
+    )
+    .with_metric_levers(levers.clone());
+    let outcome = ok_proc
+        .ready()
+        .await
+        .expect("service ready")
+        .call(Exchange::new(Message::default()))
+        .await;
+    outcome.expect("success call succeeds");
+
+    let mut err_proc = TracingProcessor::new(
+        BoxProcessor::new(ErrProcessor),
+        "dur_off".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
+        SpanKindHint::Internal,
+    )
+    .with_metric_levers(levers);
+    let outcome = err_proc
+        .ready()
+        .await
+        .expect("service ready")
+        .call(Exchange::new(Message::default()))
+        .await;
+    assert!(outcome.is_err(), "injected failure must surface");
+
+    let calls = collector.snapshot();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("record_exchange_duration"))
+            .count(),
+        0,
+        "duration lever off must suppress the duration family, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_errors"))
+            .count(),
+        1,
+        "errors are never lever-gated, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_exchanges"))
+            .count(),
+        2,
+        "one exchange per call (lever on), got {calls:?}"
+    );
 }

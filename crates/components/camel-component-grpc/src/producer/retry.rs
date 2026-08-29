@@ -67,12 +67,14 @@ where
 {
     let result = retry_async::<T, _, _, _, tonic::Status>(
         retry,
-        Some("grpc-producer"),
+        "grpc",
+        "rpc",
         || {
             let grpc = tonic::client::Grpc::new(channel.clone());
             rpc_call(grpc)
         },
         is_retryable_tonic_status,
+        None,
     )
     .await;
     match result {

@@ -7,6 +7,10 @@ use serde::{Deserialize, Deserializer};
 /// programmatically, or configure via `Camel.toml` as shown in the module documentation.
 #[derive(Clone, Debug, Default)]
 pub struct TracerConfig {
+    /// SPAN enablement (metrics-configuration Req 1: `tracer.enabled` gates
+    /// spans ONLY). Explicit values win over the "otel/prometheus imply
+    /// tracing" rule in `effective_tracer_config` (camel-config), in both
+    /// directions.
     pub enabled: bool,
 
     /// Whether `enabled` was explicitly present at the serde boundary.
@@ -18,9 +22,24 @@ pub struct TracerConfig {
     /// directions.
     pub tracing_enabled_explicit: bool,
 
+    /// PIPELINE enablement: whether routes are wrapped with the observability
+    /// adapters at all. Unlike `enabled`, this is not a TOML key — the
+    /// effective-config assembly (camel-config) raises it whenever an
+    /// exporter (otel/prometheus) or tracing itself is active, because the
+    /// pipeline carries the metric families incl. the non-disableable error
+    /// family (metrics-collection-wiring MODIFIED requirement). Programmatic
+    /// users leave it `false` and pipeline wrapping follows `enabled`.
+    pub pipeline_enabled: bool,
+
     pub detail_level: DetailLevel,
 
     pub outputs: TracerOutputs,
+
+    /// Metric-family levers (`[observability.metrics]`). Not a
+    /// `[observability.tracer]` key: the levers deserialize at their own
+    /// table and camel-config attaches them here during effective-config
+    /// assembly, so the tracer serde boundary below never reads them.
+    pub metrics_levers: MetricsLeversConfig,
 }
 
 /// Deserializes `TracerConfig` with serde-boundary detection for `enabled`:
@@ -49,8 +68,10 @@ impl<'de> Deserialize<'de> for TracerConfig {
         Ok(Self {
             enabled: raw.enabled.unwrap_or(false),
             tracing_enabled_explicit: raw.enabled.is_some(),
+            pipeline_enabled: false,
             detail_level: raw.detail_level,
             outputs: raw.outputs,
+            metrics_levers: MetricsLeversConfig::default(),
         })
     }
 }
@@ -115,6 +136,84 @@ pub enum OutputFormat {
     #[default]
     Json,
     Plain,
+}
+
+/// Metric-family levers for `[observability.metrics]` in Camel.toml
+/// (dashboard-observability D3).
+///
+/// `enabled` is the master switch for the non-error families; `exchange`,
+/// `duration`, and `components` are per-family opt-outs (a family flows
+/// only when `enabled && <family>`). No lever exists for the error family —
+/// `camel_errors_total` is structurally non-disableable
+/// (metrics-configuration Req 2).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetricsLeversConfig {
+    pub enabled: bool,
+    pub exchange: bool,
+    pub duration: bool,
+    pub components: bool,
+}
+
+impl MetricsLeversConfig {
+    /// Whether the exchanges counter family may flow.
+    pub fn exchanges_enabled(&self) -> bool {
+        self.enabled && self.exchange
+    }
+
+    /// Whether the duration histogram family may flow.
+    pub fn durations_enabled(&self) -> bool {
+        self.enabled && self.duration
+    }
+
+    /// Whether the uniform component-operations counter family may flow
+    /// (`camel_component_operations_total`; the error family is never
+    /// gated by any lever).
+    pub fn components_enabled(&self) -> bool {
+        self.enabled && self.components
+    }
+}
+
+impl Default for MetricsLeversConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            exchange: true,
+            duration: true,
+            components: false,
+        }
+    }
+}
+
+/// Deserializes `MetricsLeversConfig` via a `Raw` intermediate with
+/// `Option<bool>` fields so an absent table and an absent key both mean
+/// "default" (same serde-boundary technique as `TracerConfig`). Unknown
+/// keys are denied, consistent with the sibling observability tables.
+impl<'de> Deserialize<'de> for MetricsLeversConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            #[serde(default)]
+            enabled: Option<bool>,
+            #[serde(default)]
+            exchange: Option<bool>,
+            #[serde(default)]
+            duration: Option<bool>,
+            #[serde(default)]
+            components: Option<bool>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self {
+            enabled: raw.enabled.unwrap_or(true),
+            exchange: raw.exchange.unwrap_or(true),
+            duration: raw.duration.unwrap_or(true),
+            components: raw.components.unwrap_or(false),
+        })
+    }
 }
 
 fn default_detail_level() -> DetailLevel {

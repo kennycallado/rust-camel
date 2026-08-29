@@ -150,34 +150,6 @@ fn is_core_tag(t: &str) -> bool {
             .all(|s| s.chars().all(|c| c.is_ascii_digit()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::is_core_tag;
-
-    #[test]
-    fn accepts_three_component_numeric_tags() {
-        assert!(is_core_tag("v0.32.0"));
-        assert!(is_core_tag("v1.2.3"));
-        assert!(is_core_tag("v10.20.30"));
-    }
-
-    #[test]
-    fn rejects_two_component_and_one_component_tags() {
-        assert!(!is_core_tag("v0.32"));
-        assert!(!is_core_tag("v1"));
-        assert!(!is_core_tag("v0.320")); // typo alias of v0.32.0
-        assert!(!is_core_tag("v1.2.3.4")); // 4-component: count guard, not digits
-    }
-
-    #[test]
-    fn rejects_bridge_and_non_numeric_tags() {
-        assert!(!is_core_tag("xml-bridge-v1.0.0"));
-        assert!(!is_core_tag("vX.Y.Z"));
-        assert!(!is_core_tag("v1.2.3-rc.1"));
-        assert!(!is_core_tag(""));
-    }
-}
-
 fn git_log(range: &str) -> Result<String, String> {
     let format = format!("__REC__%H{FS}%s{FS}%b{RS}");
     let out = Command::new("git")
@@ -391,5 +363,33 @@ fn format_counts(commits: &[Commit]) -> String {
         "no user-visible changes".to_string()
     } else {
         parts.join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_core_tag;
+
+    #[test]
+    fn accepts_three_component_numeric_tags() {
+        assert!(is_core_tag("v0.32.0"));
+        assert!(is_core_tag("v1.2.3"));
+        assert!(is_core_tag("v10.20.30"));
+    }
+
+    #[test]
+    fn rejects_two_component_and_one_component_tags() {
+        assert!(!is_core_tag("v0.32"));
+        assert!(!is_core_tag("v1"));
+        assert!(!is_core_tag("v0.320")); // typo alias of v0.32.0
+        assert!(!is_core_tag("v1.2.3.4")); // 4-component: count guard, not digits
+    }
+
+    #[test]
+    fn rejects_bridge_and_non_numeric_tags() {
+        assert!(!is_core_tag("xml-bridge-v1.0.0"));
+        assert!(!is_core_tag("vX.Y.Z"));
+        assert!(!is_core_tag("v1.2.3-rc.1"));
+        assert!(!is_core_tag(""));
     }
 }

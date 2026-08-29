@@ -190,6 +190,7 @@ impl RuntimeCommandBus for RuntimeBus {
                     handler.reload().await?;
                     // rc-d3pj: record reload counter once per successful reload.
                     if let Some(metrics) = &self.metrics {
+                        // allow-open-label rc-ycts (scheme/host: TLS listener config values)
                         metrics.record_counter(
                             "tls_reloads_total",
                             1.0,
@@ -224,6 +225,7 @@ impl RuntimeCommandBus for RuntimeBus {
                 .await?;
             // rc-d3pj: record reload counter once per successful reload.
             if let Some(metrics) = &self.metrics {
+                // allow-open-label rc-xl5k (route label: user-defined route id)
                 metrics.record_counter(
                     "template_reloads_total",
                     1.0,

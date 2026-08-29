@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use tower::{Layer, Service};
 
+use camel_api::metrics::MetricsCollector;
 use camel_api::{BoxProcessor, CamelError, CircuitBreakerConfig, Exchange};
 
 // ── State ──────────────────────────────────────────────────────────────
@@ -33,15 +34,27 @@ enum CircuitState {
 pub struct CircuitBreakerLayer {
     config: CircuitBreakerConfig,
     state: Arc<Mutex<CircuitState>>,
+    route_id: Arc<str>,
+    metrics: Option<Arc<dyn MetricsCollector>>,
 }
 
 impl CircuitBreakerLayer {
-    pub fn new(config: CircuitBreakerConfig) -> Self {
+    /// `route_id` + `metrics` thread the rejection counter
+    /// (`camel_circuit_breaker_rejections_total{route}`) into the wrapped
+    /// service: every open-breaker fast-fail counts as a rejection, never
+    /// as an error (dashboard-observability D2).
+    pub fn new(
+        config: CircuitBreakerConfig,
+        route_id: Arc<str>,
+        metrics: Option<Arc<dyn MetricsCollector>>,
+    ) -> Self {
         Self {
             config,
             state: Arc::new(Mutex::new(CircuitState::Closed {
                 consecutive_failures: 0,
             })),
+            route_id,
+            metrics,
         }
     }
 }
@@ -54,6 +67,8 @@ impl<S> Layer<S> for CircuitBreakerLayer {
             inner,
             config: self.config.clone(),
             state: Arc::clone(&self.state),
+            route_id: Arc::clone(&self.route_id),
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -65,6 +80,8 @@ pub struct CircuitBreakerService<S> {
     inner: S,
     config: CircuitBreakerConfig,
     state: Arc<Mutex<CircuitState>>,
+    route_id: Arc<str>,
+    metrics: Option<Arc<dyn MetricsCollector>>,
 }
 
 impl<S: Clone> Clone for CircuitBreakerService<S> {
@@ -73,6 +90,17 @@ impl<S: Clone> Clone for CircuitBreakerService<S> {
             inner: self.inner.clone(),
             config: self.config.clone(),
             state: Arc::clone(&self.state),
+            route_id: Arc::clone(&self.route_id),
+            metrics: self.metrics.clone(),
+        }
+    }
+}
+
+impl<S> CircuitBreakerService<S> {
+    /// Count one open-breaker fast-fail as a circuit-breaker rejection.
+    fn record_rejection(&self) {
+        if let Some(ref metrics) = self.metrics {
+            metrics.increment_circuit_breaker_rejection(&self.route_id);
         }
     }
 }
@@ -118,6 +146,7 @@ where
                 } else if self.config.fallback.is_some() {
                     Poll::Ready(Ok(()))
                 } else {
+                    self.record_rejection();
                     Poll::Ready(Err(CamelError::CircuitOpen(
                         "circuit breaker is open".into(),
                     )))
@@ -131,6 +160,7 @@ where
                     // bypassing the single-probe gate. The caller retries
                     // when after_result resolves the probe state.
                     drop(state);
+                    self.record_rejection();
                     Poll::Ready(Err(CamelError::CircuitOpen(
                         "circuit breaker is half-open (probe in flight)".into(),
                     )))
@@ -166,6 +196,7 @@ where
                     if let Some(mut fallback) = self.config.fallback.clone() {
                         return Box::pin(async move { fallback.call(exchange).await });
                     }
+                    self.record_rejection();
                     return Box::pin(async {
                         Err(CamelError::CircuitOpen("circuit breaker is open".into()))
                     });
@@ -257,15 +288,33 @@ pub enum CircuitBreakerDecision {
 pub struct CircuitBreakerGate {
     config: CircuitBreakerConfig,
     state: Arc<Mutex<CircuitState>>,
+    route_id: Arc<str>,
+    metrics: Option<Arc<dyn MetricsCollector>>,
 }
 
 impl CircuitBreakerGate {
-    pub fn new(config: CircuitBreakerConfig) -> Self {
+    /// `route_id` + `metrics` mirror [`CircuitBreakerLayer::new`]: the
+    /// RouteChannelService breaker path counts its own fast-fail Reject
+    /// arms on `camel_circuit_breaker_rejections_total{route}`.
+    pub fn new(
+        config: CircuitBreakerConfig,
+        route_id: Arc<str>,
+        metrics: Option<Arc<dyn MetricsCollector>>,
+    ) -> Self {
         Self {
             config,
             state: Arc::new(Mutex::new(CircuitState::Closed {
                 consecutive_failures: 0,
             })),
+            route_id,
+            metrics,
+        }
+    }
+
+    /// Count one open-breaker fast-fail as a circuit-breaker rejection.
+    fn record_rejection(&self) {
+        if let Some(ref metrics) = self.metrics {
+            metrics.increment_circuit_breaker_rejection(&self.route_id);
         }
     }
 
@@ -283,6 +332,7 @@ impl CircuitBreakerGate {
                 } else if let Some(ref fallback) = self.config.fallback {
                     CircuitBreakerDecision::Fallback(fallback.clone())
                 } else {
+                    self.record_rejection();
                     CircuitBreakerDecision::Reject(CamelError::CircuitOpen(
                         "circuit breaker is open".into(),
                     ))
@@ -293,6 +343,7 @@ impl CircuitBreakerGate {
                     if let Some(ref fallback) = self.config.fallback {
                         CircuitBreakerDecision::Fallback(fallback.clone())
                     } else {
+                        self.record_rejection();
                         CircuitBreakerDecision::Reject(CamelError::CircuitOpen(
                             "circuit breaker is half-open (probe in flight)".into(),
                         ))
@@ -359,6 +410,10 @@ mod tests {
         Exchange::new(Message::new("test"))
     }
 
+    fn gate_with(config: CircuitBreakerConfig) -> CircuitBreakerGate {
+        CircuitBreakerGate::new(config, Arc::from("test"), None)
+    }
+
     fn ok_processor() -> BoxProcessor {
         BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }))
     }
@@ -398,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn test_stays_closed_on_success() {
         let config = CircuitBreakerConfig::new().failure_threshold(3);
-        let layer = CircuitBreakerLayer::new(config);
+        let layer = CircuitBreakerLayer::new(config, Arc::from("test"), None);
         let mut svc = layer.layer(ok_processor());
 
         for _ in 0..5 {
@@ -420,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn test_opens_after_failure_threshold() {
         let config = CircuitBreakerConfig::new().failure_threshold(3);
-        let layer = CircuitBreakerLayer::new(config);
+        let layer = CircuitBreakerLayer::new(config, Arc::from("test"), None);
         let mut svc = layer.layer(failing_processor());
 
         // Three consecutive failures should open the circuit.
@@ -445,7 +500,7 @@ mod tests {
         let config = CircuitBreakerConfig::new()
             .failure_threshold(2)
             .open_duration(Duration::from_millis(50));
-        let layer = CircuitBreakerLayer::new(config);
+        let layer = CircuitBreakerLayer::new(config, Arc::from("test"), None);
         // Use fail_n_times(2) so the first 2 calls fail (opening the circuit),
         // then the third (half-open probe) succeeds.
         let mut svc = layer.layer(fail_n_times(2));
@@ -478,7 +533,7 @@ mod tests {
         let config = CircuitBreakerConfig::new()
             .failure_threshold(2)
             .open_duration(Duration::from_millis(50));
-        let layer = CircuitBreakerLayer::new(config);
+        let layer = CircuitBreakerLayer::new(config, Arc::from("test"), None);
         let mut svc = layer.layer(failing_processor());
 
         // Trigger 2 failures to open the circuit.
@@ -505,7 +560,7 @@ mod tests {
     #[tokio::test]
     async fn test_intermittent_failures_dont_open() {
         let config = CircuitBreakerConfig::new().failure_threshold(3);
-        let layer = CircuitBreakerLayer::new(config);
+        let layer = CircuitBreakerLayer::new(config, Arc::from("test"), None);
 
         // Alternate: fail, fail, success, fail, fail, success
         // The counter should reset on success, so threshold of 3 is never reached.
@@ -545,7 +600,7 @@ mod tests {
             .failure_threshold(1)
             .open_duration(Duration::from_secs(60))
             .fallback(fallback);
-        let layer = CircuitBreakerLayer::new(config);
+        let layer = CircuitBreakerLayer::new(config, Arc::from("test"), None);
         let mut svc = layer.layer(failing_processor());
 
         let _ = svc.ready().await.unwrap().call(make_exchange()).await;
@@ -564,7 +619,7 @@ mod tests {
         let config = CircuitBreakerConfig::new()
             .failure_threshold(1)
             .open_duration(Duration::from_secs(60));
-        let layer = CircuitBreakerLayer::new(config);
+        let layer = CircuitBreakerLayer::new(config, Arc::from("test"), None);
         let mut svc = layer.layer(failing_processor());
 
         let _ = svc.ready().await.unwrap().call(make_exchange()).await;
@@ -576,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_cb_gate_before_call_closed_allows() {
-        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+        let gate = gate_with(CircuitBreakerConfig {
             failure_threshold: 3,
             open_duration: Duration::from_secs(60),
             success_threshold: 1,
@@ -587,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_cb_gate_records_failures_and_opens() {
-        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+        let gate = gate_with(CircuitBreakerConfig {
             failure_threshold: 2,
             open_duration: Duration::from_secs(60),
             success_threshold: 1,
@@ -607,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cb_gate_closes_on_success() {
-        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+        let gate = gate_with(CircuitBreakerConfig {
             failure_threshold: 1,
             open_duration: Duration::from_millis(1),
             success_threshold: 1,
@@ -633,7 +688,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cb_gate_half_open_failure_reopens() {
-        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+        let gate = gate_with(CircuitBreakerConfig {
             failure_threshold: 1,
             open_duration: Duration::from_millis(1),
             success_threshold: 1,
@@ -664,7 +719,7 @@ mod tests {
     #[test]
     fn test_cb_gate_open_with_fallback_returns_fallback() {
         let fallback = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
-        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+        let gate = gate_with(CircuitBreakerConfig {
             failure_threshold: 1,
             open_duration: Duration::from_secs(60),
             success_threshold: 1,
@@ -679,7 +734,7 @@ mod tests {
 
     #[test]
     fn test_cb_gate_handled_error_counts_as_success() {
-        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+        let gate = gate_with(CircuitBreakerConfig {
             failure_threshold: 1,
             open_duration: Duration::from_secs(60),
             success_threshold: 1,
@@ -705,7 +760,7 @@ mod tests {
             success_threshold: 1,
             fallback: None,
         };
-        let gate = CircuitBreakerGate::new(config);
+        let gate = gate_with(config);
         // Trip: one failure → Open
         gate.after_result(&Err::<Exchange, CamelError>(CamelError::CircuitOpen(
             "boom".into(),
@@ -731,7 +786,7 @@ mod tests {
         let config = CircuitBreakerConfig::new()
             .failure_threshold(1)
             .open_duration(Duration::from_millis(1));
-        let layer = CircuitBreakerLayer::new(config);
+        let layer = CircuitBreakerLayer::new(config, Arc::from("test"), None);
         let mut svc1 = layer.layer(failing_processor());
         let mut svc2 = svc1.clone();
 

@@ -113,21 +113,45 @@ impl SurrealDbConsumer {
 #[async_trait]
 impl Consumer for SurrealDbConsumer {
     async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
-        let client = self.resolve_client().await.map_err(CamelError::from)?;
-        let table = self.config.table.clone().ok_or_else(|| {
-            CamelError::Config("surrealdb live consumer requires table parameter".into())
-        })?;
-
-        crate::query::validate_identifier(&table).map_err(CamelError::from)?;
-
-        // Start the LIVE SELECT stream using the SDK's fluent API.
-        let mut stream = client
-            .select::<Vec<SurrealValue>>(table.as_str())
-            .live()
-            .await
-            .map_err(|e| {
-                CamelError::ProcessorError(format!("surrealdb LIVE SELECT failed: {e}"))
+        // The query operation is the live-query establishment (datasource
+        // resolution + LIVE SELECT bind) — the consumer's remaining
+        // principal op now that pipeline rejections carry the retained
+        // `b-prime:surrealdb:notification` label. Facade failures land on
+        // `e:surrealdb:query` (never equal to the b-prime label, so a
+        // pipeline rejection does NOT double-count here); the component
+        // series flows only with the lever on (dashboard-observability 4.2).
+        let component_metrics = self.runtime.component_metrics();
+        let established = async {
+            let client = self.resolve_client().await.map_err(CamelError::from)?;
+            let table = self.config.table.clone().ok_or_else(|| {
+                CamelError::Config("surrealdb live consumer requires table parameter".into())
             })?;
+
+            crate::query::validate_identifier(&table).map_err(CamelError::from)?;
+
+            // Start the LIVE SELECT stream using the SDK's fluent API.
+            let stream = client
+                .select::<Vec<SurrealValue>>(table.as_str())
+                .live()
+                .await
+                .map_err(|e| {
+                    CamelError::ProcessorError(format!("surrealdb LIVE SELECT failed: {e}"))
+                })?;
+
+            Ok((client, table, stream))
+        }
+        .await;
+
+        let (client, table, mut stream) = match established {
+            Ok(established) => {
+                component_metrics.observe("surrealdb", "query", false);
+                established
+            }
+            Err(e) => {
+                component_metrics.observe("surrealdb", "query", true);
+                return Err(e);
+            }
+        };
 
         // LIVE SELECT bind succeeded — signal readiness before entering the
         // background task so the runtime knows the route is fully started.

@@ -172,10 +172,13 @@ impl Endpoint for RedisEndpoint {
 
     fn create_producer(
         &self,
-        _rt: Arc<dyn RuntimeObservability>,
+        rt: Arc<dyn RuntimeObservability>,
         _ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
-        Ok(BoxProcessor::new(RedisProducer::new(self.config.clone())?))
+        Ok(BoxProcessor::new(RedisProducer::new(
+            self.config.clone(),
+            rt,
+        )?))
     }
 
     fn create_consumer(

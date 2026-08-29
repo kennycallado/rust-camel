@@ -76,6 +76,14 @@ pub trait ResequencePolicy: Send + Sync + 'static {
     /// Stable name for logging / diagnostics.
     fn name(&self) -> &'static str;
 
+    /// Number of exchanges currently held awaiting their release condition
+    /// (the awaiting-sequence buffer). Reported by the service as
+    /// `camel_queue_depth{queue="resequencer:<route>"}`. Default 0 for
+    /// stateless policies (passthrough).
+    fn buffered(&self) -> usize {
+        0
+    }
+
     /// Set the driver channel for timeout-triggered emissions.
     /// Default is a no-op. `BatchPolicy` overrides this to receive
     /// the channel that feeds the post-driver.
@@ -189,6 +197,15 @@ impl ResequencerService {
             let policy = Arc::clone(&policy);
             let actor_h = Arc::clone(&actor_handle);
             let actor_driver_tx = driver_tx; // move the original sender into the actor
+            // Queue-depth sampling: the actor loop is the resequencer's
+            // maintenance pass (there is no timer-driven sweep in the
+            // service). After each accept, publish the policy's
+            // awaiting-sequence buffer size under `resequencer:<route>`.
+            let queue_metrics = config.metrics.clone();
+            let queue_label = config
+                .route_id
+                .as_ref()
+                .map(|route| format!("resequencer:{route}"));
             let handle = tokio::spawn(async move {
                 while let Some(input) = input_rx.recv().await {
                     let ready = policy.accept(input).await;
@@ -198,6 +215,11 @@ impl ResequencerService {
                             // post-driver dropped → exit
                             return;
                         }
+                    }
+                    if let (Some(metrics), Some(label)) =
+                        (queue_metrics.as_ref(), queue_label.as_ref())
+                    {
+                        metrics.set_queue_depth(label, policy.buffered());
                     }
                 }
                 // input channel closed (EOF from shutdown) → exit naturally

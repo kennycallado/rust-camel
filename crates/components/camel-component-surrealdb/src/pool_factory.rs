@@ -99,13 +99,15 @@ impl PoolFactory for SurrealDbPoolFactory {
             let policy = NetworkRetryPolicy::default();
             let client: Surreal<SurrealAny> = retry_async::<_, _, _, _, SurrealDbError>(
                 &policy,
-                Some("surrealdb-pool"),
+                "surrealdb",
+                "connect",
                 || async {
                     connect(endpoint)
                         .await
                         .map_err(|source| SurrealDbError::Connection { source })
                 },
                 SurrealDbError::is_retryable,
+                None,
             )
             .await
             .map_err(|e| {
@@ -121,7 +123,8 @@ impl PoolFactory for SurrealDbPoolFactory {
             // and other permanent errors fail fast without burning attempts.
             retry_async::<_, _, _, _, surrealdb::Error>(
                 &policy,
-                Some("surrealdb-pool-setup"),
+                "surrealdb",
+                "setup",
                 || async {
                     client
                         .signin(Root {
@@ -134,6 +137,7 @@ impl PoolFactory for SurrealDbPoolFactory {
                     Ok(())
                 },
                 crate::error::is_transaction_conflict,
+                None,
             )
             .await
             .map_err(|e| {

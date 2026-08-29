@@ -1,6 +1,7 @@
 mod changelog;
 mod lint_component_deps;
 mod lint_context_citations;
+mod lint_metric_labels;
 mod lint_single_source;
 
 use std::path::{Path, PathBuf};
@@ -95,6 +96,13 @@ enum Commands {
     /// existence, anchor resolution, and (later) symbol validation against
     /// the workspace's own crate definitions. Exits non-zero on violations.
     LintContextCitations,
+    /// Enforce closed label sets on metric emission calls
+    /// (`record_counter`, `record_histogram`,
+    /// `record_component_operation`, `increment_retry_attempt`):
+    /// string-valued arguments must be literals, enum-derived, or
+    /// annotated `// allow-open-label <bd-ref>`. Exits non-zero on
+    /// violations.
+    LintMetricLabels,
     /// Scan component crate source for `UriOption::new` calls outside
     /// `#[cfg(test)]` modules. Enforces the single-source-of-truth
     /// invariant: metadata MUST be macro-derived, not hand-written.
@@ -272,6 +280,29 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-context-citations error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintMetricLabels => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_metric_labels::lint_metric_labels(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-metric-labels: OK (0 violations)");
+                }
+                Ok(violations) => {
+                    println!("METRIC-LABEL VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                        println!(
+                            "    remedy: use a literal/enum-derived value, or annotate `// allow-open-label <bd-ref>`"
+                        );
+                    }
+                    eprintln!("\nlint-metric-labels: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-metric-labels error: {e}");
                     std::process::exit(1);
                 }
             }

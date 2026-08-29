@@ -251,8 +251,12 @@ post-ack best-effort site uses `warn!` and reports a metric under ADR-0029.
 
 ## Metrics
 
-Metrics instrumentation is not yet wired for most processors. See TODO(PROC-004) in
-`camel-processor/src/log.rs` for the broader instrumentation gap.
+Metrics instrumentation is wired where ADR-0066 families demand it:
+circuit_breaker (rejections + state transitions), aggregator and resequencer
+(queue depth on their maintenance/sampling passes — the TTL sweep also runs
+metrics-only when bucket_ttl is unset). Remaining processors have no
+family obligation; broader instrumentation stays tracked as TODO(PROC-004)
+in `camel-processor/src/log.rs`.
 
 ## Aggregator EIP divergences from Apache Camel (ADR-0046 protocol)
 

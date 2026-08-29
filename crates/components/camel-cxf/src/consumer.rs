@@ -24,9 +24,10 @@ pub struct CxfConsumer {
     profile_name: String,
     cancel_token: Option<CancellationToken>,
     task_handle: Option<JoinHandle<Result<(), CamelError>>>,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
+    /// Observability handle: `metrics()` powers the retained
+    /// `b-prime:cxf:response-marshalling` increment and
+    /// `component_metrics()` the uniform `cxf:consume` emission
+    /// (dashboard-observability 4.2).
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
@@ -334,6 +335,19 @@ impl Consumer for CxfConsumer {
                                             }
                                         }
                                     };
+
+                                    // Uniform `cxf:consume` emission at the
+                                    // consumer entrypoint: `fault` is the
+                                    // honest failure signal — a pipeline
+                                    // rejection OR a marshalling failure
+                                    // (which also lands on the retained
+                                    // b-prime label; the two error labels
+                                    // differ, and whole-family dashboard
+                                    // sums count that failure twice —
+                                    // intended per design D5).
+                                    runtime
+                                        .component_metrics()
+                                        .observe("cxf", "consume", response.fault);
 
                                     if let Err(send_err) = response_tx.send(response).await {
                                         warn!("Failed to send CXF consumer response: {send_err}");

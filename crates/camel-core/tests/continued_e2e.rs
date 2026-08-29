@@ -199,12 +199,16 @@ async fn continued_e2e_route_channel_service_with_cb_gate() {
     );
 
     // CircuitBreakerGate — shared state via Arc
-    let cb_gate = CircuitBreakerGate::new(CircuitBreakerConfig {
-        failure_threshold: 1,
-        open_duration: Duration::from_secs(60),
-        success_threshold: 1,
-        fallback: None,
-    });
+    let cb_gate = CircuitBreakerGate::new(
+        CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 1,
+            fallback: None,
+        },
+        Arc::from("test"),
+        None,
+    );
 
     // Clone so we can inspect state after the call (shared Arc<Mutex<...>>)
     let cb_gate_clone = cb_gate.clone();

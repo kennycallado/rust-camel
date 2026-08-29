@@ -20,6 +20,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
         watch_debounce_ms: 300,
         components: ComponentsConfig::default(),
         observability: ObservabilityConfig {
+            metrics: Default::default(),
             tracer: TracerConfig {
                 enabled: true,
                 detail_level: DetailLevel::Minimal,

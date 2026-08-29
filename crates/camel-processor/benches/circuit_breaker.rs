@@ -47,7 +47,7 @@ fn bench_circuit_breaker_states(c: &mut Criterion) {
     group.bench_function("closed_passthrough", |b| {
         b.to_async(&rt).iter(|| {
             let config = new_config();
-            let layer = CircuitBreakerLayer::new(config);
+            let layer = CircuitBreakerLayer::new(config, Arc::from("bench"), None);
             let svc = layer.layer(pass_through());
             async move {
                 svc.oneshot(ex()).await.unwrap();
@@ -58,7 +58,7 @@ fn bench_circuit_breaker_states(c: &mut Criterion) {
     group.bench_function("closed_to_open_cycle", |b| {
         b.to_async(&rt).iter(|| {
             let config = new_config();
-            let layer = CircuitBreakerLayer::new(config.clone());
+            let layer = CircuitBreakerLayer::new(config.clone(), Arc::from("bench"), None);
             let svc = layer.layer(failing_service());
             async move {
                 for _ in 0..config.failure_threshold {
@@ -85,7 +85,7 @@ fn bench_circuit_breaker_states(c: &mut Criterion) {
                     }
                 })
             });
-            let layer = CircuitBreakerLayer::new(config.clone());
+            let layer = CircuitBreakerLayer::new(config.clone(), Arc::from("bench"), None);
             let svc = layer.layer(fail_then_recover);
             async move {
                 for _ in 0..threshold {
@@ -114,7 +114,7 @@ fn bench_circuit_breaker_states(c: &mut Criterion) {
                     }
                 })
             });
-            let layer = CircuitBreakerLayer::new(config.clone());
+            let layer = CircuitBreakerLayer::new(config.clone(), Arc::from("bench"), None);
             let svc = layer.layer(cycling_service);
             async move {
                 for _ in 0..3 {
