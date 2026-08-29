@@ -433,7 +433,13 @@ impl camel_api::RouteController for DefaultRouteController {
                         // rc-jxkj cohort gate: park dispatch until the startup
                         // cohort completes. Level-triggered — after the first
                         // open, later envelopes pass without parking.
+                        // rc-z5qz: `biased` with the gate polled FIRST —
+                        // with the cohort open and the pipeline token
+                        // cancelled, an unbiased select picks randomly and
+                        // may drop a deliverable envelope. Gate-open wins
+                        // deterministically; a closed gate still drops.
                         tokio::select! {
+                            biased;
                             _ = cohort_rx.wait_for(|open| *open) => {}
                             _ = pipeline_cancel.cancelled() => {
                                 // Drop the envelope; reply_tx (if any)
@@ -520,7 +526,13 @@ impl camel_api::RouteController for DefaultRouteController {
                         // rc-jxkj cohort gate: park dispatch until the startup
                         // cohort completes. Level-triggered — after the first
                         // open, later envelopes pass without parking.
+                        // rc-z5qz: `biased` with the gate polled FIRST —
+                        // with the cohort open and the pipeline token
+                        // cancelled, an unbiased select picks randomly and
+                        // may drop a deliverable envelope. Gate-open wins
+                        // deterministically; a closed gate still drops.
                         tokio::select! {
+                            biased;
                             _ = cohort_rx.wait_for(|open| *open) => {}
                             _ = pipeline_cancel.cancelled() => {
                                 // Drop the envelope; reply_tx (if any)

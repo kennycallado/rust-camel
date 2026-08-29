@@ -1100,7 +1100,18 @@ impl DefaultRouteController {
                                 // rc-jxkj cohort gate: park dispatch until
                                 // the startup cohort completes (same guard
                                 // as the non-aggregate drain loops).
+                                // rc-z5qz: `biased` with the gate polled
+                                // FIRST — with the cohort open AND the
+                                // pipeline token cancelled, both branches
+                                // are ready and an unbiased select picks
+                                // randomly, letting the cancel arm drop a
+                                // deliverable envelope (force_complete_all
+                                // then sees no buckets). Gate-open must win
+                                // deterministically; a genuinely closed
+                                // gate still drops on cancel (rc-jxkj
+                                // semantics preserved).
                                 tokio::select! {
+                                    biased;
                                     _ = cohort_rx.wait_for(|open| *open) => {}
                                     _ = pipeline_cancel.cancelled() => {
                                         // Drop the envelope; reply_tx (if

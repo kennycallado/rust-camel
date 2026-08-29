@@ -1810,6 +1810,94 @@ async fn aggregate_force_completion_on_natural_consumer_completion_emits_pending
     );
 }
 
+/// rc-z5qz regression: an OPEN cohort gate must win over a concurrently
+/// cancelled pipeline token in the forward loop's inner gate select.
+/// Unbiased, tokio picks randomly among ready branches and the cancel arm
+/// drops a deliverable envelope; force_complete_all then finds no buckets
+/// and the pending exchange is lost.
+///
+/// Determinism: the timer (`delay=0`) fires tick #1 immediately, then parks
+/// on the 60 s tick toward repeatCount=2 — the consumer-exit monitor never
+/// fires, so the only cancel source is this test. After tick #1 the forward
+/// loop parks on the CLOSED gate inside the inner select. The
+/// current-thread test runtime runs no other task between the two sync
+/// toggles below, so the parked loop resumes with BOTH branches ready —
+/// exactly the both-ready interleaving that used to coin-flip. An unbiased
+/// select survives one iteration with p=0.5, so 24 fresh route/controller
+/// iterations all pass only with p=0.5^24 (≈6e-8): an unbiased select
+/// cannot pass this test.
+#[tokio::test]
+async fn aggregate_open_gate_beats_concurrent_cancel_delivers_pending_bucket() {
+    const ITERATIONS: usize = 24;
+    for i in 0..ITERATIONS {
+        let mock = Arc::new(camel_component_mock::MockComponent::new());
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        {
+            let mut guard = registry.lock().expect("registry lock");
+            guard.register(Arc::new(camel_component_timer::TimerComponent::new()));
+            guard.register(Arc::clone(&mock) as Arc<dyn camel_component_api::Component>);
+        }
+        let mut controller = DefaultRouteController::new(
+            registry,
+            Arc::new(camel_api::NoopPlatformService::default()),
+        );
+
+        let agg_config = camel_api::AggregatorConfig::correlate_by("key")
+            .complete_when_size(10)
+            .force_completion_on_stop(true)
+            .build()
+            .unwrap();
+
+        let key_val = format!("order-{i}");
+        let route = RouteDefinition::new(
+            "timer:gate-race?period=60000&delay=0&repeatCount=2",
+            vec![
+                BuilderStep::DeclarativeSetHeader {
+                    key: "key".into(),
+                    value: camel_api::ValueSourceDef::Literal(camel_api::Value::String(
+                        key_val.clone(),
+                    )),
+                },
+                BuilderStep::Aggregate { config: agg_config },
+                BuilderStep::To("mock:gate-race-sink".into()),
+            ],
+        )
+        .with_route_id("gate-race-agg");
+        controller.add_route(route).await.unwrap();
+        controller.start_route("gate-race-agg").await.unwrap();
+
+        // Let tick #1 land: the forward loop dequeues the envelope and
+        // parks on the closed cohort gate inside the inner select.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Both-ready interleaving, back-to-back with no await between:
+        // gate branch ready, cancel branch ready.
+        controller.cohort.open();
+        controller
+            .routes
+            .get("gate-race-agg")
+            .expect("route must exist after start")
+            .pipeline_cancel_token
+            .cancel();
+
+        let sink = mock
+            .get_endpoint("gate-race-sink")
+            .expect("mock sink endpoint");
+        sink.await_exchanges(1, Duration::from_secs(2)).await;
+        let received = sink.get_received_exchanges().await;
+        assert_eq!(
+            received.len(),
+            1,
+            "iteration {i}: open gate must deliver the pending bucket, got {}",
+            received.len()
+        );
+        assert_eq!(
+            received[0].property("CamelAggregatedCompletionReason"),
+            Some(&serde_json::json!("stop"))
+        );
+    }
+}
+
 // ── Hot-swap rejection tests (Task 4) ──
 
 #[derive(Debug)]
