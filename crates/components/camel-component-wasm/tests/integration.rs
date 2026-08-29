@@ -1,6 +1,11 @@
-use camel_component_api::test_support::PanicRuntimeObservability;
-fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
-    std::sync::Arc::new(PanicRuntimeObservability)
+use camel_component_api::test_support::NoopRuntimeObservability;
+// Noop (not Panic) double for producer-call tests: since
+// dashboard-observability 4.2 the producer legitimately calls
+// `component_metrics()` on every call — the "never touches
+// observability" panic contract no longer holds there (same swap as the
+// producer unit tests).
+fn producer_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(NoopRuntimeObservability)
 }
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -119,7 +124,7 @@ async fn wasm_producer_constructor_creates_instance() {
         PathBuf::from("missing-module.wasm"),
         make_registry(),
         WasmConfig::default(),
-        test_rt(),
+        producer_rt(),
     );
     let exchange = Exchange::new(Message::new("hello"));
     let result = producer.clone().oneshot(exchange).await;
@@ -131,7 +136,12 @@ async fn wasm_producer_returns_component_not_found_for_invalid_module_file() {
     let base = tempdir().unwrap();
     let invalid = base.path().join("invalid.wasm");
     std::fs::write(&invalid, b"this-is-not-a-wasm-component").unwrap();
-    let producer = WasmProducer::new(invalid, make_registry(), WasmConfig::default(), test_rt());
+    let producer = WasmProducer::new(
+        invalid,
+        make_registry(),
+        WasmConfig::default(),
+        producer_rt(),
+    );
     let exchange = Exchange::new(Message::new("hello"));
     let result = producer.clone().oneshot(exchange).await;
     assert!(

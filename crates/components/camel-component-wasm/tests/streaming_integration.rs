@@ -456,12 +456,14 @@ async fn streaming_no_progress_watchdog_does_not_false_trip() {
 
 #[tokio::test]
 async fn plugin_return_path_streams_body() {
-    use camel_component_api::test_support::PanicRuntimeObservability;
+    // Noop (not Panic) double: the producer legitimately calls
+    // `component_metrics()` on every call since dashboard-observability 4.2.
+    use camel_component_api::test_support::NoopRuntimeObservability;
     use camel_component_wasm::producer::WasmProducer;
     use tower::Service;
 
     let observability: Arc<dyn camel_component_api::RuntimeObservability> =
-        Arc::new(PanicRuntimeObservability);
+        Arc::new(NoopRuntimeObservability);
     let mut producer = WasmProducer::new(
         streaming_plugin_path(),
         Arc::new(camel_component_api::NoOpComponentContext),
