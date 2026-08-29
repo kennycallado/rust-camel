@@ -605,6 +605,11 @@ pub async fn run(
 
     tracing::info!("camel-cli: context started");
 
+    // jemalloc memory gauges: publish allocator stats every 5s through the
+    // context's late-bound metrics handle (OpenSpec memory-gauges task 2.2).
+    #[cfg(feature = "jemalloc")]
+    crate::allocator_metrics::spawn_allocator_sampler(ctx.metrics());
+
     // 7. Resolve whether to enable the file watcher:
     //    CLI flag takes precedence; falls back to Camel.toml `watch` field (default: false).
     let watch_enabled = cli_watch.unwrap_or(camel_config.watch);

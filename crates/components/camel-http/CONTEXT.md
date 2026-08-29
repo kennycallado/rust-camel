@@ -49,7 +49,12 @@ stays consumed. No configuration override exists (Apache Camel
 The pinned-client cache is shared across all endpoints of one component
 instance. It retains at most `PINNED_CLIENT_MAX_ENTRIES` (64) clients, each
 live for a `PINNED_CLIENT_TTL` (60 s) window. Each cached client serves one
-`(host, address set)` pair. It holds up to `pool_max_idle_per_host`
+`(host, address set)` pair. Every `get_or_build` lookup emits
+`camel_pinned_client_cache_hits_total`/`_misses_total` (one miss per client
+construction; single-flight waiters count as hits) and
+`camel_pinned_client_cache_size` through the late-bound handle wired once at
+endpoint creation (ADR-0066) — the leak-regression signal rc-u4qz. It holds up
+to `pool_max_idle_per_host`
 (default 100) idle connections for that host until `pool_idle_timeout_ms`
 (default 90 s) closes them. Worst case is 64 clients times 100 idle
 connections per component instance. The shared unpinned client also holds up

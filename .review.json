@@ -1,21 +1,6 @@
 {
-  "change": "camel-config-env-override-hygiene",
   "verdict": "APPROVE-WITH-FINDINGS",
+  "resolved": "1 minor (CONTEXT.md camel-cli+camel-http) fixed in 0547e52d186f0539298208b548fbb2340a81393b",
   "reviewer": "r_glm",
-  "impl_hash": "sha256:3ec309ef6cb424b3c0b35b9040f1006d40979104b3d33bd3bad9dd029337e758",
-  "findings": [
-    {
-      "severity": "minor",
-      "issue": "bd rc-nucw (and rc-xq3t, rc-fd4f) still in_progress at review time",
-      "resolution": "by-design: conductor closes bd after archive succeeds (STAGE 4 step 8); reviewer's 'rc-fd4f closed' reading was a dependency status"
-    },
-    {
-      "severity": "minor",
-      "issue": "task 2.1 acceptance numbers not recorded in tasks.md",
-      "resolution": "numbers recorded in bd close reasons: parity 269/269 (162 #[test] fns in config.rs == 162 across 21 files), config.rs 6795->3193 lines"
-    }
-  ],
-  "code_spec_doc_issues": 0,
-  "gates": "18/18 green (lint-commits skipped by conductor rule: remote op, CI owns)",
-  "date": "2026-08-29"
+  "impl_hash": "0547e52d186f0539298208b548fbb2340a81393b"
 }

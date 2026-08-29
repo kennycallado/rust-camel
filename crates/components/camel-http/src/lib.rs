@@ -13,7 +13,9 @@ pub(crate) mod tls_reload;
 use crate::config::parse_ok_status_code_range;
 pub use bundle::HttpBundle;
 pub use bundle::HttpStaticBundle;
-pub(crate) use client_cache::{PINNED_CLIENT_MAX_ENTRIES, PINNED_CLIENT_TTL, PinnedClientCache};
+pub(crate) use client_cache::{
+    HttpComponentKind, PINNED_CLIENT_MAX_ENTRIES, PINNED_CLIENT_TTL, PinnedClientCache,
+};
 pub use config::HttpConfig;
 pub use health::HttpHealthCheck;
 pub use registry::HttpRouteRegistry;
@@ -1931,6 +1933,8 @@ impl Component for HttpComponent {
             server_config.host.clone(),
             server_config.port,
         )));
+        self.pinned_cache
+            .wire(HttpComponentKind::Http, ctx.metrics());
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,
@@ -2012,6 +2016,8 @@ impl Component for HttpsComponent {
             server_config.host.clone(),
             server_config.port,
         )));
+        self.pinned_cache
+            .wire(HttpComponentKind::Https, ctx.metrics());
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,

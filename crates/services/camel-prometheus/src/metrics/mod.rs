@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use camel_api::metrics::MetricsCollector;
+use camel_api::metrics::{AllocatorStat, MetricsCollector};
 use prometheus::{CounterVec, HistogramVec, Opts, Registry};
 
 mod families;
@@ -169,6 +169,34 @@ impl MetricsCollector for PrometheusMetrics {
             .queue_depth
             .with_label_values(&[queue])
             .set(depth as f64);
+    }
+
+    fn set_pinned_client_cache_size(&self, component: &str, entries: u64) {
+        self.families
+            .pinned_client_cache_size
+            .with_label_values(&[component])
+            .set(entries as f64);
+    }
+
+    fn increment_pinned_client_cache_hit(&self, component: &str) {
+        self.families
+            .pinned_client_cache_hits_total
+            .with_label_values(&[component])
+            .inc();
+    }
+
+    fn increment_pinned_client_cache_miss(&self, component: &str) {
+        self.families
+            .pinned_client_cache_misses_total
+            .with_label_values(&[component])
+            .inc();
+    }
+
+    fn set_allocator_memory(&self, stat: AllocatorStat, bytes: u64) {
+        self.families
+            .allocator_memory_bytes
+            .with_label_values(&[stat.as_str()])
+            .set(bytes as f64);
     }
 
     fn record_circuit_breaker_change(&self, route_id: &str, _from: &str, to: &str) {

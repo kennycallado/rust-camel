@@ -95,6 +95,8 @@ camel-component-exec = { workspace = true, optional = true }
 # the release verify gate can dump allocator config via MALLOC_CONF=
 # stats_print:true; negligible cost, and rc-vnm8 soak observability wants it.
 tikv-jemallocator = { version = "0.7", optional = true, default-features = false, features = ["stats"] }
+# must stay in lockstep with tikv-jemallocator 0.7
+tikv-jemalloc-ctl = { version = "0.7", optional = true, default-features = false, features = ["use_std", "stats"] }
 mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
@@ -137,7 +139,7 @@ surrealdb = ["dep:camel-component-surrealdb"]
 exec = ["dep:camel-component-exec"]
 # Global allocator overrides for the `camel` release binary. Additive and
 # independent; if both are enabled, jemalloc wins. Soak/migration plan: bd rc-vnm8.
-jemalloc = ["dep:tikv-jemallocator"]
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 mimalloc = ["dep:mimalloc"]
 
 [lints]

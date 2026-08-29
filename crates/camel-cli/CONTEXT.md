@@ -28,7 +28,13 @@ current-HEAD positions and are secondary to the symbol.
 
 ## Metrics
 
-Metrics instrumentation for CLI commands is not yet wired; processor-crate instrumentation is tracked separately.
+Metrics instrumentation for CLI commands is limited to the jemalloc memory
+sampler (`allocator_metrics.rs`): with the `jemalloc` feature, `camel run`
+samples allocated/resident/active/mapped every 5 s and emits
+`camel_allocator_memory_bytes{stat}` through the context's late-bound handle
+(ADR-0066); read failures warn and retry, init failure disables the sampler.
+`tikv-jemalloc-ctl` must stay in lockstep with `tikv-jemallocator`. Processor-crate
+instrumentation is tracked separately.
 
 ## camel test failure modes
 

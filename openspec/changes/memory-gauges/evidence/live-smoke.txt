@@ -1,0 +1,267 @@
+Live smoke verification — OpenSpec change `memory-gauges`
+=========================================================
+Date (UTC, run window): 2026-08-29T11:28:42Z .. 2026-08-29T11:29:08Z (26s run)
+Worktree: /home/kenny/dev/rust-camel/.worktrees/memory-gauges (HEAD 011f76b5, commits ffec3cb8..8faaeb6d landed)
+Status: PASS — all four families appeared and moved in a real `camel run` process.
+
+Build
+-----
+    cargo build -p camel-cli --features jemalloc
+    # Finished `dev` profile target(s) in 14.94s (worktree target/, sccache-warm)
+    # jemalloc feature swaps the global allocator in camel-cli main.rs and
+    # enables the 5s allocator sampler in the `run` command.
+
+Run
+---
+Work dir: /tmp/nix-shell.37wouP/mb-smoke (outside the repo; nothing in the repo modified)
+
+Camel.toml (ports 18119 metrics / 18111 http-target / 18112 https-target —
+ephemeral uncommon range; 18111+18112 are intentionally CLOSED ports, see notes):
+
+    [default]
+    routes = ["routes/*.yaml"]
+    log_level = "INFO"
+
+    [default.observability.prometheus]
+    enabled = true
+    host = "127.0.0.1"
+    port = 18119
+
+routes/pinned-poll.yaml (domain host + allowInternal=true so the SSRF-guarded
+producer resolves DNS and takes the PinnedClientCache path; IP-literal URLs
+would bypass it, and without allowInternal=true SSRF validation rejects
+`localhost` before the pinned path runs):
+
+    routes:
+      - id: "pinned-poll-http"
+        from: "timer:poll-http?period=500&repeatCount=50"
+        steps:
+          - to: "http://localhost:18111/?allowInternal=true"
+      - id: "pinned-poll-https"
+        from: "timer:poll-https?period=700&repeatCount=30"
+        steps:
+          - to: "https://localhost:18112/?allowInternal=true"
+
+Command:
+
+    timeout --signal=TERM 26 \
+      <worktree>/target/debug/camel run --config Camel.toml --no-watch > run.log 2>&1 &
+
+Log confirms exporter + clean shutdown:
+
+    INFO camel_prometheus::server: Prometheus metrics server listening on 127.0.0.1:18119
+    INFO camel_core::lifecycle::application::context_lifecycle: Stopping service: prometheus
+    INFO camel_core::lifecycle::application::context_lifecycle: CamelContext stopped
+    # timeout exit 124 at 26s; process gone afterwards (verified with pgrep)
+
+Scrape method
+-------------
+python3 urllib poller (context-mode sandbox blocks curl in shell), 9 snapshots,
+one every 3s, GET http://127.0.0.1:18119/metrics — 9/9 returned 200. Raw lines
+for the four families (incl. HELP/TYPE) below, verbatim per snapshot.
+
+Observed behavior (all four families moved)
+-------------------------------------------
+- camel_pinned_client_cache_misses_total: 1 per component from the first
+  snapshot (first request per (host, addrs) builds the pinned client).
+- camel_pinned_client_cache_hits_total: absent in snapshot 0 (prometheus
+  counters register lazily on first increment), then 24/17 (http/https) at
+  snapshot 4 and 48/29 at snapshot 8 — hits accrue per re-use within the 60s TTL.
+- camel_pinned_client_cache_size: 0 in snapshot 0 (gauge set after the cache's
+  pending-tasks run), 1/1 from snapshot 1 onward (one entry per component).
+- camel_allocator_memory_bytes: all four stats republished every 5s sampler
+  tick; allocated moved 2350840 -> 3338224 -> 2776496 across the run.
+
+Notes
+-----
+- No live TLS server was needed: the pinned-cache families are emitted on the
+  DNS-pin path (ssrf::resolve_initial_url_for_ssrf -> PinnedClientCache::
+  get_or_build) during resolution/client-selection, BEFORE the connection is
+  attempted — connection-refused on the closed target ports does not affect
+  the counters. Both component labels (camel-http, camel-https) are live here,
+  so no fallback to unit-test-only evidence was required. Unit provenance:
+  crates/components/camel-http/src/client_cache.rs #[cfg(test)] tests.
+- Config gotcha discovered while wiring: when Camel.toml contains a [default]
+  profile table, apply_profile keeps ONLY [default] — a top-level
+  [observability.prometheus] table is silently dropped (camel-config
+  config.rs apply_profile). The exporter must be nested under the profile
+  ([default.observability.prometheus]).
+
+Full scrape record (9 snapshots, verbatim)
+------------------------------------------
+### snapshot 0 2026-08-29T11:28:42Z GET http://127.0.0.1:18119/metrics -> 200, 14 family lines
+# HELP camel_allocator_memory_bytes Allocator memory statistics in bytes
+# TYPE camel_allocator_memory_bytes gauge
+camel_allocator_memory_bytes{stat="active"} 2805760
+camel_allocator_memory_bytes{stat="allocated"} 2350840
+camel_allocator_memory_bytes{stat="mapped"} 36667392
+camel_allocator_memory_bytes{stat="resident"} 8695808
+# HELP camel_pinned_client_cache_misses_total Total pinned client cache misses (client builds)
+# TYPE camel_pinned_client_cache_misses_total counter
+camel_pinned_client_cache_misses_total{component="camel-http"} 1
+camel_pinned_client_cache_misses_total{component="camel-https"} 1
+# HELP camel_pinned_client_cache_size Pinned client cache size in entries
+# TYPE camel_pinned_client_cache_size gauge
+camel_pinned_client_cache_size{component="camel-http"} 0
+camel_pinned_client_cache_size{component="camel-https"} 0
+
+### snapshot 1 2026-08-29T11:28:45Z GET http://127.0.0.1:18119/metrics -> 200, 18 family lines
+# HELP camel_allocator_memory_bytes Allocator memory statistics in bytes
+# TYPE camel_allocator_memory_bytes gauge
+camel_allocator_memory_bytes{stat="active"} 2805760
+camel_allocator_memory_bytes{stat="allocated"} 2350840
+camel_allocator_memory_bytes{stat="mapped"} 36667392
+camel_allocator_memory_bytes{stat="resident"} 8695808
+# HELP camel_pinned_client_cache_hits_total Total pinned client cache hits
+# TYPE camel_pinned_client_cache_hits_total counter
+camel_pinned_client_cache_hits_total{component="camel-http"} 6
+camel_pinned_client_cache_hits_total{component="camel-https"} 4
+# HELP camel_pinned_client_cache_misses_total Total pinned client cache misses (client builds)
+# TYPE camel_pinned_client_cache_misses_total counter
+camel_pinned_client_cache_misses_total{component="camel-http"} 1
+camel_pinned_client_cache_misses_total{component="camel-https"} 1
+# HELP camel_pinned_client_cache_size Pinned client cache size in entries
+# TYPE camel_pinned_client_cache_size gauge
+camel_pinned_client_cache_size{component="camel-http"} 1
+camel_pinned_client_cache_size{component="camel-https"} 1
+
+### snapshot 2 2026-08-29T11:28:48Z GET http://127.0.0.1:18119/metrics -> 200, 18 family lines
+# HELP camel_allocator_memory_bytes Allocator memory statistics in bytes
+# TYPE camel_allocator_memory_bytes gauge
+camel_allocator_memory_bytes{stat="active"} 4546560
+camel_allocator_memory_bytes{stat="allocated"} 3586608
+camel_allocator_memory_bytes{stat="mapped"} 42573824
+camel_allocator_memory_bytes{stat="resident"} 10608640
+# HELP camel_pinned_client_cache_hits_total Total pinned client cache hits
+# TYPE camel_pinned_client_cache_hits_total counter
+camel_pinned_client_cache_hits_total{component="camel-http"} 12
+camel_pinned_client_cache_hits_total{component="camel-https"} 8
+# HELP camel_pinned_client_cache_misses_total Total pinned client cache misses (client builds)
+# TYPE camel_pinned_client_cache_misses_total counter
+camel_pinned_client_cache_misses_total{component="camel-http"} 1
+camel_pinned_client_cache_misses_total{component="camel-https"} 1
+# HELP camel_pinned_client_cache_size Pinned client cache size in entries
+# TYPE camel_pinned_client_cache_size gauge
+camel_pinned_client_cache_size{component="camel-http"} 1
+camel_pinned_client_cache_size{component="camel-https"} 1
+
+### snapshot 3 2026-08-29T11:28:51Z GET http://127.0.0.1:18119/metrics -> 200, 18 family lines
+# HELP camel_allocator_memory_bytes Allocator memory statistics in bytes
+# TYPE camel_allocator_memory_bytes gauge
+camel_allocator_memory_bytes{stat="active"} 4546560
+camel_allocator_memory_bytes{stat="allocated"} 3586608
+camel_allocator_memory_bytes{stat="mapped"} 42573824
+camel_allocator_memory_bytes{stat="resident"} 10608640
+# HELP camel_pinned_client_cache_hits_total Total pinned client cache hits
+# TYPE camel_pinned_client_cache_hits_total counter
+camel_pinned_client_cache_hits_total{component="camel-http"} 18
+camel_pinned_client_cache_hits_total{component="camel-https"} 12
+# HELP camel_pinned_client_cache_misses_total Total pinned client cache misses (client builds)
+# TYPE camel_pinned_client_cache_misses_total counter
+camel_pinned_client_cache_misses_total{component="camel-http"} 1
+camel_pinned_client_cache_misses_total{component="camel-https"} 1
+# HELP camel_pinned_client_cache_size Pinned client cache size in entries
+# TYPE camel_pinned_client_cache_size gauge
+camel_pinned_client_cache_size{component="camel-http"} 1
+camel_pinned_client_cache_size{component="camel-https"} 1
+
+### snapshot 4 2026-08-29T11:28:54Z GET http://127.0.0.1:18119/metrics -> 200, 18 family lines
+# HELP camel_allocator_memory_bytes Allocator memory statistics in bytes
+# TYPE camel_allocator_memory_bytes gauge
+camel_allocator_memory_bytes{stat="active"} 4669440
+camel_allocator_memory_bytes{stat="allocated"} 3338224
+camel_allocator_memory_bytes{stat="mapped"} 42807296
+camel_allocator_memory_bytes{stat="resident"} 10846208
+# HELP camel_pinned_client_cache_hits_total Total pinned client cache hits
+# TYPE camel_pinned_client_cache_hits_total counter
+camel_pinned_client_cache_hits_total{component="camel-http"} 24
+camel_pinned_client_cache_hits_total{component="camel-https"} 17
+# HELP camel_pinned_client_cache_misses_total Total pinned client cache misses (client builds)
+# TYPE camel_pinned_client_cache_misses_total counter
+camel_pinned_client_cache_misses_total{component="camel-http"} 1
+camel_pinned_client_cache_misses_total{component="camel-https"} 1
+# HELP camel_pinned_client_cache_size Pinned client cache size in entries
+# TYPE camel_pinned_client_cache_size gauge
+camel_pinned_client_cache_size{component="camel-http"} 1
+camel_pinned_client_cache_size{component="camel-https"} 1
+
+### snapshot 5 2026-08-29T11:28:57Z GET http://127.0.0.1:18119/metrics -> 200, 18 family lines
+# HELP camel_allocator_memory_bytes Allocator memory statistics in bytes
+# TYPE camel_allocator_memory_bytes gauge
+camel_allocator_memory_bytes{stat="active"} 4521984
+camel_allocator_memory_bytes{stat="allocated"} 3146704
+camel_allocator_memory_bytes{stat="mapped"} 42823680
+camel_allocator_memory_bytes{stat="resident"} 10866688
+# HELP camel_pinned_client_cache_hits_total Total pinned client cache hits
+# TYPE camel_pinned_client_cache_hits_total counter
+camel_pinned_client_cache_hits_total{component="camel-http"} 30
+camel_pinned_client_cache_hits_total{component="camel-https"} 21
+# HELP camel_pinned_client_cache_misses_total Total pinned client cache misses (client builds)
+# TYPE camel_pinned_client_cache_misses_total counter
+camel_pinned_client_cache_misses_total{component="camel-http"} 1
+camel_pinned_client_cache_misses_total{component="camel-https"} 1
+# HELP camel_pinned_client_cache_size Pinned client cache size in entries
+# TYPE camel_pinned_client_cache_size gauge
+camel_pinned_client_cache_size{component="camel-http"} 1
+camel_pinned_client_cache_size{component="camel-https"} 1
+
+### snapshot 6 2026-08-29T11:29:00Z GET http://127.0.0.1:18119/metrics -> 200, 18 family lines
+# HELP camel_allocator_memory_bytes Allocator memory statistics in bytes
+# TYPE camel_allocator_memory_bytes gauge
+camel_allocator_memory_bytes{stat="active"} 4521984
+camel_allocator_memory_bytes{stat="allocated"} 3146704
+camel_allocator_memory_bytes{stat="mapped"} 42823680
+camel_allocator_memory_bytes{stat="resident"} 10866688
+# HELP camel_pinned_client_cache_hits_total Total pinned client cache hits
+# TYPE camel_pinned_client_cache_hits_total counter
+camel_pinned_client_cache_hits_total{component="camel-http"} 36
+camel_pinned_client_cache_hits_total{component="camel-https"} 25
+# HELP camel_pinned_client_cache_misses_total Total pinned client cache misses (client builds)
+# TYPE camel_pinned_client_cache_misses_total counter
+camel_pinned_client_cache_misses_total{component="camel-http"} 1
+camel_pinned_client_cache_misses_total{component="camel-https"} 1
+# HELP camel_pinned_client_cache_size Pinned client cache size in entries
+# TYPE camel_pinned_client_cache_size gauge
+camel_pinned_client_cache_size{component="camel-http"} 1
+camel_pinned_client_cache_size{component="camel-https"} 1
+
+### snapshot 7 2026-08-29T11:29:03Z GET http://127.0.0.1:18119/metrics -> 200, 18 family lines
+# HELP camel_allocator_memory_bytes Allocator memory statistics in bytes
+# TYPE camel_allocator_memory_bytes gauge
+camel_allocator_memory_bytes{stat="active"} 4280320
+camel_allocator_memory_bytes{stat="allocated"} 2776496
+camel_allocator_memory_bytes{stat="mapped"} 42889216
+camel_allocator_memory_bytes{stat="resident"} 10932224
+# HELP camel_pinned_client_cache_hits_total Total pinned client cache hits
+# TYPE camel_pinned_client_cache_hits_total counter
+camel_pinned_client_cache_hits_total{component="camel-http"} 42
+camel_pinned_client_cache_hits_total{component="camel-https"} 29
+# HELP camel_pinned_client_cache_misses_total Total pinned client cache misses (client builds)
+# TYPE camel_pinned_client_cache_misses_total counter
+camel_pinned_client_cache_misses_total{component="camel-http"} 1
+camel_pinned_client_cache_misses_total{component="camel-https"} 1
+# HELP camel_pinned_client_cache_size Pinned client cache size in entries
+# TYPE camel_pinned_client_cache_size gauge
+camel_pinned_client_cache_size{component="camel-http"} 1
+camel_pinned_client_cache_size{component="camel-https"} 1
+
+### snapshot 8 2026-08-29T11:29:06Z GET http://127.0.0.1:18119/metrics -> 200, 18 family lines
+# HELP camel_allocator_memory_bytes Allocator memory statistics in bytes
+# TYPE camel_allocator_memory_bytes gauge
+camel_allocator_memory_bytes{stat="active"} 4280320
+camel_allocator_memory_bytes{stat="allocated"} 2776496
+camel_allocator_memory_bytes{stat="mapped"} 42889216
+camel_allocator_memory_bytes{stat="resident"} 10932224
+# HELP camel_pinned_client_cache_hits_total Total pinned client cache hits
+# TYPE camel_pinned_client_cache_hits_total counter
+camel_pinned_client_cache_hits_total{component="camel-http"} 48
+camel_pinned_client_cache_hits_total{component="camel-https"} 29
+# HELP camel_pinned_client_cache_misses_total Total pinned client cache misses (client builds)
+# TYPE camel_pinned_client_cache_misses_total counter
+camel_pinned_client_cache_misses_total{component="camel-http"} 1
+camel_pinned_client_cache_misses_total{component="camel-https"} 1
+# HELP camel_pinned_client_cache_size Pinned client cache size in entries
+# TYPE camel_pinned_client_cache_size gauge
+camel_pinned_client_cache_size{component="camel-http"} 1
+camel_pinned_client_cache_size{component="camel-https"} 1
+

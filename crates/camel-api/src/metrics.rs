@@ -3,6 +3,40 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 
+/// The closed set of allocator memory statistics published through
+/// [`MetricsCollector::set_allocator_memory`].
+///
+/// # exhaustive-by-contract
+///
+/// exhaustive-by-contract: a closed 4-variant allocator stat set whose
+/// label values (`allocated | resident | active | mapped`) are fixed by the
+/// metrics spec; out-of-crate emitters (the camel-cli jemalloc sampler) match
+/// every variant, so adding one is a contract change, not a compatible
+/// extension.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AllocatorStat {
+    /// Total bytes allocated by the allocator (in-use).
+    Allocated,
+    /// Resident bytes backed by physical pages (RSS contribution).
+    Resident,
+    /// Bytes in active pages.
+    Active,
+    /// Bytes in mapped virtual ranges.
+    Mapped,
+}
+
+impl AllocatorStat {
+    /// The Prometheus `stat` label value for this statistic.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AllocatorStat::Allocated => "allocated",
+            AllocatorStat::Resident => "resident",
+            AllocatorStat::Active => "active",
+            AllocatorStat::Mapped => "mapped",
+        }
+    }
+}
+
 /// Trait for collecting metrics from the Camel runtime.
 /// Implementations can integrate with Prometheus, OpenTelemetry, etc.
 pub trait MetricsCollector: Send + Sync {
@@ -72,6 +106,31 @@ pub trait MetricsCollector: Send + Sync {
     /// only; callers derive it from a bool (see `ComponentMetrics`),
     /// never pass free text. Default: no-op (backward-compatible).
     fn record_component_operation(&self, _component: &str, _operation: &str, _outcome: &str) {}
+
+    /// Publish the pinned client cache size for a component
+    /// (`camel_pinned_client_cache_size{component}`, gauge, unit: entries).
+    /// Emitted by the owning component after each lookup, reflecting the
+    /// current (approximate) entry count. Default:
+    /// no-op (backward-compatible).
+    fn set_pinned_client_cache_size(&self, _component: &str, _entries: u64) {}
+
+    /// Increment the pinned client cache hit counter for a component
+    /// (`camel_pinned_client_cache_hits_total{component}`) — a pinned
+    /// lookup served by the cache without a rebuild. Default: no-op
+    /// (backward-compatible).
+    fn increment_pinned_client_cache_hit(&self, _component: &str) {}
+
+    /// Increment the pinned client cache miss counter for a component
+    /// (`camel_pinned_client_cache_misses_total{component}`) — a pinned
+    /// lookup that required a client rebuild. Default: no-op
+    /// (backward-compatible).
+    fn increment_pinned_client_cache_miss(&self, _component: &str) {}
+
+    /// Publish an allocator memory statistic
+    /// (`camel_allocator_memory_bytes{stat}`, gauge, unit: bytes). `stat`
+    /// is a closed [`AllocatorStat`] variant; the sampler refreshes the
+    /// current value periodically. Default: no-op (backward-compatible).
+    fn set_allocator_memory(&self, _stat: AllocatorStat, _bytes: u64) {}
 }
 
 /// No-op metrics collector for default behavior
@@ -229,6 +288,31 @@ impl MetricsCollector for MetricsHandle {
             .0
             .record_component_operation(component, operation, outcome)
     }
+
+    fn set_pinned_client_cache_size(&self, component: &str, entries: u64) {
+        self.inner
+            .load()
+            .0
+            .set_pinned_client_cache_size(component, entries)
+    }
+
+    fn increment_pinned_client_cache_hit(&self, component: &str) {
+        self.inner
+            .load()
+            .0
+            .increment_pinned_client_cache_hit(component)
+    }
+
+    fn increment_pinned_client_cache_miss(&self, component: &str) {
+        self.inner
+            .load()
+            .0
+            .increment_pinned_client_cache_miss(component)
+    }
+
+    fn set_allocator_memory(&self, stat: AllocatorStat, bytes: u64) {
+        self.inner.load().0.set_allocator_memory(stat, bytes)
+    }
 }
 
 /// A [`MetricsCollector`] that fans every observation out to a list of collectors,
@@ -345,6 +429,30 @@ impl MetricsCollector for CompositeMetricsCollector {
             collector.record_component_operation(component, operation, outcome);
         }
     }
+
+    fn set_pinned_client_cache_size(&self, component: &str, entries: u64) {
+        for collector in &self.collectors {
+            collector.set_pinned_client_cache_size(component, entries);
+        }
+    }
+
+    fn increment_pinned_client_cache_hit(&self, component: &str) {
+        for collector in &self.collectors {
+            collector.increment_pinned_client_cache_hit(component);
+        }
+    }
+
+    fn increment_pinned_client_cache_miss(&self, component: &str) {
+        for collector in &self.collectors {
+            collector.increment_pinned_client_cache_miss(component);
+        }
+    }
+
+    fn set_allocator_memory(&self, stat: AllocatorStat, bytes: u64) {
+        for collector in &self.collectors {
+            collector.set_allocator_memory(stat, bytes);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -359,6 +467,8 @@ mod tests {
         exchanges: Mutex<Vec<String>>,
         retries: Mutex<Vec<(String, String)>>,
         rejections: Mutex<Vec<String>>,
+        pinned: Mutex<Vec<(&'static str, String, u64)>>,
+        allocator: Mutex<Vec<(AllocatorStat, u64)>>,
     }
 
     impl RecordingMetrics {
@@ -369,6 +479,8 @@ mod tests {
                 exchanges: Mutex::new(Vec::new()),
                 retries: Mutex::new(Vec::new()),
                 rejections: Mutex::new(Vec::new()),
+                pinned: Mutex::new(Vec::new()),
+                allocator: Mutex::new(Vec::new()),
             }
         }
     }
@@ -411,6 +523,37 @@ mod tests {
                 .lock()
                 .expect("rejections lock")
                 .push(route.to_string());
+        }
+
+        fn set_pinned_client_cache_size(&self, component: &str, entries: u64) {
+            self.pinned.lock().expect("pinned lock").push((
+                "set_pinned_client_cache_size",
+                component.to_string(),
+                entries,
+            ));
+        }
+
+        fn increment_pinned_client_cache_hit(&self, component: &str) {
+            self.pinned.lock().expect("pinned lock").push((
+                "increment_pinned_client_cache_hit",
+                component.to_string(),
+                1,
+            ));
+        }
+
+        fn increment_pinned_client_cache_miss(&self, component: &str) {
+            self.pinned.lock().expect("pinned lock").push((
+                "increment_pinned_client_cache_miss",
+                component.to_string(),
+                1,
+            ));
+        }
+
+        fn set_allocator_memory(&self, stat: AllocatorStat, bytes: u64) {
+            self.allocator
+                .lock()
+                .expect("allocator lock")
+                .push((stat, bytes));
         }
     }
 
@@ -673,5 +816,141 @@ mod tests {
             let calls = member.calls.lock().expect("calls lock").clone();
             assert_eq!(calls, expected, "member missed part of the trait surface");
         }
+    }
+
+    /// Expected pinned-cache triple captures for one call of each method
+    /// with component `"camel-https"` and entries `3` (counters record 1).
+    fn pinned_trio_expected() -> Vec<(&'static str, String, u64)> {
+        vec![
+            ("set_pinned_client_cache_size", "camel-https".to_string(), 3),
+            (
+                "increment_pinned_client_cache_hit",
+                "camel-https".to_string(),
+                1,
+            ),
+            (
+                "increment_pinned_client_cache_miss",
+                "camel-https".to_string(),
+                1,
+            ),
+        ]
+    }
+
+    #[test]
+    fn handle_forwards_pinned_cache_trio() {
+        let collector = Arc::new(RecordingMetrics::new());
+        let handle = MetricsHandle::new();
+        handle.register(collector.clone());
+
+        handle.set_pinned_client_cache_size("camel-https", 3);
+        handle.increment_pinned_client_cache_hit("camel-https");
+        handle.increment_pinned_client_cache_miss("camel-https");
+
+        let captured = collector.pinned.lock().expect("pinned lock").clone();
+        assert_eq!(captured, pinned_trio_expected());
+
+        // An unwired handle delegates to the seeded NoOp: neither panics
+        // nor records into any collector double. Emissions made before
+        // registration are dropped, not buffered and replayed.
+        let bystander = Arc::new(RecordingMetrics::new());
+        let unwired = MetricsHandle::new();
+        unwired.set_pinned_client_cache_size("camel-https", 3);
+        unwired.increment_pinned_client_cache_hit("camel-https");
+        unwired.increment_pinned_client_cache_miss("camel-https");
+        unwired.register(bystander.clone());
+        assert!(bystander.pinned.lock().expect("pinned lock").is_empty());
+    }
+
+    #[test]
+    fn composite_forwards_pinned_cache_trio_to_all_collectors() {
+        let a = Arc::new(RecordingMetrics::new());
+        let b = Arc::new(RecordingMetrics::new());
+        let composite = CompositeMetricsCollector::new(vec![
+            Arc::clone(&a) as Arc<dyn MetricsCollector>,
+            Arc::clone(&b) as Arc<dyn MetricsCollector>,
+        ]);
+
+        composite.set_pinned_client_cache_size("camel-https", 3);
+        composite.increment_pinned_client_cache_hit("camel-https");
+        composite.increment_pinned_client_cache_miss("camel-https");
+
+        for member in [&a, &b] {
+            let captured = member.pinned.lock().expect("pinned lock").clone();
+            assert_eq!(
+                captured,
+                pinned_trio_expected(),
+                "member missed part of the pinned-cache trio"
+            );
+        }
+    }
+
+    /// The `as_str()` image of `AllocatorStat` is the closed label-value set
+    /// (spec: `allocated | resident | active | mapped`).
+    #[test]
+    fn allocator_stat_as_str_image_is_closed_set() {
+        let image: std::collections::BTreeSet<&'static str> = [
+            AllocatorStat::Allocated,
+            AllocatorStat::Resident,
+            AllocatorStat::Active,
+            AllocatorStat::Mapped,
+        ]
+        .iter()
+        .map(|stat| stat.as_str())
+        .collect();
+        let expected: std::collections::BTreeSet<&'static str> =
+            ["active", "allocated", "mapped", "resident"]
+                .into_iter()
+                .collect();
+        assert_eq!(image, expected);
+    }
+
+    /// `set_allocator_memory` forwards through a wired `MetricsHandle` and a
+    /// `CompositeMetricsCollector` (exactly one capture each); an unwired
+    /// handle neither panics nor records into a later-registered double.
+    #[test]
+    fn handle_and_composite_forward_set_allocator_memory() {
+        let expected = vec![(AllocatorStat::Resident, 4096)];
+
+        let handle_collector = Arc::new(RecordingMetrics::new());
+        let handle = MetricsHandle::new();
+        handle.register(handle_collector.clone());
+        handle.set_allocator_memory(AllocatorStat::Resident, 4096);
+        assert_eq!(
+            handle_collector
+                .allocator
+                .lock()
+                .expect("allocator lock")
+                .clone(),
+            expected,
+            "wired handle must forward exactly one allocator emission"
+        );
+
+        let composite_collector = Arc::new(RecordingMetrics::new());
+        let composite = CompositeMetricsCollector::new(vec![
+            composite_collector.clone() as Arc<dyn MetricsCollector>
+        ]);
+        composite.set_allocator_memory(AllocatorStat::Resident, 4096);
+        assert_eq!(
+            composite_collector
+                .allocator
+                .lock()
+                .expect("allocator lock")
+                .clone(),
+            expected,
+            "composite must forward exactly one allocator emission"
+        );
+
+        let bystander = Arc::new(RecordingMetrics::new());
+        let unwired = MetricsHandle::new();
+        unwired.set_allocator_memory(AllocatorStat::Resident, 4096);
+        unwired.register(bystander.clone());
+        assert!(
+            bystander
+                .allocator
+                .lock()
+                .expect("allocator lock")
+                .is_empty(),
+            "unwired-handle emissions are dropped, not replayed"
+        );
     }
 }

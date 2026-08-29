@@ -81,6 +81,10 @@ pub(super) struct StaticFamilies {
     pub(super) errors_total: CounterVec,
     pub(super) exchange_duration_seconds: HistogramVec,
     pub(super) queue_depth: GaugeVec,
+    pub(super) pinned_client_cache_size: GaugeVec,
+    pub(super) pinned_client_cache_hits_total: CounterVec,
+    pub(super) pinned_client_cache_misses_total: CounterVec,
+    pub(super) allocator_memory_bytes: GaugeVec,
     pub(super) circuit_breaker_state: GaugeVec,
     pub(super) route_state: RouteStateGauge,
     pub(super) retry_attempts_total: IntCounterVec,
@@ -154,6 +158,67 @@ pub(super) fn register_static_families(registry: &Registry) -> StaticFamilies {
     registry
         .register(Box::new(queue_depth.clone()))
         .expect("Failed to register queue_depth gauge"); // allow-unwrap
+
+    // Create and register pinned_client_cache_size gauge. The label is
+    // `component` (spec: `camel_pinned_client_cache_size{component}`) — a
+    // closed two-value set (`camel-http`, `camel-https`).
+    let pinned_client_cache_size = GaugeVec::new(
+        Opts::new(
+            "pinned_client_cache_size",
+            "Pinned client cache size in entries",
+        )
+        .namespace("camel"),
+        &["component"],
+    )
+    .expect("Failed to create pinned_client_cache_size gauge"); // allow-unwrap
+    registry
+        .register(Box::new(pinned_client_cache_size.clone()))
+        .expect("Failed to register pinned_client_cache_size gauge"); // allow-unwrap
+
+    // Create and register pinned_client_cache_hits_total counter
+    let pinned_client_cache_hits_total = CounterVec::new(
+        Opts::new(
+            "pinned_client_cache_hits_total",
+            "Total pinned client cache hits",
+        )
+        .namespace("camel"),
+        &["component"],
+    )
+    .expect("Failed to create pinned_client_cache_hits_total counter"); // allow-unwrap
+    registry
+        .register(Box::new(pinned_client_cache_hits_total.clone()))
+        .expect("Failed to register pinned_client_cache_hits_total counter"); // allow-unwrap
+
+    // Create and register pinned_client_cache_misses_total counter
+    let pinned_client_cache_misses_total = CounterVec::new(
+        Opts::new(
+            "pinned_client_cache_misses_total",
+            "Total pinned client cache misses (client builds)",
+        )
+        .namespace("camel"),
+        &["component"],
+    )
+    .expect("Failed to create pinned_client_cache_misses_total counter"); // allow-unwrap
+    registry
+        .register(Box::new(pinned_client_cache_misses_total.clone()))
+        .expect("Failed to register pinned_client_cache_misses_total counter"); // allow-unwrap
+
+    // Create and register allocator_memory_bytes gauge. The label is
+    // `stat` (spec: `camel_allocator_memory_bytes{stat}`) — a closed
+    // four-value set (`allocated | resident | active | mapped`, see
+    // `AllocatorStat` in camel-api).
+    let allocator_memory_bytes = GaugeVec::new(
+        Opts::new(
+            "allocator_memory_bytes",
+            "Allocator memory statistics in bytes",
+        )
+        .namespace("camel"),
+        &["stat"],
+    )
+    .expect("Failed to create allocator_memory_bytes gauge"); // allow-unwrap
+    registry
+        .register(Box::new(allocator_memory_bytes.clone()))
+        .expect("Failed to register allocator_memory_bytes gauge"); // allow-unwrap
 
     // Create and register circuit_breaker_state gauge
     let circuit_breaker_state = GaugeVec::new(
@@ -252,6 +317,10 @@ pub(super) fn register_static_families(registry: &Registry) -> StaticFamilies {
         errors_total,
         exchange_duration_seconds,
         queue_depth,
+        pinned_client_cache_size,
+        pinned_client_cache_hits_total,
+        pinned_client_cache_misses_total,
+        allocator_memory_bytes,
         circuit_breaker_state,
         route_state,
         retry_attempts_total,

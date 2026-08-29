@@ -159,6 +159,80 @@ fn build_info_and_uptime_rendered() {
     );
 }
 
+/// Task 1.2: the pinned-client-cache trio renders with the component label
+/// (spec: `camel_pinned_client_cache_size{component}` gauge, hit/miss
+/// counters).
+#[test]
+fn pinned_cache_trio_exports_with_component_label() {
+    let metrics = PrometheusMetrics::new();
+    metrics.set_pinned_client_cache_size("camel-http", 7);
+    metrics.increment_pinned_client_cache_hit("camel-http");
+    metrics.increment_pinned_client_cache_hit("camel-http");
+    metrics.increment_pinned_client_cache_miss("camel-https");
+    let body = metrics.gather();
+    assert!(
+        body.contains("camel_pinned_client_cache_size{component=\"camel-http\"} 7"),
+        "missing size series: {body}"
+    );
+    assert!(
+        body.contains("camel_pinned_client_cache_hits_total{component=\"camel-http\"} 2"),
+        "missing hits series: {body}"
+    );
+    assert!(
+        body.contains("camel_pinned_client_cache_misses_total{component=\"camel-https\"} 1"),
+        "missing misses series: {body}"
+    );
+}
+
+/// Task 1.2: the pinned-cache families register without colliding with the
+/// existing static families — construction must not panic on a duplicate
+/// metric, and the size family renders exactly one `# TYPE` declaration.
+#[test]
+fn pinned_cache_families_do_not_collide_with_existing() {
+    let metrics = PrometheusMetrics::new();
+    // Create one series so the family renders (the encoder skips families
+    // with no child series).
+    metrics.set_pinned_client_cache_size("camel-http", 1);
+    let body = metrics.gather();
+    let type_lines = body
+        .lines()
+        .filter(|l| l.starts_with("# TYPE camel_pinned_client_cache_size"))
+        .count();
+    assert_eq!(
+        type_lines, 1,
+        "expected exactly one size family declaration, got {type_lines}: {body}"
+    );
+}
+
+/// Task 2.1: the allocator stat family renders all four closed-set `stat`
+/// label values (spec: `camel_allocator_memory_bytes{stat}` gauge).
+#[test]
+fn allocator_family_exports_four_stats() {
+    use camel_api::metrics::AllocatorStat;
+    let metrics = PrometheusMetrics::new();
+    metrics.set_allocator_memory(AllocatorStat::Allocated, 1000);
+    metrics.set_allocator_memory(AllocatorStat::Resident, 2000);
+    metrics.set_allocator_memory(AllocatorStat::Active, 3000);
+    metrics.set_allocator_memory(AllocatorStat::Mapped, 4000);
+    let body = metrics.gather();
+    assert!(
+        body.contains("camel_allocator_memory_bytes{stat=\"allocated\"} 1000"),
+        "missing allocated series: {body}"
+    );
+    assert!(
+        body.contains("camel_allocator_memory_bytes{stat=\"resident\"} 2000"),
+        "missing resident series: {body}"
+    );
+    assert!(
+        body.contains("camel_allocator_memory_bytes{stat=\"active\"} 3000"),
+        "missing active series: {body}"
+    );
+    assert!(
+        body.contains("camel_allocator_memory_bytes{stat=\"mapped\"} 4000"),
+        "missing mapped series: {body}"
+    );
+}
+
 #[test]
 fn test_gather_returns_prometheus_format() {
     let metrics = PrometheusMetrics::new();

@@ -14,13 +14,13 @@ execution engine, no registries, no lifecycle implementation.
 ## `#[non_exhaustive]` posture
 
 ADR-0049 places this contract crate in its mandatory scope: every `pub enum` is
-`#[non_exhaustive]` or carries an `exhaustive-by-contract` exception note. The 61 `pub enum`s
+`#[non_exhaustive]` or carries an `exhaustive-by-contract` exception note. The 62 `pub enum`s
 split into:
 
 | Category | Count | Posture |
 |---|---|---|
 | `#[non_exhaustive]` | 55 | 55 attributed; pre-existing exceptions include `CamelError`, `ConfigValidationError`, `TemplateError`. |
-| `exhaustive-by-contract` exception | 6 | `PipelineOutcome` (the ADR-0024 outcome algebra), `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy), `ContentType` (the closed 4-variant cache content-type set matched by out-of-crate CacheService), `TransportId` (the closed security transport set; out-of-crate enforcement matches all variants), `CredentialSource` (the closed credential-source set; out-of-crate camel-auth extraction matches all variants), and `AccessMode` (the closed kernel access-mode set; out-of-crate camel-auth enforcement matches all variants). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
+| `exhaustive-by-contract` exception | 7 | `PipelineOutcome` (the ADR-0024 outcome algebra), `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy), `ContentType` (the closed 4-variant cache content-type set matched by out-of-crate CacheService), `TransportId` (the closed security transport set; out-of-crate enforcement matches all variants), `CredentialSource` (the closed credential-source set; out-of-crate camel-auth extraction matches all variants), `AccessMode` (the closed kernel access-mode set; out-of-crate camel-auth enforcement matches all variants), and `AllocatorStat` (the closed 4-variant jemalloc stat-label set emitted by the out-of-crate camel-cli sampler). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
 
 New contract enums use `#[non_exhaustive]` from birth; a closed-set exception needs a
 `/// exhaustive-by-contract: <rationale>` note. ADR-0049 Rule 3 governs public structs (out of

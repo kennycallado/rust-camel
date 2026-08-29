@@ -1,3 +1,4 @@
+mod allocator_metrics;
 pub mod commands;
 mod security;
 pub mod template;
