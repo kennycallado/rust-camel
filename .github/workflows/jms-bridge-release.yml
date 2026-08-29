@@ -127,7 +127,25 @@ jobs:
           body: |
             ## JMS Bridge ${{ github.ref_name }}
 
-            **Platforms:**
+            **Breaking changes:**
+            - `failover://` URLs are rejected at validation for `artemis`
+              broker entries - they previously degraded to a plaintext
+              `localhost` connection. Migrate to a single primary URL or
+              multiple broker entries (`activemq` classic keeps native
+              failover).
+            - Unsupported Artemis sidecar URLs (`failover:(...)` wrappers,
+              `nio://`, hostless/schemeless) abort startup with remediation
+              instead of silently connecting localhost plaintext.
+
+            **Behavior changes:**
+            - `JMS_MAX_BODY_BYTES` TextMessage cap is byte-accurate (UTF-8);
+              over-cap text is rejected at the bridge with byte diagnostics.
+            - Message type fidelity: `application/xml` TextMessages surface
+              as `Body::Bytes` in Rust routes; Content-Type round-trips.
+            - Shutdown hardening: racing subscribes get `UNAVAILABLE`;
+              consumers are destroyed exactly once.
+
+            **Platforms:
             - `linux-musl-x86_64` — statically linked, any Linux (Alpine, Ubuntu, NixOS, scratch)
             - `macos-aarch64` — Apple Silicon (M1/M2/M3+)
             - `windows-x86_64` — Windows 10/11

@@ -36,7 +36,7 @@ pub use config::{
 pub use health::JmsHealthCheck;
 
 /// Version of the Java bridge binary this crate is compatible with.
-pub const BRIDGE_VERSION: &str = "0.6.0";
+pub const BRIDGE_VERSION: &str = "0.6.1";
 
 /// Serializes tests that mutate `CAMEL_JMS_BRIDGE_BINARY_PATH` via
 /// `std::env::set_var`. Process-global env vars race under parallel test

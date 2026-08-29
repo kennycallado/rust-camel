@@ -18,7 +18,7 @@ pub mod health;
 pub(crate) mod metadata;
 mod producer;
 
-pub const BRIDGE_VERSION: &str = "0.6.0";
+pub const BRIDGE_VERSION: &str = "0.6.1";
 
 pub use client::{BridgeState, StylesheetId, XsltBridgeClient, XsltTransformBackend};
 pub use component::{XsltBridgeRuntime, XsltComponent};

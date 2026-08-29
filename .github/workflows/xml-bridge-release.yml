@@ -127,7 +127,10 @@ jobs:
           body: |
             ## XML Bridge ${{ github.ref_name }}
 
-            **Platforms:**
+            **Dependency updates:**
+            - Saxon-HE 12.5 -> 12.7 (XSLT 2.0/3.0 engine).
+
+            **Platforms:
             - `linux-musl-x86_64` — statically linked, any Linux (Alpine, Ubuntu, NixOS, scratch)
             - `macos-aarch64` — Apple Silicon (M1/M2/M3+)
             - `windows-x86_64` — Windows 10/11
