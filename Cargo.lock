@@ -28,7 +28,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "aggregator"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -460,7 +460,7 @@ checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -509,7 +509,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auto-restart"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -651,7 +651,7 @@ dependencies = [
  "getrandom 0.2.17",
  "instant",
  "pin-project-lite",
- "rand 0.8.7",
+ "rand 0.8.8",
  "tokio",
 ]
 
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "bean-demo"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-bean",
@@ -793,7 +793,7 @@ dependencies = [
  "cc",
  "cfg-if",
  "constant_time_eq",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -840,7 +840,7 @@ dependencies = [
  "boa_interner",
  "boa_macros",
  "boa_string",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "num-bigint 0.4.8",
  "rustc-hash",
 ]
@@ -872,7 +872,7 @@ dependencies = [
  "futures-lite",
  "hashbrown 0.16.1",
  "icu_normalizer",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "intrusive-collections",
  "itertools 0.14.0",
  "num-bigint 0.4.8",
@@ -918,7 +918,7 @@ dependencies = [
  "boa_gc",
  "boa_macros",
  "hashbrown 0.16.1",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "once_cell",
  "phf 0.13.1",
  "rustc-hash",
@@ -1053,9 +1053,9 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
 name = "borsh"
-version = "1.8.0"
+version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a88b7ea17d208c4193f2c1e6de3c35fe71f98c96982d5ced308bdcc749ff6e1f"
+checksum = "553c5d846a6ba5150c65e3b1b8ec073bcf1abc20f9b7220de384a4443ea4e20a"
 dependencies = [
  "borsh-derive",
  "bytes",
@@ -1064,15 +1064,15 @@ dependencies = [
 
 [[package]]
 name = "borsh-derive"
-version = "1.8.0"
+version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8f347189c62a579b8cd5f80714efa178f52e461dc2e6d701d264f5ff22e566c"
+checksum = "12cdfe656708a01f89b451a7d36466e6fe6c414de0aa18fc54f864f6f9ca9f56"
 dependencies = [
  "once_cell",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -1165,7 +1165,7 @@ checksum = "fc0e56a716f1e132ff6bf4bdac1c944a3fcdc1cae65f70a4a2a1ac3b401d2d1f"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "cache-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -1198,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "camel-api"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "camel-auth"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "camel-bean"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "camel-bean-macros"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1275,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "camel-bench"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-core",
@@ -1290,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "camel-bridge"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "bytes",
  "dirs",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "camel-builder"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-auth",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "camel-cli"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "ariadne",
  "async-trait",
@@ -1413,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-api"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -1440,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-container"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bollard",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-controlbus"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-component-api",
@@ -1471,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-cron"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-component-api",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-cxf"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1514,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-direct"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-exec"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-file"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-grpc"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1619,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-http"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-jms"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-kafka"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1703,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-keycloak"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1711,7 +1711,7 @@ dependencies = [
  "camel-auth",
  "camel-component-api",
  "camel-endpoint",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-llm"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1756,7 +1756,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-log"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-mcp"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1800,7 +1800,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-mock"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1816,7 +1816,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-mqtt"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-opensearch"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-redis"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -1874,7 +1874,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-seda"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -1887,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-sql"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1910,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-surrealdb"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1935,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-timer"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -1949,7 +1949,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-validator"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-bridge",
@@ -1979,7 +1979,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-wasm"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-ws"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2045,7 +2045,7 @@ dependencies = [
 
 [[package]]
 name = "camel-config"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "camel-core"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -2138,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "camel-dataformat-protobuf"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "bytes",
  "camel-api",
@@ -2152,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "camel-dsl"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -2182,7 +2182,7 @@ dependencies = [
 
 [[package]]
 name = "camel-endpoint"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -2195,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "camel-endpoint-macros"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2205,11 +2205,11 @@ dependencies = [
 
 [[package]]
 name = "camel-examples-tests"
-version = "0.37.0"
+version = "0.38.0"
 
 [[package]]
 name = "camel-function"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2230,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "camel-health"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2247,7 +2247,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-api"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -2259,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-js"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "boa_engine",
@@ -2275,7 +2275,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-jsonpath"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-language-api",
@@ -2286,7 +2286,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-minijinja"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2303,7 +2303,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-rhai"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-language-api",
@@ -2315,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-simple"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -2327,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-xpath"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-language-api",
@@ -2340,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "camel-lint"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "ariadne",
  "camel-api",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "camel-lsp"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-lint",
  "serde_json",
@@ -2363,7 +2363,7 @@ dependencies = [
 
 [[package]]
 name = "camel-master"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2381,7 +2381,7 @@ dependencies = [
 
 [[package]]
 name = "camel-otel"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -2404,7 +2404,7 @@ dependencies = [
 
 [[package]]
 name = "camel-platform-kubernetes"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -2426,7 +2426,7 @@ dependencies = [
 
 [[package]]
 name = "camel-platform-kubernetes-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-platform-kubernetes",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "camel-processor"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "camel-prometheus"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2490,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "camel-proto-compiler"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "prost",
  "prost-reflect",
@@ -2503,7 +2503,7 @@ dependencies = [
 
 [[package]]
 name = "camel-redis-repo"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -2515,7 +2515,7 @@ dependencies = [
 
 [[package]]
 name = "camel-template"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "camel-test"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2632,11 +2632,11 @@ dependencies = [
 
 [[package]]
 name = "camel-wit"
-version = "0.37.0"
+version = "0.38.0"
 
 [[package]]
 name = "camel-xj"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "camel-xslt"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -2805,7 +2805,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "rand_core 0.10.1",
 ]
 
@@ -2872,7 +2872,7 @@ dependencies = [
 
 [[package]]
 name = "circuit-breaker"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2887,7 +2887,7 @@ dependencies = [
 
 [[package]]
 name = "claim-check"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -2929,7 +2929,7 @@ dependencies = [
  "heck 0.5.0",
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2964,9 +2964,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combine"
-version = "4.6.7"
+version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "futures-core",
@@ -3025,7 +3025,7 @@ dependencies = [
 
 [[package]]
 name = "config-basic"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -3039,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "config-profiles"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -3091,7 +3091,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "container-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "bollard",
  "camel-api",
@@ -3108,7 +3108,7 @@ dependencies = [
 
 [[package]]
 name = "container-hot-reload"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-container",
@@ -3124,7 +3124,7 @@ dependencies = [
 
 [[package]]
 name = "container-nginx"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-container",
@@ -3140,7 +3140,7 @@ dependencies = [
 
 [[package]]
 name = "content-based-router"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3153,7 +3153,7 @@ dependencies = [
 
 [[package]]
 name = "content-based-routing"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3166,7 +3166,7 @@ dependencies = [
 
 [[package]]
 name = "content-enricher"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3180,7 +3180,7 @@ dependencies = [
 
 [[package]]
 name = "controlbus"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3194,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "convert-body-to"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "bytes",
  "camel-api",
@@ -3259,9 +3259,9 @@ dependencies = [
 
 [[package]]
 name = "cpufeatures"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
+checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
 ]
@@ -3438,7 +3438,7 @@ dependencies = [
 
 [[package]]
 name = "credential-sources"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-auth",
@@ -3505,7 +3505,7 @@ dependencies = [
 
 [[package]]
 name = "cron-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "custom-component-bundle"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-api",
@@ -3717,7 +3717,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "strsim",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -3739,7 +3739,7 @@ checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
 dependencies = [
  "darling_core 0.24.1",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -3835,7 +3835,7 @@ dependencies = [
 
 [[package]]
 name = "delayer"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4052,7 +4052,7 @@ checksum = "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -4076,7 +4076,7 @@ dependencies = [
 
 [[package]]
 name = "do-try"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4145,7 +4145,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamic-router"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4322,12 +4322,12 @@ checksum = "a65863d15a4ce2888bd2f0f543cc963d3879c3a022c8ee43f6141d479a3ac815"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
 name = "env-interpolation"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -4387,7 +4387,7 @@ dependencies = [
 
 [[package]]
 name = "error-handling"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4454,7 +4454,7 @@ dependencies = [
 
 [[package]]
 name = "example-master-leader"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -4473,7 +4473,7 @@ dependencies = [
 
 [[package]]
 name = "example-master-leader-yaml"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -4493,7 +4493,7 @@ dependencies = [
 
 [[package]]
 name = "exchange-uow"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4507,7 +4507,7 @@ dependencies = [
 
 [[package]]
 name = "exec-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4585,7 +4585,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "file-p1-features"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4599,7 +4599,7 @@ dependencies = [
 
 [[package]]
 name = "file-pipeline"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4612,7 +4612,7 @@ dependencies = [
 
 [[package]]
 name = "file-pollenrich"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4627,7 +4627,7 @@ dependencies = [
 
 [[package]]
 name = "file-polling"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4641,7 +4641,7 @@ dependencies = [
 
 [[package]]
 name = "file-streaming"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4698,9 +4698,9 @@ dependencies = [
 
 [[package]]
 name = "flate2"
-version = "1.1.9"
+version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
@@ -4837,7 +4837,7 @@ checksum = "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a"
 
 [[package]]
 name = "function-deno-enrich"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -4949,7 +4949,7 @@ checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -5046,7 +5046,7 @@ dependencies = [
  "i_overlay",
  "log",
  "num-traits",
- "rand 0.8.7",
+ "rand 0.8.8",
  "robust",
  "rstar 0.12.2",
  "serde",
@@ -5131,7 +5131,7 @@ checksum = "0bf7f043f89559805f8c7cacc432749b2fa0d0a0a9ee46ce47164ed5ba7f126c"
 dependencies = [
  "fnv",
  "hashbrown 0.16.1",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "stable_deref_trait",
 ]
 
@@ -5176,7 +5176,7 @@ dependencies = [
 
 [[package]]
 name = "grpc-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -5191,9 +5191,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.18"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "839c0e8a181239723652be9062bb56ca5bf5f64011f73b623f6f4fc59086a228"
+checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -5201,7 +5201,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "http",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "slab",
  "tokio",
  "tokio-util",
@@ -5344,7 +5344,7 @@ dependencies = [
 
 [[package]]
 name = "health-demo"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -5406,7 +5406,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello-world"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -5469,7 +5469,7 @@ dependencies = [
 
 [[package]]
 name = "hot-reload"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -5485,7 +5485,7 @@ dependencies = [
 
 [[package]]
 name = "hot-reload-yaml"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -5545,7 +5545,7 @@ dependencies = [
 
 [[package]]
 name = "http-client"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -5567,7 +5567,7 @@ checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
 
 [[package]]
 name = "http-server"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -5598,7 +5598,7 @@ dependencies = [
 
 [[package]]
 name = "http-streaming"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "bytes",
  "camel-api",
@@ -5640,9 +5640,9 @@ dependencies = [
 
 [[package]]
 name = "hyper"
-version = "1.11.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d22053281f852e11534f5198498373cbb59295120a20771d90f7ed1897490a72"
+checksum = "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -5907,7 +5907,7 @@ checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
 name = "idempotent-consumer"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -5977,9 +5977,9 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.14.0"
+version = "2.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
@@ -6179,7 +6179,7 @@ dependencies = [
 
 [[package]]
 name = "jms-container-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6195,7 +6195,7 @@ dependencies = [
 
 [[package]]
 name = "jms-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6280,7 +6280,7 @@ dependencies = [
 
 [[package]]
 name = "json-dsl"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-direct",
@@ -6318,9 +6318,9 @@ dependencies = [
 
 [[package]]
 name = "jsonpath-rust"
-version = "1.0.8"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e07021eefc09f897611b067ba7897b5e9266edfc902768418968772e5bb06a7"
+checksum = "8edb06feabbd4c3fe17e2572f391510e08a011b92f53a7b76236eeb18191cfbe"
 dependencies = [
  "pest",
  "pest_derive",
@@ -6390,7 +6390,7 @@ dependencies = [
  "p256",
  "p384",
  "pem",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rsa",
  "serde",
  "serde_json",
@@ -6414,7 +6414,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6559,7 +6559,7 @@ dependencies = [
 
 [[package]]
 name = "language-js"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6573,7 +6573,7 @@ dependencies = [
 
 [[package]]
 name = "language-jsonpath"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6589,7 +6589,7 @@ dependencies = [
 
 [[package]]
 name = "language-rhai"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6604,7 +6604,7 @@ dependencies = [
 
 [[package]]
 name = "language-simple"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6619,7 +6619,7 @@ dependencies = [
 
 [[package]]
 name = "language-xpath"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6634,7 +6634,7 @@ dependencies = [
 
 [[package]]
 name = "lazy-route"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6698,9 +6698,9 @@ dependencies = [
 
 [[package]]
 name = "libredox"
-version = "0.1.20"
+version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28d0a00925a9f930d679b6789b721e3a7f9ed110f41b86d2497caa780c3a070a"
+checksum = "d7955dfc218a8afb29dfeffd540e3a6e96baeb94fe7138228dd7cc6937fbbf96"
 dependencies = [
  "bitflags 2.13.1",
  "libc",
@@ -6751,7 +6751,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "llm-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6768,7 +6768,7 @@ dependencies = [
 
 [[package]]
 name = "load-balancer"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6796,7 +6796,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "log-eip"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6813,7 +6813,7 @@ dependencies = [
 
 [[package]]
 name = "loop-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6826,9 +6826,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.18.2"
+version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d2f2f9b4ba7e6b24d95e7e899329d35be83bcded72c8540cdd5368932d1d90a"
+checksum = "0d317b4b9eb398e6acce275758ec6125535505e7a146fb1a9b8bda2451b0ff4c"
 dependencies = [
  "hashbrown 0.17.1",
 ]
@@ -6877,7 +6877,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-csv"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6891,7 +6891,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-unmarshal"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6939,7 +6939,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mcp-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6997,7 +6997,7 @@ dependencies = [
 
 [[package]]
 name = "metrics-demo"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -7060,9 +7060,9 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "miniz_oxide"
-version = "0.8.9"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
@@ -7102,7 +7102,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -7127,7 +7127,7 @@ dependencies = [
 
 [[package]]
 name = "multi-route-direct"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -7141,7 +7141,7 @@ dependencies = [
 
 [[package]]
 name = "multicast"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -7180,13 +7180,13 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b6e54a8b65764f71827a90ca1d56965ec0c67f069f996477bd493402a901d1f"
 dependencies = [
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "itertools 0.13.0",
  "ndarray",
  "noisy_float",
  "num-integer",
  "num-traits",
- "rand 0.8.7",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -7262,7 +7262,7 @@ version = "0.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc67d13e91577493ff12d930fcdc92a342b46e2299210089d90d2caed837f60"
 dependencies = [
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "itoa",
  "memchr",
  "rustc-hash",
@@ -7336,7 +7336,7 @@ dependencies = [
  "num-integer",
  "num-iter",
  "num-traits",
- "rand 0.8.7",
+ "rand 0.8.8",
  "smallvec",
  "zeroize",
 ]
@@ -7470,7 +7470,7 @@ checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
 dependencies = [
  "crc32fast",
  "hashbrown 0.17.1",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "memchr",
 ]
 
@@ -7561,7 +7561,7 @@ dependencies = [
 
 [[package]]
 name = "opensearch-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -7737,7 +7737,7 @@ dependencies = [
 
 [[package]]
 name = "otel-demo"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -7989,7 +7989,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4c5cc86750666a3ed20bdaf5ca2a0344f9c67674cae0515bec2da16fbaa47db"
 dependencies = [
  "fixedbitset 0.4.2",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
 ]
 
 [[package]]
@@ -8000,7 +8000,7 @@ checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
 dependencies = [
  "fixedbitset 0.5.7",
  "hashbrown 0.15.5",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
 ]
 
 [[package]]
@@ -8110,7 +8110,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pipeline-concurrency"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -8293,7 +8293,7 @@ dependencies = [
 
 [[package]]
 name = "prometheus-demo"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -8639,9 +8639,9 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
-version = "0.8.7"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -8813,7 +8813,7 @@ checksum = "bbc4a4ea2a66a41a1152c4b3d86e8954dc087bdf33af35446e6e176db4e73c8c"
 
 [[package]]
 name = "recipientlist"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -8866,7 +8866,7 @@ dependencies = [
 
 [[package]]
 name = "redis-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -8883,7 +8883,7 @@ dependencies = [
 
 [[package]]
 name = "redis-repositories"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -8896,7 +8896,7 @@ dependencies = [
 
 [[package]]
 name = "redis-sentinel"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -8965,7 +8965,7 @@ checksum = "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -9131,7 +9131,7 @@ dependencies = [
 
 [[package]]
 name = "resequencer"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -9144,7 +9144,7 @@ dependencies = [
 
 [[package]]
 name = "rest-crud"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-auth",
@@ -9200,9 +9200,9 @@ dependencies = [
 
 [[package]]
 name = "rhai"
-version = "1.25.1"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd4dd0f8c36625202a4ba553c416c19b719947cd2a31d1bda06126e4a5727daf"
+checksum = "5e6e1be9d697d537ce450766df42ad6adf1a93f25f21d73217354ad7e3d3dae1"
 dependencies = [
  "ahash 0.8.12",
  "bitflags 2.13.1",
@@ -9284,7 +9284,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "pastey",
  "pin-project-lite",
  "rand 0.10.2",
@@ -9313,7 +9313,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_json",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -9349,7 +9349,7 @@ dependencies = [
 
 [[package]]
 name = "routing-slip"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -9521,7 +9521,7 @@ dependencies = [
  "borsh",
  "bytes",
  "num-traits",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rkyv",
  "serde",
  "serde_json",
@@ -9718,7 +9718,7 @@ dependencies = [
 
 [[package]]
 name = "sampling"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -9785,7 +9785,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_derive_internals",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -9861,7 +9861,7 @@ dependencies = [
 
 [[package]]
 name = "security-keycloak"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -9877,7 +9877,7 @@ dependencies = [
 
 [[package]]
 name = "security-wasm-policy"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -9894,7 +9894,7 @@ dependencies = [
 
 [[package]]
 name = "seda-demo"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -9994,7 +9994,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -10005,7 +10005,7 @@ checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -10024,7 +10024,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "itoa",
  "memchr",
  "serde",
@@ -10051,7 +10051,7 @@ checksum = "8d3b1629de253c70a0508c3899572da79ca359fdab27c7920ff00406df418906"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -10086,7 +10086,7 @@ dependencies = [
  "chrono",
  "hex",
  "indexmap 1.9.3",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "jiff",
  "schemars 0.9.0",
  "schemars 1.2.2",
@@ -10130,7 +10130,7 @@ checksum = "a22144e767da4ddd8416dbf383700542ffd8a5dc493dfecedfe1fe3ad03c98ae"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -10168,7 +10168,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "digest 0.11.3",
 ]
 
@@ -10200,7 +10200,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "showcase"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -11135,7 +11135,7 @@ dependencies = [
 
 [[package]]
 name = "sort"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-direct",
@@ -11186,7 +11186,7 @@ dependencies = [
 
 [[package]]
 name = "splitter"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -11200,7 +11200,7 @@ dependencies = [
 
 [[package]]
 name = "sql-datasource-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -11219,7 +11219,7 @@ dependencies = [
 
 [[package]]
 name = "sql-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -11236,7 +11236,7 @@ dependencies = [
 
 [[package]]
 name = "sql-streaming"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -11285,7 +11285,7 @@ dependencies = [
  "futures-util",
  "hashbrown 0.15.5",
  "hashlink 0.10.0",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "log",
  "memchr",
  "once_cell",
@@ -11371,7 +11371,7 @@ dependencies = [
  "memchr",
  "once_cell",
  "percent-encoding",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rsa",
  "serde",
  "sha1",
@@ -11410,7 +11410,7 @@ dependencies = [
  "md-5",
  "memchr",
  "once_cell",
- "rand 0.8.7",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -11510,7 +11510,7 @@ dependencies = [
 
 [[package]]
 name = "streaming-split"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "bytes",
  "camel-api",
@@ -11604,7 +11604,7 @@ dependencies = [
  "chrono",
  "futures",
  "getrandom 0.3.4",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "js-sys",
  "path-clean",
  "reqwest 0.13.4",
@@ -11734,7 +11734,7 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -11873,9 +11873,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.3"
+version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -11986,7 +11986,7 @@ dependencies = [
 
 [[package]]
 name = "template-basic"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -12101,7 +12101,7 @@ checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -12115,7 +12115,7 @@ dependencies = [
 
 [[package]]
 name = "throttler"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -12259,7 +12259,7 @@ checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -12365,7 +12365,7 @@ version = "0.9.12+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
 dependencies = [
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "serde_core",
  "serde_spanned",
  "toml_datetime 0.7.5+spec-1.1.0",
@@ -12380,7 +12380,7 @@ version = "1.1.4+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
 dependencies = [
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "serde_core",
  "serde_spanned",
  "toml_datetime 1.1.1+spec-1.1.0",
@@ -12413,7 +12413,7 @@ version = "0.25.13+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6975367e4d2ef766d86af01ffad14b622fecc8d4357a998fbc4deb6e9bacaf9b"
 dependencies = [
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
  "winnow 1.0.4",
@@ -12537,7 +12537,7 @@ checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
 dependencies = [
  "futures-core",
  "futures-util",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "pin-project-lite",
  "slab",
  "sync_wrapper",
@@ -12647,7 +12647,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracer-demo"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -12772,7 +12772,7 @@ dependencies = [
 
 [[package]]
 name = "transform-pipeline"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -13090,9 +13090,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.25.0"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -13112,7 +13112,7 @@ dependencies = [
 
 [[package]]
 name = "validator"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -13204,7 +13204,7 @@ checksum = "b8dad83b4f25e74f184f64c43b150b91efe7647395b42289f38e50566d82855b"
 
 [[package]]
 name = "wasm-bean-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-bean",
@@ -13282,7 +13282,7 @@ checksum = "b089037d7eb453ed57b560fe7833de0707411c8b9fdc429745ced77e2a1bacb9"
 dependencies = [
  "anyhow",
  "heck 0.5.0",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "log",
  "petgraph 0.6.5",
  "smallvec",
@@ -13303,17 +13303,17 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
-version = "0.257.1"
+version = "0.258.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d8ad9f0a39050867bda22e6486c316e2e52d20a42154d5bc433934bf738d085"
+checksum = "e974fe6821a8cf64575d51ea2194e2c8f77e7b66e9afe7419ce8a97f9ee0d251"
 dependencies = [
  "leb128fmt",
- "wasmparser 0.257.1",
+ "wasmparser 0.258.0",
 ]
 
 [[package]]
 name = "wasm-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -13328,7 +13328,7 @@ dependencies = [
 
 [[package]]
 name = "wasm-streaming-plugin"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "bytes",
  "camel-api",
@@ -13364,19 +13364,19 @@ checksum = "437970b35b1a85cfde9c74b2398352d8d653f3bd8e3a3db0c063ea8f5b4b36ff"
 dependencies = [
  "bitflags 2.13.1",
  "hashbrown 0.17.1",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "semver",
  "serde",
 ]
 
 [[package]]
 name = "wasmparser"
-version = "0.257.1"
+version = "0.258.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d92fc335fb6d48f46bda1d8b26b69e28320c15ac3272208333833d6e217e2b4a"
+checksum = "d9a61719f93a87b16d325921e251800c4833f8fab50fa21c7de73aed50086313"
 dependencies = [
  "bitflags 2.13.1",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "semver",
 ]
 
@@ -13457,7 +13457,7 @@ dependencies = [
  "cranelift-entity",
  "gimli",
  "hashbrown 0.17.1",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "log",
  "object",
  "postcard",
@@ -13627,7 +13627,7 @@ dependencies = [
  "anyhow",
  "bitflags 2.13.1",
  "heck 0.5.0",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "wit-parser",
 ]
 
@@ -13697,24 +13697,24 @@ dependencies = [
 
 [[package]]
 name = "wast"
-version = "257.0.1"
+version = "258.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c416ee8044cf88c5280e3d87c322b009525eb25142cf7428f0a90ea88febc3b"
+checksum = "97f7defc7ecca8b19ac7f824598eadd0c53985ee00c74060d65051e9da5b58a1"
 dependencies = [
  "bumpalo",
  "leb128fmt",
  "memchr",
  "unicode-width 0.2.2",
- "wasm-encoder 0.257.1",
+ "wasm-encoder 0.258.0",
 ]
 
 [[package]]
 name = "wat"
-version = "1.257.1"
+version = "1.258.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "672e5495f00c5fc6c6b502205bae4708aa4dd13d969754438743afe0a8af0f1d"
+checksum = "7555c008cca87f2ac58d9f83ccda7e7b44611093ce28eb28f052e7c78024b9bf"
 dependencies = [
- "wast 257.0.1",
+ "wast 258.0.0",
 ]
 
 [[package]]
@@ -14295,7 +14295,7 @@ dependencies = [
 
 [[package]]
 name = "wiretap"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -14322,7 +14322,7 @@ dependencies = [
  "anyhow",
  "hashbrown 0.17.1",
  "id-arena",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "log",
  "semver",
  "serde",
@@ -14358,7 +14358,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "ws-server"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -14426,7 +14426,7 @@ dependencies = [
 
 [[package]]
 name = "xj-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -14442,7 +14442,7 @@ dependencies = [
 
 [[package]]
 name = "xml-body"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "serde_json",
@@ -14483,7 +14483,7 @@ dependencies = [
 
 [[package]]
 name = "xslt-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -14505,7 +14505,7 @@ checksum = "0637d3a5566a82fa5214bae89087bc8c9fb94cd8e8a3c07feb691bb8d9c632db"
 
 [[package]]
 name = "xtask"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-dsl",
@@ -14533,7 +14533,7 @@ checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
 
 [[package]]
 name = "yaml-dsl"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "camel-api",
  "camel-component-direct",
@@ -14688,7 +14688,7 @@ checksum = "34df6fc39dbd26ddc9c10e6a2984476e13acce22e64e4487636ef494369225da"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -14699,7 +14699,7 @@ checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
 dependencies = [
  "crc32fast",
  "flate2",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "memchr",
  "typed-path",
  "zopfli",
@@ -14707,7 +14707,7 @@ dependencies = [
 
 [[package]]
 name = "zip-splitter"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "bytes",
  "camel-api",
