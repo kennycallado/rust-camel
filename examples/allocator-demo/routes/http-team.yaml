@@ -1,0 +1,89 @@
+routes:
+  # Scenario 2 — HTTP "team" polling a KNOWN set of 5 local hosts (ports
+  # 18131-18135, payload sizes 1/2/4/6/8 MiB). Each tick: fetch every host,
+  # filter the response with a rhai script, then hand the payload to the
+  # cache EIP backed by the persistent (redb + payload=disk) repository.
+  #
+  # Keys are tick-scoped (`t${header.CamelTimerCounter}`) so the on-disk
+  # payload store ACCUMULATES across the fill phase — that makes the
+  # disk-grows / memory-stays-flat contrast (ADR-0065 payload offload)
+  # observable within a single run. Timer: 25 fires x 2 s = 50 s fill, then
+  # the process goes quiet until the timeout wrapper sends TERM.
+  #
+  # PinnedClientKey includes the port, so localhost:18131..18135 are FIVE
+  # distinct pinned clients: expect camel_pinned_client_cache_misses_total
+  # to settle at 5 (one client build per host) while hits climb with traffic.
+  - id: "http-team-rhai-cache"
+    from: "timer:team?period=2000&repeatCount=25"
+    steps:
+      # ── host-1 ── 1 MiB ──────────────────────────────────────────────
+      - to: "http://localhost:18131/?allowInternal=true&httpMethod=GET"
+      - convert_body_to: text   # HTTP response arrives as Bytes; rhai sees Text
+      - script:
+          language: "rhai"
+          source: |
+            headers["teamFilter"] = if body.starts_with("TEAM-OK:") { "pass" } else { "drop" };
+            headers["bodyBytes"] = body.len();
+      - cache:
+          repository: "persistent"
+          key: "team:host-1:t${header.CamelTimerCounter}"
+          ttl: "600s"
+          on_miss:
+            - log: "host-1 payload stored (${header.bodyBytes} bytes, filter=${header.teamFilter})"
+      # ── host-2 ── 2 MiB ──────────────────────────────────────────────
+      - to: "http://localhost:18132/?allowInternal=true&httpMethod=GET"
+      - convert_body_to: text   # HTTP response arrives as Bytes; rhai sees Text
+      - script:
+          language: "rhai"
+          source: |
+            headers["teamFilter"] = if body.starts_with("TEAM-OK:") { "pass" } else { "drop" };
+            headers["bodyBytes"] = body.len();
+      - cache:
+          repository: "persistent"
+          key: "team:host-2:t${header.CamelTimerCounter}"
+          ttl: "600s"
+          on_miss:
+            - log: "host-2 payload stored (${header.bodyBytes} bytes, filter=${header.teamFilter})"
+      # ── host-3 ── 4 MiB ──────────────────────────────────────────────
+      - to: "http://localhost:18133/?allowInternal=true&httpMethod=GET"
+      - convert_body_to: text   # HTTP response arrives as Bytes; rhai sees Text
+      - script:
+          language: "rhai"
+          source: |
+            headers["teamFilter"] = if body.starts_with("TEAM-OK:") { "pass" } else { "drop" };
+            headers["bodyBytes"] = body.len();
+      - cache:
+          repository: "persistent"
+          key: "team:host-3:t${header.CamelTimerCounter}"
+          ttl: "600s"
+          on_miss:
+            - log: "host-3 payload stored (${header.bodyBytes} bytes, filter=${header.teamFilter})"
+      # ── host-4 ── 6 MiB ──────────────────────────────────────────────
+      - to: "http://localhost:18134/?allowInternal=true&httpMethod=GET"
+      - convert_body_to: text   # HTTP response arrives as Bytes; rhai sees Text
+      - script:
+          language: "rhai"
+          source: |
+            headers["teamFilter"] = if body.starts_with("TEAM-OK:") { "pass" } else { "drop" };
+            headers["bodyBytes"] = body.len();
+      - cache:
+          repository: "persistent"
+          key: "team:host-4:t${header.CamelTimerCounter}"
+          ttl: "600s"
+          on_miss:
+            - log: "host-4 payload stored (${header.bodyBytes} bytes, filter=${header.teamFilter})"
+      # ── host-5 ── 8 MiB ──────────────────────────────────────────────
+      - to: "http://localhost:18135/?allowInternal=true&httpMethod=GET"
+      - convert_body_to: text   # HTTP response arrives as Bytes; rhai sees Text
+      - script:
+          language: "rhai"
+          source: |
+            headers["teamFilter"] = if body.starts_with("TEAM-OK:") { "pass" } else { "drop" };
+            headers["bodyBytes"] = body.len();
+      - cache:
+          repository: "persistent"
+          key: "team:host-5:t${header.CamelTimerCounter}"
+          ttl: "600s"
+          on_miss:
+            - log: "host-5 payload stored (${header.bodyBytes} bytes, filter=${header.teamFilter})"
+      - log: "team tick ${header.CamelTimerCounter} complete (5 hosts, 21 MiB combined)"

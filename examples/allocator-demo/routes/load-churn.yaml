@@ -1,0 +1,15 @@
+routes:
+  # Known allocation workload: each exchange allocates an 8 MiB body,
+  # holds it for 1 s, then releases it. Timer fires every 500 ms with a
+  # cap of 4 concurrent exchanges, so 2-4 bodies (16-32 MiB) are live at
+  # any moment during the 40 s load phase; nothing is retained afterwards.
+  - id: "alloc-churn"
+    from: "timer:load?period=500&repeatCount=80"
+    concurrent: 4
+    steps:
+      - script:
+          language: "js"
+          source: |
+            camel.body = "x".repeat(8 * 1024 * 1024);
+      - delay: 1000
+      - log: "churn exchange released (8 MiB body)"

@@ -1,0 +1,33 @@
+# Allocator leak-vs-retention demo — runtime config.
+#
+# GOTCHA (from the memory-gauges live smoke): when Camel.toml contains a
+# [default] profile table, profile application keeps ONLY [default] — a
+# top-level [observability.prometheus] table is silently dropped. The
+# Prometheus exporter must be nested under the profile as below.
+
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+
+[default.observability.prometheus]
+enabled = true
+host = "127.0.0.1"
+port = 18120
+
+# Scenario 2 (http-team): persistent cache repository with ADR-0065 payload
+# offload. Index entries live in the redb file; payload bodies are offloaded
+# to blob files under payload_dir (payload = "disk"). Unchanged for scenario 1,
+# which does not touch the cache EIP. Paths are relative to this directory and
+# gitignored (see .gitignore); clear them between runs for a fresh reading.
+[default.cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+payload = "disk"
+payload_dir = "payloads"
+
+# The rhai filter step inspects 1-8 MiB bodies; the runtime default string
+# limit is 1 MiB (DoS protection, ADR-0011). Raise it for the demo so every
+# team host's payload passes through the script.
+[default.languages.rhai.limits]
+max-string-size = 16777216

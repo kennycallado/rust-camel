@@ -1,0 +1,5 @@
+camel
+# Scenario 2 runtime artifacts (redb cache file + offloaded payload blobs).
+# Produced by `camel run` inside the example directory; never commit them.
+cache.redb
+payloads/
