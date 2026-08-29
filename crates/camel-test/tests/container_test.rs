@@ -29,6 +29,16 @@ fn rt() -> Arc<dyn RuntimeObservability> {
     Arc::new(PanicRuntimeObservability)
 }
 
+// Noop (not Panic) double for tests that exercise consumer
+// cancellation/error paths: the container events-stream records
+// `e:container:events-stream` when the stream breaks (cancellation
+// surfaces as a stream error), so `metrics()` is legitimately invoked
+// there — the "never touches observability" panic contract no longer
+// holds on that path.
+fn consumer_rt() -> Arc<dyn RuntimeObservability> {
+    Arc::new(camel_component_api::test_support::NoopRuntimeObservability)
+}
+
 async fn connect_docker() -> Option<Docker> {
     let docker = Docker::connect_with_local_defaults().ok()?;
     if docker.ping().await.is_err() {
@@ -502,7 +512,7 @@ async fn test_container_consumer_cancellation() {
     let component = ContainerComponent::new();
     let ctx = NoOpComponentContext;
     let endpoint = component.create_endpoint("container:events", &ctx).unwrap();
-    let mut consumer = endpoint.create_consumer(rt()).unwrap();
+    let mut consumer = endpoint.create_consumer(consumer_rt()).unwrap();
 
     let (tx, _rx) = mpsc::channel(16);
     let cancel_token = CancellationToken::new();
