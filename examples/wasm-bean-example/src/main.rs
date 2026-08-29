@@ -39,10 +39,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_value_bytes: None,
     };
     let wasm_config = camel_component_wasm::WasmConfig::from_limits(&limits);
+    // Context is constructed after bean load; observability args pass
+    // None/false until then (camel-cli run.rs wires the real handle at
+    // its bean site, where the context already exists).
     let wasm_bean = WasmBean::new(
         &wasm_path,
         wasm_config,
-        Arc::new(camel_core::RegistryComponentContext::new(registry_arc)),
+        Arc::new(camel_core::RegistryComponentContext::new(
+            registry_arc,
+            None,
+            false,
+        )),
         bean_config,
     )
     .await?;

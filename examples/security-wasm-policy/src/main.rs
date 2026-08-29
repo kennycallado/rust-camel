@@ -116,10 +116,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // For production routes, prefer Camel.toml registration via
     // [security.policies.wasm.<name>] + YAML `security_policy: wasm: <name>`.
     // See crates/components/camel-component-wasm/README.md for details.
+    // Context is constructed after policy load; observability args pass
+    // None/false until then.
     let wasm_policy = WasmSecurityPolicy::new(
         &wasm_path,
         WasmConfig::default(),
-        Arc::new(camel_core::RegistryComponentContext::new(registry)),
+        Arc::new(camel_core::RegistryComponentContext::new(
+            registry, None, false,
+        )),
         HashMap::new(),
     )
     .await?;

@@ -234,6 +234,8 @@ pub async fn run(
                 wasm_config,
                 Arc::new(camel_core::RegistryComponentContext::new(
                     component_registry.clone(),
+                    Some(ctx.metrics()),
+                    camel_component_api::ComponentContext::component_metrics_enabled(&ctx),
                 )),
                 bean_cfg.config.clone(),
             )
@@ -489,6 +491,8 @@ pub async fn run(
         let wasm_bundle = camel_component_wasm::WasmBundle::new(
             Arc::new(camel_core::RegistryComponentContext::new(
                 ctx.registry_arc(),
+                Some(ctx.metrics()),
+                camel_component_api::ComponentContext::component_metrics_enabled(&ctx),
             )),
             base_dir,
         );

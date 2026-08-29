@@ -408,8 +408,10 @@ pub(crate) async fn build_security_compile_context_from_config(
     camel_config: &camel_config::config::CamelConfig,
     registry: Arc<std::sync::Mutex<camel_core::Registry>>,
 ) -> Result<SecurityCompileContext, CamelError> {
-    let wasm_ctx: Arc<dyn camel_component_api::ComponentContext> =
-        Arc::new(camel_core::RegistryComponentContext::new(registry));
+    // compile-time policy scan, no route runtime, no wired collector (rc-66he design decision)
+    let wasm_ctx: Arc<dyn camel_component_api::ComponentContext> = Arc::new(
+        camel_core::RegistryComponentContext::new(registry, None, false),
+    );
     let (providers, bindings) = resolve_authenticators(&camel_config.security).await?;
     let mut security_ctx = register_providers(providers, bindings);
 

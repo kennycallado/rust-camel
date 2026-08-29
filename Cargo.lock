@@ -13304,6 +13304,7 @@ version = "0.37.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-api",
  "camel-component-log",
  "camel-component-timer",
  "camel-component-wasm",
@@ -13319,6 +13320,7 @@ dependencies = [
  "bytes",
  "camel-api",
  "camel-builder",
+ "camel-component-api",
  "camel-component-log",
  "camel-component-timer",
  "camel-component-wasm",

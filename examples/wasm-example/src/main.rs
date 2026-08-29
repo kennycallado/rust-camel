@@ -40,7 +40,11 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
     // base_dir = fixtures/ → "echo.wasm" resolves to fixtures/echo.wasm
     ctx.register_component(WasmComponent::new(
-        Arc::new(camel_core::RegistryComponentContext::new(registry)),
+        Arc::new(camel_core::RegistryComponentContext::new(
+            registry,
+            Some(ctx.metrics()),
+            camel_component_api::ComponentContext::component_metrics_enabled(&ctx),
+        )),
         fixtures_dir,
     ));
 
