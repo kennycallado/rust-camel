@@ -91,7 +91,8 @@ impl Default for Registry {
 /// to `Registry::get`. The metrics collector is threaded in from the
 /// composition root (camel-cli) at construction; it is the ADR-0066
 /// late-bound handle, not a backend snapshot, so late registrations flow
-/// through [`ComponentContext::metrics`] without re-snapshotting. The
+/// through [`camel_component_api::ComponentContext::metrics`] without
+/// re-snapshotting. The
 /// components-lever snapshot gates only the component-operations family —
 /// the error family is never lever-gated. When no collector is wired
 /// (e.g. compile-time security scan, standalone examples without a
