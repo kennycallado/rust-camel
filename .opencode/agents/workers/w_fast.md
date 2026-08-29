@@ -2,7 +2,8 @@
 description: fast - fast and cheap implementation worker for simple tasks.
 mode: subagent
 temperature: 0.1
-model: opencode-go/muse-spark-1.2-contributor
+model: opencode-go/deepseek-v4-flash
+variant: high
 tools:
   write: true
   edit: true
