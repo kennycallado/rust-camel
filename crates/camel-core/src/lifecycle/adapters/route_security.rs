@@ -16,32 +16,13 @@ use camel_auth::{ProviderEntry, ProviderRegistry};
 
 use crate::lifecycle::application::route_definition::RouteDefinition;
 
-/// Map a route's `from` URI scheme to a [`TransportId`].
-///
-/// Server transports (`http`, `ws`, `grpc`, `mcp`, `wasm`) map to their
-/// canonical transport id. Non-server schemes (e.g. `timer`, `mock`) have no
-/// transport semantics and fall back to `Http`, matching the pre-kernel
-/// hardcoded default in `SecurityPolicyLayer`.
-pub(crate) fn transport_from_uri(uri: &str) -> TransportId {
-    let scheme = uri
-        .split([':', '?'])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match scheme.as_str() {
-        "http" | "https" => TransportId::Http,
-        "ws" | "wss" => TransportId::Ws,
-        "grpc" => TransportId::Grpc,
-        "mcp" => TransportId::Mcp,
-        "wasm" => TransportId::Wasm,
-        _ => TransportId::Http,
-    }
-}
-
-/// Consumer-backed server schemes that receive a [`RouteSecurityPlan`].
-/// Everything else (`timer:`, `direct:`, `mock:`, …) is not a server
-/// consumer and gets no plan.
-fn consumer_transport_from_uri(uri: &str) -> Option<TransportId> {
+/// Canonical server-scheme classifier — the ONE place a `from` URI scheme
+/// maps to a [`TransportId`] (rc-xmsf). Plan compilation and every
+/// transport-set question derive from this; adding a server scheme means
+/// editing this match only. The bind gate (`bind_key_from_uri` in
+/// `route_controller_trait.rs`) deliberately does NOT use this set — see
+/// its comment.
+fn scheme_transport(uri: &str) -> Option<TransportId> {
     let scheme = uri
         .split([':', '?'])
         .next()
@@ -55,6 +36,23 @@ fn consumer_transport_from_uri(uri: &str) -> Option<TransportId> {
         "wasm" => Some(TransportId::Wasm),
         _ => None,
     }
+}
+
+/// Map a route's `from` URI scheme to a [`TransportId`].
+///
+/// Server transports (`http`, `ws`, `grpc`, `mcp`, `wasm`) map to their
+/// canonical transport id. Non-server schemes (e.g. `timer`, `mock`) have no
+/// transport semantics and fall back to `Http`, matching the pre-kernel
+/// hardcoded default in `SecurityPolicyLayer`.
+pub(crate) fn transport_from_uri(uri: &str) -> TransportId {
+    scheme_transport(uri).unwrap_or(TransportId::Http)
+}
+
+/// Consumer-backed server schemes that receive a [`RouteSecurityPlan`].
+/// Everything else (`timer:`, `direct:`, `mock:`, …) is not a server
+/// consumer and gets no plan.
+fn consumer_transport_from_uri(uri: &str) -> Option<TransportId> {
+    scheme_transport(uri)
 }
 
 fn transport_name(transport: TransportId) -> &'static str {
