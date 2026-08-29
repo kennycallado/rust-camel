@@ -3090,6 +3090,17 @@ fn unset_env(key: &str) {
 #[cfg(test)]
 static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Poison-safe acquisition of [`CWD_LOCK`]. Test-only coordination mutex:
+/// recovery is safe because `CwdGuard` restores the cwd on unwind, so a
+/// panicking test never leaves a broken invariant behind the lock —
+/// `CwdGuard` is declared after the lock guard, so it unwinds first.
+#[cfg(test)]
+fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
+    CWD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// RAII restore of the process working directory. Declare it after reading the
 /// original cwd and before `set_current_dir` into a tempdir; dropping restores,
 /// including on panic unwind, so the tempdir's own `Drop` never runs while cwd

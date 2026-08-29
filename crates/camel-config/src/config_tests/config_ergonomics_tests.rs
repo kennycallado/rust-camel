@@ -25,7 +25,7 @@ fn include_base_dir_maps_bare_filename_to_current_dir() {
 /// Requires chdir into a temp fixture dir; serialized via CWD_LOCK.
 #[test]
 fn from_file_bare_relative_filename_resolves_includes() {
-    let _cwd_guard = CWD_LOCK.lock().unwrap();
+    let _cwd_guard = super::cwd_lock();
     let _env_guard = env_lock();
     unset_env("CAMEL_PROFILE");
 
@@ -44,7 +44,7 @@ fn from_file_bare_relative_filename_resolves_includes() {
 
 #[test]
 fn from_file_async_bare_relative_filename_resolves_includes() {
-    let _cwd_guard = CWD_LOCK.lock().unwrap();
+    let _cwd_guard = super::cwd_lock();
     let _env_guard = env_lock();
     unset_env("CAMEL_PROFILE");
 
