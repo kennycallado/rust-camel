@@ -59,7 +59,18 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
   public void subscribe(SubscribeRequest request, StreamObserver<JmsMessage> responseObserver) {
     JmsConsumer consumer = consumerFactory.get();
     String subId = request.getSubscriptionId();
-    activeConsumers.put(subId, consumer);
+    JmsConsumer existing = activeConsumers.putIfAbsent(subId, consumer);
+    if (existing != null) {
+      // Duplicate subscription_id: destroy the fresh consumer (no leak) and reject the stream
+      // before any cancel-handler registration or broker subscription — the live stream for this
+      // subscription_id must stay the sole owner of the map entry.
+      consumerFactory.destroy(consumer);
+      responseObserver.onError(
+          Status.ALREADY_EXISTS
+              .withDescription("subscription_id already active: " + subId)
+              .asException());
+      return;
+    }
 
     // Tracks whether the stream has been terminated (by client cancel, error,
     // or completion). compareAndSet ensures exactly ONE of the three paths
@@ -153,7 +164,10 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
       return false;
     }
     consumer.stop();
-    activeConsumers.remove(subId);
+    // Owner-checked remove: the entry may no longer be ours (e.g. @PreDestroy cleared the
+    // map and a new owner registered) — the stale teardown must not evict the new owner's
+    // consumer.
+    activeConsumers.remove(subId, consumer);
     consumerFactory.destroy(consumer);
     return true;
   }

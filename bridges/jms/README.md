@@ -19,6 +19,18 @@ A Quarkus-based gRPC bridge that exposes JMS messaging to the Rust runtime. The 
 
 A malformed, non-positive, or above-ceiling `JMS_MAX_BODY_BYTES` value aborts startup. The cap applies to both body types: `BytesMessage` bodies are checked against the pre-read body length, and `TextMessage` bodies are checked against the materialized text length (`TextMessage` exposes no pre-read size). The ceiling is 19 MiB. Operators must respect the ordering constraint: the cap stays at or below 19 MiB, and the Rust IPC decode limit is 20 MiB. The headroom absorbs IPC framing overhead (destination, headers, content type), so a message accepted by the bridge is always decodable on the Rust side.
 
+## Message-type forwarding policy (ADR-0067)
+
+The bridge forwards broker messages to a bytes-only proto. Only `BytesMessage` and `TextMessage` carry a body. The other JMS types arrive empty-bodied with headers preserved. See [ADR-0067](../../docs/adr/0067-jms-message-type-forwarding-policy.md).
+
+| JMS type | Body forwarded | Representation | Rationale |
+| -------- | -------------- | -------------- | --------- |
+| `BytesMessage` | yes | raw bytes | byte-intact |
+| `TextMessage` | yes | UTF-8 text with `ContentType` property as `content_type`, fallback `text/plain` | |
+| `ObjectMessage` | empty | none | never deserialized — gadget risk |
+| `MapMessage` | empty | none | no canonical wire representation chosen yet — see ADR |
+| `StreamMessage` | empty | none | sequential accessor reads would imply parsing the stream — never invoked |
+
 ## Broker URL Schemes
 
 The broker URL scheme selects plaintext or TLS connection setup:

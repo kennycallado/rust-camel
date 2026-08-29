@@ -219,6 +219,16 @@ public class JmsConsumer {
     b.setTimestamp(msg.getJMSTimestamp());
     b.setDestination(destination);
 
+    // Content-type fidelity (rc-kzti): an explicit "ContentType" property wins over the
+    // TextMessage default. Defensive read: well-behaved providers return null for an absent
+    // property; a misbehaving provider that throws (checked or unchecked) must not kill
+    // forwarding — same posture as the header-enumeration loop below.
+    String contentTypeProp = null;
+    try {
+      contentTypeProp = msg.getStringProperty("ContentType");
+    } catch (Exception ignored) {
+    }
+
     if (msg instanceof BytesMessage bm) {
       long len = bm.getBodyLength();
       long cap = resolveMaxBodyBytes();
@@ -259,7 +269,9 @@ public class JmsConsumer {
         throw new JMSException(diagnostic);
       }
       b.setBody(ByteString.copyFromUtf8(text != null ? text : ""));
-      b.setContentType("text/plain");
+      // Empty means "no real content type"; whitespace-only values are preserved as-is.
+      b.setContentType(
+          contentTypeProp != null && !contentTypeProp.isEmpty() ? contentTypeProp : "text/plain");
     }
 
     java.util.Enumeration<?> names = msg.getPropertyNames();

@@ -1,6 +1,58 @@
 {
-  "verdict": "APPROVE-WITH-FINDINGS",
-  "resolved": "1 minor (CONTEXT.md camel-cli+camel-http) fixed in 0547e52d186f0539298208b548fbb2340a81393b",
-  "reviewer": "r_glm",
-  "impl_hash": "0547e52d186f0539298208b548fbb2340a81393b"
+ "reviewer": "reviewers/r_glm",
+ "verdict": "APPROVE-WITH-FINDINGS",
+ "rounds": 1,
+ "impl_head": "13804077",
+ "findings": [
+  {
+   "sev": "important",
+   "finding": "bd rc-5e4l Rust-uniqueness-test criterion uncovered by plan",
+   "resolution": "closed by 9ea98b39 two_subscribes_mint_distinct_subscription_ids (124 lib green)"
+  },
+  {
+   "sev": "minor",
+   "finding": "CONTEXT-MAP 0065-after-0066 inversion pre-existing",
+   "resolution": "out of scope, untouched"
+  }
+ ],
+ "gates": "fmt 0, clippy x3 0, 9 lints 0, schema 0, build-ws 0, lib 8074/0 (jms 124/0 after follow-up), hex 33/33, audit 0, gradle full 0, validate strict True",
+ "release_note": "external application/xml TextMessage now surfaces Body::Bytes in Rust consumers (was Body::Text) - intended fidelity change per docs/src/components/jms.md:113",
+ "papal_blessing": {
+  "expert": "experts/e_opus",
+  "verdict": "BLESS-WITH-CONDITIONS",
+  "rounds": 1,
+  "conditions": [
+   {
+    "n": 1,
+    "sev": "blocking",
+    "cond": "rebase onto origin/main (23 stray commits)",
+    "resolution": "PREMISE-ERROR: origin/main is the unpushed remote; merge target is LOCAL main. Demonstrated merge-base(ad3cc970)..HEAD = 16 commits, 16 files, all jms/openspec/adr \u2014 zero parallel-session files. No rebase needed."
+   },
+   {
+    "n": 2,
+    "sev": "blocking",
+    "cond": "re-run gates after rebase",
+    "resolution": "no rebase occurred; gates green at 9ea98b39 and re-verified after C3-C5 (java 26/0, rust 124/0, fmt/clippy/lint-citations 0)"
+   },
+   {
+    "n": 3,
+    "sev": "should",
+    "cond": "widen catch JMSException->Exception",
+    "resolution": "applied + comment updated"
+   },
+   {
+    "n": 4,
+    "sev": "should",
+    "cond": "document Body::Text->Bytes flip",
+    "resolution": "spec scenario added (validate True) + docs/src/components/jms.md:113 paragraph"
+   },
+   {
+    "n": 5,
+    "sev": "nit",
+    "cond": "ADR Input 1 prose",
+    "resolution": "'No body accessor is invoked (property accessors still run...)'"
+   }
+  ],
+  "grill": "guard race-free (interleaving walked); distinct-id test genuine (scope-limit noted); flattening rejection sound"
+ }
 }

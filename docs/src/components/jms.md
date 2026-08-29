@@ -110,7 +110,7 @@ The bridge binary downloads on first use. It comes from a configured release URL
 
 `activemq:queue:orders` subscribes to a destination. The Consumer submits one Exchange per inbound JMS message. The Exchange body carries the message payload. With `mapJmsHeaders=true` (the default), the headers carry `JMSMessageID`, `JMSCorrelationID`, `JMSTimestamp`, `JMSDestination`, and `JMSPriority`.
 
-The body is typed from the JMS `content_type`. `text/*` becomes `Body::Text`. `application/json` becomes `Body::Json` when valid JSON. Binary content becomes `Body::Bytes`. The consumer pre-flights the bridge slot before starting. A missing or degraded bridge fails fast with `JMS bridge not available`.
+The body is typed from the JMS `content_type`. `text/*` becomes `Body::Text`. `application/json` becomes `Body::Json` when valid JSON. Binary content becomes `Body::Bytes`. A `TextMessage` carrying an explicit `ContentType` property (for example `application/xml` from a non-Camel producer, or from this component's own producer) now keeps that value, so such payloads surface as `Body::Bytes` instead of `Body::Text`. The consumer pre-flights the bridge slot before starting. A missing or degraded bridge fails fast with `JMS bridge not available`.
 
 The `concurrentConsumers` parameter spawns N parallel consumer tasks on the same destination. Each task subscribes independently and submits Exchanges into the shared route pipeline. `messageSelector` filters messages at the broker with a SQL-92 expression.
 

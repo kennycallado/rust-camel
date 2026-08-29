@@ -528,9 +528,16 @@ impl Consumer for JmsConsumer {
 mod tests {
     use super::*;
     use crate::BrokerType;
+    use crate::component::BridgeSlot;
     use crate::config::{JmsPoolConfig, jms_reconnect_default};
+    use crate::proto::bridge_service_server::{BridgeService, BridgeServiceServer};
+    use crate::proto::{HealthRequest, HealthResponse, SendRequest, SendResponse};
     use camel_component_api::test_support::PanicRuntimeObservability;
+    use futures::Stream;
+    use std::pin::Pin;
+    use std::sync::Mutex;
     use tokio::sync::mpsc;
+    use tonic::{Request, Response, Status};
 
     fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
         std::sync::Arc::new(PanicRuntimeObservability)
@@ -868,5 +875,164 @@ mod tests {
             3,
             "max_attempts=3 must yield exactly 3 invocations"
         );
+    }
+
+    // ── rc-5e4l: subscription_id uniqueness ──────────────────────────────────
+
+    /// In-process bridge mock that records every outgoing SubscribeRequest
+    /// subscription_id (mirrors `spawn_mock_bridge` in bridge_client_test.rs).
+    #[derive(Clone)]
+    struct RecordingBridge {
+        recorded: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl BridgeService for RecordingBridge {
+        async fn send(
+            &self,
+            _request: Request<SendRequest>,
+        ) -> Result<Response<SendResponse>, Status> {
+            Err(Status::unimplemented("send not exercised here"))
+        }
+
+        type SubscribeStream = Pin<Box<dyn Stream<Item = Result<JmsMessage, Status>> + Send>>;
+
+        async fn subscribe(
+            &self,
+            request: Request<SubscribeRequest>,
+        ) -> Result<Response<Self::SubscribeStream>, Status> {
+            self.recorded
+                .lock()
+                .expect("recorder mutex poisoned")
+                .push(request.into_inner().subscription_id);
+            // Empty stream: consumer_loop sees Ok(None) immediately and, with
+            // max_attempts=1, terminates after exactly one subscribe.
+            Ok(Response::new(Box::pin(futures::stream::empty::<
+                Result<JmsMessage, Status>,
+            >())))
+        }
+
+        async fn health(
+            &self,
+            _request: Request<HealthRequest>,
+        ) -> Result<Response<HealthResponse>, Status> {
+            Ok(Response::new(HealthResponse {
+                healthy: true,
+                broker_connected: true,
+                message: "ok".to_string(),
+            }))
+        }
+    }
+
+    async fn spawn_recording_bridge(recorded: Arc<Mutex<Vec<String>>>) -> std::io::Result<u16> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(BridgeServiceServer::new(RecordingBridge { recorded }))
+                .serve_with_incoming(incoming)
+                .await;
+        });
+
+        // Give the spawned accept loop a moment before the client dials.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        Ok(port)
+    }
+
+    /// Pins consumer.rs:213 — `subscription_id: Uuid::new_v4().to_string()` —
+    /// against a future refactor to a static/shared id. Two subscribe flows
+    /// through the same consumer path must mint DISTINCT, non-empty,
+    /// uuid-shaped ids (not a test of uuid randomness itself).
+    #[tokio::test]
+    async fn two_subscribes_mint_distinct_subscription_ids() {
+        let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let port = spawn_recording_bridge(Arc::clone(&recorded))
+            .await
+            .expect("spawn recording bridge");
+
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+            .expect("valid endpoint uri")
+            .connect()
+            .await
+            .expect("connect to mock bridge");
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::Generic,
+            ))
+            .unwrap(),
+        );
+        // Manually insert a Ready slot pointing at the in-process mock, the
+        // same shape `get_or_create_slot` produces after a bridge starts.
+        let (state_tx, state_rx) = tokio::sync::watch::channel(BridgeState::Ready { channel });
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::Generic,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
+        // max_attempts=1 → each consumer_loop invocation performs exactly one
+        // subscribe, then terminates when the empty stream ends.
+        let reconnect = NetworkRetryPolicy {
+            max_attempts: 1,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            ..NetworkRetryPolicy::default()
+        };
+
+        for idx in 0..2u32 {
+            let (route_tx, _route_rx) = mpsc::channel(16);
+            let ctx = ConsumerContext::new(
+                route_tx,
+                CancellationToken::new(),
+                format!("jms-distinct-id-{idx}"),
+            );
+            consumer_loop(
+                &pool,
+                "default",
+                &endpoint_cfg,
+                &reconnect,
+                CancellationToken::new(),
+                &ctx,
+                idx,
+                rt(),
+            )
+            .await;
+        }
+
+        let ids = recorded.lock().expect("recorder mutex poisoned");
+        assert_eq!(
+            ids.len(),
+            2,
+            "two subscribe flows must each mint exactly one subscription_id"
+        );
+        assert!(
+            !ids[0].is_empty() && !ids[1].is_empty(),
+            "subscription_ids must be non-empty"
+        );
+        assert_ne!(
+            ids[0], ids[1],
+            "two subscribes must never share a subscription_id"
+        );
+        for id in ids.iter() {
+            assert_eq!(id.len(), 36, "uuid-shaped subscription_id: {id}");
+            assert_eq!(
+                id.matches('-').count(),
+                4,
+                "uuid-shaped subscription_id: {id}"
+            );
+        }
     }
 }

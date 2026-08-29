@@ -8,7 +8,9 @@
 //! limit, so intact delivery is only possible when the bridge decode limit is
 //! applied.
 
+use std::collections::HashSet;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::Stream;
@@ -31,6 +33,7 @@ fn near_cap_body() -> Vec<u8> {
 #[derive(Clone)]
 struct MockJmsBridge {
     subscribe_message: Option<JmsMessage>,
+    active_ids: Arc<Mutex<HashSet<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -43,8 +46,17 @@ impl BridgeService for MockJmsBridge {
 
     async fn subscribe(
         &self,
-        _request: Request<SubscribeRequest>,
+        request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
+        let subscription_id = request.into_inner().subscription_id;
+        if !self
+            .active_ids
+            .lock()
+            .expect("active_ids mutex poisoned")
+            .insert(subscription_id)
+        {
+            return Err(Status::already_exists("subscription_id already active"));
+        }
         let msg = self
             .subscribe_message
             .clone()
@@ -75,6 +87,7 @@ async fn spawn_mock_bridge(message: JmsMessage) -> std::io::Result<u16> {
         let _ = tonic::transport::Server::builder()
             .add_service(BridgeServiceServer::new(MockJmsBridge {
                 subscribe_message: Some(message),
+                active_ids: Arc::new(Mutex::new(HashSet::new())),
             }))
             .serve_with_incoming(incoming)
             .await;
@@ -130,6 +143,80 @@ async fn near_cap_body_decodes_end_to_end() {
         near_cap_body(),
         "body must arrive byte-intact below the 16 MiB cap"
     );
+}
+
+#[tokio::test]
+async fn content_type_round_trips_through_stream() {
+    let message = JmsMessage {
+        content_type: "application/xml".to_string(),
+        body: b"<a/>".to_vec(),
+        ..Default::default()
+    };
+
+    let port = spawn_mock_bridge(message).await.expect("spawn mock bridge");
+
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("valid endpoint uri")
+        .connect()
+        .await
+        .expect("connect to mock bridge");
+    let mut client = bridge_service_client(channel);
+
+    let resp = client
+        .subscribe(SubscribeRequest {
+            destination: "queue.ct.test".to_string(),
+            subscription_id: "ct-round-trip".to_string(),
+        })
+        .await
+        .expect("subscribe accepted");
+
+    let mut stream = resp.into_inner();
+    let delivered = stream
+        .message()
+        .await
+        .expect("jms message decodes")
+        .expect("stream yields one jms message");
+    assert_eq!(delivered.content_type, "application/xml");
+    assert_eq!(delivered.body, b"<a/>", "body must arrive byte-intact");
+}
+
+#[tokio::test]
+async fn duplicate_subscription_id_surfaces_already_exists() {
+    let message = JmsMessage {
+        content_type: "application/octet-stream".to_string(),
+        body: b"dup".to_vec(),
+        ..Default::default()
+    };
+
+    let port = spawn_mock_bridge(message).await.expect("spawn mock bridge");
+
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("valid endpoint uri")
+        .connect()
+        .await
+        .expect("connect to mock bridge");
+    let mut first = bridge_service_client(channel.clone());
+    let mut second = bridge_service_client(channel);
+
+    first
+        .subscribe(SubscribeRequest {
+            destination: "queue.dup.test".to_string(),
+            subscription_id: "dup-test".to_string(),
+        })
+        .await
+        .expect("first subscribe accepted");
+
+    let err = match second
+        .subscribe(SubscribeRequest {
+            destination: "queue.dup.test".to_string(),
+            subscription_id: "dup-test".to_string(),
+        })
+        .await
+    {
+        Ok(_) => panic!("duplicate subscription_id must be rejected"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), tonic::Code::AlreadyExists);
 }
 
 #[test]
