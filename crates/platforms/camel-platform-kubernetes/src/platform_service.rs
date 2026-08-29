@@ -47,6 +47,9 @@ impl KubernetesPlatformConfig {
     /// `renew_deadline` must be less than `lease_duration` to guarantee
     /// the holder can renew before the lease expires. `retry_period`
     /// must be less than `renew_deadline` to allow at least one retry.
+    /// `lease_duration - renew_deadline` must be at least `retry_period`
+    /// to leave one full retry window of renewal slack for clock skew
+    /// and renew jitter.
     pub fn validate(&self) -> Result<(), PlatformError> {
         if self.renew_deadline >= self.lease_duration {
             return Err(PlatformError::Config(format!(
@@ -58,6 +61,12 @@ impl KubernetesPlatformConfig {
             return Err(PlatformError::Config(format!(
                 "retry_period ({:?}) must be less than renew_deadline ({:?})",
                 self.retry_period, self.renew_deadline
+            )));
+        }
+        if self.lease_duration - self.renew_deadline < self.retry_period {
+            return Err(PlatformError::Config(format!(
+                "lease_duration ({:?}) minus renew_deadline ({:?}) must be >= retry_period ({:?}) to leave one retry window of renewal slack",
+                self.lease_duration, self.renew_deadline, self.retry_period
             )));
         }
         if !(0.0..=1.0).contains(&self.jitter_factor) {
@@ -935,6 +944,47 @@ mod tests {
         };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("jitter_factor"));
+    }
+
+    #[test]
+    fn validate_defaults_pass() {
+        let config = KubernetesPlatformConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_insufficient_slack_rejected() {
+        let config = KubernetesPlatformConfig {
+            lease_duration: Duration::from_secs(12),
+            renew_deadline: Duration::from_secs(11),
+            retry_period: Duration::from_secs(2),
+            ..KubernetesPlatformConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("lease_duration"),
+            "missing lease_duration: {message}"
+        );
+        assert!(
+            message.contains("renew_deadline"),
+            "missing renew_deadline: {message}"
+        );
+        assert!(
+            message.contains("retry_period"),
+            "missing retry_period: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_slack_equal_to_retry_period_passes() {
+        let config = KubernetesPlatformConfig {
+            lease_duration: Duration::from_secs(12),
+            renew_deadline: Duration::from_secs(10),
+            retry_period: Duration::from_secs(2),
+            ..KubernetesPlatformConfig::default()
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]

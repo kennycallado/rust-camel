@@ -55,5 +55,10 @@ pub(crate) enum DelegateState {
         /// within `drain_timeout`. Aborted on timeout to prevent detached
         /// tasks from sending stale exchanges.
         bridge_handle: Option<JoinHandle<()>>,
+        /// Leader epoch this delegate was reconciled at (the value the
+        /// epoch-stamping bridge carries). A `StartedLeading` delivery whose
+        /// published epoch equals this stamp is an idempotent no-op; a
+        /// differing epoch forces a full re-reconciliation. See ADR-0035.
+        epoch: u64,
     },
 }

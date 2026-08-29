@@ -48,6 +48,8 @@ fn master_reconnect_default() -> NetworkRetryPolicy {
 #[derive(Debug, Clone)]
 pub struct MasterComponentConfig {
     /// Timeout in milliseconds for draining a delegate consumer on leadership loss.
+    /// The drain runs after leadership is lost and may overlap a successor's
+    /// lease; see the README "How It Works" section.
     pub drain_timeout_ms: u64,
     /// Structured reconnection policy, replacing the flat `delegate_retry_max_attempts`
     /// field for new configs. Default: unlimited (`max_attempts=0`).

@@ -303,6 +303,10 @@ fn producer_passthrough_bubbles_delegate_errors() {
 struct FakeLeadershipService {
     tx: Mutex<Option<watch::Sender<Option<LeadershipEvent>>>>,
     is_leader: Arc<AtomicBool>,
+    /// Leader epoch published to the supervision loop (shared through
+    /// `LeadershipHandle::new`). Bumped from tests to simulate a coalesced
+    /// takeover flap while the delegate stays Active.
+    leader_epoch: Arc<AtomicU64>,
     initial: Option<LeadershipEvent>,
 }
 
@@ -312,8 +316,14 @@ impl FakeLeadershipService {
         Self {
             tx: Mutex::new(None),
             is_leader: Arc::new(AtomicBool::new(starts_as_leader)),
+            leader_epoch: Arc::new(AtomicU64::new(1)),
             initial,
         }
+    }
+
+    /// Shared handle to the epoch counter for bump-from-test access.
+    fn leader_epoch(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.leader_epoch)
     }
 
     async fn emit(&self, event: LeadershipEvent) {
@@ -349,7 +359,7 @@ impl LeadershipService for FakeLeadershipService {
         Ok(LeadershipHandle::new(
             rx,
             Arc::clone(&self.is_leader),
-            Arc::new(AtomicU64::new(1)),
+            Arc::clone(&self.leader_epoch),
             cancel,
             term_rx,
         ))
@@ -652,6 +662,11 @@ struct ErrorDelegateComponent {
     endpoint_error: Option<CamelError>,
     consumer_error_after: usize, // fail start() this many times, then succeed
     consumer_error: Option<CamelError>,
+    /// One-shot exit signal handed to the FIRST created consumer (create
+    /// ordinal 1) only: the consumer exits on its own when the signal
+    /// fires, so the supervision tick observes a finished handle without
+    /// any teardown. `None` in every test that does not need the knob.
+    first_exit_signal: Arc<Mutex<Option<watch::Receiver<()>>>>,
 }
 
 impl Component for ErrorDelegateComponent {
@@ -672,6 +687,7 @@ impl Component for ErrorDelegateComponent {
             create_consumer_calls: Arc::clone(&self.create_consumer_calls),
             consumer_error_after: self.consumer_error_after,
             consumer_error: self.consumer_error.clone(),
+            first_exit_signal: Arc::clone(&self.first_exit_signal),
         }))
     }
 }
@@ -680,6 +696,7 @@ struct ErrorDelegateEndpoint {
     create_consumer_calls: Arc<AtomicUsize>,
     consumer_error_after: usize,
     consumer_error: Option<CamelError>,
+    first_exit_signal: Arc<Mutex<Option<watch::Receiver<()>>>>,
 }
 
 impl Endpoint for ErrorDelegateEndpoint {
@@ -698,7 +715,18 @@ impl Endpoint for ErrorDelegateEndpoint {
                 .clone()
                 .unwrap_or_else(|| CamelError::ProcessorError("default error".to_string())));
         }
-        Ok(Box::new(SuccessDelegateConsumer))
+        // The one-shot exit signal is scoped to create ordinal 1: the
+        // first consumer self-exits on the signal, later consumers run
+        // until cancelled.
+        let exit_signal = if call_idx == 1 {
+            self.first_exit_signal
+                .lock()
+                .expect("mutex poisoned: delegate exit signal")
+                .take()
+        } else {
+            None
+        };
+        Ok(Box::new(SuccessDelegateConsumer { exit_signal }))
     }
 
     fn create_producer(
@@ -711,13 +739,23 @@ impl Endpoint for ErrorDelegateEndpoint {
 }
 
 /// A delegate consumer that starts, sends one message, then cancels.
-struct SuccessDelegateConsumer;
+/// With a one-shot `exit_signal` (dead-delegate test), it exits on its
+/// own when the signal fires instead — the task handle finishes without
+/// any teardown, so the supervision tick observes a dead Active delegate.
+struct SuccessDelegateConsumer {
+    exit_signal: Option<watch::Receiver<()>>,
+}
 
 #[async_trait]
 impl Consumer for SuccessDelegateConsumer {
     async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
         context.send(Exchange::new(Message::new("ok"))).await?;
-        context.cancelled().await;
+        match self.exit_signal.as_mut() {
+            Some(exit) => {
+                let _ = exit.changed().await;
+            }
+            None => context.cancelled().await,
+        }
         Ok(())
     }
 
@@ -934,6 +972,17 @@ fn expected_lifecycle_labels(event: &str, reason: &str) -> Vec<(String, String)>
     ]
 }
 
+/// Count of lifecycle observations whose labels match `event` with the
+/// default reason (`"none"`) for the lock/route pair used by the metrics
+/// tests. `create_error` observations never match (different reason).
+fn lifecycle_events(metrics: &RecordingMetricsCollector, event: &str) -> usize {
+    metrics
+        .counters_named("master_delegate_lifecycle_total")
+        .iter()
+        .filter(|(_, labels)| *labels == expected_lifecycle_labels(event, "none"))
+        .count()
+}
+
 /// Expected complete label set of a `master_leadership_transitions_total`
 /// observation for the lock/route pair used by the metrics tests.
 fn expected_transition_labels(event: &str) -> Vec<(String, String)> {
@@ -974,6 +1023,7 @@ fn build_error_delegate_master_with_metrics(
             endpoint_error,
             consumer_error_after,
             consumer_error,
+            first_exit_signal: Arc::new(Mutex::new(None)),
         }),
         metrics,
         platform_service,
@@ -1196,8 +1246,11 @@ async fn create_error_endpoint_transient() {
         events: Mutex::new(Vec::new()),
     });
 
-    // max_attempts = 1: the initial-snapshot attempt is not budget-gated,
-    // should_retry(0) is true, so exactly one retry follows it.
+    // max_attempts = 1: the initial snapshot consults should_retry(0)
+    // (allowed) and counts itself, so exactly one create is attempted; the
+    // next tick consults should_retry(1) → refused, and budget exhaustion
+    // stops the consumer. (The previous two-observation assertion ratified
+    // the N+1 snapshot quirk; in-arm counting fixes it.)
     let mut master = build_error_delegate_master_with_metrics(
         platform_service,
         Arc::clone(&create_endpoint_calls),
@@ -1222,19 +1275,15 @@ async fn create_error_endpoint_transient() {
     );
 
     let lifecycle = metrics.counters_named("master_delegate_lifecycle_total");
-    assert_eq!(lifecycle.len(), 2);
+    assert_eq!(lifecycle.len(), 1);
     assert_eq!(
         lifecycle[0],
         (1.0, expected_lifecycle_labels("create_error", "transient"))
     );
     assert_eq!(
-        lifecycle[1],
-        (1.0, expected_lifecycle_labels("create_error", "transient"))
-    );
-    assert_eq!(
         create_endpoint_calls.load(Ordering::SeqCst),
-        2,
-        "initial snapshot attempt plus one budget-gated retry"
+        1,
+        "exact budget: one counted attempt at max_attempts = 1"
     );
 
     cancel.cancel();
@@ -1475,6 +1524,343 @@ async fn retry_accumulation_one_transition_n_create_errors() {
     master.stop().await.unwrap();
 }
 
+// ── Exact acquisition budget tests (camel-master-reconcile-hygiene
+// Task 1.2) ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn term_bump_at_exhausted_budget_reacquires_fresh() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    // max_attempts = 1 with a healthy delegate: the initial snapshot spends
+    // the whole budget. A guard-detected term bump on the live delegate is a
+    // new acquisition epoch: it must reset the budget and recreate — never
+    // leave a zombie delegate stamped at the old epoch.
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        0,
+        None,
+        1,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Baseline barrier: the first exchange (stamped epoch 1) plus the
+    // started lifecycle observation confirm the initial acquisition landed.
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    let first_epoch = first
+        .exchange
+        .properties
+        .get(crate::leadership::LEADER_EPOCH_PROPERTY)
+        .and_then(|v| v.as_str());
+    assert_eq!(first_epoch, Some("1"), "baseline bridge stamps epoch 1");
+    assert!(
+        await_counter_observations(&metrics, "master_delegate_lifecycle_total", 1).await,
+        "started observation should be recorded within 5s"
+    );
+
+    // Delivery-driven term bump on a live delegate with an exhausted budget.
+    leadership.leader_epoch().store(2, Ordering::Release);
+    leadership.emit(LeadershipEvent::StartedLeading).await;
+
+    let recreated = timeout(Duration::from_secs(5), async {
+        loop {
+            if create_consumer_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(
+        recreated,
+        "term bump must reset the exhausted budget and recreate the delegate within 5s"
+    );
+    assert!(
+        !master
+            .leadership_task
+            .as_ref()
+            .is_some_and(|h| h.is_finished()),
+        "a fresh acquisition epoch must keep the leadership task alive"
+    );
+
+    // The next envelope comes from the recreated delegate, restamped at the
+    // bumped epoch.
+    let second = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second_epoch = second
+        .exchange
+        .properties
+        .get(crate::leadership::LEADER_EPOCH_PROPERTY)
+        .expect("recreated bridge must stamp x-camel-leader-epoch");
+    assert_eq!(
+        second_epoch,
+        &serde_json::Value::String("2".to_string()),
+        "recreated bridge must carry the bumped epoch 2"
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn persistent_transient_at_max_two_attempts_exactly_twice() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    // max_attempts = 2 with persistent transient endpoint failure: exactly
+    // two counted attempts, then the budget refuses and the consumer stops.
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        Some(transient_io_error()),
+        0,
+        None,
+        2,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    assert!(
+        await_leadership_task_exit(&master).await,
+        "budget-exhaustion shutdown should finish the leadership task within 5s"
+    );
+
+    let lifecycle = metrics.counters_named("master_delegate_lifecycle_total");
+    assert_eq!(lifecycle.len(), 2, "exactly two create_error observations");
+    assert_eq!(
+        lifecycle[0],
+        (1.0, expected_lifecycle_labels("create_error", "transient"))
+    );
+    assert_eq!(
+        lifecycle[1],
+        (1.0, expected_lifecycle_labels("create_error", "transient"))
+    );
+    assert_eq!(
+        create_endpoint_calls.load(Ordering::SeqCst),
+        2,
+        "exact budget: two counted attempts at max_attempts = 2"
+    );
+
+    cancel.cancel();
+    let _ = master.stop().await;
+}
+
+#[tokio::test]
+async fn exhausted_budget_refuses_duplicate_delivery() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    // max_attempts = 1, transient endpoint error. The duplicate
+    // StartedLeading delivered right after start (delegate Inactive after
+    // the failed create) counts against the same acquisition epoch but
+    // performs no create.
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        Some(transient_io_error()),
+        0,
+        None,
+        1,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    leadership.emit(LeadershipEvent::StartedLeading).await;
+
+    assert!(
+        await_leadership_task_exit(&master).await,
+        "budget-exhaustion shutdown should finish the leadership task within 5s"
+    );
+
+    let lifecycle = metrics.counters_named("master_delegate_lifecycle_total");
+    assert_eq!(lifecycle.len(), 1);
+    assert_eq!(
+        lifecycle[0],
+        (1.0, expected_lifecycle_labels("create_error", "transient"))
+    );
+    assert_eq!(
+        create_endpoint_calls.load(Ordering::SeqCst),
+        1,
+        "the duplicate delivery counted but performed no create"
+    );
+
+    cancel.cancel();
+    let _ = master.stop().await;
+}
+
+#[tokio::test]
+async fn disabled_policy_creates_nothing() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    // Constructed directly (not via the metrics builder): a disabled policy
+    // is a deliberate non-default configuration. The in-arm consult refuses
+    // every delivery — zero creates, consumer stops at the first tick.
+    let mut master = MasterConsumer::new(
+        METRICS_TEST_LOCK.to_string(),
+        "errdelegate:delegate".to_string(),
+        Arc::new(ErrorDelegateComponent {
+            create_endpoint_calls: Arc::clone(&create_endpoint_calls),
+            create_consumer_calls: Arc::clone(&create_consumer_calls),
+            endpoint_error: None,
+            consumer_error_after: 0,
+            consumer_error: None,
+            first_exit_signal: Arc::new(Mutex::new(None)),
+        }),
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+        platform_service,
+        Duration::from_millis(500),
+        NetworkRetryPolicy::disabled(),
+        Arc::new(PanicRuntimeObservability) as Arc<dyn camel_component_api::RuntimeObservability>,
+    );
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    assert!(
+        await_leadership_task_exit(&master).await,
+        "a disabled policy must stop the consumer at the first retry tick"
+    );
+
+    assert_eq!(
+        create_endpoint_calls.load(Ordering::SeqCst),
+        0,
+        "a disabled policy must perform no endpoint create"
+    );
+    assert_eq!(
+        create_consumer_calls.load(Ordering::SeqCst),
+        0,
+        "a disabled policy must perform no consumer create"
+    );
+    assert!(
+        metrics
+            .counters_named("master_delegate_lifecycle_total")
+            .is_empty(),
+        "a disabled policy must emit no lifecycle observations"
+    );
+
+    cancel.cancel();
+    let _ = master.stop().await;
+}
+
+#[tokio::test]
+async fn unlimited_default_keeps_retrying() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    // max_attempts = 0 (default): unlimited — persistent transient failure
+    // must never exhaust the budget or stop the consumer.
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        Some(transient_io_error()),
+        0,
+        None,
+        0,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    assert!(
+        await_counter_observations(&metrics, "master_delegate_lifecycle_total", 3).await,
+        "an unlimited policy should keep recording create_error observations"
+    );
+
+    let create_errors = metrics
+        .counters_named("master_delegate_lifecycle_total")
+        .iter()
+        .filter(|(_, labels)| *labels == expected_lifecycle_labels("create_error", "transient"))
+        .count();
+    assert!(
+        create_errors >= 3,
+        "expected at least 3 create_error observations"
+    );
+
+    sleep(Duration::from_secs(2)).await;
+    assert!(
+        !master
+            .leadership_task
+            .as_ref()
+            .is_some_and(|h| h.is_finished()),
+        "max_attempts = 0 must never exhaust the budget"
+    );
+
+    cancel.cancel();
+    let _ = master.stop().await;
+}
+
 // ── MST-001 leadership transition edge tests (master-metrics-wiring
 // Task 1.3) ──────────────────────────────────────────────────────────
 
@@ -1653,24 +2039,36 @@ async fn repeated_identical_delivery_does_not_reemit() {
         "initial acquisition should be recorded within 5s"
     );
 
-    // Phase A: deliver StartedLeading again (true → true, no edge). The
-    // duplicate still re-runs reconcile_event, which recreates the
-    // delegate — the create_consumer_calls bump proves the loop
-    // processed the delivery before the assertion below.
+    // Phase A: deliver StartedLeading again (true → true, no edge). An
+    // identical delivery while Active at the published epoch must be an
+    // epoch-idempotent no-op: the delegate is neither stopped nor
+    // recreated. No counter exists for a no-op delivery, so settle 500 ms
+    // (matches the file's sleep-settle precedent) and assert stability.
+    let baseline_started = lifecycle_events(&metrics, "started");
+    let baseline_stopped = lifecycle_events(&metrics, "stopped");
+    assert_eq!(
+        baseline_started, 1,
+        "baseline delegate should have started exactly once"
+    );
+    assert_eq!(baseline_stopped, 0, "baseline should have no stops");
+
     leadership.emit(LeadershipEvent::StartedLeading).await;
-    let processed = timeout(Duration::from_secs(5), async {
-        loop {
-            if create_consumer_calls.load(Ordering::SeqCst) >= 2 {
-                break;
-            }
-            sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .is_ok();
-    assert!(
-        processed,
-        "duplicate StartedLeading should be processed within 5s"
+    sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(
+        create_consumer_calls.load(Ordering::SeqCst),
+        1,
+        "duplicate StartedLeading must not recreate the delegate"
+    );
+    assert_eq!(
+        lifecycle_events(&metrics, "started"),
+        baseline_started,
+        "duplicate StartedLeading must not emit a started lifecycle observation"
+    );
+    assert_eq!(
+        lifecycle_events(&metrics, "stopped"),
+        baseline_stopped,
+        "duplicate StartedLeading must not emit a stopped lifecycle observation"
     );
 
     let acquired_count = metrics
@@ -1684,11 +2082,41 @@ async fn repeated_identical_delivery_does_not_reemit() {
     );
 
     // Establish the leading → not-leading edge so Phase B starts from
-    // not-leading with exactly one lost transition recorded.
+    // not-leading with exactly one lost transition recorded. The await is
+    // the positive delivery-processing barrier for everything above: watch
+    // deliveries are handled in order, so a late-processed duplicate with
+    // a broken guard would bump create_consumer_calls before this edge is
+    // recorded — caught by the asserts below.
     leadership.emit(LeadershipEvent::StoppedLeading).await;
     assert!(
         await_counter_observations(&metrics, "master_leadership_transitions_total", 2).await,
         "lost transition should be recorded within 5s of the edge"
+    );
+    // The lost transition is emitted before reconcile_event stops the
+    // delegate, so await the stopped observation before asserting deltas.
+    assert!(
+        await_counter_observations(
+            &metrics,
+            "master_delegate_lifecycle_total",
+            baseline_started + baseline_stopped + 1
+        )
+        .await,
+        "delegate stop at the lost edge should be recorded within 5s"
+    );
+    assert_eq!(
+        create_consumer_calls.load(Ordering::SeqCst),
+        1,
+        "no delivery up to the lost edge may recreate the delegate"
+    );
+    assert_eq!(
+        lifecycle_events(&metrics, "started"),
+        baseline_started,
+        "duplicate StartedLeading must not emit a started lifecycle observation"
+    );
+    assert_eq!(
+        lifecycle_events(&metrics, "stopped"),
+        baseline_stopped + 1,
+        "the lost edge must stop the delegate exactly once"
     );
 
     // Phase B: StoppedLeading twice in a row (false → false, no edge).
@@ -1701,15 +2129,387 @@ async fn repeated_identical_delivery_does_not_reemit() {
     leadership.emit(LeadershipEvent::StoppedLeading).await;
     sleep(Duration::from_millis(500)).await;
 
-    let transitions = metrics.counters_named("master_leadership_transitions_total");
-    assert_eq!(transitions.len(), 2);
-    let lost_count = transitions
+    let lost_count = metrics
+        .counters_named("master_leadership_transitions_total")
         .iter()
         .filter(|(_, labels)| *labels == expected_transition_labels("lost"))
         .count();
     assert_eq!(
         lost_count, 1,
         "false→false deliveries must not re-emit the lost transition"
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn term_bump_while_active_reconciles_once() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Baseline: Active delegate at epoch 1 with one acquisition transition
+    // and one started lifecycle observation.
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    assert!(
+        await_counter_observations(&metrics, "master_leadership_transitions_total", 1).await,
+        "initial acquisition should be recorded within 5s"
+    );
+    let baseline_started = lifecycle_events(&metrics, "started");
+    let baseline_stopped = lifecycle_events(&metrics, "stopped");
+    assert_eq!(
+        baseline_started, 1,
+        "baseline delegate should have started exactly once"
+    );
+    assert_eq!(baseline_stopped, 0, "baseline should have no stops");
+    assert_eq!(
+        create_consumer_calls.load(Ordering::SeqCst),
+        1,
+        "baseline delegate should be created exactly once"
+    );
+
+    // Coalesced flap across a takeover: the published epoch advances while
+    // the delegate stays Active. The duplicate StartedLeading delivery
+    // must drain and recreate the delegate exactly once, restamping the
+    // epoch bridge at the new epoch.
+    leadership.leader_epoch().store(2, Ordering::Release);
+    leadership.emit(LeadershipEvent::StartedLeading).await;
+    let reconciled = timeout(Duration::from_secs(5), async {
+        loop {
+            if create_consumer_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(
+        reconciled,
+        "term bump should force re-reconciliation within 5s"
+    );
+    // The recreation completes only when its "started" observation is
+    // recorded (the create counter bumps slightly before the lifecycle
+    // emit inside reconcile_event).
+    assert!(
+        await_counter_observations(
+            &metrics,
+            "master_delegate_lifecycle_total",
+            baseline_started + baseline_stopped + 2
+        )
+        .await,
+        "stopped+started lifecycle pair should be recorded within 5s"
+    );
+
+    // Exactly one stopped+started lifecycle pair added by the bump.
+    assert_eq!(
+        create_consumer_calls.load(Ordering::SeqCst),
+        2,
+        "term bump must recreate the delegate exactly once"
+    );
+    assert_eq!(
+        lifecycle_events(&metrics, "started") - baseline_started,
+        1,
+        "term bump must emit exactly one started lifecycle observation"
+    );
+    assert_eq!(
+        lifecycle_events(&metrics, "stopped") - baseline_stopped,
+        1,
+        "term bump must emit exactly one stopped lifecycle observation"
+    );
+
+    // The next envelope comes from the recreated delegate through the
+    // bridge restamped at the bumped epoch.
+    let second = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.exchange.input.body.as_text(), Some("ok"));
+    let epoch_prop = second
+        .exchange
+        .properties
+        .get(crate::leadership::LEADER_EPOCH_PROPERTY)
+        .expect("recreated bridge must stamp x-camel-leader-epoch");
+    assert_eq!(
+        epoch_prop,
+        &serde_json::Value::String("2".to_string()),
+        "recreated bridge must carry the bumped epoch 2"
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+// ── Tick-driven stale-stamp detection tests (camel-master-reconcile-
+// hygiene Task 1.3) ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn tick_renews_epoch_advance_restamps_without_delivery() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Baseline: Active delegate at epoch 1, one create, one acquisition
+    // transition, one started lifecycle observation.
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    let first_epoch = first
+        .exchange
+        .properties
+        .get(crate::leadership::LEADER_EPOCH_PROPERTY)
+        .and_then(|v| v.as_str());
+    assert_eq!(first_epoch, Some("1"), "baseline bridge stamps epoch 1");
+    assert!(
+        await_counter_observations(&metrics, "master_leadership_transitions_total", 1).await,
+        "initial acquisition should be recorded within 5s"
+    );
+    let baseline_started = lifecycle_events(&metrics, "started");
+    let baseline_stopped = lifecycle_events(&metrics, "stopped");
+    assert_eq!(
+        baseline_started, 1,
+        "baseline delegate should have started exactly once"
+    );
+    assert_eq!(baseline_stopped, 0, "baseline should have no stops");
+    assert_eq!(
+        create_consumer_calls.load(Ordering::SeqCst),
+        1,
+        "baseline delegate should be created exactly once"
+    );
+
+    // Renewal-path epoch advance with NO watch delivery (clamp adoption
+    // of an out-of-band lease term): only the published epoch moves.
+    // The retry tick must detect the stale stamp and re-reconcile.
+    leadership.leader_epoch().store(2, Ordering::Release);
+
+    let reconciled = timeout(Duration::from_secs(5), async {
+        loop {
+            if create_consumer_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(
+        reconciled,
+        "stale-stamp tick must dispatch the reconciliation within 5s"
+    );
+    // The recreation completes only when its stopped+started pair is
+    // recorded (the create counter bumps before the lifecycle emits).
+    assert!(
+        await_counter_observations(
+            &metrics,
+            "master_delegate_lifecycle_total",
+            baseline_started + baseline_stopped + 2
+        )
+        .await,
+        "stopped+started lifecycle pair should be recorded within 5s"
+    );
+
+    // Exactly one stopped+started pair added by the tick dispatch.
+    assert_eq!(
+        create_consumer_calls.load(Ordering::SeqCst),
+        2,
+        "stale-stamp tick must recreate the delegate exactly once"
+    );
+    assert_eq!(
+        lifecycle_events(&metrics, "started") - baseline_started,
+        1,
+        "tick dispatch must emit exactly one started lifecycle observation"
+    );
+    assert_eq!(
+        lifecycle_events(&metrics, "stopped") - baseline_stopped,
+        1,
+        "tick dispatch must emit exactly one stopped lifecycle observation"
+    );
+
+    // The next envelope comes from the recreated delegate through the
+    // bridge restamped at the advanced epoch.
+    let second = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let epoch_prop = second
+        .exchange
+        .properties
+        .get(crate::leadership::LEADER_EPOCH_PROPERTY)
+        .expect("recreated bridge must stamp x-camel-leader-epoch");
+    assert_eq!(
+        epoch_prop,
+        &serde_json::Value::String("2".to_string()),
+        "recreated bridge must carry the advanced epoch 2"
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn dead_delegate_stale_stamp_resets_budget() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    // One-shot exit signal: the FIRST consumer self-exits when the signal
+    // fires; delegate #2 keeps running until cancelled.
+    let (exit_tx, exit_rx) = tokio::sync::watch::channel(());
+
+    // max_attempts = 1 with a healthy delegate: the initial snapshot
+    // spends the whole budget. Constructed directly (not via the metrics
+    // builder) because the exit-signal knob must reach the component.
+    let mut master = MasterConsumer::new(
+        METRICS_TEST_LOCK.to_string(),
+        "errdelegate:delegate".to_string(),
+        Arc::new(ErrorDelegateComponent {
+            create_endpoint_calls: Arc::clone(&create_endpoint_calls),
+            create_consumer_calls: Arc::clone(&create_consumer_calls),
+            endpoint_error: None,
+            consumer_error_after: 0,
+            consumer_error: None,
+            first_exit_signal: Arc::new(Mutex::new(Some(exit_rx))),
+        }),
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+        platform_service,
+        Duration::from_millis(500),
+        NetworkRetryPolicy {
+            max_attempts: 1,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            multiplier: 1.0,
+            ..NetworkRetryPolicy::default()
+        },
+        Arc::new(PanicRuntimeObservability) as Arc<dyn camel_component_api::RuntimeObservability>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Baseline: the single healthy create exhausts the budget at count 1.
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    let first_epoch = first
+        .exchange
+        .properties
+        .get(crate::leadership::LEADER_EPOCH_PROPERTY)
+        .and_then(|v| v.as_str());
+    assert_eq!(first_epoch, Some("1"), "baseline bridge stamps epoch 1");
+    assert_eq!(
+        create_consumer_calls.load(Ordering::SeqCst),
+        1,
+        "budget must be exhausted by the single healthy create"
+    );
+
+    // Ordering matters (design §1): bump the published epoch BEFORE the
+    // delegate dies, so the tick that finds the dead handle takes the
+    // stale-stamp branch (budget reset) instead of the finished-handle
+    // teardown (which would leave the stale exhausted budget in force
+    // and stop the consumer).
+    leadership.leader_epoch().store(2, Ordering::Release);
+    let _ = exit_tx.send(());
+
+    let recreated = timeout(Duration::from_secs(5), async {
+        loop {
+            if create_consumer_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(
+        recreated,
+        "stale-stamp dispatch must reset the exhausted budget and recreate within 5s"
+    );
+    assert!(
+        !master
+            .leadership_task
+            .as_ref()
+            .is_some_and(|h| h.is_finished()),
+        "the stale-stamp reset must keep the leadership task alive"
+    );
+
+    // The next envelope comes from delegate #2, restamped at the new epoch.
+    let second = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let epoch_prop = second
+        .exchange
+        .properties
+        .get(crate::leadership::LEADER_EPOCH_PROPERTY)
+        .expect("recreated bridge must stamp x-camel-leader-epoch");
+    assert_eq!(
+        epoch_prop,
+        &serde_json::Value::String("2".to_string()),
+        "recreated bridge must carry the advanced epoch 2"
     );
 
     cancel.cancel();

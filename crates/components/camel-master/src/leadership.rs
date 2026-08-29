@@ -1,12 +1,14 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use camel_api::{CamelError, MetricsCollector, PlatformService};
-use camel_component_api::{Component, ConsumerContext, ExchangeEnvelope, is_retryable_camel_error};
+use camel_component_api::{
+    Component, ConsumerContext, ExchangeEnvelope, NetworkRetryPolicy, is_retryable_camel_error,
+};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::consumer::DelegateState;
 use crate::endpoint::MasterDelegateContext;
@@ -84,7 +86,7 @@ fn stamp_epoch(env: &mut ExchangeEnvelope, epoch: u64) {
 /// Emit a leadership transition counter observation. Called by the
 /// supervision loop on observed not-leading → leading (`acquired`) and
 /// leading → not-leading (`lost`) state edges. See
-/// specs/master-component/spec.md.
+/// openspec/specs/master-component/spec.md.
 pub(crate) fn emit_leadership_transition(
     metrics: &Arc<dyn MetricsCollector>,
     lock: &str,
@@ -133,6 +135,7 @@ pub(crate) async fn stop_delegate(
         run_token,
         mut handle,
         mut bridge_handle,
+        ..
     } = std::mem::replace(state, DelegateState::Inactive)
     {
         run_token.cancel();
@@ -199,6 +202,14 @@ pub(crate) struct ReconcileContext<'a> {
     /// Monotonic fencing token, snapshotted by `reconcile_event` on the
     /// `StartedLeading` transition. See ADR-0035.
     pub(crate) leader_epoch: Arc<AtomicU64>,
+    /// Delegate acquisition attempts within the current acquisition epoch
+    /// (design §2). `AtomicU32` because the context is held across `.await`s
+    /// inside the `tokio::spawn`ed supervision task (`Cell<u32>` is `!Sync`
+    /// and would make the future `!Send`); access is single-task, so
+    /// `Relaxed` ordering suffices.
+    pub(crate) attempts: AtomicU32,
+    /// Reconnect policy consulted before every delegate create attempt.
+    pub(crate) reconnect: NetworkRetryPolicy,
 }
 
 pub(crate) async fn reconcile_event(
@@ -208,7 +219,29 @@ pub(crate) async fn reconcile_event(
 ) -> Result<(), CamelError> {
     match event {
         camel_api::LeadershipEvent::StartedLeading => {
-            info!(lock = %ctx.lock_name, "master leadership acquired");
+            // Epoch-idempotence: an identical delivery (watch re-delivery
+            // without a takeover) while Active at the published epoch is a
+            // no-op — no drain, no recreate, no lifecycle emission. A
+            // differing epoch (term bump across a takeover) falls through to
+            // the full re-reconciliation below.
+            let current_epoch = ctx.leader_epoch.load(Ordering::Acquire);
+            if let DelegateState::Active { epoch, .. } = state
+                && *epoch == current_epoch
+            {
+                debug!(
+                    lock = %ctx.lock_name,
+                    current_epoch,
+                    "dropping duplicate StartedLeading delivery at the published epoch"
+                );
+                return Ok(());
+            }
+
+            // A differing epoch (term bump across a takeover) detected on an
+            // Active delegate begins a new acquisition epoch: the budget
+            // resets below, before the consult. Captured before the drain —
+            // the drain destroys the Active state and its epoch.
+            let term_bump = matches!(&*state, DelegateState::Active { .. });
+
             stop_delegate(
                 state,
                 ctx.drain_timeout,
@@ -223,6 +256,26 @@ pub(crate) async fn reconcile_event(
                 metrics: Arc::clone(ctx.metrics),
                 platform_service: Arc::clone(ctx.platform_service),
             };
+
+            // Exact acquisition budget (design §2): AFTER the drain
+            // (no-zombie ordering). The consult evaluates the pre-increment
+            // count, but the counter increments on EVERY delivery regardless
+            // of the verdict — it counts deliveries, not successful creates.
+            // A refused consult performs no create.
+            if term_bump {
+                ctx.attempts.swap(0, Ordering::Relaxed);
+            }
+            let count = ctx.attempts.load(Ordering::Relaxed);
+            ctx.attempts
+                .store(count.saturating_add(1), Ordering::Relaxed);
+            if !ctx.reconnect.should_retry(count) {
+                return Ok(());
+            }
+
+            // Logged only when the consult admits the create: a refused
+            // delivery (exhausted budget or disabled policy) performs no
+            // create and must not claim acquisition.
+            info!(lock = %ctx.lock_name, "master leadership acquired");
 
             let endpoint = match ctx
                 .delegate_component
@@ -301,6 +354,7 @@ pub(crate) async fn reconcile_event(
                 run_token,
                 handle,
                 bridge_handle: Some(bridge_handle),
+                epoch: my_epoch,
             };
             emit_lifecycle(
                 ctx.metrics,
@@ -572,6 +626,7 @@ mod tests {
             run_token: CancellationToken::new(),
             handle: delegate_handle,
             bridge_handle: Some(bridge_handle),
+            epoch: 42,
         };
 
         let metrics: Arc<dyn camel_api::MetricsCollector> = Arc::new(NoOpMetrics);
@@ -627,6 +682,7 @@ mod tests {
             run_token: CancellationToken::new(),
             handle: delegate_handle,
             bridge_handle: Some(bridge_handle),
+            epoch: 42,
         };
 
         let metrics: Arc<dyn camel_api::MetricsCollector> = Arc::new(NoOpMetrics);
