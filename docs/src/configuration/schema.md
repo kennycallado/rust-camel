@@ -551,14 +551,29 @@ A small allowlist of `CAMEL_*` environment variables overrides specific fields w
 | `CAMEL_RUNTIME_JOURNAL_COMPACTION_THRESHOLD_EVENTS` | `runtime_journal.compaction_threshold_events` |
 | `CAMEL_IDEMPOTENT_REPO_PATH` | `idempotent_repo.path` |
 | `CAMEL_IDEMPOTENT_REPO_DURABILITY` | `idempotent_repo.durability` |
-| `CAMEL_CACHE_REPO_BACKEND` | `cache_repo.backend` |
-| `CAMEL_CACHE_REPO_PATH` | `cache_repo.path` |
-| `CAMEL_CACHE_REPO_MAX_CAPACITY` | `cache_repo.max_capacity` |
-| `CAMEL_CACHE_REPO_STALE_RETENTION` | `cache_repo.stale_retention` |
-| `CAMEL_CACHE_REPO_MAX_ENTRIES` | `cache_repo.max_entries` |
 | `CAMEL_SUPERVISION_INITIAL_DELAY_MS` | `supervision.initial_delay_ms` |
 | `CAMEL_SUPERVISION_MAX_ATTEMPTS` | `supervision.max_attempts` |
 
+Cache repo overrides carry a typed contract. String-typed fields receive their raw value verbatim, with no numeric or boolean coercion. Numeric-typed fields parse strictly typed values. Duration fields accept humantime forms with explicit units. A unitless numeric value is rejected at validation with an error naming the required format. An empty value is skipped for the newer scalar variables, so the file or profile value stays effective. Legacy variables receive the raw value, empty or not.
+
+| Variable | Field | Value class | Empty value | Duration rule |
+|----------|-------|-------------|-------------|---------------|
+| `CAMEL_CACHE_REPO_BACKEND` | `cache_repo.backend` | string-verbatim | raw value (not skipped) | — |
+| `CAMEL_CACHE_REPO_PATH` | `cache_repo.path` | string-verbatim | raw value (not skipped) | — |
+| `CAMEL_CACHE_REPO_MAX_CAPACITY` | `cache_repo.max_capacity` | numeric-typed | raw value (not skipped) | — |
+| `CAMEL_CACHE_REPO_STALE_RETENTION` | `cache_repo.stale_retention` | string-verbatim | raw value (not skipped) | humantime units required. Unitless numeric rejected: `cache_repo.stale_retention: invalid duration '604800' — use a unit-bearing form such as '7d' or '24h'` |
+| `CAMEL_CACHE_REPO_MAX_ENTRIES` | `cache_repo.max_entries` | numeric-typed | raw value (not skipped) | — |
+| `CAMEL_CACHE_REPO_PAYLOAD` | `cache_repo.payload` | string-verbatim | skipped (file/profile value stays effective) | — |
+| `CAMEL_CACHE_REPO_PAYLOAD_DIR` | `cache_repo.payload_dir` | string-verbatim | skipped (file/profile value stays effective) | — |
+| `CAMEL_CACHE_REPO_CACHE_SIZE` | `cache_repo.cache_size` | string-verbatim | skipped (file/profile value stays effective) | — |
+| `CAMEL_CACHE_REPO_SWEEP_INTERVAL` | `cache_repo.sweep_interval` | string-verbatim | skipped (file/profile value stays effective) | humantime units required. Unitless numeric rejected: `cache_repo.sweep_interval: invalid duration '3600' — use a unit-bearing form such as '7d' or '24h'` |
+| `CAMEL_CACHE_REPO_MASTER_NAME` | `cache_repo.master_name` | string-verbatim | skipped (file/profile value stays effective) | — |
+| `CAMEL_CACHE_REPO_KEY_PREFIX` | `cache_repo.key_prefix` | string-verbatim | skipped (file/profile value stays effective) | — |
+| `CAMEL_CACHE_REPO_DB` | `cache_repo.db` | numeric-typed | skipped (file/profile value stays effective) | — |
+| `CAMEL_CACHE_REPO_SENTINEL_NODES` | `cache_repo.sentinel_nodes` | CSV list | empty list replaces the file value and normalizes to absent on redis | — |
+
 `CAMEL_CONFIG_FILE` and `CAMEL_PROFILE` are also read, but outside the allowlist. `CAMEL_CONFIG_FILE` selects the file path before load. `CAMEL_PROFILE` selects the profile section.
+
+> **Note:** Connection strings and credentials are outside the allowlist. Set them with `${env:VAR}` placeholders in `Camel.toml` values, never through env overrides. The loader ignores `CAMEL_CACHE_REPO_URL`, `CAMEL_CACHE_REPO_USERNAME`, `CAMEL_CACHE_REPO_PASSWORD`, `CAMEL_CACHE_REPO_SENTINEL_USERNAME`, and `CAMEL_CACHE_REPO_SENTINEL_PASSWORD` and logs a warning.
 
 **Reference**: [Config crate](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-config/CONTEXT.md)
