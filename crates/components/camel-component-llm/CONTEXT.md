@@ -31,7 +31,7 @@ When `stream=false`, the producer collects all `ChatEvent`s into a single result
 _Avoid_: sync mode, blocking mode
 
 **Streaming mode**:
-Default. Producer returns `Body::Stream(StreamBody)`. Usage metadata goes to metrics/tracing, NOT Exchange headers (race condition).
+Default. Producer returns `Body::Stream(StreamBody)`. Usage metadata goes to metrics/tracing, NOT Exchange headers (race condition). Duplicate tool-call ids within one streamed turn are suppressed first-wins at the stream seam, mirroring materialized dedup; header parity is intentionally excluded — streaming omits usage/tool headers (race condition) and downstream reads deduped tool-call intent from body frames.
 _Avoid_: async mode (ambiguous with async runtime)
 
 **Usage availability**:

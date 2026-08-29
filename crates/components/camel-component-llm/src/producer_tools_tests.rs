@@ -13,7 +13,7 @@ use crate::producer::LlmProducer;
 use crate::provider::LlmProvider;
 use crate::provider::mock::{MockMode, MockProvider};
 
-use super::producer_test_helpers::make_exchange;
+use super::producer_test_helpers::{collect_stream_frames, make_exchange};
 
 // -----------------------------------------------------------------------
 // Multi-turn messages header test
@@ -313,4 +313,171 @@ async fn text_only_turn_sets_body() {
 
     assert_eq!(exchange.input.body, Body::Text("plain answer".into()));
     assert!(!exchange.input.headers.contains_key(CAMEL_LLM_TOOL_CALLS));
+}
+
+// -----------------------------------------------------------------------
+// Streaming tool-call dedup (first-wins on id, mirrors materialized)
+// -----------------------------------------------------------------------
+
+/// Extract the `type == "tool_call"` JSON frames from collected stream
+/// chunks, preserving arrival order.
+fn tool_call_frames(frames: &[String]) -> Vec<Value> {
+    frames
+        .iter()
+        .filter_map(|f| serde_json::from_str::<Value>(f).ok())
+        .filter(|v| v["type"] == "tool_call")
+        .collect()
+}
+
+#[tokio::test]
+async fn streaming_duplicate_tool_call_ids_forwarded_once() {
+    let provider = Arc::new(
+        MockProvider::new("test", MockMode::Fixed("unused".into())).with_tool_calls_and_text(
+            "Done.",
+            vec![
+                ("call_1", "get_weather", r#"{"city":"London"}"#),
+                ("call_1", "get_weather", r#"{"city":"London"}"#),
+            ],
+        ),
+    );
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: true,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(config, provider, 32768, "test-route".into()).build();
+    let mut exchange = make_exchange(Body::Text("prompt".into()));
+
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+
+    let frames = collect_stream_frames(&mut exchange).await;
+    let calls = tool_call_frames(&frames);
+    assert_eq!(
+        calls.len(),
+        1,
+        "duplicate tool-call id must be forwarded exactly once; frames: {frames:?}"
+    );
+    assert_eq!(calls[0]["id"], "call_1");
+    assert_eq!(calls[0]["arguments"], r#"{"city":"London"}"#);
+}
+
+#[tokio::test]
+async fn streaming_conflicting_dup_payload_first_wins() {
+    let provider = Arc::new(
+        MockProvider::new("test", MockMode::Fixed("unused".into())).with_tool_calls_and_text(
+            "Done.",
+            vec![
+                ("call_1", "get_weather", r#"{"city":"London"}"#),
+                ("call_1", "get_weather", r#"{"city":"Paris"}"#),
+            ],
+        ),
+    );
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: true,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(config, provider, 32768, "test-route".into()).build();
+    let mut exchange = make_exchange(Body::Text("prompt".into()));
+
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+
+    let frames = collect_stream_frames(&mut exchange).await;
+    let calls = tool_call_frames(&frames);
+    assert_eq!(
+        calls.len(),
+        1,
+        "conflicting duplicate must be dropped; frames: {frames:?}"
+    );
+    assert_eq!(calls[0]["id"], "call_1");
+    assert_eq!(
+        calls[0]["arguments"], r#"{"city":"London"}"#,
+        "first occurrence must win over conflicting repeat"
+    );
+}
+
+#[tokio::test]
+async fn streaming_distinct_ids_all_forwarded_in_order() {
+    let provider = Arc::new(
+        MockProvider::new("test", MockMode::Fixed("unused".into())).with_tool_calls_and_text(
+            "Done.",
+            vec![
+                ("call_1", "get_weather", r#"{"city":"London"}"#),
+                ("call_2", "get_time", r#"{"zone":"UTC"}"#),
+                ("call_1", "get_weather", r#"{"city":"London"}"#),
+            ],
+        ),
+    );
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: true,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(config, provider, 32768, "test-route".into()).build();
+    let mut exchange = make_exchange(Body::Text("prompt".into()));
+
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+
+    let frames = collect_stream_frames(&mut exchange).await;
+    let calls = tool_call_frames(&frames);
+    let ids: Vec<&str> = calls
+        .iter()
+        .map(|c| c["id"].as_str().expect("tool_call id is a string"))
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["call_1", "call_2"],
+        "distinct ids forwarded in arrival order, trailing duplicate dropped"
+    );
+    // Mock emits exactly: 1 text delta + 3 tool-call events + 1 empty
+    // Finished terminator. After dedup: 1 text + 2 tool calls + 1
+    // terminator = 4 frames — no phantom empty frame from the dedup.
+    assert_eq!(frames.len(), 4, "no phantom frame; frames: {frames:?}");
+}
+
+#[tokio::test]
+async fn streaming_dedup_matches_materialized() {
+    // Conflicting duplicate (London then Paris): first-wins in BOTH modes.
+    let script = vec![
+        ("call_1", "get_weather", r#"{"city":"London"}"#),
+        ("call_1", "get_weather", r#"{"city":"Paris"}"#),
+    ];
+
+    // Materialized: header carries exactly one deduped tool call.
+    let provider = Arc::new(
+        MockProvider::new("test", MockMode::Fixed("unused".into()))
+            .with_tool_calls_and_text("Done.", script.clone()),
+    );
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: false,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(config, provider, 32768, "test-route".into()).build();
+    let mut exchange = make_exchange(Body::Text("prompt".into()));
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+    let materialized: Vec<crate::EmittedToolCall> =
+        serde_json::from_value(exchange.input.headers[CAMEL_LLM_TOOL_CALLS].clone())
+            .expect("tool calls header");
+
+    // Streaming: body frames carry exactly one deduped tool call.
+    let provider = Arc::new(
+        MockProvider::new("test", MockMode::Fixed("unused".into()))
+            .with_tool_calls_and_text("Done.", script.clone()),
+    );
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: true,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(config, provider, 32768, "test-route".into()).build();
+    let mut exchange = make_exchange(Body::Text("prompt".into()));
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+    let frames = collect_stream_frames(&mut exchange).await;
+    let calls = tool_call_frames(&frames);
+
+    assert_eq!(materialized.len(), 1, "materialized dedup keeps first");
+    assert_eq!(calls.len(), 1, "streaming dedup must match materialized");
+    assert_eq!(materialized[0].id, calls[0]["id"]);
+    assert_eq!(materialized[0].arguments, calls[0]["arguments"]);
 }

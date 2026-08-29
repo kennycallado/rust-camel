@@ -496,6 +496,15 @@ impl LlmProducer {
 
         let byte_stream = stream! {
             let mut s = stream;
+            // Per-chunk first-wins dedup state, mirroring the materialized
+            // path (`run_provider_work`): downstream tool executors key on
+            // id, so a repeated id must never cross the stream seam twice.
+            let mut seen_tool_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            // First occurrence's (name, arguments) per id, to classify a
+            // duplicate as identical (debug) vs conflicting (warn).
+            let mut first_tool_payloads: std::collections::HashMap<String, (String, String)> =
+                std::collections::HashMap::new();
             loop {
                 let next = match timeout {
                     Some(d) => match tokio::time::timeout(d, s.next()).await {
@@ -515,6 +524,30 @@ impl LlmProducer {
                         name,
                         arguments,
                     })) => {
+                        // Assumes `ChatEvent::ToolCall` is assembled-once
+                        // per provider contract (ADR-0020 boundary); a
+                        // fragmenting provider must assemble inside its
+                        // adapter before crossing the trait.
+                        if !seen_tool_ids.insert(id.clone()) {
+                            if let Some((first_name, first_args)) = first_tool_payloads.get(&id) {
+                                if first_name != &name || first_args != &arguments {
+                                    tracing::warn!(
+                                        route_id = %route_id,
+                                        id = %id,
+                                        "duplicate tool call id with conflicting payload dropped; first wins"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        route_id = %route_id,
+                                        id = %id,
+                                        "duplicate tool call id dropped"
+                                    );
+                                }
+                            }
+                            continue;
+                        }
+                        first_tool_payloads
+                            .insert(id.clone(), (name.clone(), arguments.clone()));
                         tracing::info!(
                             route_id = %route_id,
                             tool_name = %name,

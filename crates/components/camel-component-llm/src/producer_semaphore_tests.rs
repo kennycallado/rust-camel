@@ -93,3 +93,42 @@ async fn streaming_permit_held_until_stream_consumed() {
     // second can now proceed
     let _ = second.await;
 }
+
+#[tokio::test]
+async fn streaming_permit_released_after_dedup_stream_drop() {
+    let mock = Arc::new(
+        MockProvider::new("t", MockMode::Fixed("unused".into())).with_tool_calls_and_text(
+            "Done.",
+            vec![
+                ("call_1", "get_weather", r#"{"city":"London"}"#),
+                ("call_1", "get_weather", r#"{"city":"London"}"#),
+            ],
+        ),
+    );
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let producer = make_producer_with_semaphore(provider, true, 1);
+
+    // First call: consume the stream to completion — dedup fires, the
+    // stream ends, and draining drops the PermitStream (releasing the
+    // permit; the dedup state must not leak it).
+    let mut p1 = producer.clone();
+    let mut out1 = p1
+        .call(make_exchange(Body::Text("a".into())))
+        .await
+        .expect("first call ok");
+    drain_stream(&mut out1).await;
+
+    // Second call must proceed without blocking.
+    let mut p2 = producer.clone();
+    let second = tokio::spawn(async move { p2.call(make_exchange(Body::Text("b".into()))).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        second.is_finished(),
+        "permit must be released after the deduped stream is consumed"
+    );
+    second
+        .await
+        .expect("second task join")
+        .expect("second call ok");
+    assert_eq!(mock.call_count(), 2, "second call reached the provider");
+}

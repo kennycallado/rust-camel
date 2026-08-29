@@ -146,15 +146,27 @@ pub(super) fn make_producer_with_semaphore(
 /// clear the inner stream option so the `PermitStream` (and its
 /// semaphore permit) is dropped.
 pub(super) async fn drain_stream(out: &mut Exchange) {
-    if let Body::Stream(sb) = &out.input.body {
+    collect_stream_frames(out).await;
+}
+
+/// Drain a streaming body to completion, returning every chunk as a
+/// lossy UTF-8 string, and clear the inner stream option so the
+/// `PermitStream` (and its semaphore permit) is dropped.
+pub(super) async fn collect_stream_frames(out: &mut Exchange) -> Vec<String> {
+    let mut frames = Vec::new();
+    if let Body::Stream(sb) = &mut out.input.body {
         let mut guard = sb.stream.lock().await;
         if let Some(stream) = guard.as_mut() {
-            while stream.next().await.is_some() {}
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.expect("stream chunk ok");
+                frames.push(String::from_utf8_lossy(&chunk).into_owned());
+            }
         }
         // Clear the stream — this drops the PermitStream and releases
         // the semaphore permit (permit lives in the stream, see ADR-0021).
         *guard = None;
     }
+    frames
 }
 
 /// Pull exactly one event from a streaming body (to start it) without
