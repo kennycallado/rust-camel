@@ -99,9 +99,9 @@ struct CacheEntry {
 /// Provider-local cache of successful authentication results.
 ///
 /// Backed by `std::sync::RwLock<HashMap>` with lazy eviction, mirroring
-/// [`CachingPermissionEvaluator`]. Entries never outlive their token: the
-/// effective lifetime is `min(configured TTL, token_exp - now)`, and hits
-/// re-check `now < expires_at`.
+/// [`CachingPermissionEvaluator`](crate::permission_cache::CachingPermissionEvaluator).
+/// Entries never outlive their token: the effective lifetime is
+/// `min(configured TTL, token_exp - now)`, and hits re-check `now < expires_at`.
 pub struct AuthnCache {
     cache: std::sync::RwLock<HashMap<AuthnCacheKey, CacheEntry>>,
     options: AuthnCacheOptions,

@@ -237,12 +237,25 @@ impl MetricsCollector for MetricsHandle {
 /// Built by [`MetricsHandle::register`] — the second registration stores a
 /// composite of `[first, second]`; a third composes over that composite, so
 /// ordering and prior observation are preserved (composition, not replacement).
+///
+/// Internal type, hidden from the published docs. Out-of-tree code must not
+/// construct composites directly: registering an externally built composite
+/// plus its inner collector double-counts (the handle's opaque-Arc dedupe
+/// cannot see inside a composite). Register collectors via
+/// [`MetricsHandle::register`] instead.
+#[doc(hidden)]
 pub struct CompositeMetricsCollector {
     collectors: Vec<Arc<dyn MetricsCollector>>,
 }
 
 impl CompositeMetricsCollector {
     /// Creates a composite that delegates to `collectors` in order.
+    ///
+    /// Internal constructor, hidden from the published docs. Prefer
+    /// [`MetricsHandle::register`], which composes while deduplicating by
+    /// `Arc` pointer identity; direct construction bypasses that dedupe and
+    /// can double-count.
+    #[doc(hidden)]
     pub fn new(collectors: Vec<Arc<dyn MetricsCollector>>) -> Self {
         Self { collectors }
     }

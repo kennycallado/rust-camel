@@ -417,6 +417,13 @@ impl Service<Exchange> for LogProducer {
                 LogLevel::Debug => debug!("{msg}"),
                 LogLevel::Info => info!("{msg}"),
                 LogLevel::Warn => warn!("{msg}"),
+                // Deliberately unannotated: LogProducer is a user-output
+                // mechanism — the route selects this level — so the call sits
+                // outside ADR-0012's operational convention (see this crate's
+                // CONTEXT.md). The lint-log-levels exclusion is symbol-bound
+                // (structural, in scripts/xtask), and
+                // tests/logproducer_exclusion_regression.rs guards that this
+                // crate carries zero level-policy annotations.
                 LogLevel::Error => error!("{msg}"),
             }
 

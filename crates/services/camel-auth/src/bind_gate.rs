@@ -6,7 +6,9 @@
 //! `camel_core::` (hexagonal invariant, `xtask lint-component-deps`), while
 //! both `camel-core` and the transports already depend on `camel-auth`.
 //! `camel-core` re-exports both items from
-//! [`crate::lifecycle::adapters::route_controller_trait`], so existing
+//! `crate::lifecycle::adapters::route_controller_trait` (camel-core internal
+//! path — camel-auth cannot intra-doc-link camel-core: the dependency
+//! direction is camel-core → camel-auth), so existing
 //! callers (controller, CLI) keep their import paths.
 
 use std::collections::HashMap;

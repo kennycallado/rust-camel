@@ -113,6 +113,14 @@ pub(crate) async fn resolve_and_validate_host(
     .map_err(|e| format!("DNS resolution failed: {e}"))?
     .collect();
 
+    // An empty resolution must fail closed on both branches: under
+    // allow_internal=true it would otherwise return an empty pin set, which
+    // collapses the port distinction in the pinned-client cache key and gives
+    // reqwest zero addresses at connect time.
+    if resolved.is_empty() {
+        return Err(format!("host '{host}' did not resolve to any addresses"));
+    }
+
     if allow_internal {
         return Ok(resolved);
     }
