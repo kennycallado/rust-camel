@@ -25,13 +25,13 @@ dependencies {
     implementation("xml-apis:xml-apis:1.4.01")
 
     // XSLT — Saxon-HE 12.x (MPL-2.0)
-    implementation("net.sf.saxon:Saxon-HE:12.5")
+    implementation("net.sf.saxon:Saxon-HE:12.7")
 
     // Saxon pulls xmlresolver 5.x, whose optional Jing (RELAX NG) adapter
     // classes are hard-linked by GraalVM 25 at image build time. The
     // optional dep must exist on the classpath or native-image analysis
     // fails with NoClassDefFoundError: com/thaiopensource/validate/.
-    // Exclusions keep our own pins (Saxon 12.5, xml-apis 1.4.01) intact.
+    // Exclusions keep our own pins (Saxon 12.7, xml-apis 1.4.01) intact.
     implementation("org.relaxng:jing:20220510") {
         exclude(group = "net.sf.saxon")
         exclude(group = "xml-apis")
