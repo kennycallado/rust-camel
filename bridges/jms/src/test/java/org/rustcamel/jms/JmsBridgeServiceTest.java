@@ -2,11 +2,13 @@ package org.rustcamel.jms;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -16,6 +18,12 @@ import io.grpc.stub.StreamObserver;
 import jakarta.enterprise.inject.Instance;
 import java.lang.reflect.Field;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import jms_bridge.JmsMessage;
 import jms_bridge.SubscribeRequest;
@@ -130,6 +138,9 @@ class JmsBridgeServiceTest {
 
     innerA.get().onCompleted();
 
+    verify(consumerA).stop();
+    verify(instance).destroy(consumerA);
+
     ConcurrentHashMap<String, JmsConsumer> active = activeConsumersOf(service);
     assertEquals(1, active.size());
     assertSame(consumerB, active.get("s2"));
@@ -154,6 +165,120 @@ class JmsBridgeServiceTest {
 
     // No cancel-handler registration may happen for a rejected stream.
     verify(serverObsB, never()).setOnCancelHandler(any());
+  }
+
+  @Test
+  void lateCleanupAfterDrainDoesNotDoubleDestroy() throws Exception {
+    when(instance.get()).thenReturn(consumerA);
+    AtomicReference<StreamObserver<JmsMessage>> innerA = stubbingSubscribe(consumerA);
+
+    service.subscribe(req("s1"), obsA);
+    service.shutdown();
+    // Late CAS winner: the consumer's error callback fires after the drain already tore it down.
+    innerA.get().onError(new RuntimeException("late teardown"));
+
+    verify(instance, times(1)).destroy(consumerA);
+    verify(consumerA, times(1)).stop();
+    assertTrue(activeConsumersOf(service).isEmpty());
+  }
+
+  @Test
+  void drainCatchesSubscriberRegisteredBeforeFlag() throws Exception {
+    when(instance.get()).thenReturn(consumerA);
+    stubbingSubscribe(consumerA);
+
+    service.subscribe(req("s1"), obsA);
+    service.shutdown();
+
+    verify(instance, times(1)).destroy(consumerA);
+    assertTrue(activeConsumersOf(service).isEmpty());
+  }
+
+  @Test
+  void subscribeRefusedAfterFlagDestroysOwnConsumer() throws Exception {
+    when(instance.get()).thenReturn(consumerB);
+    service.shutdown();
+
+    service.subscribe(req("s1"), obsB);
+
+    ArgumentCaptor<Throwable> errorCaptor = ArgumentCaptor.forClass(Throwable.class);
+    verify(obsB).onError(errorCaptor.capture());
+    assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(errorCaptor.getValue()).getCode());
+    verify(instance, times(1)).destroy(consumerB);
+    verify(consumerB, never()).subscribe(anyString(), anyString(), any(), any());
+    assertTrue(activeConsumersOf(service).isEmpty());
+  }
+
+  @Test
+  void racingRegistrationObservedAfterFlagRefuses() throws Exception {
+    CountDownLatch enteredGet = new CountDownLatch(1);
+    CountDownLatch releaseGet = new CountDownLatch(1);
+    doAnswer(
+            invocation -> {
+              enteredGet.countDown();
+              releaseGet.await(5, TimeUnit.SECONDS);
+              return consumerB;
+            })
+        .when(instance)
+        .get();
+
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    try {
+      Future<?> subscribeTask = executor.submit(() -> service.subscribe(req("s1"), obsB));
+
+      assertTrue(enteredGet.await(5, TimeUnit.SECONDS));
+      // Flag rises while the subscribe thread is still inside consumerFactory.get().
+      service.shutdown();
+      releaseGet.countDown();
+      subscribeTask.get(5, TimeUnit.SECONDS);
+
+      ArgumentCaptor<Throwable> errorCaptor = ArgumentCaptor.forClass(Throwable.class);
+      verify(obsB).onError(errorCaptor.capture());
+      assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(errorCaptor.getValue()).getCode());
+      verify(instance, times(1)).destroy(consumerB);
+      verify(consumerB, never()).subscribe(anyString(), anyString(), any(), any());
+      assertTrue(activeConsumersOf(service).isEmpty());
+    } finally {
+      executor.shutdownNow();
+      assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+    }
+  }
+
+  @Test
+  void shutdownAndCleanupRaceDestroysExactlyOnce() throws Exception {
+    when(instance.get()).thenReturn(consumerA);
+    AtomicReference<StreamObserver<JmsMessage>> innerA = stubbingSubscribe(consumerA);
+
+    service.subscribe(req("s1"), obsA);
+
+    CyclicBarrier barrier = new CyclicBarrier(2);
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    try {
+      Future<?> shutdownTask =
+          executor.submit(
+              () -> {
+                barrier.await(5, TimeUnit.SECONDS);
+                service.shutdown();
+                return null;
+              });
+      Future<?> errorTask =
+          executor.submit(
+              () -> {
+                barrier.await(5, TimeUnit.SECONDS);
+                innerA.get().onError(new RuntimeException("cancel races shutdown"));
+                return null;
+              });
+
+      shutdownTask.get(5, TimeUnit.SECONDS);
+      errorTask.get(5, TimeUnit.SECONDS);
+
+      verify(consumerA, times(1)).stop();
+      verify(instance, times(1)).destroy(consumerA);
+      assertTrue(activeConsumersOf(service).isEmpty());
+    } finally {
+      executor.shutdownNow();
+      assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+    }
   }
 
   private static SubscribeRequest req(String subId) {

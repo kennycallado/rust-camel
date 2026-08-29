@@ -253,14 +253,15 @@ public class JmsConsumer {
       // materialized by the JMS client either way, but oversized text never reaches the protobuf
       // body or the stream.
       String text = tm.getText();
-      int len = text != null ? text.length() : 0;
+      ByteString body = ByteString.copyFromUtf8(text != null ? text : "");
+      long size = body.size();
       long cap = resolveMaxBodyBytes();
-      if (len > cap) {
+      if (size > cap) {
         String diagnostic =
             MAX_BODY_BYTES_ENV
                 + ": rejecting message body of "
-                + len
-                + " chars (cap "
+                + size
+                + " bytes (cap "
                 + cap
                 + " bytes); message not forwarded";
         // Handler-contract boundary (ADR-0012): the consumer logs at warn and forwards the error
@@ -268,7 +269,7 @@ public class JmsConsumer {
         LOG.warn(diagnostic);
         throw new JMSException(diagnostic);
       }
-      b.setBody(ByteString.copyFromUtf8(text != null ? text : ""));
+      b.setBody(body);
       // Empty means "no real content type"; whitespace-only values are preserved as-is.
       b.setContentType(
           contentTypeProp != null && !contentTypeProp.isEmpty() ? contentTypeProp : "text/plain");

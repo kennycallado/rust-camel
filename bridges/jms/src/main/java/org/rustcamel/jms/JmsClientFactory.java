@@ -183,8 +183,11 @@ public class JmsClientFactory {
   /**
    * Builds the Netty connector transport config for {@code brokerUri}, mapping the URI scheme
    * honestly onto TLS: only {@code ssl://}/{@code wss://} activate SSL properties, sourced from the
-   * BRIDGE_BROKER_* env contract. Plaintext schemes ({@code tcp}/{@code nio}/{@code ws}) and an
-   * outer {@code failover:} scheme get no SSL properties.
+   * BRIDGE_BROKER_* env contract. Plaintext schemes ({@code tcp}/{@code ws}) get no SSL properties.
+   *
+   * <p>The scheme is dispatched exhaustively and fail-loud: an unsupported scheme (for example an
+   * outer {@code failover:}/{@code fanout:} wrapper) aborts startup, as does a URL with no scheme
+   * or no host — no default host is assumed.
    *
    * <p>This is the production entry point: it reads System.getenv() and BridgeConfig directly.
    * Tests use the explicit-values overload below because System.getenv() is immutable.
@@ -209,7 +212,31 @@ public class JmsClientFactory {
       String truststorePath,
       String keystorePassword,
       String brokerType) {
-    String host = brokerUri.getHost() != null ? brokerUri.getHost() : "localhost";
+    String scheme = brokerUri.getScheme();
+    if (scheme == null) {
+      throw new IllegalStateException(
+          "Broker URL '" + brokerUri + "' has no scheme; a complete URL is required");
+    }
+    boolean secure;
+    switch (scheme) {
+      case "tcp", "ws" -> secure = false;
+      case "ssl", "wss" -> secure = true;
+      default ->
+          throw new IllegalStateException(
+              "Unsupported broker URL scheme '"
+                  + scheme
+                  + "' (URL: "
+                  + brokerUri
+                  + "): unwrap failover:/fanout: wrappers to a single primary broker URL; configure HA broker-side or as multiple broker entries");
+    }
+
+    String host = brokerUri.getHost();
+    if (host == null || host.isBlank()) {
+      throw new IllegalStateException(
+          "Broker URL '"
+              + brokerUri
+              + "' has no host; a complete URL is required — no default host is assumed");
+    }
     int port = brokerUri.getPort() > 0 ? brokerUri.getPort() : 61616;
 
     Map<String, Object> params = new HashMap<>();
@@ -226,8 +253,6 @@ public class JmsClientFactory {
     params.put(TransportConstants.HANDSHAKE_TIMEOUT, 5_000); // ms (int)
     params.put(TransportConstants.NETTY_CONNECT_TIMEOUT, 5_000); // ms (int)
 
-    String scheme = brokerUri.getScheme();
-    boolean secure = "ssl".equals(scheme) || "wss".equals(scheme);
     if (!secure) {
       return params;
     }

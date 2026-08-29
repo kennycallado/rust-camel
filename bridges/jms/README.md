@@ -17,7 +17,7 @@ A Quarkus-based gRPC bridge that exposes JMS messaging to the Rust runtime. The 
 
 ### Body cap
 
-A malformed, non-positive, or above-ceiling `JMS_MAX_BODY_BYTES` value aborts startup. The cap applies to both body types: `BytesMessage` bodies are checked against the pre-read body length, and `TextMessage` bodies are checked against the materialized text length (`TextMessage` exposes no pre-read size). The ceiling is 19 MiB. Operators must respect the ordering constraint: the cap stays at or below 19 MiB, and the Rust IPC decode limit is 20 MiB. The headroom absorbs IPC framing overhead (destination, headers, content type), so a message accepted by the bridge is always decodable on the Rust side.
+A malformed, non-positive, or above-ceiling `JMS_MAX_BODY_BYTES` value aborts startup. The cap applies to both body types: `BytesMessage` bodies are checked against the pre-read body length, and `TextMessage` bodies are materialized and UTF-8 encoded before enforcement — the cap bounds the forwarded body size, not the peak sidecar allocation (a transient ~2-3x allocation of oversized text precedes rejection). The ceiling is 19 MiB. Operators must respect the ordering constraint: the cap stays at or below 19 MiB, and the Rust IPC decode limit is 20 MiB. The headroom absorbs IPC framing overhead (destination, headers, content type), so a message accepted by the bridge is always decodable on the Rust side.
 
 ## Message-type forwarding policy (ADR-0067)
 
@@ -35,7 +35,7 @@ The bridge forwards broker messages to a bytes-only proto. Only `BytesMessage` a
 
 The broker URL scheme selects plaintext or TLS connection setup:
 
-- Plaintext schemes: `tcp://`, `nio://`, `ws://`. No TLS material is required.
+- Plaintext schemes: `tcp://`, `ws://`. No TLS material is required.
 - Secure schemes: `ssl://`, `wss://`. The full TLS material contract below applies.
 
 ### TLS material contract (secure schemes)

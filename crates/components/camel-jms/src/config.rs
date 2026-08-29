@@ -483,6 +483,13 @@ impl JmsPoolConfig {
                     name, bc.broker_url, known_schemes
                 )));
             }
+
+            if bc.broker_url.starts_with("failover://") && bc.broker_type == BrokerType::Artemis {
+                return Err(CamelError::ProcessorError(format!(
+                    "broker '{}' uses failover:// with the artemis broker type (URL '{}'): the Artemis sidecar does not unwrap failover wrappers — use a single primary broker URL or multiple broker entries",
+                    name, bc.broker_url
+                )));
+            }
         }
 
         if self.bridge_start_timeout_ms == 0 {
@@ -719,6 +726,27 @@ mod tests {
             let cfg = JmsPoolConfig::single_broker(*url, BrokerType::ActiveMq);
             assert!(cfg.validate().is_ok(), "scheme should be accepted: {url}");
         }
+    }
+
+    #[test]
+    fn rejects_failover_scheme_for_artemis_with_migration_hint() {
+        let cfg =
+            JmsPoolConfig::single_broker("failover://tcp://localhost:61616", BrokerType::Artemis);
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("failover"), "got: {}", err);
+        assert!(
+            err.to_string().contains("failover://tcp://localhost:61616"),
+            "error must name the URL: {}",
+            err
+        );
+        assert!(err.to_string().contains("broker entries"), "got: {}", err);
+    }
+
+    #[test]
+    fn accepts_failover_scheme_for_classic() {
+        let cfg =
+            JmsPoolConfig::single_broker("failover://tcp://localhost:61616", BrokerType::ActiveMq);
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

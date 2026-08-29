@@ -179,7 +179,8 @@ class JmsConsumerBodyCapTest {
 
   @Test
   void oversizedTextMessageRejected() throws Exception {
-    // TextMessage has no pre-read length, so the cap lands on the materialized string: a body
+    // TextMessage has no pre-read length, so the cap lands on the UTF-8 encoded size of the
+    // materialized string: a body
     // above the cap must fail with the same diagnostic shape as the BytesMessage gate.
     TextMessage big = mock(TextMessage.class);
     stubCommonAttributes(big);
@@ -199,6 +200,47 @@ class JmsConsumerBodyCapTest {
     assertTrue(
         String.valueOf(t.getMessage()).contains("2048"),
         "error must report the actual length: " + t.getMessage());
+    assertTrue(
+        String.valueOf(t.getMessage()).contains("bytes"),
+        "error must report the length in bytes: " + t.getMessage());
+  }
+
+  @Test
+  void textMessageUtf8OverCapRejected() throws Exception {
+    // 1024 CJK chars: UTF-16 length 1024 == cap, so the old char-length gate forwards; UTF-8
+    // size 3072 > cap, so the byte-accurate gate must reject. Honest RED against the old gate.
+    TextMessage cjk = mock(TextMessage.class);
+    stubCommonAttributes(cjk);
+    when(cjk.getText()).thenReturn("\u4e2d".repeat(Math.toIntExact(TEST_CAP_BYTES)));
+
+    RecordingObserver obs = subscribeOnce(cjk);
+    assertTrue(obs.errored.await(15, TimeUnit.SECONDS), "UTF-8-oversized text must yield an error");
+
+    assertEquals(0, obs.nextCount, "UTF-8-oversized text must not be delivered");
+    Throwable t = obs.error.get();
+    assertNotNull(t, "error outcome must be carried");
+    assertTrue(
+        String.valueOf(t.getMessage()).contains("3072"),
+        "error must report the UTF-8 size in bytes: " + t.getMessage());
+    assertTrue(
+        String.valueOf(t.getMessage()).contains("bytes"),
+        "error must use byte units: " + t.getMessage());
+  }
+
+  @Test
+  void textMessageAsciiAtExactlyCapPasses() throws Exception {
+    // Boundary pin: ASCII text whose UTF-8 size equals the cap exactly must be forwarded.
+    TextMessage atCap = mock(TextMessage.class);
+    stubCommonAttributes(atCap);
+    when(atCap.getText()).thenReturn("x".repeat(Math.toIntExact(TEST_CAP_BYTES)));
+
+    RecordingObserver obs = subscribeOnce(atCap);
+    assertTrue(obs.next.await(15, TimeUnit.SECONDS), "at-cap text must be delivered");
+    consumer.stop();
+
+    assertEquals(1, obs.nextCount, "exactly one message delivered");
+    JmsMessage delivered = obs.last.get();
+    assertEquals(TEST_CAP_BYTES, delivered.getBody().size(), "body size must equal the cap");
   }
 
   @Test

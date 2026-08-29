@@ -1,6 +1,53 @@
 {
-  "verdict": "APPROVE-WITH-FINDINGS",
-  "reviewer": "r_glm",
-  "impl_hash": "post-3f804e52",
-  "note": "Holistic review of the complete diff (merge-base..HEAD): 3 minors (CONTEXT.md slack doc; same-tick double dispatch gate; info!-before-consult) + 2 nits (tests split; attempts-log structural verification) — all 3 minors fixed in 3f804e52 and re-verified (52/52, 59/59, clippy/fmt/lint-context-citations green). Nits: tests.rs split filed as bd rc-rj0v; structural verification ratified in design. Scenario count is 16 (13 master + 3 k8s), all mapped 1:1."
+ "reviewer": "reviewers/r_glm",
+ "verdict": "APPROVE-WITH-FINDINGS",
+ "rounds": 1,
+ "impl_head": "df9e7c85",
+ "findings": [
+  {
+   "sev": "minor",
+   "finding": "bd closure pending",
+   "resolution": "at archive per protocol"
+  },
+  {
+   "sev": "minor",
+   "finding": "no nio:// rejection pin",
+   "resolution": "closed: nioSchemeAborts test added, 42/42 java"
+  }
+ ],
+ "gates": "fmt 0, clippy x3 0, 9 lints 0, schema 0, build-ws 0, lib 8092/0 (jms 126/0), hex 33/33, audit 0, gradle 42/42, validate strict True",
+ "release_notes_bridges_061": [
+  "BREAKING: failover:// rejected for artemis entries (was localhost plaintext); classic keeps it",
+  "BREAKING: unsupported schemes (failover wrappers, nio://) + hostless/schemeless URLs abort with remediation",
+  "JMS_MAX_BODY_BYTES TextMessage cap byte-accurate (UTF-8); cap bounds forwarded body",
+  "Shutdown hardening: UNAVAILABLE on racing subscribe; exactly-once consumer destroy"
+ ],
+ "papal_blessing": {
+  "expert": "experts/e_opus",
+  "verdict": "BLESS-WITH-CONDITIONS",
+  "rounds": 1,
+  "conditions": [
+   {
+    "n": "1+2",
+    "cond": "BREAKING markers on failover/scheme commits",
+    "resolution": "SATISFIED AT SQUASH: merge collapses to one commit; squash subject gets '!' + BREAKING CHANGE body section (the changelog generator reads the range, intermedicates vanish). Verified: xtask changelog parses conventional commits incl. '!'."
+   },
+   {
+    "n": "3",
+    "cond": "0.6.1 migration line in release-notes source",
+    "resolution": "squash body BREAKING section carries both migration lines (artemis failover->single-URL-or-multi-entry; unsupported-scheme/hostless abort) - the generated notes ARE the source"
+   },
+   {
+    "n": "4",
+    "cond": "rc-2yiq close-reason broker-type-scoped",
+    "resolution": "queued at archive step"
+   },
+   {
+    "n": "5",
+    "cond": "close rc-5r45 rc-lupv at archive",
+    "resolution": "queued at archive step"
+   }
+  ],
+  "grill": "lock linearization sound (worst interleavings walked); dispatch artemis-only-reached traced (classic never hits transportConfig); cap DoS delta immaterial (getText already materialized 2x in both); barrier aggregate-determinism honest"
+ }
 }

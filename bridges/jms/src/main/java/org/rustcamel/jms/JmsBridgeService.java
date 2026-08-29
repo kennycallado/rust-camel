@@ -7,6 +7,7 @@ import io.quarkus.grpc.GrpcService;
 import io.smallrye.common.annotation.Blocking;
 import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import jms_bridge.BridgeServiceGrpc;
@@ -28,6 +29,8 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
   @Inject JmsClientFactory clientFactory;
 
   private final ConcurrentHashMap<String, JmsConsumer> activeConsumers = new ConcurrentHashMap<>();
+  private final Object shutdownLock = new Object();
+  private volatile boolean shutdown = false;
   private volatile boolean lastHealthy = false;
   private volatile long lastHealthCheck = 0L;
   private volatile String lastHealthMessage = "ok";
@@ -59,7 +62,25 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
   public void subscribe(SubscribeRequest request, StreamObserver<JmsMessage> responseObserver) {
     JmsConsumer consumer = consumerFactory.get();
     String subId = request.getSubscriptionId();
-    JmsConsumer existing = activeConsumers.putIfAbsent(subId, consumer);
+    boolean refused;
+    JmsConsumer existing;
+    synchronized (shutdownLock) {
+      if (shutdown) {
+        refused = true;
+        existing = null;
+      } else {
+        refused = false;
+        existing = activeConsumers.putIfAbsent(subId, consumer);
+      }
+    }
+    if (refused) {
+      // Shutdown raced the registration: destroy the fresh consumer (no leak) and refuse the
+      // stream — it never entered the map nor reached the broker.
+      consumerFactory.destroy(consumer);
+      responseObserver.onError(
+          Status.UNAVAILABLE.withDescription("bridge shutting down").asException());
+      return;
+    }
     if (existing != null) {
       // Duplicate subscription_id: destroy the fresh consumer (no leak) and reject the stream
       // before any cancel-handler registration or broker subscription — the live stream for this
@@ -155,30 +176,39 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
 
   /**
    * Exactly-once teardown for a subscription: wins the {@code finished} race at most once and, on
-   * winning, stops the consumer, removes it from the active map, and destroys it. Returns whether
-   * this call won (and therefore performed the cleanup) so callers can gate their follow-up stream
-   * response.
+   * winning AND still owning the map entry, stops and destroys the consumer. Returns whether this
+   * call won the CAS (and therefore may terminate the stream response).
    */
   private boolean cleanupSubscription(JmsConsumer consumer, String subId, AtomicBoolean finished) {
     if (!finished.compareAndSet(false, true)) {
       return false;
     }
-    consumer.stop();
-    // Owner-checked remove: the entry may no longer be ours (e.g. @PreDestroy cleared the
-    // map and a new owner registered) — the stale teardown must not evict the new owner's
-    // consumer.
-    activeConsumers.remove(subId, consumer);
-    consumerFactory.destroy(consumer);
+    // Owner-checked remove gates BOTH stop and destroy: the entry may no longer be ours
+    // (e.g. @PreDestroy drained the map and a new owner registered) — the stale teardown
+    // must not stop/destroy twice nor evict the new owner's consumer.
+    if (activeConsumers.remove(subId, consumer)) {
+      consumer.stop();
+      consumerFactory.destroy(consumer);
+    }
     return true;
   }
 
   @PreDestroy
   public void shutdown() {
-    for (JmsConsumer c : activeConsumers.values()) {
-      c.stop();
-      consumerFactory.destroy(c);
+    synchronized (shutdownLock) {
+      shutdown = true;
     }
-    activeConsumers.clear();
+    // Drain entry by entry instead of wiping the map wholesale: every removal is
+    // owner-checked and performs exactly one stop+destroy, so a concurrent stream
+    // teardown can never double-destroy a consumer.
+    while (!activeConsumers.isEmpty()) {
+      for (Map.Entry<String, JmsConsumer> e : activeConsumers.entrySet()) {
+        if (activeConsumers.remove(e.getKey(), e.getValue())) {
+          e.getValue().stop();
+          consumerFactory.destroy(e.getValue());
+        }
+      }
+    }
   }
 
   private static void safeRespond(StreamObserver<JmsMessage> responseObserver, Throwable t) {

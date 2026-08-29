@@ -104,6 +104,8 @@ username    = "admin"      # optional
 password    = "admin"      # optional
 ```
 
+`failover://` URLs are accepted for Classic (`activemq`) brokers and rejected for `artemis` (use a single primary URL or multiple broker entries).
+
 The bridge binary downloads on first use. It comes from a configured release URL and is cached at `~/.cache/rust-camel/jms-bridge/`. The download is SHA256-verified. Set `CAMEL_JMS_BRIDGE_BINARY_PATH` to point at a local build for development.
 
 ## Consumer
