@@ -7,8 +7,10 @@ import jakarta.inject.Inject;
 import jakarta.xml.ws.Dispatch;
 import jakarta.xml.ws.Service;
 import java.io.File;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 import javax.xml.namespace.QName;
 import javax.xml.transform.Source;
@@ -30,12 +32,22 @@ public class CxfClientManager {
       String operation,
       long timeoutMs) {}
 
-  private final Map<DispatchKey, Dispatch<Source>> dispatches = new ConcurrentHashMap<>();
+  /**
+   * Access-order LRU Dispatch cache, bounded by {@code CXF_MAX_DISPATCHES}. Lookup and cold
+   * creation are serialized under the map monitor; the SOAP invoke stays outside it.
+   */
+  private final Map<DispatchKey, Dispatch<Source>> dispatches =
+      Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true));
+
+  /** Test seam: pins the dispatch-cache bound deterministically. */
+  int pinnedMaxDispatches = -1;
 
   @Inject SecurityProfileStore profileStore;
 
   @PostConstruct
   void init() {
+    int maxDispatches = resolveMaxDispatches();
+    LOG.fine("Dispatch cache bound: " + maxDispatches);
     try {
       Bus bus = new CXFBusFactory().createBus();
       LOG.fine("CXF Bus initialized: " + bus);
@@ -61,11 +73,21 @@ public class CxfClientManager {
     DispatchKey key =
         new DispatchKey(wsdl, address, service, port, profileName, normalizedOperation, timeoutMs);
     try {
-      return dispatches.computeIfAbsent(
-          key,
-          k ->
-              createDispatch(
-                  wsdl, address, service, port, profile, normalizedOperation, k.timeoutMs()));
+      synchronized (dispatches) {
+        Dispatch<Source> existing = dispatches.get(key);
+        if (existing != null) {
+          return existing;
+        }
+        Dispatch<Source> created =
+            createDispatch(
+                wsdl, address, service, port, profile, normalizedOperation, key.timeoutMs());
+        int maxDispatches = resolveMaxDispatches();
+        while (dispatches.size() >= maxDispatches) {
+          evictLruDispatch();
+        }
+        dispatches.put(key, created);
+        return created;
+      }
     } catch (RuntimeException ex) {
       if (ex.getCause() instanceof Exception nested) {
         throw nested;
@@ -74,8 +96,37 @@ public class CxfClientManager {
     }
   }
 
+  /** Evicts the least-recently-used entry and closes it best-effort. */
+  private void evictLruDispatch() {
+    Iterator<DispatchKey> iterator = dispatches.keySet().iterator();
+    DispatchKey lru = iterator.next();
+    Dispatch<Source> evicted = dispatches.remove(lru);
+    closeQuietly(evicted);
+    LOG.fine(
+        "Evicted LRU dispatch: "
+            + new File(lru.wsdl()).getName()
+            + " "
+            + lru.address()
+            + " "
+            + lru.port());
+  }
+
   int cacheSize() {
     return dispatches.size();
+  }
+
+  private int resolveMaxDispatches() {
+    return pinnedMaxDispatches > 0 ? pinnedMaxDispatches : BridgeConfig.parseMaxDispatches();
+  }
+
+  void closeQuietly(Dispatch<Source> dispatch) {
+    if (dispatch instanceof DispatchImpl<Source> impl) {
+      try {
+        impl.close();
+      } catch (Exception e) {
+        LOG.fine("Dispatch close failed: " + e);
+      }
+    }
   }
 
   private Dispatch<Source> createDispatch(
@@ -125,6 +176,11 @@ public class CxfClientManager {
 
   @PreDestroy
   void close() {
-    dispatches.clear();
+    synchronized (dispatches) {
+      for (Dispatch<Source> dispatch : dispatches.values()) {
+        closeQuietly(dispatch);
+      }
+      dispatches.clear();
+    }
   }
 }

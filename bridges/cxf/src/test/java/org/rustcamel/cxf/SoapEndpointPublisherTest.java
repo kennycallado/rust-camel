@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import com.google.protobuf.ByteString;
+import cxf_bridge.ConsumerRequest;
 import cxf_bridge.ConsumerResponse;
 import io.vertx.core.AsyncResult;
 import io.vertx.core.Future;
@@ -179,6 +180,144 @@ class SoapEndpointPublisherTest {
     SecurityProfile profile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
     String responseXml = triggerRequestFlow(requestXml, profile, response);
     assertTrue(responseXml.contains("<result>ok</result>"));
+  }
+
+  @Test
+  void prefixedBodyExtractedByLocalName() throws Exception {
+    String requestXml =
+        "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+            + "<soapenv:Body><p:order xmlns:p=\"urn:t\">X</p:order></soapenv:Body></soapenv:Envelope>";
+
+    ConsumerResponse response =
+        ConsumerResponse.newBuilder()
+            .setRequestId("test-pin-prefixed")
+            .setSecurityProfile(TEST_PROFILE_NAME)
+            .build();
+
+    SecurityProfile profile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
+    triggerRequestFlow(requestXml, profile, response);
+
+    ArgumentCaptor<ConsumerRequest> requestCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
+    verify(cxfServerManager).handleSoapRequest(requestCaptor.capture());
+    assertEquals(
+        "<p:order xmlns:p=\"urn:t\">X</p:order>",
+        requestCaptor.getValue().getPayload().toStringUtf8());
+  }
+
+  @Test
+  void decoyElementNameNotMisExtracted() throws Exception {
+    String requestXml =
+        "<Envelope xmlns=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+            + "<Body><xsd:bodyData xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">keep</xsd:bodyData>"
+            + "</Body></Envelope>";
+
+    ConsumerResponse response =
+        ConsumerResponse.newBuilder()
+            .setRequestId("test-decoy")
+            .setSecurityProfile(TEST_PROFILE_NAME)
+            .build();
+
+    SecurityProfile profile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
+    triggerRequestFlow(requestXml, profile, response);
+
+    ArgumentCaptor<ConsumerRequest> requestCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
+    verify(cxfServerManager).handleSoapRequest(requestCaptor.capture());
+    assertEquals(
+        "<xsd:bodyData xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">keep</xsd:bodyData>",
+        requestCaptor.getValue().getPayload().toStringUtf8());
+  }
+
+  @Test
+  void missingBodyForwardsEmptyPayload() throws Exception {
+    String requestXml =
+        "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+            + "<soapenv:Header><h:data xmlns:h=\"urn:h\">x</h:data></soapenv:Header>"
+            + "</soapenv:Envelope>";
+
+    ConsumerResponse response =
+        ConsumerResponse.newBuilder()
+            .setRequestId("test-missing-body")
+            .setSecurityProfile(TEST_PROFILE_NAME)
+            .build();
+
+    SecurityProfile profile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
+    triggerRequestFlow(requestXml, profile, response);
+
+    ArgumentCaptor<ConsumerRequest> requestCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
+    verify(cxfServerManager).handleSoapRequest(requestCaptor.capture());
+    assertEquals("", requestCaptor.getValue().getPayload().toStringUtf8());
+  }
+
+  @Test
+  void malformedEnvelopeFails400() throws Exception {
+    SecurityProfile profile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
+    when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(profile);
+
+    when(cxfServerManager.handleSoapRequest(any()))
+        .thenReturn(
+            CompletableFuture.completedFuture(
+                ConsumerResponse.newBuilder()
+                    .setRequestId("test-malformed")
+                    .setSecurityProfile(TEST_PROFILE_NAME)
+                    .build()));
+
+    when(headers.entries())
+        .thenReturn(
+            List.of(
+                Map.entry("content-type", "text/xml"),
+                Map.entry("soapaction", "\"urn:test:Operation\"")));
+
+    ArgumentCaptor<Callable> callableCaptor = ArgumentCaptor.forClass(Callable.class);
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<AsyncResult<String>>> resultHandlerCaptor =
+        ArgumentCaptor.forClass(Handler.class);
+    doAnswer(invocation -> null)
+        .when(vertx)
+        .executeBlocking(callableCaptor.capture(), resultHandlerCaptor.capture());
+
+    doAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Handler<AsyncResult<HttpServer>> handler = invocation.getArgument(2);
+              handler.handle(Future.succeededFuture(httpServer));
+              return null;
+            })
+        .when(httpServer)
+        .listen(anyInt(), anyString(), any());
+
+    ArgumentCaptor<String> responseCaptor = ArgumentCaptor.forClass(String.class);
+    when(httpResponse.end(responseCaptor.capture())).thenAnswer(i -> Future.succeededFuture());
+
+    publisher.publish();
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<HttpServerRequest>> requestHandlerCaptor =
+        ArgumentCaptor.forClass(Handler.class);
+    verify(httpServer).requestHandler(requestHandlerCaptor.capture());
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<Buffer>> chunkCaptor = ArgumentCaptor.forClass(Handler.class);
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<Void>> endCaptor = ArgumentCaptor.forClass(Handler.class);
+    when(httpRequest.handler(chunkCaptor.capture())).thenReturn(httpRequest);
+    when(httpRequest.endHandler(endCaptor.capture())).thenReturn(httpRequest);
+
+    requestHandlerCaptor.getValue().handle(httpRequest);
+    chunkCaptor.getValue().handle(Buffer.buffer("<not-xml".getBytes(StandardCharsets.UTF_8)));
+    endCaptor.getValue().handle((Void) null);
+
+    @SuppressWarnings("unchecked")
+    Callable<String> callable = callableCaptor.getValue();
+    Exception thrown = assertThrows(Exception.class, callable::call);
+
+    @SuppressWarnings("unchecked")
+    Handler<AsyncResult<String>> resultHandler = resultHandlerCaptor.getValue();
+    resultHandler.handle(Future.failedFuture(thrown));
+
+    verify(httpResponse).setStatusCode(400);
+    String faultBody = responseCaptor.getValue();
+    assertTrue(faultBody.contains("malformed"), faultBody);
+    verify(cxfServerManager, never()).handleSoapRequest(any());
   }
 
   @Test

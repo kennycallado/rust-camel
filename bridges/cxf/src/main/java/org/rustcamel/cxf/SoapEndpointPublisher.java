@@ -18,17 +18,14 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import javax.xml.parsers.ParserConfigurationException;
 import org.apache.wss4j.common.ext.WSSecurityException;
+import org.xml.sax.SAXParseException;
 
 @ApplicationScoped
 public class SoapEndpointPublisher {
   private static final Logger LOG = Logger.getLogger(SoapEndpointPublisher.class.getName());
   private static final String DEFAULT_ADDRESS = "http://0.0.0.0:9000/cxf";
-  private static final String MAX_BODY_BYTES_ENV = "CXF_MAX_BODY_BYTES";
-  private static final long DEFAULT_MAX_BODY_BYTES = 16L * 1024 * 1024;
-
-  /** Above the 16 MiB default cap, below the 18 MiB Rust gRPC decode limit. */
-  static final long MAX_BODY_BYTES_CEILING = 17L * 1024 * 1024;
 
   private static final String BODY_LIMIT_REJECT_MESSAGE = "request body exceeds CXF_MAX_BODY_BYTES";
 
@@ -249,7 +246,8 @@ public class SoapEndpointPublisher {
             requestXml = wssProcessor.processInbound(requestXml);
           }
 
-          String requestBody = extractSoapBody(requestXml);
+          String requestBody =
+              SoapEnvelopeHelper.extractBody(SoapEnvelopeHelper.parseResponse(requestXml));
 
           Map<String, String> headers =
               req.headers().entries().stream()
@@ -309,18 +307,29 @@ public class SoapEndpointPublisher {
             Throwable cause = ar.cause();
             LOG.log(Level.SEVERE, "SOAP request processing failed", cause);
 
-            boolean isSecurityFailure =
-                cause instanceof WSSecurityException
-                    || (cause != null && cause.getCause() instanceof WSSecurityException);
+            boolean isMalformedEnvelope =
+                hasInChain(cause, SAXParseException.class, ParserConfigurationException.class);
+            boolean isSecurityFailure = hasInChain(cause, WSSecurityException.class);
 
-            String faultCode = isSecurityFailure ? "soap:Client" : "soap:Server";
-            String faultString =
-                isSecurityFailure
-                    ? "WS-Security processing failed: " + sanitize(cause.getMessage())
-                    : "Internal server error";
+            String faultCode;
+            String faultString;
+            int statusCode;
+            if (isMalformedEnvelope) {
+              statusCode = 400;
+              faultCode = "soap:Client";
+              faultString = "malformed XML envelope: " + sanitize(cause.getMessage());
+            } else if (isSecurityFailure) {
+              statusCode = 400;
+              faultCode = "soap:Client";
+              faultString = "WS-Security processing failed: " + sanitize(cause.getMessage());
+            } else {
+              statusCode = 500;
+              faultCode = "soap:Server";
+              faultString = "Internal server error";
+            }
 
             req.response()
-                .setStatusCode(isSecurityFailure ? 400 : 500)
+                .setStatusCode(statusCode)
                 .putHeader("content-type", "text/xml; charset=utf-8")
                 .end(buildSoapFault(faultCode, faultString));
           }
@@ -338,11 +347,7 @@ public class SoapEndpointPublisher {
    * malformed or non-positive value so a typo never silently disables the cap.
    */
   static long maxBodyBytes() {
-    String raw = System.getenv(MAX_BODY_BYTES_ENV);
-    if (raw == null || raw.isBlank()) {
-      return DEFAULT_MAX_BODY_BYTES;
-    }
-    return parseCap(raw);
+    return BridgeConfig.parseMaxBodyBytes();
   }
 
   /**
@@ -350,27 +355,7 @@ public class SoapEndpointPublisher {
    * non-positive, or above-ceiling input.
    */
   static long parseCap(String raw) {
-    try {
-      long parsed = Long.parseLong(raw.trim());
-      if (parsed <= 0) {
-        throw new IllegalStateException(
-            MAX_BODY_BYTES_ENV + " must be a positive byte count: " + raw);
-      }
-      if (parsed > MAX_BODY_BYTES_CEILING) {
-        throw new IllegalStateException(
-            MAX_BODY_BYTES_ENV
-                + " exceeds its "
-                + MAX_BODY_BYTES_CEILING
-                + "-byte ceiling: "
-                + parsed
-                + "; caps above 17 MiB invert the decode-limit ordering (cap <= 17 MiB ceiling"
-                + " < 18 MiB Rust decode limit), bodies pass this Java cap only to fail at the"
-                + " 18 MiB Rust gRPC decode limit");
-      }
-      return parsed;
-    } catch (NumberFormatException e) {
-      throw new IllegalStateException(MAX_BODY_BYTES_ENV + " invalid: " + raw, e);
-    }
+    return BridgeConfig.parseMaxBodyBytes(raw);
   }
 
   /**
@@ -461,37 +446,18 @@ public class SoapEndpointPublisher {
         .replace("'", "&apos;");
   }
 
-  private static String extractSoapBody(String requestXml) {
-    String xml = requestXml == null ? "" : requestXml.trim();
-    String lower = xml.toLowerCase();
-    int bodyStart = lower.indexOf(":body");
-    if (bodyStart < 0) {
-      bodyStart = lower.indexOf("<body");
+  /** True when any {@link Throwable} in the cause chain is an instance of one of {@code types}. */
+  private static boolean hasInChain(Throwable thrown, Class<?>... types) {
+    java.util.Set<Throwable> seen =
+        java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    for (Throwable t = thrown; t != null && seen.add(t); t = t.getCause()) {
+      for (Class<?> type : types) {
+        if (type.isInstance(t)) {
+          return true;
+        }
+      }
     }
-    if (bodyStart < 0) {
-      return xml;
-    }
-    int open = lower.lastIndexOf('<', bodyStart);
-    int openEnd = lower.indexOf('>', bodyStart);
-    if (open < 0 || openEnd < 0 || openEnd <= open) {
-      return xml;
-    }
-    int close = lower.indexOf("</", openEnd);
-    int closeBody = lower.indexOf(":body>", openEnd);
-    if (closeBody < 0) {
-      closeBody = lower.indexOf("</body>", openEnd);
-    }
-    if (closeBody < 0) {
-      return xml.substring(openEnd + 1).trim();
-    }
-    int bodyEndOpen = lower.lastIndexOf("</", closeBody);
-    if (bodyEndOpen < 0) {
-      bodyEndOpen = close;
-    }
-    if (bodyEndOpen <= openEnd) {
-      return "";
-    }
-    return xml.substring(openEnd + 1, bodyEndOpen).trim();
+    return false;
   }
 
   private static String wrapEnvelope(String xmlBody, String soapVersion) {

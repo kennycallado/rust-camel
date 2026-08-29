@@ -13,6 +13,7 @@ import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.Source;
 import javax.xml.transform.stream.StreamSource;
 import org.junit.jupiter.api.Test;
+import org.w3c.dom.Document;
 
 class SoapEnvelopeHelperTest {
 
@@ -123,6 +124,17 @@ class SoapEnvelopeHelperTest {
         "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\">"
             + "<soap:Header/><soap:Body><m:ping xmlns:m=\"urn:test\"><m:id>1</m:id></m:ping></soap:Body></soap:Envelope>";
     String extracted = SoapEnvelopeHelper.extractBody(new StreamSource(new StringReader(envelope)));
+    assertTrue(extracted.contains("<m:ping"));
+    assertTrue(extracted.contains("<m:id>1</m:id>"));
+  }
+
+  @Test
+  void soap12NamespaceResolves() throws Exception {
+    String envelope =
+        "<env:Envelope xmlns:env=\"http://www.w3.org/2003/05/soap-envelope\">"
+            + "<env:Body><m:ping xmlns:m=\"urn:test\"><m:id>1</m:id></m:ping></env:Body></env:Envelope>";
+    Document doc = SoapEnvelopeHelper.parseResponse(envelope);
+    String extracted = SoapEnvelopeHelper.extractBody(doc);
     assertTrue(extracted.contains("<m:ping"));
     assertTrue(extracted.contains("<m:id>1</m:id>"));
   }

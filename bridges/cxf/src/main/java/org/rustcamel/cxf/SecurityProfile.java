@@ -4,8 +4,10 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.logging.Logger;
 import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.CallbackHandler;
@@ -301,6 +303,12 @@ public class SecurityProfile {
     List<String> actions = new ArrayList<>();
 
     String inActions = resolveActionsIn();
+    // Timestamp precedes Signature so signature part resolution sees the materialized
+    // wsu:Timestamp element (same order as the outbound path). Build-time composition
+    // guarantees Timestamp implies Signature, which implies a truststore.
+    if (hasText(truststorePath) && containsAction(inActions, "Timestamp")) {
+      actions.add(WSHandlerConstants.TIMESTAMP);
+    }
     if (hasText(truststorePath) && containsAction(inActions, "Signature")) {
       actions.add(WSHandlerConstants.SIGNATURE);
       props.put(ConfigurationConstants.SIG_PROP_REF_ID, SIG_CRYPTO_REF_ID);
@@ -382,6 +390,19 @@ public class SecurityProfile {
   }
 
   public static class Builder {
+    /**
+     * Action tokens the bridge actually materializes, stored LOWERCASE (entries are compared
+     * against lowercased tokens, so membership is case-insensitive and case-consistent by
+     * construction). Anything outside these sets — UsernameToken, SAML, SignatureConfirmation, ...
+     * — is silently ignored by WSS4J sidecar processing today, so unknown tokens fail the profile
+     * build instead (fail-loud, ADR-0033).
+     */
+    private static final Set<String> SUPPORTED_INBOUND_ACTIONS =
+        Set.of("signature", "encrypt", "timestamp");
+
+    private static final Set<String> SUPPORTED_OUTBOUND_ACTIONS =
+        Set.of("signature", "encrypt", "timestamp");
+
     private final String name;
     private String wsdlPath;
     private String serviceName;
@@ -489,14 +510,33 @@ public class SecurityProfile {
      * Fail-loud checks on the RAW configured inbound actions — same discipline as {@link
      * #validateOutboundActions()}: blank/unset actions are raw-exempt (the runtime default
      * "Signature" is only materialized when a truststore exists, and the manual consumer path keeps
-     * the keystore fallback). Explicit actions are material-checked individually: Signature needs
-     * verification anchors, which live in the truststore; Encrypt needs decryption keys, which live
-     * in the keystore. Without these checks createInInterceptor() silently drops the unmatched
-     * action, so the endpoint would skip inbound verification or decryption without any error.
+     * the keystore fallback). Set membership first: every token must be one the bridge actually
+     * materializes — UsernameToken/SAML/SignatureConfirmation are not, so a profile carrying them
+     * would silently skip enforcement. Composition second: Timestamp outside a signature is not
+     * tamper-evident, so Timestamp requires Signature. Material last: Signature needs verification
+     * anchors, which live in the truststore; Encrypt needs decryption keys, which live in the
+     * keystore. Without these checks createInInterceptor() silently drops the unmatched action, so
+     * the endpoint would skip inbound verification or decryption without any error.
      */
     private void validateInboundActions() {
       String raw = securityActionsIn;
       if (!hasText(raw)) return;
+      String unknown = firstUnsupportedAction(raw, SUPPORTED_INBOUND_ACTIONS);
+      if (unknown != null) {
+        throw new IllegalArgumentException(
+            "in-actions include unsupported action '"
+                + unknown
+                + "' (raw: '"
+                + raw
+                + "'); supported inbound actions: Signature, Encrypt, Timestamp;"
+                + " UsernameToken/SAML/SignatureConfirmation are not materialized");
+      }
+      if (containsAction(raw, "Timestamp") && !containsAction(raw, "Signature")) {
+        throw new IllegalArgumentException(
+            "in-actions include Timestamp but not Signature: '"
+                + raw
+                + "'. A Timestamp emitted outside the signature is not tamper-evident");
+      }
       if (containsAction(raw, "Signature") && !hasText(truststorePath)) {
         throw new IllegalArgumentException(
             "in-actions include Signature but no truststore is configured: '"
@@ -516,15 +556,26 @@ public class SecurityProfile {
     /**
      * Fail-loud checks on the RAW configured outbound actions. Blank/unset actions are raw-exempt:
      * the runtime default ("Signature") is resolved later and validated by {@link
-     * #validateSignatureKnobs()}. Composition first: Timestamp outside a signature is not
-     * tamper-evident, so Timestamp requires Signature. Material second: Signature, Encrypt, and
-     * Timestamp all need crypto material, so a keystore is required. Inbound counterpart: {@link
-     * #validateInboundActions()} applies the same raw-exempt, material-per-action discipline to
-     * actions.in — together the two validators form one build-time security contract.
+     * #validateSignatureKnobs()}. Set membership first: every token must be one the bridge actually
+     * materializes. Composition second: Timestamp outside a signature is not tamper-evident, so
+     * Timestamp requires Signature. Material third: Signature, Encrypt, and Timestamp all need
+     * crypto material, so a keystore is required. Inbound counterpart: {@link
+     * #validateInboundActions()} applies the same membership, composition, and material-per-action
+     * discipline to actions.in — together the two validators form one build-time security contract.
      */
     private void validateOutboundActions() {
       String raw = securityActionsOut;
       if (!hasText(raw)) return;
+      String unknown = firstUnsupportedAction(raw, SUPPORTED_OUTBOUND_ACTIONS);
+      if (unknown != null) {
+        throw new IllegalArgumentException(
+            "out-actions include unsupported action '"
+                + unknown
+                + "' (raw: '"
+                + raw
+                + "'); supported outbound actions: Signature, Encrypt, Timestamp;"
+                + " UsernameToken/SAML/SignatureConfirmation are not materialized");
+      }
       if (containsAction(raw, "Timestamp") && !containsAction(raw, "Signature")) {
         throw new IllegalArgumentException(
             "out-actions include Timestamp but not Signature: '"
@@ -665,6 +716,21 @@ public class SecurityProfile {
       if (part.equalsIgnoreCase(token)) return true;
     }
     return false;
+  }
+
+  /**
+   * First token of {@code raw} not present (case-insensitively, via lowercase comparison) in {@code
+   * supported}, or null if every token is supported. Same whitespace token-splitting as {@link
+   * #containsAction(String, String)}.
+   */
+  private static String firstUnsupportedAction(String raw, Set<String> supported) {
+    for (String part : raw.split("\\s+")) {
+      // Leading/trailing whitespace or doubled separators yield blank parts; skip them
+      // (containsAction tolerates the same raw string, so validation must too).
+      if (part.isBlank()) continue;
+      if (!supported.contains(part.toLowerCase(Locale.ROOT))) return part;
+    }
+    return null;
   }
 
   /** Password callback handler for WSS4J inbound processing. */

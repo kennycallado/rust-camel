@@ -127,6 +127,21 @@ jobs:
           body: |
             ## CXF Bridge ${{ github.ref_name }}
 
+            **Breaking changes:**
+            - Unknown WS-Security action tokens (anything outside
+              Signature/Encrypt/Timestamp, e.g. `UsernameToken`) now fail
+              profile build at startup instead of silently disabling
+              security. `Timestamp` requires `Signature` in both directions.
+            - Inbound envelope extraction is namespace-aware: malformed
+              envelopes are rejected with HTTP 400 (previously mis-forwarded);
+              a missing Body forwards an empty payload.
+
+            **Behavior changes:**
+            - Producer responses beyond `CXF_MAX_BODY_BYTES` (16 MiB default)
+              fail the route with gRPC `RESOURCE_EXHAUSTED` naming the size.
+            - Dispatch cache bounded by `CXF_MAX_DISPATCHES` (64 default,
+              1024 ceiling) with LRU eviction and deterministic close.
+
             **Platforms:**
             - `linux-musl-x86_64` — statically linked, any Linux (Alpine, Ubuntu, NixOS, scratch)
             - `macos-aarch64` — Apple Silicon (M1/M2/M3+)

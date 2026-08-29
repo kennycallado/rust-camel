@@ -8,8 +8,16 @@ version = project.findProperty("version")?.toString() ?: "0.6.0"
 
 repositories {
     mavenCentral()
-    maven {
-        url = uri("https://build.shibboleth.net/nexus/content/groups/public")
+    exclusiveContent {
+        forRepository {
+            maven {
+                url = uri("https://build.shibboleth.net/nexus/content/groups/public")
+            }
+        }
+        filter {
+            includeGroup("org.opensaml")
+            includeGroup("net.shibboleth")
+        }
     }
 }
 

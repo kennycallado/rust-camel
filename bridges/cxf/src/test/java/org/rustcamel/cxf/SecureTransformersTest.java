@@ -38,6 +38,6 @@ class SecureTransformersTest {
         EXPECTED,
         new String(
             SoapEnvelopeHelper.sourceToBytes(new DOMSource(document)), StandardCharsets.UTF_8));
-    assertEquals(EXPECTED, CxfBridgeService.toXmlString(new DOMSource(document)));
+    assertEquals(EXPECTED, CxfBridgeService.toXmlString(new DOMSource(document), Long.MAX_VALUE));
   }
 }

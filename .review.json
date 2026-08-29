@@ -2,52 +2,45 @@
  "reviewer": "reviewers/r_glm",
  "verdict": "APPROVE-WITH-FINDINGS",
  "rounds": 1,
- "impl_head": "df9e7c85",
+ "impl_head": "c86e2a95",
  "findings": [
   {
    "sev": "minor",
-   "finding": "bd closure pending",
-   "resolution": "at archive per protocol"
+   "finding": "seam javadoc late-pin wording",
+   "resolution": "closed: reworded (CDI eager, late pins ignored)"
   },
   {
    "sev": "minor",
-   "finding": "no nio:// rejection pin",
-   "resolution": "closed: nioSchemeAborts test added, 42/42 java"
+   "finding": "bridges/README.md index stale",
+   "resolution": "closed: cap both-directions + CXF_MAX_DISPATCHES row"
+  },
+  {
+   "sev": "minor",
+   "finding": "release notes no carrier",
+   "resolution": "closed: migration lines added to cxf-bridge-release.yml body"
   }
  ],
- "gates": "fmt 0, clippy x3 0, 9 lints 0, schema 0, build-ws 0, lib 8092/0 (jms 126/0), hex 33/33, audit 0, gradle 42/42, validate strict True",
+ "gates": "java 163/0 (cleanTest fresh) + spotlessCheck 0; validate strict True; openspec status complete; RUST GATES N/A (0 .rs/Cargo.toml changed): fmt, clippy x3, 9 xtask lints, schema, audit, build-ws, test-lib, hex \u2014 all N/A no-Rust-changed; lint-commits SKIPPED per conductor rule (remote fetch, CI owns)",
+ "per_task": "T1 APPROVE-AWF(2 minors closed 3ba7808b), T2 APPROVE-AWF(1 minor closed 2cbf4aff), T3 APPROVE-AWF(1 doc closed), T4 APPROVE clean, T5 APPROVE-AWF(2 record-keeping: bd close-reason carriers)",
  "release_notes_bridges_061": [
-  "BREAKING: failover:// rejected for artemis entries (was localhost plaintext); classic keeps it",
-  "BREAKING: unsupported schemes (failover wrappers, nio://) + hostless/schemeless URLs abort with remediation",
-  "JMS_MAX_BODY_BYTES TextMessage cap byte-accurate (UTF-8); cap bounds forwarded body",
-  "Shutdown hardening: UNAVAILABLE on racing subscribe; exactly-once consumer destroy"
+  "BREAKING unknown action tokens fail startup (sets: Sig/Enc/Timestamp; TS needs Sig)",
+  "BREAKING malformed envelopes 400 / missing Body empty payload",
+  "response cap CXF_MAX_BODY_BYTES both directions (RESOURCE_EXHAUSTED producer-side)",
+  "dispatch cache CXF_MAX_DISPATCHES 64/1024 LRU + close",
+  "nexus scoped to opensaml/shibboleth groups (non-user-visible)"
  ],
  "papal_blessing": {
-  "expert": "experts/e_opus",
+  "expert": "experts/e_glm (papal duty, e_opus/e_gpt unavailable per human)",
   "verdict": "BLESS-WITH-CONDITIONS",
   "rounds": 1,
   "conditions": [
    {
-    "n": "1+2",
-    "cond": "BREAKING markers on failover/scheme commits",
-    "resolution": "SATISFIED AT SQUASH: merge collapses to one commit; squash subject gets '!' + BREAKING CHANGE body section (the changelog generator reads the range, intermedicates vanish). Verified: xtask changelog parses conventional commits incl. '!'."
-   },
-   {
-    "n": "3",
-    "cond": "0.6.1 migration line in release-notes source",
-    "resolution": "squash body BREAKING section carries both migration lines (artemis failover->single-URL-or-multi-entry; unsupported-scheme/hostless abort) - the generated notes ARE the source"
-   },
-   {
-    "n": "4",
-    "cond": "rc-2yiq close-reason broker-type-scoped",
-    "resolution": "queued at archive step"
-   },
-   {
-    "n": "5",
-    "cond": "close rc-5r45 rc-lupv at archive",
-    "resolution": "queued at archive step"
+    "n": "1",
+    "cond": "README allocation honesty sentence (JMS-precedent: cap bounds serialized bytes + forwarded aggregation, not peak sidecar heap - DOM already parsed pre-cap)",
+    "resolution": "closed: sentence appended after cap paragraph"
    }
   ],
-  "grill": "lock linearization sound (worst interleavings walked); dispatch artemis-only-reached traced (classic never hits transportConfig); cap DoS delta immaterial (getText already materialized 2x in both); barrier aggregate-determinism honest"
+  "grill": "(a) lock+close sound - same-monitor mutual exclusion, closeQuietly continues on failure, evict-vs-invoke race = documented thrash tradeoff non-blocking; (b) whitelist posture right (reject > silent-insecure; deferral tracked); (c) boundary correct both write paths; (d) decoy RED honest by code archaeology at dcf5c9fc~1; (e) urkv early-close deviation acceptable (reason accurate, work green); carrier 4-lines-vs-5 documented (shibboleth non-user-visible)",
+  "fresh_verification": "163/0/0 re-run by expert, spotless 0, strict validate True, 0 rust files (stale origin/main scare resolved)"
  }
 }

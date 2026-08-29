@@ -20,7 +20,8 @@ Each bridge reads its configuration from environment variables at startup. Malfo
 
 | Variable             | Default             | Description                                                                                    |
 | -------------------- | ------------------- | ---------------------------------------------------------------------------------------------- |
-| `CXF_MAX_BODY_BYTES` | `16777216` (16 MiB) | Listener request-body cap. Ceiling 17 MiB, below the 18 MiB Rust gRPC decode limit. Oversized bodies get HTTP 413. |
+| `CXF_MAX_BODY_BYTES` | `16777216` (16 MiB) | Body cap, both directions: listener request bodies (oversized get HTTP 413) and producer response bodies (oversized fail the route with gRPC `RESOURCE_EXHAUSTED`). Ceiling 17 MiB, below the 18 MiB Rust gRPC decode limit. |
+| `CXF_MAX_DISPATCHES` | `64` | Bounds the producer's Dispatch cache (LRU eviction, entries closed on evict/shutdown). Ceiling 1024. Malformed values abort startup. |
 
 The cxf listener accepts `http://` consumer addresses only; TLS listener support is not yet available.
 

@@ -2,6 +2,15 @@
 
 A Quarkus-based gRPC bridge for Apache CXF SOAP services with WS-Security support.
 
+## Build and dependencies
+
+The Shibboleth Maven nexus
+(`https://build.shibboleth.net/nexus/content/groups/public`) is declared
+with a Gradle `exclusiveContent` filter: it resolves only the
+`org.opensaml` and `net.shibboleth` groups (OpenSAML 5.x, required by
+WSS4J 4.x; Maven Central 404s those artifacts). Every other artifact
+resolves from Maven Central.
+
 ## WS-Security Configuration
 
 The CXF bridge supports WS-Security (signing, encryption, verification, and decryption) via WSS4J. Security is enabled automatically when a keystore path is configured.
@@ -17,8 +26,8 @@ The CXF bridge supports WS-Security (signing, encryption, verification, and decr
 | `cxf.sig.username`                        | `clientkey`       | Alias of the key entry in the keystore used for signing.                                                                                                |
 | `cxf.sig.password`                        | _(none)_          | Password for the private key entry.                                                                                                                     |
 | `cxf.enc.username`                        | `serverkey`       | Alias used for encryption (recipient's public key).                                                                                                     |
-| `cxf.security.actions.out`                | _(empty)_         | Space-separated WSS4J action tokens for outbound messages (e.g. `Signature`, `Signature Encrypt`, `Signature Timestamp`; see Timestamp behavior for constraints and build-time rejections).                                                      |
-| `cxf.security.actions.in`                 | _(empty)_         | Space-separated WSS4J action tokens for inbound messages. Blank/unset keeps the default (`Signature`), which the in-interceptor materializes only when a truststore is present. Explicit `Signature` requires `cxf.truststore.path`; explicit `Encrypt` requires `cxf.keystore.path`; the build fails otherwise. The keystore fallback applies only to the manual consumer path, and the truststore may point at the same JKS as the keystore. |
+| `cxf.security.actions.out`                | _(empty)_         | Space-separated WSS4J action tokens for outbound messages (e.g. `Signature`, `Signature Encrypt`, `Signature Timestamp`). Supported tokens: `Signature`, `Encrypt`, `Timestamp` (`Timestamp` requires `Signature`); any other token fails the profile build. See Timestamp behavior for constraints and build-time rejections.                                                      |
+| `cxf.security.actions.in`                 | _(empty)_         | Space-separated WSS4J action tokens for inbound messages. Blank/unset keeps the default (`Signature`), which the in-interceptor materializes only when a truststore is present. Supported tokens: `Signature`, `Encrypt`, `Timestamp` (`Timestamp` requires `Signature`); any other token fails the profile build. Explicit `Signature` requires `cxf.truststore.path`; explicit `Encrypt` requires `cxf.keystore.path`; the build fails otherwise. The keystore fallback applies only to the manual consumer path, and the truststore may point at the same JKS as the keystore. |
 | `CXF_PROFILE_<N>_SIGNATURE_ALGORITHM` (`cxf.security.signature.algorithm`) | _(WSS4J default)_ | Signature algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#rsa-sha1` for legacy, `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` for modern). Applied on BOTH producer requests and consumer signed responses. |
 | `CXF_PROFILE_<N>_SIGNATURE_DIGEST_ALGORITHM` (`cxf.security.signature.digest.algorithm`) | _(WSS4J default)_ | Digest algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#sha1` or `http://www.w3.org/2001/04/xmlenc#sha256`). Applied on BOTH paths. |
 | `CXF_PROFILE_<N>_SIGNATURE_C14N_ALGORITHM` (`cxf.security.signature.c14n.algorithm`) | _(WSS4J default)_ | Canonicalization algorithm URI (e.g. `http://www.w3.org/2001/10/xml-exc-c14n#`). Applied on BOTH paths. |
@@ -139,16 +148,22 @@ The manual consumer's inbound processing enforces the same rule: when the requir
 include both `Timestamp` and `Signature`, the verified signature must cover
 the timestamp.
 
-Two rules fail loud at profile construction. They read the configured
-outbound actions; blank or unset actions are exempt.
+Three rules fail loud at profile construction. They read the configured
+inbound and outbound actions; blank or unset actions are exempt.
 
-- Timestamp requires Signature. Configured outbound actions that contain
-  `Timestamp` but not `Signature` are rejected: a timestamp emitted outside
-  the signature is not tamper-evident.
+- Supported tokens only. Both action lists accept exactly `Signature`,
+  `Encrypt`, and `Timestamp` (case-insensitive). Any other token —
+  `UsernameToken`, SAML, `SignatureConfirmation` — is not materialized by
+  the bridge, so it is rejected: the build error names the token, the
+  supported set, and the raw actions string.
+- Timestamp requires Signature. Configured actions that contain
+  `Timestamp` but not `Signature` are rejected in both directions: a
+  timestamp emitted outside the signature is not tamper-evident.
 - Signing material is required. Configured outbound actions that contain
-  `Signature`, `Encrypt`, or `Timestamp` require a keystore. The composition
-  rule is checked first; the keystore check runs only for a valid
-  composition.
+  `Signature`, `Encrypt`, or `Timestamp` require a keystore; inbound
+  `Signature` requires a truststore and inbound `Encrypt` requires a
+  keystore. The membership and composition rules are checked first; the
+  material checks run only for a valid composition.
 
 ### Startup logging
 
@@ -173,25 +188,41 @@ Consumer addresses accept plain `http://` only. The bridge does not expose a TLS
 
 The default listener address is `http://0.0.0.0:9000/cxf`.
 
+### Inbound payload extraction
+
+The listener parses each inbound envelope with a namespace-aware DOM
+parser and forwards the first element child of the SOAP Body. The
+extraction resolves Body by namespace, not by prefix, so SOAP 1.1 and
+SOAP 1.2 envelopes work with any prefix (or none). A malformed XML
+envelope is rejected with HTTP 400 and nothing is forwarded. An
+envelope without a Body forwards an empty payload.
+
 ## Dispatch cache (producer)
 
 Producer-side SOAP clients are cached per (WSDL, address, service, port,
 security profile, operation, request timeout). Every entry's request
 context — endpoint address, timeouts, SOAPAction — is written once at
 creation and never mutated afterwards, so concurrent invokes cannot
-cross-contaminate. Cardinality grows per distinct operation/timeout pair
-per endpoint tuple. **Caution (ADR-0032):** `operation` and the request
-timeout can also be supplied per-exchange via the `CamelCxfOperation`
-and `CamelCxfTimeoutMs` Exchange headers. A route that derives either
-from untrusted request data lets an external caller mint one cached
-client (a permanent allocation) per distinct value — bound cardinality
-only when these dimensions come from route configuration, not from the
-data plane. An eviction cap is tracked as rc-urkv.
+cross-contaminate. The cache is bounded by `CXF_MAX_DISPATCHES`
+(default 64, ceiling 1024): when an insertion would exceed the cap, the
+least-recently-used entry is evicted and its CXF `Dispatch` is closed,
+and entries remaining at shutdown are closed the same way. Lookup and
+cold creation are serialized under one lock, so a given cache key is
+created exactly once. **Caution (ADR-0032):** `operation` and the
+request timeout can also be supplied per-exchange via the
+`CamelCxfOperation` and `CamelCxfTimeoutMs` Exchange headers. A route
+that derives either from untrusted request data lets an external caller
+churn cached clients — the cap bounds the blast radius, but hot eviction
+still costs allocations and reconnects; keep these dimensions in route
+configuration, not the data plane.
 
 ## Environment Variables
 
 | Variable              | Default              | Description                                                                                                                                               |
 | --------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CXF_MAX_BODY_BYTES`  | `16777216` (16 MiB)  | Listener request-body cap in bytes. Oversized request bodies are rejected with HTTP 413.                                                                   |
+| `CXF_MAX_BODY_BYTES`  | `16777216` (16 MiB)  | Body cap in bytes for both directions: the listener request body (rejected with HTTP 413) and the serialized producer response body (over-cap responses fail the invoke with `RESOURCE_EXHAUSTED`). |
+| `CXF_MAX_DISPATCHES`  | `64`                 | Bound on the producer Dispatch cache (ceiling 1024); the least-recently-used entry is evicted and closed when an insertion would exceed it.                |
 
-A malformed, non-positive, or above-ceiling value aborts startup. The ceiling is 17 MiB. Operators must respect the ordering constraint: the cap stays at or below 17 MiB, and the Rust gRPC decode limit is 18 MiB. A body accepted by the listener is therefore always decodable on the Rust side.
+A malformed, non-positive, or above-ceiling value aborts startup for both variables. The body-cap ceiling is 17 MiB. Operators must respect the ordering constraint: the cap stays at or below 17 MiB, and the Rust gRPC decode limit is 18 MiB. A body accepted by the listener is therefore always decodable on the Rust side. The dispatch-cap ceiling is 1024.
+
+The cap bounds both directions of the bridge. Inbound, the listener rejects a request body past the cap with HTTP 413. Outbound, the producer serializes the remote response under the same cap: a response whose serialized size exceeds it fails the route exchange with `RESOURCE_EXHAUSTED` — the error description names `CXF_MAX_BODY_BYTES` and the observed size, and no payload is forwarded. Like the JMS cap, this bounds the serialized bytes and the forwarded aggregation, not the peak sidecar allocation: CXF has already parsed the response DOM into the heap by the time the cap rejects.

@@ -729,6 +729,136 @@ class SecurityProfileTest {
     assertEquals("Signature Encrypt", props.get("action"));
   }
 
+  @Test
+  @DisplayName("unknown inbound action token is rejected at build")
+  void unknownInboundTokenRejectedAtBuild() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                SecurityProfile.builder("in-unknown")
+                    .keystore(keystorePath.toString(), "changeit")
+                    .truststore(keystorePath.toString(), "changeit")
+                    .actionsIn("UsernameToken")
+                    .build(),
+            "expected build() to reject the unsupported inbound token UsernameToken");
+    String msg = ex.getMessage();
+    assertTrue(msg.contains("UsernameToken"), "expected message naming the token: " + msg);
+    assertTrue(msg.contains("Signature"), "expected supported set naming Signature: " + msg);
+    assertTrue(msg.contains("Encrypt"), "expected supported set naming Encrypt: " + msg);
+    assertTrue(msg.contains("Timestamp"), "expected supported set naming Timestamp: " + msg);
+  }
+
+  @Test
+  @DisplayName("unknown outbound action token is rejected at build")
+  void unknownOutboundTokenRejectedAtBuild() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                SecurityProfile.builder("out-unknown")
+                    .keystore(keystorePath.toString(), "changeit")
+                    .actionsOut("SignatureConfirmation")
+                    .build(),
+            "expected build() to reject the unsupported outbound token SignatureConfirmation");
+    String msg = ex.getMessage();
+    assertTrue(msg.contains("SignatureConfirmation"), "expected message naming the token: " + msg);
+    assertTrue(msg.contains("Signature"), "expected supported set naming Signature: " + msg);
+    assertTrue(msg.contains("Encrypt"), "expected supported set naming Encrypt: " + msg);
+    assertTrue(msg.contains("Timestamp"), "expected supported set naming Timestamp: " + msg);
+  }
+
+  @Test
+  @DisplayName("bare inbound Timestamp without Signature is rejected by composition")
+  void bareInboundTimestampRejectedByComposition() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                SecurityProfile.builder("in-ts-no-sig")
+                    .keystore(keystorePath.toString(), "changeit")
+                    .truststore(keystorePath.toString(), "changeit")
+                    .actionsIn("Timestamp")
+                    .build(),
+            "expected build() to reject inbound Timestamp without Signature");
+    String msg = ex.getMessage();
+    assertTrue(msg.contains("Timestamp"), "expected message naming Timestamp: " + msg);
+    assertTrue(msg.contains("Signature"), "expected message naming Signature: " + msg);
+  }
+
+  @Test
+  @DisplayName("inbound Timestamp Signature composition still builds")
+  void inboundTimestampSignatureStillBuilds() {
+    SecurityProfile p =
+        SecurityProfile.builder("in-ts-sig")
+            .keystore(keystorePath.toString(), "changeit")
+            .truststore(keystorePath.toString(), "changeit")
+            .actionsIn("Timestamp Signature")
+            .build();
+    assertEquals("Timestamp Signature", p.securityActionsIn());
+  }
+
+  @Test
+  @DisplayName("leading-whitespace raw in-actions build: blank tokens are skipped")
+  void leadingWhitespaceRawStringBuilds() {
+    SecurityProfile p =
+        SecurityProfile.builder("in-leading-ws")
+            .keystore(keystorePath.toString(), "changeit")
+            .truststore(keystorePath.toString(), "changeit")
+            .actionsIn(" Timestamp Signature")
+            .build();
+    assertEquals(" Timestamp Signature", p.securityActionsIn());
+    var interceptor = assertInstanceOf(WSS4JInInterceptor.class, p.createInInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    assertEquals("Timestamp Signature", props.get("action"));
+  }
+
+  @Test
+  @DisplayName("inbound Encrypt with a keystore still builds")
+  void inboundEncryptWithKeystoreBuilds() {
+    SecurityProfile p =
+        SecurityProfile.builder("in-enc-ok")
+            .keystore(keystorePath.toString(), "changeit")
+            .actionsIn("Encrypt")
+            .build();
+    assertEquals("Encrypt", p.securityActionsIn());
+  }
+
+  @Test
+  @DisplayName("lowercase inbound token matches the supported set case-insensitively")
+  void mixedCaseTokenTreatedCaseInsensitively() {
+    SecurityProfile p =
+        SecurityProfile.builder("in-lowercase")
+            .keystore(keystorePath.toString(), "changeit")
+            .truststore(keystorePath.toString(), "changeit")
+            .actionsIn("signature")
+            .build();
+    assertEquals("signature", p.securityActionsIn());
+  }
+
+  @Test
+  @DisplayName("blank unset actions stay raw-exempt at build")
+  void blankActionsStayRawExempt() {
+    SecurityProfile p = SecurityProfile.builder("blank-both").build();
+    assertNull(p.securityActionsIn());
+    assertNull(p.securityActionsOut());
+  }
+
+  @Test
+  @DisplayName("inbound interceptor materializes Timestamp before Signature")
+  void inboundInterceptorMaterializesTimestamp() {
+    SecurityProfile p =
+        SecurityProfile.builder("in-ts-materialized")
+            .keystore(keystorePath.toString(), "changeit")
+            .truststore(keystorePath.toString(), "changeit")
+            .actionsIn("Timestamp Signature")
+            .build();
+    var interceptor = assertInstanceOf(WSS4JInInterceptor.class, p.createInInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    // Timestamp precedes Signature, mirroring the outbound ordering.
+    assertEquals("Timestamp Signature", props.get("action"));
+  }
+
   private static void assertBuildRejectedNaming(SecurityProfile.Builder builder, String envVar) {
     IllegalArgumentException ex =
         assertThrows(

@@ -6,6 +6,7 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.quarkus.grpc.GrpcService;
 import io.smallrye.common.annotation.Blocking;
+import jakarta.annotation.PostConstruct;
 import jakarta.inject.Inject;
 import jakarta.xml.ws.soap.SOAPFaultException;
 import java.io.StringReader;
@@ -31,6 +32,33 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
   @Inject CxfServerManager serverManager;
 
   @Inject SecurityProfileStore profileStore;
+
+  /**
+   * Test seam: pins the producer response-body cap deterministically. {@code -1} (production) lets
+   * {@link #responseCapBytes()} resolve the cap from {@link BridgeConfig#parseMaxBodyBytes()} on
+   * first use; a positive value wins over the environment when set before first resolution (in CDI
+   * construction the {@code @PostConstruct} hook resolves eagerly, so late pins are ignored).
+   */
+  long pinnedMaxBodyBytes = -1;
+
+  private long resolvedResponseCapBytes = -1;
+
+  @PostConstruct
+  void initResponseCap() {
+    // Eager startup validation (ADR-0033): resolve and memoize the cap at post-construct.
+    responseCapBytes();
+  }
+
+  private long responseCapBytes() {
+    if (resolvedResponseCapBytes > 0) {
+      return resolvedResponseCapBytes;
+    }
+    // Resolve once and memoize. A pin set after construction but before first invoke wins over the
+    // environment, matching the publisher's per-request pin semantics.
+    resolvedResponseCapBytes =
+        pinnedMaxBodyBytes > 0 ? pinnedMaxBodyBytes : BridgeConfig.parseMaxBodyBytes();
+    return resolvedResponseCapBytes;
+  }
 
   @Override
   public void invoke(SoapRequest request, StreamObserver<SoapResponse> responseObserver) {
@@ -88,7 +116,21 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
       }
       // Service.Mode.PAYLOAD: dispatch returns just the SOAP body content (no envelope wrapper).
       // The serialized source is the response payload directly — no envelope extraction needed.
-      String responseBody = toXmlString(responseSource);
+      String responseBody;
+      try {
+        responseBody = toXmlString(responseSource, responseCapBytes());
+      } catch (ResponseCapExceededException e) {
+        LOG.log(Level.WARNING, "SOAP invoke aborted: {0}", e.getMessage());
+        responseObserver.onError(
+            Status.RESOURCE_EXHAUSTED
+                .withDescription(
+                    "response body "
+                        + e.observedBytes
+                        + " bytes exceeds CXF_MAX_BODY_BYTES="
+                        + e.capBytes)
+                .asRuntimeException());
+        return;
+      }
       boolean fault = false;
 
       SoapResponse.Builder builder =
@@ -168,11 +210,82 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
     responseObserver.onCompleted();
   }
 
-  static String toXmlString(Source source) throws Exception {
-    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-    SecureTransformers.factory()
-        .newTransformer()
-        .transform(source, new javax.xml.transform.stream.StreamResult(out));
-    return out.toString(java.nio.charset.StandardCharsets.UTF_8);
+  static String toXmlString(Source source, long cap) throws Exception {
+    BoundedOutputStream bounded = new BoundedOutputStream(cap);
+    try {
+      SecureTransformers.factory()
+          .newTransformer()
+          .transform(source, new javax.xml.transform.stream.StreamResult(bounded));
+    } catch (Exception e) {
+      throw unwrapResponseCap(e);
+    }
+    return bounded.toUtf8String();
+  }
+
+  /**
+   * The transformer wraps sink failures in {@code TransformerException}s — walk the cause chain and
+   * rethrow {@link ResponseCapExceededException} itself so the invoke() catch sees the cap breach
+   * instead of a generic transformer failure.
+   */
+  private static Exception unwrapResponseCap(Exception e) throws Exception {
+    if (e instanceof ResponseCapExceededException capEx) {
+      throw capEx;
+    }
+    Throwable cause = e.getCause();
+    while (cause != null) {
+      if (cause instanceof ResponseCapExceededException capEx) {
+        throw capEx;
+      }
+      if (cause.getCause() == cause) {
+        break;
+      }
+      cause = cause.getCause();
+    }
+    return e;
+  }
+
+  /** Counts serialized bytes and refuses to buffer past the response cap. */
+  private static final class BoundedOutputStream extends java.io.OutputStream {
+    private final long capBytes;
+    private final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+
+    BoundedOutputStream(long capBytes) {
+      this.capBytes = capBytes;
+    }
+
+    @Override
+    public void write(int b) {
+      enforceCap(1);
+      out.write(b);
+    }
+
+    @Override
+    public void write(byte[] b, int off, int len) {
+      enforceCap(len);
+      out.write(b, off, len);
+    }
+
+    private void enforceCap(int incoming) {
+      long next = out.size() + incoming;
+      if (next > capBytes) {
+        throw new ResponseCapExceededException(next, capBytes);
+      }
+    }
+
+    String toUtf8String() {
+      return out.toString(java.nio.charset.StandardCharsets.UTF_8);
+    }
+  }
+
+  /** The serialized producer response outgrew {@code CXF_MAX_BODY_BYTES}. */
+  static final class ResponseCapExceededException extends RuntimeException {
+    final long observedBytes;
+    final long capBytes;
+
+    ResponseCapExceededException(long observedBytes, long capBytes) {
+      super("response body " + observedBytes + " bytes exceeds CXF_MAX_BODY_BYTES=" + capBytes);
+      this.observedBytes = observedBytes;
+      this.capBytes = capBytes;
+    }
   }
 }
