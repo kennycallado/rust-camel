@@ -88,13 +88,30 @@ pipeline are out of scope.
 ### Requirement: Non-credential cache_repo environment overrides
 
 The system SHALL allow per-deployment overrides of non-credential
-`cache_repo` fields via `CAMEL_CACHE_REPO_*` environment variables:
-`PAYLOAD`, `PAYLOAD_DIR`, `CACHE_SIZE`, `SWEEP_INTERVAL`, `MASTER_NAME`,
-`KEY_PREFIX`, `DB`, and `SENTINEL_NODES` (comma-separated list).
+`cache_repo` fields via `CAMEL_CACHE_REPO_*` environment variables with a
+typed contract per field class: `BACKEND`, `PATH`, `STALE_RETENTION`,
+`MAX_CAPACITY`, `MAX_ENTRIES`, `PAYLOAD`, `PAYLOAD_DIR`, `CACHE_SIZE`,
+`SWEEP_INTERVAL`, `MASTER_NAME`, `KEY_PREFIX`, `DB`, and `SENTINEL_NODES`
+(comma-separated list).
 
-An EMPTY scalar override variable is a no-op (the file/profile value remains
-effective); an EMPTY `SENTINEL_NODES` override replaces the field with an
-empty list, which the first requirement then normalizes to absent.
+String-typed scalar fields (`BACKEND`, `PATH`, `STALE_RETENTION`,
+`PAYLOAD`, `PAYLOAD_DIR`, `CACHE_SIZE`, `SWEEP_INTERVAL`, `MASTER_NAME`,
+`KEY_PREFIX`) SHALL receive their raw value verbatim as a string — no
+numeric or boolean coercion. Numeric-typed fields (`MAX_CAPACITY`,
+`MAX_ENTRIES`, `DB`) SHALL parse strictly typed values. Duration string
+fields (`STALE_RETENTION`, `SWEEP_INTERVAL`) accept humantime forms with
+explicit units; a unitless numeric value SHALL be rejected at validation
+with an error naming the required format, and SHALL NOT be interpreted as
+seconds.
+
+An EMPTY scalar override variable among the newer set (`PAYLOAD`,
+`PAYLOAD_DIR`, `CACHE_SIZE`, `SWEEP_INTERVAL`, `MASTER_NAME`, `KEY_PREFIX`,
+`DB`) is a no-op (the file/profile value remains effective); an EMPTY
+`SENTINEL_NODES` override replaces the field with an empty list, which the
+first requirement then normalizes to absent. Legacy vars (`BACKEND`,
+`PATH`, `STALE_RETENTION`, `MAX_CAPACITY`, `MAX_ENTRIES`) keep their
+established empty-value behavior — the empty-scalar skip does not apply to
+them.
 
 #### Scenario: scalar override applied
 
@@ -148,4 +165,56 @@ empty list, which the first requirement then normalizes to absent.
 - **THEN** the variable is ignored with the existing
   "not in override allowlist" warning and no security-sensitive field of the
   config changes
+
+#### Scenario: unitless numeric stale retention fails validation with a unit-naming error
+
+- **GIVEN** a config with a valid standalone `url` topology (persistent
+  backend) and the environment variable
+  `CAMEL_CACHE_REPO_STALE_RETENTION=604800` set to a bare numeric value
+- **WHEN** env overrides are merged, the config deserializes, and validation
+  runs
+- **THEN** load fails with the stale-retention duration validation error
+  naming the accepted unit-bearing format — not with a deserialization
+  "invalid type: integer" error
+
+#### Scenario: human-readable duration override applies
+
+- **GIVEN** a config with a valid standalone `url` topology (persistent
+  backend), `cache_repo.stale_retention` absent, and the environment
+  variable `CAMEL_CACHE_REPO_STALE_RETENTION=7d`
+- **WHEN** env overrides are merged
+- **THEN** the effective config carries `stale_retention = Some("7d")`,
+  which resolves to a seven-day retention
+
+#### Scenario: legacy string scalars pass through verbatim
+
+- **GIVEN** the environment variable `CAMEL_CACHE_REPO_PATH=007`
+- **WHEN** env overrides are merged and the config deserializes
+- **THEN** the effective config carries `path = Some("007")` — the value is
+  never coerced to an integer
+
+#### Scenario: bare numeric backend reaches backend validation
+
+- **GIVEN** the environment variable `CAMEL_CACHE_REPO_BACKEND=123`
+- **WHEN** env overrides are merged and validation runs
+- **THEN** load fails with the unknown-backend validation error, the value
+  having passed through verbatim as the string `"123"`
+
+#### Scenario: numeric fields stay strictly typed
+
+- **GIVEN** the environment variable `CAMEL_CACHE_REPO_MAX_ENTRIES=notanumber`
+- **WHEN** env overrides are merged and the config deserializes
+- **THEN** load fails with a typed deserialization error on
+  `Option<usize>`
+
+#### Scenario: legacy empty scalar overrides the file value and fails validation
+
+- **GIVEN** a config with a valid standalone `url` topology and
+  `cache_repo.stale_retention = "7d"` in the file, and the environment
+  variable `CAMEL_CACHE_REPO_STALE_RETENTION=` set to an empty string
+- **WHEN** env overrides are merged, the config deserializes, and validation
+  runs
+- **THEN** no empty-scalar skip applies to the legacy var: the empty
+  override replaces the file value, and load fails with the same
+  stale-retention duration-format error as an invalid non-empty value
 
