@@ -126,12 +126,14 @@ async fn unknown_resource_read_rejected_no_exchange() {
 
     // A live resource route exists — the unknown URI must not reach it.
     let (tx, mut rx) = mpsc::channel::<McpResourceRead>(8);
+    let owner = Arc::new(());
     handle
         .resource_registry
         .register(
             "crm://customers".to_string(),
             "dispatch-route".to_string(),
             tx,
+            Arc::downgrade(&owner),
         )
         .expect("resource must register");
     handle.resource_registry.mark_ready("crm://customers");

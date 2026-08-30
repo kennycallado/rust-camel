@@ -11,23 +11,28 @@
 //! the TOML/DSL hard-conflict start failure, equal declarations proceeding,
 //! TOML-only servers unchanged, and presence-based caps (a cap declared by
 //! exactly one side is that side's runtime value; a cap declared by neither
-//! keeps the 128 default).
+//! keeps the 128 default). The crash regressions (fix-mcp-dead-registry-entry
+//! Task 4) pin the crash windows: an aborted bridge plus a consumer dropped
+//! without `stop()` must not wedge the shared listener — the same tool name
+//! and resource URI restart, the dead entry vanishes from `tools/list`, and
+//! a refused live duplicate leaves the incumbent's security plan intact.
 
 mod common;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use camel_api::security_policy::{AccessMode, RouteSecurityPlan, TransportId};
 use camel_api::{Body, CamelError};
 use camel_component_api::consumer::ExchangeEnvelope;
 use camel_component_api::{
     Component, Consumer, ConsumerContext, NoOpComponentContext, NoopRuntimeObservability,
-    RuntimeObservability,
+    RuntimeObservability, SecurityContext,
 };
 use camel_component_mcp::McpServerRegistry;
 use camel_component_mcp::component::McpComponent;
 use camel_component_mcp::config::{McpGlobalConfig, McpServerConfig, McpTlsConfig};
-use camel_component_mcp::types::McpToolInvocation;
+use camel_component_mcp::types::{McpResourceRead, McpToolInvocation};
 use common::warn_capture;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -239,6 +244,30 @@ async fn consumer_stop_unregisters() {
         handle.tool_registry.resolve("lookup").is_none(),
         "stop must unregister the tool"
     );
+}
+
+#[tokio::test]
+async fn restart_after_clean_stop_succeeds() {
+    // Owner-liveness wiring (fix-mcp-dead-registry-entry Task 1): a clean
+    // stop unregisters the tool under the consumer's own owner token, so a
+    // second consumer for the same tool name starts fresh on the same bind.
+    let bind = "127.0.0.21:0";
+    let cfg = server_config(bind, true, None);
+    let component = component_with_server("crm", cfg);
+    let uri = format!("mcp:crm/tool/t?schema={}", encoded(TRIVIAL_SCHEMA));
+
+    let mut first = consumer_for(&component, &uri);
+    let (ctx, _route_rx) = test_context();
+    first.start(ctx).await.expect("first start must succeed");
+    first.stop().await.expect("clean stop");
+
+    let mut second = consumer_for(&component, &uri);
+    let (ctx, _route_rx) = test_context();
+    second
+        .start(ctx)
+        .await
+        .expect("restart after a clean stop must succeed");
+    second.stop().await.expect("clean stop");
 }
 
 #[tokio::test]
@@ -610,4 +639,266 @@ async fn toml_cap_kept_when_dsl_silent() {
     );
 
     consumer.stop().await.expect("clean stop");
+}
+
+// ── Crash regressions (fix-mcp-dead-registry-entry Task 4, ADR-0068) ──
+
+/// A distinct compiled route plan — the tests tell planA from planB by the
+/// `provider_ref` field (same discriminator as the Task 3 registry tests).
+fn security_plan(provider_ref: &str) -> RouteSecurityPlan {
+    RouteSecurityPlan {
+        access_mode: AccessMode::Authenticated,
+        provider_ref: Some(provider_ref.to_string()),
+        transport: TransportId::Mcp,
+        credential_sources: vec![],
+        audience_binding: None,
+    }
+}
+
+#[tokio::test]
+async fn aborted_bridge_and_dropped_consumer_same_name_restart_succeeds() {
+    // Crash regression: aborting the bridge and dropping the consumer
+    // WITHOUT `stop()` leaves the registry entry behind with a dead owner
+    // (the leak window). Owner liveness must let fresh consumers take over
+    // the tool name and the resource URI on the same bind, and dispatch
+    // must reach the takeover routes. `Registration` is Tool XOR Resource
+    // per consumer, so the takeover drives one of each.
+    let bind = "127.0.0.22:0";
+    let cfg = server_config(bind, true, None);
+    let component = component_with_server("crm", cfg.clone());
+    let tool_uri = format!("mcp:crm/tool/t?schema={}", encoded(TRIVIAL_SCHEMA));
+    let resource_uri = "mcp:crm/resource/r?uri=crm://x";
+
+    let mut tool_c1 = consumer_for(&component, &tool_uri);
+    let (ctx, _route_rx) = test_context();
+    tool_c1.start(ctx).await.expect("tool c1 must start");
+    let bridge = tool_c1
+        .background_task_handle()
+        .expect("bridge handle present after start");
+    bridge.abort();
+    drop(tool_c1);
+
+    let mut resource_c1 = consumer_for(&component, resource_uri);
+    let (ctx, _route_rx) = test_context();
+    resource_c1
+        .start(ctx)
+        .await
+        .expect("resource c1 must start");
+    let bridge = resource_c1
+        .background_task_handle()
+        .expect("bridge handle present after start");
+    bridge.abort();
+    drop(resource_c1);
+
+    // Takeover: both dead entries are replaceable.
+    let mut tool_c2 = consumer_for(&component, &tool_uri);
+    let (ctx, mut tool_route_rx) = test_context();
+    tool_c2
+        .start(ctx)
+        .await
+        .expect("tool takeover after abort+drop must succeed");
+    let mut resource_c2 = consumer_for(&component, resource_uri);
+    let (ctx, mut resource_route_rx) = test_context();
+    resource_c2
+        .start(ctx)
+        .await
+        .expect("resource takeover after abort+drop must succeed");
+
+    let handle = McpServerRegistry::global()
+        .get_or_spawn(bind, &cfg)
+        .await
+        .expect("shared listener");
+
+    // tools/call for "t" is answered by the takeover route.
+    let entry = handle.tool_registry.resolve("t").expect("tool registered");
+    let (reply_tx, reply_rx) = oneshot::channel();
+    entry
+        .sender
+        .send(McpToolInvocation {
+            name: "t".to_string(),
+            arguments: serde_json::json!({ "id": "42" }),
+            headers: std::collections::HashMap::new(),
+            principal: None,
+            reply: reply_tx,
+        })
+        .await
+        .expect("invocation enqueue");
+    let envelope = tool_route_rx
+        .recv()
+        .await
+        .expect("route received the exchange");
+    let mut out = envelope.exchange;
+    out.input.body = Body::Text("takeover-ok".to_string());
+    envelope
+        .reply_tx
+        .expect("reply channel present")
+        .send(Ok(out))
+        .expect("route reply");
+    let result = reply_rx.await.expect("tool result");
+    assert_eq!(
+        result.content,
+        serde_json::Value::String("takeover-ok".to_string()),
+        "tools/call must be served by the takeover consumer"
+    );
+
+    // resources/read for crm://x dispatches to the takeover resource route.
+    let entry = handle
+        .resource_registry
+        .resolve("crm://x")
+        .expect("resource registered");
+    let (reply_tx, reply_rx) = oneshot::channel();
+    entry
+        .sender
+        .send(McpResourceRead {
+            uri: "crm://x".to_string(),
+            headers: std::collections::HashMap::new(),
+            principal: None,
+            reply: reply_tx,
+        })
+        .await
+        .expect("read enqueue");
+    let envelope = resource_route_rx
+        .recv()
+        .await
+        .expect("route received the exchange");
+    assert_eq!(
+        envelope.exchange.input.body,
+        Body::Text("crm://x".to_string()),
+        "the resource bridge carries the requested URI as the route body"
+    );
+    let mut out = envelope.exchange;
+    out.input.body = Body::Text("resource-ok".to_string());
+    envelope
+        .reply_tx
+        .expect("reply channel present")
+        .send(Ok(out))
+        .expect("route reply");
+    let resource = reply_rx.await.expect("resource result");
+    assert_eq!(
+        resource.content,
+        b"resource-ok".to_vec(),
+        "resources/read must be served by the takeover consumer"
+    );
+
+    tool_c2.stop().await.expect("clean stop");
+    resource_c2.stop().await.expect("clean stop");
+}
+
+#[tokio::test]
+async fn dropped_consumer_without_stop_releases_name() {
+    // Crash regression: a consumer dropped without stop() — no abort either,
+    // the bridge task stays detached — must not veto a legal restart.
+    // Channel liveness alone would NOT fix this case: the dead entry's
+    // sender side keeps the detached bridge parked on `recv`, so the name
+    // is released through owner liveness, not channel death.
+    let bind = "127.0.0.23:0";
+    let cfg = server_config(bind, true, None);
+    let component = component_with_server("crm", cfg.clone());
+    let uri = format!("mcp:crm/tool/t?schema={}", encoded(TRIVIAL_SCHEMA));
+
+    let mut first = consumer_for(&component, &uri);
+    let (ctx, _route_rx) = test_context();
+    first.start(ctx).await.expect("first start must succeed");
+    drop(first);
+
+    let mut second = consumer_for(&component, &uri);
+    let (ctx, _route_rx) = test_context();
+    second
+        .start(ctx)
+        .await
+        .expect("the dropped consumer must have released the tool name");
+    second.stop().await.expect("clean stop");
+}
+
+#[tokio::test]
+async fn live_duplicate_consumer_rejected() {
+    // Guard: the duplicate rejection itself predates the fix, but the
+    // plan invariant is Task 3 — the refused start neither removed nor
+    // overwrote the incumbent's bind security plan (planA stays, the
+    // impostor's planB never lands).
+    let bind = "127.0.0.24:0";
+    let cfg = server_config(bind, true, None);
+    let component = component_with_server("crm", cfg.clone());
+    let uri = format!("mcp:crm/tool/t?schema={}", encoded(TRIVIAL_SCHEMA));
+
+    let mut incumbent = consumer_for(&component, &uri);
+    incumbent.set_security_context(SecurityContext::from_plan(security_plan("plan-a")));
+    let (ctx, _route_rx) = test_context();
+    incumbent
+        .start(ctx)
+        .await
+        .expect("incumbent consumer must start");
+
+    let mut duplicate = consumer_for(&component, &uri);
+    duplicate.set_security_context(SecurityContext::from_plan(security_plan("plan-b")));
+    let (ctx, _route_rx) = test_context();
+    let err = duplicate
+        .start(ctx)
+        .await
+        .expect_err("a live duplicate tool name must be refused");
+    assert!(
+        matches!(err, CamelError::EndpointCreationFailed(ref message)
+            if message.contains("already registered")),
+        "the duplicate refusal must name the existing registration, got {err}"
+    );
+
+    let handle = McpServerRegistry::global()
+        .get_or_spawn(bind, &cfg)
+        .await
+        .expect("shared listener");
+    assert_eq!(
+        handle
+            .security
+            .plan_for("test-route")
+            .expect("the incumbent's plan must survive the refused start")
+            .provider_ref,
+        Some("plan-a".to_string()),
+        "the failed start must keep the incumbent's plan (planA), not the impostor's (planB)"
+    );
+
+    incumbent.stop().await.expect("clean stop");
+}
+
+#[tokio::test]
+async fn dead_owner_tool_absent_from_list_ready_via_listener_handle() {
+    // Crash regression (Task 1's lazy prune): after the consumer drops
+    // without stop(), the dead owner's entry must vanish from the
+    // listener's tools/list projection — the cloned handle keeps the
+    // listener itself alive, so only owner liveness can hide the entry.
+    let bind = "127.0.0.25:0";
+    let cfg = server_config(bind, true, None);
+    let component = component_with_server("crm", cfg.clone());
+
+    let mut consumer = consumer_for(
+        &component,
+        &format!("mcp:crm/tool/t?schema={}", encoded(TRIVIAL_SCHEMA)),
+    );
+    let (ctx, _route_rx) = test_context();
+    consumer.start(ctx).await.expect("tool consumer must start");
+
+    let handle = McpServerRegistry::global()
+        .get_or_spawn(bind, &cfg)
+        .await
+        .expect("shared listener");
+    assert!(
+        handle
+            .tool_registry
+            .list_ready()
+            .iter()
+            .any(|(name, _)| name == "t"),
+        "the live consumer's tool must be listed, got {:?}",
+        handle.tool_registry.list_ready()
+    );
+
+    drop(consumer);
+
+    assert!(
+        !handle
+            .tool_registry
+            .list_ready()
+            .iter()
+            .any(|(name, _)| name == "t"),
+        "a dead owner's tool must vanish from tools/list, got {:?}",
+        handle.tool_registry.list_ready()
+    );
 }

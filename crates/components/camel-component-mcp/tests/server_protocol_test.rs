@@ -13,6 +13,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use camel_component_mcp::McpServerRegistry;
 use camel_component_mcp::adapter::RmcpClient;
@@ -381,6 +382,7 @@ async fn tools_list_carries_cache_metadata() {
         .await
         .expect("listener must spawn");
     let (tx, _rx) = tokio::sync::mpsc::channel::<McpToolInvocation>(8);
+    let owner = Arc::new(());
     handle
         .tool_registry
         .register(
@@ -392,6 +394,7 @@ async fn tools_list_carries_cache_metadata() {
                 "required": ["id"],
                 "properties": {"id": {"type": "string"}}
             }),
+            Arc::downgrade(&owner),
         )
         .expect("tool must register");
     handle.tool_registry.mark_ready("lookup");
@@ -420,12 +423,14 @@ async fn resources_list_carries_cache_metadata() {
         .await
         .expect("listener must spawn");
     let (rtx, _rrx) = tokio::sync::mpsc::channel::<McpResourceRead>(8);
+    let owner = Arc::new(());
     handle
         .resource_registry
         .register(
             "crm://customers".to_string(),
             "cache-metadata-route".to_string(),
             rtx,
+            Arc::downgrade(&owner),
         )
         .expect("resource must register");
     handle.resource_registry.mark_ready("crm://customers");

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
@@ -50,6 +50,16 @@ impl BindSlot {
     }
 }
 
+/// One route's compiled plan plus the registering consumer's owner
+/// liveness token (ADR-0068): the consumer holds the strong `Arc<()>`,
+/// the entry holds this `Weak`. When the token no longer upgrades the
+/// plan is dead — replaced by the next registration and ignored by
+/// lookups and the exposure gate.
+struct OwnedPlan {
+    plan: RouteSecurityPlan,
+    owner: Weak<()>,
+}
+
 /// Per-bind dispatch-security book (Task 2.6): the compiled
 /// [`RouteSecurityPlan`] of every route registered on this bind plus the
 /// [`ProviderRegistry`] snapshot the route controller threaded through the
@@ -61,8 +71,9 @@ impl BindSlot {
 /// otherwise extract per `credential_sources` → `kernel_authenticate`).
 pub struct McpBindSecurity {
     /// Plans by route id (one mcp: route serves exactly one tool or one
-    /// resource; the route id is the registration key).
-    plans: Mutex<HashMap<String, RouteSecurityPlan>>,
+    /// resource; the route id is the registration key). Each entry is
+    /// scoped to its registering consumer's owner token (ADR-0068).
+    plans: Mutex<HashMap<String, OwnedPlan>>,
     /// Provider registry snapshot (last registration wins; routes on one
     /// bind share the process-wide registry in practice).
     providers: Mutex<Option<Arc<ProviderRegistry>>>,
@@ -76,18 +87,66 @@ impl McpBindSecurity {
         }
     }
 
-    /// Register (or replace) `route_id`'s plan and, when present, refresh
-    /// the provider snapshot (last registration wins).
+    /// Register (or replace) `route_id`'s plan under the liveness token
+    /// `owner` and, when present, refresh the provider snapshot (last
+    /// registration wins).
+    ///
+    /// Owner-scoped (ADR-0068): a plan for `route_id` held by a live
+    /// owner is KEPT — this call returns without removing or overwriting
+    /// it (the newcomer fails the duplicate guard later in `start()`);
+    /// a dead owner's plan is replaced.
     pub fn register_plan(
         &self,
         route_id: &str,
         plan: RouteSecurityPlan,
         providers: Option<Arc<ProviderRegistry>>,
+        owner: Weak<()>,
     ) {
-        self.plans
+        let mut plans = self
+            .plans
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(route_id.to_string(), plan);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = plans.get(route_id)
+            && existing.owner.upgrade().is_some()
+        {
+            // ADR-0068: keep-incumbent — the live owner's plan must stay
+            // intact; removing or overwriting it would open an
+            // unauthenticated pass-through window for the incumbent route.
+            return;
+        }
+        plans.insert(route_id.to_string(), OwnedPlan { plan, owner });
+        drop(plans);
+        if let Some(providers) = providers {
+            *self
+                .providers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(providers);
+        }
+    }
+
+    /// Unconditionally install `route_id`'s plan under `owner`, replacing
+    /// any incumbent. Called by a consumer that has just WON the tool or
+    /// resource entry `register` (ADR-0068: winner re-assertion — entry
+    /// ownership proves route identity): in the concurrent-start
+    /// interleaving the keep-incumbent [`Self::register_plan`] may have
+    /// kept another live consumer's plan while this consumer won the
+    /// name/URI entry; without the re-assertion the loser's
+    /// owner-conditional cleanup would strip the only plan behind the
+    /// winner's live entry. Overwriting an incumbent owned by `owner`
+    /// itself (`Weak::ptr_eq`) is a same-content re-register.
+    pub fn register_plan_takeover(
+        &self,
+        route_id: &str,
+        plan: RouteSecurityPlan,
+        providers: Option<Arc<ProviderRegistry>>,
+        owner: Weak<()>,
+    ) {
+        let mut plans = self
+            .plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        plans.insert(route_id.to_string(), OwnedPlan { plan, owner });
+        drop(plans);
         if let Some(providers) = providers {
             *self
                 .providers
@@ -105,24 +164,50 @@ impl McpBindSecurity {
             .remove(route_id);
     }
 
-    /// The plan registered for `route_id`, or `None` (pre-2.6 direct-drive
-    /// routes: no plan, pass-through).
-    pub fn plan_for(&self, route_id: &str) -> Option<RouteSecurityPlan> {
-        self.plans
+    /// Removes `route_id`'s plan only when the registered entry carries
+    /// exactly `owner` (`Weak::ptr_eq`). Returns whether a removal
+    /// happened. A late stop by a dead owner must not delete a live
+    /// replacement's plan, which would drop dispatch to unauthenticated
+    /// pass-through (ADR-0068).
+    pub fn unregister_plan_owned(&self, route_id: &str, owner: &Weak<()>) -> bool {
+        let mut plans = self
+            .plans
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owned = plans
             .get(route_id)
-            .cloned()
+            .is_some_and(|entry| Weak::ptr_eq(&entry.owner, owner));
+        if owned {
+            plans.remove(route_id);
+        }
+        owned
     }
 
-    /// All registered plans as `(route_id, plan)` pairs (bind-gate input;
-    /// order unspecified).
-    pub fn plans_snapshot(&self) -> Vec<(String, RouteSecurityPlan)> {
-        self.plans
+    /// The plan registered for `route_id` under a live owner, or `None`
+    /// (pre-2.6 direct-drive routes: no plan, pass-through; or the plan's
+    /// owner died — a dead plan must not authenticate dispatch,
+    /// ADR-0068). Dead-owner entries are pruned lazily on read.
+    pub fn plan_for(&self, route_id: &str) -> Option<RouteSecurityPlan> {
+        let mut plans = self
+            .plans
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        plans.retain(|_, entry| entry.owner.upgrade().is_some());
+        plans.get(route_id).map(|entry| entry.plan.clone())
+    }
+
+    /// All live-owner plans as `(route_id, plan)` pairs (bind-gate input;
+    /// order unspecified). Dead owners are pruned first, so a dead
+    /// route's plan stops influencing the bind exposure gate (ADR-0068).
+    pub fn plans_snapshot(&self) -> Vec<(String, RouteSecurityPlan)> {
+        let mut plans = self
+            .plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        plans.retain(|_, entry| entry.owner.upgrade().is_some());
+        plans
             .iter()
-            .map(|(id, plan)| (id.clone(), plan.clone()))
+            .map(|(id, entry)| (id.clone(), entry.plan.clone()))
             .collect()
     }
 
@@ -509,6 +594,10 @@ pub struct ToolEntry {
     pub route_id: String,
     /// Readiness flag — tools not yet ready are hidden from `tools/list`.
     pub ready: AtomicBool,
+    /// Owner liveness token: the registering consumer holds the strong
+    /// `Arc<()>`, the entry holds this `Weak`. When the token no longer
+    /// upgrades the entry is dead and is pruned lazily (ADR-0068).
+    pub owner: Weak<()>,
 }
 
 /// Snapshot clone for `resolve`: the `AtomicBool` is copied by value (a fresh
@@ -521,8 +610,20 @@ impl Clone for ToolEntry {
             input_schema: self.input_schema.clone(),
             route_id: self.route_id.clone(),
             ready: AtomicBool::new(self.ready.load(Ordering::SeqCst)),
+            // Liveness is registry-internal (ADR-0068): the dispatch snapshot
+            // carries an inert token, never the registering owner.
+            owner: Weak::new(),
         }
     }
+}
+
+/// Removes every entry whose owner token no longer upgrades — the strong
+/// `Arc<()>` was dropped without a stop, so the entry is dead. Called by
+/// listings, resolves, and the cap check so dead entries stop being
+/// advertised and release their cap slots without waiting for a restart
+/// (ADR-0068: lazy prune).
+fn prune_dead(entries: &mut HashMap<String, ToolEntry>) {
+    entries.retain(|_, entry| entry.owner.upgrade().is_some());
 }
 
 impl McpToolRegistry {
@@ -534,13 +635,22 @@ impl McpToolRegistry {
         }
     }
 
-    /// Registers `name` → (`sender`, `input_schema`) for `route_id`.
+    /// Registers `name` → (`sender`, `input_schema`) for `route_id` under
+    /// the liveness token `owner`.
     ///
-    /// A duplicate `name` is rejected with an [`McpError::Endpoint`] — closing
-    /// the check-then-register race in the consumer, where two concurrent
+    /// A duplicate `name` whose entry is still owned by a live token is
+    /// rejected with an [`McpError::Endpoint`] — closing the
+    /// check-then-register race in the consumer, where two concurrent
     /// same-name starts would otherwise silently replace the first
-    /// registration (stranding the first route's channel). The (N+1)th
-    /// distinct name is rejected with [`McpError::CapExceeded`].
+    /// registration (stranding the first route's channel). A duplicate whose
+    /// owner died (the consumer dropped without a stop) is REPLACED by the
+    /// newcomer and the dead registration's route id is warned
+    /// (ADR-0068: replace-dead-on-conflict) — a same-name replace does not
+    /// grow the map, so it bypasses the cap check. Before the cap check,
+    /// every dead-owner entry under any name is pruned, so a crashed
+    /// consumer's slots are reclaimed without waiting for an unrelated
+    /// listing; the (N+1)th distinct live name is rejected with
+    /// [`McpError::CapExceeded`].
     /// # Security note
     ///
     /// Tools registered directly through this pub API carry no
@@ -554,16 +664,40 @@ impl McpToolRegistry {
         route_id: String,
         sender: tokio::sync::mpsc::Sender<McpToolInvocation>,
         input_schema: serde_json::Value,
+        owner: Weak<()>,
     ) -> Result<(), McpError> {
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if entries.contains_key(&name) {
-            return Err(McpError::Endpoint(format!(
-                "tool '{name}' is already registered"
-            )));
+        if let Some(existing) = entries.get(&name) {
+            if existing.owner.upgrade().is_some() {
+                return Err(McpError::Endpoint(format!(
+                    "tool '{name}' is already registered"
+                )));
+            }
+            // ADR-0068: replace-dead-on-conflict
+            tracing::warn!(
+                name = %name,
+                dead_route_id = %existing.route_id,
+                "replacing a dead owner's tool registration"
+            );
+            entries.insert(
+                name,
+                ToolEntry {
+                    sender,
+                    input_schema,
+                    route_id,
+                    ready: AtomicBool::new(false),
+                    owner,
+                },
+            );
+            return Ok(());
         }
+        // Reclaim the cap slots of dead owners under every name before the
+        // cap check (ADR-0068: lazy prune). The replace branch above does not
+        // grow the map, so only the fresh-name path enforces the cap.
+        prune_dead(&mut entries);
         if entries.len() >= self.max {
             return Err(McpError::CapExceeded {
                 kind: "tools".to_string(),
@@ -577,6 +711,7 @@ impl McpToolRegistry {
                 input_schema,
                 route_id,
                 ready: AtomicBool::new(false),
+                owner,
             },
         );
         Ok(())
@@ -605,13 +740,44 @@ impl McpToolRegistry {
             .remove(name);
     }
 
-    /// Ready tools as `(name, input_schema)` pairs; not-ready tools are
-    /// hidden. Order is unspecified.
-    pub fn list_ready(&self) -> Vec<(String, serde_json::Value)> {
-        let entries = self
+    /// Removes `name` only when the registered entry carries exactly `owner`
+    /// (`Weak::ptr_eq`). Returns whether a removal happened. A late stop by
+    /// a dead owner must not delete a replacement's entry (ADR-0068).
+    pub fn unregister_owned(&self, name: &str, owner: &Weak<()>) -> bool {
+        let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owned = entries
+            .get(name)
+            .is_some_and(|entry| Weak::ptr_eq(&entry.owner, owner));
+        if owned {
+            entries.remove(name);
+        }
+        owned
+    }
+
+    /// Whether `name` maps to an entry whose owner token is still alive. The
+    /// consumer's duplicate fast-path consults this instead of `resolve`, so
+    /// a dead owner's lingering entry does not veto a legal takeover
+    /// (ADR-0068).
+    pub fn name_taken_by_live_owner(&self, name: &str) -> bool {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(name)
+            .is_some_and(|entry| entry.owner.upgrade().is_some())
+    }
+
+    /// Ready tools as `(name, input_schema)` pairs; not-ready tools are
+    /// hidden and dead-owner entries are pruned before listing. Order is
+    /// unspecified.
+    pub fn list_ready(&self) -> Vec<(String, serde_json::Value)> {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        prune_dead(&mut entries);
         entries
             .iter()
             .filter(|(_, entry)| entry.ready.load(Ordering::SeqCst))
@@ -620,23 +786,26 @@ impl McpToolRegistry {
     }
 
     /// A snapshot of the entry for `name` (cloned schema + cloned sender), or
-    /// `None` when `name` is unknown or unregistered. The dispatch layer maps
-    /// `None` to a clean MCP method error; no dead channel is ever awaited.
+    /// `None` when `name` is unknown, unregistered, or its owner died (the
+    /// dead entry is pruned). The dispatch layer maps `None` to a clean MCP
+    /// method error; no dead channel is ever awaited.
     pub fn resolve(&self, name: &str) -> Option<ToolEntry> {
-        self.entries
+        let mut entries = self
+            .entries
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(name)
-            .cloned()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        prune_dead(&mut entries);
+        entries.get(name).cloned()
     }
 }
 
-/// Per-listener resource registry: resource URI → route sender and readiness
-/// flag.
+/// Per-listener resource registry: resource URI → route sender, readiness
+/// flag, and owner liveness token.
 ///
 /// Registration is bounded by `max`; the (N+1)th distinct URI is rejected
-/// with [`McpError::CapExceeded`]. Lookups never await (see
-/// [`McpToolRegistry`]).
+/// with [`McpError::CapExceeded`]. A dead owner's entry is replaced on
+/// conflict and pruned lazily (ADR-0068, mirroring [`McpToolRegistry`]).
+/// Lookups never await (see [`McpToolRegistry`]).
 #[derive(Debug)]
 pub struct McpResourceRegistry {
     max: usize,
@@ -654,6 +823,10 @@ pub struct ResourceEntry {
     /// Readiness flag — resources not yet ready are hidden from
     /// `resources/list`.
     pub ready: AtomicBool,
+    /// Owner liveness token: the registering consumer holds the strong
+    /// `Arc<()>`, the entry holds this `Weak`. When the token no longer
+    /// upgrades the entry is dead and is pruned lazily (ADR-0068).
+    pub owner: Weak<()>,
 }
 
 /// Snapshot clone for `resolve`: the `AtomicBool` is copied by value (a fresh
@@ -665,8 +838,18 @@ impl Clone for ResourceEntry {
             sender: self.sender.clone(),
             route_id: self.route_id.clone(),
             ready: AtomicBool::new(self.ready.load(Ordering::SeqCst)),
+            // Liveness is registry-internal (ADR-0068): the dispatch snapshot
+            // carries an inert token, never the registering owner.
+            owner: Weak::new(),
         }
     }
+}
+
+/// Removes every entry whose owner token no longer upgrades — the strong
+/// `Arc<()>` was dropped without a stop, so the entry is dead (ADR-0068:
+/// lazy prune). Resource-side twin of the tool registry's `prune_dead`.
+fn prune_dead_resources(entries: &mut HashMap<String, ResourceEntry>) {
+    entries.retain(|_, entry| entry.owner.upgrade().is_some());
 }
 
 impl McpResourceRegistry {
@@ -678,26 +861,67 @@ impl McpResourceRegistry {
         }
     }
 
-    /// Registers `uri` → `sender` for `route_id`.
+    /// Registers `uri` → `sender` for `route_id` under the liveness token
+    /// `owner`.
     ///
-    /// A duplicate `uri` is rejected with an [`McpError::Endpoint`] — closing
-    /// the check-then-register race in the consumer. The (N+1)th distinct URI
-    /// is rejected with [`McpError::CapExceeded`].
+    /// A duplicate `uri` whose entry is still owned by a live token is
+    /// rejected with an [`McpError::Endpoint`] — closing the
+    /// check-then-register race in the consumer, where two concurrent
+    /// same-URI starts would otherwise silently replace the first
+    /// registration (stranding the first route's channel). A duplicate whose
+    /// owner died (the consumer dropped without a stop) is REPLACED by the
+    /// newcomer and the dead registration's route id is warned
+    /// (ADR-0068: replace-dead-on-conflict) — a same-URI replace does not
+    /// grow the map, so it bypasses the cap check. Before the cap check,
+    /// every dead-owner entry under any URI is pruned, so a crashed
+    /// consumer's slots are reclaimed without waiting for an unrelated
+    /// listing; the (N+1)th distinct live URI is rejected with
+    /// [`McpError::CapExceeded`].
+    /// # Security note
+    ///
+    /// Resources registered directly through this pub API carry no
+    /// `RouteSecurityPlan` and are served WITHOUT authentication (public
+    /// pass-through, invisible to the per-bind exposure gate).
+    /// Kernel-secured registration flows through the consumer's plan
+    /// registration instead.
     pub fn register(
         &self,
         uri: String,
         route_id: String,
         sender: tokio::sync::mpsc::Sender<McpResourceRead>,
+        owner: Weak<()>,
     ) -> Result<(), McpError> {
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if entries.contains_key(&uri) {
-            return Err(McpError::Endpoint(format!(
-                "resource '{uri}' is already registered"
-            )));
+        if let Some(existing) = entries.get(&uri) {
+            if existing.owner.upgrade().is_some() {
+                return Err(McpError::Endpoint(format!(
+                    "resource '{uri}' is already registered"
+                )));
+            }
+            // ADR-0068: replace-dead-on-conflict
+            tracing::warn!(
+                uri = %uri,
+                dead_route_id = %existing.route_id,
+                "replacing a dead owner's resource registration"
+            );
+            entries.insert(
+                uri,
+                ResourceEntry {
+                    sender,
+                    route_id,
+                    ready: AtomicBool::new(false),
+                    owner,
+                },
+            );
+            return Ok(());
         }
+        // Reclaim the cap slots of dead owners under every URI before the
+        // cap check (ADR-0068: lazy prune). The replace branch above does not
+        // grow the map, so only the fresh-URI path enforces the cap.
+        prune_dead_resources(&mut entries);
         if entries.len() >= self.max {
             return Err(McpError::CapExceeded {
                 kind: "resources".to_string(),
@@ -710,6 +934,7 @@ impl McpResourceRegistry {
                 sender,
                 route_id,
                 ready: AtomicBool::new(false),
+                owner,
             },
         );
         Ok(())
@@ -737,13 +962,43 @@ impl McpResourceRegistry {
             .remove(uri);
     }
 
-    /// Ready resource URIs; not-ready resources are hidden. Order is
-    /// unspecified.
-    pub fn list_ready(&self) -> Vec<String> {
-        let entries = self
+    /// Removes `uri` only when the registered entry carries exactly `owner`
+    /// (`Weak::ptr_eq`). Returns whether a removal happened. A late stop by
+    /// a dead owner must not delete a replacement's entry (ADR-0068).
+    pub fn unregister_owned(&self, uri: &str, owner: &Weak<()>) -> bool {
+        let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owned = entries
+            .get(uri)
+            .is_some_and(|entry| Weak::ptr_eq(&entry.owner, owner));
+        if owned {
+            entries.remove(uri);
+        }
+        owned
+    }
+
+    /// Whether `uri` maps to an entry whose owner token is still alive. The
+    /// consumer's duplicate fast-path consults this instead of `resolve`, so
+    /// a dead owner's lingering entry does not veto a legal takeover
+    /// (ADR-0068).
+    pub fn uri_taken_by_live_owner(&self, uri: &str) -> bool {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(uri)
+            .is_some_and(|entry| entry.owner.upgrade().is_some())
+    }
+
+    /// Ready resource URIs; not-ready resources are hidden and dead-owner
+    /// entries are pruned before listing. Order is unspecified.
+    pub fn list_ready(&self) -> Vec<String> {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        prune_dead_resources(&mut entries);
         entries
             .iter()
             .filter(|(_, entry)| entry.ready.load(Ordering::SeqCst))
@@ -752,13 +1007,15 @@ impl McpResourceRegistry {
     }
 
     /// A snapshot of the entry for `uri` (cloned sender), or `None` when
-    /// `uri` is unknown or unregistered. The dispatch layer maps `None` to a
-    /// clean MCP method error; no dead channel is ever awaited.
+    /// `uri` is unknown, unregistered, or its owner died (the dead entry is
+    /// pruned). The dispatch layer maps `None` to a clean MCP method error;
+    /// no dead channel is ever awaited.
     pub fn resolve(&self, uri: &str) -> Option<ResourceEntry> {
-        self.entries
+        let mut entries = self
+            .entries
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(uri)
-            .cloned()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        prune_dead_resources(&mut entries);
+        entries.get(uri).cloned()
     }
 }

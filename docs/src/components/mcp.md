@@ -31,7 +31,7 @@ Consumer URIs come from DSL lowering. The `schema` and `uri` values travel on th
 
 ## Server (Consumer)
 
-One Streamable-HTTP listener serves each bind address. Every tool and resource route on that server shares it. The first consumer on a bind starts the listener. A later consumer with a conflicting config (`tls`, `allowed_hosts`, catalog caps) is rejected. Registration of a duplicate tool name or resource URI is also rejected.
+One Streamable-HTTP listener serves each bind address. Every tool and resource route on that server shares it. The first consumer on a bind starts the listener. A later consumer with a conflicting config (`tls`, `allowed_hosts`, catalog caps) is rejected. Registration of a name or URI held by a live owner is rejected; a dead owner's entry is replaced on restart (ADR-0068).
 
 Security follows the unified transport auth kernel (ADR-0061): a server
 without a `security_policy` starts **Public by default**, and the per-bind

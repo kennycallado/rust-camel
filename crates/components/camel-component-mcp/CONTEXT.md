@@ -79,8 +79,13 @@ rejects the (N+1)th route with a clean `CamelError` (no silent truncation).
   conflicts with the live listener (`allowed_hosts`, TLS, caps) is rejected
   fail-closed; duplicate registration is rejected atomically.
 - `McpToolRegistry` — per-listener `name → route` map backing `tools/call`.
+  Each entry carries the registering consumer's owner-liveness token
+  (ADR-0068): a dead owner's entry is replaced on re-registration and
+  pruned lazily. The unregister used by `stop()` and failure cleanup is
+  owner-conditional (`unregister_owned`, `Weak::ptr_eq`).
 - `McpResourceRegistry` — per-listener `uri → route` map backing
-  `resources/read`.
+  `resources/read`. Entries follow the same owner-liveness discipline as
+  `McpToolRegistry` (ADR-0068).
 
 ## Adapter confinement
 

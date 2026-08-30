@@ -1,46 +1,13 @@
 {
- "reviewer": "reviewers/r_glm",
- "verdict": "APPROVE-WITH-FINDINGS",
- "rounds": 1,
- "impl_head": "c86e2a95",
- "findings": [
-  {
-   "sev": "minor",
-   "finding": "seam javadoc late-pin wording",
-   "resolution": "closed: reworded (CDI eager, late pins ignored)"
-  },
-  {
-   "sev": "minor",
-   "finding": "bridges/README.md index stale",
-   "resolution": "closed: cap both-directions + CXF_MAX_DISPATCHES row"
-  },
-  {
-   "sev": "minor",
-   "finding": "release notes no carrier",
-   "resolution": "closed: migration lines added to cxf-bridge-release.yml body"
-  }
- ],
- "gates": "java 163/0 (cleanTest fresh) + spotlessCheck 0; validate strict True; openspec status complete; RUST GATES N/A (0 .rs/Cargo.toml changed): fmt, clippy x3, 9 xtask lints, schema, audit, build-ws, test-lib, hex \u2014 all N/A no-Rust-changed; lint-commits SKIPPED per conductor rule (remote fetch, CI owns)",
- "per_task": "T1 APPROVE-AWF(2 minors closed 3ba7808b), T2 APPROVE-AWF(1 minor closed 2cbf4aff), T3 APPROVE-AWF(1 doc closed), T4 APPROVE clean, T5 APPROVE-AWF(2 record-keeping: bd close-reason carriers)",
- "release_notes_bridges_061": [
-  "BREAKING unknown action tokens fail startup (sets: Sig/Enc/Timestamp; TS needs Sig)",
-  "BREAKING malformed envelopes 400 / missing Body empty payload",
-  "response cap CXF_MAX_BODY_BYTES both directions (RESOURCE_EXHAUSTED producer-side)",
-  "dispatch cache CXF_MAX_DISPATCHES 64/1024 LRU + close",
-  "nexus scoped to opensaml/shibboleth groups (non-user-visible)"
- ],
- "papal_blessing": {
-  "expert": "experts/e_glm (papal duty, e_opus/e_gpt unavailable per human)",
-  "verdict": "BLESS-WITH-CONDITIONS",
-  "rounds": 1,
-  "conditions": [
-   {
-    "n": "1",
-    "cond": "README allocation honesty sentence (JMS-precedent: cap bounds serialized bytes + forwarded aggregation, not peak sidecar heap - DOM already parsed pre-cap)",
-    "resolution": "closed: sentence appended after cap paragraph"
-   }
-  ],
-  "grill": "(a) lock+close sound - same-monitor mutual exclusion, closeQuietly continues on failure, evict-vs-invoke race = documented thrash tradeoff non-blocking; (b) whitelist posture right (reject > silent-insecure; deferral tracked); (c) boundary correct both write paths; (d) decoy RED honest by code archaeology at dcf5c9fc~1; (e) urkv early-close deviation acceptable (reason accurate, work green); carrier 4-lines-vs-5 documented (shibboleth non-user-visible)",
-  "fresh_verification": "163/0/0 re-run by expert, spotless 0, strict validate True, 0 rust files (stale origin/main scare resolved)"
- }
+  "kind": "holistic-review",
+  "verdict": "APPROVE",
+  "reviewer": "r_glm",
+  "session": "ses_fae48482bffeX7wPLaP0Sc8x2x",
+  "date": "2026-08-30",
+  "impl_head": "fd60e2c7",
+  "history": [
+    "APPROVE-WITH-FINDINGS: (1) IMPORTANT concurrent-restart race — loser cleanup strips winner plan -> unauthenticated pass-through; (2) IMPORTANT stale mcp.md duplicate-rejection sentence; minors: registry.rs 1k split, cleanup closure dedup",
+    "FIXED: 5e204fee register_plan_takeover + winner re-assert after both register arms + red->green regression tests + mcp.md sentence; spec amended (fd60e2c7) + re-blessed BLESS by e_gpt (hash 41aa0999...)",
+    "APPROVE: interleaving closed at every branch; minors filed as bd rc-eba2"
+  ]
 }

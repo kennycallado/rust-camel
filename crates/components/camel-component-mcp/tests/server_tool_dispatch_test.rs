@@ -126,6 +126,7 @@ async fn tools_list_hides_not_ready_tool() {
 
     // Registered but NOT ready: a started consumer's channel held pre-ready.
     let (tx, _rx) = mpsc::channel::<McpToolInvocation>(8);
+    let owner = Arc::new(());
     handle
         .tool_registry
         .register(
@@ -133,6 +134,7 @@ async fn tools_list_hides_not_ready_tool() {
             "dispatch-route".to_string(),
             tx,
             id_schema(),
+            Arc::downgrade(&owner),
         )
         .expect("tool must register");
 
@@ -174,6 +176,7 @@ async fn valid_args_reach_route() {
     let (addr, handle) = spawn_server("127.0.0.3:0").await;
 
     let (tx, mut rx) = mpsc::channel::<McpToolInvocation>(8);
+    let owner = Arc::new(());
     handle
         .tool_registry
         .register(
@@ -181,6 +184,7 @@ async fn valid_args_reach_route() {
             "dispatch-route".to_string(),
             tx,
             id_schema(),
+            Arc::downgrade(&owner),
         )
         .expect("tool must register");
     handle.tool_registry.mark_ready("lookup");
@@ -227,6 +231,7 @@ async fn invalid_args_rejected_no_exchange() {
     let (addr, handle) = spawn_server("127.0.0.4:0").await;
 
     let (tx, mut rx) = mpsc::channel::<McpToolInvocation>(8);
+    let owner = Arc::new(());
     handle
         .tool_registry
         .register(
@@ -234,6 +239,7 @@ async fn invalid_args_rejected_no_exchange() {
             "dispatch-route".to_string(),
             tx,
             id_schema(),
+            Arc::downgrade(&owner),
         )
         .expect("tool must register");
     handle.tool_registry.mark_ready("lookup");
@@ -260,6 +266,7 @@ async fn unknown_tool_call_returns_clean_error() {
 
     // A live route handler exists — the unknown name must not reach it.
     let (tx, mut rx) = mpsc::channel::<McpToolInvocation>(8);
+    let owner = Arc::new(());
     handle
         .tool_registry
         .register(
@@ -267,6 +274,7 @@ async fn unknown_tool_call_returns_clean_error() {
             "dispatch-route".to_string(),
             tx,
             id_schema(),
+            Arc::downgrade(&owner),
         )
         .expect("tool must register");
     handle.tool_registry.mark_ready("known");
@@ -341,6 +349,7 @@ async fn stopped_tool_call_returns_clean_error() {
 async fn error_shaped_success_content_stays_success_and_flag_drives_error() {
     let (addr, handle) = spawn_server("127.0.0.7:0").await;
     let (tx, mut rx) = mpsc::channel::<McpToolInvocation>(8);
+    let owner = Arc::new(());
     handle
         .tool_registry
         .register(
@@ -348,6 +357,7 @@ async fn error_shaped_success_content_stays_success_and_flag_drives_error() {
             "dispatch-route".to_string(),
             tx,
             id_schema(),
+            Arc::downgrade(&owner),
         )
         .expect("tool must register");
     handle.tool_registry.mark_ready("lookup");

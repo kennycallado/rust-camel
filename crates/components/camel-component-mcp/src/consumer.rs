@@ -150,6 +150,11 @@ struct Running {
     /// Route id this consumer registered its plan under (Task 2.6) —
     /// unregistered from the bind's security book on stop.
     route_id: String,
+    /// Owner liveness token for the registry entry (ADR-0068): the entry
+    /// holds a `Weak` view of this strong `Arc`. The consumer dying without
+    /// a stop — task abort, unwind, plain drop — kills the token, so the
+    /// dead entry is replaced by the next registration or pruned lazily.
+    owner: Arc<()>,
     /// The bridge task (detached by `start`); taken by
     /// [`Consumer::background_task_handle`] for runtime monitoring.
     bridge: Option<JoinHandle<Result<(), CamelError>>>,
@@ -253,32 +258,47 @@ impl Consumer for McpConsumer {
             &plan_refs,
             registry.acknowledged(&cfg.bind),
         )?;
-        security.register_plan(&route_id, plan, providers);
+        // The plan is registered under this consumer's owner token
+        // (ADR-0068): a live incumbent keeps its plan, and a failed start
+        // or a late stop can only release a plan this consumer owns.
+        let owner = Arc::new(());
+        security.register_plan(
+            &route_id,
+            plan.clone(),
+            providers.clone(),
+            Arc::downgrade(&owner),
+        );
 
         // (c) The shared listener for this bind (the first consumer spawns
         // it; later consumers reuse the handle).
         let handle = match registry.get_or_spawn(&cfg.bind, &cfg).await {
             Ok(handle) => handle,
             Err(e) => {
-                security.unregister_plan(&route_id);
+                security.unregister_plan_owned(&route_id, &Arc::downgrade(&owner));
                 return Err(e.into());
             }
         };
 
-        // (d) Duplicate guard + register. The registry rejects duplicates
-        // atomically (see `register`), so the pre-check here is only a
-        // friendly-error fast path that lets the second consumer fail before
-        // spawning a bridge: the registry's atomic rejection is what actually
-        // prevents two concurrent same-name starts from silently overwriting
-        // the first registration (stranding the first route's channel).
-        // Any failure here unregisters the plan registered in (b2) — a
-        // refused start must leave no stale plan on the bind's gate.
+        // (d) Duplicate guard + register. The registry rejects live-owner
+        // duplicates atomically (see `register`), so the pre-check here is
+        // only a friendly-error fast path that lets the second consumer fail
+        // before spawning a bridge. It consults liveness
+        // (`name_taken_by_live_owner` / `uri_taken_by_live_owner`) so a dead
+        // owner's lingering entry — a consumer that dropped without a
+        // stop — does not veto a legal takeover: `register` replaces the
+        // dead entry. The registry's
+        // atomic rejection is what actually prevents two concurrent
+        // same-key starts from silently overwriting the first registration
+        // (stranding the first route's channel).
+        // Any failure here releases the plan registered in (b2)
+        // owner-conditionally (ADR-0068): a refused duplicate start cannot
+        // remove a live incumbent's plan.
         let (registration, bridge) = match self.operation.clone() {
             McpEndpointUri::Tool {
                 name, input_schema, ..
             } => {
-                if handle.tool_registry.resolve(&name).is_some() {
-                    security.unregister_plan(&route_id);
+                if handle.tool_registry.name_taken_by_live_owner(&name) {
+                    security.unregister_plan_owned(&route_id, &Arc::downgrade(&owner));
                     return Err(McpError::Endpoint(format!(
                         "tool '{name}' is already registered on MCP server '{server}' — a \
                          second consumer for the same tool name is refused"
@@ -286,22 +306,37 @@ impl Consumer for McpConsumer {
                     .into());
                 }
                 let (tx, rx) = mpsc::channel(INVOCATION_BUFFER);
-                if let Err(e) =
-                    handle
-                        .tool_registry
-                        .register(name.clone(), route_id.clone(), tx, input_schema)
-                {
-                    security.unregister_plan(&route_id);
+                if let Err(e) = handle.tool_registry.register(
+                    name.clone(),
+                    route_id.clone(),
+                    tx,
+                    input_schema,
+                    Arc::downgrade(&owner),
+                ) {
+                    security.unregister_plan_owned(&route_id, &Arc::downgrade(&owner));
                     return Err(e.into());
                 }
+                // ADR-0068: winner re-assertion — entry ownership proves
+                // route identity. This consumer won the tool entry; make
+                // its plan own the route so the duplicate guard's loser
+                // cannot strip the plan behind the live entry.
+                security.register_plan_takeover(
+                    &route_id,
+                    plan.clone(),
+                    providers.clone(),
+                    Arc::downgrade(&owner),
+                );
                 (
                     Registration::Tool { name },
                     spawn_tool_bridge(rx, ctx.clone()),
                 )
             }
             McpEndpointUri::Resource { resource_uri, .. } => {
-                if handle.resource_registry.resolve(&resource_uri).is_some() {
-                    security.unregister_plan(&route_id);
+                if handle
+                    .resource_registry
+                    .uri_taken_by_live_owner(&resource_uri)
+                {
+                    security.unregister_plan_owned(&route_id, &Arc::downgrade(&owner));
                     return Err(McpError::Endpoint(format!(
                         "resource '{resource_uri}' is already registered on MCP server \
                          '{server}' — a second consumer for the same resource URI is refused"
@@ -309,21 +344,32 @@ impl Consumer for McpConsumer {
                     .into());
                 }
                 let (tx, rx) = mpsc::channel(INVOCATION_BUFFER);
-                if let Err(e) =
-                    handle
-                        .resource_registry
-                        .register(resource_uri.clone(), route_id.clone(), tx)
-                {
-                    security.unregister_plan(&route_id);
+                if let Err(e) = handle.resource_registry.register(
+                    resource_uri.clone(),
+                    route_id.clone(),
+                    tx,
+                    Arc::downgrade(&owner),
+                ) {
+                    security.unregister_plan_owned(&route_id, &Arc::downgrade(&owner));
                     return Err(e.into());
                 }
+                // ADR-0068: winner re-assertion — entry ownership proves
+                // route identity. This consumer won the resource entry;
+                // make its plan own the route so the duplicate guard's
+                // loser cannot strip the plan behind the live entry.
+                security.register_plan_takeover(
+                    &route_id,
+                    plan.clone(),
+                    providers.clone(),
+                    Arc::downgrade(&owner),
+                );
                 (
                     Registration::Resource { uri: resource_uri },
                     spawn_resource_bridge(rx, ctx.clone()),
                 )
             }
             operation => {
-                security.unregister_plan(&route_id);
+                security.unregister_plan_owned(&route_id, &Arc::downgrade(&owner));
                 return Err(CamelError::EndpointCreationFailed(format!(
                     "MCP consumer cannot start for producer operation {operation:?}"
                 )));
@@ -343,6 +389,7 @@ impl Consumer for McpConsumer {
             registration,
             handle,
             route_id,
+            owner,
             bridge: Some(bridge),
         });
         Ok(())
@@ -355,13 +402,29 @@ impl Consumer for McpConsumer {
 
         // Unregister FIRST: subsequent dispatch resolves `None` and maps to a
         // clean MCP method error instead of awaiting a dead channel. The
-        // bind-security plan goes with it (stop releases everything the
-        // consumer registered on the bind).
+        // unregister is owner-conditional (ADR-0068): a late stop of a dead
+        // owner cannot delete a replacement's entry. The bind-security plan
+        // goes with it, also owner-conditionally: a late stop cannot remove
+        // a live replacement's plan (that would drop dispatch to
+        // unauthenticated pass-through).
         match &running.registration {
-            Registration::Tool { name } => running.handle.tool_registry.unregister(name),
-            Registration::Resource { uri } => running.handle.resource_registry.unregister(uri),
+            Registration::Tool { name } => {
+                running
+                    .handle
+                    .tool_registry
+                    .unregister_owned(name, &Arc::downgrade(&running.owner));
+            }
+            Registration::Resource { uri } => {
+                running
+                    .handle
+                    .resource_registry
+                    .unregister_owned(uri, &Arc::downgrade(&running.owner));
+            }
         }
-        running.handle.security.unregister_plan(&running.route_id);
+        running
+            .handle
+            .security
+            .unregister_plan_owned(&running.route_id, &Arc::downgrade(&running.owner));
 
         // Cancel the bridge if we still own it (it may be parked on `recv`
         // while external sender clones keep the channel open), then release
