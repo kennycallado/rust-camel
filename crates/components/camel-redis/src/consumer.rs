@@ -149,8 +149,10 @@ impl Consumer for RedisConsumer {
             self.cancel_token = None;
         }
 
-        // Create cancellation token for this consumer
-        let cancel_token = CancellationToken::new();
+        // Create cancellation token for this consumer: a child of the context
+        // token, so a local stop() cancels only this consumer while route
+        // stop still cascades through the parent link.
+        let cancel_token = ctx.cancel_token().child_token();
         self.cancel_token = Some(cancel_token.clone());
 
         // Clone config and mode for the spawned task
@@ -770,6 +772,45 @@ mod tests {
 
         // Clean up
         consumer.stop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn consumer_task_exits_on_context_token_cancel() {
+        let config = create_test_config(RedisCommand::Blpop);
+        let mut consumer = RedisConsumer::new(config, test_rt()).expect("Blpop should be valid");
+
+        let (tx, _rx) = mpsc::channel(16);
+        let cancel_token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel_token.clone(), "redis-test-route".to_string());
+
+        assert!(consumer.start(ctx).await.is_ok());
+        cancel_token.cancel();
+        let handle = consumer.background_task_handle().expect("handle");
+        let joined = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        assert!(
+            joined.is_ok(),
+            "consumer task did not exit after context token cancel"
+        );
+        assert!(matches!(joined.unwrap(), Ok(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn local_stop_does_not_cancel_runtime_token() {
+        let config = create_test_config(RedisCommand::Blpop);
+        let mut consumer = RedisConsumer::new(config, test_rt()).expect("Blpop should be valid");
+
+        let (tx, _rx) = mpsc::channel(16);
+        let cancel_token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel_token.clone(), "redis-test-route".to_string());
+
+        assert!(consumer.start(ctx).await.is_ok());
+        let stopped = tokio::time::timeout(Duration::from_secs(2), consumer.stop()).await;
+        assert!(stopped.is_ok(), "stop() did not return in time");
+        assert!(stopped.unwrap().is_ok());
+        assert!(
+            !cancel_token.is_cancelled(),
+            "local stop must not cancel the runtime context token"
+        );
     }
 
     #[tokio::test]

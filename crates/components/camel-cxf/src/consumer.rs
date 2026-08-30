@@ -148,7 +148,7 @@ async fn await_ready_channel(pool: Arc<CxfBridgePool>) -> Result<Channel, CamelE
 impl Consumer for CxfConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
         let pool = Arc::clone(&self.pool);
-        let cancel = CancellationToken::new();
+        let cancel = ctx.cancel_token();
         self.cancel_token = Some(cancel.clone());
 
         // Eagerly create/probe the bridge slot BEFORE spawning the consumer

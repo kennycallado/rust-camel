@@ -98,6 +98,11 @@ impl WasmSourceConsumer {
 #[async_trait::async_trait]
 impl Consumer for WasmSourceConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        // Adopt the Runtime's context token: stop() must observe it, and the
+        // clone into SourceHostState below must carry it into every host
+        // import's cancel select!. The new() token is only a placeholder.
+        self.cancel_token = ctx.cancel_token();
+
         // 1. Engine config: component model + async + epoch interruption.
         //    concurrency_support is REQUIRED for Store::run_concurrent /
         //    call_run_async (async source world). Mirrors the plugin engine

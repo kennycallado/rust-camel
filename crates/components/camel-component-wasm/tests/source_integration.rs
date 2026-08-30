@@ -444,3 +444,32 @@ async fn test_source_crash_recovery() {
         .expect("stop() timed out after crash")
         .expect("stop() returned error after crash");
 }
+
+/// Cancel-token conformance: the guest run task must observe the
+/// ConsumerContext's cancel token (the Runtime's shutdown signal), not only
+/// the token owned by stop().
+///
+/// Prerequisites: pre-built guest wasm.
+#[tokio::test]
+#[ignore = "requires pre-built guest wasm (see module docs)"]
+async fn source_task_exits_on_context_token_cancel() {
+    let port = free_port().await;
+    let mut consumer = make_consumer(vec![
+        ("bind".into(), format!("127.0.0.1:{port}")),
+        ("path".into(), "/webhook".into()),
+    ]);
+    let (ctx, _rx, token) = make_consumer_context("cancel-route", 16);
+
+    consumer.start(ctx).await.expect("start() failed");
+
+    token.cancel();
+
+    let handle = consumer
+        .background_task_handle()
+        .expect("run task handle should be present after start()");
+    let outcome = tokio::time::timeout(Duration::from_secs(3), handle).await;
+    assert!(
+        outcome.is_ok(),
+        "run task did not exit within 3s of context token cancel"
+    );
+}

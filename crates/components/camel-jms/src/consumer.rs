@@ -443,7 +443,7 @@ impl Consumer for JmsConsumer {
         let broker_name = self.broker_name.clone();
         let endpoint_config = self.endpoint_config.clone();
         let reconnect = self.reconnect.clone();
-        let cancel = CancellationToken::new();
+        let cancel = ctx.cancel_token();
         self.cancel_token = Some(cancel.clone());
 
         // JMS-011: spawn concurrent consumer tasks
@@ -745,6 +745,50 @@ mod tests {
             result.is_ok(),
             "stop must absorb panic and return Ok: {:?}",
             result.err()
+        );
+    }
+
+    // ── JMS-002: stop joins tasks awaiting the context token ────────────────
+
+    #[tokio::test]
+    async fn stop_joins_tasks_awaiting_context_token() {
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::Generic,
+            ))
+            .unwrap(),
+        );
+        let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
+        let mut consumer = JmsConsumer::new(
+            pool,
+            "default".to_string(),
+            endpoint_cfg,
+            jms_reconnect_default(),
+            rt(),
+        );
+
+        let (tx, _rx) = mpsc::channel(16);
+        let t = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, t.clone(), "test-route".to_string());
+        consumer.cancel_token = Some(ctx.cancel_token());
+        consumer.task_handles = vec![tokio::spawn({
+            let t = t.clone();
+            async move {
+                t.cancelled().await;
+                Ok(())
+            }
+        })];
+
+        let result = tokio::time::timeout(Duration::from_secs(1), consumer.stop()).await;
+        assert!(result.is_ok(), "stop must complete within 1s");
+        assert!(
+            result.unwrap().is_ok(),
+            "stop must return Ok after joining tasks"
+        );
+        assert!(
+            consumer.task_handles.is_empty(),
+            "task_handles must be cleared after stop"
         );
     }
 

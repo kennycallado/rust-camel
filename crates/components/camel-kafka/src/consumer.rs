@@ -62,7 +62,7 @@ impl Consumer for KafkaConsumer {
             ));
         }
 
-        let cancel_token = CancellationToken::new();
+        let cancel_token = ctx.cancel_token();
         self.cancel_token = Some(cancel_token.clone());
 
         // Capture route_id for ADR-0012 metrics in stop().
@@ -915,6 +915,40 @@ mod tests {
             msg.contains("already started"),
             "error must mention already started: {}",
             msg
+        );
+    }
+
+    #[tokio::test]
+    async fn consumer_task_exits_on_context_token_cancel() {
+        let config = make_resolved_config();
+        let mut consumer = KafkaConsumer::new(config, test_rt());
+
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(route_tx, token.clone(), "test-route".to_string());
+
+        let started = consumer.start(ctx).await;
+        assert!(started.is_ok(), "start should succeed");
+
+        token.cancel();
+
+        let handle = consumer
+            .background_task_handle()
+            .expect("background task handle");
+        let joined = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("consumer task must exit on context token cancel");
+        assert!(
+            matches!(joined, Ok(Ok(()))),
+            "join should yield Ok(Ok(())): {joined:?}"
+        );
+
+        let stop_result = tokio::time::timeout(Duration::from_secs(2), consumer.stop())
+            .await
+            .expect("stop() must complete in time");
+        assert!(
+            stop_result.is_ok(),
+            "stop() should return Ok: {stop_result:?}"
         );
     }
 

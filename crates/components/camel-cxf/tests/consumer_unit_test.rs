@@ -1,14 +1,21 @@
 mod support;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use camel_component_api::NoopRuntimeObservability;
+use camel_component_api::consumer::{Consumer, ConsumerContext};
+use camel_component_cxf::config::CxfPoolConfig;
+use camel_component_cxf::consumer::CxfConsumer;
 use camel_component_cxf::proto::{
     ConsumerRequest, ConsumerResponse, cxf_bridge_client::CxfBridgeClient,
 };
+use camel_component_cxf::{BridgeSlot, CxfBridgePool};
 use support::mock_bridge::{MockState, spawn_mock_bridge};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 
 async fn open_consumer_stream() -> Result<
@@ -464,6 +471,41 @@ async fn test_consumer_50_concurrent_requests_correlated()
 
     let expected: Vec<String> = (1..=50).map(|i| format!("req-{i:03}")).collect();
     assert_eq!(ids, expected);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn consumer_task_exits_on_context_token_cancel()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (port, _state) = spawn_mock_bridge().await?;
+    let channel = Channel::from_shared(format!("http://127.0.0.1:{port}"))?
+        .connect()
+        .await?;
+
+    let slot = BridgeSlot::new_ready_for_test(channel);
+    let pool = CxfBridgePool::from_config(CxfPoolConfig {
+        profiles: vec![],
+        ..CxfPoolConfig::default()
+    })?;
+    pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
+
+    let rt = Arc::new(NoopRuntimeObservability);
+    let mut consumer = CxfConsumer::new(Arc::new(pool), "test".to_string(), rt);
+
+    let (tx, _rx) = mpsc::channel(16);
+    let token = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "test-route".to_string());
+
+    consumer.start(ctx).await?;
+
+    token.cancel();
+    let handle = consumer.background_task_handle().expect("handle");
+    let outcome = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    assert!(
+        outcome.is_ok(),
+        "consumer task did not observe the context token cancel and exit within 2s"
+    );
 
     Ok(())
 }
