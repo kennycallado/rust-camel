@@ -613,11 +613,12 @@ async fn cxf_consumer_handles_malformed_soap() {
         .await
         .expect("request should not panic");
 
-    // Response should be either server error (5xx) or 200 with error info — key is no crash
+    // Malformed envelopes are rejected with HTTP 400 (hardened extraction,
+    // nothing forwarded); the key guarantee is a structured rejection, no crash
     let status = res.status();
-    assert!(
-        status.is_server_error() || status.is_success(),
-        "Expected 2xx or 5xx for malformed SOAP, got {status}"
+    assert_eq!(
+        status, 400,
+        "Expected 400 Bad Request for malformed SOAP, got {status}"
     );
 
     h.stop().await;
