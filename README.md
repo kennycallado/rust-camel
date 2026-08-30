@@ -86,7 +86,7 @@ shape of the problem.
 
 ## Documentation
 
-- **[Guide](https://kennycallado.github.io/rust-camel/)** — concepts,
+- **[Guide](https://kennycallado.github.io/rust-camel/docs/)** — concepts,
   tutorials, recipes, and operations.
 - **[API reference](https://docs.rs/camel-api/)** — public Rust types, traits,
   methods, and contracts.
@@ -106,9 +106,9 @@ cargo run -p hello-world
 A route receives an `Exchange` from `timer:tick` and sends it to `log:info`.
 
 Follow the guide to build your [first route in
-Rust](https://kennycallado.github.io/rust-camel/getting-started/rust-route.html)
+Rust](https://kennycallado.github.io/rust-camel/docs/getting-started/rust-route.html)
 or [first route in
-YAML](https://kennycallado.github.io/rust-camel/getting-started/yaml-route.html).
+YAML](https://kennycallado.github.io/rust-camel/docs/getting-started/yaml-route.html).
 
 ### Use the CLI
 

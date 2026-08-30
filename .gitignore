@@ -1,5 +1,6 @@
 /target
 /.worktrees
+/pages-artifact/
 docs/*
 !docs/adr
 !docs/benchmarks

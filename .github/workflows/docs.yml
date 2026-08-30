@@ -66,8 +66,10 @@ jobs:
         run: |
           mdbook build docs
           mdbook test docs
-      - name: Check rendered guide links
-        run: lychee --offline --no-progress docs/book
+      - name: Build Pages artifact
+        run: scripts/build-pages.sh
+      - name: Check rendered site links
+        run: lychee --offline --no-progress pages-artifact
 
   # Deploy gates on validate: a red validation run can never publish a
   # broken site (fixes the 2026-08-10 incident class where the old
@@ -96,11 +98,13 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Build guide
-        run: mdbook build docs
+        run: |
+          mdbook build docs
+          scripts/build-pages.sh
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
         with:
-          path: docs/book
+          path: pages-artifact
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

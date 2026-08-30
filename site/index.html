@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Build integration routes in Rust or YAML with Tower-native pipelines.">
+    <meta name="theme-color" content="#11100f">
+    <title>rust-camel — Integration routes, native to Rust</title>
+    <link rel="icon" href="mark.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="rust-camel home">
+        <img class="brand-mark" src="mark.svg" alt="">
+        <span>rust-camel</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="docs/" aria-label="Documentation" title="Documentation">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H11a1 1 0 0 1 1 1v17a2 2 0 0 0-2-2H4zM20 5.5A3.5 3.5 0 0 0 16.5 2H13a1 1 0 0 0-1 1v17a2 2 0 0 1 2-2h6z"/></svg>
+        </a>
+        <a href="https://github.com/kennycallado/rust-camel" aria-label="GitHub repository" title="GitHub repository">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1 0S17.9-.4 15 1.6a14 14 0 0 0-6 0C6.1-.4 4.9 0 4.9 0a5.4 5.4 0 0 0-.2 3A5.8 5.8 0 0 0 3.2 7.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 9 18v4M9 19c-3 .9-3-1.5-4.2-2"/></svg>
+        </a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <h1>Integration routes,<br><span>native to Rust.</span></h1>
+          <p class="lede">
+            Connect APIs, brokers, databases, files, and services through
+            composable Tower-native pipelines. Author routes in Rust or YAML.
+          </p>
+          <div class="actions">
+            <a class="button button-primary" href="docs/">Read the documentation</a>
+            <a class="button button-secondary" href="https://github.com/kennycallado/rust-camel">View on GitHub</a>
+          </div>
+        </div>
+
+        <div class="code-card" aria-label="Example YAML route">
+          <div class="code-header">
+            <span>routes/hello.yaml</span>
+            <span class="code-language">YAML</span>
+          </div>
+          <pre><code><span class="key">routes</span>:
+  - <span class="key">id</span>: <span class="value">"hello"</span>
+    <span class="key">from</span>: <span class="value">"direct:start"</span>
+    <span class="key">steps</span>:
+      - <span class="key">set_header</span>:
+          <span class="key">key</span>: <span class="value">"source"</span>
+          <span class="key">value</span>: <span class="value">"hello"</span>
+      - <span class="key">to</span>: <span class="value">"log:done"</span></code></pre>
+        </div>
+      </section>
+
+      <section class="proof" aria-label="Project highlights">
+        <div><strong>Tower-native</strong><span>Every processor and producer is a Service&lt;Exchange&gt;.</span></div>
+        <div><strong>Rust or YAML</strong><span>Use compile-time safety or declarative route authoring.</span></div>
+        <div><strong>Single binary</strong><span>Deploy without a JVM or a separate integration runtime.</span></div>
+      </section>
+
+      <section class="section advantages">
+        <div class="section-heading">
+          <p class="eyebrow">Built for integration work</p>
+          <h2>Familiar patterns. Rust foundations.</h2>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <span class="feature-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 7h5l3 5h8M4 17h5l3-5M17 9l3 3-3 3"/></svg>
+            </span>
+            <h3>Composable by construction</h3>
+            <p>Build filters, splitters, aggregators, retries, and other Enterprise Integration Patterns as one pipeline.</p>
+          </article>
+          <article>
+            <span class="feature-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.5 11l7-4M8.5 13l7 4"/></svg>
+            </span>
+            <h3>Connect real systems</h3>
+            <p>Route between HTTP, Kafka, Redis, SQL, gRPC, WebSocket, MQTT, files, LLMs, MCP, and more.</p>
+          </article>
+          <article>
+            <span class="feature-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.7-2.8 8-7 10-4.2-2-7-5.3-7-10V6l7-3zM8.5 12l2.2 2.2 4.8-5"/></svg>
+            </span>
+            <h3>Operate with confidence</h3>
+            <p>Use health checks, metrics, tracing, hot reload, schema validation, and explicit error handling.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section quickstart">
+        <div>
+          <p class="eyebrow">Quick start</p>
+          <h2>First route in minutes.</h2>
+          <p>Install the CLI, scaffold an integration, and run it locally.</p>
+        </div>
+        <div class="terminal">
+          <div class="terminal-bar"><span>rust-camel — bash</span></div>
+          <pre><code><span class="terminal-path">~</span> <span class="prompt">❯</span> cargo install camel-cli
+<span class="terminal-path">~</span> <span class="prompt">❯</span> camel new my-integration
+<span class="terminal-path">~</span> <span class="prompt">❯</span> cd my-integration
+<span class="terminal-path">~/my-integration</span> <span class="prompt">❯</span> camel run</code></pre>
+        </div>
+      </section>
+
+      <section class="cta">
+        <p class="eyebrow">Pre-release and evolving</p>
+        <h2>Explore the project.</h2>
+        <p>APIs may change. Try the guide, inspect the source, and help shape rust-camel.</p>
+        <div class="actions">
+          <a class="button button-primary" href="docs/getting-started/">Get started</a>
+          <a class="button button-secondary" href="https://github.com/kennycallado/rust-camel">Browse the source</a>
+          <button class="button button-disabled" type="button" disabled>Benchmarks <span>Coming soon</span></button>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <a class="brand" href="./"><img class="brand-mark" src="mark.svg" alt=""><span>rust-camel</span></a>
+      <p>Apache-2.0 licensed.</p>
+    </footer>
+  </body>
+</html>

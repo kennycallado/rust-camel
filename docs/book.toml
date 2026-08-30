@@ -9,7 +9,7 @@ build-dir = "book"
 
 [output.html]
 git-repository-url = "https://github.com/kennycallado/rust-camel"
-site-url = "/rust-camel/"
+site-url = "/rust-camel/docs/"
 
 [preprocessor.adrs]
 command = "python3 scripts/mdbook-adrs.py"
