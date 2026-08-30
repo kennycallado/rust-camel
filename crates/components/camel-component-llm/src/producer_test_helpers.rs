@@ -158,7 +158,7 @@ pub(super) async fn collect_stream_frames(out: &mut Exchange) -> Vec<String> {
         let mut guard = sb.stream.lock().await;
         if let Some(stream) = guard.as_mut() {
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.expect("stream chunk ok");
+                let chunk = chunk.expect("stream chunk ok"); // allow-unwrap
                 frames.push(String::from_utf8_lossy(&chunk).into_owned());
             }
         }
