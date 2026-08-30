@@ -60,6 +60,8 @@ is a YAML or programmatic route, identical logically across the 4 artifacts.
 |---|---|---|---|
 | **T1** | `timer -> log` (trivial) | no | fixture exists (v1) |
 | **T2** | `timer -> set_body -> set_header -> filter -> choice -> log` (5 EIPs) | no | fixture exists (v2) |
+| **T2j** | `t2-json`: T2-family route over the canonical JSON payload (`set_body` → unmarshal → filter → transform → marshal; payload classes 1/32/256/1024 KiB) | no | registered in `bench-missing-cells`; local smoke passed; awaiting first container run |
+| **T2s** | `split-aggregate`: timer → canonical 100-item array → split (sequential) → `direct:agg-in` → aggregate (`completion_size=100`) → marker | no | registered in `bench-missing-cells`; local smoke passed; awaiting first container run |
 | **T3** | HTTP server: `http POST /bench -> log -> respond 200` | no | proposed v3 |
 | **T4a** | `timer -> set_body(XML) -> xslt(transform) -> log` | **YES** (xml bridge) | proposed v3 |
 | **T4b** | `timer -> set_body(XML) -> validator(XSD) -> log` | **YES** (xml bridge) | proposed v3 |
@@ -90,6 +92,8 @@ Each cell shows state + version + report link (if measured).
 |---|---|---|---|---|
 | **T1** timer+log | ✓ v1+v2 — [v1 report](2026-07-18-startup-minimal-benchmark.md), [v2 report](2026-07-18-benchmark-v2.md) | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) — baseline warm | ✗ won't-measure: timer-driven, fixed throughput (100 msgs/sec at 10ms period) | ✗ won't-measure: same |
 | **T2** 5 EIPs (no-bridge) | ✓ v2 — [v2 report](2026-07-18-benchmark-v2.md) | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) | ✗ won't-measure: timer-driven, fixed throughput | ✗ won't-measure: same |
+| **T2j** t2-json (canonical JSON body) | ? open-if: first published container-hosted run; fixtures + harness registered, local smoke passed | ? open-if: same | ? open-if: same | ? open-if: same |
+| **T2s** split-aggregate (split → aggregate, 100 items) | ? open-if: first published container-hosted run; fixtures + harness registered, local smoke passed | ? open-if: same | ? open-if: same | ? open-if: same |
 | **T3** HTTP server (no-bridge) | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) — listener spin-up cost | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) — request-serving viability | ✓ v4 (platform-http) — 78,628 req/s (rust-camel-lib), 37,713 (Quarkus native), 66,808 (Camel JVM); 1.18× rust-camel vs JVM, 2.08× rust-camel vs Quarkus native, 1.77× JVM vs Quarkus native | ✓ v4 (platform-http) — RSS delta (median, 5 rounds): rust-camel-lib +52 KiB, rust-camel-cli +44 KiB, camel-standalone-dsl +540 KiB, camel-standalone-yaml +448 KiB, camel-quarkus-dsl-native −1,672 KiB (RSS shrinks — GC releasing), camel-quarkus-yaml-native −284 KiB |
 | **T4a** XSLT bridge (~10ms Java work) | ? v3 — bridge process spawn cost | ✓ v3 — [v3 report](../docs/benchmarks/2026-07-21-benchmark-v3.md) (2 pairs: standalone + Quarkus native, both Saxon-HE) | ✗ won't-measure: throughput dominated by XSLT engine, not bridge overhead | ✗ won't-measure: same as M3 |
 | **T4b** XSD validation bridge (<1ms Java work) | ? v3 — bridge process spawn cost | ✓ v3 — [v3 report](../docs/benchmarks/2026-07-21-benchmark-v3.md) (2 pairs) | ✗ won't-measure: same rationale as T4a | ✗ won't-measure: same |
@@ -100,6 +104,17 @@ Each cell shows state + version + report link (if measured).
 | **T7** Composite multi-hop | ? v5-if: composite-route realism becomes decision input | ? v5-if: bridge tax composition matters | ? v5-if | ? v5-if |
 
 **Cumulative measured cells**: 10 — T1×M1/M2, T2×M1/M2, T3×M1/M2/M3/M4, T4a×M2, T4b×M2. v4 added T3×M3+M4 (sustained throughput + memory growth, 6 http-server artifacts).
+
+**Payload axis (T3)**: the harness carries a transport payload axis with
+classes 1 KiB, 32 KiB, 256 KiB, and 1 MiB (task 1.1 of
+`bench-missing-cells`). Published T3 cells use the fixed default payload;
+the axis is not yet exercised matrix-wide.
+
+**Metric-family lever study**: not a contender row, so it has no matrix
+cell. Its first run was contaminated and marked INVALID in the
+[v4 addendum](../docs/benchmarks/2026-08-29-benchmark-v4-addendum.md).
+Clean re-run (quiet host): ratio 0.9890, CI [0.9785, 1.0126] — lever cost
+unresolved from zero; the re-run protocol lives there.
 
 ## ICP layer (derived, not asserted)
 
@@ -169,6 +184,11 @@ When a new version is published:
 3. Update `open-if` conditions if vN data changes them.
 4. Note in the vN report which cells were added and which ICPs shifted.
 
+An addendum extends an already-published report without changing it (the
+v4 addendum of 2026-08-29 is the current example). An addendum does not
+bump the coverage release and adds no measured cells; a cell reaches
+`✓ vN` only through a published run.
+
 ## Cross-references
 
 - Methodology + domain language: `benchmarks/CONTEXT.md`
@@ -176,6 +196,7 @@ When a new version is published:
 - v2 report: `docs/benchmarks/2026-07-18-benchmark-v2.md`
 - v2 spec: `docs/superpowers/specs/2026-07-18-rc-p9ki-benchmark-v2-design.md`
 - v2 plan: `docs/superpowers/plans/2026-07-18-rc-p9ki-benchmark-v2.md`
+- v4 addendum (lever study + published-ratio CIs): `docs/benchmarks/2026-08-29-benchmark-v4-addendum.md`
 - Consultation (initial, 6 Qs): `docs/benchmarks/consultation-v3-direction-2026-07-18.md`
 - Consultation (follow-up, Q7-Q11): `docs/benchmarks/consultation-v3-followup-2026-07-18.md`
 - Harness: `benchmarks/harness/run.sh`

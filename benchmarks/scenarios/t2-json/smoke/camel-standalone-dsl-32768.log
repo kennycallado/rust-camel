@@ -1,0 +1,7 @@
+[main] INFO org.apache.camel.main.MainSupport - Apache Camel (Main) 4.8.0 is starting
+[main] INFO org.apache.camel.impl.engine.AbstractCamelContext - Apache Camel 4.8.0 (camel-1) is starting
+[main] INFO org.apache.camel.impl.engine.AbstractCamelContext - Routes startup (total:1)
+[main] INFO org.apache.camel.impl.engine.AbstractCamelContext -     Started route1 (timer://bench)
+[main] INFO org.apache.camel.impl.engine.AbstractCamelContext - Apache Camel 4.8.0 (camel-1) started in 48ms (build:0ms init:0ms start:48ms)
+BENCH_INPUT_SHA256=a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9
+[Camel (camel-1) thread #1 - timer://bench] INFO route1 - BENCH_ROUTE_READY bytes=32781

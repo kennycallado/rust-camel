@@ -11,6 +11,8 @@
 //! - `bridge-check` — compare bridge PIDs at round boundaries.
 //! - `aggregate-bridge-tax` — pair rust vs java per scenario from a tree
 //!   of `m2-summary.json` files (spec F1 bridge tax reporting).
+//! - `aggregate-ratios` — ratio of M3 throughput medians between two
+//!   `m3-summary.json` cells with a percentile-bootstrap CI.
 //!
 //! See `bench_loadgen` library docs for the spec citations per command.
 
@@ -37,6 +39,7 @@ fn main() -> ExitCode {
         "rss-sample" => bench_loadgen::cli::rss_sample_main(rest),
         "bridge-check" => bench_loadgen::cli::bridge_check_main(rest),
         "aggregate-bridge-tax" => bench_loadgen::cli::aggregate_bridge_tax_main(rest),
+        "aggregate-ratios" => bench_loadgen::cli::aggregate_ratios_main(rest),
         other => {
             eprintln!("error: unknown subcommand '{other}'");
             usage();
@@ -63,6 +66,9 @@ fn usage() {
          \n  bridge-check --start=PATH --end=PATH  Compare bridge PID files.\
          \n  aggregate-bridge-tax --input-dir=PATH [--output=PATH]\
          \n                                       Pair rust vs java per scenario.\
+         \n  aggregate-ratios <cellA.json> <cellB.json> [--seed=N]\
+         \n                                       [--bci-resamples=N] [--independent]\
+         \n                                       Ratio of M3 medians + bootstrap CI.\
          \n\
          \nThis is the v3 benchmark harness loadgen (spec §4.5). See the library\
          \ndocs (cargo doc -p bench-loadgen --open) for spec citations per command."

@@ -1,0 +1,46 @@
+# t2-json scenario route for camel-quarkus-yaml (JVM, Pair B, OpenSpec
+# change bench-missing-cells task 2.2).
+#
+# Same logical route as the camel-quarkus-dsl BenchRoute (Pair A) but
+# authored in Apache Camel YAML DSL: timer -> process(benchBody) ->
+# unmarshal(json) -> filter(jsonpath) -> process(insertBench) ->
+# marshal(json) -> process(assertOutput) -> log marker. Discovered via
+# the default classpath:camel/* scan (native mode uses the pinned
+# camel.main.routesIncludePattern from the -native sibling's
+# application.properties — Substrate VM cannot enumerate `camel/*`).
+#
+# The three `process` steps resolve CDI-produced named beans from
+# BenchBeans.java (benchBody / insertBench / assertOutput); the route
+# STRUCTURE lives in this file, which is the property Pair B measures.
+# The marker `BENCH_ROUTE_READY bytes=<n>` is the exact harness grep
+# target; any processor assert failure kills the route BEFORE the
+# marker so the cell fails loudly.
+#
+# Uses camelCase keys per Spike 1B finding that kebab-case is
+# deprecated in Quarkus 3.20.0 YAML DSL (still parses but warns).
+
+- route:
+    from:
+      uri: "timer:bench"
+      parameters:
+        repeatCount: 1
+        delay: 0
+      steps:
+        - process:
+            ref: "benchBody"
+        - unmarshal:
+            json:
+              library: "Jackson"
+              unmarshalType: "com.fasterxml.jackson.databind.node.ObjectNode"
+        - filter:
+            jsonpath: "$[?(@.id == 'bench')]"
+            steps:
+              - process:
+                  ref: "insertBench"
+        - marshal:
+            json:
+              library: "Jackson"
+        - process:
+            ref: "assertOutput"
+        - log:
+            message: "BENCH_ROUTE_READY bytes=${header.benchOutLen}"

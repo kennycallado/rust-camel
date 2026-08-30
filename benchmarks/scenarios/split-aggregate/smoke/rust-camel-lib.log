@@ -1,0 +1,9 @@
+[2m2026-08-29T18:16:13.830546Z[0m [32m INFO[0m BENCH_INPUT_SHA256=123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316
+[2m2026-08-29T18:16:13.831393Z[0m [32m INFO[0m Starting CamelContext
+[2m2026-08-29T18:16:13.831518Z[0m [32m INFO[0m Starting route [3mroute_id[0m[2m=[0mbench-split-route
+[2m2026-08-29T18:16:13.831587Z[0m [32m INFO[0m Route started [3mroute_id[0m[2m=[0mbench-split-route
+[2m2026-08-29T18:16:13.831647Z[0m [32m INFO[0m Starting route [3mroute_id[0m[2m=[0mbench-agg-route
+[2m2026-08-29T18:16:13.831707Z[0m [32m INFO[0m direct consumer started [3mendpoint_name[0m[2m=[0magg-in
+[2m2026-08-29T18:16:13.831721Z[0m [32m INFO[0m Route started [3mroute_id[0m[2m=[0mbench-agg-route
+[2m2026-08-29T18:16:13.831739Z[0m [32m INFO[0m CamelContext started
+[2m2026-08-29T18:16:13.837155Z[0m [32m INFO[0m BENCH_ROUTE_READY items=100

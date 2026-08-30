@@ -1,0 +1,38 @@
+# Benchmark fixture for rust-camel CLI + YAML (Pair B partner,
+# split-aggregate scenario, OpenSpec change bench-missing-cells task
+# 2.3). Mirrors the t2-json fixture's Camel.toml — same ADR-0033
+# fail-closed exec stub, same supervision block — but lives under the
+# split-aggregate scenario dir so the harness picks up the
+# split-aggregate route on a split-aggregate run.
+#
+# Unlike t2-json, the route file carries NO template tokens (the
+# canonical array is fixed at 100 items): the smoke/harness runs
+# routes/split-aggregate.yaml directly via
+# `camel run --config Camel.toml --routes routes/split-aggregate.yaml`.
+
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+watch = false
+
+# ADR-0033 fail-closed workaround: ExecBundle requires at least one profile
+# to pass startup validation, even when no route uses `exec:` URIs. The stub
+# below registers `true` (a no-op that always exits 0) under the name
+# `bench-stub` so validation succeeds. It is never invoked by the benchmark.
+# NixOS note: bare `true` resolves via PATH at CLI startup; do NOT hardcode
+# `/bin/true` (NixOS has no FHS, /bin/true does not exist).
+[default.components.exec]
+workspace_root = "."
+
+# `profiles` is a Vec<ExecProfile> — TOML array-of-tables syntax ([[...]]),
+# NOT a map ([default.components.exec.profiles.<name>] would deserialize
+# as a struct/map and fail with "invalid type: map, expected a sequence").
+[[default.components.exec.profiles]]
+name = "bench-stub"
+executable = "true"
+
+[default.supervision]
+max_attempts = 5
+initial_delay_ms = 1000
+backoff_multiplier = 2.0
+max_delay_ms = 60000

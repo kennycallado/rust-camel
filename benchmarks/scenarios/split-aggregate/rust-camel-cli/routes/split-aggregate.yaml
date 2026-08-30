@@ -1,0 +1,116 @@
+# split-aggregate route for rust-camel-cli (Pair B, OpenSpec change
+# bench-missing-cells task 2.3). YAML mirror of the rust-camel-lib
+# fixture: the canonical 100-item array is split SEQUENTIALLY into
+# fragments, each dispatched to direct:agg-in, aggregated under a
+# constant correlation key with completion at exactly 100.
+#
+# NO template tokens — the canonical array is fixed (100 items,
+# "b0".."b99", 591 bytes). Run directly:
+#   camel run --config Camel.toml --routes routes/split-aggregate.yaml
+#
+# Flow (mirrors the lib fixture):
+#   route bench-split-route:
+#     timer -> set_body (rhai builds the canonical array string)
+#     -> input assert (script, rhai: exact 591 length — errors
+#        propagate, no marker on failure)
+#     -> BENCH_INPUT_SHA256 log
+#     -> unmarshal json (body becomes the parsed Body::Json array)
+#     -> split (expression json_array, sequential — NO parallel)
+#        -> to direct:agg-in (per fragment)
+#   route bench-agg-route:
+#     direct:agg-in -> set_header (constant correlation key)
+#     -> aggregate (header correlation, strategy collect_all,
+#        completion_size 100, force_completion_on_stop false)
+#     -> filter (rhai: CamelAggregatedSize == 100) — gates the
+#        completion steps. The aggregate step has no timeout and no
+#        force-completion, so it compiles as a plain mid-route step and
+#        the PENDING sentinel (property CamelAggregatorPending=true,
+#        empty body) of an incomplete bucket flows through the SAME
+#        subsequent steps — the filter is what keeps the completion
+#        steps completion-only.
+#     -> assert (script, js: the aggregated Body::Json array has
+#        length exactly 100 — rhai cannot read structured bodies)
+#     -> set_property bench.aggregated.size = 100
+#     -> marker log (simple: reads the completion property)
+#
+# Language notes (recorded per task 2.3):
+# - rhai binds `body` as TEXT ONLY — perfect for the canonical-array
+#   build/assert (before unmarshal), useless for the aggregated
+#   Body::Json array after the aggregate. The completion assert uses js
+#   (`camel.body` exposes the structured body).
+# - The aggregator stamps `CamelAggregatedSize` (= bucket length, JSON
+#   number) on the completion exchange
+#   (crates/camel-processor/src/aggregator.rs, `call`). The marker
+#   interpolates THAT property; a pending sentinel has no such property
+#   and is filtered out before the marker step.
+# - set_header `value:` is the literal form; the correlation key is a
+#   CONSTANT. `header` is the required field and drives builder-path
+#   correlation (compile.rs compile_aggregate_step -> correlate_by(
+#   def.header)); `correlation_key` is the optional canonical-path
+#   spelling — both carry the same constant for parity.
+
+routes:
+  - id: "bench-split-route"
+    from: "timer:bench?repeatCount=1&delay=0"
+    steps:
+      # Canonical array: 100 items, item i = "b<i>", compact JSON —
+      # exactly 591 bytes (README golden table). rhai has no
+      # string-repeat operator; build item by item.
+      - set_body:
+          rhai: |
+            let s = "[";
+            for i in 0..100 {
+              if i > 0 { s += ","; }
+              s += "\"" + `b${i}` + "\"";
+            }
+            s += "]";
+            s
+      # Input assert: errors propagate — a wrong canonical array kills
+      # the route before any marker.
+      - script:
+          language: rhai
+          source: |
+            if body.len() != 591 {
+              throw "split-aggregate canonical array length mismatch: got " + body.len();
+            }
+      - log: "BENCH_INPUT_SHA256=123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316"
+      # Body::Text -> Body::Json (the parsed 100-item array).
+      - unmarshal: json
+      # Sequential split (parallel defaults to false): each fragment
+      # ("b0".."b99") is dispatched to the agg route before the next.
+      - split:
+          expression: json_array
+          steps:
+            - to: "direct:agg-in"
+
+  - id: "bench-agg-route"
+    from: "direct:agg-in"
+    steps:
+      - set_header:
+          key: "bench.correlation"
+          value: "bench"
+      - aggregate:
+          header: "bench.correlation"
+          correlation_key: "bench.correlation"
+          strategy: collect_all
+          completion_size: 100
+          force_completion_on_stop: false
+      # Completion gate: the aggregator stamps CamelAggregatedSize on
+      # the completion exchange only; pending sentinels are dropped
+      # here so the steps below are completion-only.
+      - filter:
+          rhai: 'property("CamelAggregatedSize") == 100'
+          steps:
+            # Payload assert on the aggregated collection (the
+            # CollectAll JSON array): length exactly 100.
+            - script:
+                language: js
+                source: |
+                  if (camel.body.length !== 100) {
+                    throw "aggregated collection length != 100: " + camel.body.length;
+                  }
+                  camel.body
+            - set_property:
+                name: "bench.aggregated.size"
+                value: 100
+            - log: "BENCH_ROUTE_READY items=${exchangeProperty.bench.aggregated.size}"

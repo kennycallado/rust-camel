@@ -1,13 +1,1 @@
-{
-  "kind": "holistic-review",
-  "verdict": "APPROVE",
-  "reviewer": "r_glm",
-  "session": "ses_fae48482bffeX7wPLaP0Sc8x2x",
-  "date": "2026-08-30",
-  "impl_head": "fd60e2c7",
-  "history": [
-    "APPROVE-WITH-FINDINGS: (1) IMPORTANT concurrent-restart race — loser cleanup strips winner plan -> unauthenticated pass-through; (2) IMPORTANT stale mcp.md duplicate-rejection sentence; minors: registry.rs 1k split, cleanup closure dedup",
-    "FIXED: 5e204fee register_plan_takeover + winner re-assert after both register arms + red->green regression tests + mcp.md sentence; spec amended (fd60e2c7) + re-blessed BLESS by e_gpt (hash 41aa0999...)",
-    "APPROVE: interleaving closed at every branch; minors filed as bd rc-eba2"
-  ]
-}
+{"verdict": "APPROVE-WITH-FINDINGS", "reviewer": "r_glm", "impl_hash": "b61e8859c40f381abc48bebb47345aaaa875f72e", "findings": "3 minors applied in final commits: COVERAGE paragraph rewrite, CONTEXT.md sec7 resolution note, CLI byte-equality assert", "date": "2026-08-30"}

@@ -725,9 +725,11 @@ dependencies = [
 name = "bench-loadgen"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "tokio-util",
 ]
@@ -11185,6 +11187,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "split-aggregate-rust-camel-lib"
+version = "0.1.0"
+dependencies = [
+ "bench-loadgen",
+ "camel-api",
+ "camel-builder",
+ "camel-component-api",
+ "camel-component-direct",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "hex",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "splitter"
 version = "0.38.0"
 dependencies = [
@@ -11914,6 +11937,24 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows",
+]
+
+[[package]]
+name = "t2-json-rust-camel-lib"
+version = "0.1.0"
+dependencies = [
+ "bench-loadgen",
+ "camel-api",
+ "camel-builder",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "hex",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

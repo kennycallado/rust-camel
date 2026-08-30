@@ -1,0 +1,68 @@
+# split-aggregate scenario routes for camel-quarkus-yaml (JVM, Pair B,
+# OpenSpec change bench-missing-cells task 2.4).
+#
+# Same logical routes as the camel-quarkus-dsl BenchRoute (Pair A) but
+# authored in Apache Camel YAML DSL (design D3):
+#
+#   route 1: timer -> process(buildArray) -> split(jsonpath "$",
+#            sequential by default) -> to(direct:agg-in) per fragment
+#   route 2: direct:agg-in -> setHeader(constant correlation) ->
+#            aggregate(completionSize=100, list-append strategy,
+#            forceCompletionOnStop=false) -> process(assertCompletion)
+#            -> log marker
+#
+# Discovered via the default classpath:camel/* scan (native mode uses
+# the pinned camel.main.routesIncludePattern from the -native sibling's
+# application.properties — Substrate VM cannot enumerate `camel/*`).
+#
+# The two `process` steps resolve CDI-produced named beans from
+# BenchBeans.java (buildArray / assertCompletion); the list-append
+# aggregation strategy is referenced via the documented `#class:` form.
+# The route STRUCTURE lives in this file, which is the property Pair B
+# measures. The marker `BENCH_ROUTE_READY items=<n>` is the exact
+# harness grep target and fires ONLY from the aggregator's completion
+# path; any processor assert failure kills the route BEFORE the marker
+# so the cell fails loudly. forceCompletionOnStop stays false — an
+# incomplete bucket emits NO marker (spec: the cell fails by marker
+# deadline).
+#
+# Uses camelCase keys per Spike 1B finding that kebab-case is
+# deprecated in Quarkus 3.20.0 YAML DSL (still parses but warns).
+
+- route:
+    from:
+      uri: "timer:bench"
+      parameters:
+        repeatCount: 1
+        delay: 0
+      steps:
+        - process:
+            ref: "buildArray"
+        - split:
+            jsonpath: "$"
+            steps:
+              - to: "direct:agg-in"
+
+- route:
+    from:
+      uri: "direct:agg-in"
+      steps:
+        - setHeader:
+            name: "bench.correlation"
+            constant: "bench"
+        - aggregate:
+            # CONSTANT correlation key (README canonical route; the
+            # camel-core-languages `simple` form would pull the `bean`
+            # language onto the minimal classpath — constant is the
+            # documented zero-dep form and identical semantics for a
+            # single correlation class).
+            correlationExpression:
+              constant: "bench"
+            aggregationStrategy: "#class:com.rustcamel.bench.ListAppendStrategy"
+            completionSize: 100
+            forceCompletionOnStop: false
+            steps:
+              - process:
+                  ref: "assertCompletion"
+              - log:
+                  message: "BENCH_ROUTE_READY items=${exchangeProperty.CamelAggregatedSize}"

@@ -26,24 +26,40 @@ use crate::warmup::WarmupConfig;
 /// hard requirement is that empty/missing `--url` is a hard error, not a
 /// livelock, and that the natural `--url http://…` invocation works.
 fn parse_flags(args: &[String]) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
+    split_positionals_and_flags(args).1
+}
+
+/// Split argv into `(positionals, flags)` in a single consumption pass.
+///
+/// Flag forms: `--key=value`, `--key value` (space-separated; the next
+/// arg is consumed as the value when it does not start with `-`), and
+/// bare `--flag` (stored as `flag -> ""`). Any other token is positional.
+/// Shared by [`parse_flags`] and the subcommands that take positional
+/// arguments (`aggregate-ratios`).
+fn split_positionals_and_flags(
+    args: &[String],
+) -> (Vec<String>, std::collections::HashMap<String, String>) {
+    let mut positionals = Vec::new();
+    let mut flags = std::collections::HashMap::new();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
         if let Some(rest) = a.strip_prefix("--") {
             if let Some(eq) = rest.find('=') {
                 let (k, v) = rest.split_at(eq);
-                map.insert(k.to_string(), v[1..].to_string());
+                flags.insert(k.to_string(), v[1..].to_string());
             } else if i + 1 < args.len() && !args[i + 1].starts_with('-') {
-                map.insert(rest.to_string(), args[i + 1].clone());
+                flags.insert(rest.to_string(), args[i + 1].clone());
                 i += 1;
             } else {
-                map.insert(rest.to_string(), String::new());
+                flags.insert(rest.to_string(), String::new());
             }
+        } else {
+            positionals.push(a.clone());
         }
         i += 1;
     }
-    map
+    (positionals, flags)
 }
 
 /// `devnull` subcommand: start the HTTP devnull baseline stub.
@@ -90,6 +106,42 @@ pub fn calibrate_main(args: &[String]) -> ExitCode {
     }
 }
 
+/// Parse + validate the optional `--payload-size` flag (bytes).
+///
+/// Absent flag ⇒ `Ok(None)` — the exact legacy body behavior. A value
+/// that is not an integer, or not one of
+/// [`crate::payload::VALID_PAYLOAD_SIZES`], prints a usage error on
+/// stderr naming the valid sizes and yields `Err(ExitCode 2)`.
+fn parse_payload_size(
+    subcommand: &str,
+    flags: &std::collections::HashMap<String, String>,
+) -> Result<Option<usize>, ExitCode> {
+    let Some(raw) = flags.get("payload-size") else {
+        return Ok(None);
+    };
+    let parsed = match raw.parse::<usize>() {
+        Ok(n) => n,
+        Err(_) => {
+            eprintln!(
+                "{subcommand}: --payload-size=<bytes>: invalid integer; valid sizes: {}",
+                crate::payload::VALID_PAYLOAD_SIZES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            return Err(ExitCode::from(2));
+        }
+    };
+    match crate::payload::validate_payload_size(parsed) {
+        Ok(n) => Ok(Some(n)),
+        Err(msg) => {
+            eprintln!("{subcommand}: --payload-size: {msg}");
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
 /// `measure-a` subcommand: Protocol A measurement.
 pub fn measure_a_main(args: &[String]) -> ExitCode {
     let flags = parse_flags(args);
@@ -132,6 +184,10 @@ pub fn measure_a_main(args: &[String]) -> ExitCode {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let output_path = flags.get("out").cloned();
+    let payload_size = match parse_payload_size("measure-a", &flags) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
     let cfg = WarmupConfig {
         max_time_seconds: warmup_time_secs,
         max_messages: warmup_msgs,
@@ -145,6 +201,7 @@ pub fn measure_a_main(args: &[String]) -> ExitCode {
         cfg,
         bci_resamples,
         bci_seed,
+        payload_size,
         output_path.as_deref(),
     ) {
         Ok(()) => ExitCode::SUCCESS,
@@ -198,12 +255,17 @@ pub fn measure_throughput_main(args: &[String]) -> ExitCode {
         .and_then(|s| s.parse().ok())
         .unwrap_or(workers);
     let output_path = flags.get("out").cloned();
+    let payload_size = match parse_payload_size("measure-throughput", &flags) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
     match crate::cli_runtime::run_measure_throughput(
         &url,
         duration_secs,
         warmup_secs,
         workers,
         connections,
+        payload_size,
         output_path.as_deref(),
     ) {
         Ok(()) => ExitCode::SUCCESS,
@@ -335,6 +397,59 @@ pub fn aggregate_bridge_tax_main(args: &[String]) -> ExitCode {
         println!("{json}");
     }
     ExitCode::SUCCESS
+}
+
+/// `aggregate-ratios` subcommand: ratio of M3 throughput medians between
+/// two cells with a percentile-bootstrap CI.
+///
+/// Usage: `aggregate-ratios <cellA.json> <cellB.json> [--seed=N]
+/// [--bci-resamples=N] [--independent]`. Validation failures print
+/// `ERROR: <reason>` to stderr and exit 2; success prints one `RATIO …`
+/// line and exits 0. See [`crate::ratios`] for the validation taxonomy
+/// and CI method.
+pub fn aggregate_ratios_main(args: &[String]) -> ExitCode {
+    let (positionals, flags) = split_positionals_and_flags(args);
+    if positionals.len() != 2 {
+        eprintln!(
+            "aggregate-ratios: expected <cellA.json> <cellB.json> [flags], got {} positional arg(s)",
+            positionals.len()
+        );
+        return ExitCode::from(2);
+    }
+    let seed: u64 = match flags.get("seed").map(|s| s.parse::<u64>()) {
+        Some(Ok(v)) => v,
+        Some(Err(_)) => {
+            eprintln!("aggregate-ratios: --seed must be an integer");
+            return ExitCode::from(2);
+        }
+        None => 0,
+    };
+    let n_resamples: usize = match flags.get("bci-resamples").map(|s| s.parse::<usize>()) {
+        Some(Ok(v)) => v,
+        Some(Err(_)) => {
+            eprintln!("aggregate-ratios: --bci-resamples must be an integer");
+            return ExitCode::from(2);
+        }
+        None => crate::ratios::DEFAULT_N_RESAMPLES,
+    };
+    let independent = flags.contains_key("independent");
+
+    match crate::ratios::compute_ratio(
+        std::path::Path::new(&positionals[0]),
+        std::path::Path::new(&positionals[1]),
+        independent,
+        seed,
+        n_resamples,
+    ) {
+        Ok((line, _)) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(reason) => {
+            eprintln!("ERROR: {reason}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// Recursive walker (bounded to depth 3). For each `m2-summary.json`

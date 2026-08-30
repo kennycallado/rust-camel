@@ -1,0 +1,16 @@
+[2m2026-08-30T11:57:26.532144Z[0m [33m WARN[0m [2mcamel_cli::commands::run[0m[2m:[0m camel run trusts the current working directory and will execute route scripts, WASM modules, and beans resolved from it; only run from a trusted directory
+[2m2026-08-30T11:57:26.535293Z[0m [32m INFO[0m [2mcamel_cli::commands::run[0m[2m:[0m camel-cli: loading routes from patterns: ["/tmp/t2-json-routes-OnndYf.yaml"]
+[2m2026-08-30T11:57:26.541368Z[0m [33m WARN[0m [2mcamel_core::shared::components::domain::registry[0m[2m:[0m metadata scheme mismatch, normalizing [3mscheme[0m[2m=[0mwss [3merror[0m[2m=[0mScheme mismatch: component metadata scheme is 'ws' but component scheme is 'wss'
+[2m2026-08-30T11:57:26.541453Z[0m [33m WARN[0m [2mcamel_core::shared::components::domain::registry[0m[2m:[0m metadata scheme mismatch, normalizing [3mscheme[0m[2m=[0mactivemq [3merror[0m[2m=[0mScheme mismatch: component metadata scheme is 'jms' but component scheme is 'activemq'
+[2m2026-08-30T11:57:26.541457Z[0m [33m WARN[0m [2mcamel_core::shared::components::domain::registry[0m[2m:[0m metadata scheme mismatch, normalizing [3mscheme[0m[2m=[0martemis [3merror[0m[2m=[0mScheme mismatch: component metadata scheme is 'jms' but component scheme is 'artemis'
+[2m2026-08-30T11:57:26.541515Z[0m [33m WARN[0m [2mcamel_core::shared::components::domain::registry[0m[2m:[0m metadata scheme mismatch, normalizing [3mscheme[0m[2m=[0mopensearchs [3merror[0m[2m=[0mScheme mismatch: component metadata scheme is 'opensearch' but component scheme is 'opensearchs'
+[2m2026-08-30T11:57:26.562212Z[0m [32m INFO[0m [2mcamel_core::lifecycle::application::context_lifecycle[0m[2m:[0m Starting CamelContext
+[2m2026-08-30T11:57:26.562238Z[0m [32m INFO[0m [2mcamel_core::lifecycle::application::context_lifecycle[0m[2m:[0m Starting service: function-runtime
+[2m2026-08-30T11:57:26.562251Z[0m [32m INFO[0m [2mcamel_core::lifecycle::application::context_lifecycle[0m[2m:[0m Starting service: bridge-cleanup
+[2m2026-08-30T11:57:26.562330Z[0m [32m INFO[0m [2mcamel_core::lifecycle::adapters::route_controller_trait[0m[2m:[0m Starting route [3mroute_id[0m[2m=[0mbench-route
+[2m2026-08-30T11:57:26.562383Z[0m [32m INFO[0m [2mcamel_core::lifecycle::adapters::route_controller_trait[0m[2m:[0m Route started [3mroute_id[0m[2m=[0mbench-route
+[2m2026-08-30T11:57:26.562401Z[0m [32m INFO[0m [2mcamel_core::lifecycle::application::context_lifecycle[0m[2m:[0m CamelContext started
+[2m2026-08-30T11:57:26.562426Z[0m [32m INFO[0m [2mcamel_cli::commands::run[0m[2m:[0m camel-cli: context started
+[2m2026-08-30T11:57:26.562431Z[0m [32m INFO[0m [2mcamel_cli::commands::run[0m[2m:[0m camel-cli: running (hot-reload disabled). Press Ctrl+C to stop.
+[2m2026-08-30T11:57:26.566205Z[0m [32m INFO[0m [2mcamel_processor::log[0m[2m:[0m "BENCH_INPUT_SHA256=a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9" [3mexchange_id[0m[2m=[0m3fead49a-c4d2-478c-9409-0131a9330603
+[2m2026-08-30T11:57:26.569160Z[0m [32m INFO[0m [2mcamel_processor::log[0m[2m:[0m "BENCH_ROUTE_READY bytes=32781" [3mexchange_id[0m[2m=[0m3fead49a-c4d2-478c-9409-0131a9330603

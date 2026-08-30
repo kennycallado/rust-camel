@@ -1,0 +1,98 @@
+# t2-json route for rust-camel-cli (Pair B, OpenSpec change
+# bench-missing-cells task 2.1).
+#
+# TEMPLATE TOKENS — this file is NOT run directly. The smoke script and
+# the harness invoke it via TEMPLATE COPY: copy to a temp file, then
+# sed-substitute:
+#   SIZE  -> ${BENCH_PAYLOAD_BYTES:-32768}   (canonical body size, bytes)
+#   GOLDEN -> the (size, 0) SHA-256 digest from the scenario README's
+#             golden table
+# then run: camel run --config Camel.toml --routes <temp> --no-watch.
+#
+# Flow (mirrors the lib fixture): set_body (rhai builds the canonical
+# document) -> input assert (script, rhai — errors propagate, no marker
+# on failure) -> BENCH_INPUT_SHA256 log -> unmarshal json (body becomes
+# Body::Json, the parsed structured value) -> filter (jsonpath) ->
+# transform (js operates on the PARSED structured body, inserts
+# "bench": true, returns the MAP — never a string; marshal("json") is
+# the single serializer) -> marshal json -> output assert (script,
+# rhai: exact SIZE+13 length AND substring "bench":true) -> header with
+# the output length -> marker.
+#
+# Language notes (recorded per task 2.1):
+# - rhai binds `body` as TEXT ONLY. Before unmarshal that is the
+#   canonical document (assert domain); after marshal that is the output
+#   bytes (assert domain). A rhai transform AFTER unmarshal is
+#   impossible: Body::Json reads as "" in rhai — hence the js transform.
+# - The js language (`camel.body`) exposes the structured body; the
+#   expression mutates a structured copy and returns the MAP, and
+#   set_body/transform lowers Value::Object to Body::Json — so
+#   marshal("json") performs the only serialization.
+# - The filter predicate is `$.id` (truthiness of the selected value),
+#   NOT the literal comparison `$.id == 'bench'`: the DSL's jsonpath
+#   predicate is truthiness-of-selection (RFC 9535 comparisons live
+#   inside [?(...)] filters). The canonical builder authors
+#   id == "bench" by construction, so `$.id` selects a non-empty string
+#   iff the document is the canonical one.
+#
+# The marker `BENCH_ROUTE_READY bytes=${header.benchOutLen}` emits only
+# when BOTH in-route asserts pass — a marker-suffix mismatch or a throw
+# means the cell fails (per the T2 marker contract).
+
+routes:
+  - id: "bench-route"
+    from: "timer:bench?repeatCount=1&delay=0"
+    steps:
+      # Canonical document, exactly SIZE bytes, tick 0 (selftest):
+      # {"id":"bench","seq":0,"fill":"<K×'b'>"} — overhead 32 bytes.
+      # rhai has no string-repeat operator; `pad` fills in one pass.
+      - set_body:
+          rhai: |
+            let fill = "";
+            fill.pad(SIZE - 32, 'b');
+            let doc = "{\"id\":\"bench\",\"seq\":0,\"fill\":\"" + fill + "\"}";
+            doc
+      # Input assert (script step: errors propagate — a throw kills the
+      # route before the marker, unlike expression-position throws which
+      # are swallowed to a null body by the compiler's await_eval).
+      - script:
+          language: rhai
+          source: |
+            if body.len() != SIZE {
+              throw "t2-json input length mismatch: got " + body.len();
+            }
+            if !body.contains("\"id\":\"bench\"") || !body.contains("\"seq\":0,") {
+              throw "t2-json input is not the canonical document";
+            }
+            let expected = "";
+            expected.pad(SIZE - 32, 'b');
+            let doc = "{\"id\":\"bench\",\"seq\":0,\"fill\":\"" + expected + "\"}";
+            if body != doc {
+              throw "t2-json input not byte-identical to canonical doc";
+            }
+      - log: "BENCH_INPUT_SHA256=GOLDEN"
+      # Body::Text -> Body::Json (parsed structured value).
+      - unmarshal: json
+      - filter:
+          jsonpath: "$.id"
+          steps:
+            # Structured transform: insert the member, return the MAP.
+            - transform:
+                language: js
+                source: "camel.body.bench = true; camel.body"
+      # Single serialization: Value::Object -> text (serde_json).
+      - marshal: json
+      # Output assert: exact SIZE+13 length AND the inserted member.
+      - script:
+          language: rhai
+          source: |
+            if body.len() != SIZE + 13 {
+              throw "t2-json output length mismatch: got " + body.len();
+            }
+            if !body.contains("\"bench\":true") {
+              throw "t2-json output missing bench member";
+            }
+      - set_header:
+          key: "benchOutLen"
+          rhai: "body.len()"
+      - log: "BENCH_ROUTE_READY bytes=${header.benchOutLen}"

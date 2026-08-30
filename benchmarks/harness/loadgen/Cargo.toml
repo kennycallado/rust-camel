@@ -25,9 +25,11 @@ path = "src/bin/devnull.rs"
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "time", "net", "fs"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+sha2 = "0.11"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "time", "net", "fs", "test-util"] }

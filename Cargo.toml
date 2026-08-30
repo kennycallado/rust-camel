@@ -16,6 +16,8 @@ members = [
     # below so `cargo build` at root does not compile them.
     "benchmarks/scenarios/startup-minimal/rust-camel-lib",
     "benchmarks/scenarios/t2-realistic-eip/rust-camel-lib",
+    "benchmarks/scenarios/t2-json/rust-camel-lib",
+    "benchmarks/scenarios/split-aggregate/rust-camel-lib",
     "benchmarks/scenarios/http-server/rust-camel-lib",
     "benchmarks/scenarios/xslt-bridge/rust-camel-lib",
     "benchmarks/scenarios/xsd-validation-bridge/rust-camel-lib",

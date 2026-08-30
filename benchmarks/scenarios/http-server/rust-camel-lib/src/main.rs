@@ -89,6 +89,16 @@ async fn main() -> Result<(), CamelError> {
     //    process exit (no marker emitted → harness sees a hard
     //    failure, which is the correct outcome).
     ctx.add_route_definition(route).await?;
+
+    // ADR-0061 bind-exposure gate: 0.0.0.0:8080 is non-loopback and the
+    // route is Public — acknowledge explicitly (the benchmark binds all
+    // interfaces on purpose; the gate's permanent warning still fires).
+    // Without this the route refuses to start (bd rc-lp1t surface).
+    let acks = camel_core::route_controller::BindExposureAcks::new(
+        [("0.0.0.0:8080".to_string(), true)].into_iter().collect(),
+    );
+    ctx.set_bind_exposure_acks(acks).await;
+
     ctx.start().await?;
 
     // 5. Marker emission — listener-bound, NOT sibling-timer, NOT

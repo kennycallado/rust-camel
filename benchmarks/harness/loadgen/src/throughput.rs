@@ -43,6 +43,9 @@ pub struct ThroughputResult {
     pub total_attempts: u64,
     /// Error rate: (non_2xx + errors) / attempts × 100.
     pub error_rate_pct: f64,
+    /// Transport payload size in bytes when a `--payload-size` axis
+    /// value was set; `None` = legacy fixed body (pre-axis behavior).
+    pub payload_size_bytes: Option<u64>,
     /// Raw per-second buckets (for plotting / diagnostics).
     pub per_second_buckets: Vec<u64>,
 }
@@ -123,6 +126,7 @@ pub fn aggregate_throughput(buckets: Vec<u64>, non_2xx: u64, errors: u64) -> Thr
         total_errors: errors,
         total_attempts,
         error_rate_pct,
+        payload_size_bytes: None,
         per_second_buckets: buckets,
     }
 }

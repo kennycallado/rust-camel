@@ -1,0 +1,41 @@
+# t2-json scenario route for camel-standalone-yaml (Pair B, OpenSpec
+# change bench-missing-cells task 2.2).
+#
+# Same logical route as the dsl-module App.java (Pair A hardcoded
+# Java-DSL) but authored in Apache Camel YAML DSL and parsed at runtime
+# via camel-yaml-dsl: timer -> process(benchBody) -> unmarshal(json) ->
+# filter(jsonpath) -> process(insertBench) -> marshal(json) ->
+# process(assertOutput) -> log marker.
+#
+# The three `process` steps resolve named beans bound by AppYaml.java
+# (benchBody / insertBench / assertOutput); the route STRUCTURE lives
+# in this file, which is the property Pair B measures. The marker
+# `BENCH_ROUTE_READY bytes=<n>` is the exact harness grep target; any
+# processor assert failure kills the route BEFORE the marker so the
+# cell fails loudly.
+
+- route:
+    from:
+      uri: "timer:bench"
+      parameters:
+        repeatCount: 1
+        delay: 0
+      steps:
+        - process:
+            ref: "benchBody"
+        - unmarshal:
+            json:
+              library: "Jackson"
+              unmarshalType: "com.fasterxml.jackson.databind.node.ObjectNode"
+        - filter:
+            jsonpath: "$[?(@.id == 'bench')]"
+            steps:
+              - process:
+                  ref: "insertBench"
+        - marshal:
+            json:
+              library: "Jackson"
+        - process:
+            ref: "assertOutput"
+        - log:
+            message: "BENCH_ROUTE_READY bytes=${header.benchOutLen}"

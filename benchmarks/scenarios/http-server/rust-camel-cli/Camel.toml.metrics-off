@@ -1,0 +1,57 @@
+# Arm B (metrics-off) — metric-family lever study, task 3.1 of
+# openspec/changes/bench-missing-cells. Identical to Camel.toml plus
+# the observability blocks below (design D5):
+# - Both arms register the SAME Prometheus backend (127.0.0.1:18191) so
+#   the A/B isolates family-emission cost, not backend presence.
+# - Arm B turns ONLY the master metrics gate off (`enabled = false`);
+#   the per-family levers stay at their defaults. With the master gate
+#   off, the exchange/duration/component families do not flow.
+# - camel_errors_total is non-disableable (ADR-0066 D5) and still fires
+#   in this arm — it is part of the constant background, not the lever.
+#
+# NESTING GOTCHA (allocator-demo, task step 2): [observability.*] must
+# live UNDER the [default] profile table. A top-level [observability]
+# is silently swallowed when [default] exists.
+
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+watch = false
+
+# Lever study arm B: prometheus backend ON, master metrics gate OFF.
+[default.observability.prometheus]
+enabled = true
+host = "127.0.0.1"
+port = 18191
+
+[default.observability.metrics]
+enabled = false
+
+# ADR-0061 public-exposure acknowledgment: the T3 route binds
+# 0.0.0.0:8080 (Public access, non-loopback) and refuses to start
+# without this operator acknowledgment. Present IDENTICALLY in both
+# lever-study arms — it is a fixture prerequisite, not a lever.
+[default.binds."0.0.0.0:8080"]
+allow_public_exposure = true
+
+# ADR-0033 fail-closed workaround: ExecBundle requires at least one profile
+# to pass startup validation, even when no route uses `exec:` URIs. The stub
+# below registers `true` (a no-op that always exits 0) under the name
+# `bench-stub` so validation succeeds. It is never invoked by the benchmark.
+# NixOS note: bare `true` resolves via PATH at CLI startup; do NOT hardcode
+# `/bin/true` (NixOS has no FHS, /bin/true does not exist).
+[default.components.exec]
+workspace_root = "."
+
+# `profiles` is a Vec<ExecProfile> — TOML array-of-tables syntax ([[...]]),
+# NOT a map ([default.components.exec.profiles.<name>] would deserialize
+# as a struct/map and fail with "invalid type: map, expected a sequence").
+[[default.components.exec.profiles]]
+name = "bench-stub"
+executable = "true"
+
+[default.supervision]
+max_attempts = 5
+initial_delay_ms = 1000
+backoff_multiplier = 2.0
+max_delay_ms = 60000

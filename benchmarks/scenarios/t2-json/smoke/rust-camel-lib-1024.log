@@ -1,0 +1,6 @@
+[2m2026-08-30T11:57:26.650214Z[0m [32m INFO[0m BENCH_INPUT_SHA256=5abe5f00068356cad4e72f4d5e5e0a5d15d4a5cc9df8d0f22e22bf1448891b0f
+[2m2026-08-30T11:57:26.650853Z[0m [32m INFO[0m Starting CamelContext
+[2m2026-08-30T11:57:26.650967Z[0m [32m INFO[0m Starting route [3mroute_id[0m[2m=[0mbench-route
+[2m2026-08-30T11:57:26.651030Z[0m [32m INFO[0m Route started [3mroute_id[0m[2m=[0mbench-route
+[2m2026-08-30T11:57:26.651053Z[0m [32m INFO[0m CamelContext started
+[2m2026-08-30T11:57:26.652779Z[0m [32m INFO[0m BENCH_ROUTE_READY bytes=1037

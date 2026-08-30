@@ -264,6 +264,32 @@ jobs:
       - name: audit
         run: cargo audit
 
+  bench-smoke:
+    # Criterion bench targets are NOT compiled by `cargo build --workspace`;
+    # this job compiles and runs the smoke subset itself. Container
+    # full-matrix stays manual: benchmarks/harness/run-all.sh.
+    name: Bench Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Maximize disk space
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/google/chrome /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          sudo apt-get clean
+          df -h /
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install libclang for bindgen
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libclang-dev
+      - name: Bench smoke (quick mode)
+        run: cargo bench -p camel-bench --bench pipeline --bench body_coercion -- --quick
+
   wasm-integration:
     name: WASM Integration (ubuntu-latest)
     runs-on: ubuntu-latest

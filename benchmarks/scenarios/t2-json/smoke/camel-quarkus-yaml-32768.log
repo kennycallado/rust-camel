@@ -1,0 +1,11 @@
+2026-08-29 22:29:01,648 INFO  [org.apa.cam.qua.cor.CamelBootstrapRecorder] (main) Apache Camel Quarkus 3.20.0 is starting
+2026-08-29 22:29:01,655 INFO  [org.apa.cam.mai.MainSupport] (main) Apache Camel (Main) 4.10.2 is starting
+2026-08-29 22:29:02,051 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main) Apache Camel 4.10.2 (camel-1) is starting
+2026-08-29 22:29:02,066 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main) Routes startup (total:1)
+2026-08-29 22:29:02,067 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main)     Started route1 (timer://bench)
+2026-08-29 22:29:02,067 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main) Apache Camel 4.10.2 (camel-1) started in 15ms (build:0ms init:0ms start:15ms boot:708ms)
+2026-08-29 22:29:02,084 INFO  [io.quarkus] (main) camel-quarkus-yaml 1.0.0 on JVM (powered by Quarkus 3.20.0) started in 1.123s. 
+2026-08-29 22:29:02,084 INFO  [io.quarkus] (main) Profile prod activated. 
+2026-08-29 22:29:02,085 INFO  [io.quarkus] (main) Installed features: [camel-core, camel-jackson, camel-jsonpath, camel-timer, camel-yaml-dsl, cdi]
+BENCH_INPUT_SHA256=a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9
+2026-08-29 22:29:02,175 INFO  [route1] (Camel (camel-1) thread #1 - timer://bench) BENCH_ROUTE_READY bytes=32781

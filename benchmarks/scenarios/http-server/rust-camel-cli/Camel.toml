@@ -42,3 +42,9 @@ max_attempts = 5
 initial_delay_ms = 1000
 backoff_multiplier = 2.0
 max_delay_ms = 60000
+
+# ADR-0061: the T3 route binds 0.0.0.0:8080 (Public, non-loopback) —
+# benchmark fixtures bind all interfaces on purpose; acknowledge the
+# exposure (the gate's permanent startup warning still fires).
+[default.binds."0.0.0.0:8080"]
+allow_public_exposure = true

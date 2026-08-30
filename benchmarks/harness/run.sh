@@ -84,7 +84,11 @@ if [[ -z "${JAVA_HOME:-}" ]]; then
     echo "error: JAVA_HOME is not set and no JDK 21 found at standard locations." >&2
     echo "       Host: export JAVA_HOME=/path/to/jdk21" >&2
     echo "       Container: use bash benchmarks/harness/run-all.sh (handles it)" >&2
-    exit 1
+    # --dry-run only resolves cells; a JVM toolchain is not needed.
+    if [[ "${1:-}" != "--dry-run" && "$*" != *--dry-run* ]]; then
+        exit 1
+    fi
+    JAVA_HOME="/dry-run-placeholder"
 fi
 JAVA_BIN="$JAVA_HOME/bin/java"
 NATIVE_IMAGE_BIN="$JAVA_HOME/bin/native-image"
@@ -144,6 +148,11 @@ declare -A SCENARIO_MARKER=(
     # EventNotifierSupport on RouteStarted.
     ["xslt-bridge"]="BENCH_ROUTE_READY"
     ["xsd-validation-bridge"]="BENCH_ROUTE_READY"
+    # split-aggregate (OpenSpec change bench-missing-cells task 2.4):
+    # the marker suffix is class-INDEPENDENT — the aggregate bucket
+    # always completes at exactly 100 items, so the literal matches
+    # every run regardless of BENCH_PAYLOAD_BYTES.
+    ["split-aggregate"]="BENCH_ROUTE_READY items=100"
 )
 
 # Per-scenario artifact set (spec §4.3 asymmetric matrix).
@@ -166,6 +175,23 @@ declare -A SCENARIO_ARTIFACT_SET=(
 # harness drives bench-loadgen against this URL for calibration +
 # measure-a. Override via env var if a smoke run shifts the port.
 BENCH_HTTP_URL="${BENCH_HTTP_URL:-http://127.0.0.1:8080/bench}"
+
+# Structured-payload axis (OpenSpec change bench-missing-cells task
+# 2.4): Protocol-B fixtures read this env var and build the canonical
+# body for that class (t2-json); split-aggregate ignores it (fixed
+# 100-item array). Exported so every fixture process (java -jar, rust
+# binaries, `camel run`) inherits it — the env-var counterpart of how
+# BENCH_HTTP_URL reaches the Protocol A loadgen via argv.
+BENCH_PAYLOAD_BYTES="${BENCH_PAYLOAD_BYTES:-32768}"
+export BENCH_PAYLOAD_BYTES
+
+# The t2-json expected marker DERIVES its suffix from the same variable
+# the fixtures read, so marker and fixture can never diverge under a
+# non-default class (spec §Payload-size axis). Bash array assignment
+# evaluates at declaration, so this entry is declared AFTER the
+# BENCH_PAYLOAD_BYTES default above (the array itself is declared
+# earlier in this file).
+SCENARIO_MARKER["t2-json"]="BENCH_ROUTE_READY bytes=$((BENCH_PAYLOAD_BYTES + 13))"
 
 # Per-scenario per-contender argv (set by resolve_scenario_artifacts).
 # Each entry is one cell: scenario × contender. The 8 contenders per
@@ -205,7 +231,7 @@ M2_BCI_RESAMPLES=2000
 # M3/M4 defaults (sustained throughput + memory growth under load).
 # Targets T3 http-server cells only (PROTOCOL_A_CELLS is the cell set;
 # they are the contenders that bind 0.0.0.0:8080 and respond to HTTP).
-M3_DURATION_SECS=50
+M3_DURATION_SECS="${M3_DURATION_SECS:-50}"
 M3_WARMUP_SECS=10
 M3_ROUNDS=5
 
@@ -805,6 +831,13 @@ resolve_rust_lib_bin() {
     local scenario_dir="$1" scenario_name="$2"
     local bin="$scenario_dir/rust-camel-lib/target/release/$scenario_name"
     if [[ ! -x "$bin" ]]; then
+        # Dry-run tolerance (task 2.4): mirror the native-runner
+        # placeholder so a pre-build dry-run still resolves the full
+        # cell list. Real runs still hard-fail below.
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "<would-build:rust-camel-lib:$scenario_name>"
+            return 0
+        fi
         echo "error: rust-camel-lib binary not found or not executable: $bin" >&2
         echo "       (expected bin name = scenario name per fixture convention)" >&2
         exit 1
@@ -821,10 +854,48 @@ resolve_standalone_jar() {
     local jar
     jar="$(ls "$subdir"/target/*-jar-with-dependencies.jar 2>/dev/null | head -1 || true)"
     if [[ -z "$jar" || ! -f "$jar" ]]; then
+        # Dry-run tolerance (task 2.4): mirror the native-runner
+        # placeholder so a pre-build dry-run (hosts without a JVM
+        # toolchain cannot `mvn package`) still resolves the full cell
+        # list. Real runs still hard-fail below.
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "<would-build:$(basename "$subdir")>"
+            return 0
+        fi
         echo "error: camel-standalone jar not found under $subdir/target/ (expected exactly one *-jar-with-dependencies.jar)" >&2
         exit 1
     fi
     echo "$jar"
+}
+
+# Compute the (size, tick=0) canonical JSON document digest — task 1.2
+# formula, the same bytes every t2-json fixture builds: fixed field
+# order id,seq,fill, zero whitespace, fill length K = size - (20 + 1
+# digit + 9 + 2) = size - 32. The harness derives the digest from the
+# FORMULA (single golden source — review finding F5: no digest table is
+# copied here; the per-family golden literals live only in the fixture
+# test files).
+canonical_json_digest() {
+    local size="$1"
+    local fill=$((size - 32))
+    if ((fill < 1)); then
+        echo "error: canonical_json_digest: size $size too small for tick 0" >&2
+        return 1
+    fi
+    printf '%s' "$(printf '{"id":"bench","seq":0,"fill":"%s"}' \
+        "$(printf 'b%.0s' $(seq 1 "$fill"))")" | sha256sum | awk '{print $1}'
+}
+
+# Substitute a CLI route template's tokens (SIZE, GOLDEN) the same way
+# the t2-json scenario smoke does — routes/*.yaml templates are never
+# run directly (see the token contract in routes/t2-json.yaml). Echoes
+# the substituted file path (written under $SCRATCH_DIR, which lives
+# for the whole harness run).
+substitute_cli_route_template() {
+    local route="$1" size="$2" golden="$3"
+    local out="$SCRATCH_DIR/$(basename "${route%.yaml}")-${size}.yaml"
+    sed -e "s/SIZE/${size}/g" -e "s/GOLDEN/${golden}/g" "$route" > "$out"
+    echo "$out"
 }
 
 # Resolve cargo target dir for the root workspace (Pair B rust-camel-cli
@@ -1092,6 +1163,9 @@ build_native_artifact() {
 # the host JDK MUST be GraalVM CE 21.0.2 (the build will silently fall
 # back to JVM mode otherwise).
 preflight_toolchain() {
+    # --dry-run resolves cells and prints what would run; it must work on
+    # hosts without a JVM toolchain (artifacts are placeholders there).
+    [[ "$DRY_RUN" == "true" ]] && return 0
     if [[ ! -x "$JAVA_BIN" ]]; then
         echo "error: pre-flight failed: JAVA_HOME/bin/java not found at $JAVA_BIN" >&2
         echo "       set JAVA_HOME to a JDK 21 install (GraalVM CE 21.0.2 for local native builds," >&2
@@ -1373,6 +1447,17 @@ resolve_all_cells() {
             exit 1
         fi
 
+        # TEMPLATE COPY for token-carrying CLI routes (t2-json — task
+        # 2.4): routes/*.yaml templates carrying SIZE/GOLDEN tokens are
+        # never run directly; substitute exactly like the scenario
+        # smoke, with GOLDEN derived from the (size, 0) formula so the
+        # harness keeps a single golden source.
+        if grep -q 'GOLDEN' "$rust_cli_route" 2>/dev/null; then
+            rust_cli_route="$(substitute_cli_route_template \
+                "$rust_cli_route" "$BENCH_PAYLOAD_BYTES" \
+                "$(canonical_json_digest "$BENCH_PAYLOAD_BYTES")")"
+        fi
+
         # -- Build (or skip via fingerprint) the 2 native artifacts --
         # Both builds run sequentially — they share the same gradle
         # .gradle/ cache and daemon, and parallel native builds OOM
@@ -1497,8 +1582,10 @@ _shuffle_seeded() {
 }
 
 shuffle_cells() {
-    # Optional $1 = seed for reproducible ordering (T5).
-    _shuffle_seeded CELLS "$1"
+    # Optional $1 = seed for reproducible ordering (T5). Default-empty
+    # (bd: dry-run called this bare and `set -u` aborted on the unset
+    # positional — found by the task 2.4 dry-run test).
+    _shuffle_seeded CELLS "${1:-}"
 }
 
 # =====================================================================
@@ -1713,6 +1800,11 @@ resolve_devnull_bin() {
 declare -A SCENARIO_M2_PROTOCOL=(
     ["startup-minimal"]="B"
     ["t2-realistic-eip"]="B"
+    # t2-json + split-aggregate (OpenSpec change bench-missing-cells
+    # task 2.4): timer-driven Protocol B like the rest of the T2
+    # family (timer → set_body → component → log).
+    ["t2-json"]="B"
+    ["split-aggregate"]="B"
     ["xslt-bridge"]="B"
     ["xsd-validation-bridge"]="B"
     # T3 http-server uses Protocol A (HTTP request-response). The URL

@@ -1,0 +1,38 @@
+# Benchmark fixture for rust-camel CLI + YAML (Pair B partner, t2-json
+# scenario, OpenSpec change bench-missing-cells task 2.1). Mirrors the
+# t2-realistic-eip fixture's Camel.toml — same ADR-0033 fail-closed exec
+# stub, same supervision block — but lives under the t2-json scenario dir
+# so the harness picks up the t2-json route on a t2-json run.
+#
+# The route file carries TWO template tokens (SIZE, GOLDEN) and is
+# invoked via TEMPLATE COPY: the smoke/harness copies
+# routes/t2-json.yaml to a temp file, sed-substitutes SIZE with
+# ${BENCH_PAYLOAD_BYTES:-32768} and GOLDEN with the (size, 0) digest from
+# the scenario README's golden table, then runs with `--routes <temp>`.
+
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+watch = false
+
+# ADR-0033 fail-closed workaround: ExecBundle requires at least one profile
+# to pass startup validation, even when no route uses `exec:` URIs. The stub
+# below registers `true` (a no-op that always exits 0) under the name
+# `bench-stub` so validation succeeds. It is never invoked by the benchmark.
+# NixOS note: bare `true` resolves via PATH at CLI startup; do NOT hardcode
+# `/bin/true` (NixOS has no FHS, /bin/true does not exist).
+[default.components.exec]
+workspace_root = "."
+
+# `profiles` is a Vec<ExecProfile> — TOML array-of-tables syntax ([[...]]),
+# NOT a map ([default.components.exec.profiles.<name>] would deserialize
+# as a struct/map and fail with "invalid type: map, expected a sequence").
+[[default.components.exec.profiles]]
+name = "bench-stub"
+executable = "true"
+
+[default.supervision]
+max_attempts = 5
+initial_delay_ms = 1000
+backoff_multiplier = 2.0
+max_delay_ms = 60000

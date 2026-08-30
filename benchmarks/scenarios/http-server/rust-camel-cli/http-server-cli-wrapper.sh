@@ -121,6 +121,13 @@ if [[ -z "$camel_bin" || -z "$config" || -z "$routes" ]]; then
     usage
 fi
 
+# Lever A/B passthrough (task 3.1, bench-missing-cells): when
+# BENCH_CAMEL_TOML is set, it replaces the --config argument so the
+# harness can point this wrapper at a metric-arm Camel.toml
+# (Camel.toml.metrics-on / Camel.toml.metrics-off) without changing the
+# default path used when the env var is absent.
+config="${BENCH_CAMEL_TOML:-$config}"
+
 if [[ ! -x "$camel_bin" ]]; then
     echo "error: --camel-bin path is not executable: $camel_bin" >&2
     exit 2
@@ -184,7 +191,7 @@ setsid "$camel_bin" run \
     >"$child_stdout" 2>"$child_stderr" &
 child_pid=$!
 
-echo "info: spawned child 'camel run' with pid $child_pid" >&2
+echo "info: spawned child 'camel run' with pid $child_pid: setsid $camel_bin run --config $config --routes $routes --no-watch" >&2
 
 # Forward child stderr + stdout to the wrapper's streams
 # immediately so the harness sees the child's tracing output

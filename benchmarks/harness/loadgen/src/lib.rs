@@ -15,6 +15,8 @@
 //!   interval on per-round p50 (e_opus deferral to plan, spec §4.2).
 //! - [`rss`] — process-tree RSS sampling via `/proc/<pid>/task/<tid>/children`
 //!   recursive walk (spec §4.9); headline = max of per-sample Σ VmRSS.
+//! - [`ratios`] — ratio of M3 throughput medians between two cells with a
+//!   percentile-bootstrap CI (paired or independent resampling).
 //! - [`bridge`] — bridge generation tracking (spec §4.6 + §4.11): PID at
 //!   round boundaries, invalidate-on-change, 30s first-output health
 //!   timeout.
@@ -41,7 +43,9 @@ pub mod bridge;
 pub mod calibration;
 pub mod cli;
 pub mod cli_runtime;
+pub mod payload;
 pub mod protocol_b;
+pub mod ratios;
 pub mod rss;
 pub mod stats;
 pub mod throughput;

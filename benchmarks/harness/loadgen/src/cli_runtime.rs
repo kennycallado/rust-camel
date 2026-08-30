@@ -215,6 +215,36 @@ async fn send_batch(
 
 // ----- measure-a -----
 
+/// Shared per-run request body (payload axis).
+///
+/// `None` payload (no `--payload-size` flag) attaches the exact legacy
+/// literal body (`"ping"` for Protocol A, `"bench"` for M3) —
+/// bit-for-bit the pre-axis behavior. `Some(n)` holds the transport
+/// payload of `n` bytes as [`bytes::Bytes`], whose `clone` is a
+/// refcount bump, so attaching on the hot path doesn't copy the
+/// payload (`reqwest::Body` itself is not `Clone`).
+#[derive(Clone)]
+struct RunBody {
+    legacy: &'static str,
+    payload: Option<bytes::Bytes>,
+}
+
+impl RunBody {
+    fn new(payload_size: Option<usize>, legacy: &'static str) -> Self {
+        Self {
+            legacy,
+            payload: payload_size.map(|n| bytes::Bytes::from(crate::payload::transport_body(n))),
+        }
+    }
+
+    fn attach(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.payload {
+            Some(b) => req.body(b.clone()),
+            None => req.body(self.legacy),
+        }
+    }
+}
+
 /// Run Protocol A measurement: warmup → N rounds × N samples.
 ///
 /// `output_path` (if set) receives one line per sample: `<rtt_ns>` for
@@ -223,6 +253,10 @@ async fn send_batch(
 /// `bci_resamples` and `bci_seed` control per-round BCa CI computation
 /// (brief 2h: 2000 resamples, 95% CI on per-round p50; seed makes the
 /// bootstrap deterministic for a given (round, samples) input).
+///
+/// `payload_size` selects the transport payload axis: `None` sends the
+/// legacy `"ping"` body; `Some(n)` sends an `n`-byte payload (validated
+/// upstream by `crate::payload::validate_payload_size`).
 #[allow(clippy::too_many_arguments)]
 pub fn run_measure_a(
     url: &str,
@@ -232,6 +266,7 @@ pub fn run_measure_a(
     warmup_cfg: WarmupConfig,
     bci_resamples: usize,
     bci_seed: u64,
+    payload_size: Option<usize>,
     output_path: Option<&str>,
 ) -> Result<(), RuntimeError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -246,6 +281,7 @@ pub fn run_measure_a(
         warmup_cfg,
         bci_resamples,
         bci_seed,
+        payload_size,
         output_path,
     ))
 }
@@ -259,6 +295,7 @@ async fn measure_a_async(
     warmup_cfg: WarmupConfig,
     bci_resamples: usize,
     bci_seed: u64,
+    payload_size: Option<usize>,
     output_path: Option<&str>,
 ) -> Result<(), RuntimeError> {
     if rate_per_sec == 0 {
@@ -268,10 +305,11 @@ async fn measure_a_async(
         .pool_max_idle_per_host(4)
         .tcp_nodelay(true)
         .build()?;
+    let body = RunBody::new(payload_size, "ping");
 
     // --- Warmup ---
     let warmup_start = Instant::now();
-    let warmup_samples = warmup_drive(&client, url, rate_per_sec, &warmup_cfg).await?;
+    let warmup_samples = warmup_drive(&client, url, rate_per_sec, &warmup_cfg, &body).await?;
     let warmup_elapsed = warmup_start.elapsed().as_nanos() as u64;
     let warmup_outcome = check_warmup_stability(&warmup_samples, warmup_elapsed, &warmup_cfg);
     match warmup_outcome {
@@ -308,7 +346,7 @@ async fn measure_a_async(
         let start = Instant::now();
         for i in 0..samples_per_round {
             let tick = Instant::now();
-            if let Ok(resp) = client.post(url).body("ping").send().await {
+            if let Ok(resp) = body.attach(client.post(url)).send().await {
                 let _ = resp.bytes().await;
                 let rtt_ns = tick.elapsed().as_nanos() as u64;
                 samples.push(rtt_ns);
@@ -406,6 +444,7 @@ async fn warmup_drive(
     url: &str,
     rate_per_sec: u32,
     cfg: &WarmupConfig,
+    body: &RunBody,
 ) -> Result<Vec<u64>, RuntimeError> {
     let mut samples: Vec<u64> = Vec::with_capacity(cfg.max_messages as usize);
     let period_ns: u64 = 1_000_000_000 / (rate_per_sec.max(1) as u64);
@@ -416,7 +455,7 @@ async fn warmup_drive(
             break;
         }
         let tick = Instant::now();
-        if let Ok(resp) = client.post(url).body("ping").send().await {
+        if let Ok(resp) = body.attach(client.post(url)).send().await {
             let _ = resp.bytes().await;
             let rtt_ns = tick.elapsed().as_nanos() as u64;
             samples.push(rtt_ns);
@@ -460,6 +499,7 @@ pub fn run_measure_throughput(
     warmup_secs: u64,
     workers: usize,
     connections: usize,
+    payload_size: Option<usize>,
     output_path: Option<&str>,
 ) -> Result<(), RuntimeError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -472,6 +512,7 @@ pub fn run_measure_throughput(
         warmup_secs,
         workers,
         connections,
+        payload_size,
         output_path,
     ))
 }
@@ -482,6 +523,7 @@ async fn run_throughput_async(
     warmup_secs: u64,
     workers: usize,
     connections: usize,
+    payload_size: Option<usize>,
     output_path: Option<&str>,
 ) -> Result<(), RuntimeError> {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -497,6 +539,7 @@ async fn run_throughput_async(
         .pool_idle_timeout(Duration::from_secs(60))
         .tcp_nodelay(true)
         .build()?;
+    let body = RunBody::new(payload_size, "bench");
 
     // Per-second counter is swapped to 0 by the bucket collector; workers
     // accumulate against it. non_2xx and error counters are summed
@@ -514,13 +557,14 @@ async fn run_throughput_async(
         let non_2xx_count = non_2xx_count.clone();
         let error_count = error_count.clone();
         let cancel = cancel.clone();
+        let body = body.clone();
         worker_handles.push(tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {
                         return;
                     }
-                    result = client.post(&url).body("bench").send() => {
+                    result = body.attach(client.post(&url)).send() => {
                         match result {
                             Ok(response) => {
                                 let status = response.status().as_u16();
@@ -577,7 +621,9 @@ async fn run_throughput_async(
         let _ = h.await;
     }
 
-    let result = crate::throughput::aggregate_throughput(buckets, window_non_2xx, window_errors);
+    let mut result =
+        crate::throughput::aggregate_throughput(buckets, window_non_2xx, window_errors);
+    result.payload_size_bytes = payload_size.map(|n| n as u64);
 
     // JSON output. Per the brief, downstream tools consume the full
     // `ThroughputResult` plus the run parameters for context. The
@@ -588,6 +634,7 @@ async fn run_throughput_async(
         "warmup_secs": warmup_secs,
         "workers": workers,
         "connections": connections,
+        "payload_size_bytes": result.payload_size_bytes,
         "mean_msgs_per_sec": result.mean_msgs_per_sec,
         "p50_msgs_per_sec": result.p50_msgs_per_sec,
         "min_msgs_per_sec": result.min_msgs_per_sec,
