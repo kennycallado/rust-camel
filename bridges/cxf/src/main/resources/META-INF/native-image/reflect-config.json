@@ -19,6 +19,7 @@
   {"name": "org.apache.cxf.endpoint.ClientImpl", "allDeclaredConstructors": true, "allDeclaredMethods": true},
   {"name": "com.sun.xml.ws.spi.ProviderImpl", "allDeclaredConstructors": true, "allDeclaredMethods": true},
   {"name": "org.apache.cxf.wSDL11ExtensionHelper", "allDeclaredConstructors": true, "allDeclaredMethods": true},
+  {"name": "org.apache.cxf.binding.AbstractBindingFactory", "allDeclaredConstructors": true, "allDeclaredMethods": true},
   {"name": "org.apache.cxf.binding.soap.SoapBindingFactory", "allDeclaredConstructors": true, "allDeclaredMethods": true},
   {"name": "org.apache.cxf.binding.soap.SoapTransportFactory", "allDeclaredConstructors": true, "allDeclaredMethods": true},
   {"name": "org.apache.cxf.common.logging.Slf4jLogger", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allPublicMethods": true},
