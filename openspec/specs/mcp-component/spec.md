@@ -333,11 +333,17 @@ rejected with a clean MCP error and SHALL NOT produce an Exchange.
 
 ### Requirement: MCP server fail-closed authentication
 
-The MCP server endpoint SHALL refuse to bind unless a `security_policy` is
-configured for the named server, because MCP inputs are adversary-controlled
-Exchange data that crosses the ADR-0032 trust boundary into the data plane.
-The bind SHALL prefer a loopback address and SHALL emit a `warn!` log when the
-configured bind is `0.0.0.0` or a non-loopback interface.
+The MCP server endpoint SHALL enforce the ADR-0061 per-bind exposure
+gate at consumer start. A loopback bind SHALL start without a
+`security_policy`. A non-loopback bind SHALL expose its routes only
+when a route declares a `security_policy` or the operator acknowledges
+public exposure for that bind address (`allow_public_exposure`,
+fail-closed when empty). The gate SHALL refuse a non-loopback route
+that has neither. The bind SHALL prefer a loopback address. A bind
+that exposes routes publicly on a non-loopback interface after an
+explicit acknowledgement SHALL emit a `warn!` log, because MCP inputs
+are adversary-controlled Exchange data that crosses the ADR-0032 trust
+boundary into the data plane.
 
 Enforcement is route-level: the adapter SHALL carry the inbound HTTP request
 headers onto the Exchange, and each request SHALL pass through the route's
@@ -360,29 +366,30 @@ security plan after winning; the re-assertion SHALL overwrite a plan
 whose owner is another consumer, even a live one, because entry
 ownership proves the right to the route identity.
 
-#### Scenario: concurrent restart loser cannot strip the winner's plan
+#### Scenario: loopback policy-less bind starts
 
-- **GIVEN** consumer A died without `stop()` leaving its entry and plan
-  behind, and consumers B and C start concurrently on the same route
-  identity
-- **WHEN** C wins the entry registration and B fails the duplicate guard
-  and runs its failure cleanup
-- **THEN** the route's dispatch enforces C's security plan and does not
-  fall back to unauthenticated pass-through
-
-#### Scenario: bind refused without security policy
-
-- **GIVEN** a `mcp:` server declaration with no `security_policy`
+- **GIVEN** a `mcp:` server declaration with no `security_policy` and a
+  loopback bind
 - **WHEN** the server consumer starts
-- **THEN** the consumer fails to start with a `CamelError`
+- **THEN** the consumer starts successfully; `validate_server_policy`
+  returns no refusal for the loopback policy-less config
 
-#### Scenario: non-loopback bind warns
+#### Scenario: non-loopback policy-less bind refused without ack
 
-- **GIVEN** a `mcp:` server declaration with a `security_policy` and bind
-  `0.0.0.0:9100`
+- **GIVEN** a `mcp:` server declaration with no `security_policy`, bind
+  `0.0.0.0:9100`, and an empty `allow_public_exposure` acknowledgement map
+- **WHEN** the server consumer starts
+- **THEN** the kernel per-bind exposure gate fails the start with a
+  `CamelError` and no route is exposed
+
+#### Scenario: acknowledged public non-loopback exposure warns
+
+- **GIVEN** a `mcp:` server declaration with bind `0.0.0.0:9100` and a
+  route exposed publicly on that bind under an `allow_public_exposure`
+  acknowledgement
 - **WHEN** the server consumer starts
 - **THEN** the consumer starts successfully and emits a `warn!` about the
-  non-loopback bind
+  public non-loopback exposure
 
 #### Scenario: request without credentials denied
 
@@ -417,6 +424,16 @@ ownership proves the right to the route identity.
   duplicate-name guard
 - **THEN** the route's dispatch keeps enforcing consumer A's plan and no
   failure-path cleanup removed or overwrote it
+
+#### Scenario: concurrent restart loser cannot strip the winner's plan
+
+- **GIVEN** consumer A died without `stop()` leaving its entry and plan
+  behind, and consumers B and C start concurrently on the same route
+  identity
+- **WHEN** C wins the entry registration and B fails the duplicate guard
+  and runs its failure cleanup
+- **THEN** the route's dispatch enforces C's security plan and does not
+  fall back to unauthenticated pass-through
 
 ### Requirement: Catalog cardinality cap
 
