@@ -1,5 +1,7 @@
 # Coverage Matrix — rust-camel benchmark suite
 
+Technical coverage index for scenarios. Owner-facing view: benchmarks/README.md.
+
 > Living index of what the benchmark program has measured, is explicitly not measuring, or
 > will measure conditionally. Each version of the suite adds cells; the matrix accumulates
 > coverage over time. Reports are snapshots of which cells were measured in that release.
@@ -90,13 +92,13 @@ Each cell shows state + version + report link (if measured).
 
 | | M1 cold-start + RSS | M2 warm p99 | M3 sustained throughput | M4 memory growth |
 |---|---|---|---|---|
-| **T1** timer+log | ✓ v1+v2 — [v1 report](2026-07-18-startup-minimal-benchmark.md), [v2 report](2026-07-18-benchmark-v2.md) | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) — baseline warm | ✗ won't-measure: timer-driven, fixed throughput (100 msgs/sec at 10ms period) | ✗ won't-measure: same |
-| **T2** 5 EIPs (no-bridge) | ✓ v2 — [v2 report](2026-07-18-benchmark-v2.md) | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) | ✗ won't-measure: timer-driven, fixed throughput | ✗ won't-measure: same |
+| **T1** timer+log | ✓ v1+v2 — [v1 report](../../docs/benchmarks/history/2026-07-18-startup-minimal-benchmark.md), [v2 report](../../docs/benchmarks/history/2026-07-18-benchmark-v2.md) | ✓ [v3](../../docs/benchmarks/history/2026-07-21-benchmark-v3.md) — baseline warm | ✗ won't-measure: timer-driven, fixed throughput (100 msgs/sec at 10ms period) | ✗ won't-measure: same |
+| **T2** 5 EIPs (no-bridge) | ✓ v2 — [v2 report](../../docs/benchmarks/history/2026-07-18-benchmark-v2.md) | ✓ [v3](../../docs/benchmarks/history/2026-07-21-benchmark-v3.md) | ✗ won't-measure: timer-driven, fixed throughput | ✗ won't-measure: same |
 | **T2j** t2-json (canonical JSON body) | ? open-if: first published container-hosted run; fixtures + harness registered, local smoke passed | ? open-if: same | ? open-if: same | ? open-if: same |
 | **T2s** split-aggregate (split → aggregate, 100 items) | ? open-if: first published container-hosted run; fixtures + harness registered, local smoke passed | ? open-if: same | ? open-if: same | ? open-if: same |
-| **T3** HTTP server (no-bridge) | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) — listener spin-up cost | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) — request-serving viability | ✓ v4 (platform-http) — 78,628 req/s (rust-camel-lib), 37,713 (Quarkus native), 66,808 (Camel JVM); 1.18× rust-camel vs JVM, 2.08× rust-camel vs Quarkus native, 1.77× JVM vs Quarkus native | ✓ v4 (platform-http) — RSS delta (median, 5 rounds): rust-camel-lib +52 KiB, rust-camel-cli +44 KiB, camel-standalone-dsl +540 KiB, camel-standalone-yaml +448 KiB, camel-quarkus-dsl-native −1,672 KiB (RSS shrinks — GC releasing), camel-quarkus-yaml-native −284 KiB |
-| **T4a** XSLT bridge (~10ms Java work) | ? v3 — bridge process spawn cost | ✓ v3 — [v3 report](../docs/benchmarks/2026-07-21-benchmark-v3.md) (2 pairs: standalone + Quarkus native, both Saxon-HE) | ✗ won't-measure: throughput dominated by XSLT engine, not bridge overhead | ✗ won't-measure: same as M3 |
-| **T4b** XSD validation bridge (<1ms Java work) | ? v3 — bridge process spawn cost | ✓ v3 — [v3 report](../docs/benchmarks/2026-07-21-benchmark-v3.md) (2 pairs) | ✗ won't-measure: same rationale as T4a | ✗ won't-measure: same |
+| **T3** HTTP server (no-bridge) | ✓ [v3](../../docs/benchmarks/history/2026-07-21-benchmark-v3.md) — listener spin-up cost | ✓ [v3](../../docs/benchmarks/history/2026-07-21-benchmark-v3.md) — request-serving viability | ✓ v4 (platform-http) — 78,628 req/s (rust-camel-lib), 37,713 (Quarkus native), 66,808 (Camel JVM); 1.18× rust-camel vs JVM, 2.08× rust-camel vs Quarkus native, 1.77× JVM vs Quarkus native | ✓ v4 (platform-http) — RSS delta (median, 5 rounds): rust-camel-lib +52 KiB, rust-camel-cli +44 KiB, camel-standalone-dsl +540 KiB, camel-standalone-yaml +448 KiB, camel-quarkus-dsl-native −1,672 KiB (RSS shrinks — GC releasing), camel-quarkus-yaml-native −284 KiB |
+| **T4a** XSLT bridge (~10ms Java work) | ? v3 — bridge process spawn cost | ✓ v3 — [v3 report](../../docs/benchmarks/history/2026-07-21-benchmark-v3.md) (2 pairs: standalone + Quarkus native, both Saxon-HE) | ✗ won't-measure: throughput dominated by XSLT engine, not bridge overhead | ✗ won't-measure: same as M3 |
+| **T4b** XSD validation bridge (<1ms Java work) | ? v3 — bridge process spawn cost | ✓ v3 — [v3 report](../../docs/benchmarks/history/2026-07-21-benchmark-v3.md) (2 pairs) | ✗ won't-measure: same rationale as T4a | ✗ won't-measure: same |
 | **T4c** JMS bridge | ? v4-if: T4a/T4b tax curve motivates more bridge coverage | ? v4-if: same | ✗ won't-measure: JMS broker dominates | ✗ won't-measure: same |
 | **T4d** CXF bridge (SOAP) | ? v5-if: SOAP user demand emerges | ? v5-if: same | ✗ won't-measure | ✗ won't-measure |
 | **T5** Kafka consumer | ? v4 — Kafka is widely used; bootstrap cost matters | ? v4 — broker round-trip vs in-process comparison | ? v5-if: streaming ICP emerges | ? v5-if |
@@ -112,7 +114,7 @@ the axis is not yet exercised matrix-wide.
 
 **Metric-family lever study**: not a contender row, so it has no matrix
 cell. Its first run was contaminated and marked INVALID in the
-[v4 addendum](../docs/benchmarks/2026-08-29-benchmark-v4-addendum.md).
+[v4 addendum](../../docs/benchmarks/history/2026-08-29-benchmark-v4-addendum.md).
 Clean re-run (quiet host): ratio 0.9890, CI [0.9785, 1.0126] — lever cost
 unresolved from zero; the re-run protocol lives there.
 
@@ -125,7 +127,7 @@ that support it. ICPs without supporting cells are "candidates" — not yet clai
 |---|---|---|
 | **Dev inner-loop / CI** | T1×M1, T2×M1 (rust-camel 8ms vs Java 18-300ms cold-start) | ✓ **Validated** — pure M1 ICP, survives all critiques. |
 | **K8s sidecar in request path** | T3×M2 (HTTP server warm p99 — rust-camel in request path) | ? **Candidate** — pending v3 M2 data on HTTP server |
-| **Scale-to-zero / function cold-start** | T1×M1 + T1×M2 (cold-start + warm p99) | ? **Candidate** — explicitly data-scoped to M1 alone in v1; re-opens with M2 (per `benchmarks/CONTEXT.md` §5) |
+| **Scale-to-zero / function cold-start** | T1×M1 + T1×M2 (cold-start + warm p99) | ? **Candidate** — explicitly data-scoped to M1 alone in v1; re-opens with M2 (per `benchmarks/harness/CONTEXT.md` §5) |
 | **Mostly-no-bridge integration** | T3×M2 + T4a/b×M2 (bridge tax curve defines the boundary) | ? **Candidate** — pending v3 bridge tax curve; emergent from no-bridge vs bridge comparison |
 | **Request-serving / API gateway** | T3×M2 + T3×M3 (HTTP server warm latency + saturation) | ✓ **Validated** — v4 M3 measured: rust-camel-lib 78,628 req/s vs Camel JVM 66,808 (1.18×) vs Quarkus native 37,713 (2.08×). Native trades ~1.8× throughput for ~7× lower RSS and ~30× faster cold-start. Ratios are single-host descriptive (see v4 report limitations). |
 | **Batch processing** | T6×M3 or T5×M3 | ✗ **Not yet claimable** — no M3 data; batch ICP is M3-gated |
@@ -191,13 +193,13 @@ bump the coverage release and adds no measured cells; a cell reaches
 
 ## Cross-references
 
-- Methodology + domain language: `benchmarks/CONTEXT.md`
-- v1 report: `docs/benchmarks/2026-07-18-startup-minimal-benchmark.md`
-- v2 report: `docs/benchmarks/2026-07-18-benchmark-v2.md`
+- Methodology + domain language: `benchmarks/harness/CONTEXT.md`
+- v1 report: `docs/benchmarks/history/2026-07-18-startup-minimal-benchmark.md`
+- v2 report: `docs/benchmarks/history/2026-07-18-benchmark-v2.md`
 - v2 spec: `docs/superpowers/specs/2026-07-18-rc-p9ki-benchmark-v2-design.md`
 - v2 plan: `docs/superpowers/plans/2026-07-18-rc-p9ki-benchmark-v2.md`
-- v4 addendum (lever study + published-ratio CIs): `docs/benchmarks/2026-08-29-benchmark-v4-addendum.md`
-- Consultation (initial, 6 Qs): `docs/benchmarks/consultation-v3-direction-2026-07-18.md`
-- Consultation (follow-up, Q7-Q11): `docs/benchmarks/consultation-v3-followup-2026-07-18.md`
+- v4 addendum (lever study + published-ratio CIs): `docs/benchmarks/history/2026-08-29-benchmark-v4-addendum.md`
+- Consultation (initial, 6 Qs): `docs/benchmarks/history/consultation-v3-direction-2026-07-18.md`
+- Consultation (follow-up, Q7-Q11): `docs/benchmarks/history/consultation-v3-followup-2026-07-18.md`
 - Harness: `benchmarks/harness/run.sh`
-- Spike results (native-image validation): `benchmarks/spike-results.md`
+- Spike results (native-image validation): `benchmarks/attic/spike-results.md`

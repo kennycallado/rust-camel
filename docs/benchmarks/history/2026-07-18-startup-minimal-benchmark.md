@@ -1,3 +1,4 @@
+> Era-1 report. Frozen at git tag bench/era-1-final. Live data: benchmarks/records/.
 # Startup benchmark — startup-minimal scenario (2026-07-18)
 
 > bd rc-f3g9. First of an extensible scenario suite (see

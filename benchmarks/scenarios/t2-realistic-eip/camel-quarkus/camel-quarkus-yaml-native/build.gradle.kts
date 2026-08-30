@@ -6,7 +6,7 @@ import org.gradle.language.jvm.tasks.ProcessResources
 // resources (including camel/routes.yaml) with the JVM sibling.
 // Mirrors the v1 camel-quarkus-yaml-native subproject's two
 // NixOS+Substrate-VM keys (see
-// benchmarks/spike-results.md "NixOS + native-image resource
+// benchmarks/attic/spike-results.md "NixOS + native-image resource
 // discovery" and the v1 fixture's src/main/resources/
 // application.properties).
 //

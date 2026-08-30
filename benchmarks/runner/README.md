@@ -1,0 +1,1 @@
+The runner's identity is the image digest recorded in `DIGEST` (see `pin.sh`); tags are convenience labels for local use only and never appear in records or canonical run configuration — every canonical run consumes the `sha256:` digest from `DIGEST`.

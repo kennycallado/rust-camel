@@ -1,3 +1,4 @@
+> Era-1 report. Frozen at git tag bench/era-1-final. Live data: benchmarks/records/.
 # Startup benchmark v3 — Protocol B instrumentation fixes (2026-07-21)
 
 > **Provenance**: Measured against tag `bench-v3` (`929b81a2`), host:

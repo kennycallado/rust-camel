@@ -1,3 +1,4 @@
+> Era-1 report. Frozen at git tag bench/era-1-final. Live data: benchmarks/records/.
 # Startup benchmark v2 — Quarkus native-image + T2 EIP scenario (2026-07-18)
 
 > bd `rc-p9ki`. Extension of v1 (`rc-f3g9`, closed; report at

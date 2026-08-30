@@ -7,7 +7,7 @@
 # YAML subproject's `camel/routes.yaml`; only the field names differ
 # (rust-camel uses `key:` / `value:` for set_header and `value:` for
 # set_body literal, NOT Apache Camel's `name:` / `constant:` — see
-# spike `benchmarks/spikes/spike-yaml-predicate/routes/spike-t2.yaml`
+# spike `benchmarks/attic/spikes/spike-yaml-predicate/routes/spike-t2.yaml`
 # for the proven rust-camel shape).
 #
 # The `log` step uses the bare-string form which is always evaluated as

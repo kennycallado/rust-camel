@@ -267,7 +267,7 @@ jobs:
   bench-smoke:
     # Criterion bench targets are NOT compiled by `cargo build --workspace`;
     # this job compiles and runs the smoke subset itself. Container
-    # full-matrix stays manual: benchmarks/harness/run-all.sh.
+    # full-matrix stays manual: benchmarks/bench run-all.
     name: Bench Smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -287,6 +287,12 @@ jobs:
       - name: Install libclang for bindgen
         if: runner.os == 'Linux'
         run: sudo apt-get install -y libclang-dev
+      - name: Bench facade smoke (help)
+        run: bash benchmarks/bench help
+      - name: Bench facade smoke (dry-run, no JDK)
+        run: bash benchmarks/bench run --scenarios=t2-json,split-aggregate --dry-run
+      - name: Records guard (summaries must regenerate)
+        run: python3 benchmarks/harness/summarize.py --check benchmarks/records
       - name: Bench smoke (quick mode)
         run: cargo bench -p camel-bench --bench pipeline --bench body_coercion -- --quick
 

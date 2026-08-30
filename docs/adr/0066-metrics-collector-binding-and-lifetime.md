@@ -230,3 +230,13 @@ Components opt in with the `components` lever, default off.
 | `crates/camel-processor/src/aggregator.rs:31` | 250ms queue-depth sampler |
 | `crates/components/camel-component-seda/src/lib.rs:43` | 250ms queue-depth sampler |
 | `crates/camel-processor/src/resequencer/mod.rs:202-211` | post-accept publish |
+
+### Gauge A/B lever cost (bench-era-2)
+
+The request-path cost of keeping the metric families (memory gauges)
+ON was measured by an A/B lever study on the http-server cell:
+ratio 0.9890, 95% CI [0.9785, 1.0126], UNPAIRED cross-run arms —
+cost unresolved from zero, at most about 1% at this resolution.
+Canonical benchmark runs therefore keep gauges ON. Full protocol,
+quiet-host gates, and interpretation:
+`docs/benchmarks/history/2026-08-29-benchmark-v4-addendum.md`.

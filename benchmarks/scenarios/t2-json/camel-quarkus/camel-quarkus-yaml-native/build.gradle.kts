@@ -6,7 +6,7 @@ import org.gradle.language.jvm.tasks.ProcessResources
 // Shares Java source (BenchBeans) and resources (including
 // camel/routes.yaml) with the JVM sibling. Mirrors the
 // t2-realistic-eip camel-quarkus-yaml-native subproject's two
-// NixOS+Substrate-VM keys (see benchmarks/spike-results.md "NixOS +
+// NixOS+Substrate-VM keys (see benchmarks/attic/spike-results.md "NixOS +
 // native-image resource discovery" and this scenario's sibling
 // src/main/resources/application.properties).
 //

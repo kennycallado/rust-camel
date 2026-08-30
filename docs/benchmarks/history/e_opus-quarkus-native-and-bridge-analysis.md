@@ -1,3 +1,4 @@
+> Era-1 report. Frozen at git tag bench/era-1-final. Live data: benchmarks/records/.
 # Deep Analysis: Quarkus Native Throughput + Bridge Subsystem Tax
 
 > **Status note (post-experiment)**: This analysis was written as a

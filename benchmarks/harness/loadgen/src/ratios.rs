@@ -82,19 +82,39 @@ pub struct RatioOutcome {
     pub hi: f64,
 }
 
+/// Structured ratio row: the schema v1 `ratios` shape (SCHEMA.md) that
+/// `aggregate-ratios --json` prints and `benchmarks/harness/summarize.py`
+/// copies verbatim into the record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RatioReport {
+    /// Numerator cell directory name (first summary argument).
+    pub numerator: String,
+    /// Denominator cell directory name (second summary argument).
+    pub denominator: String,
+    /// Metric the ratio applies to (always `m3` — the only summary
+    /// this module reads).
+    pub metric: String,
+    /// Point estimate (median-of-means ratio).
+    pub point: f64,
+    /// Lower 95% percentile-bootstrap confidence bound.
+    pub ci_lo: f64,
+    /// Upper 95% percentile-bootstrap confidence bound.
+    pub ci_hi: f64,
+    /// `bootstrap-paired` or `bootstrap-independent`, matching the
+    /// human line's ` UNPAIRED` suffix.
+    pub method: String,
+}
+
 /// Load both summaries, validate the pair, compute the ratio + CI, and
-/// format the one-line report.
-///
-/// Returns `(line, outcome)`; the line is
-/// `RATIO <A-cell-dir>/<B-cell-dir> point=… lo=… hi=…` plus ` UNPAIRED`
-/// when `independent`.
-pub fn compute_ratio(
+/// return the structured report (numerator/denominator cell dirs,
+/// metric, point, CI bounds, method).
+pub fn compute_ratio_report(
     a_path: &Path,
     b_path: &Path,
     independent: bool,
     seed: u64,
     n_resamples: usize,
-) -> Result<(String, RatioOutcome), String> {
+) -> Result<RatioReport, String> {
     if n_resamples < 2 {
         return Err(format!(
             "bci-resamples must be >= 2 for a two-sided interval, got {n_resamples}"
@@ -116,21 +136,91 @@ pub fn compute_ratio(
             b_path.display()
         )
     })?;
-    let point = ma / mb;
-
     let outcome = RatioOutcome {
-        point,
+        point: ma / mb,
         ..bootstrap_ratio(&a, &b, independent, seed, n_resamples)
     };
 
+    Ok(RatioReport {
+        numerator: a.cell_dir,
+        denominator: b.cell_dir,
+        metric: "m3".to_string(),
+        point: outcome.point,
+        ci_lo: outcome.lo,
+        ci_hi: outcome.hi,
+        method: if independent {
+            "bootstrap-independent".to_string()
+        } else {
+            "bootstrap-paired".to_string()
+        },
+    })
+}
+
+/// Serialization shape for [`ratio_json_line`]. Field order is fixed by
+/// the derive (declaration order), immune to serde_json feature
+/// unification (`preserve_order` swaps `Map` for `IndexMap` under
+/// workspace-wide builds, which would make `json!`-map key order
+/// nondeterministic). Declaration order is alphabetical so the emitted
+/// line is sorted-key regardless.
+#[derive(serde::Serialize)]
+struct RatioJsonLine<'a> {
+    ci_hi: f64,
+    ci_lo: f64,
+    denominator: &'a str,
+    method: &'a str,
+    metric: &'a str,
+    numerator: &'a str,
+    point: f64,
+}
+
+/// Single-line sorted-key JSON object for a report — the exact
+/// `--json` stdout contract.
+pub fn ratio_json_line(report: &RatioReport) -> String {
+    let line = RatioJsonLine {
+        ci_hi: report.ci_hi,
+        ci_lo: report.ci_lo,
+        denominator: &report.denominator,
+        method: &report.method,
+        metric: &report.metric,
+        numerator: &report.numerator,
+        point: report.point,
+    };
+    // Plain string/number struct serialization is infallible; fall
+    // back to a diagnostic on the impossible path instead of `expect`
+    // (repo bans it outside tests).
+    serde_json::to_string(&line)
+        .unwrap_or_else(|err| format!("{{\"error\":\"ratio json serialization failed: {err}\"}}"))
+}
+
+/// Load both summaries, validate the pair, compute the ratio + CI, and
+/// format the one-line report.
+///
+/// Returns `(line, outcome)`; the line is
+/// `RATIO <A-cell-dir>/<B-cell-dir> point=… lo=… hi=…` plus ` UNPAIRED`
+/// when `independent`.
+pub fn compute_ratio(
+    a_path: &Path,
+    b_path: &Path,
+    independent: bool,
+    seed: u64,
+    n_resamples: usize,
+) -> Result<(String, RatioOutcome), String> {
+    let report = compute_ratio_report(a_path, b_path, independent, seed, n_resamples)?;
     let mut line = format!(
         "RATIO {}/{} point={:.4} lo={:.4} hi={:.4}",
-        a.cell_dir, b.cell_dir, outcome.point, outcome.lo, outcome.hi
+        report.numerator, report.denominator, report.point, report.ci_lo, report.ci_hi
     );
     if independent {
         line.push_str(" UNPAIRED");
     }
-    Ok((line, outcome))
+    Ok((
+        line,
+        RatioOutcome {
+            point: report.point,
+            lo: report.ci_lo,
+            hi: report.ci_hi,
+        },
+    ))
 }
 
 /// Pair-level validation: equal round counts; paired mode additionally
@@ -454,6 +544,77 @@ mod tests {
         let (line2, out2) = compute_ratio(&pa, &pb, false, 0, 2000).unwrap();
         assert_eq!(line1, line2);
         assert_eq!(out1, out2);
+    }
+
+    #[test]
+    fn ratio_report_fields_match_line_and_method() {
+        let root = TempRoot::new("report");
+        let pa = write_summary(
+            root.path(),
+            "cell-a",
+            "t/cell-a",
+            "[200.0, 200.0, 200.0, 200.0, 200.0]",
+            5,
+        );
+        let pb = write_summary(
+            root.path(),
+            "cell-b",
+            "t/cell-b",
+            "[100.0, 100.0, 100.0, 100.0, 100.0]",
+            5,
+        );
+        write_uniform_order(root.path(), &["t/cell-a", "t/cell-b"], 5);
+
+        let report = compute_ratio_report(&pa, &pb, false, 0, 2000).unwrap();
+        assert_eq!(report.numerator, "cell-a");
+        assert_eq!(report.denominator, "cell-b");
+        assert_eq!(report.metric, "m3");
+        assert_eq!(report.method, "bootstrap-paired");
+        assert!((report.point - 2.0).abs() < 1e-9, "point {report:?}");
+        let (line, out) = compute_ratio(&pa, &pb, false, 0, 2000).unwrap();
+        assert_eq!(out.point, report.point);
+        assert_eq!(out.lo, report.ci_lo);
+        assert_eq!(out.hi, report.ci_hi);
+        assert!(line.contains("point=2.0000"), "line {line}");
+
+        let indep = compute_ratio_report(&pa, &pb, true, 0, 2000).unwrap();
+        assert_eq!(indep.method, "bootstrap-independent");
+        let (_, line_out) = compute_ratio(&pa, &pb, true, 0, 2000).unwrap();
+        assert!(line_out.hi == indep.ci_hi);
+    }
+
+    /// `--json` stdout contract: ONE line, exactly the seven schema
+    /// `ratios` fields, keys sorted (ci_hi < ci_lo < denominator <
+    /// method < numerator < point). Pinned as a golden string.
+    #[test]
+    fn ratio_json_line_sorted_keys_golden() {
+        let report = RatioReport {
+            numerator: "rust-camel-lib".to_string(),
+            denominator: "camel-standalone-dsl".to_string(),
+            metric: "m3".to_string(),
+            point: 1.5,
+            ci_lo: 1.4,
+            ci_hi: 1.6,
+            method: "bootstrap-paired".to_string(),
+        };
+        let line = ratio_json_line(&report);
+        let expected = concat!(
+            "{\"ci_hi\":1.6,\"ci_lo\":1.4,",
+            "\"denominator\":\"camel-standalone-dsl\",",
+            "\"method\":\"bootstrap-paired\",",
+            "\"metric\":\"m3\",",
+            "\"numerator\":\"rust-camel-lib\",",
+            "\"point\":1.5}"
+        );
+        assert_eq!(line, expected);
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["numerator"], "rust-camel-lib");
+        assert_eq!(parsed["denominator"], "camel-standalone-dsl");
+        assert_eq!(parsed["metric"], "m3");
+        assert_eq!(parsed["method"], "bootstrap-paired");
+        assert_eq!(parsed["point"], 1.5);
+        assert_eq!(parsed["ci_lo"], 1.4);
+        assert_eq!(parsed["ci_hi"], 1.6);
     }
 
     #[test]

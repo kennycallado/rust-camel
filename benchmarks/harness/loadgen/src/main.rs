@@ -12,7 +12,10 @@
 //! - `aggregate-bridge-tax` — pair rust vs java per scenario from a tree
 //!   of `m2-summary.json` files (spec F1 bridge tax reporting).
 //! - `aggregate-ratios` — ratio of M3 throughput medians between two
-//!   `m3-summary.json` cells with a percentile-bootstrap CI.
+//!   `m3-summary.json` cells with a percentile-bootstrap CI (`--json`
+//!   for the machine-readable schema `ratios` row).
+//! - `payload-digest` — canonical input SHA-256 for a scenario +
+//!   payload class (payload.rs canonical builders).
 //!
 //! See `bench_loadgen` library docs for the spec citations per command.
 
@@ -40,6 +43,7 @@ fn main() -> ExitCode {
         "bridge-check" => bench_loadgen::cli::bridge_check_main(rest),
         "aggregate-bridge-tax" => bench_loadgen::cli::aggregate_bridge_tax_main(rest),
         "aggregate-ratios" => bench_loadgen::cli::aggregate_ratios_main(rest),
+        "payload-digest" => bench_loadgen::cli::payload_digest_main(rest),
         other => {
             eprintln!("error: unknown subcommand '{other}'");
             usage();
@@ -67,8 +71,10 @@ fn usage() {
          \n  aggregate-bridge-tax --input-dir=PATH [--output=PATH]\
          \n                                       Pair rust vs java per scenario.\
          \n  aggregate-ratios <cellA.json> <cellB.json> [--seed=N]\
-         \n                                       [--bci-resamples=N] [--independent]\
+         \n                                       [--bci-resamples=N] [--independent] [--json]\
          \n                                       Ratio of M3 medians + bootstrap CI.\
+         \n  payload-digest --scenario=NAME --payload-class=CLASS\
+         \n                                       Canonical input SHA-256 (hex, one line).\
          \n\
          \nThis is the v3 benchmark harness loadgen (spec §4.5). See the library\
          \ndocs (cargo doc -p bench-loadgen --open) for spec citations per command."

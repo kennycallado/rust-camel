@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# benchmarks/bench — single entrypoint for the benchmark suite.
+#
+# `run` and `run-all` pass through to the harness scripts with
+# arguments and environment unchanged (same flags, same env vars).
+# `summarize` and `publish` delegate to harness/summarize.py
+# (records layer).
+set -euo pipefail
+
+BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+    cat <<'EOF'
+Usage: bench <subcommand> [args...]
+
+Subcommands:
+  run        Measure on this host; passes through to harness/run.sh
+             (same flags, same env vars, unchanged environment).
+  run-all    Full matrix inside the benchmark-runner container;
+             passes through to harness/run-all.sh (docker only).
+  summarize  Build a run record from a completed run
+             (summarize.py --run-dir X --meta Y --out-dir Z).
+  publish    Copy a validated run record into records/ and rebuild
+             the index (summarize.py --publish --run-dir Z).
+  help       Show this usage.
+EOF
+}
+
+case "${1:-}" in
+    run)
+        shift
+        exec "$BENCH_DIR/harness/run.sh" "$@"
+        ;;
+    run-all)
+        shift
+        exec "$BENCH_DIR/harness/run-all.sh" "$@"
+        ;;
+    summarize)
+        shift
+        exec python3 "$BENCH_DIR/harness/summarize.py" "$@"
+        ;;
+    publish)
+        shift
+        exec python3 "$BENCH_DIR/harness/summarize.py" --publish "$@"
+        ;;
+    help | -h | --help)
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

@@ -1,3 +1,4 @@
+> Era-1 report. Frozen at git tag bench/era-1-final. Live data: benchmarks/records/.
 # Benchmark v4 — Sustained Throughput (M3) + Memory Growth (M4)
 
 > **Provenance**: Measured on commit `21c12332` (2026-07-23T16:15:47Z), host:

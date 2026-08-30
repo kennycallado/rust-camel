@@ -14,7 +14,7 @@
 # n=50, warmup=3. --dry-run prints the 16-cell shuffled order and
 # exits 0 without invoking any contender.
 #
-# Scenario auto-discovery excludes `benchmarks/spikes/` (lives outside
+# Scenario auto-discovery excludes `benchmarks/attic/spikes/` (lives outside
 # scenarios/, so already excluded) AND any directory matching the
 # `spike-*` glob — prevents future Task 1-style spike artifacts from
 # polluting the measurement matrix.
@@ -64,7 +64,7 @@ SCENARIOS_DIR="$REPO_ROOT/benchmarks/scenarios"
 # the launch command, so setting it here is the deterministic fix. Placed
 # BEFORE app args so the SubstrateVM runtime option parser consumes it.
 NATIVE_HEAP_ARG="-Xmx512m"
-RESULTS_ROOT="$REPO_ROOT/benchmarks/results"
+RESULTS_ROOT="${BENCH_RESULTS_ROOT:-$REPO_ROOT/benchmarks/results}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="$RESULTS_ROOT/$TIMESTAMP"
 
@@ -81,13 +81,15 @@ if [[ -z "${JAVA_HOME:-}" ]]; then
     done
 fi
 if [[ -z "${JAVA_HOME:-}" ]]; then
-    echo "error: JAVA_HOME is not set and no JDK 21 found at standard locations." >&2
-    echo "       Host: export JAVA_HOME=/path/to/jdk21" >&2
-    echo "       Container: use bash benchmarks/harness/run-all.sh (handles it)" >&2
-    # --dry-run only resolves cells; a JVM toolchain is not needed.
+    # --dry-run only resolves cells; a JVM toolchain is not needed,
+    # so a missing JAVA_HOME is tolerated there (notice, not error).
     if [[ "${1:-}" != "--dry-run" && "$*" != *--dry-run* ]]; then
+        echo "error: JAVA_HOME is not set and no JDK 21 found at standard locations." >&2
+        echo "       Host: export JAVA_HOME=/path/to/jdk21" >&2
+        echo "       Container: use bash benchmarks/harness/run-all.sh (handles it)" >&2
         exit 1
     fi
+    echo "notice: JAVA_HOME is not set; continuing (--dry-run resolves cells without a JVM toolchain)" >&2
     JAVA_HOME="/dry-run-placeholder"
 fi
 JAVA_BIN="$JAVA_HOME/bin/java"
@@ -210,6 +212,15 @@ declare -a SCENARIOS=()    # ordered list of scenario names
 declare -A PROTOCOL_A_CELL_URL=()
 declare -a PROTOCOL_A_CELLS=()
 
+# Dry-run deferral state (bd rc-4mzj): when the shared rust-camel-cli
+# release binary is absent, every scenario's rust-camel-cli cell is
+# DEFERRED — excluded from the resolved set with a per-cell notice —
+# instead of fatal. This is what lets CI's bench-smoke job dry-run on
+# a cold checkout (a cold release build of camel-cli exceeds the job
+# budget). Measurement runs never defer: the binary check hard-fails.
+RUST_CLI_BIN_DEFERRED=false
+DEFERRED_CELL_COUNT=0
+
 # =====================================================================
 # Argument parsing (flag-based, v1 positional form REMOVED — v1 is
 # closed, harness is internal tooling, no back-compat shim)
@@ -248,7 +259,7 @@ usage: run.sh [--scenarios=<csv>] [--n=<count>] [--warmup=<count>]
               [--dry-run]
   --scenarios         comma-separated list of scenario names under
                       benchmarks/scenarios/; default = auto-discover all
-                      (excludes benchmarks/spikes/ and any `spike-*` pattern).
+                      (excludes benchmarks/attic/spikes/ and any `spike-*` pattern).
   --n                 M1 measured runs per cell (default 50).
   --warmup            M1 warmup runs per cell, discarded (default 3).
   --metric            m1, m2, m1+m2, m3, m3+m4, or m1+m2+m3+m4
@@ -1358,9 +1369,14 @@ resolve_bridge_scenario_cells() {
     local rcl_cell_safe="${scenario}_rust-camel-cli"
     local rcl_latency="/tmp/v3-protocol-b-${rcl_cell_safe}.log"
     local rcl_pid="/tmp/v3-bridge-pid-${rcl_cell_safe}.txt"
-    add_cell "$scenario" "rust-camel-cli" \
-        "$rust_cli_wrapper --camel-bin $rust_cli_bin --config $rust_cli_camel_toml --routes $rust_cli_route --bridge-binary $bridge_binary --bridge-wrapper $bridge_wrapper --bridge-pid-file $rcl_pid --latency-file $rcl_latency" \
-        "$marker"
+    if [[ "$RUST_CLI_BIN_DEFERRED" == "true" ]]; then
+        echo "dry-run: cell $scenario/rust-camel-cli deferred (release binary not built: $rust_cli_bin)"
+        DEFERRED_CELL_COUNT=$((DEFERRED_CELL_COUNT + 1))
+    else
+        add_cell "$scenario" "rust-camel-cli" \
+            "$rust_cli_wrapper --camel-bin $rust_cli_bin --config $rust_cli_camel_toml --routes $rust_cli_route --bridge-binary $bridge_binary --bridge-wrapper $bridge_wrapper --bridge-pid-file $rcl_pid --latency-file $rcl_latency" \
+            "$marker"
+    fi
 }
 
 # Resolve all per-cell artifacts and populate the CELLS / CELL_ARGV
@@ -1375,9 +1391,20 @@ resolve_all_cells() {
         exit 1
     fi
     local rust_cli_bin="$root_target/release/camel"
+    # Release binary is a MEASUREMENT prerequisite, not a dry-run one:
+    # in dry-run mode a missing binary defers the cli-dependent cells
+    # (see DEFERRED_CELL_COUNT above) so the rest of the matrix —
+    # fixtures, routes, registrations — still gets validated. Real
+    # runs keep the hard failure (a missing binary mid-measurement
+    # would silently shrink the matrix).
+    RUST_CLI_BIN_DEFERRED=false
     if [[ ! -x "$rust_cli_bin" ]]; then
-        echo "error: rust-camel-cli binary not found at $rust_cli_bin (cargo build --release -p camel-cli)" >&2
-        exit 1
+        if [[ "$DRY_RUN" == "true" ]]; then
+            RUST_CLI_BIN_DEFERRED=true
+        else
+            echo "error: rust-camel-cli binary not found at $rust_cli_bin (cargo build --release -p camel-cli)" >&2
+            exit 1
+        fi
     fi
 
     for scenario in "${SCENARIOS[@]}"; do
@@ -1513,15 +1540,23 @@ resolve_all_cells() {
         # the child's "CamelContext started" stdout line and emits the
         # marker per the rc-w1u9 handshake). Bridge scenarios also use
         # wrappers; those are dispatched via resolve_bridge_scenario_cells.
-        local rcli_wrapper="$scenario_dir/rust-camel-cli/${scenario}-cli-wrapper.sh"
-        if [[ -x "$rcli_wrapper" ]]; then
-            add_cell "$scenario" "rust-camel-cli" \
-                "$rcli_wrapper --camel-bin $rust_cli_bin --config $rust_cli_camel_toml --routes $rust_cli_route" \
-                "$marker"
+        # Dry-run with an unbuilt release binary defers the cell
+        # entirely (RUST_CLI_BIN_DEFERRED) — route/Camel.toml checks
+        # above still ran, so the fixture set stays validated.
+        if [[ "$RUST_CLI_BIN_DEFERRED" == "true" ]]; then
+            echo "dry-run: cell $scenario/rust-camel-cli deferred (release binary not built: $rust_cli_bin)"
+            DEFERRED_CELL_COUNT=$((DEFERRED_CELL_COUNT + 1))
         else
-            add_cell "$scenario" "rust-camel-cli" \
-                "$rust_cli_bin run --config $rust_cli_camel_toml --routes $rust_cli_route --no-watch" \
-                "$marker"
+            local rcli_wrapper="$scenario_dir/rust-camel-cli/${scenario}-cli-wrapper.sh"
+            if [[ -x "$rcli_wrapper" ]]; then
+                add_cell "$scenario" "rust-camel-cli" \
+                    "$rcli_wrapper --camel-bin $rust_cli_bin --config $rust_cli_camel_toml --routes $rust_cli_route" \
+                    "$marker"
+            else
+                add_cell "$scenario" "rust-camel-cli" \
+                    "$rust_cli_bin run --config $rust_cli_camel_toml --routes $rust_cli_route --no-watch" \
+                    "$marker"
+            fi
         fi
     done
 
@@ -2842,6 +2877,10 @@ for _s in "${SCENARIOS[@]}"; do
         *)      expected_cells=$((expected_cells + 6)) ;;
     esac
 done
+# Dry-run deferrals (unbuilt release binary) shrink the resolved set by
+# exactly one cli cell per affected scenario. Measurement runs never
+# defer, so the subtraction is 0 and the assertion is unchanged there.
+expected_cells=$((expected_cells - DEFERRED_CELL_COUNT))
 echo "resolved cells: ${#CELLS[@]} (expected: $expected_cells)"
 if [[ ${#CELLS[@]} -ne $expected_cells ]]; then
     echo "error: expected $expected_cells cells, got ${#CELLS[@]}" >&2

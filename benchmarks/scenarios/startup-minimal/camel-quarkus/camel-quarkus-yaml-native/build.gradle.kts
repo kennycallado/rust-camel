@@ -6,7 +6,7 @@ import org.gradle.language.jvm.tasks.ProcessResources
 // camel/routes.yaml) with the JVM sibling. The native subproject adds
 // its own application.properties with the two NixOS+Substrate-VM keys
 // (quarkus.native.resources.includes + camel.main.routesIncludePattern)
-// documented in benchmarks/spike-results.md; these are required for the
+// documented in benchmarks/attic/spike-results.md; these are required for the
 // route YAML to be discoverable at native runtime. Fairness contract:
 // JVM and native run the SAME route YAML.
 

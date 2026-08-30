@@ -101,6 +101,83 @@ pub fn canonical_body_sha256(size: usize, tick: u64) -> String {
     sha256_hex(canonical_json_body(size, tick).as_bytes())
 }
 
+/// Item count of the split-aggregate canonical array (scenario
+/// `split-aggregate`, OpenSpec change `bench-missing-cells`).
+pub const SPLIT_AGGREGATE_ITEMS: usize = 100;
+
+/// Build the split-aggregate canonical input body: a compact JSON
+/// array of [`SPLIT_AGGREGATE_ITEMS`] string items, item `i` being
+/// `"b<i>"`, serialized with zero whitespace — exactly what
+/// `serde_json::to_string` produces for that value (591 bytes).
+/// Byte-identical across every split-aggregate fixture: the rust
+/// fixture pins the same construction in
+/// `scenarios/split-aggregate/rust-camel-lib/src/main.rs`
+/// (`canonical_split_array`), the JVM fixtures in their
+/// `CanonicalArrayTest` goldens.
+pub fn canonical_split_aggregate_array() -> String {
+    let items: Vec<String> = (0..SPLIT_AGGREGATE_ITEMS)
+        .map(|i| format!("\"b{i}\""))
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// Era-default canonical input size (bytes) for scenario `t2-json`
+/// when the payload class is `shared` — the 32 KiB entry of the
+/// golden canonical digest table (`GOLDEN_CANONICAL_DIGESTS`).
+pub const T2_JSON_DEFAULT_PAYLOAD_SIZE: usize = 32768;
+
+/// Canonical input digest for a `(scenario, payload-class)` pair.
+///
+/// The CLI-facing `payload-digest` subcommand maps `--scenario` +
+/// `--payload-class` onto the same inputs the fixtures use. Class
+/// `shared` — the harness's record vocabulary for every cell — maps
+/// to the scenario's DEFAULT canonical input: for `t2-json` the
+/// canonical JSON body at [`T2_JSON_DEFAULT_PAYLOAD_SIZE`] with the
+/// self-test tick ([`CANONICAL_SELFTEST_TICK`]); for
+/// `split-aggregate` the canonical 100-item array
+/// ([`canonical_split_aggregate_array`]). Numeric classes are also
+/// accepted for `t2-json` (payload-size axis runs) and select the
+/// canonical body at that byte size. Any other scenario or class
+/// yields `Err`; the CLI prints it on stderr and exits 2.
+pub fn scenario_payload_digest(scenario: &str, payload_class: &str) -> Result<String, String> {
+    match scenario {
+        "t2-json" => {
+            if payload_class == "shared" {
+                return Ok(canonical_body_sha256(
+                    T2_JSON_DEFAULT_PAYLOAD_SIZE,
+                    CANONICAL_SELFTEST_TICK,
+                ));
+            }
+            let size = payload_class.parse::<usize>().map_err(|_| {
+                format!(
+                    "unknown payload class {payload_class:?}: t2-json classes are \
+                     \"shared\" or byte sizes {}",
+                    VALID_PAYLOAD_SIZES
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+            let size = validate_payload_size(size)?;
+            Ok(canonical_body_sha256(size, CANONICAL_SELFTEST_TICK))
+        }
+        "split-aggregate" => {
+            if payload_class != "shared" {
+                return Err(format!(
+                    "unknown payload class {payload_class:?}: split-aggregate classes are \"shared\""
+                ));
+            }
+            Ok(sha256_hex(canonical_split_aggregate_array().as_bytes()))
+        }
+        other => Err(format!(
+            "unknown scenario {other:?}: payload-digest supports t2-json and \
+             split-aggregate (the scenarios whose fixtures build payload.rs \
+             canonical bodies)"
+        )),
+    }
+}
+
 /// Lowercase hex SHA-256 of `data`.
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -232,6 +309,145 @@ mod tests {
             body.len(),
             size,
             "multi-digit tick must not break exact sizing"
+        );
+    }
+
+    /// Every tick-0 golden digest is reachable through the
+    /// scenario→class mapping the `payload-digest` CLI uses, so the CLI
+    /// output equals the pinned goldens (e.g. (32768,0) = `a0db69e1…`).
+    #[test]
+    fn scenario_payload_digest_matches_goldens() {
+        for &(size, tick, golden) in &GOLDEN_CANONICAL_DIGESTS {
+            if tick != CANONICAL_SELFTEST_TICK {
+                continue;
+            }
+            let class = size.to_string();
+            assert_eq!(
+                scenario_payload_digest("t2-json", &class).unwrap(),
+                golden,
+                "scenario digest mismatch for class {class}"
+            );
+        }
+    }
+
+    /// `shared` maps to each scenario's DEFAULT canonical input —
+    /// the mapping summarize.py relies on (it passes
+    /// `--payload-class shared` for every cell): t2-json → the 32 KiB
+    /// era-default golden `a0db69e1…`, which must equal the numeric
+    /// `32768` class; split-aggregate → the canonical array golden
+    /// `123444b4…`.
+    #[test]
+    fn scenario_payload_digest_shared_maps_to_scenario_default() {
+        const T2_JSON_32768_GOLDEN: &str =
+            "a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9";
+        const SPLIT_AGGREGATE_GOLDEN: &str =
+            "123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316";
+        assert_eq!(
+            scenario_payload_digest("t2-json", "shared").unwrap(),
+            T2_JSON_32768_GOLDEN,
+            "t2-json/shared must be the era-default 32768 golden"
+        );
+        assert_eq!(
+            scenario_payload_digest("t2-json", "shared").unwrap(),
+            scenario_payload_digest("t2-json", "32768").unwrap(),
+            "shared must equal the era-default numeric class"
+        );
+        assert_eq!(
+            scenario_payload_digest("split-aggregate", "shared").unwrap(),
+            SPLIT_AGGREGATE_GOLDEN,
+            "split-aggregate/shared must be the canonical array golden"
+        );
+    }
+
+    /// Unknown scenarios and invalid classes are rejected (CLI:
+    /// stderr + exit 2). The unknown-scenario error keeps its
+    /// `unknown scenario` prefix — summarize.py detects it to record
+    /// `input_sha256: null`. The t2-json unknown-class error names
+    /// `shared` plus every valid size (self-describing usage error);
+    /// numeric classes outside the axis set are rejected too.
+    #[test]
+    fn scenario_payload_digest_rejects_unknown() {
+        for (scenario, class) in [
+            ("startup-minimal", "shared"),
+            ("http-server", "shared"),
+            ("split-aggregate", "32768"),
+        ] {
+            let err = scenario_payload_digest(scenario, class)
+                .err()
+                .unwrap_or_else(|| panic!("({scenario}, {class}) must be rejected"));
+            if matches!(scenario, "startup-minimal" | "http-server") {
+                assert!(
+                    err.starts_with("unknown scenario"),
+                    "({scenario}, {class}): error must keep the `unknown scenario` prefix: {err}"
+                );
+            }
+        }
+        let err = scenario_payload_digest("t2-json", "garbage")
+            .err()
+            .unwrap_or_else(|| panic!("t2-json/garbage must be rejected"));
+        assert!(
+            err.contains("\"shared\""),
+            "unknown-class error must name shared: {err}"
+        );
+        for valid in VALID_PAYLOAD_SIZES {
+            assert!(
+                err.contains(&valid.to_string()),
+                "unknown-class error must name valid size {valid}: {err}"
+            );
+        }
+        assert!(scenario_payload_digest("t2-json", "2048").is_err());
+        let err = scenario_payload_digest("t2-json", "2048").expect_err("2048 must be rejected");
+        for valid in VALID_PAYLOAD_SIZES {
+            assert!(
+                err.contains(&valid.to_string()),
+                "error must name valid size {valid}: {err}"
+            );
+        }
+    }
+
+    /// Golden for the split-aggregate canonical array (change
+    /// `bench-missing-cells`): exactly 591 bytes, items `b0`..`b99`,
+    /// digest pinned in the scenario README + smoke evidence. Also
+    /// pins the single-serialization invariant: re-serializing the
+    /// parsed array with serde_json reproduces the exact same bytes.
+    #[test]
+    fn split_aggregate_array_digest_golden() {
+        const GOLDEN: &str = "123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316";
+        let body = canonical_split_aggregate_array();
+        assert_eq!(body.len(), 591, "canonical array must be 591 bytes");
+        assert!(
+            body.starts_with("[\"b0\",\"b1\","),
+            "canonical array must start with quoted items b0, b1"
+        );
+        assert!(
+            body.ends_with("\"b98\",\"b99\"]"),
+            "canonical array must end with quoted items b98, b99"
+        );
+        assert_eq!(sha256_hex(body.as_bytes()), GOLDEN, "digest drift");
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("canonical array must be valid JSON: {e}"));
+        let items = parsed
+            .as_array()
+            .unwrap_or_else(|| panic!("canonical array must parse as a JSON array"));
+        assert_eq!(items.len(), SPLIT_AGGREGATE_ITEMS);
+        for (i, item) in items.iter().enumerate() {
+            assert_eq!(
+                item,
+                &serde_json::Value::String(format!("b{i}")),
+                "item {i} drifted"
+            );
+        }
+        let reserialized = serde_json::to_string(&parsed)
+            .unwrap_or_else(|e| panic!("re-serialization failed: {e}"));
+        assert_eq!(
+            reserialized, body,
+            "re-serialization must be byte-identical"
+        );
+        // Reachable through the scenario→class mapping the CLI uses.
+        assert_eq!(
+            scenario_payload_digest("split-aggregate", "shared").unwrap(),
+            GOLDEN,
+            "scenario digest mismatch for split-aggregate/shared"
         );
     }
 }

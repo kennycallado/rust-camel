@@ -42,7 +42,12 @@ benchmarks/results/
 benchmarks/.cache/
 .docker-cache/
 
+# Container-run harness outputs (run-all.sh BENCH_RESULTS_ROOT target;
+# raw run artifacts + meta snapshots live only on the measurement host)
+benchmarks/harness/out/
+
 # conductor-light workflow scratch (per-change blessing/review verdicts;
 # written at worktree root, must not be tracked)
 .bless.json
 .review.json
+benchmarks/runner/DIGEST

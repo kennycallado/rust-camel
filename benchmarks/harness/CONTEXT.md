@@ -9,7 +9,7 @@
 >
 > **Authority note:** this doc is subordinate to the benchmark harness code
 > (`benchmarks/harness/run.sh`, fixture sources) and the published report
-> (`docs/benchmarks/2026-07-18-startup-minimal-benchmark.md`). Where prose and
+> (`docs/benchmarks/history/2026-07-18-startup-minimal-benchmark.md`). Where prose and
 > code disagree, code wins. Cross-references, not duplication: the plan
 > (`docs/superpowers/plans/2026-07-18-rc-f3g9-startup-benchmark.md`) holds the
 > full 6-round methodology arbitration history; this doc synthesizes the
@@ -41,6 +41,8 @@ harness, plan, and report — not generic dictionary senses.
 | **Axis** | An orthogonal experimental variable held fixed in v1 but candidate for future variation: payload size, concurrency level, message rate. Not yet exercised — v1 fixes all axes at "single message, no payload, no concurrency". |
 | **Metric / Dimension** | A measured quantity. v1 measures three: cold-start wall-clock (ms), peak RSS (KiB), artifact size (MiB). Metrics are grouped into families for planning: M1 (cold-start + RSS, done), M2 (warm p99), M3 (sustained throughput), M4 (memory growth under load). |
 | **Matrix** | The full cross-product of {tier × scenario × contender × pairing × metric × axis}. v1 fills exactly one cell family; the "matrix" is the mental model for how the suite grows without restructuring. |
+| **variant** | Record vocabulary (`run.json` `cells.variant`): the harness registers exactly one build shape per contender, so the literal `"default"`. Native builds appear as distinct contenders (e.g. `camel-quarkus-dsl-native`), not variants. |
+| **payload_class** | Record vocabulary (`run.json` `cells.payload_class`): the harness wires ONE shared payload per scenario (`$scenario_dir/shared/bench-payload.xml`) into every contender, so the literal `"shared"`. |
 | **Cold-start** | Wall-clock from *immediately before the process is launched* to the moment the "ready" marker is observed. Explicitly includes JVM/process bootstrap (fork, classloading, JIT init). "First call after process fork", page-cache warm. NOT "first-ever invocation on a freshly booted machine". |
 | **Warm-state** | (Future / not measured in v1.) The runtime after JIT compilation and class-init lazy paths have been exercised — the state in which p99 request latency is meaningful. |
 | **Steady-state** | (Future.) The regime under sustained constant load where GC pauses, allocator behavior, and throughput plateau become observable. |
@@ -54,12 +56,12 @@ harness, plan, and report — not generic dictionary senses.
 | **Bean** | (Camel term.) A registered object a route can invoke. Not exercised in v1 or v2; relevant to future scenarios that measure bean-binding overhead. |
 | **Transform** | An EIP step that mutates the message body. Exercised in v2 T2 (`set_body` EIP is the body-mutating step; `set_header` mutates headers). |
 | **Substrate VM** | The GraalVM native-image runtime (also called "the native image runtime"). A closed-world AOT-compiled executable, no HotSpot JVM. `VmHWM` (peak RSS) is what `time -v` reads; Substrate VM's memory model differs from HotSpot (no JIT compiler footprint, no class metadata lazy-loading). Cold-start in Substrate VM shifts work from runtime to **build time** (native-image compilation), so a small post-build cold-start delta reflects deployment economics, not pure runtime cost — see "Native initialization caveat" in the v2 report. |
-| **Native initialization** | The build-time cost of generating a native-image binary. For the v2 Quarkus native artifacts, ~64-77 seconds per binary (per `benchmarks/spike-results.md` Spike 1B); the resulting cold-start (~18 ms) is dramatically lower than JVM mode (~540 ms), but **the cost of changing the route is re-running the native build**, not restarting a process. This is the trade-off that the v2 "Native initialization caveat" section of the report makes explicit. |
+| **Native initialization** | The build-time cost of generating a native-image binary. For the v2 Quarkus native artifacts, ~64-77 seconds per binary (per `benchmarks/attic/spike-results.md` Spike 1B); the resulting cold-start (~18 ms) is dramatically lower than JVM mode (~540 ms), but **the cost of changing the route is re-running the native build**, not restarting a process. This is the trade-off that the v2 "Native initialization caveat" section of the report makes explicit. |
 | **Fingerprint caching** | The v2 harness's mechanism for skipping a native-image rebuild when the inputs that determine the binary are unchanged. A SHA-256 hash of (shared JVM sibling's `src/main/`, native subproject's `build.gradle.kts`, parent `settings.gradle.kts`, JVM sibling's `build.gradle.kts`, native subproject's `application.properties`, `gradle/` wrapper contents, `$JAVA_HOME` path, `native-image --version` output) is stored at `<native-subproject>/.bench-fingerprint`. The build is skipped if the fingerprint matches AND the runner binary exists. A fingerprint mismatch invalidates the cache (forces a rebuild). Fingerprint caching is a **build-time** optimization; the measured numbers are post-build cold-start, so fingerprint caching does not affect the reported medians/p95s. |
 | **Pair A predicate deviation** | The T2 Pair A cross-runtime predicate difference: Apache Camel uses Simple language (`simple("${body} == 'ping'")`), rust-camel-lib uses closure predicates (`|ex| ex.body().as_str() == Some("ping")`). The two mechanisms are not language-subsystem-equivalent; T2 Pair A measures "overall EIP pipeline overhead at each framework's idiomatic surface", not "language-subsystem overhead". Pair B is language-subsystem-equivalent (both runtimes parse `${body}` from YAML). Documented explicitly in the v2 report so Pair A claims are scoped accordingly. |
 | **ICP (Ideal Customer Profile)** | The named deployment shape for which a benchmark result is a *qualifying* argument rather than bragging. A startup benchmark without a named ICP is meaningless (in a long-lived ESB, JVM startup is irrelevant). v1 chose two ICPs and rejected two — see §5. |
 | **Container-hosted cold-start** | (v3) M1 measurement taken inside a long-lived Mandrel-based container. Excludes image pull, container creation, k8s scheduling. All cells share identical container tax → relative comparison preserved. |
-| **Mandrel-único** | (v3) Single Dockerfile based on the Quarkus Mandrel builder image, with Rust toolchain + Maven + bench utilities layered on. One container does the entire build + measure pipeline. Replaces the prior 4-container approach (runner + rust-builder + maven + gradle-native). |
+| **Mandrel-único** | (era-2) Single Dockerfile based on `eclipse-temurin:21-jdk-jammy` with Rust toolchain + Gradle + Maven + bench utilities layered on. Native-image builds delegate to the `QUARKUS_NATIVE_BUILDER_IMAGE` container through the host docker socket (`BENCH_NATIVE_MODE=docker`). One container does the build + measure pipeline. |
 
 ### Self-grill record — §1 Glossary
 
@@ -73,7 +75,7 @@ harness, plan, and report — not generic dictionary senses.
 **Answers (with citations):**
 1. [glossary] No conflict — `CONTEXT-MAP.md` has no "artifact"/"contender" term. The distinction is real and load-bearing: the plan's Goal line explicitly says "6 artifacts in 2 fair pairings (originally framed as 4 contenders)" (`plans/2026-07-18-rc-f3g9-startup-benchmark.md` Goal). Documenting both terms prevents the "4-row flat table" error the pairing design exists to avoid.
 2. [sharpen] Two concepts. Tier = workload complexity (route topology); Metric = measured quantity. `benchmarks/README.md` future-scenarios block lists throughput/memory-under-load as *scenarios* (tier-like) while the plan separately tracks cold-start/RSS as *metrics*. They cross-product — a T2 EIP scenario could still be measured on M1 cold-start. Kept as distinct glossary rows.
-3. [scenario] Reconstruction: v1: 3 contenders (Camel-standalone, Camel-Quarkus, rust-camel). JVM contenders split A/B (2 artifacts each = 4); rust-camel splits into lib (A) + CLI (B) = 2. Total 6. v2: same 3 contenders, each expands to 4 artifacts (Pair A + Pair B × {JVM, native}) = 12 plus 2 (rust-camel has no JVM mode) = 8 total artifacts per scenario × 2 scenarios = 16 cells. Report's 4 rows per pair × 2 pairs = 8 per scenario × 2 scenarios = 16 (`docs/benchmarks/2026-07-18-benchmark-v2.md` Results tables). Consistent.
+3. [scenario] Reconstruction: v1: 3 contenders (Camel-standalone, Camel-Quarkus, rust-camel). JVM contenders split A/B (2 artifacts each = 4); rust-camel splits into lib (A) + CLI (B) = 2. Total 6. v2: same 3 contenders, each expands to 4 artifacts (Pair A + Pair B × {JVM, native}) = 12 plus 2 (rust-camel has no JVM mode) = 8 total artifacts per scenario × 2 scenarios = 16 cells. Report's 4 rows per pair × 2 pairs = 8 per scenario × 2 scenarios = 16 (`docs/benchmarks/history/2026-07-18-benchmark-v2.md` Results tables). Consistent.
 4. [cross-ref] Confirmed: `rust-camel-lib/src/main.rs` emits `.log("BENCH_ROUTE_READY", LogLevel::Info)`; harness asserts `marker_count -ne 1` is a hard failure (`run.sh` measure_once). Marker contract is real. T2 marker is the same `BENCH_ROUTE_READY` token but with `body=pong-bench` suffix on the same line — the harness `grep -cF` counts the exact full string.
 5. [v2] Each new term has a stable, citable definition: Substrate VM is the GraalVM native-image runtime (`spike-results.md` Spike 1B); native initialization is the build-time shift (v2 report "Native initialization caveat" section); fingerprint caching is `run.sh` `compute_and_check_fingerprint` (harness line ~380); Pair A predicate deviation is the spec §4.1 document. All four are recorded as glossary rows so v3+ contributors can find them without re-reading the spec/plan.
 
@@ -89,7 +91,7 @@ reason. Full arbitration history: plan doc "Measurement design correction"
 
 | Decision | Rationale |
 |---|---|
-| **Container-hosted cold-start (v3)** | M1 measures "application process cold-start inside a pre-provisioned container environment" — explicitly excluding image pull, container creation, k8s scheduling, and CI runner provisioning. All cells pay identical container tax (process startup, ld.so, libc — same container, same namespace, so it cancels in the relative comparison). The Mandrel-único runner image (`benchmarks/runner/Dockerfile`, based on `quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-21`) hosts both the build and the measurement in one long-lived container; host requires only docker. Replaces v1 "Build in Docker, run bare-metal on host": bare-metal required host-installed JDK + cargo + NixOS-specific paths, neither CI-portable nor reproducible. |
+| **Container-hosted cold-start (v3)** | M1 measures "application process cold-start inside a pre-provisioned container environment" — explicitly excluding image pull, container creation, k8s scheduling, and CI runner provisioning. All cells pay identical container tax (process startup, ld.so, libc — same container, same namespace, so it cancels in the relative comparison). The runner image (`benchmarks/runner/Dockerfile`, era-2 base `eclipse-temurin:21-jdk-jammy`, native builds delegated to `QUARKUS_NATIVE_BUILDER_IMAGE` via the host docker socket) hosts both the build and the measurement in one long-lived container; host requires only docker. Replaces v1 "Build in Docker, run bare-metal on host": bare-metal required host-installed JDK + cargo + NixOS-specific paths, neither CI-portable nor reproducible. |
 | **Single harness-side clock (no in-process timing)** | Two rejected alternatives bracket the truth: (1) timing `docker run` from *outside* over-counts (container overhead); (2) self-instrumenting from inside `main()` under-counts (skips JVM creation, bootstrap classloading, JIT init — all *before* user code, and all part of real cold-start). A single wall-clock captured immediately before `exec` and stopped at the marker captures full bootstrap with no double-clock fragility. Fixtures therefore carry **zero self-timing** — they only print the marker. |
 | **GNU `time -v` for peak RSS** | `Maximum resident set size` from `/usr/bin/time -v` is a *peak*, not an instantaneous sample. An instantaneous `/proc` read can land in a GC valley and under-report a JVM. Peak is the honest worst-case footprint. |
 | **`/run/current-system/sw/bin/time` on NixOS** | This host is NixOS: there is no `/usr/bin/time`; GNU time lives at `/run/current-system/sw/bin/time`. The bash builtin `time` does NOT support `-v`. The harness probes candidates (`/usr/bin/time`, the NixOS path, `command -v time`) and verifies `-v true` works before selecting — portable across NixOS and FHS hosts. |
@@ -115,7 +117,7 @@ reason. Full arbitration history: plan doc "Measurement design correction"
 4. [cross-ref] Does the ADR-0033 stub description match the actual `Camel.toml`, and is `/bin/true` really avoided?
 
 **Answers (with citations):**
-1. [glossary] "Bare-metal" is consistent: report Methodology says "All 6 artifacts run bare-metal on the host (build happens in Docker, execution does not)" (`docs/benchmarks/2026-07-18-startup-minimal-benchmark.md`). "Single clock" = one `date +%s%N` pair in `measure_once`, no in-process counterpart. No conflict with rust-camel runtime vocab.
+1. [glossary] "Bare-metal" is consistent: report Methodology says "All 6 artifacts run bare-metal on the host (build happens in Docker, execution does not)" (`docs/benchmarks/history/2026-07-18-startup-minimal-benchmark.md`). "Single clock" = one `date +%s%N` pair in `measure_once`, no in-process counterpart. No conflict with rust-camel runtime vocab.
 2. [sharpen] **Two distinct mechanisms, and the task brief conflates them.** (a) `Cargo.lock` is shared because the lib fixture is a *workspace member* → dep-version parity (`Cargo.toml:19` "Sharing the workspace `Cargo.lock`…isolates only parser/CLI overhead — not dep drift"). (b) `.cargo/config.toml` sets a **fixture-LOCAL** `target-dir = "target"` — the opposite of "shared" — so the binary lands at a fixed per-fixture path (`rust-camel-lib/.cargo/config.toml:12-13`). Sharpened into two separate table rows; flagged the conflation as a terminology gap (see final message).
 3. [scenario] Constructed: host with `CARGO_TARGET_DIR=/home/shared/rust-camel-target`. Plain `cargo build --release` → binary lands in the shared dir, harness path resolution *misses it*. Documented command is `env -u CARGO_TARGET_DIR cargo build --release`, which neutralizes the override; harness independently calls `cargo metadata` with the var unset to recompute the path. Both sides agree. Correct.
 4. [cross-ref] Confirmed against `rust-camel-cli/Camel.toml:29-31`: `[[default.components.exec.profiles]]` / `name = "bench-stub"` / `executable = "true"`; comment lines 21-22 explicitly warn "do NOT hardcode `/bin/true` (NixOS has no FHS)". Description matches code exactly.
@@ -251,7 +253,7 @@ without a JVM in the request path.
 1. [glossary] Consistent. Parity analysis §3.12 defines the conditioning ("benchmark is only a weapon if the ICP is named"); the report §ICP delivers named ICPs with the same vocabulary. No drift.
 2. [sharpen] One ICP with two facets: "deployment density" (RSS budget) and "dynamic route loading without a JVM in the request path" (the YAML-parse-is-free property). Kept unified in the table with both facets noted — splitting would over-fragment a single deployment shape.
 3. [scenario] Constructed: if M2 later shows rust-camel warm p99 crushing JVM p99, scale-to-zero could *re-enter* as a candidate — but that is a **future-metric** question, framed as open in §7 (M2). v1's rejection is scoped to "on the M1 cold-start data alone", which is honest. The rejection is not permanent; it is data-scoped.
-4. [cross-ref] Confirmed: Pair A row "rust-camel (embedded library) 8.0 / 9 ms, 5 956 KiB RSS, 4.8 MiB" and Pair B "rust-camel (CLI+YAML) 13.0 / 14 ms, 31 960 KiB, 86 MiB" (`docs/benchmarks/2026-07-18-startup-minimal-benchmark.md` Results). 6 MiB ≈ 5 956 KiB, 32 MiB ≈ 31 960 KiB. Numbers match.
+4. [cross-ref] Confirmed: Pair A row "rust-camel (embedded library) 8.0 / 9 ms, 5 956 KiB RSS, 4.8 MiB" and Pair B "rust-camel (CLI+YAML) 13.0 / 14 ms, 31 960 KiB, 86 MiB" (`docs/benchmarks/history/2026-07-18-startup-minimal-benchmark.md` Results). 6 MiB ≈ 5 956 KiB, 32 MiB ≈ 31 960 KiB. Numbers match.
 
 **Outcome:** confirm (ICP framings stand; noted explicitly that the scale-to-zero rejection is *data-scoped to M1*, re-openable if M2 lands — cross-linked to §7).
 
@@ -304,7 +306,7 @@ doc does **not** recommend scope. That is the next phase (brainstorm + spec).
 
 ### Scenario tiers
 
-- **Q:** ~~What would need to be true for Tier 2 (real EIPs: filter/choice/split/transform) to be the right next scenario?~~ — **Resolved:** v2 added `t2-realistic-eip` with 5 EIPs (`set_body`, `set_header`, `filter`, `choice`, `log`). Split and transform are not in T2 (split requires multi-exchange handling; transform is a synonym for `set_body` in the Camel vocabulary). Follow-up for v3+: **should T2 be extended to split + aggregate** to cover the "one-to-many" EIP surface? — that requires a multi-message harness shape (currently single-message, repeatCount=1). Follow-up resolved 2026-08-30 as the dedicated T2s scenario (`split-aggregate`, change `bench-missing-cells`): registered, six fixtures, marker-contract smoke-passed — see `benchmarks/COVERAGE.md` (T2s row). The residual question (folding split+aggregate into T2 itself) stays open.
+- **Q:** ~~What would need to be true for Tier 2 (real EIPs: filter/choice/split/transform) to be the right next scenario?~~ — **Resolved:** v2 added `t2-realistic-eip` with 5 EIPs (`set_body`, `set_header`, `filter`, `choice`, `log`). Split and transform are not in T2 (split requires multi-exchange handling; transform is a synonym for `set_body` in the Camel vocabulary). Follow-up for v3+: **should T2 be extended to split + aggregate** to cover the "one-to-many" EIP surface? — that requires a multi-message harness shape (currently single-message, repeatCount=1). Follow-up resolved 2026-08-30 as the dedicated T2s scenario (`split-aggregate`, change `bench-missing-cells`): registered, six fixtures, marker-contract smoke-passed — see `benchmarks/scenarios/COVERAGE.md` (T2s row). The residual question (folding split+aggregate into T2 itself) stays open.
 - **Q:** For Tier 3 (external deps: kafka/http)? — That the ICP shifts toward "does the runtime hold up with real I/O in the route", which cold-start cannot answer; requires a broker/server in the harness (a materially more complex, less reproducible setup).
 - **Q:** For Tier 4 (multi-route + error handling)? — That supervision/error-disposition overhead (ADR-0018/0019) becomes a claimed differentiator worth measuring.
 
@@ -345,13 +347,27 @@ doc does **not** recommend scope. That is the next phase (brainstorm + spec).
 ## Cross-references
 
 - Harness design + methodology summary: `benchmarks/README.md`
-- Published v1 report with real numbers: `docs/benchmarks/2026-07-18-startup-minimal-benchmark.md`
-- Published v2 report (native-image + T2): `docs/benchmarks/2026-07-18-benchmark-v2.md`
+- Published v1 report with real numbers: `docs/benchmarks/history/2026-07-18-startup-minimal-benchmark.md`
+- Published v2 report (native-image + T2): `docs/benchmarks/history/2026-07-18-benchmark-v2.md`
 - Full plan + 6-round methodology arbitration history (v1): `docs/superpowers/plans/2026-07-18-rc-f3g9-startup-benchmark.md`
 - v2 plan: `docs/superpowers/plans/2026-07-18-rc-p9ki-benchmark-v2.md`
 - v2 spec: `docs/superpowers/specs/2026-07-18-rc-p9ki-benchmark-v2-design.md`
-- Spike results (NixOS native build workarounds): `benchmarks/spike-results.md`
+- Spike results (NixOS native build workarounds): `benchmarks/attic/spike-results.md`
 - ICP conditioning (why a named ICP is mandatory): `docs/superpowers/analysis/analysis-apache-camel-parity-2026-06-27.md` §3.12
 - ADR-0033 (fail-closed startup validation, the reason for the `Camel.toml` exec stub): `docs/adr/0033-security-defaults-fail-closed-startup-validation.md`
 - v1 bd: `rc-f3g9` (closed)
 - v2 bd: `rc-p9ki`
+
+## Quiet-host criteria (canonical run)
+
+A canonical benchmark run is valid only on a quiet host. All three gates
+are checked immediately before the run starts; a run not meeting them is
+void — discard the results and re-run once the host is quiet. Do not
+publish or cite numbers from a void run.
+
+- **Load gate**: host 1-min load average below 3.0 for 10 consecutive
+  minutes before start.
+- **Baseline-stability gate**: devnull-baseline warmup within ±5% across
+  its last 3 probes.
+- **No-concurrent-builds gate**: no concurrent cargo/gradle/maven
+  processes — `pgrep -c 'cargo|gradle|mvn'` returns 0.

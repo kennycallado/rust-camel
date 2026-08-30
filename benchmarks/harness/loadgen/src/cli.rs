@@ -403,10 +403,12 @@ pub fn aggregate_bridge_tax_main(args: &[String]) -> ExitCode {
 /// two cells with a percentile-bootstrap CI.
 ///
 /// Usage: `aggregate-ratios <cellA.json> <cellB.json> [--seed=N]
-/// [--bci-resamples=N] [--independent]`. Validation failures print
-/// `ERROR: <reason>` to stderr and exit 2; success prints one `RATIO …`
-/// line and exits 0. See [`crate::ratios`] for the validation taxonomy
-/// and CI method.
+/// [--bci-resamples=N] [--independent] [--json]`. Validation failures
+/// print `ERROR: <reason>` to stderr and exit 2. Default output is one
+/// human `RATIO …` line; `--json` instead prints a single sorted-key
+/// JSON object (`RatioReport`, the schema v1 `ratios` shape) consumed
+/// by `benchmarks/harness/summarize.py`. See [`crate::ratios`] for the
+/// validation taxonomy and CI method.
 pub fn aggregate_ratios_main(args: &[String]) -> ExitCode {
     let (positionals, flags) = split_positionals_and_flags(args);
     if positionals.len() != 2 {
@@ -433,20 +435,65 @@ pub fn aggregate_ratios_main(args: &[String]) -> ExitCode {
         None => crate::ratios::DEFAULT_N_RESAMPLES,
     };
     let independent = flags.contains_key("independent");
+    let json_output = flags.contains_key("json");
 
-    match crate::ratios::compute_ratio(
-        std::path::Path::new(&positionals[0]),
-        std::path::Path::new(&positionals[1]),
-        independent,
-        seed,
-        n_resamples,
-    ) {
-        Ok((line, _)) => {
-            println!("{line}");
+    let a_path = std::path::Path::new(&positionals[0]);
+    let b_path = std::path::Path::new(&positionals[1]);
+    if json_output {
+        match crate::ratios::compute_ratio_report(a_path, b_path, independent, seed, n_resamples) {
+            Ok(report) => {
+                println!("{}", crate::ratios::ratio_json_line(&report));
+                ExitCode::SUCCESS
+            }
+            Err(reason) => {
+                eprintln!("ERROR: {reason}");
+                ExitCode::from(2)
+            }
+        }
+    } else {
+        match crate::ratios::compute_ratio(a_path, b_path, independent, seed, n_resamples) {
+            Ok((line, _)) => {
+                println!("{line}");
+                ExitCode::SUCCESS
+            }
+            Err(reason) => {
+                eprintln!("ERROR: {reason}");
+                ExitCode::from(2)
+            }
+        }
+    }
+}
+
+/// `payload-digest` subcommand: canonical input SHA-256 (lowercase hex,
+/// one line) for a `--scenario` + `--payload-class` pair, via the
+/// payload.rs canonical builders (see
+/// [`crate::payload::scenario_payload_digest`]). Unknown scenario or
+/// class: stderr error, exit 2 — the caller (e.g. summarize.py's
+/// `input_sha256`) must treat that as a LOUD failure, never fall back
+/// to hashing a summary artifact.
+pub fn payload_digest_main(args: &[String]) -> ExitCode {
+    let flags = parse_flags(args);
+    let scenario = match flags.get("scenario") {
+        Some(s) if !s.trim().is_empty() => s.clone(),
+        _ => {
+            eprintln!("payload-digest: --scenario=<name> is required");
+            return ExitCode::from(2);
+        }
+    };
+    let payload_class = match flags.get("payload-class") {
+        Some(c) if !c.trim().is_empty() => c.clone(),
+        _ => {
+            eprintln!("payload-digest: --payload-class=<class> is required");
+            return ExitCode::from(2);
+        }
+    };
+    match crate::payload::scenario_payload_digest(&scenario, &payload_class) {
+        Ok(digest) => {
+            println!("{digest}");
             ExitCode::SUCCESS
         }
-        Err(reason) => {
-            eprintln!("ERROR: {reason}");
+        Err(msg) => {
+            eprintln!("payload-digest: {msg}");
             ExitCode::from(2)
         }
     }

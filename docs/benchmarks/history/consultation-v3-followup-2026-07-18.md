@@ -1,3 +1,4 @@
+> Era-1 report. Frozen at git tag bench/era-1-final. Live data: benchmarks/records/.
 # Consultation follow-up — coverage matrix + bridge-aware v3 cells (2026-07-18)
 
 **Nature**: continuation of prior consultation (same session). Strategic frame now settled

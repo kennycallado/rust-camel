@@ -1,3 +1,4 @@
+> Era-1 report. Frozen at git tag bench/era-1-final. Live data: benchmarks/records/.
 # Benchmark v4 addendum — metric-family lever study (M3, rust-camel-cli)
 
 > **RESULT STATUS: SUPERSEDED.** The first attempt of this study ran

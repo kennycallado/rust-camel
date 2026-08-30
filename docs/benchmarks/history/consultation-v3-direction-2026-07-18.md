@@ -1,3 +1,4 @@
+> Era-1 report. Frozen at git tag bench/era-1-final. Live data: benchmarks/records/.
 # Consultation — benchmark suite v3+ direction (2026-07-18)
 
 **Nature**: mid-design strategic counsel, not a blessing gate. Reasoning over verdict.
