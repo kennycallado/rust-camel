@@ -3,7 +3,9 @@
 Comparative benchmark suite for rust-camel. This README uses the public
 vocabulary only: run (corrida), scenario (escenario), contender
 (contendiente), date (fecha), record (registro). Technical depth lives in
-[harness/CONTEXT.md](harness/CONTEXT.md).
+[harness/CONTEXT.md](harness/CONTEXT.md). To add a new scenario or a new
+contender, follow the recipes in
+[scenarios/README.md](scenarios/README.md).
 
 ## What a run is
 
