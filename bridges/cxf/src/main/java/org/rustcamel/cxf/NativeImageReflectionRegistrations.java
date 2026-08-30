@@ -7,6 +7,17 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  *
  * <p>Uses {@code classNames} (String-based) instead of {@code targets} (class-literal) to avoid
  * build-time class loading that can fail native-image builds.
+ *
+ * <p>This annotation is the ONLY live reflection mechanism in this bridge: Quarkus regenerates
+ * {@code META-INF/native-image/reflect-config.json} at packaging time from these {@code classNames},
+ * so any static config file placed at that path is silently ignored (its unique entries must live
+ * here instead).
+ *
+ * <p>Every entry here must be a class that exists on the runtime classpath. Nonexistent classes are
+ * silently no-ops (Quarkus writes them to the generated config, but native-image never resolves
+ * them), which hides typos. After editing this list, force a CLEAN native rebuild: Gradle's
+ * incremental cache can serve a stale compiled class to the Quarkus augmentation step, so a
+ * warm-cache rebuild may register the OLD list even though {@code compileJava} reports "executed".
  */
 @RegisterForReflection(
     classNames = {
@@ -63,6 +74,10 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       "org.apache.cxf.service.factory.FactoryBeanListenerManager",
 
       // --- CXF bus-extensions.txt (cxf-rt-*) ---
+      // AbstractBindingFactory.setBus is invoked reflectively on the producer/
+      // Dispatch path (bus-extensions.txt wiring). Without allDeclaredMethods
+      // reflection the native image throws MissingReflectionRegistrationError.
+      "org.apache.cxf.binding.AbstractBindingFactory",
       "org.apache.cxf.binding.soap.SoapBindingFactory",
       "org.apache.cxf.binding.soap.SoapTransportFactory",
       "org.apache.cxf.binding.xml.wsdl11.XMLWSDLExtensionLoader",
