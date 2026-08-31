@@ -118,6 +118,24 @@ cell. Its first run was contaminated and marked INVALID in the
 Clean re-run (quiet host): ratio 0.9890, CI [0.9785, 1.0126] — lever cost
 unresolved from zero; the re-run protocol lives there.
 
+## Node contender axis
+
+The node family (`node-native`, `node-fastify`; OpenSpec change
+`bench-node`) declares completeness: both contenders are registered in
+every active scenario, so the axis below spans all seven. No node cell
+is measured yet — every cell stays unmeasured until first container
+run (bd rc-f4po).
+
+| Scenario | node-native | node-fastify |
+|---|---|---|
+| **T1** startup-minimal | ? open-if: first published container-hosted run | ? open-if: first published container-hosted run |
+| **T2** t2-realistic-eip | ? open-if: first published container-hosted run | ? open-if: first published container-hosted run |
+| **T2j** t2-json | ? open-if: first published container-hosted run | ? open-if: first published container-hosted run |
+| **T2s** split-aggregate | ? open-if: first published container-hosted run | ? open-if: first published container-hosted run |
+| **T3** http-server | ? open-if: first published container-hosted run | ? open-if: first published container-hosted run |
+| **T4a** xslt-bridge | ? open-if: first published container-hosted run | ? open-if: first published container-hosted run |
+| **T4b** xsd-validation-bridge | ? open-if: first published container-hosted run | ? open-if: first published container-hosted run |
+
 ## ICP layer (derived, not asserted)
 
 ICPs are **derived from measured cells**, not asserted upfront. Each ICP must cite the cells

@@ -1,0 +1,12 @@
+{
+  "name": "bench-node-fastify-xslt-bridge",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "T4a xslt-bridge fixture — node-fastify contender (bench-node task 3.2)",
+  "dependencies": {
+    "fastify": "5.12.1",
+    "saxon-js": "2.7.0",
+    "xslt3": "2.7.0"
+  }
+}

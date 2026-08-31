@@ -29,6 +29,18 @@ RUST_CLI_WRAPPER="$SCENARIO_DIR/rust-camel-cli/xslt-bridge-cli-wrapper.sh"
 STAND_DSL_JAR="$SCENARIO_DIR/camel-standalone/camel-standalone-dsl/target/camel-standalone-dsl-1.0.0-jar-with-dependencies.jar"
 QD_NATIVE="$SCENARIO_DIR/camel-quarkus/camel-quarkus-dsl-native/build/camel-quarkus-dsl-native-1.0.0-runner"
 
+# Node contender legs (bench-node task 3.2). Same NODE_BIN resolution
+# chain as harness/run.sh (duplicated 8 lines, cross-referenced).
+NODE_BIN="${NODE_BIN:-}"
+if [[ -z "$NODE_BIN" && -x /opt/node/bin/node ]]; then
+    NODE_BIN=/opt/node/bin/node
+fi
+if [[ -z "$NODE_BIN" ]]; then
+    NODE_BIN="$(command -v node 2>/dev/null || echo "<missing:node>")"
+fi
+NODE_NATIVE_DIR="$SCENARIO_DIR/node-native"
+NODE_FASTIFY_DIR="$SCENARIO_DIR/node-fastify"
+
 # Reduced tick count for smoke speed (production uses 10000).
 SMOKE_REPEAT_COUNT="${SMOKE_REPEAT_COUNT:-200}"
 SMOKE_DEADLINE_MS=45000
@@ -52,6 +64,8 @@ cleanup_cell_artifacts() {
     pkill -9 -f "$CAMEL_BIN" 2>/dev/null || true
     [[ -f "$STAND_DSL_JAR" ]] && pkill -9 -f "$STAND_DSL_JAR" 2>/dev/null || true
     [[ -x "$QD_NATIVE" ]] && pkill -9 -f "$QD_NATIVE" 2>/dev/null || true
+    pkill -9 -f "$NODE_NATIVE_DIR/route.mjs" 2>/dev/null || true
+    pkill -9 -f "$NODE_FASTIFY_DIR/route.mjs" 2>/dev/null || true
     # Orphan tail/awk subprocesses from the CLI wrapper's latency tee.
     pkill -9 -f 'tail -n \+1 -F' 2>/dev/null || true
     pkill -9 -f 'awk -v lf=' 2>/dev/null || true
@@ -97,6 +111,33 @@ verify_cli_payload_byte_equality() {
         diff <(printf '%s\n' "$extracted") <(printf '%s\n' "$shared_content") | head -20 >&2
         return 1
     fi
+    return 0
+}
+
+# Digest drift guard (bench-node task 3.2 review): the committed
+# smoke evidence records the fixture's transform-output digest
+# (BENCH_XSLT_SELFTEST_SHA256, logged pre-marker). A live run whose
+# digest stops matching means engine drift (saxon-js/xslt3 version
+# bump) or shared-asset drift — fail loudly, the run is not
+# comparable to the recorded evidence. Cross-runtime parity is NOT
+# claimed: this pins THIS fixture's output against its own evidence
+# (Saxon-JS ≠ Saxon-HE serializers; see node-native/README.md).
+# Args: label live_log committed_log
+assert_node_digest() {
+    local label="$1" live_log="$2" committed_log="$3"
+    local expected
+    expected="$(grep -o 'BENCH_XSLT_SELFTEST_SHA256=[0-9a-f]*' "$committed_log" 2>/dev/null | head -1 | cut -d= -f2)"
+    if [[ -z "$expected" ]]; then
+        echo "FAIL: $label — no BENCH_XSLT_SELFTEST_SHA256 in committed evidence $committed_log"
+        FAIL=$((FAIL+1)); FAILED_ARTIFACTS+=("$label:digest-missing")
+        return 1
+    fi
+    if ! grep -q "BENCH_XSLT_SELFTEST_SHA256=$expected" "$live_log" 2>/dev/null; then
+        echo "FAIL: $label — transform digest drift (evidence: $expected)"
+        FAIL=$((FAIL+1)); FAILED_ARTIFACTS+=("$label:digest-drift")
+        return 1
+    fi
+    echo "  selftest digest: OK ($expected)"
     return 0
 }
 
@@ -215,6 +256,25 @@ launch_camel_standalone_dsl() {
         -jar "$STAND_DSL_JAR"
 }
 
+# Node legs (bench-node task 3.2): absolute script path so cleanup's
+# pkill -f matches the argv; cwd = fixture dir so the import.meta.url
+# defaults and any relative env paths resolve.
+launch_node_native() {
+    cd "$NODE_NATIVE_DIR"
+    BENCH_PAYLOAD="$SCENARIO_DIR/shared/bench-payload.xml" \
+    BENCH_STYLESHEET="$SCENARIO_DIR/shared/identity-transform.xsl" \
+    BENCH_LATENCY_FILE="/tmp/v3-protocol-b-t4a-node-native.log" \
+    "$NODE_BIN" "$NODE_NATIVE_DIR/route.mjs"
+}
+
+launch_node_fastify() {
+    cd "$NODE_FASTIFY_DIR"
+    BENCH_PAYLOAD="$SCENARIO_DIR/shared/bench-payload.xml" \
+    BENCH_STYLESHEET="$SCENARIO_DIR/shared/identity-transform.xsl" \
+    BENCH_LATENCY_FILE="/tmp/v3-protocol-b-t4a-node-fastify.log" \
+    "$NODE_BIN" "$NODE_FASTIFY_DIR/route.mjs"
+}
+
 # launch_camel_quarkus_dsl_native intentionally omitted for T4a —
 # the cell is won't-measure (Xalan cannot compile the XSLT in native
 # mode). See task-4-bug-investigation.md "T4a camel-quarkus-dsl-native
@@ -287,6 +347,38 @@ if [[ -x "$QD_NATIVE" ]]; then
     echo "SKIP: camel-quarkus-dsl-native is won't-measure for T4a (Xalan cannot compile the XSLT in native mode — see task-4-bug-investigation.md)"
 else
     echo "SKIP: $QD_NATIVE not built (T4a quarkus is won't-measure anyway)"
+fi
+
+# --- node-native (bench-node task 3.2) ---
+if [[ -x "$NODE_BIN" && -d "$NODE_NATIVE_DIR/node_modules/saxon-js" && -d "$NODE_NATIVE_DIR/node_modules/xslt3" ]]; then
+    if smoke_cell "node-native" \
+        "/tmp/v3-smoke-t4a-node-native.log" \
+        "/tmp/v3-protocol-b-t4a-node-native.log" \
+        "" \
+        launch_node_native; then
+        assert_node_digest "node-native" \
+            "/tmp/v3-smoke-t4a-node-native.log" \
+            "$SCENARIO_DIR/smoke/node-native.log"
+    fi
+else
+    echo "SKIP: node-native prerequisites not present (node binary + node_modules"
+    echo "      — run: cd $NODE_NATIVE_DIR && npm ci --omit=dev)"
+fi
+
+# --- node-fastify (bench-node task 3.2) ---
+if [[ -x "$NODE_BIN" && -d "$NODE_FASTIFY_DIR/node_modules/fastify" && -d "$NODE_FASTIFY_DIR/node_modules/saxon-js" && -d "$NODE_FASTIFY_DIR/node_modules/xslt3" ]]; then
+    if smoke_cell "node-fastify" \
+        "/tmp/v3-smoke-t4a-node-fastify.log" \
+        "/tmp/v3-protocol-b-t4a-node-fastify.log" \
+        "" \
+        launch_node_fastify; then
+        assert_node_digest "node-fastify" \
+            "/tmp/v3-smoke-t4a-node-fastify.log" \
+            "$SCENARIO_DIR/smoke/node-fastify.log"
+    fi
+else
+    echo "SKIP: node-fastify prerequisites not present (node binary + node_modules"
+    echo "      — run: cd $NODE_FASTIFY_DIR && npm ci --omit=dev)"
 fi
 
 echo

@@ -29,6 +29,18 @@ RUST_CLI_WRAPPER="$SCENARIO_DIR/rust-camel-cli/xsd-validation-bridge-cli-wrapper
 STAND_DSL_JAR="$SCENARIO_DIR/camel-standalone/camel-standalone-dsl/target/camel-standalone-dsl-1.0.0-jar-with-dependencies.jar"
 QD_NATIVE="$SCENARIO_DIR/camel-quarkus/camel-quarkus-dsl-native/build/camel-quarkus-dsl-native-1.0.0-runner"
 
+# Node contender legs (bench-node task 3.1). Same NODE_BIN resolution
+# chain as harness/run.sh (duplicated 8 lines, cross-referenced).
+NODE_BIN="${NODE_BIN:-}"
+if [[ -z "$NODE_BIN" && -x /opt/node/bin/node ]]; then
+    NODE_BIN=/opt/node/bin/node
+fi
+if [[ -z "$NODE_BIN" ]]; then
+    NODE_BIN="$(command -v node 2>/dev/null || echo "<missing:node>")"
+fi
+NODE_NATIVE_DIR="$SCENARIO_DIR/node-native"
+NODE_FASTIFY_DIR="$SCENARIO_DIR/node-fastify"
+
 # Reduced tick count for smoke speed (production uses 10000).
 SMOKE_REPEAT_COUNT="${SMOKE_REPEAT_COUNT:-200}"
 SMOKE_DEADLINE_MS=45000
@@ -53,6 +65,8 @@ cleanup_cell_artifacts() {
     pkill -9 -f "$CAMEL_BIN" 2>/dev/null || true
     [[ -f "$STAND_DSL_JAR" ]] && pkill -9 -f "$STAND_DSL_JAR" 2>/dev/null || true
     [[ -x "$QD_NATIVE" ]] && pkill -9 -f "$QD_NATIVE" 2>/dev/null || true
+    pkill -9 -f "$NODE_NATIVE_DIR/route.mjs" 2>/dev/null || true
+    pkill -9 -f "$NODE_FASTIFY_DIR/route.mjs" 2>/dev/null || true
     pkill -9 -f 'tail -n \+1 -F' 2>/dev/null || true
     pkill -9 -f 'awk -v lf=' 2>/dev/null || true
     sleep 0.5
@@ -216,6 +230,25 @@ launch_camel_quarkus_dsl_native() {
         -Dbench.latency_file="/tmp/v3-protocol-b-t4b-camel-quarkus-dsl-native.log"
 }
 
+# Node legs (bench-node task 3.1): absolute script path so cleanup's
+# pkill -f matches the argv; cwd = fixture dir so the import.meta.url
+# defaults and any relative env paths resolve.
+launch_node_native() {
+    cd "$NODE_NATIVE_DIR"
+    BENCH_PAYLOAD="$SCENARIO_DIR/shared/bench-payload.xml" \
+    BENCH_SCHEMA="$SCENARIO_DIR/shared/schema.xsd" \
+    BENCH_LATENCY_FILE="/tmp/v3-protocol-b-t4b-node-native.log" \
+    "$NODE_BIN" "$NODE_NATIVE_DIR/route.mjs"
+}
+
+launch_node_fastify() {
+    cd "$NODE_FASTIFY_DIR"
+    BENCH_PAYLOAD="$SCENARIO_DIR/shared/bench-payload.xml" \
+    BENCH_SCHEMA="$SCENARIO_DIR/shared/schema.xsd" \
+    BENCH_LATENCY_FILE="/tmp/v3-protocol-b-t4b-node-fastify.log" \
+    "$NODE_BIN" "$NODE_FASTIFY_DIR/route.mjs"
+}
+
 # Pre-flight: warn if rust-camel CLI binary missing.
 if [[ ! -x "$CAMEL_BIN" ]]; then
     echo "SKIP: \$CAMEL_BIN not built at $CAMEL_BIN (build with: cargo build --release -p camel-cli)" >&2
@@ -278,6 +311,30 @@ if [[ -x "$QD_NATIVE" ]]; then
 else
     echo "SKIP: $QD_NATIVE not built"
     echo "      build with: cd $SCENARIO_DIR/camel-quarkus && ./gradlew :camel-quarkus-dsl-native:build -Dquarkus.native.container-build=false"
+fi
+
+# --- node-native (bench-node task 3.1) ---
+if [[ -x "$NODE_BIN" && -d "$NODE_NATIVE_DIR/node_modules/xmllint-wasm" ]]; then
+    smoke_cell "node-native" \
+        "/tmp/v3-smoke-t4b-node-native.log" \
+        "/tmp/v3-protocol-b-t4b-node-native.log" \
+        "" \
+        launch_node_native
+else
+    echo "SKIP: node-native prerequisites not present (node binary + node_modules"
+    echo "      — run: cd $NODE_NATIVE_DIR && npm ci --omit=dev)"
+fi
+
+# --- node-fastify (bench-node task 3.1) ---
+if [[ -x "$NODE_BIN" && -d "$NODE_FASTIFY_DIR/node_modules/fastify" && -d "$NODE_FASTIFY_DIR/node_modules/xmllint-wasm" ]]; then
+    smoke_cell "node-fastify" \
+        "/tmp/v3-smoke-t4b-node-fastify.log" \
+        "/tmp/v3-protocol-b-t4b-node-fastify.log" \
+        "" \
+        launch_node_fastify
+else
+    echo "SKIP: node-fastify prerequisites not present (node binary + node_modules"
+    echo "      — run: cd $NODE_FASTIFY_DIR && npm ci --omit=dev)"
 fi
 
 echo

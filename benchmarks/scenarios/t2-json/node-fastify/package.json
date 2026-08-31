@@ -1,0 +1,10 @@
+{
+  "name": "bench-node-fastify-t2-json",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "T2 t2-json fixture — node-fastify contender (bench-node task 2.2)",
+  "dependencies": {
+    "fastify": "5.12.1"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "bench-node-native-xsd-validation-bridge",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "T4b xsd-validation-bridge fixture — node-native contender (bench-node task 3.1)",
+  "dependencies": {
+    "xmllint-wasm": "5.3.0"
+  }
+}

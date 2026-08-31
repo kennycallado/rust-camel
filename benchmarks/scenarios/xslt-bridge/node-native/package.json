@@ -1,0 +1,11 @@
+{
+  "name": "bench-node-native-xslt-bridge",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "T4a xslt-bridge fixture — node-native contender (bench-node task 3.2)",
+  "dependencies": {
+    "saxon-js": "2.7.0",
+    "xslt3": "2.7.0"
+  }
+}

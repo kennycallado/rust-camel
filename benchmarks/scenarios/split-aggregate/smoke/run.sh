@@ -9,6 +9,11 @@
 #   1. lib fixture   (programmatic routes, Pair A)
 #   2. CLI artifact  via `camel run` + routes/split-aggregate.yaml
 #                    (no template tokens — the array is fixed)
+#   3. Node fixtures OPTIONAL (bench-node task 2.3): node-native
+#                    (needs a node binary) and node-fastify (also
+#                    needs node_modules — run `npm ci --omit=dev` in
+#                    its dir first). Same greps — the fixed array
+#                    makes INPUT parity trivial.
 # Exit 0 on full pass; 1 on any failure.
 #
 # Usage: bash benchmarks/scenarios/split-aggregate/smoke/run.sh
@@ -126,6 +131,42 @@ CLI_LOG="$SCRIPT_DIR/rust-camel-cli.log"
     --no-watch > "$CLI_LOG" 2>&1 &
 CLI_PID=$!
 run_and_check "rust-camel-cli" "$CLI_LOG" "$CLI_PID"
+
+# ── 3. Node fixtures (bench-node task 2.3) ───────────────────────────
+# OPTIONAL legs: need a node binary (NODE_BIN override, runner install
+# path, PATH — same resolution chain as the harness); node-fastify
+# additionally needs node_modules (npm ci --omit=dev in its dir). The
+# input array is fixed, so no size env is passed and the log names
+# carry no size suffix (scenario convention).
+if [[ -n "${NODE_BIN:-}" ]]; then
+    :
+elif [[ -x /opt/node/bin/node ]]; then
+    NODE_BIN=/opt/node/bin/node
+else
+    NODE_BIN="$(command -v node 2>/dev/null || echo "")"
+fi
+echo "--- node legs (node: ${NODE_BIN:-<missing>}) ---"
+if [[ ! -x "$NODE_BIN" ]]; then
+    echo "SKIP (no node binary): node legs skipped"
+else
+    echo "--- node-native ---"
+    NODE_LOG="$SCRIPT_DIR/node-native.log"
+    (cd "$SCENARIO_DIR/node-native" \
+        && "$NODE_BIN" route.mjs) > "$NODE_LOG" 2>&1 &
+    NODE_PID=$!
+    run_and_check "node-native" "$NODE_LOG" "$NODE_PID"
+
+    if [[ -d "$SCENARIO_DIR/node-fastify/node_modules" ]]; then
+        echo "--- node-fastify ---"
+        FASTIFY_LOG="$SCRIPT_DIR/node-fastify.log"
+        (cd "$SCENARIO_DIR/node-fastify" \
+            && "$NODE_BIN" route.mjs) > "$FASTIFY_LOG" 2>&1 &
+        FASTIFY_PID=$!
+        run_and_check "node-fastify" "$FASTIFY_LOG" "$FASTIFY_PID"
+    else
+        echo "SKIP: node-fastify prerequisites not present (need npm ci --omit=dev in $SCENARIO_DIR/node-fastify)"
+    fi
+fi
 
 # ── Cleanup + summary ────────────────────────────────────────────────
 # PID-scoped kills only (run_and_check); no wide pkill — a stray

@@ -1,0 +1,10 @@
+{
+  "name": "bench-node-fastify-startup-minimal",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "T1 startup-minimal fixture — node-fastify contender (bench-node task 2.1)",
+  "dependencies": {
+    "fastify": "5.12.1"
+  }
+}

@@ -2,16 +2,24 @@
 
 A scenario is a workload (a route under measurement). A contender is
 a system under test. One scenario × one contender = one cell, the
-unit every run measures. The standard set is six contenders per
-scenario: `rust-camel-lib`, `rust-camel-cli`,
-`camel-standalone-dsl`, `camel-standalone-yaml`,
-`camel-quarkus-dsl-native`, `camel-quarkus-yaml-native`.
+unit every run measures.
+
+A **contender family** is a runtime family registered as a unit in
+the harness wiring: the `FAMILY_COMPLETENESS` map in
+`harness/run.sh` lists its members (today: the node family =
+`node-native` + `node-fastify`). A family that declares
+completeness registers EVERY member in EVERY selected active
+scenario, or in none — no cherry-picking cells where it wins.
+Families that do not declare completeness stay per-scenario opt-in;
+the documented existing exemption is the YAML artifact-set pair
+(`camel-standalone-yaml`, `camel-quarkus-yaml-native`), reduced out
+of bridge scenarios by `SCENARIO_ARTIFACT_SET`.
 
 - Coverage index: `COVERAGE.md` (which cells exist, which are
   measured).
 - Run protocol and vocabulary: `../harness/CONTEXT.md`.
 - Template scenario for everything below: `t2-json/` (newest,
-  six-artifact, canonical payload).
+  full artifact set plus the node family, canonical payload).
 
 ## Adding a new scenario
 
@@ -45,7 +53,7 @@ Template: copy the SHAPE of `t2-json/` (never its content blindly).
 6. **Smoke** — first `bash benchmarks/bench run --scenarios=<name>
    --dry-run` green (no JDK needed). Then the real smoke: every
    contender must produce the SAME input digest, byte-identical
-   across all six.
+   across the scenario's full fixture set.
 7. **Paperwork** — a row in `COVERAGE.md` with status
    `? open-if: first published container-hosted run` (never claim a
    measurement that no run produced).
@@ -59,9 +67,14 @@ Much cheaper — the scenario already exists.
 2. **Cell** — one `add_cell` line in `harness/run.sh` for the
    scenario (plus a builder only if the contender is a whole new
    runtime).
-3. **Smoke** — its input digest must be byte-identical to the other
+3. **Completeness** — declare family completeness (every member
+   registered in EVERY active scenario via `FAMILY_COMPLETENESS` in
+   `harness/run.sh`) OR cite the documented exemption (the YAML
+   artifact-set pair). A partial registration aborts: the harness
+   completeness guard fails the run before any cell is wired.
+4. **Smoke** — its input digest must be byte-identical to the other
    contenders' in the same scenario.
-4. **Paperwork** — update the scenario's row/column in
+5. **Paperwork** — update the scenario's row/column in
    `COVERAGE.md` with `open-if` until a published run measures it.
 
 ## Golden rules

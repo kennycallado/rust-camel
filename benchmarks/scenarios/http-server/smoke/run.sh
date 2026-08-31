@@ -33,6 +33,15 @@ M2_CACHE="${M2_CACHE:-/tmp/m2-cache}"
 DOCKER_MVN_IMAGE="${DOCKER_MVN_IMAGE:-maven:3.9-eclipse-temurin-21}"
 CAMEL_BIN="${CAMEL_BIN:-$WORKTREE/target/release/camel}"
 RUST_LIB_BIN="$SCENARIO_DIR/rust-camel-lib/target/release/http-server"
+# Node binary: same resolution chain as the harness (bench-node task
+# 1.1/1.2) — NODE_BIN env override, runner install path, PATH.
+if [[ -n "${NODE_BIN:-}" ]]; then
+    :
+elif [[ -x /opt/node/bin/node ]]; then
+    NODE_BIN=/opt/node/bin/node
+else
+    NODE_BIN="$(command -v node 2>/dev/null || echo "<missing:node>")"
+fi
 RUST_CLI_WRAPPER="$SCENARIO_DIR/rust-camel-cli/http-server-cli-wrapper.sh"
 STAND_DSL_JAR="$SCENARIO_DIR/camel-standalone/camel-standalone-dsl/target/camel-standalone-dsl-1.0.0-jar-with-dependencies.jar"
 STAND_YAML_JAR="$SCENARIO_DIR/camel-standalone/camel-standalone-yaml/target/camel-standalone-yaml-1.0.0-jar-with-dependencies.jar"
@@ -159,6 +168,14 @@ smoke_artifact() {
             "$QY_NATIVE" > "$log" 2>&1 &
             pid=$!
             ;;
+        node-native)
+            "$NODE_BIN" "$SCENARIO_DIR/node-native/route.mjs" > "$log" 2>&1 &
+            pid=$!
+            ;;
+        node-fastify)
+            "$NODE_BIN" "$SCENARIO_DIR/node-fastify/route.mjs" > "$log" 2>&1 &
+            pid=$!
+            ;;
         *)
             echo "  FAIL: unknown artifact '$label'"
             FAIL=$((FAIL+1))
@@ -239,6 +256,12 @@ smoke_artifact() {
         camel-quarkus-yaml|camel-quarkus-yaml-native)
             pkill -9 -f 'camel-quarkus-yaml' 2>/dev/null || true
             ;;
+        node-native)
+            pkill -9 -f 'node-native/route.mjs' 2>/dev/null || true
+            ;;
+        node-fastify)
+            pkill -9 -f 'node-fastify/route.mjs' 2>/dev/null || true
+            ;;
     esac
     kill -9 "$pid" 2>/dev/null || true
     # Wait for the main process to exit.
@@ -311,6 +334,20 @@ if [[ -x "$QY_NATIVE" ]]; then
     smoke_artifact camel-quarkus-yaml-native
 else
     echo "SKIP: $QY_NATIVE not built"
+fi
+
+if [[ -x "$NODE_BIN" && -f "$SCENARIO_DIR/node-native/route.mjs" ]]; then
+    echo "--- node-native ---"
+    smoke_artifact node-native
+else
+    echo "SKIP: node binary or node-native fixture not present ($NODE_BIN)"
+fi
+
+if [[ -x "$NODE_BIN" && -f "$SCENARIO_DIR/node-fastify/route.mjs" && -d "$SCENARIO_DIR/node-fastify/node_modules" ]]; then
+    echo "--- node-fastify ---"
+    smoke_artifact node-fastify
+else
+    echo "SKIP: node-fastify prerequisites not present (need node + npm ci)"
 fi
 
 echo

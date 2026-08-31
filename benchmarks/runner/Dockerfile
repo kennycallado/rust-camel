@@ -70,6 +70,24 @@ RUN mkdir -p $GRADLE_HOME \
     && rmdir /opt/gradle-$GRADLE_VERSION \
     && rm /tmp/gradle.zip
 
+# Node.js 22.x LTS (node contenders, OpenSpec change bench-node).
+# ARG defaults mirror the pin.sh literals — pin.sh is the single
+# source of truth; the defaults exist so a bare `docker build` still
+# works. `.tar.gz` (not .tar.xz) because xz-utils is absent from the
+# image. The tarball is SHA256-verified BEFORE extraction — a
+# mismatch fails the build (fail closed).
+ARG NODE_VERSION=22.14.0
+ARG NODE_SHA256=9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2
+ENV NODE_HOME=/opt/node
+ENV PATH=$NODE_HOME/bin:$PATH
+RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" -o /tmp/node.tar.gz \
+    && echo "${NODE_SHA256}  /tmp/node.tar.gz" | sha256sum -c - \
+    && mkdir -p $NODE_HOME \
+    && tar -xzf /tmp/node.tar.gz -C $NODE_HOME --strip-components=1 \
+    && rm /tmp/node.tar.gz \
+    && ln -s $NODE_HOME/bin/node /usr/local/bin/node \
+    && ln -s $NODE_HOME/bin/npm /usr/local/bin/npm
+
 # Cache volume mount points: pre-create with world-writable perms so
 # named volumes (maven-cache, gradle-cache) attached at runtime are
 # writable by the host UID (container runs as --user $(id -u):$(id -g)).
@@ -80,7 +98,7 @@ RUN mkdir -p /root/.m2 /root/.gradle \
 # Verify the toolchain is wired correctly (image-build-time gate).
 # No native-image here by design — native builds go through
 # $QUARKUS_NATIVE_BUILDER_IMAGE (see header).
-RUN java -version && cargo --version && mvn -version && gradle -version && /usr/bin/time --version | head -1
+RUN java -version && cargo --version && mvn -version && gradle -version && node --version && /usr/bin/time --version | head -1
 
 # Default workdir; overridden by -w /work at run time.
 WORKDIR /work

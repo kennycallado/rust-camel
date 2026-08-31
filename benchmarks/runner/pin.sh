@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Build the canonical benchmark runner image and record its digest.
 #
-# Usage: bash benchmarks/runner/pin.sh
+# Usage: bash benchmarks/runner/pin.sh [--report]
+#
+# --report prints the pin record (tool versions + digests baked into
+# the image) and exits 0 without building.
 #
 # Builds runner/Dockerfile with `docker build --iidfile`, resolves the
 # FULL image digest, and writes it to benchmarks/runner/DIGEST as
@@ -23,14 +26,55 @@
 # tags are convenience labels only.
 set -euo pipefail
 
+# =====================================================================
+# Pin record — single source of truth for the tool versions baked
+# into the runner image. The Dockerfile ARG defaults mirror these
+# literals (so a bare `docker build` still works); this script feeds
+# them via --build-arg and prints them via --report. The drift guard
+# below fails on any divergence between the two.
+# =====================================================================
+NODE_VERSION="22.14.0"
+# sha256 of node-v${NODE_VERSION}-linux-x64.tar.gz (nodejs.org/dist).
+NODE_SHA256="9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_TAG="${IMAGE_TAG:-benchmark-runner:v1}"
 DIGEST_FILE="$SCRIPT_DIR/DIGEST"
 
+REPORT_ONLY=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --report) REPORT_ONLY=true ;;
+        *) echo "error: unknown flag '$1' (usage: bash benchmarks/runner/pin.sh [--report])" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+if [[ "$REPORT_ONLY" == "true" ]]; then
+    echo "NODE_VERSION=$NODE_VERSION"
+    echo "NODE_SHA256=$NODE_SHA256"
+    exit 0
+fi
+
+# Drift guard: the Dockerfile ARG defaults must equal the pin.sh
+# literals, or a bare `docker build` (no --build-arg) would produce a
+# different image than the pinned build. Fail closed on a mismatch OR
+# a missing ARG line.
+for pin in NODE_VERSION NODE_SHA256; do
+    dockerfile_default="$(grep -E "^ARG ${pin}=" "$SCRIPT_DIR/Dockerfile" | head -1 | cut -d= -f2- || true)"
+    if [[ "$dockerfile_default" != "${!pin}" ]]; then
+        echo "error: Dockerfile ARG ${pin} default '${dockerfile_default}' drifted from pin.sh literal '${!pin}' (update one or the other)" >&2
+        exit 1
+    fi
+done
+
 iidfile="$(mktemp)"
 trap 'rm -f "$iidfile"' EXIT
 
-docker build --iidfile "$iidfile" -t "$IMAGE_TAG" -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
+docker build --iidfile "$iidfile" -t "$IMAGE_TAG" \
+    --build-arg "NODE_VERSION=$NODE_VERSION" \
+    --build-arg "NODE_SHA256=$NODE_SHA256" \
+    -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
 
 image_id="$(tr -d '[:space:]' < "$iidfile")"
 if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then

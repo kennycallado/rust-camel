@@ -18,6 +18,13 @@
 #                             camel-quarkus-{dsl,yaml} fast-jar runners.
 #                             Absent artifacts print "SKIP (not built)";
 #                             the rust pair above stays MANDATORY.
+#   5. Node fixtures   @ $PAYLOAD_BYTES  OPTIONAL (bench-node task 2.2):
+#                             node-native (needs a node binary) and
+#                             node-fastify (also needs node_modules —
+#                             run `npm ci --omit=dev` in its dir first).
+#                             Same greps; golden digest parity is INPUT
+#                             parity only (output member order differs
+#                             across serializers).
 # Exit 0 on full pass; 1 on any failure.
 #
 # Usage: bash benchmarks/scenarios/t2-json/smoke/run.sh
@@ -231,9 +238,47 @@ else
     fi
 fi
 
+# ── 5. Node fixtures @ BENCH_PAYLOAD_BYTES (bench-node task 2.2) ─────
+# OPTIONAL legs: need a node binary (NODE_BIN override, runner install
+# path, PATH — same resolution chain as the harness); node-fastify
+# additionally needs node_modules (npm ci --omit=dev in its dir).
+if [[ -n "${NODE_BIN:-}" ]]; then
+    :
+elif [[ -x /opt/node/bin/node ]]; then
+    NODE_BIN=/opt/node/bin/node
+else
+    NODE_BIN="$(command -v node 2>/dev/null || echo "")"
+fi
+echo "--- node legs (node: ${NODE_BIN:-<missing>}) ---"
+if [[ ! -x "$NODE_BIN" ]]; then
+    echo "SKIP (no node binary): node legs skipped"
+else
+    echo "--- node-native @ $PAYLOAD_BYTES ---"
+    NODE_LOG="$SCRIPT_DIR/node-native-$PAYLOAD_BYTES.log"
+    (cd "$SCENARIO_DIR/node-native" \
+        && env BENCH_PAYLOAD_BYTES="$PAYLOAD_BYTES" "$NODE_BIN" route.mjs) \
+        > "$NODE_LOG" 2>&1 &
+    NODE_PID=$!
+    run_and_check "node-native@$PAYLOAD_BYTES" "$NODE_LOG" \
+        "$((PAYLOAD_BYTES + 13))" "$GOLDEN_MAIN" "$NODE_PID"
+
+    if [[ -d "$SCENARIO_DIR/node-fastify/node_modules" ]]; then
+        echo "--- node-fastify @ $PAYLOAD_BYTES ---"
+        FASTIFY_LOG="$SCRIPT_DIR/node-fastify-$PAYLOAD_BYTES.log"
+        (cd "$SCENARIO_DIR/node-fastify" \
+            && env BENCH_PAYLOAD_BYTES="$PAYLOAD_BYTES" "$NODE_BIN" route.mjs) \
+            > "$FASTIFY_LOG" 2>&1 &
+        FASTIFY_PID=$!
+        run_and_check "node-fastify@$PAYLOAD_BYTES" "$FASTIFY_LOG" \
+            "$((PAYLOAD_BYTES + 13))" "$GOLDEN_MAIN" "$FASTIFY_PID"
+    else
+        echo "SKIP: node-fastify prerequisites not present (need npm ci --omit=dev in $SCENARIO_DIR/node-fastify)"
+    fi
+fi
+
 # ── Cleanup + summary ────────────────────────────────────────────────
-# Stray runtime processes hold nothing the next run needs, but the CLI
-# binary may linger after SIGKILL of the parent — sweep it. 2>/dev/null || true 2>/dev/null || true
+# No sweep needed: every process here is a direct child killed and
+# reaped by run_and_check, so nothing lingers into the next run.
 
 echo
 echo "=== t2-json smoke summary: $PASS pass, $FAIL fail ==="

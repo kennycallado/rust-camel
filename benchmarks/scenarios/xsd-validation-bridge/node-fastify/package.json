@@ -1,0 +1,11 @@
+{
+  "name": "bench-node-fastify-xsd-validation-bridge",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "T4b xsd-validation-bridge fixture — node-fastify contender (bench-node task 3.1)",
+  "dependencies": {
+    "fastify": "5.12.1",
+    "xmllint-wasm": "5.3.0"
+  }
+}

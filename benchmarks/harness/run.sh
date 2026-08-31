@@ -100,6 +100,23 @@ NATIVE_IMAGE_BIN="$JAVA_HOME/bin/native-image"
 # on PATH, else /opt/gradle/bin/gradle (the container's install path).
 GRADLE_BIN="${GRADLE_BIN:-$(command -v gradle 2>/dev/null || echo /opt/gradle/bin/gradle)}"
 
+# Node binary — honors NODE_BIN env (host smoke override). Prefer the
+# runner container's install path (/opt/node/bin/node), fall back to
+# `node` on PATH (host smoke). Resolution is non-fatal so --dry-run
+# works on node-less hosts: an unresolved value (<missing:node>) still
+# lists node cells with a placeholder argv — an unrunnable cell, but
+# a documented one. Measure runs get no such tolerance: the node
+# wiring site in resolve_all_cells fails loud when a fixture is
+# present and NODE_BIN is unresolved (instead of dying later at cell
+# startup as an opaque marker timeout).
+if [[ -n "${NODE_BIN:-}" ]]; then
+    :  # explicit env override wins
+elif [[ -x /opt/node/bin/node ]]; then
+    NODE_BIN=/opt/node/bin/node
+else
+    NODE_BIN="$(command -v node 2>/dev/null || echo "<missing:node>")"
+fi
+
 # Native build mode: prefer 'local' (direct native-image invocation)
 # when native-image is callable — works inside the Mandrel container
 # (native-image in $JAVA_HOME/bin) and on hosts with GraalVM CE 21+.
@@ -1167,6 +1184,31 @@ build_native_artifact() {
     fi
 }
 
+# Node fixture dependency install (bench-node task 1.2). A fixture
+# WITH package.json needs `npm ci --omit=dev` before it can run
+# (node_modules/ is never committed); a fixture WITHOUT package.json
+# is its own artifact — the committed script has zero dependencies,
+# so there is nothing to build. Keyed on package.json presence, not
+# contender name: node-native is dependency-free except in the XML
+# scenarios (saxon-js), so either contender may carry a package.json.
+# Dry-run mirrors the <would-build:...> placeholder convention so a
+# cold-checkout dry-run resolves the full cell list without npm.
+build_node_artifact() {
+    local fixture_dir="$1"
+    if [[ ! -f "$fixture_dir/package.json" ]]; then
+        return 0
+    fi
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "<would-build:npm-ci>"
+        return 0
+    fi
+    echo "  npm ci --omit=dev in $fixture_dir"
+    if ! (cd "$fixture_dir" && npm ci --omit=dev); then
+        echo "error: npm ci failed in $fixture_dir" >&2
+        exit 1
+    fi
+}
+
 # Pre-flight (4d, pre-build phase): toolchain sanity. With container
 # builds (default since v3 spike 2026-07-20), the host JDK only needs
 # to be JDK 21 (any vendor) for gradle invocation; the native-image
@@ -1379,6 +1421,96 @@ resolve_bridge_scenario_cells() {
     fi
 }
 
+# =====================================================================
+# Contender-family completeness (bench-node task 1.2, spec
+# §Contender completeness)
+# =====================================================================
+
+# Families declaring completeness register ALL their members in EVERY
+# selected active scenario, or in NONE (today: the node family =
+# node-native + node-fastify). Families NOT listed here (e.g. the
+# camel-standalone YAML artifact-set pair, absent from bridge
+# scenarios by the documented SCENARIO_ARTIFACT_SET reduction) stay
+# per-scenario opt-in. Value = space-separated member (= fixture dir)
+# names.
+declare -A FAMILY_COMPLETENESS=(
+    ["node"]="node-native node-fastify"
+)
+# WHY: guard + expected-cell count are family-generic; the wiring
+# below is node-specific — add a family->launcher dispatch when a
+# second family registers (fail-closed resolved!=expected otherwise).
+
+# Selection-scoped completeness guard. Given the run's SELECTED
+# scenario list: if the family has a fixture dir in >=1 selected
+# ACTIVE scenario (active = has a SCENARIO_MARKER entry), every member
+# must have one in ALL selected active scenarios — a partial
+# registration would silently shrink the measured matrix, so it
+# aborts BEFORE any cell wiring fires. Fixtures under INACTIVE
+# scenarios (no marker, no harness wiring — e.g. multi-step) only
+# warn: they are outside the rule until the scenario is activated.
+assert_family_completeness() {
+    local family="$1"
+    local members="${FAMILY_COMPLETENESS[$family]:-}"
+    if [[ -z "$members" ]]; then
+        echo "error: assert_family_completeness: family '$family' not registered in FAMILY_COMPLETENESS" >&2
+        exit 1
+    fi
+
+    local dir name member scenario
+    # Inactive-scenario fixtures: warn and stay outside the rule
+    # (they register no cell and count toward nothing).
+    for dir in "$SCENARIOS_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        name="${dir%/}"; name="${name##*/}"
+        if [[ -z "${SCENARIO_MARKER[$name]:-}" ]]; then
+            for member in $members; do
+                if [[ -d "$dir/$member" ]]; then
+                    echo "warning: $name is inactive; fixture not registered" >&2
+                    break
+                fi
+            done
+        fi
+    done
+
+    # Active subset of the selection. A selected inactive name keeps
+    # its pre-existing failure in resolve_all_cells' marker check;
+    # the guard itself only rules on active scenarios.
+    local -a active=()
+    for scenario in "${SCENARIOS[@]}"; do
+        [[ -n "${SCENARIO_MARKER[$scenario]:-}" ]] && active+=("$scenario")
+    done
+
+    # Trigger: the family is present anywhere in the selected active
+    # set. Zero presence = the family simply does not run this time
+    # (mid-change phases have fixtures for only some scenarios).
+    local triggered=false
+    for scenario in "${active[@]}"; do
+        for member in $members; do
+            if [[ -d "$SCENARIOS_DIR/$scenario/$member" ]]; then
+                triggered=true
+                break 2
+            fi
+        done
+    done
+    [[ "$triggered" == "true" ]] || return 0
+
+    # Missing entries are <scenario>/<member> pairs: the abort must
+    # name BOTH the contender and every scenario it is missing (spec
+    # scenario "contender family registered with a missing fixture").
+    local -a missing=()
+    for member in $members; do
+        for scenario in "${active[@]}"; do
+            if [[ ! -d "$SCENARIOS_DIR/$scenario/$member" ]]; then
+                missing+=("$scenario/$member")
+            fi
+        done
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "error: contender family $family declares completeness but is missing fixtures in: ${missing[*]}" >&2
+        exit 1
+    fi
+}
+
 # Resolve all per-cell artifacts and populate the CELLS / CELL_ARGV
 # maps. Iterates the 2 scenarios × 8 contenders = 16 cells.
 resolve_all_cells() {
@@ -1407,6 +1539,13 @@ resolve_all_cells() {
         fi
     fi
 
+    # Completeness guard BEFORE any cell wiring fires: a partially
+    # registered family aborts here, never mid-matrix.
+    local _fam
+    for _fam in "${!FAMILY_COMPLETENESS[@]}"; do
+        assert_family_completeness "$_fam"
+    done
+
     for scenario in "${SCENARIOS[@]}"; do
         local scenario_dir="$SCENARIOS_DIR/$scenario"
         if [[ ! -d "$scenario_dir" ]]; then
@@ -1419,6 +1558,46 @@ resolve_all_cells() {
             echo "       to add a scenario, declare its marker in SCENARIO_MARKER + create the fixture" >&2
             exit 1
         fi
+
+        # -- Node contender family (bench-node task 1.2) --
+        # Wires BEFORE the bridge dispatch below: bridge scenarios
+        # `continue` past the standard block, so node cells for
+        # xsd/xslt must register here or never. The completeness guard
+        # (top of resolve_all_cells) already proved the selection is
+        # all-or-nothing per family, so a present fixture dir is never
+        # a partial registration. Asset paths resolve inside the
+        # fixture via import.meta.url; the protocol-B latency file is
+        # injected EXPLICITLY per cell (task 3.1 review) so the
+        # fixtures' hardcoded defaults are only a standalone-run
+        # fallback, not a second source of truth. The `env` prefix is
+        # load-bearing: GNU time re-parses the argv list and would
+        # otherwise treat VAR=value tokens as positional args (same
+        # trick as the rust-camel-lib cell).
+        local _member _node_fixture
+        for _member in ${FAMILY_COMPLETENESS[node]}; do
+            _node_fixture="$scenario_dir/$_member"
+            [[ -d "$_node_fixture" ]] || continue
+            # Fail loud at wiring when a fixture is present but no
+            # node binary resolved: without this, a measure run dies
+            # at cell startup as an opaque marker timeout. Dry-run is
+            # exempt — CI bench-smoke dry-runs on node-less hosts and
+            # must keep documenting the cell with the placeholder argv.
+            if [[ "$DRY_RUN" == "false" && "$NODE_BIN" == "<missing"* ]]; then
+                echo "error: node fixture present but NODE_BIN unresolved (install node or set NODE_BIN)" >&2
+                exit 1
+            fi
+            if [[ ! -f "$_node_fixture/route.mjs" ]]; then
+                echo "error: node fixture entry script not found: $_node_fixture/route.mjs" >&2
+                exit 1
+            fi
+            build_node_artifact "$_node_fixture"
+            # Same cell_safe the M2 protocol-B reader derives
+            # (${cell//\//_}), so this path IS the probe path.
+            local _node_cell_safe="${scenario}_${_member}"
+            local _node_latency="/tmp/v3-protocol-b-${_node_cell_safe}.log"
+            add_cell "$scenario" "$_member" \
+                "env BENCH_LATENCY_FILE=$_node_latency $NODE_BIN $_node_fixture/route.mjs" "$marker"
+        done
 
         # -- Dispatch bridge scenarios to the 4-artifact resolver --
         # T4a/T4b have an asymmetric matrix (4 artifacts, not 8); the
@@ -2849,6 +3028,7 @@ if [[ "$METRIC" == *"m3"* ]]; then
     echo "M3/M4: rounds=${M3_ROUNDS} duration_secs=${M3_DURATION_SECS} warmup_secs=${M3_WARMUP_SECS} (T3 http-server only)"
 fi
 echo "dry-run: $DRY_RUN"
+echo "node: $NODE_BIN"
 
 # Step 1: discover scenarios.
 discover_scenarios
@@ -2864,7 +3044,8 @@ preflight_toolchain
 # fingerprint) the 2 native artifacts per scenario, then resolves the
 # 6 cells per non-bridge scenario (T4a/T4b stay at 4 — bridge
 # asymmetric matrix per spec §4.3 + e_opus round-5 verdict: bridge
-# tax is authoring-format-invariant).
+# tax is authoring-format-invariant), plus the node family cells for
+# every scenario carrying node fixtures (bench-node task 1.2).
 resolve_all_cells
 
 # Compute the expected cell count scenario-aware (T1/T2/T3 = 6 each,
@@ -2876,6 +3057,20 @@ for _s in "${SCENARIOS[@]}"; do
         bridge) expected_cells=$((expected_cells + 4)) ;;
         *)      expected_cells=$((expected_cells + 6)) ;;
     esac
+    # Completeness-declaring families add one cell per member fixture
+    # present in the scenario (bench-node task 1.2: bridge with node
+    # → 4+2=6, full with node → 6+2=8). Presence-driven, not
+    # name-driven: between bench-node phases fixtures exist for only
+    # some scenarios, and a zero-fixture selection must keep the old
+    # count (the guard inside resolve_all_cells rejects PARTIAL
+    # coverage inside a selection, so the dynamic count never papers
+    # over a gap).
+    for _fam in "${!FAMILY_COMPLETENESS[@]}"; do
+        for _member in ${FAMILY_COMPLETENESS[$_fam]}; do
+            [[ -d "$SCENARIOS_DIR/$_s/$_member" ]] \
+                && expected_cells=$((expected_cells + 1))
+        done
+    done
 done
 # Dry-run deferrals (unbuilt release binary) shrink the resolved set by
 # exactly one cli cell per affected scenario. Measurement runs never
