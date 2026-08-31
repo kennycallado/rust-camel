@@ -221,6 +221,13 @@ declare -A CELL_SCENARIO=  # cell → scenario dir
 declare -A CELL_ARGV=      # cell → space-separated argv (re-parsed on demand)
 declare -A CELL_MARKER=    # cell → expected marker string
 declare -A CELL_WONT_MEASURE=  # cell → human-readable skip reason (absent = measurable)
+# Cell launched through a `*-cli-wrapper.sh` (setsid-detached child).
+# For these cells GNU time -v reports the WRAPPER's RSS, not the
+# contender's — RSS is invalid by construction. measure_once writes
+# `null` in the rss column of samples.txt for these cells and the
+# summary tables print n/a instead of a misleading number. Elapsed ms
+# stays valid (marker flows through the wrapper's inherited stdout).
+declare -A CELL_RSS_WRAPPER=
 declare -a SCENARIOS=()    # ordered list of scenario names
 
 # Protocol A state (T3 http-server): per-cell URL + the list of cells
@@ -1781,6 +1788,11 @@ add_cell() {
     if [[ -n "$wont_measure_reason" ]]; then
         CELL_WONT_MEASURE["$cell"]="$wont_measure_reason"
     fi
+    # Wrapper-launched cell (see CELL_RSS_WRAPPER declaration): time
+    # -v would measure the bash wrapper, so RSS is invalid.
+    if [[ "$argv_str" == *cli-wrapper.sh* ]]; then
+        CELL_RSS_WRAPPER["$cell"]=1
+    fi
 }
 
 # =====================================================================
@@ -1931,6 +1943,13 @@ measure_once() {
     fi
 
     rss_kb=$(grep -oP 'Maximum resident set size \(kbytes\): \K[0-9]+' "$time_file" 2>/dev/null || true)
+    if [[ -n "${CELL_RSS_WRAPPER[$cell]:-}" ]]; then
+        # Wrapper cell (setsid child): time -v measured the bash
+        # wrapper, not the contender. Emit `null` instead of the
+        # wrapper's RSS; elapsed ms stays valid (see CELL_RSS_WRAPPER).
+        echo "$elapsed_ms null" >> "$results_file"
+        return 0
+    fi
     if [[ -z "$rss_kb" || "$rss_kb" -eq 0 ]]; then
         echo "error: invalid RSS measurement for $cell (see $time_file)" >&2
         return 1
@@ -3269,17 +3288,21 @@ fi
 # -- summary: per-scenario per-pair output (v1 had per-pair; v2 groups
 # by scenario too) --
 # v3.5: camel-quarkus-dsl + camel-quarkus-yaml (JVM mode) dropped —
-# redundant with camel-standalone-{dsl,yaml} baseline. Total: 3
-# contenders per pair × 5 scenarios = 26 cells (was 32).
-declare -a PAIR_A_CONTENDERS=(camel-standalone-dsl camel-quarkus-dsl-native rust-camel-lib)
-declare -a PAIR_B_CONTENDERS=(camel-standalone-yaml camel-quarkus-yaml-native rust-camel-cli)
+# redundant with camel-standalone-{dsl,yaml} baseline.
+# bench-node: node-native joins Pair A (bare runtime, no route-file
+# framework), node-fastify joins Pair B (framework-authored routes).
+# Total per scenario: 4 + 4 = 8 contenders.
+declare -a PAIR_A_CONTENDERS=(camel-standalone-dsl camel-quarkus-dsl-native rust-camel-lib node-native)
+declare -a PAIR_B_CONTENDERS=(camel-standalone-yaml camel-quarkus-yaml-native rust-camel-cli node-fastify)
 declare -A PAIR_LABELS=(
     ["camel-standalone-dsl"]="Pair A"
     ["camel-quarkus-dsl-native"]="Pair A (native)"
     ["rust-camel-lib"]="Pair A"
+    ["node-native"]="Pair A (node)"
     ["camel-standalone-yaml"]="Pair B"
     ["camel-quarkus-yaml-native"]="Pair B (native)"
     ["rust-camel-cli"]="Pair B"
+    ["node-fastify"]="Pair B (node)"
 )
 
 for scenario in "${SCENARIOS[@]}"; do
@@ -3293,7 +3316,11 @@ for scenario in "${SCENARIOS[@]}"; do
             echo "  $contender: SKIP — ${CELL_WONT_MEASURE[$cell]}"
         elif [[ -s "$SCRATCH_DIR/$local_safe.txt" ]]; then
             echo -n "  $contender time: "; summarize 1 "$SCRATCH_DIR/$local_safe.txt"
-            echo -n "  $contender rss:  "; summarize 2 "$SCRATCH_DIR/$local_safe.txt"
+            if [[ -n "${CELL_RSS_WRAPPER[$cell]:-}" ]]; then
+                echo "  $contender rss:  n/a (wrapper-launched; time -v measured the wrapper, not the contender)"
+            else
+                echo -n "  $contender rss:  "; summarize 2 "$SCRATCH_DIR/$local_safe.txt"
+            fi
         else
             echo "  $contender: no data (no samples in $SCRATCH_DIR/$local_safe.txt)"
         fi
@@ -3306,7 +3333,11 @@ for scenario in "${SCENARIOS[@]}"; do
             echo "  $contender: SKIP — ${CELL_WONT_MEASURE[$cell]}"
         elif [[ -s "$SCRATCH_DIR/$local_safe.txt" ]]; then
             echo -n "  $contender time: "; summarize 1 "$SCRATCH_DIR/$local_safe.txt"
-            echo -n "  $contender rss:  "; summarize 2 "$SCRATCH_DIR/$local_safe.txt"
+            if [[ -n "${CELL_RSS_WRAPPER[$cell]:-}" ]]; then
+                echo "  $contender rss:  n/a (wrapper-launched; time -v measured the wrapper, not the contender)"
+            else
+                echo -n "  $contender rss:  "; summarize 2 "$SCRATCH_DIR/$local_safe.txt"
+            fi
         else
             echo "  $contender: no data"
         fi

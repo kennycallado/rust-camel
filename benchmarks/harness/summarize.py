@@ -15,8 +15,8 @@ summaries (parse-protocol-b output) carry no `cell` field and m1 dirs
 have no summary, so those dir names are split by longest
 `scenario + "_"` prefix against the scenario set anchored by the
 sibling summaries' `cell` fields (a pure m1 run falls back to meta's
-`subset` field). A run dir that resolves to 0 cells is a LOUD error —
-never a silent empty record.
+`scenarios` field — legacy metas' `subset`). A run dir that resolves
+to 0 cells is a LOUD error — never a silent empty record.
 
 There is no m1 summary JSON: m1 medians are computed here from the raw
 samples. Ratio math is delegated to `bench-loadgen aggregate-ratios
@@ -178,9 +178,13 @@ def _cached_input_sha256(cache, scenario, payload_class):
 def _m1_samples(path):
     """Startup-ms values from a measure_once samples.txt.
 
-    Each measured line is `<elapsed_ms> <rss_kb>` (run.sh measure_once).
-    Any line whose first token is not numeric (headers, warnings) is
-    skipped explicitly; the median is computed by the caller.
+    Each measured line is `<elapsed_ms> <rss_kb>` (run.sh
+    measure_once). Wrapper-launched cells write the literal `null` in
+    the rss column (time -v measured the wrapper, not the contender)
+    — only the first column is read here, so `null` is naturally
+    tolerated. Any line whose first token is not numeric (headers,
+    warnings) is skipped explicitly; the median is computed by the
+    caller.
     """
     values = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -252,11 +256,13 @@ def load_cells(run_dir, meta=None):
                     scenario = cell.partition("/")[0]
                     if scenario:
                         scenarios.add(scenario)
-    if not scenarios and meta is not None and meta.get("subset"):
-        # Pure m1 run: scenario vocabulary from meta's `subset`.
-        scenarios = {
-            s.strip() for s in str(meta["subset"]).split(",") if s.strip()
-        }
+    if not scenarios and meta is not None and (
+        meta.get("scenarios") or meta.get("subset")
+    ):
+        # Pure m1 run: scenario vocabulary from meta's `scenarios`
+        # (legacy metas: `subset`).
+        raw = str(meta.get("scenarios") or meta.get("subset"))
+        scenarios = {s.strip() for s in raw.split(",") if s.strip()}
     # Pass 2: emit cells (identity from `cell` fields; m1/m2 via
     # longest-prefix split).
     digest_cache = {}
@@ -333,7 +339,7 @@ def _m1_cell(entry, scenarios, digest_cache):
     """m1 cell from `<scenario>_<contender>/samples.txt`.
 
     The scenario vocabulary comes from sibling summaries' `cell`
-    fields (or meta's `subset` for pure m1 runs — see
+    fields (or meta's `scenarios` for pure m1 runs — see
     [`load_cells`]); the dir name is split by longest prefix so
     contenders containing `_` are never confused with scenario names.
     No match: loud ValueError.
@@ -376,11 +382,12 @@ def build_record(run_dir, meta):
     """Assemble the run.json object per benchmarks/records/SCHEMA.md.
 
     `meta` supplies git_commit, container_digest, era, protocol,
-    host_provenance (plus optional date). `run_id` (or `run_seq` to
-    compose `<YYYYMMDD>-v<N>`) is REQUIRED — there is no default
-    sequence fallback. Ratios are NOT computed here — main() fills
-    them via compute_ratios so the builder stays subprocess-free and
-    deterministic.
+    host_provenance (plus optional date). `run_id` is REQUIRED for
+    new runs (the launch timestamp, emitted by run-all.sh). Legacy
+    metas may still carry `run_seq`, from which a
+    `<YYYYMMDD>-v<N>` id is composed. Ratios are NOT computed here —
+    main() fills them via compute_ratios so the builder stays
+    subprocess-free and deterministic.
     """
     date, compact = _run_date(run_dir, meta)
     run_id = meta.get("run_id")
@@ -616,9 +623,11 @@ def load_index(records_dir):
 def index_entry(record):
     """Index entry for a run.json object (SCHEMA.md `index.json`).
 
-    `subset` is derived from the cells' scenario names (comma-joined,
-    sorted) per the SCHEMA.md subset vocabulary; `path` is relative
-    to records/ and points at the run DIRECTORY.
+    `scenarios` is derived from the cells' scenario names
+    (comma-joined, sorted); `path` is relative to records/ and points
+    at the run DIRECTORY. (The field was `subset` pre-2026-08-31;
+    renamed with the named-subset retirement — the index was empty,
+    so no back-compat shim is needed.)
     """
     scenarios = sorted({c["scenario"] for c in record.get("cells", [])})
     return {
@@ -626,7 +635,7 @@ def index_entry(record):
         "date": record["date"],
         "era": str(record["era"]),
         "git_commit": record["git_commit"],
-        "subset": ",".join(scenarios),
+        "scenarios": ",".join(scenarios),
         "path": f"{record['run_id']}/",
     }
 

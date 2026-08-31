@@ -32,7 +32,7 @@ Top-level fields:
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema_version` | integer | Schema version. `1` for this document. |
-| `run_id` | string | `<YYYYMMDD>-v<N>`. Date-first so records sort lexicographically by date. `<N>` is a global sequence continuing era-1 numbering; the first era-2 record is `20260905-v5` style. |
+| `run_id` | string | `<YYYYMMDDTHHMMSSZ>` — the launch timestamp, plain and chronological (records sort lexicographically). No sequence numbering (retired 2026-08-31: named subsets and `-v<N>` ids drifted from the owner's product definition — one command, one complete run, one record). Legacy era-1/era-2-pre ids keep the `<YYYYMMDD>-v<N>` shape. |
 | `era` | string | `"1"` or `"2"`. A string, not an integer, so the vocabulary can grow without a type change. |
 | `date` | string | ISO-8601 date of the run. |
 | `git_commit` | string | 40-hex commit the run was measured against. |
@@ -132,11 +132,11 @@ Each entry:
 | Field | Type | Description |
 | --- | --- | --- |
 | `run_id` | string | The run's `run_id`. |
-| `date` | string | ISO-8601 date of the run (`YYYY-MM-DD`). Same-date index ties break by `run_id` sequence. |
+| `date` | string | ISO-8601 date of the run (`YYYY-MM-DD`). |
 | `era` | string | `"1"` or `"2"`. |
 | `git_commit` | string | 40-hex commit of the run. |
-| `subset` | string | Scenario subset the run covers. Vocabulary is comma-joined scenario family names or the literal `v1`; e.g. `startup-minimal,http-server,t2-json,split-aggregate`. |
-| `path` | string | Relative to `records/`, pointing at the run DIRECTORY (e.g. `20260905-v5/`); consumers append `run.json`. |
+| `scenarios` | string | Scenarios the run covers, comma-joined and sorted (derived from the cells). Pre-2026-08-31 entries carry `subset` with the same shape (legacy vocabulary). |
+| `path` | string | Relative to `records/`, pointing at the run DIRECTORY (e.g. `20260905T142601Z/`); consumers append `run.json`. |
 
 `runs` is ordered by date ascending. The object shape is versioned via
 `index_schema_version` so the index can evolve without breaking

@@ -70,25 +70,29 @@ native cell fails.
 ## 4. The run — one command
 
 ```console
-$ BENCH_SUBSET=v1 BENCH_RUN_SEQ=5 bash benchmarks/bench run-all
+$ bash benchmarks/bench run-all
 ```
 
-- **Subset**: the four validated families `startup-minimal`,
-  `http-server`, `t2-json`, `split-aggregate`. Verify without
-  touching docker:
-  `BENCH_SUBSET=v1 bash benchmarks/harness/run-all.sh --print-subset`.
-- **Wall-clock**: ~3 h. Keep the host quiet for the whole window.
+- **Coverage**: EVERY active scenario × every contender
+  (auto-discovery of `benchmarks/scenarios/` minus `spike-*` and
+  unregistered dirs like `multi-step`). No subsets, no env vars —
+  `--scenarios=` stays a harness-level developer knob only.
+- **Wall-clock**: ~4-6 h for the full matrix. Keep the host quiet for
+  the whole window.
 - **Artifacts** under `benchmarks/harness/out/<ts>/`:
   - `meta.json` — launch snapshot written by `run-all.sh`: resolved
     digest, `git_commit`, quiet-host load snapshot (one/five/fifteen),
-    protocol (rounds 5, order seed), `run_seq` 5.
+    protocol (rounds 5, order seed), and `run_id` = the launch
+    timestamp (no sequence numbering — one command, one complete run,
+    one record).
   - `<inner-timestamp>/` — the raw run dir: per-cell `samples.txt`,
     `m2-summary.json`, `provenance.json`, and
     `measurement_order.json` when M3/M4 arms run.
-
-`BENCH_RUN_SEQ=5` is what makes the record land as
-`<YYYYMMDD>-v5` (summarize.py has no `--run-id`/`--run-seq` flags;
-the meta document carries the sequence).
+- **samples.txt rss column**: wrapper-launched cells
+  (`rust-camel-cli` in `http-server` and the bridge scenarios) write
+  the literal `null` — GNU `time -v` measured the bash
+  `*-cli-wrapper.sh`, not the contender, so RSS is invalid by
+  construction there. Elapsed ms stays valid.
 
 ## 5. Post-run: summarize, publish, check
 
@@ -108,7 +112,7 @@ $ python3 benchmarks/harness/summarize.py --check benchmarks/records
   `protocol.duration_secs` (the launch estimate 10800) with the
   actual wall-clock seconds of the run.
 - `summarize` builds `run.json` + `summary.md` into `--out-dir`;
-  `run_id` composes from meta (`run_seq` 5 → `<YYYYMMDD>-v5`).
+  `run_id` comes straight from meta (the launch timestamp).
 - `publish` copies the record into `records/` and rebuilds
   `records/index.json`.
 - `--check` is the mechanical post-run guard (index/dir identity,

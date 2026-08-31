@@ -16,7 +16,7 @@ META = {
     "era": "2",
     "git_commit": "a" * 40,
     "container_digest": None,
-    "run_seq": 5,
+    "run_id": "20260905T150000Z",
     "protocol": {
         "rounds": 2,
         "duration_secs": 10.0,
@@ -245,8 +245,9 @@ class SummarizeTest(unittest.TestCase):
             self.assertIn(key, record)
         self.assertEqual(record["schema_version"], 1)
         self.assertIsInstance(record["era"], str)
-        # run_seq composes the run_id (no -v1 fallback).
-        self.assertEqual(record["run_id"], "20260905-v5")
+        # run_id comes straight from meta (launch timestamp; no
+        # sequence composition for new runs).
+        self.assertEqual(record["run_id"], "20260905T150000Z")
         # input_sha256 is the canonical INPUT digest (payload-digest),
         # not a hash of the summary artifact. Scenarios with a
         # canonical payload contract (t2-json) get the era-default
@@ -347,12 +348,19 @@ class SummarizeTest(unittest.TestCase):
             record = summarize.build_record(self.run_dir, meta)
         self.assertEqual(record["run_id"], "20260905-v9")
 
-    def test_run_id_or_run_seq_required(self):
+    def test_run_id_required_legacy_run_seq_composes(self):
         meta = dict(META)
-        del meta["run_seq"]
+        del meta["run_id"]
         with mock.patch.dict(os.environ, {"BENCH_PAYLOAD_DIGEST_BIN": "true"}):
             with self.assertRaises(ValueError):
                 summarize.build_record(self.run_dir, meta)
+        # Legacy metas (pre-2026-08-31) carry run_seq instead; the
+        # <YYYYMMDD>-v<N> composition still works for them.
+        legacy = dict(meta, run_seq=5)
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(self.run_dir, legacy)
+        self.assertEqual(record["run_id"], "20260905-v5")
 
     def test_round_values_coerces_floats_and_warns(self):
         err = io.StringIO()
@@ -491,7 +499,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(cells[0]["contender"], "rust-camel-lib")
         self.assertEqual(cells[0]["median"], 15.0)
 
-    def test_pure_m1_run_resolves_from_meta_subset(self):
+    def test_pure_m1_run_resolves_from_meta_scenarios(self):
         run = self.root / "20260905T160000Z"
         for name in ("t2-json_rust-camel-lib", "startup-minimal_rust-camel-lib"):
             cell = run / name
@@ -499,17 +507,28 @@ class SummarizeTest(unittest.TestCase):
             (cell / "samples.txt").write_text(
                 "12 900\n14 950\n", encoding="utf-8"
             )
-        meta = dict(META, subset="t2-json,startup-minimal")
         env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
-        with mock.patch.dict(os.environ, env):
-            cells = summarize.load_cells(run, meta)
-        self.assertEqual(
-            {(c["scenario"], c["contender"], c["metric"]) for c in cells},
-            {
-                ("t2-json", "rust-camel-lib", "m1"),
-                ("startup-minimal", "rust-camel-lib", "m1"),
-            },
-        )
+        for meta in (
+            dict(META, scenarios="t2-json,startup-minimal"),
+            dict(META, subset="t2-json,startup-minimal"),  # legacy key
+        ):
+            with mock.patch.dict(os.environ, env):
+                cells = summarize.load_cells(run, meta)
+            self.assertEqual(
+                {(c["scenario"], c["contender"], c["metric"]) for c in cells},
+                {
+                    ("t2-json", "rust-camel-lib", "m1"),
+                    ("startup-minimal", "rust-camel-lib", "m1"),
+                },
+            )
+
+    def test_m1_samples_tolerates_null_rss(self):
+        # Wrapper-launched cells (see run.sh CELL_RSS_WRAPPER) write
+        # `<ms> null`: time -v measured the wrapper, not the
+        # contender. _m1_samples reads only the ms column.
+        f = self.root / "null-rss-samples.txt"
+        f.write_text("34 null\n36 null\n32 null\n", encoding="utf-8")
+        self.assertEqual(summarize._m1_samples(f), [34.0, 36.0, 32.0])
 
     def test_zero_cells_is_loud(self):
         run = self.root / "20260905T170000Z"
@@ -639,7 +658,7 @@ class SummarizeTest(unittest.TestCase):
         )
         meta_path = self.root / "meta.json"
         meta_path.write_text(
-            json.dumps(dict(META, run_seq=4)), encoding="utf-8"
+            json.dumps(dict(META, run_id="20260723T161422Z")), encoding="utf-8"
         )
         out = self.root / "out"
         env = {
@@ -654,7 +673,7 @@ class SummarizeTest(unittest.TestCase):
             ])
         self.assertEqual(rc, 0)
         record = json.loads((out / "run.json").read_text(encoding="utf-8"))
-        self.assertEqual(record["run_id"], "20260723-v4")
+        self.assertEqual(record["run_id"], "20260723T161422Z")
         self.assertEqual(len(record["ratios"]), 1)
         row = record["ratios"][0]
         self.assertEqual(row["numerator"], "rust-camel-lib")

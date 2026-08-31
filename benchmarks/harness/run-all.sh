@@ -4,13 +4,13 @@
 # mounts.
 #
 # Usage: bash benchmarks/harness/run-all.sh [harness args...]
-# Example: bash benchmarks/harness/run-all.sh --metric=m1+m2 \
-#            --scenarios=startup-minimal,http-server --n=50
+# Example: bash benchmarks/harness/run-all.sh --metric=m1+m2 --n=50
 #
-# Subset pinning (bench-era-2): BENCH_SUBSET=v1 pins the run to the
-# four validated families (startup-minimal, http-server, t2-json,
-# split-aggregate). `--print-subset` prints the resolved scenario
-# list and exits 0 without touching docker.
+# NO SUBSETS (2026-08-31, owner ruling): the default run measures
+# EVERY active scenario × every contender (auto-discovery of
+# benchmarks/scenarios/ minus spike-*). `--scenarios=` remains a
+# harness-level developer/test knob only — never part of the
+# owner-facing surface (`bash benchmarks/bench run-all`).
 #
 # Digest identity (bench-era-2): without IMAGE_NAME the runner image
 # is taken from benchmarks/runner/DIGEST (pin.sh output). Local
@@ -19,10 +19,9 @@
 # re-run pin.sh so a `repo@sha256:<id>` manifest digest replaces it.
 # An explicit IMAGE_NAME override must be a digest reference
 # (`sha256:<64hex>` or `repo@sha256:<64hex>`) — any mutable tag or
-# malformed reference exits 1 pointing at pin.sh. The guard runs
-# BEFORE any docker call, so `--print-subset` never reaches the
-# daemon. A digest-pinned run NEVER auto-builds — a rebuilt image
-# would be a different digest.
+# malformed reference exits 1 pointing at pin.sh. A digest-pinned
+# run NEVER auto-builds — a rebuilt image would be a different
+# digest.
 #
 # Results redirect (bench-era-2): the container harness writes raw
 # artifacts under benchmarks/harness/out/<ts>/ (gitignored, via
@@ -36,30 +35,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-# === Step 0: v1 subset mapping + --print-subset interception ===
-BENCH_SUBSET="${BENCH_SUBSET:-}"
-case "$BENCH_SUBSET" in
-    "") SUBSET_SCENARIOS="" ;;
-    v1)
-        # The validated families (bench-era-2; spec "Canonical v1
-        # baseline run").
-        SUBSET_SCENARIOS="startup-minimal,http-server,t2-json,split-aggregate"
-        ;;
-    *)
-        echo "error: unknown BENCH_SUBSET '$BENCH_SUBSET' (supported: v1)" >&2
-        exit 2
-        ;;
-esac
-
-PRINT_SUBSET=false
-HARNESS_ARGS=()
-for arg in "$@"; do
-    if [[ "$arg" == "--print-subset" ]]; then
-        PRINT_SUBSET=true
-    else
-        HARNESS_ARGS+=("$arg")
-    fi
-done
+# === Step 0: argument passthrough (no subset concept — see header) ===
+HARNESS_ARGS=("$@")
 
 # === Digest-identity guard (ordered BEFORE any docker call): an
 # explicitly overridden IMAGE_NAME must be a digest reference —
@@ -78,15 +55,6 @@ if [[ -n "${IMAGE_NAME:-}" ]]; then
         echo "         bash benchmarks/runner/pin.sh" >&2
         exit 1
     fi
-fi
-
-if [[ "$PRINT_SUBSET" == "true" ]]; then
-    if [[ -n "$SUBSET_SCENARIOS" ]]; then
-        echo "$SUBSET_SCENARIOS"
-    else
-        echo "default: auto-discovery of every scenario under benchmarks/scenarios/"
-    fi
-    exit 0
 fi
 
 # === Step 0b: default image = the pinned digest from runner/DIGEST ===
@@ -154,28 +122,17 @@ KERNEL="$(uname -r)"
 # ~3h wall-clock estimate recorded at launch (override if known).
 PROTOCOL_DURATION="${BENCH_PROTOCOL_DURATION_SECS:-10800}"
 
-# subset string for meta: the explicit subset, else the same
-# auto-discovery set run.sh resolves (scenario dirs minus spike-*).
-if [[ -n "$SUBSET_SCENARIOS" ]]; then
-    META_SUBSET="$SUBSET_SCENARIOS"
-else
-    META_SUBSET="$(find benchmarks/scenarios -mindepth 1 -maxdepth 1 -type d \
-        ! -name 'spike-*' -printf '%f\n' | LC_ALL=C sort | paste -sd, -)"
-fi
+# Scenario vocabulary for meta: the auto-discovery set run.sh
+# resolves (scenario dirs minus spike-*). meta records `scenarios`
+# (what the run covers); the old `subset` field is retired
+# (2026-08-31 owner ruling — no named subsets).
+META_SCENARIOS="$(find benchmarks/scenarios -mindepth 1 -maxdepth 1 -type d \
+    ! -name 'spike-*' -printf '%f\n' | LC_ALL=C sort | paste -sd, -)"
 
-# summarize.py composes run_id "<YYYYMMDD>-v<seq>" from run_seq
-# (no --run-id/--run-seq CLI flags exist; the meta document carries
-# the sequence).
-RUN_SEQ_JSON=""
-if [[ -n "${BENCH_RUN_SEQ:-}" ]]; then
-    if [[ ! "$BENCH_RUN_SEQ" =~ ^[0-9]+$ ]]; then
-        echo "error: BENCH_RUN_SEQ='$BENCH_RUN_SEQ' must be a non-negative integer" >&2
-        echo "       (the run sequence that composes the record id <YYYYMMDD>-v<N>)." >&2
-        exit 1
-    fi
-    RUN_SEQ_JSON=",
-  \"run_seq\": ${BENCH_RUN_SEQ}"
-fi
+# Record identity (2026-08-31 owner ruling): run_id is the launch
+# timestamp — plain, chronological, no sequence numbering. The old
+# `run_seq` / `<YYYYMMDD>-v<N>` composition is retired for new runs
+# (summarize.py still understands run_seq in legacy metas).
 
 # SCHEMA.md container_digest is the bare `sha256:<id>` — strip a
 # push-qualified repo prefix if pin.sh recorded one.
@@ -187,10 +144,11 @@ META_DIGEST="${IMAGE_NAME##*@}"
 cat > "$OUT_ROOT/meta.json" <<EOF
 {
   "era": "2",
-  "subset": "$META_SUBSET",
+  "run_id": "$TS",
+  "scenarios": "$META_SCENARIOS",
   "git_commit": "$GIT_COMMIT",
   "container_digest": "$META_DIGEST",
-  "captured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"$RUN_SEQ_JSON,
+  "captured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "host_provenance": {
     "cpu_model": "$CPU_MODEL",
     "cores": $HOST_CORES,
@@ -212,11 +170,7 @@ cat > "$OUT_ROOT/meta.json" <<EOF
 EOF
 echo "=== meta snapshot: $OUT_ROOT/meta.json ==="
 
-# === Step 2c: subset args prepended ahead of any explicit harness args ===
-SUBSET_ARGS=()
-if [[ -n "$SUBSET_SCENARIOS" ]]; then
-    SUBSET_ARGS=(--scenarios="$SUBSET_SCENARIOS")
-fi
+# === Step 2c: harness args passthrough (no subset prepending) ===
 
 # === Step 2d: prepare cache directories (bind-mounted, host-UID-owned) ===
 # Named Docker volumes end up root-owned; chmod in Dockerfile doesn't
@@ -296,6 +250,6 @@ exec docker run --rm \
         echo "--- Phase 2: run harness ---"
         bash benchmarks/harness/run.sh "$@"
     ' \
-    _ "${SUBSET_ARGS[@]}" "${HARNESS_ARGS[@]}"
+    _ "${HARNESS_ARGS[@]}"
 # Note: the `_` placeholder occupies $0 inside the container's bash -c,
-# so "$@" correctly forwards the subset + original harness args.
+# so "$@" correctly forwards the original harness args.
