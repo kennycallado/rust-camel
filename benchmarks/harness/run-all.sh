@@ -134,7 +134,14 @@ export BENCH_SEED="$ORDER_SEED"
 BENCH_NATIVE_MODE="${BENCH_NATIVE_MODE:-docker}"
 DOCKER_SOCK_ARGS=()
 if [[ "$BENCH_NATIVE_MODE" == "docker" ]]; then
-    DOCKER_SOCK_ARGS=(-v /var/run/docker.sock:/var/run/docker.sock)
+    # The container user is the host UID without the host's supplementary
+    # groups; the docker socket is root:<docker-gid> 0660. Without
+    # --group-add the socket mount is unusable and the first native build
+    # dies with permission denied (found 2026-08-31 while hardening the
+    # first container run). Resolve the gid from the socket itself.
+    DOCKER_SOCK_GID="$(stat -c %g /var/run/docker.sock)"
+    DOCKER_SOCK_ARGS=(-v /var/run/docker.sock:/var/run/docker.sock
+        --group-add "$DOCKER_SOCK_GID")
 fi
 
 # Quiet-host snapshot (records/SCHEMA.md host_provenance.load).
@@ -220,13 +227,18 @@ mkdir -p "$CACHE_DIR/cargo" "$CACHE_DIR/m2" "$CACHE_DIR/gradle"
 
 # === Step 3: launch the runner container with the harness invocation ===
 # Mount layout:
-#   - $REPO_ROOT → /work (the entire repo, read-write for build outputs)
-#   - $CACHE_DIR/cargo  → /work/.cache/cargo  (Rust crate cache, bind-mounted)
-#   - $CACHE_DIR/m2     → /work/.cache/m2     (Maven dep cache, bind-mounted)
-#   - $CACHE_DIR/gradle → /work/.cache/gradle (Gradle dep cache, bind-mounted)
+#   - $REPO_ROOT → $REPO_ROOT (MIRRORED host path, read-write for build
+#     outputs). The mirror is load-bearing: native builds delegate to the
+#     Mandrel builder through the HOST docker daemon (docker-out-of-docker),
+#     and the daemon can only bind-mount HOST paths. If the repo sat at a
+#     container-only path (/work), every builder mount would resolve to
+#     nothing on the host and quarkusAppPartsBuild would die with
+#     NoSuchFileException /project/... (first container run 2026-08-31).
+#   - caches live under $REPO_ROOT/benchmarks/.cache (cargo, m2,
+#     gradle) and are env-pointed there — same mirrored-path rationale.
 #
 # CARGO_HOME / GRADLE_USER_HOME / MAVEN repo.local all point under
-# /work/.cache/ so the tools write to the bind-mounted dirs.
+# mirrored .cache/ so the tools write to the bind-mounted dirs.
 #
 # UID/GID:
 #   Run as the host user so build outputs (target/, build/) are
@@ -256,22 +268,23 @@ echo "=== Launching $IMAGE_NAME ==="
 #   Phase 1: build all Rust + Maven artifacts (Quarkus native deferred to harness)
 #   Phase 2: run the measurement harness
 exec docker run --rm \
-    -v "$REPO_ROOT:/work" \
+    -v "$REPO_ROOT:$REPO_ROOT" \
     "${DOCKER_SOCK_ARGS[@]}" \
-    -w /work \
+    -w "$REPO_ROOT" \
     --user "$(id -u):$(id -g)" \
     -e HOME=/tmp \
     -e LC_ALL=C \
-    -e CARGO_HOME=/work/benchmarks/.cache/cargo \
-    -e RUSTUP_HOME=/work/benchmarks/.cache/cargo/rustup \
-    -e GRADLE_USER_HOME=/work/benchmarks/.cache/gradle \
-    -e MAVEN_ARGS="-Dmaven.repo.local=/work/benchmarks/.cache/m2" \
+    -e CARGO_HOME="$REPO_ROOT/benchmarks/.cache/cargo" \
+    -e RUSTUP_HOME="$REPO_ROOT/benchmarks/.cache/cargo/rustup" \
+    -e GRADLE_USER_HOME="$REPO_ROOT/benchmarks/.cache/gradle" \
+    -e MAVEN_ARGS="-Dmaven.repo.local=$REPO_ROOT/benchmarks/.cache/m2" \
     --network host \
     -e BENCH_HTTP_URL="${BENCH_HTTP_URL:-http://127.0.0.1:8080/bench}" \
     -e BENCH_NATIVE_MODE="$BENCH_NATIVE_MODE" \
     -e QUARKUS_NATIVE_BUILDER_IMAGE \
     -e BENCH_SEED="$ORDER_SEED" \
     -e BENCH_RESULTS_ROOT="$OUT_ROOT" \
+    -e BENCH_SCRATCH_DIR="$OUT_ROOT/scratch" \
     -e NATIVE_ZLIB_LINK="" \
     -e GRADLE_BIN=/opt/gradle/bin/gradle \
     "$IMAGE_NAME" \

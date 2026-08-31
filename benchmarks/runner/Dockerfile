@@ -88,6 +88,45 @@ RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-l
     && ln -s $NODE_HOME/bin/node /usr/local/bin/node \
     && ln -s $NODE_HOME/bin/npm /usr/local/bin/npm
 
+# C toolchain for cargo build scripts and sys crates (first container
+# run 2026-08-31 died with `linker cc not found`: the toolchain gate
+# below checked cargo's presence but nothing ever LINKED, so the gap
+# survived image validation). gcc provides cc + binutils; libc6-dev supplies the crt startup
+# objects (Scrt1/crti/crtn) and static stubs (-lutil -lrt -lpthread)
+# that linking needs; cmake + make are required by aws-lc-sys
+# (rustls backend); pkg-config is
+# cheap insurance for sys crates that probe it; gawk because the
+# harness result tables use asort() — mawk (Ubuntu default) lacks it
+# (found at the first container run 2026-08-31). Separately layered
+# AFTER the downloaded toolchains so adding packages later does not
+# invalidate their cache.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc \
+        libc6-dev \
+        make \
+        cmake \
+        pkg-config \
+        gawk \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI (static, official build) for BENCH_NATIVE_MODE=docker: the
+# harness pre-flight requires a docker binary in PATH to drive native
+# builds through the host socket mounted at run time (first container
+# run 2026-08-31 died at pre-flight: host runs always had docker on
+# PATH, the image never did). CLI-only — the daemon runs on the host;
+# client/daemon skew tolerance is wide (client 28.x vs host 29.x).
+# ARG defaults mirror pin.sh literals — pin.sh is the single source of
+# truth (drift guard there fails closed). SHA256 verified before
+# extraction, same fail-closed chain as the Node layer.
+ARG DOCKER_CLI_VERSION=28.5.2
+ARG DOCKER_CLI_SHA256=ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker-cli.tgz \
+    && echo "${DOCKER_CLI_SHA256}  /tmp/docker-cli.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/docker-cli.tgz -C /tmp docker/docker --strip-components=1 \
+    && mv /tmp/docker /usr/local/bin/docker \
+    && rm /tmp/docker-cli.tgz
+
 # Cache volume mount points: pre-create with world-writable perms so
 # named volumes (maven-cache, gradle-cache) attached at runtime are
 # writable by the host UID (container runs as --user $(id -u):$(id -g)).
@@ -98,7 +137,7 @@ RUN mkdir -p /root/.m2 /root/.gradle \
 # Verify the toolchain is wired correctly (image-build-time gate).
 # No native-image here by design — native builds go through
 # $QUARKUS_NATIVE_BUILDER_IMAGE (see header).
-RUN java -version && cargo --version && mvn -version && gradle -version && node --version && /usr/bin/time --version | head -1
+RUN java -version && cargo --version && mvn -version && gradle -version && node --version && cc --version | head -1 && cmake --version | head -1 && docker --version && /usr/bin/time --version | head -1
 
 # Default workdir; overridden by -w /work at run time.
 WORKDIR /work

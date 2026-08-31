@@ -456,9 +456,18 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
-# Per-run scratch dir (v1: kept ephemeral; final results go to RUN_DIR
-# only at the end so a Ctrl-C during measurement doesn't half-write).
-SCRATCH_DIR="$(mktemp -d)"
+# Per-run scratch dir (final results go to RUN_DIR only at the end so
+# a Ctrl-C during measurement doesn't half-write). BENCH_SCRATCH_DIR
+# overrides the ephemeral default: run-all.sh points it under the
+# host-visible out/ tree (mirror mount), so a silent container death
+# (first v1 run 2026-08-31 lost 2h of M1 samples to container-local
+# /tmp) preserves samples + per-cell .out evidence for post-mortem.
+if [[ -n "${BENCH_SCRATCH_DIR:-}" ]]; then
+    mkdir -p "$BENCH_SCRATCH_DIR"
+    SCRATCH_DIR="$BENCH_SCRATCH_DIR"
+else
+    SCRATCH_DIR="$(mktemp -d)"
+fi
 echo "scratch dir: $SCRATCH_DIR"
 
 # =====================================================================
@@ -470,7 +479,7 @@ _expand_cpuset() {
     local spec="$1"
     local -n _expand_arr="$2"
     _expand_arr=()
-    [[ -z "$spec" ]] && return
+    [[ -z "$spec" ]] && return 0
     local part lo hi i
     local -a _parts=()
     IFS=',' read -ra _parts <<< "$spec"
@@ -2143,8 +2152,14 @@ kill_contender() {
 # Args: <pid>
 _kill_process_tree_recursive() {
     local pid="$1"
-    [[ -z "$pid" ]] && return
-    kill -0 "$pid" 2>/dev/null || return
+    # Bare `return` inherits the failing command's rc and, under
+    # `set -e`, silently kills the whole harness (found 2026-08-31:
+    # startup-minimal/node-native — 26ms — is slow enough to be
+    # observed in the /proc child poll but fast enough to be reaped
+    # before the post-marker kill; `kill -0` then fails and the
+    # inherited rc=1 aborted the run with no message).
+    [[ -z "$pid" ]] && return 0
+    kill -0 "$pid" 2>/dev/null || return 0
     local -A seen=()
     local -a stack=("$pid")
     local -a to_kill=()
@@ -3148,11 +3163,28 @@ if [[ "$METRIC" == "m1" || "$METRIC" == "m1+m2" ]]; then
     for ((r = 0; r < N; r++)); do
         shuffle_cells
         for cell in "${CELLS[@]}"; do
+            echo "  m1: $cell (round $((r+1))/$N)"
             if [[ -n "${CELL_WONT_MEASURE[$cell]:-}" ]]; then
                 echo "SKIP: $cell (M1 round $r) — ${CELL_WONT_MEASURE[$cell]}"
                 continue
             fi
-            measure_once "$cell" "$SCRATCH_DIR/${cell//\//_}.txt"
+            # A measured run that returns non-zero (process died before
+            # marker, 30s deadline, marker_count != 1, invalid RSS) must
+            # NOT abort the whole run. Called bare under `set -e`, the
+            # inherited rc=1 silently kills the harness mid-matrix — the
+            # same failure class as the kill-tree `return` bug (commit
+            # 59829ece), one layer deeper. Over 50 rounds × ~26 cells the
+            # transient-blip probability approaches 1 (node's ~26ms edge,
+            # JVM cold-start jitter, listener-port reuse). Warn, drop the
+            # one sample, and continue — mirrors the M2 protocol A/B loop
+            # (`|| echo warn`). n=50 with occasional drops still yields a
+            # valid p95; a genuinely broken cell surfaces as "no data" in
+            # the final summary, which the human reviews before publish.
+            # Warmup keeps its FATAL semantics (a lying smoke test), so a
+            # cell that cannot produce even one clean sample is caught
+            # before the measured runs begin.
+            measure_once "$cell" "$SCRATCH_DIR/${cell//\//_}.txt" \
+                || echo "warn: m1 measured run failed for $cell (round $((r+1))/$N); dropping sample, continuing" >&2
         done
     done
 

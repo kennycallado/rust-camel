@@ -2,6 +2,7 @@ package com.rustcamel.bench;
 
 import java.util.ArrayList;
 import java.util.List;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import org.apache.camel.AggregationStrategy;
 import org.apache.camel.Exchange;
 
@@ -17,6 +18,11 @@ import org.apache.camel.Exchange;
  * Per-family duplication of the standalone-yaml sibling's class is
  * deliberate (pairing classpath isolation).
  */
+// #class: lookup is reflective: native-image strips the class unless
+// registered. Found at the first container run (2026-08-31): the
+// YAML-native runner died with ClassNotFoundException before its
+// marker; the DSL sibling instantiates directly and never tripped.
+@RegisterForReflection
 public class ListAppendStrategy implements AggregationStrategy {
 
     /// The first fragment seeds a fresh list; every later fragment

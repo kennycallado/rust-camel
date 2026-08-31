@@ -36,6 +36,12 @@ set -euo pipefail
 NODE_VERSION="22.14.0"
 # sha256 of node-v${NODE_VERSION}-linux-x64.tar.gz (nodejs.org/dist).
 NODE_SHA256="9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2"
+# docker static CLI (official tgz, download.docker.com) for
+# BENCH_NATIVE_MODE=docker — drives host-socket native builds.
+DOCKER_CLI_VERSION="28.5.2"
+# sha256 of docker-${DOCKER_CLI_VERSION}.tgz (computed from the
+# official artifact; no .sha256 is published alongside).
+DOCKER_CLI_SHA256="ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_TAG="${IMAGE_TAG:-benchmark-runner:v1}"
@@ -53,6 +59,8 @@ done
 if [[ "$REPORT_ONLY" == "true" ]]; then
     echo "NODE_VERSION=$NODE_VERSION"
     echo "NODE_SHA256=$NODE_SHA256"
+    echo "DOCKER_CLI_VERSION=$DOCKER_CLI_VERSION"
+    echo "DOCKER_CLI_SHA256=$DOCKER_CLI_SHA256"
     exit 0
 fi
 
@@ -60,7 +68,7 @@ fi
 # literals, or a bare `docker build` (no --build-arg) would produce a
 # different image than the pinned build. Fail closed on a mismatch OR
 # a missing ARG line.
-for pin in NODE_VERSION NODE_SHA256; do
+for pin in NODE_VERSION NODE_SHA256 DOCKER_CLI_VERSION DOCKER_CLI_SHA256; do
     dockerfile_default="$(grep -E "^ARG ${pin}=" "$SCRIPT_DIR/Dockerfile" | head -1 | cut -d= -f2- || true)"
     if [[ "$dockerfile_default" != "${!pin}" ]]; then
         echo "error: Dockerfile ARG ${pin} default '${dockerfile_default}' drifted from pin.sh literal '${!pin}' (update one or the other)" >&2
@@ -74,6 +82,8 @@ trap 'rm -f "$iidfile"' EXIT
 docker build --iidfile "$iidfile" -t "$IMAGE_TAG" \
     --build-arg "NODE_VERSION=$NODE_VERSION" \
     --build-arg "NODE_SHA256=$NODE_SHA256" \
+    --build-arg "DOCKER_CLI_VERSION=$DOCKER_CLI_VERSION" \
+    --build-arg "DOCKER_CLI_SHA256=$DOCKER_CLI_SHA256" \
     -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
 
 image_id="$(tr -d '[:space:]' < "$iidfile")"

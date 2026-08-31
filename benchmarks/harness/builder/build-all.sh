@@ -10,7 +10,7 @@
 # Idempotent: cargo and mvn skip up-to-date builds.
 
 set -euo pipefail
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 
 echo "=== Building Rust artifacts ==="
@@ -19,16 +19,16 @@ echo "=== Building Rust artifacts ==="
 for scenario_dir in "$REPO_ROOT"/benchmarks/scenarios/*/rust-camel-lib; do
     [[ -d "$scenario_dir" ]] || continue
     echo "  → $(basename "$(dirname "$scenario_dir")")/rust-camel-lib"
-    (cd "$scenario_dir" && env -u CARGO_TARGET_DIR cargo build --release 2>&1 | tail -1)
+    (cd "$scenario_dir" && env -u CARGO_TARGET_DIR cargo build --release 2>&1 | tail -3)
 done
 
 # Shared rust-camel-cli binary (used by all scenarios via route YAML).
 echo "  → camel-cli (shared)"
-(cd "$REPO_ROOT" && env -u CARGO_TARGET_DIR cargo build --release -p camel-cli 2>&1 | tail -1)
+(cd "$REPO_ROOT" && env -u CARGO_TARGET_DIR cargo build --release -p camel-cli 2>&1 | tail -3)
 
 # Load generator (M2 Protocol A).
 echo "  → bench-loadgen"
-(cd "$REPO_ROOT" && env -u CARGO_TARGET_DIR cargo build --release -p bench-loadgen 2>&1 | tail -1) || true
+(cd "$REPO_ROOT" && env -u CARGO_TARGET_DIR cargo build --release -p bench-loadgen 2>&1 | tail -3) || true
 
 # XML bridge binary (T4a/T4b — bridges/xml).
 if [[ -d "$REPO_ROOT/bridges/xml" ]]; then
@@ -58,19 +58,24 @@ for standalone_dir in "$REPO_ROOT"/benchmarks/scenarios/*/camel-standalone; do
             continue
         fi
         echo "  → $scenario/$sub_name"
-        (cd "$sub" && mvn package -DskipTests -q 2>&1 | tail -1)
+        (cd "$sub" && mvn package -DskipTests -q 2>&1 | tail -3)
     done
 done
 
 echo ""
 echo "=== Build summary ==="
 echo "Rust binaries:"
-find "$REPO_ROOT"/benchmarks/scenarios/*/rust-camel-lib/target/release -maxdepth 1 -type f -executable 2>/dev/null | while read -r f; do
+# (find || true): find exits nonzero if ANY scenario lacks target/release
+# (never-built fixture); under `set -euo pipefail` that silently killed
+# the script mid-summary (first container run 2026-08-31). Listing
+# partial results is correct here — the harness fails loud later if a
+# cell's binary is actually missing.
+(find "$REPO_ROOT"/benchmarks/scenarios/*/rust-camel-lib/target/release -maxdepth 1 -type f -executable 2>/dev/null || true) | while read -r f; do
     echo "  $(basename "$f") — $(du -h "$f" | cut -f1)"
 done
 echo "camel-cli: $(du -h "$REPO_ROOT/target/release/camel" 2>/dev/null | cut -f1 || echo 'NOT FOUND')"
 echo ""
 echo "Maven jars:"
-find "$REPO_ROOT"/benchmarks/scenarios/*/camel-standalone/*/target -name '*-jar-with-dependencies.jar' 2>/dev/null | while read -r f; do
+(find "$REPO_ROOT"/benchmarks/scenarios/*/camel-standalone/*/target -name '*-jar-with-dependencies.jar' 2>/dev/null || true) | while read -r f; do
     echo "  $(basename "$f") — $(du -h "$f" | cut -f1)"
 done
