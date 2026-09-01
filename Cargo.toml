@@ -217,7 +217,7 @@ testcontainers-modules = { version = "0.15", features = ["kafka", "postgres", "r
 # windows-sys (windows) for `openat`-style relative path resolution to
 # enforce the dependency-closure contract. Feature-gated in the crate.
 rustix = { version = "0.38", features = ["fs"] }
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",
