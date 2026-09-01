@@ -1,0 +1,4 @@
+# Source: crates/camel-dsl/tests/format_aware_errors.rs:10 (const YAML_MALFORMED)
+routes:
+  - id: ""
+    from: timer:tick

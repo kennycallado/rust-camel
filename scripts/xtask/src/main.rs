@@ -1,4 +1,5 @@
 mod changelog;
+mod fuzz;
 mod lint_component_deps;
 mod lint_context_citations;
 mod lint_metric_labels;
@@ -159,6 +160,14 @@ enum Commands {
         /// without the `!:` subject marker. Used by `lint-commits` gate.
         #[arg(long)]
         check: bool,
+    },
+    /// Run a cargo-fuzz target in this worktree only
+    Fuzz {
+        /// Fuzz target name (e.g. dsl_yaml)
+        target: String,
+        /// Max total fuzzing time in seconds
+        #[arg(long, default_value_t = 60)]
+        time: u64,
     },
 }
 
@@ -429,6 +438,13 @@ fn main() {
         Commands::Changelog { from, to, check } => {
             if let Err(e) = changelog::run(from, to, check) {
                 eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Fuzz { target, time } => {
+            let root = workspace_root_or_exit();
+            if let Err(msg) = fuzz::run(&root, &target, time) {
+                eprintln!("error: {msg}");
                 std::process::exit(1);
             }
         }

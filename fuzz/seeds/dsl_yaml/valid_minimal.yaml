@@ -1,0 +1,5 @@
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - sampling: 7

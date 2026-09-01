@@ -1,0 +1,7 @@
+# Derived: valid route with an unknown step name (schema_validation.rs
+# unknown-field fixtures are serde_json::json! values, not YAML).
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - definitely_not_a_step: {}

@@ -49,6 +49,8 @@ exclude = [
     "examples/wasm-source-webhook",
     # Config-only demo (Camel.toml + routes, no Rust crate).
     "examples/allocator-demo",
+    # cargo-fuzz crate: excluded to keep the production lockfile frozen.
+    "fuzz",
 ]
 
 [workspace.metadata.crane]

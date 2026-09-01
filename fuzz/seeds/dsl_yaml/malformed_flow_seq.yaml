@@ -1,0 +1,4 @@
+# Source: crates/camel-dsl/tests/format_aware_errors.rs:69 (let yaml_bad)
+routes:
+  - id: [invalid
+    from: timer:tick

@@ -1,0 +1,19 @@
+[package]
+name = "camel-fuzz"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+camel-dsl = { path = "../crates/camel-dsl" }
+camel-api = { path = "../crates/camel-api" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "dsl_yaml"
+path = "fuzz_targets/dsl_yaml.rs"
+test = false
+doc = false
