@@ -21,7 +21,7 @@ tower.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 axum = { workspace = true, features = ["ws"] }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 tokio-tungstenite.workspace = true
 tungstenite = "0.26"
 http.workspace = true

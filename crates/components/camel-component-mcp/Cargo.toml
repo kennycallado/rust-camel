@@ -17,7 +17,7 @@ camel-auth = { workspace = true }
 camel-component-api = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 http = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = "0.26"
