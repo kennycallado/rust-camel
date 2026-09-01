@@ -205,7 +205,7 @@ rhai = { version = "1", features = ["sync", "no_module"] }
 # - urlencode: enables the |urlencode filter (used by HTTP query templates).
 minijinja = { version = "2", features = ["fuel", "json", "urlencode"] }
 # Pin to 0.21: Context is !Send + !Sync
-boa_engine = { version = "0.21", features = [] }
+boa_engine = { version = "0.22", features = [] }
 arc-swap = "1"
 humantime = "2"
 config = "0.15"
