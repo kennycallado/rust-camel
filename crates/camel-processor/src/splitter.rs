@@ -96,8 +96,10 @@ impl Service<Exchange> for SplitterService {
         let cancel_token = self.cancel_token.clone();
 
         Box::pin(async move {
-            // Split the exchange into fragments.
-            let mut fragments = expression(&exchange);
+            // Split the exchange into fragments. A typed expression error
+            // (e.g. wrong body type) fails loud instead of degrading to an
+            // empty-fragment pass-through.
+            let mut fragments = expression(&exchange)?;
 
             // If no fragments were produced, return the original exchange.
             if fragments.is_empty() {
@@ -837,9 +839,9 @@ mod tests {
     async fn test_splitter_rejects_fragment_flood() {
         // Expression that produces 5 fragments; cap at 2.
         let expression: camel_api::SplitExpression = std::sync::Arc::new(|_| {
-            (0..5)
+            Ok((0..5)
                 .map(|i| Exchange::new(Message::new(Body::Text(i.to_string()))))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>())
         });
         let cfg = SplitterConfig::new(expression).max_fragments(2);
         let passthrough = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
@@ -930,6 +932,30 @@ mod tests {
                 assert_eq!(arr[2], 3);
             }
             other => panic!("expected JSON array body, got {other:?}"),
+        }
+    }
+
+    // ── 18. Wrong body type fails loud ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_splitter_wrong_type_body_fails_loud() {
+        // Splitting a Text body with body_json_array must return Err with
+        // the typed message, not silently pass the original through.
+        let config = SplitterConfig::new(camel_api::split_body_json_array());
+        let mut svc = SplitterService::new(config, passthrough_pipeline()).unwrap();
+
+        let ex = Exchange::new(Message::new(Body::Text("a,b".to_string())));
+        let result = svc.ready().await.unwrap().call(ex).await;
+
+        let err = result.expect_err("wrong body type must fail loud, not pass through");
+        let msg = err.to_string();
+        for needle in [
+            "body_json_array",
+            "text",
+            "json (array)",
+            "add an unmarshal step before split",
+        ] {
+            assert!(msg.contains(needle), "message '{msg}' missing '{needle}'");
         }
     }
 }

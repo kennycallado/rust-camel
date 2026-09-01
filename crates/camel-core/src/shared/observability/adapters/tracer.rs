@@ -11,7 +11,7 @@ use tracing::Instrument;
 
 use crate::shared::observability::domain::{DetailLevel, MetricsLeversConfig};
 use camel_api::metrics::MetricsCollector;
-use camel_api::{Body, BoxProcessor, CIRCUIT_OPEN, CamelError, Exchange, SpanKindHint};
+use camel_api::{BoxProcessor, CIRCUIT_OPEN, CamelError, Exchange, SpanKindHint, body_type_name};
 
 /// RAII guard that ensures an OTel span is ended when dropped.
 ///
@@ -22,19 +22,6 @@ pub(crate) struct SpanEndGuard(pub(crate) OtelContext);
 impl Drop for SpanEndGuard {
     fn drop(&mut self) {
         self.0.span().end();
-    }
-}
-
-/// Returns a human-readable name for the body type variant.
-fn body_type_name(body: &Body) -> &'static str {
-    match body {
-        Body::Empty => "empty",
-        Body::Bytes(_) => "bytes",
-        Body::Text(_) => "text",
-        Body::Json(_) => "json",
-        Body::Xml(_) => "xml",
-        Body::Stream(_) => "stream",
-        _ => "unknown",
     }
 }
 

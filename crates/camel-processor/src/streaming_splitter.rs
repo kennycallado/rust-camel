@@ -230,6 +230,11 @@ mod tests {
     /// Build a `StreamingSplitExpression` that reads from `Body::Stream` and
     /// splits using the NdjsonCodec. Mirrors the resolution logic in
     /// `step_resolution.rs`.
+    ///
+    /// The non-`Body::Stream` error arm mirrors the DeclarativeStreamSplit
+    /// compile arm in
+    /// `camel-core/src/lifecycle/adapters/step_compilers/splitting.rs` and
+    /// must stay in sync with it.
     fn ndjson_stream_expression(config: camel_api::StreamSplitConfig) -> StreamingSplitExpression {
         Arc::new(move |exchange: Exchange| {
             let config = config.clone();
@@ -240,10 +245,8 @@ mod tests {
                     p
                 }),
                 _ => {
-                    return Box::pin(futures::stream::once(async {
-                        Err(CamelError::ProcessorError(
-                            "streaming split requires Body::Stream".into(),
-                        ))
+                    return Box::pin(futures::stream::once(async move {
+                        Err(camel_api::streaming_split_type_error(&exchange.input.body))
                     }));
                 }
             };
@@ -823,6 +826,41 @@ mod tests {
         match &result.input.body {
             Body::Json(v) => assert_eq!(*v, expected),
             other => panic!("expected JSON body, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_streaming_splitter_non_stream_body_typed_error() {
+        // A non-stream body fed to the streaming split expression must surface
+        // as a typed TypeConversionFailed with the unmarshal hint, not be
+        // swallowed by the service.
+        let split_config = camel_api::StreamSplitConfig {
+            format: camel_api::StreamSplitFormat::Ndjson,
+            ..Default::default()
+        };
+        let expression = ndjson_stream_expression(split_config);
+        let mut svc = StreamingSplitterService::new(
+            expression,
+            passthrough_pipeline(),
+            AggregationStrategy::LastWins,
+            true,
+        );
+
+        let result = svc.ready().await.unwrap().call(make_exchange("x")).await;
+
+        let err = result.expect_err("non-stream body must fail loud, not pass through");
+        match err {
+            CamelError::TypeConversionFailed(msg) => {
+                for needle in [
+                    "streaming split",
+                    "text",
+                    "stream",
+                    "add an unmarshal step before split",
+                ] {
+                    assert!(msg.contains(needle), "message '{msg}' missing '{needle}'");
+                }
+            }
+            other => panic!("expected TypeConversionFailed, got {other:?}"),
         }
     }
 }

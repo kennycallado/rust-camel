@@ -348,6 +348,23 @@ impl Body {
     }
 }
 
+/// Returns a human-readable name for the body type variant.
+///
+/// The camel-core tracer reuses this public helper. The `_ => "unknown"` arm
+/// stays for forward compatibility (`Body` is `#[non_exhaustive]`).
+#[allow(unreachable_patterns)]
+pub fn body_type_name(body: &Body) -> &'static str {
+    match body {
+        Body::Empty => "empty",
+        Body::Bytes(_) => "bytes",
+        Body::Text(_) => "text",
+        Body::Json(_) => "json",
+        Body::Xml(_) => "xml",
+        Body::Stream(_) => "stream",
+        _ => "unknown",
+    }
+}
+
 // Conversion impls
 impl From<String> for Body {
     fn from(s: String) -> Self {
@@ -382,6 +399,20 @@ impl From<serde_json::Value> for Body {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_body_type_name_variants() {
+        assert_eq!(body_type_name(&Body::Empty), "empty");
+        assert_eq!(body_type_name(&Body::Bytes(Bytes::new())), "bytes");
+        assert_eq!(body_type_name(&Body::Text(String::new())), "text");
+        assert_eq!(body_type_name(&Body::Json(serde_json::Value::Null)), "json");
+        assert_eq!(body_type_name(&Body::Xml(String::new())), "xml");
+        let stream_body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(None)),
+            metadata: StreamMetadata::default(),
+        });
+        assert_eq!(body_type_name(&stream_body), "stream");
+    }
 
     #[test]
     fn test_body_default_is_empty() {

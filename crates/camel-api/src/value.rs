@@ -42,3 +42,42 @@ pub fn cmp_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         (_, J::Object(_)) => std::cmp::Ordering::Greater,
     }
 }
+
+/// Returns a human-readable name for the JSON value variant.
+///
+/// Used by error messages that report the received value type without
+/// including value content. The catch-all keeps the match robust if
+/// `serde_json` ever grows variants and preserves the `other` output.
+#[allow(unreachable_patterns)]
+pub fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Number(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Object(_) => "object",
+        Value::Null => "null",
+        _ => "other",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_value_type_name_variants() {
+        assert_eq!(value_type_name(&Value::String("x".into())), "string");
+        assert_eq!(value_type_name(&Value::Array(Vec::new())), "array");
+        assert_eq!(
+            value_type_name(&Value::Number(serde_json::Number::from(1))),
+            "number"
+        );
+        assert_eq!(value_type_name(&Value::Bool(true)), "boolean");
+        assert_eq!(
+            value_type_name(&Value::Object(serde_json::Map::new())),
+            "object"
+        );
+        assert_eq!(value_type_name(&Value::Null), "null");
+    }
+}

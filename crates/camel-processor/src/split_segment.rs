@@ -134,7 +134,12 @@ impl camel_api::OutcomePipeline for SplitSegment {
 
         Box::pin(async move {
             let original = exchange;
-            let fragments = splitter(&original);
+            // A typed error from the split expression fails loud as
+            // `Failed`, carrying the original error untouched.
+            let fragments = match splitter(&original) {
+                Ok(fragments) => fragments,
+                Err(err) => return PipelineOutcome::Failed(err),
+            };
 
             if fragments.is_empty() {
                 return PipelineOutcome::Completed(original);
@@ -522,13 +527,13 @@ mod tests {
 
         // Custom splitter producing 3 fragments.
         let splitter: SplitExpression = Arc::new(|ex: &Exchange| {
-            (0..3)
+            Ok((0..3)
                 .map(|i| {
                     let mut frag = ex.clone();
                     frag.input.body = Body::Text(format!("frag-{i}"));
                     frag
                 })
-                .collect()
+                .collect())
         });
 
         /// Body that uses a barrier to synchronize all fragments past the
@@ -628,13 +633,13 @@ mod tests {
     async fn stop_inside_split_parallel_lowest_stopped_index_wins() {
         // Custom splitter producing 3 fragments with index-identifiable body.
         let splitter: SplitExpression = Arc::new(|ex: &Exchange| {
-            (0..3)
+            Ok((0..3)
                 .map(|i| {
                     let mut frag = ex.clone();
                     frag.input.body = Body::Text(format!("from-fragment-{i}"));
                     frag
                 })
-                .collect()
+                .collect())
         });
 
         // Body that stops for fragments 0 and 2; fragment 1 completes.
@@ -714,13 +719,13 @@ mod tests {
 
         // Split into 6 fragments. parallel_limit=2.
         let splitter: SplitExpression = Arc::new(|ex: &Exchange| {
-            (0..6)
+            Ok((0..6)
                 .map(|i| {
                     let mut frag = ex.clone();
                     frag.input.body = Body::Text(format!("frag-{i}"));
                     frag
                 })
-                .collect()
+                .collect())
         });
 
         let c = Arc::clone(&concurrent);
@@ -919,13 +924,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn split_parallel_stop_on_exception_true() {
         let splitter: SplitExpression = Arc::new(|ex: &Exchange| {
-            (0..5)
+            Ok((0..5)
                 .map(|i| {
                     let mut frag = ex.clone();
                     frag.input.body = Body::Text(format!("frag-{i}"));
                     frag
                 })
-                .collect()
+                .collect())
         });
 
         // All fragments fail. stop_on_exception=true → first Failed propagated.
@@ -986,13 +991,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn split_parallel_stop_on_exception_false() {
         let splitter: SplitExpression = Arc::new(|ex: &Exchange| {
-            (0..5)
+            Ok((0..5)
                 .map(|i| {
                     let mut frag = ex.clone();
                     frag.input.body = Body::Text(format!("frag-{i}"));
                     frag
                 })
-                .collect()
+                .collect())
         });
 
         // Fragment 0 passes, 1 fails, 2-4 pass.
@@ -1049,6 +1054,67 @@ mod tests {
             invocations.load(Ordering::SeqCst),
             5,
             "all fragments should be spawned"
+        );
+    }
+
+    // ── Test 10: Split expression error → Failed, body never runs ──────
+
+    #[tokio::test]
+    async fn test_split_segment_expression_error_is_failed() {
+        /// Recording body: counts invocations, always completes.
+        #[derive(Clone)]
+        struct RecordingBody {
+            counter: Arc<AtomicUsize>,
+        }
+        impl camel_api::OutcomePipeline for RecordingBody {
+            fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+                Box::new(self.clone())
+            }
+            fn run<'a>(
+                &'a mut self,
+                exchange: Exchange,
+            ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { PipelineOutcome::Completed(exchange) })
+            }
+        }
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let splitter: SplitExpression = Arc::new(|_| {
+            Err(CamelError::TypeConversionFailed(
+                "declarative split requires a text or array value, got number; add an unmarshal step before split"
+                    .to_string(),
+            ))
+        });
+
+        let mut seg = SplitSegment {
+            splitter,
+            body: OutcomeSegment::new(Box::new(RecordingBody {
+                counter: Arc::clone(&invocations),
+            })),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let ex = Exchange::new(Message::new("anything"));
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+
+        match result {
+            PipelineOutcome::Failed(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("declarative split"),
+                    "carried error should mention 'declarative split': {msg}"
+                );
+            }
+            other => panic!("Expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "body segment must record zero invocations when the split expression errors"
         );
     }
 }

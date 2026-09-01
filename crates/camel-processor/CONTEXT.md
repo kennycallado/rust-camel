@@ -218,6 +218,19 @@ Per ADR-0046 §Anti-patrones, this divergence is documented here as tracked
 content (not in a gitignored spike doc). Source: spike Splitter (commit
 `8d31e74a`), divergence label D2.
 
+The split expression fails loud on a wrong-type body. `SplitterService::call`
+propagates `CamelError::TypeConversionFailed` before fragmentation when the
+body does not match the expression's expected type. The error message names
+the expression, the received body type, and the fix: add an unmarshal step before split.
+This replaces the previous silent pass-through (eager built-ins returned the
+original exchange and left downstream aggregation unfired) and the declarative
+single-fragment fallback (the exchange was cloned as one unsplit fragment).
+
+Genuinely empty content still returns the original exchange and skips
+aggregation. `Body::Empty`, empty text, and an empty array all yield zero
+fragments, so the empty-fragment branch keeps `Ok(original)`. Only a type
+mismatch fails; empty content is not an error.
+
 ## Stateful repository EIPs (ADR-0046 retro-exempt)
 
 `IdempotentConsumerSegment` (`struct IdempotentConsumerSegment` and `impl OutcomePipeline for IdempotentConsumerSegment` in `src/idempotent_consumer.rs`) and `ClaimCheckService` (`struct ClaimCheckService` in `src/claim_check.rs`) are stateful EIPs backed by a repository trait, implemented 2026-06-27/28 (before ADR-0046 was accepted 2026-07-17). They are **retroactive-exempt** from the ADR-0046 consultation protocol per §Scope: no Camel test-mining is required. This section documents their contract **from existing behaviour** (not from a Camel comparison) so a future contributor understands the shape without re-deriving it.

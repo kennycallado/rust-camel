@@ -232,6 +232,36 @@ composes over that composite — ordering and prior observation are preserved
 (composition, not replacement).
 _Avoid_: metrics multiplexer, chained collector, collector list
 
+## Splitter
+
+**SplitExpression**:
+The fallible split expression alias (`splitter.rs`):
+`Arc<dyn Fn(&Exchange) -> Result<Vec<Exchange>, CamelError> + Send + Sync>`.
+A split expression returns a `Result`. A wrong-type body yields
+`CamelError::TypeConversionFailed` before fragmentation. The error message
+names the expression, the received body type, and the fix: add an unmarshal step before split.
+_Avoid_: split function, split closure (use SplitExpression for the alias)
+
+**split_body_lines**:
+Built-in split expression that fragments a text body per line. A `Body::Empty`
+body passes through with zero fragments. Any other body type errors with
+`CamelError::TypeConversionFailed` and the unmarshal hint.
+_Avoid_: line splitter
+
+**split_body_json_array**:
+Built-in split expression that fragments a JSON array body per element. A
+`Body::Empty` body and an empty array pass through with zero fragments. A
+non-array JSON body and any other body type error with
+`CamelError::TypeConversionFailed` and the unmarshal hint.
+_Avoid_: json array splitter
+
+**split_body**:
+The infallible custom split closure. Its bound stays `Fn(&Body) -> Vec<Body>`;
+the returned closure wraps the fragments in `Ok`. Custom closures own their
+type policy and stay infallible. An empty `Vec` from a custom closure keeps
+pass-through semantics.
+_Avoid_: custom splitter
+
 ## Example dialogue
 
 > "Where is `Exchange` defined, and where is its lifecycle?"

@@ -63,7 +63,7 @@ pub mod xml_convert;
 // Re-export core types at crate root for convenience.
 pub use aggregator::{AggregationFn, AggregatorConfig, CompletionCondition};
 pub use backoff::{BackoffConfig, BackoffState};
-pub use body::{Body, BoxAsyncRead, StreamBody, StreamMetadata};
+pub use body::{Body, BoxAsyncRead, StreamBody, StreamMetadata, body_type_name};
 pub use body_converter::{BodyType, convert as convert_body};
 pub use cache::{CacheEntry, CacheRepository, CacheStats, ContentType};
 pub use circuit_breaker::CircuitBreakerConfig;
@@ -141,14 +141,14 @@ pub use runtime::{
 pub use splitter::{
     AggregationStrategy, SplitExpression, SplitterConfig, StreamSplitConfig, StreamSplitFormat,
     StreamingSplitExpression, fragment_exchange, split_body, split_body_json_array,
-    split_body_lines,
+    split_body_lines, streaming_split_type_error,
 };
 pub use ssrf::{SsrfPolicy, is_ssrf_blocked_ip};
 pub use step_lifecycle::{StepLifecycle, StepShutdownReason};
 pub use supervision::SupervisionConfig;
 pub use throttler::{ThrottleStrategy, ThrottlerConfig};
 pub use unit_of_work::UnitOfWorkConfig;
-pub use value::{Headers, Value, cmp_values};
+pub use value::{Headers, Value, cmp_values, value_type_name};
 
 // Template types
 pub use template::{

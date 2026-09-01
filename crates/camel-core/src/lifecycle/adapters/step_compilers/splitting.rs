@@ -123,11 +123,11 @@ impl StepCompiler for SplittingCompiler {
                 steps,
             } => {
                 let lang_expr = compile_language_expression(ctx.languages, &expression)?;
-                let split_fn: camel_api::splitter::SplitExpression =
-                    Arc::new(move |exchange: &Exchange| {
+                let split_fn: camel_api::splitter::SplitExpression = Arc::new(
+                    move |exchange: &Exchange| {
                         let value = await_eval(&lang_expr, exchange);
                         match value {
-                            Value::String(s) => s
+                            Value::String(s) => Ok(s
                                 .lines()
                                 .filter(|line| !line.is_empty())
                                 .map(|line| {
@@ -135,18 +135,22 @@ impl StepCompiler for SplittingCompiler {
                                     fragment.input.body = Body::from(line.to_string());
                                     fragment
                                 })
-                                .collect(),
-                            Value::Array(arr) => arr
+                                .collect()),
+                            Value::Array(arr) => Ok(arr
                                 .into_iter()
                                 .map(|v| {
                                     let mut fragment = exchange.clone();
                                     fragment.input.body = Body::from(v);
                                     fragment
                                 })
-                                .collect(),
-                            _ => vec![exchange.clone()],
+                                .collect()),
+                            _ => Err(CamelError::TypeConversionFailed(format!(
+                                "declarative split requires a text or array value, got {received}; add an unmarshal step before split",
+                                received = camel_api::value_type_name(&value)
+                            ))),
                         }
-                    });
+                    },
+                );
 
                 let (sub_segments, lifecycles) = ctx.compile_children_segments(steps, registry)?;
                 let body_segment = compose_outcome_segment(sub_segments);
@@ -262,11 +266,12 @@ impl StepCompiler for SplittingCompiler {
                                         p
                                     }),
                                     _ => {
-                                        return Box::pin(futures::stream::once(async {
-                                            Err(CamelError::ProcessorError(
-                                                "streaming split requires Body::Stream".into(),
-                                            ))
-                                        }));
+                                        let err = camel_api::streaming_split_type_error(
+                                            &exchange.input.body,
+                                        );
+                                        return Box::pin(futures::stream::once(
+                                            async move { Err(err) },
+                                        ));
                                     }
                                 };
                                 let stream = match take_stream(&stream_body) {
@@ -431,7 +436,22 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    use crate::lifecycle::adapters::step_compilers::build_registry;
     use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
+    use crate::lifecycle::application::route_definition::LanguageExpressionDef;
+    use camel_api::{BoxProcessorExt, OpaqueProcessor, PipelineOutcome};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Language registry with `SimpleLanguage` under key `"simple"` —
+    /// follows the `languages_with_simple` pattern from `step_resolution.rs`.
+    fn languages_with_simple() -> SharedLanguageRegistry {
+        let mut map: HashMap<String, Arc<dyn camel_language_api::Language>> = HashMap::new();
+        map.insert(
+            "simple".to_string(),
+            Arc::new(camel_language_simple::SimpleLanguage::new()),
+        );
+        Arc::new(std::sync::Mutex::new(map))
+    }
 
     /// Shared context builder — follows the pattern from `mod.rs::dispatch_tests::ctx`.
     #[allow(clippy::too_many_arguments)]
@@ -562,5 +582,166 @@ mod tests {
 
         let result = lifecycle.shutdown(StepShutdownReason::RouteStop).await;
         assert!(result.is_ok(), "shutdown should return Ok(())");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_declarative_split_non_text_non_array_fails() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages = languages_with_simple();
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        // Body segment records invocations; the count must stay at zero when
+        // the split expression fails (no cloned-fragment fallback).
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        let split_step = BuilderStep::DeclarativeSplit {
+            expression: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${header.num}".into(),
+            },
+            aggregation: camel_api::splitter::AggregationStrategy::LastWins,
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: false,
+            steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                BoxProcessor::from_fn(move |ex: Exchange| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(ex) })
+                }),
+            ))],
+        };
+
+        let reg = build_registry();
+
+        let result = reg
+            .compile_step(split_step, 0, &ctx)
+            .expect("compilation should succeed")
+            .expect("should match DeclarativeSplit");
+
+        let mut segment = match result {
+            CompiledStep::Segment { segment, .. } => segment,
+            other => panic!("Expected CompiledStep::Segment, got {other:?}"),
+        };
+
+        let mut exchange = Exchange::new(camel_api::Message::new("ignored"));
+        exchange.input.set_header("num", Value::Number(1.into()));
+
+        let outcome = segment.run(exchange).await;
+        match outcome {
+            PipelineOutcome::Failed(err) => {
+                let msg = err.to_string();
+                assert!(
+                    matches!(err, CamelError::TypeConversionFailed(_)),
+                    "expected TypeConversionFailed, got: {msg}"
+                );
+                assert!(msg.contains("declarative split"), "message: {msg}");
+                assert!(msg.contains("number"), "message: {msg}");
+                assert!(msg.contains("text or array"), "message: {msg}");
+                assert!(
+                    msg.contains("add an unmarshal step before split"),
+                    "message: {msg}"
+                );
+            }
+            other => panic!(
+                "expected PipelineOutcome::Failed, got success={}",
+                other.is_success()
+            ),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "body segment must not run when the split expression fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_declarative_stream_split_non_stream_body_typed_error() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let split_step = BuilderStep::DeclarativeStreamSplit {
+            stream_config: camel_api::StreamSplitConfig {
+                format: StreamSplitFormat::Ndjson,
+                ..Default::default()
+            },
+            aggregation: camel_api::splitter::AggregationStrategy::LastWins,
+            stop_on_exception: false,
+            steps: vec![],
+        };
+
+        let reg = build_registry();
+
+        let result = reg
+            .compile_step(split_step, 0, &ctx)
+            .expect("compilation should succeed")
+            .expect("should match DeclarativeStreamSplit");
+
+        let mut segment = match result {
+            CompiledStep::Segment { segment, .. } => segment,
+            other => panic!("Expected CompiledStep::Segment, got {other:?}"),
+        };
+
+        let exchange = Exchange::new(camel_api::Message::new(Body::Text("x".into())));
+
+        // The first pull of the compiled expression surfaces the typed error
+        // (the segment translates it to PipelineOutcome::Failed).
+        let outcome = segment.run(exchange).await;
+        match outcome {
+            PipelineOutcome::Failed(err) => {
+                let msg = err.to_string();
+                assert!(
+                    matches!(err, CamelError::TypeConversionFailed(_)),
+                    "expected TypeConversionFailed, got: {msg}"
+                );
+                assert!(msg.contains("streaming split"), "message: {msg}");
+                assert!(msg.contains("text"), "message: {msg}");
+                assert!(msg.contains("stream"), "message: {msg}");
+                assert!(
+                    msg.contains("add an unmarshal step before split"),
+                    "message: {msg}"
+                );
+            }
+            other => panic!(
+                "expected PipelineOutcome::Failed, got success={}",
+                other.is_success()
+            ),
+        }
     }
 }

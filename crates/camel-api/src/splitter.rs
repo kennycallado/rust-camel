@@ -3,13 +3,18 @@ use std::sync::Arc;
 
 use futures::Stream;
 
-use crate::body::Body;
+use crate::body::{Body, body_type_name};
 use crate::error::CamelError;
 use crate::exchange::Exchange;
 use crate::message::Message;
 
 /// A function that splits a single exchange into multiple fragment exchanges.
-pub type SplitExpression = Arc<dyn Fn(&Exchange) -> Vec<Exchange> + Send + Sync>;
+///
+/// Built-in expressions return [`CamelError::TypeConversionFailed`] when the
+/// body type does not match their input contract; empty-content bodies yield
+/// `Ok(Vec::new())` (pass-through).
+pub type SplitExpression =
+    Arc<dyn Fn(&Exchange) -> Result<Vec<Exchange>, CamelError> + Send + Sync>;
 
 /// A function that lazily produces a stream of exchange fragments.
 ///
@@ -22,6 +27,16 @@ pub type StreamingSplitExpression = Arc<
         + Send
         + Sync,
 >;
+
+/// Typed error returned when a streaming split receives a body that is not
+/// `Body::Stream`. Shared by the compiled production expression, the test
+/// mirrors, and examples so the message cannot drift between copies.
+pub fn streaming_split_type_error(body: &Body) -> CamelError {
+    CamelError::TypeConversionFailed(format!(
+        "streaming split requires body type stream, got {}; add an unmarshal step before split",
+        body_type_name(body)
+    ))
+}
 
 /// Strategy for aggregating fragment results back into a single exchange.
 #[derive(Clone, Default)]
@@ -311,43 +326,72 @@ pub fn fragment_exchange(parent: &Exchange, body: Body) -> Exchange {
 }
 
 /// Split the exchange body by newlines. Returns one fragment per line.
-/// Non-text bodies produce an empty vec.
+///
+/// Empty bodies pass through with zero fragments. Wrong-type bodies return a
+/// [`CamelError::TypeConversionFailed`] naming the received body type and the
+/// expected `text` input.
 pub fn split_body_lines() -> SplitExpression {
     Arc::new(|exchange: &Exchange| {
         let text = match &exchange.input.body {
             Body::Text(s) => s.as_str(),
-            _ => return Vec::new(),
+            Body::Empty => return Ok(Vec::new()),
+            _ => {
+                return Err(CamelError::TypeConversionFailed(format!(
+                    "split expression 'body_lines' requires body type text, got {received}; add an unmarshal step before split",
+                    received = body_type_name(&exchange.input.body)
+                )));
+            }
         };
-        text.lines()
+        Ok(text
+            .lines()
             .map(|line| fragment_exchange(exchange, Body::Text(line.to_string())))
-            .collect()
+            .collect())
     })
 }
 
 /// Split a JSON array body into one fragment per element.
-/// Non-array bodies produce an empty vec.
+///
+/// Empty bodies and empty arrays pass through with zero fragments. Non-array
+/// JSON and wrong-type bodies return a [`CamelError::TypeConversionFailed`]
+/// naming the received body type and the expected `json (array)` input.
 pub fn split_body_json_array() -> SplitExpression {
     Arc::new(|exchange: &Exchange| {
         let arr = match &exchange.input.body {
             Body::Json(serde_json::Value::Array(arr)) => arr,
-            _ => return Vec::new(),
+            Body::Empty => return Ok(Vec::new()),
+            Body::Json(_) => {
+                return Err(CamelError::TypeConversionFailed(
+                    "split expression 'body_json_array' requires body type json (array), got json (non-array); add an unmarshal step before split"
+                        .to_string(),
+                ))
+            }
+            _ => {
+                return Err(CamelError::TypeConversionFailed(format!(
+                    "split expression 'body_json_array' requires body type json (array), got {received}; add an unmarshal step before split",
+                    received = body_type_name(&exchange.input.body)
+                )))
+            }
         };
-        arr.iter()
+        Ok(arr
+            .iter()
             .map(|val| fragment_exchange(exchange, Body::Json(val.clone())))
-            .collect()
+            .collect())
     })
 }
 
 /// Split the exchange body using a custom function that operates on the body.
+///
+/// Custom closures stay infallible: they own their body-type policy and an
+/// empty `Vec` keeps pass-through semantics.
 pub fn split_body<F>(f: F) -> SplitExpression
 where
     F: Fn(&Body) -> Vec<Body> + Send + Sync + 'static,
 {
     Arc::new(move |exchange: &Exchange| {
-        f(&exchange.input.body)
+        Ok(f(&exchange.input.body)
             .into_iter()
             .map(|body| fragment_exchange(exchange, body))
-            .collect()
+            .collect())
     })
 }
 
@@ -362,7 +406,7 @@ mod tests {
         ex.input.set_header("source", Value::String("test".into()));
         ex.set_property("trace", Value::Bool(true));
 
-        let fragments = split_body_lines()(&ex);
+        let fragments = split_body_lines()(&ex).unwrap();
         assert_eq!(fragments.len(), 3);
         assert_eq!(fragments[0].input.body.as_text(), Some("a"));
         assert_eq!(fragments[1].input.body.as_text(), Some("b"));
@@ -381,7 +425,7 @@ mod tests {
     #[test]
     fn test_split_body_lines_empty() {
         let ex = Exchange::new(Message::default()); // Body::Empty
-        let fragments = split_body_lines()(&ex);
+        let fragments = split_body_lines()(&ex).unwrap();
         assert!(fragments.is_empty());
     }
 
@@ -390,7 +434,7 @@ mod tests {
         let arr = serde_json::json!([1, 2, 3]);
         let ex = Exchange::new(Message::new(arr));
 
-        let fragments = split_body_json_array()(&ex);
+        let fragments = split_body_json_array()(&ex).unwrap();
         assert_eq!(fragments.len(), 3);
         assert!(matches!(&fragments[0].input.body, Body::Json(v) if *v == serde_json::json!(1)));
         assert!(matches!(&fragments[1].input.body, Body::Json(v) if *v == serde_json::json!(2)));
@@ -402,8 +446,104 @@ mod tests {
         let obj = serde_json::json!({"not": "array"});
         let ex = Exchange::new(Message::new(obj));
 
-        let fragments = split_body_json_array()(&ex);
+        let err = split_body_json_array()(&ex).unwrap_err();
+        assert!(matches!(err, CamelError::TypeConversionFailed(_)));
+        assert!(err.to_string().contains("json (non-array)"));
+    }
+
+    #[test]
+    fn test_split_body_lines_wrong_type_json_errors() {
+        let ex = Exchange::new(Message::new(serde_json::json!({"a": 1})));
+
+        let err = split_body_lines()(&ex).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, CamelError::TypeConversionFailed(_)));
+        for needle in [
+            "body_lines",
+            "json",
+            "text",
+            "add an unmarshal step before split",
+        ] {
+            assert!(msg.contains(needle), "message '{msg}' missing '{needle}'");
+        }
+    }
+
+    #[test]
+    fn test_split_body_json_array_wrong_type_text_errors() {
+        let ex = Exchange::new(Message::new("x"));
+
+        let err = split_body_json_array()(&ex).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, CamelError::TypeConversionFailed(_)));
+        for needle in [
+            "body_json_array",
+            "text",
+            "json (array)",
+            "add an unmarshal step before split",
+        ] {
+            assert!(msg.contains(needle), "message '{msg}' missing '{needle}'");
+        }
+    }
+
+    #[test]
+    fn test_split_body_json_array_non_array_json_errors() {
+        let ex = Exchange::new(Message::new(serde_json::json!({"o": 1})));
+
+        let err = split_body_json_array()(&ex).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, CamelError::TypeConversionFailed(_)));
+        assert!(msg.contains("json (non-array)"));
+    }
+
+    #[test]
+    fn test_split_body_lines_empty_body_ok() {
+        let ex = Exchange::new(Message::default()); // Body::Empty
+        let fragments = split_body_lines()(&ex).unwrap();
         assert!(fragments.is_empty());
+    }
+
+    #[test]
+    fn test_split_body_json_array_empty_body_ok() {
+        let ex = Exchange::new(Message::default()); // Body::Empty
+        let fragments = split_body_json_array()(&ex).unwrap();
+        assert!(fragments.is_empty());
+    }
+
+    #[test]
+    fn test_split_body_json_array_empty_array_ok() {
+        let ex = Exchange::new(Message::new(serde_json::json!([])));
+        let fragments = split_body_json_array()(&ex).unwrap();
+        assert!(fragments.is_empty());
+    }
+
+    #[test]
+    fn test_split_body_lines_empty_text_ok() {
+        let ex = Exchange::new(Message::new(""));
+        let fragments = split_body_lines()(&ex).unwrap();
+        assert!(fragments.is_empty());
+    }
+
+    #[test]
+    fn test_split_error_omits_payload() {
+        let ex = Exchange::new(Message::new(serde_json::json!({
+            "secret": "SECRET-8f31a"
+        })));
+
+        let err = split_body_lines()(&ex).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, CamelError::TypeConversionFailed(_)));
+        for needle in [
+            "body_lines",
+            "json",
+            "text",
+            "add an unmarshal step before split",
+        ] {
+            assert!(msg.contains(needle), "message '{msg}' missing '{needle}'");
+        }
+        assert!(
+            !msg.contains("SECRET-8f31a"),
+            "message '{msg}' leaks payload"
+        );
     }
 
     #[test]
@@ -419,7 +559,7 @@ mod tests {
         let mut ex = Exchange::new(Message::new("x, y, z"));
         ex.set_property("id", Value::from(42));
 
-        let fragments = splitter(&ex);
+        let fragments = splitter(&ex).unwrap();
         assert_eq!(fragments.len(), 3);
         assert_eq!(fragments[0].input.body.as_text(), Some("x"));
         assert_eq!(fragments[1].input.body.as_text(), Some("y"));
@@ -459,13 +599,13 @@ mod tests {
 
     #[test]
     fn test_splitter_config_default_max_fragments() {
-        let cfg = SplitterConfig::new(Arc::new(|_: &Exchange| Vec::new()) as SplitExpression);
+        let cfg = SplitterConfig::new(Arc::new(|_: &Exchange| Ok(Vec::new())) as SplitExpression);
         assert_eq!(cfg.max_fragments, 100_000);
     }
 
     #[test]
     fn test_splitter_config_rejects_zero_max_fragments() {
-        let cfg = SplitterConfig::new(Arc::new(|_: &Exchange| Vec::new()) as SplitExpression)
+        let cfg = SplitterConfig::new(Arc::new(|_: &Exchange| Ok(Vec::new())) as SplitExpression)
             .max_fragments(0);
         assert!(cfg.validate().is_err());
     }
@@ -490,7 +630,7 @@ mod tests {
         parent.otel_context = Context::current().with_remote_span_context(span_context);
 
         // Create fragment via split_body_lines
-        let fragments = split_body_lines()(&parent);
+        let fragments = split_body_lines()(&parent).unwrap();
         assert!(!fragments.is_empty(), "Should have at least one fragment");
 
         // Verify each fragment has the same span context as parent
@@ -602,7 +742,7 @@ mod tests {
         );
         parent.otel_context = Context::current().with_remote_span_context(span_context);
 
-        let fragments = split_body_lines()(&parent);
+        let fragments = split_body_lines()(&parent).unwrap();
         assert_eq!(fragments.len(), 3);
 
         // All fragments should share the same trace ID

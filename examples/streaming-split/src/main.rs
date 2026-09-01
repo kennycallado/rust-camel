@@ -46,11 +46,8 @@ fn make_streaming_expression() -> camel_api::StreamingSplitExpression {
                 p
             }),
             _ => {
-                return Box::pin(futures::stream::once(async {
-                    Err(CamelError::ProcessorError(
-                        "streaming split requires Body::Stream".into(),
-                    ))
-                }));
+                let err = camel_api::streaming_split_type_error(&exchange.input.body);
+                return Box::pin(futures::stream::once(async move { Err(err) }));
             }
         };
         let stream = match stream_body.stream.try_lock() {
