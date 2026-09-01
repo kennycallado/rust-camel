@@ -1034,6 +1034,7 @@ pub(crate) fn route_step_to_declarative_step(
                 completion_predicate,
                 strategy,
                 max_buckets: aggregate.max_buckets,
+                max_bucket_size: aggregate.max_bucket_size,
                 bucket_ttl_ms: aggregate.bucket_ttl_ms,
                 force_completion_on_stop: aggregate.force_completion_on_stop,
                 discard_on_timeout: aggregate.discard_on_timeout,

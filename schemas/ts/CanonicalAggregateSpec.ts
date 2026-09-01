@@ -2,7 +2,12 @@
 import type { CanonicalAggregateStrategySpec } from "./CanonicalAggregateStrategySpec";
 import type { LanguageExpressionDef } from "./LanguageExpressionDef";
 
-export type CanonicalAggregateSpec = { header: string, completion_size: number | null, completion_timeout_ms: number, correlation_key: string | null, force_completion_on_stop: boolean | null, discard_on_timeout: boolean | null, strategy: CanonicalAggregateStrategySpec, max_buckets: number | null, bucket_ttl_ms: number, 
+export type CanonicalAggregateSpec = { header: string, completion_size: number | null, completion_timeout_ms: number, correlation_key: string | null, force_completion_on_stop: boolean | null, discard_on_timeout: boolean | null, strategy: CanonicalAggregateStrategySpec, max_buckets: number | null, 
+/**
+ * Per-bucket accumulation bound (audit 2026-08-31, F6-2).
+ * Absent = builder default (10_000).
+ */
+max_bucket_size: number | null, bucket_ttl_ms: number, 
 /**
  * Language expression predicate; completes the bucket when it evaluates
  * true against the incoming exchange (runtime-resolved via the language

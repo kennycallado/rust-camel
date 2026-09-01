@@ -280,6 +280,10 @@ pub struct CanonicalAggregateSpec {
     pub discard_on_timeout: Option<bool>,
     pub strategy: CanonicalAggregateStrategySpec,
     pub max_buckets: Option<usize>,
+    /// Per-bucket accumulation bound (audit 2026-08-31, F6-2).
+    /// Absent = builder default (10_000).
+    #[serde(default)]
+    pub max_bucket_size: Option<usize>,
     #[ts(type = "number")]
     pub bucket_ttl_ms: Option<u64>,
     /// Language expression predicate; completes the bucket when it evaluates
@@ -840,6 +844,7 @@ mod tests {
             discard_on_timeout: None,
             strategy: CanonicalAggregateStrategySpec::CollectAll,
             max_buckets: None,
+            max_bucket_size: None,
             bucket_ttl_ms: None,
             completion_predicate: None,
         })];
@@ -855,6 +860,7 @@ mod tests {
             discard_on_timeout: None,
             strategy: CanonicalAggregateStrategySpec::CollectAll,
             max_buckets: None,
+            max_bucket_size: None,
             bucket_ttl_ms: None,
             completion_predicate: None,
         })];

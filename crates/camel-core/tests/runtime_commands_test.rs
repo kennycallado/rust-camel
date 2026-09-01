@@ -767,6 +767,7 @@ async fn register_route_accepts_advanced_canonical_steps() {
                 discard_on_timeout: None,
                 strategy: CanonicalAggregateStrategySpec::CollectAll,
                 max_buckets: Some(100),
+                max_bucket_size: None,
                 bucket_ttl_ms: Some(60_000),
                 completion_predicate: None,
             }),

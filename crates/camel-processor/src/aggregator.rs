@@ -445,6 +445,23 @@ impl Service<Exchange> for AggregatorService {
                     )));
                 }
 
+                // F6-2 (audit 2026-08-31): per-bucket accumulation bound. A
+                // single hot correlation key must not buffer unboundedly while
+                // waiting for predicate/timeout completion.
+                if let Some(max_size) = config.max_bucket_size
+                    && let Some(existing) = guard.get(&key_str)
+                    && existing.exchanges.len() >= max_size
+                {
+                    tracing::warn!(
+                        max_bucket_size = max_size,
+                        correlation_key = %key_str,
+                        "Aggregator reached per-bucket size limit, rejecting exchange"
+                    );
+                    return Err(CamelError::ProcessorError(format!(
+                        "Aggregator bucket reached maximum {max_size} exchanges"
+                    )));
+                }
+
                 let bucket = guard.entry(key_str.clone()).or_insert_with(Bucket::new);
                 bucket.push(exchange);
 
@@ -1189,6 +1206,41 @@ mod tests {
         );
     }
 
+    /// Audit 2026-08-31, F6-2: one hot correlation key must not buffer
+    /// unboundedly. With a predicate-only completion and a tiny
+    /// max_bucket_size, the Nth+1 exchange on the same key is rejected.
+    #[tokio::test]
+    async fn test_aggregator_enforces_max_bucket_size() {
+        let config = AggregatorConfig::correlate_by("orderId")
+            // Predicate that never fires — completion would otherwise end the test.
+            .complete_when(|_| false)
+            .max_bucket_size(3)
+            .build()
+            .unwrap();
+
+        let mut svc = new_test_svc(config);
+
+        for _ in 0..3 {
+            let ex = make_exchange("orderId", "hot-key", "body");
+            let r = svc.ready().await.unwrap().call(ex).await;
+            assert!(r.is_ok(), "first 3 exchanges accepted: {r:?}");
+        }
+
+        let ex = make_exchange("orderId", "hot-key", "body");
+        let result = svc.ready().await.unwrap().call(ex).await;
+        assert!(result.is_err(), "4th exchange on hot key must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("maximum"),
+            "error should mention the per-bucket maximum: {err}"
+        );
+
+        // A DIFFERENT key is unaffected (bounded per bucket, not global).
+        let ex = make_exchange("orderId", "other-key", "body");
+        let result = svc.ready().await.unwrap().call(ex).await;
+        assert!(result.is_ok(), "other keys still accepted: {result:?}");
+    }
+
     #[tokio::test]
     async fn test_bucket_ttl_eviction() {
         let config = AggregatorConfig::correlate_by("orderId")
@@ -1889,6 +1941,7 @@ mod tests {
             correlation: CorrelationStrategy::HeaderName("orderId".into()),
             strategy: AggregationStrategy::CollectAll,
             max_buckets: Some(100),
+            max_bucket_size: Some(100),
             bucket_ttl: None,
             force_completion_on_stop: false,
             discard_on_timeout: false,
@@ -1984,6 +2037,7 @@ mod tests {
             correlation: CorrelationStrategy::HeaderName("k".into()),
             strategy: AggregationStrategy::CollectAll,
             max_buckets: Some(50),
+            max_bucket_size: Some(50),
             bucket_ttl: Some(Duration::from_secs(30)),
             force_completion_on_stop: false,
             discard_on_timeout: false,

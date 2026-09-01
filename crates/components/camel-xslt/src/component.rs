@@ -253,10 +253,43 @@ impl XsltComponent {
         Arc::clone(&self.runtime)
     }
 
+    /// Maximum stylesheet size read from disk (audit 2026-08-31, F4-5).
+    /// Stylesheets are operator config; the cap is defense-in-depth against
+    /// a misconfigured URI pointing at a huge/unbounded file.
+    const MAX_STYLESHEET_BYTES: u64 = 16 * 1024 * 1024;
+
     fn read_stylesheet(&self, stylesheet_uri: &str) -> Result<Vec<u8>, XsltError> {
         let path = PathBuf::from(stylesheet_uri);
 
-        Ok(std::fs::read(path)?)
+        // Audit 2026-08-31, F4-5: confinement parity with camel-template —
+        // reject traversal components and NUL in the configured path
+        // (defense-in-depth; the URI is operator config, but a rejected
+        // `../` here costs nothing and catches bad deploys early).
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(XsltError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "stylesheet path contains '..' traversal component",
+            )));
+        }
+
+        let file = std::fs::File::open(&path)?;
+        let meta = file.metadata()?;
+        if meta.len() > Self::MAX_STYLESHEET_BYTES {
+            return Err(XsltError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("stylesheet exceeds {} bytes", Self::MAX_STYLESHEET_BYTES),
+            )));
+        }
+        let mut bytes = Vec::new();
+        {
+            use std::io::Read;
+            file.take(Self::MAX_STYLESHEET_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+        }
+        Ok(bytes)
     }
 }
 

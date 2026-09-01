@@ -525,6 +525,12 @@ struct FileUriConfig {
         desc = "Sweep stale temp files at consumer startup"
     )]
     cleanup_stale_temps: bool,
+    #[uri_param(
+        name = "maxWriteBytes",
+        default = "0",
+        desc = "Maximum bytes written per file (0 = unlimited). Guards disk-fill via large/streaming bodies"
+    )]
+    max_write_bytes: u64,
 }
 
 /// Configuration for file component endpoints.
@@ -646,6 +652,11 @@ pub struct FileConfig {
     /// Write timeout as Duration.
     pub write_timeout: Duration,
 
+    /// Maximum bytes written per produced file (audit 2026-08-31, F4-3).
+    /// `0` = unlimited (back-compat default). Streaming bodies are truncated
+    /// with an error past the cap.
+    pub max_write_bytes: u64,
+
     pub max_depth: usize,
     pub min_depth: usize,
     pub max_messages_per_poll: i64,
@@ -728,6 +739,7 @@ impl UriConfig for FileConfig {
         let initial_delay_ms = parse_u64_param(params, "initialDelay", 1000)?;
         let read_timeout_ms = parse_u64_param(params, "readTimeout", 30_000)?;
         let write_timeout_ms = parse_u64_param(params, "writeTimeout", 30_000)?;
+        let max_write_bytes = parse_u64_param(params, "maxWriteBytes", 0)?;
 
         let cfg = Self {
             directory: parts.path,
@@ -759,6 +771,7 @@ impl UriConfig for FileConfig {
             read_timeout: Duration::from_millis(read_timeout_ms),
             write_timeout_ms,
             write_timeout: Duration::from_millis(write_timeout_ms),
+            max_write_bytes,
             max_depth: parse_u64_param(params, "maxDepth", u64::MAX)? as usize,
             min_depth: parse_u64_param(params, "minDepth", 0)? as usize,
             max_messages_per_poll: params
@@ -1127,6 +1140,56 @@ fn path_contains_traversal(path: &str) -> bool {
         .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
+/// Lexical pre-validation for user-influenced path segments (e.g. the resolved
+/// `file_name` or a substituted `doneFileName` pattern). Runs BEFORE joining so
+/// that an absolute value cannot silently discard the base via `Path::join`,
+/// and traversal components are rejected even when the target does not exist
+/// yet (where canonicalize-based checks have nothing to resolve).
+///
+/// `label` identifies the source in the error message (e.g. "fileName",
+/// "doneFileName").
+fn validate_relative_filename(raw: &str, label: &str) -> Result<(), CamelError> {
+    let p = std::path::Path::new(raw);
+    if raw.is_empty() {
+        return Err(CamelError::ProcessorError(format!(
+            "{label} resolved to an empty path"
+        )));
+    }
+    if raw.contains('\0') {
+        return Err(CamelError::ProcessorError(format!(
+            "{label} contains a NUL byte"
+        )));
+    }
+    if p.is_absolute() {
+        return Err(CamelError::ProcessorError(format!(
+            "{label} must be relative to the endpoint directory, got absolute path: '{raw}'"
+        )));
+    }
+    if path_contains_traversal(raw) {
+        return Err(CamelError::ProcessorError(format!(
+            "{label} contains directory traversal: '{raw}'"
+        )));
+    }
+    Ok(())
+}
+
+/// Open a file for writing/append, refusing to follow a symlink in the final
+/// path component. Closes the TOCTOU window between
+/// `validate_path_is_within_base` (which canonicalizes the path by name) and
+/// the open itself: even if an attacker swaps the leaf for a symlink after
+/// validation, the open fails instead of escaping the base directory.
+///
+/// On non-Unix platforms there is no `O_NOFOLLOW` equivalent in std; fall back
+/// to the plain open (the canonicalize check in `validate_path_is_within_base`
+/// still applies).
+fn open_options_no_follow() -> OpenOptions {
+    let mut opts = OpenOptions::new();
+    // Inherent tokio method (cfg-gated on unix inside tokio); no trait import needed.
+    #[cfg(unix)]
+    opts.custom_flags(libc::O_NOFOLLOW);
+    opts
+}
+
 fn is_valid_temp_prefix(prefix: &str) -> bool {
     !prefix.contains('\0')
         && !std::path::Path::new(prefix).is_absolute()
@@ -1286,6 +1349,11 @@ impl Service<Exchange> for FileProducer {
             let file_name = FileProducer::resolve_filename(&exchange, &config).await?;
             let body = exchange.input.body.clone();
 
+            // 0. Security: lexical pre-check of the resolved name (rejects
+            // absolute paths that would discard `dir_path` on join, NUL bytes,
+            // and `..` traversal before any filesystem touch).
+            validate_relative_filename(&file_name, "fileName")?;
+
             let dir_path = std::path::Path::new(&config.directory);
             let target_path = dir_path.join(&file_name);
 
@@ -1307,7 +1375,7 @@ impl Service<Exchange> for FileProducer {
                 FileExistStrategy::Fail => {
                     let mut file = tokio::time::timeout(
                         config.write_timeout,
-                        OpenOptions::new()
+                        open_options_no_follow()
                             .write(true)
                             .create_new(true)
                             .open(&target_path),
@@ -1318,16 +1386,24 @@ impl Service<Exchange> for FileProducer {
                     })?
                     .map_err(CamelError::from)?;
 
-                    write_body_with_charset(body, &config.charset, &mut file, config.write_timeout)
-                        .await?;
+                    write_body_with_charset(
+                        body,
+                        &config.charset,
+                        &mut file,
+                        config.write_timeout,
+                        config.max_write_bytes,
+                    )
+                    .await?;
                     file.flush().await.map_err(CamelError::from)?;
                 }
                 FileExistStrategy::Ignore if target_path.exists() => return Ok(exchange),
                 FileExistStrategy::Append => {
-                    // Append: write directly without temp file (append is inherently non-atomic)
+                    // Append: write directly without temp file (append is inherently non-atomic).
+                    // O_NOFOLLOW (via open_options_no_follow) closes the dangling-symlink escape:
+                    // a symlink leaf fails the open instead of being followed outside the base.
                     let mut file = tokio::time::timeout(
                         config.write_timeout,
-                        OpenOptions::new()
+                        open_options_no_follow()
                             .append(true)
                             .create(true)
                             .open(&target_path),
@@ -1338,8 +1414,14 @@ impl Service<Exchange> for FileProducer {
                     })?
                     .map_err(CamelError::from)?;
 
-                    write_body_with_charset(body, &config.charset, &mut file, config.write_timeout)
-                        .await?;
+                    write_body_with_charset(
+                        body,
+                        &config.charset,
+                        &mut file,
+                        config.write_timeout,
+                        config.max_write_bytes,
+                    )
+                    .await?;
 
                     file.flush().await.map_err(CamelError::from)?;
                 }
@@ -1356,6 +1438,7 @@ impl Service<Exchange> for FileProducer {
                         config.durable,
                         config.write_timeout,
                         &config.charset,
+                        config.max_write_bytes,
                     )
                     .await?;
                 }
@@ -1371,6 +1454,7 @@ impl Service<Exchange> for FileProducer {
                         config.durable,
                         config.write_timeout,
                         &config.charset,
+                        config.max_write_bytes,
                     )
                     .await?;
                 }
@@ -1378,9 +1462,20 @@ impl Service<Exchange> for FileProducer {
 
             if let Some(done_pattern) = &config.done_file_name {
                 let done_name = done_pattern.replace("${file:name}", &file_name);
+                // Security: the substituted name derives from the (header-influenced)
+                // file_name, so it needs the same confinement as the body write:
+                // reject absolute paths / traversal lexically, then confirm the
+                // joined path stays within the base directory.
+                validate_relative_filename(&done_name, "doneFileName")?;
+                let done_path = dir_path.join(&done_name);
+                validate_path_is_within_base(dir_path, &done_path)?;
                 tokio::time::timeout(
                     config.write_timeout,
-                    fs::write(dir_path.join(done_name), []),
+                    open_options_no_follow()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(&done_path),
                 )
                 .await
                 .map_err(|_| CamelError::ProcessorError("Timeout creating done file".into()))?
@@ -1413,10 +1508,17 @@ pub(crate) async fn write_body_with_charset(
     charset: &Option<String>,
     file: &mut fs::File,
     timeout: Duration,
+    max_bytes: u64,
 ) -> Result<(), CamelError> {
     match body {
         Body::Text(text) | Body::Xml(text) => {
             let bytes = encode_text_by_charset(&text, charset)?;
+            if max_bytes > 0 && bytes.len() as u64 > max_bytes {
+                return Err(CamelError::ProcessorError(format!(
+                    "body of {} bytes exceeds maxWriteBytes limit of {max_bytes}",
+                    bytes.len()
+                )));
+            }
             tokio::time::timeout(timeout, file.write_all(&bytes))
                 .await
                 .map_err(|_| CamelError::ProcessorError("Timeout writing file".into()))?
@@ -1425,10 +1527,26 @@ pub(crate) async fn write_body_with_charset(
         }
         other => {
             let mut reader = other.into_async_read()?;
-            tokio::time::timeout(timeout, io::copy(&mut reader, file))
+            // F4-3: cap streamed bytes so a large/unbounded stream body cannot
+            // fill the disk. `take` truncates silently, so we compare the
+            // copied count against the cap afterwards and error.
+            let mut limited = tokio::io::AsyncReadExt::take(
+                &mut reader,
+                if max_bytes > 0 {
+                    max_bytes + 1
+                } else {
+                    u64::MAX
+                },
+            );
+            let copied = tokio::time::timeout(timeout, io::copy(&mut limited, file))
                 .await
                 .map_err(|_| CamelError::ProcessorError("Timeout writing to file".into()))?
                 .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+            if max_bytes > 0 && copied > max_bytes {
+                return Err(CamelError::ProcessorError(format!(
+                    "streamed body exceeds maxWriteBytes limit of {max_bytes} bytes"
+                )));
+            }
             Ok(())
         }
     }
@@ -2236,9 +2354,12 @@ mod tests {
         assert!(result.is_err(), "Should reject path traversal attempt");
 
         let err = result.unwrap_err();
+        // Rejected either by the lexical pre-check ("traversal") or by the
+        // canonicalize-based base check ("outside") — both are valid refusals.
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("outside"),
-            "Error should mention path is outside base directory"
+            msg.contains("outside") || msg.contains("traversal"),
+            "Error should mention path confinement violation, got: {msg}"
         );
     }
 
@@ -2887,6 +3008,7 @@ mod tests {
             read_timeout_ms: 30_000,
             write_timeout: Duration::from_millis(30_000),
             write_timeout_ms: 30_000,
+            max_write_bytes: 0,
             max_depth: usize::MAX,
             min_depth: 0,
             max_messages_per_poll: 0,
@@ -2934,6 +3056,7 @@ mod tests {
             read_timeout_ms: 30_000,
             write_timeout: Duration::from_millis(30_000),
             write_timeout_ms: 30_000,
+            max_write_bytes: 0,
             max_depth: usize::MAX,
             min_depth: 0,
             max_messages_per_poll: 0,
@@ -2983,6 +3106,7 @@ mod tests {
             read_timeout_ms: 30_000,
             write_timeout: Duration::from_millis(30_000),
             write_timeout_ms: 30_000,
+            max_write_bytes: 0,
             max_depth: usize::MAX,
             min_depth: 0,
             max_messages_per_poll: 0,
@@ -3927,11 +4051,174 @@ mod tests {
         assert!(!base.join("data.txt.done").exists());
     }
 
+    // -----------------------------------------------------------------------
+    // Security: adversarial path tests (audit 2026-08-31, findings F4-1/F4-2)
+    // -----------------------------------------------------------------------
+
+    /// F4-1: an absolute CamelFileName header must NOT let the done file escape
+    /// the endpoint directory (Path::join would otherwise discard the base).
+    #[tokio::test]
+    async fn test_done_file_rejects_absolute_file_name_header() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+        let outside = dir.path().parent().unwrap().join("pwn.done");
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("file:{dir_path}?doneFileName=${{file:name}}.done"),
+                &ctx,
+            )
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("data"));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("/tmp/pwn".to_string()),
+        );
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err(), "absolute CamelFileName must be rejected");
+        assert!(
+            !outside.exists() && !std::path::Path::new("/tmp/pwn.done").exists(),
+            "no done file may be created outside the base directory"
+        );
+    }
+
+    /// F4-1: traversal in CamelFileName must not let the done file escape.
+    #[tokio::test]
+    async fn test_done_file_rejects_traversal_in_file_name_header() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("file:{dir_path}?doneFileName=${{file:name}}.done"),
+                &ctx,
+            )
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("data"));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("../escape".to_string()),
+        );
+
+        let result = producer.oneshot(exchange).await;
+        assert!(
+            result.is_err(),
+            "traversal in CamelFileName must be rejected"
+        );
+        assert!(
+            !dir.path().parent().unwrap().join("escape.done").exists(),
+            "no done file may be created outside the base directory"
+        );
+    }
+
+    /// F4-2: fileExist=Append must refuse to follow a symlink leaf, even when
+    /// the symlink points to a path that does not exist yet (dangling).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_append_refuses_dangling_symlink_leaf() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+        let outside = dir.path().parent().unwrap().join("escape_target");
+
+        // Plant a dangling symlink inside the base dir pointing outside.
+        std::os::unix::fs::symlink(&outside, dir.path().join("link")).unwrap();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?fileExist=Append"), &ctx)
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("attacker bytes"));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("link".to_string()),
+        );
+
+        let result = producer.oneshot(exchange).await;
+        assert!(
+            result.is_err(),
+            "Append must refuse to open a symlink leaf (O_NOFOLLOW)"
+        );
+        assert!(
+            !outside.exists(),
+            "no file may be created outside the base via dangling symlink"
+        );
+    }
+
+    /// F4-2: fileExist=Fail must refuse a symlink leaf too (create_new already
+    /// fails, but the refusal must remain under O_NOFOLLOW semantics).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_fail_refuses_symlink_leaf() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+        let outside = dir.path().parent().unwrap().join("fail_escape_target");
+        std::fs::write(&outside, b"precious").unwrap();
+
+        // Symlink inside base -> existing file outside base.
+        std::os::unix::fs::symlink(&outside, dir.path().join("link")).unwrap();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?fileExist=Fail"), &ctx)
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("clobber"));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("link".to_string()),
+        );
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err(), "Fail must refuse a symlink leaf");
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"precious",
+            "outside file must remain untouched"
+        );
+    }
+
+    /// Unit: the lexical pre-validator rejects absolute paths, traversal and NUL.
+    #[test]
+    fn test_validate_relative_filename_rejects_evil_values() {
+        assert!(validate_relative_filename("/etc/passwd", "fileName").is_err());
+        assert!(validate_relative_filename("../x", "fileName").is_err());
+        assert!(validate_relative_filename("a/../../x", "fileName").is_err());
+        assert!(validate_relative_filename("a\0b", "fileName").is_err());
+        assert!(validate_relative_filename("", "fileName").is_err());
+        assert!(validate_relative_filename("ok/nested.txt", "fileName").is_ok());
+    }
+
     #[test]
     fn uri_options_count_parity() {
         assert_eq!(
             FileConfig::uri_options().len(),
-            31,
+            32,
             "FileUriConfig #[uri_param] count drifted from parser"
         );
     }

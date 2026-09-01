@@ -353,6 +353,7 @@ async fn session_header_not_required() {
         &McpRemoteConfig {
             url: format!("http://{addr}/mcp"),
             transport: McpTransport::StreamableHttp,
+            allow_internal: true, // tests bind loopback
         },
     )
     .await

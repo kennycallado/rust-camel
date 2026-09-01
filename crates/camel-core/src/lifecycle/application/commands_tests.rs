@@ -664,6 +664,7 @@ fn canonical_step_conversion_covers_common_variants() {
             discard_on_timeout: Some(false),
             strategy: camel_api::runtime::CanonicalAggregateStrategySpec::CollectAll,
             max_buckets: Some(100),
+            max_bucket_size: None,
             bucket_ttl_ms: Some(60000),
             completion_predicate: None,
         },

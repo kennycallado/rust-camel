@@ -692,6 +692,9 @@ fn compile_canonical_aggregate(config: CanonicalAggregateSpec) -> Result<Builder
     if let Some(max_buckets) = config.max_buckets {
         builder = builder.max_buckets(max_buckets);
     }
+    if let Some(max_bucket_size) = config.max_bucket_size {
+        builder = builder.max_bucket_size(max_bucket_size);
+    }
     if let Some(ttl_ms) = config.bucket_ttl_ms {
         builder = builder.bucket_ttl(Duration::from_millis(ttl_ms));
     }
@@ -1660,6 +1663,7 @@ fn compile_aggregate_step_to_canonical(
         discard_on_timeout: def.discard_on_timeout,
         strategy,
         max_buckets: def.max_buckets,
+        max_bucket_size: def.max_bucket_size,
         bucket_ttl_ms: def.bucket_ttl_ms,
         completion_predicate: def.completion_predicate,
     }))
@@ -1823,6 +1827,9 @@ fn compile_aggregate_step(def: AggregateStepDef) -> Result<BuilderStep, CamelErr
     };
     if let Some(max_buckets) = def.max_buckets {
         builder = builder.max_buckets(max_buckets);
+    }
+    if let Some(max_bucket_size) = def.max_bucket_size {
+        builder = builder.max_bucket_size(max_bucket_size);
     }
     if let Some(ttl_ms) = def.bucket_ttl_ms {
         builder = builder.bucket_ttl(Duration::from_millis(ttl_ms));
@@ -2937,6 +2944,7 @@ mod tests {
                 completion_predicate: None,
                 strategy: AggregateStrategyDef::CollectAll,
                 max_buckets: None,
+                max_bucket_size: None,
                 bucket_ttl_ms: None,
                 force_completion_on_stop: None,
                 discard_on_timeout: None
@@ -3122,6 +3130,7 @@ mod tests {
             completion_predicate: None,
             strategy: AggregateStrategyDef::CollectAll,
             max_buckets: None,
+            max_bucket_size: None,
             bucket_ttl_ms: None,
             force_completion_on_stop: None,
             discard_on_timeout: None,
@@ -3140,6 +3149,7 @@ mod tests {
             completion_predicate: None,
             strategy: AggregateStrategyDef::CollectAll,
             max_buckets: None,
+            max_bucket_size: None,
             bucket_ttl_ms: None,
             force_completion_on_stop: None,
             discard_on_timeout: None,
@@ -3158,6 +3168,7 @@ mod tests {
             completion_predicate: Some(make_predicate("true")),
             strategy: AggregateStrategyDef::CollectAll,
             max_buckets: None,
+            max_bucket_size: None,
             bucket_ttl_ms: None,
             force_completion_on_stop: None,
             discard_on_timeout: None,
@@ -3188,6 +3199,7 @@ mod tests {
             completion_predicate: Some(make_predicate("true")),
             strategy: AggregateStrategyDef::CollectAll,
             max_buckets: None,
+            max_bucket_size: None,
             bucket_ttl_ms: None,
             force_completion_on_stop: None,
             discard_on_timeout: None,
@@ -3212,6 +3224,7 @@ mod tests {
             completion_predicate: None,
             strategy: AggregateStrategyDef::CollectAll,
             max_buckets: Some(100),
+            max_bucket_size: Some(100),
             bucket_ttl_ms: Some(60000),
             force_completion_on_stop: Some(true),
             discard_on_timeout: Some(true),
@@ -3232,6 +3245,7 @@ mod tests {
             discard_on_timeout: None,
             strategy: CanonicalAggregateStrategySpec::CollectAll,
             max_buckets: None,
+            max_bucket_size: None,
             bucket_ttl_ms: None,
             completion_predicate: Some(LanguageExpressionDef {
                 language: "simple".into(),
@@ -3262,6 +3276,7 @@ mod tests {
             discard_on_timeout: None,
             strategy: CanonicalAggregateStrategySpec::CollectAll,
             max_buckets: None,
+            max_bucket_size: None,
             bucket_ttl_ms: None,
             completion_predicate: Some(LanguageExpressionDef {
                 language: "simple".into(),
@@ -3899,6 +3914,7 @@ mod tests {
                 discard_on_timeout: Some(false),
                 strategy: CanonicalAggregateStrategySpec::CollectAll,
                 max_buckets: Some(100),
+                max_bucket_size: None,
                 bucket_ttl_ms: Some(60000),
                 completion_predicate: None,
             }),
@@ -4106,6 +4122,7 @@ mod tests {
                 completion_predicate: None,
                 strategy: AggregateStrategyDef::CollectAll,
                 max_buckets: None,
+                max_bucket_size: None,
                 bucket_ttl_ms: None,
                 force_completion_on_stop: None,
                 discard_on_timeout: None,

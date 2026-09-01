@@ -1080,7 +1080,7 @@ mod tests {
                         .unwrap(),
                 }
             ),
-            "Aggregate { config: AggregatorConfig { header_name: \"id\", completion: Single(Size(1)), correlation: HeaderName(\"id\"), strategy: CollectAll, max_buckets: Some(10000), bucket_ttl: Some(300s), force_completion_on_stop: false, discard_on_timeout: false, max_timeout_tasks: 1024 } }"
+            "Aggregate { config: AggregatorConfig { header_name: \"id\", completion: Single(Size(1)), correlation: HeaderName(\"id\"), strategy: CollectAll, max_buckets: Some(10000), max_bucket_size: Some(10000), bucket_ttl: Some(300s), force_completion_on_stop: false, discard_on_timeout: false, max_timeout_tasks: 1024 } }"
         );
 
         assert_eq!(

@@ -19,6 +19,7 @@ camel-language-simple.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
+libc = { workspace = true }
 tower.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

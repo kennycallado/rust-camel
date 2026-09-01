@@ -26,6 +26,14 @@ use dashmap::DashMap;
 /// See `MemoryIdempotentRepository::DEFAULT_MAX_ENTRIES` for the rationale.
 pub const DEFAULT_MAX_ENTRIES: usize = 100_000;
 
+/// Default cap on the depth of ONE stack (audit 2026-08-31, F6-3).
+/// `max_entries` bounds the number of stack KEYS; without a per-stack bound,
+/// repeated `push` to a single hot key accumulates unbounded `Message`s.
+/// Past the cap, `push` is REJECTED with an error (fail-visible — matches
+/// the aggregator's reject-on-cap semantics; silently dropping the oldest
+/// claim would lose data the caller believes is stashed).
+pub const DEFAULT_MAX_STACK_DEPTH: usize = 10_000;
+
 #[derive(Debug)]
 struct SingleEntry {
     payload: Message,
@@ -160,14 +168,21 @@ impl ClaimCheckRepository for MemoryClaimCheckRepository {
                 self.stacks.remove(&k);
             }
         }
-        self.stacks
+        let mut entry = self
+            .stacks
             .entry(key.to_string())
             .or_insert_with(|| StackEntry {
                 payloads: VecDeque::new(),
                 seq: self.next_seq.fetch_add(1, Ordering::Relaxed),
-            })
-            .payloads
-            .push_back(payload);
+            });
+        // F6-3: bound per-stack depth — reject the push when full so a hot
+        // key cannot grow the repo unboundedly (fail-visible, no silent loss).
+        if entry.payloads.len() >= DEFAULT_MAX_STACK_DEPTH {
+            return Err(CamelError::RouteError(format!(
+                "Claim check stack for key '{key}' reached maximum depth {DEFAULT_MAX_STACK_DEPTH}"
+            )));
+        }
+        entry.payloads.push_back(payload);
         Ok(())
     }
 
@@ -344,5 +359,33 @@ mod tests {
     fn test_claim_check_repo_default_max_entries_is_100_000() {
         let repo = MemoryClaimCheckRepository::new("test");
         assert_eq!(repo.max_entries(), DEFAULT_MAX_ENTRIES);
+    }
+
+    /// Audit 2026-08-31, F6-3: one hot stack key must not grow unboundedly.
+    /// Push #DEFAULT_MAX_STACK_DEPTH+1 is rejected with an error.
+    #[tokio::test]
+    async fn push_rejects_stack_past_max_depth() {
+        let repo = new_repo();
+        let msg = || Message::new(Body::Text("m".to_string()));
+
+        // Fill the stack to the cap. 10_000 pushes is cheap (in-memory).
+        for _ in 0..DEFAULT_MAX_STACK_DEPTH {
+            repo.push("hot", msg()).await.unwrap();
+        }
+
+        let result = repo.push("hot", msg()).await;
+        assert!(result.is_err(), "push past the depth cap must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("maximum depth"),
+            "error should name the depth cap: {err}"
+        );
+
+        // A pop frees a slot — the next push succeeds again.
+        repo.pop("hot").await.unwrap();
+        assert!(repo.push("hot", msg()).await.is_ok());
+
+        // A different key is unaffected.
+        assert!(repo.push("other", msg()).await.is_ok());
     }
 }

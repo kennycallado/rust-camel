@@ -316,6 +316,67 @@ pub struct McpRemoteConfig {
 
     /// Transport to use (Streamable HTTP only).
     pub transport: McpTransport,
+
+    /// Allow this remote to point at internal/private addresses (SSRF
+    /// policy, audit 2026-08-31 F2-4). Default `false`: IP-literal URLs in
+    /// private/loopback/link-local ranges are rejected at config load, and
+    /// cleartext `http://` is rejected unless the target is internal or this
+    /// flag is set. Hostname-based URLs are resolution-independent at this
+    /// layer — operators must trust their DNS (no DNS pinning here, unlike
+    /// the http component).
+    #[serde(default)]
+    pub allow_internal: bool,
+}
+
+impl McpRemoteConfig {
+    /// Validate the remote URL against scheme and SSRF policy. Called at
+    /// component/endpoint creation (config load) — fails closed.
+    pub fn validate_url(&self, name: &str) -> Result<(), McpError> {
+        let lower = self.url.to_ascii_lowercase();
+        let scheme_ok = lower.starts_with("http://") || lower.starts_with("https://");
+        if !scheme_ok {
+            return Err(McpError::Endpoint(format!(
+                "remote '{name}' url must use http:// or https:// (got scheme of '{}')",
+                self.url.split(':').next().unwrap_or("")
+            )));
+        }
+
+        // Extract host for IP-literal checks. String-based: this crate has no
+        // url dependency; the authority is between "://" and the next '/'.
+        let after_scheme = &self.url[self.url.find("://").unwrap() + 3..]; // allow-unwrap: starts_with checked above
+        let authority = after_scheme
+            .split('/')
+            .next()
+            .unwrap_or(after_scheme)
+            // strip userinfo if present
+            .rsplit('@')
+            .next()
+            .unwrap_or("");
+        // Strip port (and IPv6 brackets).
+        let host = if let Some(rest) = authority.strip_prefix('[') {
+            rest.split(']').next().unwrap_or(rest)
+        } else {
+            authority.split(':').next().unwrap_or(authority)
+        };
+
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            let blocked = camel_api::is_ssrf_blocked_ip(&ip);
+            if blocked && !self.allow_internal {
+                return Err(McpError::Endpoint(format!(
+                    "remote '{name}' url points at a blocked/internal address ({ip}); \
+                     set allow_internal=true to override"
+                )));
+            }
+            // Cleartext to a public address is forbidden even when the IP is
+            // not blocked (mirrors the http component's no-cleartext rule).
+            if !blocked && lower.starts_with("http://") && !self.allow_internal {
+                return Err(McpError::Endpoint(format!(
+                    "remote '{name}' uses cleartext http:// to a public address; use https://"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Global MCP configuration, deserialized from the `mcp` config key.
@@ -340,6 +401,81 @@ mod tests {
         let json = r#"{"url": "http://127.0.0.1:0", "transport": "stdio"}"#;
         let err = serde_json::from_str::<McpRemoteConfig>(json).unwrap_err();
         assert!(err.to_string().contains("stdio"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit 2026-08-31, F2-4: remote URL SSRF/scheme policy
+    // -----------------------------------------------------------------------
+
+    fn remote(url: &str, allow_internal: bool) -> McpRemoteConfig {
+        McpRemoteConfig {
+            url: url.to_string(),
+            transport: McpTransport::StreamableHttp,
+            allow_internal,
+        }
+    }
+
+    #[test]
+    fn remote_url_rejects_non_http_schemes() {
+        for bad in ["file:///etc/passwd", "ftp://host/", "gopher://x"] {
+            let err = remote(bad, true).validate_url("r").unwrap_err();
+            assert!(
+                err.to_string().contains("http"),
+                "{bad} must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_url_blocks_private_ip_literals_by_default() {
+        for ip in [
+            "http://127.0.0.1:8000/mcp",
+            "http://10.0.0.5/mcp",
+            "http://192.168.1.1/mcp",
+            "http://169.254.169.254/latest/meta-data", // cloud metadata
+            "http://[::1]/mcp",
+        ] {
+            let err = remote(ip, false).validate_url("r").unwrap_err();
+            assert!(
+                err.to_string().contains("blocked/internal"),
+                "{ip} must be blocked: {err}"
+            );
+        }
+        // Explicit opt-in allows them (test/local deployments).
+        assert!(
+            remote("http://127.0.0.1:8000/mcp", true)
+                .validate_url("r")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn remote_url_rejects_cleartext_to_public_ip() {
+        let err = remote("http://93.184.216.34/mcp", false)
+            .validate_url("r")
+            .unwrap_err();
+        assert!(err.to_string().contains("cleartext"), "{err}");
+        // https to public is fine.
+        assert!(
+            remote("https://93.184.216.34/mcp", false)
+                .validate_url("r")
+                .is_ok()
+        );
+        // Hostname-based URLs pass this layer (no DNS pinning here).
+        assert!(
+            remote("https://mcp.example.com/mcp", false)
+                .validate_url("r")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn remote_url_masks_userinfo_before_ip_check() {
+        // Credentials in userinfo must not fool the host extraction.
+        let err = remote("http://user:pass@127.0.0.1:8000/mcp", false)
+            .validate_url("r")
+            .unwrap_err();
+        assert!(err.to_string().contains("blocked/internal"), "{err}");
     }
 
     #[test]

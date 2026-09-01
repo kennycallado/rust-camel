@@ -2,7 +2,7 @@
 //! sort by expression, burst-emit in order.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -12,15 +12,39 @@ use camel_api::resequencer::BatchCompletion;
 use camel_api::value::cmp_values;
 use camel_language_api::Expression;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::ResequencePolicy;
+
+/// Default upper bound on simultaneously open correlation buckets
+/// (audit 2026-08-31, F6-1). Mirrors the aggregator's `max_buckets` default
+/// (`camel-api` aggregator.rs:209). New keys beyond the cap are dropped.
+pub const DEFAULT_MAX_BUCKETS: usize = 10_000;
+
+/// Default upper bound on buffered exchanges inside ONE bucket (F6-1). A hot
+/// correlation key can otherwise buffer unboundedly until completion fires.
+/// Exchanges beyond the cap are dropped (fail-visible: warn + ack drop, same
+/// class as the resequencer's post-ack drop semantics in ADR-0029).
+pub const DEFAULT_MAX_BUCKET_SIZE: usize = 1_000;
+
+/// Default upper bound on live timeout tasks (F6-1). Mirrors the aggregator's
+/// `max_timeout_tasks` default (`camel-api` aggregator.rs:214). When the cap is
+/// reached, new buckets still buffer but get no per-key timer — their
+/// completion then relies on size or shutdown flush.
+pub const DEFAULT_MAX_TIMEOUT_TASKS: usize = 1024;
 
 /// Per-correlation-key bucket holding pending exchanges.
 #[derive(Default)]
 struct Bucket {
     exchanges: Vec<Exchange>,
+}
+
+/// One live timeout task: the cancellation token plus the spawn generation
+/// that owns it. The generation makes cleanup compare-and-remove safe under
+/// key reuse (a stale task's removal is a no-op once superseded).
+struct TimeoutEntry {
+    generation: u64,
+    cancel: CancellationToken,
 }
 
 /// Batch resequencing policy.
@@ -40,11 +64,25 @@ pub struct BatchPolicy {
     /// Per-correlation-key buckets (exchanges pending completion).
     buckets: Mutex<HashMap<String, Bucket>>,
 
-    /// Timeout cancellation tokens, keyed by correlation key.
-    timeout_tokens: Mutex<HashMap<String, CancellationToken>>,
+    /// Live timeout tasks, keyed by correlation key. Token and handle share
+    /// one entry so they share one lifecycle: removing the entry retires
+    /// both (re-review of F6-1: the original two-map layout leaked the
+    /// token entry on natural timeout completion).
+    timeout_tasks: Mutex<HashMap<String, TimeoutEntry>>,
 
-    /// Timeout task handles, keyed by correlation key.
-    timeout_handles: Mutex<HashMap<String, JoinHandle<()>>>,
+    /// Monotonic spawn generation. Guards timeout ownership: a stale task
+    /// (superseded by key reuse after size-based completion) can neither
+    /// drain the newer bucket nor remove the newer task's entry.
+    timeout_generation: AtomicU64,
+
+    /// Test-only synchronization point INSIDE
+    /// `take_bucket_if_current_timeout_task`, between the generation check
+    /// and the bucket take — i.e. while the `timeout_tasks` lock is still
+    /// held. Lets the regression test force the interleaving that a
+    /// separate-check-then-take implementation would permit (re-review 2
+    /// of F6-1: proving the test bites).
+    #[cfg(test)]
+    interleave_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 
     /// Channel to the post-driver for timeout-triggered emissions.
     /// Set by `ResequencerService` after channel creation.
@@ -53,6 +91,15 @@ pub struct BatchPolicy {
     /// Shutdown guard — timeout tasks check this before sending
     /// to avoid racing with post-driver channel close (M7).
     shutdown_started: AtomicBool,
+
+    /// Upper bound on simultaneously open buckets (F6-1).
+    max_buckets: usize,
+
+    /// Upper bound on buffered exchanges inside one bucket (F6-1).
+    max_bucket_size: usize,
+
+    /// Upper bound on live timeout tasks (F6-1).
+    max_timeout_tasks: usize,
 }
 
 impl BatchPolicy {
@@ -63,16 +110,41 @@ impl BatchPolicy {
         sort_expr: Arc<dyn Expression>,
         completion: BatchCompletion,
     ) -> Arc<Self> {
+        Self::with_limits(
+            correlation_expr,
+            sort_expr,
+            completion,
+            DEFAULT_MAX_BUCKETS,
+            DEFAULT_MAX_BUCKET_SIZE,
+            DEFAULT_MAX_TIMEOUT_TASKS,
+        )
+    }
+
+    /// Create a `BatchPolicy` with explicit resource bounds (F6-1).
+    /// `new_cyclic` delegates here with the `DEFAULT_*` constants.
+    pub fn with_limits(
+        correlation_expr: Arc<dyn Expression>,
+        sort_expr: Arc<dyn Expression>,
+        completion: BatchCompletion,
+        max_buckets: usize,
+        max_bucket_size: usize,
+        max_timeout_tasks: usize,
+    ) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
             correlation_expr,
             sort_expr,
             completion,
             weak_self: weak.clone(),
             buckets: Mutex::new(HashMap::new()),
-            timeout_tokens: Mutex::new(HashMap::new()),
-            timeout_handles: Mutex::new(HashMap::new()),
+            timeout_tasks: Mutex::new(HashMap::new()),
+            timeout_generation: AtomicU64::new(0),
+            #[cfg(test)]
+            interleave_hook: Mutex::new(None),
             driver_tx: Mutex::new(None),
             shutdown_started: AtomicBool::new(false),
+            max_buckets,
+            max_bucket_size,
+            max_timeout_tasks,
         })
     }
 
@@ -136,39 +208,84 @@ impl BatchPolicy {
         buckets.remove(key)
     }
 
-    /// Cancel and remove timeout task for a key.
+    /// Cancel and remove the timeout task for `key` (size-based completion,
+    /// flush). Removing the whole entry first makes a concurrently waking
+    /// stale task a no-op via the generation guard.
     fn cancel_timeout(&self, key: &str) {
+        if let Some(entry) = self
+            .timeout_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key)
         {
-            let mut tokens = self
-                .timeout_tokens
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(token) = tokens.remove(key) {
-                token.cancel();
-            }
+            entry.cancel.cancel();
         }
+    }
+
+    /// Atomically verify this task still owns the timeout entry for `key`
+    /// AND take the bucket — ONE critical section holding `timeout_tasks`
+    /// across the bucket removal (re-review 2 of F6-1). Closing the gap
+    /// between a separate generation check and a separate `take_bucket`
+    /// prevents the reuse race where a stale task passes the guard, gets
+    /// interleaved by size-completion + key reuse, and then drains the NEW
+    /// generation's bucket. Lock order: `timeout_tasks` → `buckets`.
+    fn take_bucket_if_current_timeout_task(&self, key: &str, generation: u64) -> Option<Bucket> {
+        let tasks = self.timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
+        if !tasks
+            .get(key)
+            .is_some_and(|entry| entry.generation == generation)
         {
-            let mut handles = self
-                .timeout_handles
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            handles.remove(key);
+            return None;
+        }
+        // Test-only interleaving point: runs while `timeout_tasks` is held.
+        // A correct (combined) implementation serializes any concurrent
+        // supersede behind this lock (the hook's bounded wait elapses); a
+        // separate check-then-take implementation lets the supersede
+        // complete inside the gap (the hook's wait succeeds).
+        #[cfg(test)]
+        if let Some(hook) = self
+            .interleave_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            hook();
+        }
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        buckets.remove(key)
+    }
+
+    /// Remove the timeout entry for `key` iff it still belongs to `generation`.
+    fn remove_timeout_task_if_current(&self, key: &str, generation: u64) {
+        let mut tasks = self.timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
+        if tasks
+            .get(key)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            tasks.remove(key);
         }
     }
 
     /// Spawn a timeout task for the given key.
     /// Must be called from a method that has access to `&self` (which has the `weak_self`).
+    ///
+    /// Generation-safety (re-review of F6-1): each spawn takes a fresh
+    /// monotonic generation. The task drains and cleans up only through
+    /// generation-checked combined operations, so a stale task (superseded
+    /// by key reuse after size-based completion) can neither steal the
+    /// newer bucket nor delete the newer task's entry. The entry (token +
+    /// generation) is inserted BEFORE spawning so the map never holds a
+    /// half-observed task; the task itself is detached (cancellation winds
+    /// it down, flush drops all entries).
     fn spawn_timeout_task(&self, key: String, timeout_ms: u64) {
+        let generation = self.timeout_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
-        // Store the cancellation token
+        // Store the entry before the task exists.
         {
-            let mut tokens = self
-                .timeout_tokens
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            tokens.insert(key.clone(), cancel);
+            let mut tasks = self.timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
+            tasks.insert(key.clone(), TimeoutEntry { generation, cancel });
         }
 
         let weak = self.weak_self.clone();
@@ -178,7 +295,7 @@ impl BatchPolicy {
             guard.clone()
         };
 
-        let handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             let timeout = Duration::from_millis(timeout_ms);
 
             tokio::select! {
@@ -202,10 +319,19 @@ impl BatchPolicy {
                 return;
             }
 
-            // Drain the bucket
-            let bucket = policy.take_bucket(&key_clone);
+            // Atomically verify ownership AND take the bucket in one
+            // critical section. A stale task (superseded by key reuse after
+            // size-based completion) gets None here and can neither drain
+            // the newer bucket nor remove the newer entry.
+            let bucket = policy.take_bucket_if_current_timeout_task(&key_clone, generation);
             let Some(bucket) = bucket else {
-                return; // bucket already drained by size-based completion
+                // Bucket already drained by size-based completion (or a
+                // newer task owns the key) — clean up our own entry only if
+                // it is still ours (compare-and-remove; no-op when
+                // superseded). The original two-map layout leaked the token
+                // here: re-review of F6-1.
+                policy.remove_timeout_task_if_current(&key_clone, generation);
+                return;
             };
 
             let sorted = policy.drain_and_sort(bucket).await;
@@ -223,23 +349,9 @@ impl BatchPolicy {
                 }
             }
 
-            // Clean up handle entry
-            {
-                let mut handles = policy
-                    .timeout_handles
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                handles.remove(&key_clone);
-            }
+            // Clean up our entry — only if a newer task has not superseded us.
+            policy.remove_timeout_task_if_current(&key_clone, generation);
         });
-
-        {
-            let mut handles = self
-                .timeout_handles
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            handles.insert(key, handle);
-        }
     }
 }
 
@@ -262,18 +374,55 @@ impl ResequencePolicy for BatchPolicy {
 
         let bucket_count = {
             let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+            // F6-1 bucket-count cap: refuse to open a NEW bucket past the cap.
+            // Existing buckets keep accepting (bounded per-bucket below).
+            if !buckets.contains_key(&key) && buckets.len() >= self.max_buckets {
+                // log-policy: handler-owned
+                tracing::warn!(
+                    correlation_id = %correlation_id,
+                    max_buckets = self.max_buckets,
+                    "BatchPolicy: bucket cap reached, dropping exchange"
+                );
+                return vec![];
+            }
             let bucket = buckets.entry(key.clone()).or_default();
+            // F6-1 per-bucket cap: a hot key cannot buffer unboundedly.
+            if bucket.exchanges.len() >= self.max_bucket_size {
+                // log-policy: handler-owned
+                tracing::warn!(
+                    correlation_id = %correlation_id,
+                    max_bucket_size = self.max_bucket_size,
+                    "BatchPolicy: per-bucket cap reached, dropping exchange"
+                );
+                return vec![];
+            }
             bucket.exchanges.push(input);
             bucket.exchanges.len()
         };
 
-        // Spawn timeout task if needed (first exchange for this key)
+        // Spawn timeout task if needed (first exchange for this key), subject
+        // to the F6-1 timeout-task cap: past the cap the bucket still buffers
+        // and completes on size or shutdown flush (mirrors the aggregator's
+        // graceful degradation to TTL-only eviction).
         if bucket_count == 1 && self.needs_timeout() {
-            let timeout_ms = match self.completion {
-                BatchCompletion::Timeout(t) | BatchCompletion::SizeOrTimeout(_, t) => t,
-                _ => unreachable!(),
+            let live_tasks = {
+                let tasks = self.timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
+                tasks.len()
             };
-            self.spawn_timeout_task(key.clone(), timeout_ms);
+            if live_tasks < self.max_timeout_tasks {
+                let timeout_ms = match self.completion {
+                    BatchCompletion::Timeout(t) | BatchCompletion::SizeOrTimeout(_, t) => t,
+                    _ => unreachable!(),
+                };
+                self.spawn_timeout_task(key.clone(), timeout_ms);
+            } else {
+                // log-policy: handler-owned
+                tracing::warn!(
+                    correlation_id = %correlation_id,
+                    max_timeout_tasks = self.max_timeout_tasks,
+                    "BatchPolicy: timeout-task cap reached; bucket relies on size/flush completion"
+                );
+            }
         }
 
         // Check if the bucket is complete (size-based)
@@ -305,28 +454,16 @@ impl ResequencePolicy for BatchPolicy {
             }
         }
 
-        // Cancel all remaining timeout tasks
+        // Cancel all remaining timeout tasks (dropping the entries detaches
+        // the tasks; they wind down once cancelled)
         {
-            let tokens: HashMap<String, CancellationToken> = {
-                let mut guard = self
-                    .timeout_tokens
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+            let tasks: HashMap<String, TimeoutEntry> = {
+                let mut guard = self.timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
                 std::mem::take(&mut *guard)
             };
-            for (_, token) in tokens {
-                token.cancel();
+            for (_, entry) in tasks {
+                entry.cancel.cancel();
             }
-        }
-        // Drop handles — tasks wind down when cancelled
-        {
-            let _handles = {
-                let mut guard = self
-                    .timeout_handles
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                std::mem::take(&mut *guard)
-            };
         }
 
         all_sorted
@@ -569,5 +706,312 @@ mod tests {
         );
 
         assert!(!policy.needs_timeout());
+    }
+
+    // -----------------------------------------------------------------------
+    // F6-1 resource-bound tests (audit 2026-08-31)
+    // -----------------------------------------------------------------------
+
+    /// Bucket-count cap: N unique keys fill the map; key N+1 is dropped.
+    #[tokio::test]
+    async fn batch_bucket_count_cap_drops_new_keys() {
+        let policy = BatchPolicy::with_limits(
+            Arc::new(PropExpr("key".into())),
+            Arc::new(PropExpr("seq".into())),
+            BatchCompletion::Size(100), // never completes by size in this test
+            4,                          // max_buckets
+            1000,                       // max_bucket_size
+            16,                         // max_timeout_tasks
+        );
+
+        for i in 0..4 {
+            let mut ex = mk_exchange(i);
+            ex.set_property("key", serde_json::json!(format!("k{i}")));
+            assert!(policy.accept(ex).await.is_empty(), "buffered, not emitted");
+        }
+        assert_eq!(policy.buckets.lock().unwrap().len(), 4);
+
+        // Fifth unique key must be dropped (cap reached).
+        let mut ex = mk_exchange(99);
+        ex.set_property("key", serde_json::json!("k-overflow"));
+        assert!(policy.accept(ex).await.is_empty());
+        assert_eq!(
+            policy.buckets.lock().unwrap().len(),
+            4,
+            "no new bucket past the cap"
+        );
+
+        // Existing keys still accept (bounded per-bucket).
+        let mut ex = mk_exchange(100);
+        ex.set_property("key", serde_json::json!("k0"));
+        assert!(policy.accept(ex).await.is_empty());
+        assert_eq!(
+            policy.buckets.lock().unwrap()["k0"].exchanges.len(),
+            2,
+            "existing bucket keeps accepting"
+        );
+    }
+
+    /// Per-bucket cap: one hot key cannot buffer more than max_bucket_size.
+    #[tokio::test]
+    async fn batch_per_bucket_cap_drops_overflow() {
+        let policy = BatchPolicy::with_limits(
+            Arc::new(ConstExpr("hot".into())),
+            Arc::new(PropExpr("seq".into())),
+            BatchCompletion::Size(1_000_000), // effectively never
+            10,                               // max_buckets
+            3,                                // max_bucket_size
+            16,                               // max_timeout_tasks
+        );
+
+        for i in 0..3 {
+            assert!(policy.accept(mk_exchange(i)).await.is_empty());
+        }
+        assert_eq!(policy.buffered(), 3);
+
+        // 4th and 5th on the same key are dropped.
+        assert!(policy.accept(mk_exchange(3)).await.is_empty());
+        assert!(policy.accept(mk_exchange(4)).await.is_empty());
+        assert_eq!(
+            policy.buffered(),
+            3,
+            "bucket must not grow past max_bucket_size"
+        );
+    }
+
+    /// Timeout-task cap: past the cap, no new task is spawned (bucket relies on
+    /// size/flush). Uses Timeout completion so every new key wants a task.
+    #[tokio::test]
+    async fn batch_timeout_task_cap_stops_spawning() {
+        let policy = BatchPolicy::with_limits(
+            Arc::new(PropExpr("key".into())),
+            Arc::new(PropExpr("seq".into())),
+            BatchCompletion::Timeout(60_000), // long; we flush before it fires
+            16,                               // max_buckets
+            100,                              // max_bucket_size
+            2,                                // max_timeout_tasks
+        );
+
+        for i in 0..4 {
+            let mut ex = mk_exchange(i);
+            ex.set_property("key", serde_json::json!(format!("k{i}")));
+            assert!(policy.accept(ex).await.is_empty());
+        }
+
+        assert_eq!(
+            policy.timeout_tasks.lock().unwrap().len(),
+            2,
+            "no more than max_timeout_tasks tasks spawned"
+        );
+        assert_eq!(
+            policy.buckets.lock().unwrap().len(),
+            4,
+            "buckets still buffered even without their own timer"
+        );
+
+        // Flush completes everything (no hang, no loss of buffered exchanges).
+        let flushed = policy.flush().await;
+        assert_eq!(flushed.len(), 4);
+    }
+
+    /// Re-review of F6-1 (token-entry leak): sequential unique keys that all
+    /// complete by natural timeout must not leave entries behind — the
+    /// timeout map returns to empty after each task fires.
+    #[tokio::test]
+    async fn batch_sequential_unique_keys_do_not_leak_timeout_entries() {
+        let policy = BatchPolicy::with_limits(
+            Arc::new(PropExpr("key".into())),
+            Arc::new(PropExpr("seq".into())),
+            BatchCompletion::Timeout(30),
+            100, // max_buckets
+            100, // max_bucket_size
+            16,  // max_timeout_tasks
+        );
+
+        for i in 0..8 {
+            let mut ex = mk_exchange(i);
+            ex.set_property("key", serde_json::json!(format!("k{i}")));
+            assert!(policy.accept(ex).await.is_empty());
+            // Let the timeout fire and the task finish its cleanup.
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            assert_eq!(
+                policy.timeout_tasks.lock().unwrap().len(),
+                0,
+                "timeout entry must be removed on natural completion (k{i})"
+            );
+        }
+        assert_eq!(policy.buckets.lock().unwrap().len(), 0);
+    }
+
+    /// Re-review 2 of F6-1 (guard/take TOCTOU under key reuse): the
+    /// generation check and the bucket take must be ONE critical section.
+    /// Drives the supersede cycle, then asserts that a stale generation's
+    /// COMBINED take returns None AND leaves the newer bucket intact, while
+    /// the current generation's take drains it.
+    #[tokio::test]
+    async fn batch_timeout_key_reuse_stale_take_leaves_newer_bucket() {
+        let policy = BatchPolicy::with_limits(
+            Arc::new(ConstExpr("hot".into())),
+            Arc::new(PropExpr("seq".into())),
+            BatchCompletion::Timeout(60_000), // long — nothing fires naturally here
+            16,
+            100,
+            16,
+        );
+
+        // Bucket + timeout task for key "hot" (generation 1).
+        assert!(policy.accept(mk_exchange(1)).await.is_empty());
+        let first_gen = {
+            let tasks = policy.timeout_tasks.lock().unwrap();
+            tasks.get("hot").map(|e| e.generation).unwrap()
+        };
+
+        // Supersede: size-based completion path cancels + removes generation
+        // 1 AND drains the bucket, then a new exchange respawns generation
+        // 2 with a fresh bucket for the same key.
+        policy.cancel_timeout("hot");
+        assert!(policy.take_bucket("hot").is_some());
+        assert!(policy.timeout_tasks.lock().unwrap().is_empty());
+        assert!(policy.accept(mk_exchange(2)).await.is_empty());
+        let second_gen = {
+            let tasks = policy.timeout_tasks.lock().unwrap();
+            tasks.get("hot").map(|e| e.generation).unwrap()
+        };
+        assert_ne!(first_gen, second_gen);
+
+        // A stale cleanup (as if the generation-1 task woke up late) must
+        // not remove the generation-2 entry.
+        policy.remove_timeout_task_if_current("hot", first_gen);
+        assert_eq!(
+            policy.timeout_tasks.lock().unwrap().len(),
+            1,
+            "stale generation cleanup must not remove the newer entry"
+        );
+
+        // The stale task's combined guard+take must return None AND leave
+        // the newer generation's bucket untouched.
+        let stolen = policy.take_bucket_if_current_timeout_task("hot", first_gen);
+        assert!(
+            stolen.is_none(),
+            "stale generation must not take the bucket"
+        );
+        assert_eq!(
+            policy.buffered(),
+            1,
+            "newer bucket must remain after the stale combined take"
+        );
+
+        // The current generation's combined take succeeds and drains.
+        let bucket = policy.take_bucket_if_current_timeout_task("hot", second_gen);
+        assert_eq!(
+            bucket
+                .expect("current generation drains its bucket")
+                .exchanges
+                .len(),
+            1
+        );
+        policy.remove_timeout_task_if_current("hot", second_gen);
+        assert!(policy.timeout_tasks.lock().unwrap().is_empty());
+
+        // Flush has nothing left — exactly-once semantics preserved.
+        let flushed = policy.flush().await;
+        assert!(flushed.is_empty());
+    }
+
+    /// Re-review 2 of F6-1 (regression bite): proves the combined
+    /// guard+take is atomic by forcing the interleaving DETERMINISTICALLY.
+    /// A background thread performs the full supersede (cancel + newer
+    /// bucket + newer generation entry) exactly between the generation
+    /// check and the bucket take, via the test-only hook inside the
+    /// critical section. Under the combined implementation the supersede
+    /// blocks on the held `timeout_tasks` lock and the take retrieves the
+    /// ORIGINAL bucket; a separate check-then-take implementation would
+    /// let the supersede complete in the gap and the take would STEAL the
+    /// newer generation's bucket — failing the assertions below.
+    #[tokio::test]
+    async fn batch_timeout_combined_take_atomic_under_interleaved_supersede() {
+        let policy = BatchPolicy::with_limits(
+            Arc::new(ConstExpr("hot".into())),
+            Arc::new(PropExpr("seq".into())),
+            BatchCompletion::Timeout(60_000), // long — nothing fires naturally here
+            16,
+            100,
+            16,
+        );
+
+        // Bucket + timeout task for key "hot" (generation 1, seq 1).
+        assert!(policy.accept(mk_exchange(1)).await.is_empty());
+        let first_gen = {
+            let tasks = policy.timeout_tasks.lock().unwrap();
+            tasks.get("hot").map(|e| e.generation).unwrap()
+        };
+
+        let (start_tx, start_rx) = std::sync::mpsc::channel::<()>();
+        let (supersede_done_tx, supersede_done_rx) = std::sync::mpsc::channel::<()>();
+        let supersede_done_rx = std::sync::Arc::new(std::sync::Mutex::new(supersede_done_rx));
+        *policy.interleave_hook.lock().unwrap() = Some(Arc::new(move || {
+            // Signal the background supersede, then wait (bounded) for it to
+            // complete. Under the CORRECT combined implementation the
+            // supersede blocks on the held `timeout_tasks` lock, this wait
+            // times out, and the take proceeds with the original bucket.
+            // Under a separate check-then-take implementation the supersede
+            // completes in the unlocked gap, this wait succeeds, and the
+            // subsequent take steals the newer bucket — failing the test.
+            start_tx.send(()).expect("hook start signal");
+            let _ = supersede_done_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(2));
+        }));
+
+        let bg_policy = Arc::clone(&policy);
+        let bg = std::thread::spawn(move || {
+            start_rx.recv().expect("bg start");
+            // Full supersede, as a size-completion + key reuse would do.
+            bg_policy.cancel_timeout("hot");
+            {
+                let mut buckets = bg_policy.buckets.lock().unwrap();
+                buckets.insert(
+                    "hot".to_string(),
+                    Bucket {
+                        exchanges: vec![mk_exchange(2)],
+                    },
+                );
+            }
+            let newer_gen = bg_policy.timeout_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            bg_policy.timeout_tasks.lock().unwrap().insert(
+                "hot".to_string(),
+                TimeoutEntry {
+                    generation: newer_gen,
+                    cancel: CancellationToken::new(),
+                },
+            );
+            supersede_done_tx.send(()).expect("supersede done signal");
+        });
+
+        // The operation under test: guard + take in one critical section.
+        // join() blocks until the background supersede finishes (it is
+        // serialized behind the lock the take holds).
+        let taken = policy.take_bucket_if_current_timeout_task("hot", first_gen);
+        bg.join().expect("background thread clean");
+
+        let taken = taken.expect("generation 1 still owned the take at check time");
+        // The taken bucket is the ORIGINAL (seq 1) — never the newer one.
+        let seq_of = |ex: &Exchange| ex.property("seq").cloned().unwrap_or_default();
+        assert_eq!(
+            seq_of(&taken.exchanges[0]),
+            serde_json::json!(1),
+            "combined take must retrieve the original bucket, not steal the newer one"
+        );
+        // The newer generation's bucket survived the interleaving.
+        assert_eq!(
+            policy.buffered(),
+            1,
+            "newer bucket must remain after the interleaved supersede"
+        );
+        let newer_bucket = policy.take_bucket("hot").expect("newer bucket present");
+        assert_eq!(seq_of(&newer_bucket.exchanges[0]), serde_json::json!(2));
+
+        policy.flush().await;
     }
 }

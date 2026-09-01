@@ -13,7 +13,12 @@ pub fn parse_mqtt_uri(uri: &str) -> Result<MqttEndpointConfig, CamelError> {
     let rest = uri
         .strip_prefix("mqtt://")
         .or_else(|| uri.strip_prefix("mqtts://"))
-        .ok_or_else(|| CamelError::Config(format!("mqtt: invalid URI scheme: {uri}")))?;
+        .ok_or_else(|| {
+            CamelError::Config(format!(
+                "mqtt: invalid URI scheme: {}",
+                crate::config::redact_broker_url(uri)
+            ))
+        })?;
 
     let (authority_path, query) = match rest.split_once('?') {
         Some((a, q)) => (a, Some(q)),

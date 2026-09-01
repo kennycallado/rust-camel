@@ -391,10 +391,61 @@ pub struct BrokerConfig {
     pub password: Option<String>,
 }
 
+/// Redact credentials embedded in a JMS broker URL (audit 2026-08-31,
+/// F5-3). ActiveMQ-style URLs routinely carry credentials:
+/// `failover:(tcp://host:61616)?jms.userName=admin&jms.password=secret` or
+/// `tcp://user:pass@host`. Masks userinfo before '@' and drops query
+/// parameters whose key mentions user/password/secret/credential/token.
+/// String-based (no url crate dep in this component).
+pub(crate) fn redact_broker_url(raw: &str) -> String {
+    let sensitive = [
+        "password",
+        "passwd",
+        "secret",
+        "credential",
+        "token",
+        "username",
+        "user",
+    ];
+    // 1) Mask userinfo in scheme://user:pass@host positions.
+    let after_userinfo = match raw.split_once('@') {
+        Some((before, after)) => {
+            // Only mask when the '@' is in an authority position (after "://").
+            match before.rfind("://") {
+                Some(idx) => {
+                    let scheme_end = idx + 3;
+                    format!("{}***@{}", &raw[..scheme_end], after)
+                }
+                None => raw.to_string(),
+            }
+        }
+        None => raw.to_string(),
+    };
+    // 2) Redact sensitive query params, keep the rest for diagnosability.
+    match after_userinfo.split_once('?') {
+        Some((base, query)) => {
+            let redacted: Vec<String> = query
+                .split('&')
+                .map(|pair| {
+                    let key = pair.split('=').next().unwrap_or(pair).to_lowercase();
+                    if sensitive.iter().any(|s| key.contains(s)) {
+                        let k = pair.split('=').next().unwrap_or(pair);
+                        format!("{k}=<redacted>")
+                    } else {
+                        pair.to_string()
+                    }
+                })
+                .collect();
+            format!("{base}?{}", redacted.join("&"))
+        }
+        None => after_userinfo,
+    }
+}
+
 impl std::fmt::Debug for BrokerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BrokerConfig")
-            .field("broker_url", &self.broker_url)
+            .field("broker_url", &redact_broker_url(&self.broker_url))
             .field("broker_type", &self.broker_type)
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
@@ -478,16 +529,22 @@ impl JmsPoolConfig {
 
             let has_known_scheme = known_schemes.iter().any(|s| bc.broker_url.starts_with(s));
             if !has_known_scheme {
+                // Re-review of F5-2: validation errors are persisted to the
+                // redb journal — the broker URL must be redacted here too,
+                // not only in Debug.
                 return Err(CamelError::ProcessorError(format!(
                     "broker '{}' has an invalid broker_url '{}': must start with one of {:?}",
-                    name, bc.broker_url, known_schemes
+                    name,
+                    redact_broker_url(&bc.broker_url),
+                    known_schemes
                 )));
             }
 
             if bc.broker_url.starts_with("failover://") && bc.broker_type == BrokerType::Artemis {
                 return Err(CamelError::ProcessorError(format!(
                     "broker '{}' uses failover:// with the artemis broker type (URL '{}'): the Artemis sidecar does not unwrap failover wrappers — use a single primary broker URL or multiple broker entries",
-                    name, bc.broker_url
+                    name,
+                    redact_broker_url(&bc.broker_url)
                 )));
             }
         }
@@ -516,6 +573,79 @@ impl JmsPoolConfig {
 mod tests {
     use super::*;
     use crate::BrokerType;
+
+    /// Re-review of F5-2: validation errors persist to the redb journal —
+    /// the emitted error string must carry the redacted URL, not the raw one.
+    #[test]
+    fn validate_error_redacts_broker_url_credentials() {
+        let mut cfg = super::JmsPoolConfig::default();
+        cfg.brokers.insert(
+            "primary".to_string(),
+            crate::BrokerConfig {
+                broker_url: "http://admin:secretpass@evil.example.com:61616".to_string(),
+                broker_type: BrokerType::Artemis,
+                username: None,
+                password: None,
+            },
+        );
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            !err.contains("secretpass"),
+            "error must not carry credentials: {err}"
+        );
+        assert!(
+            err.contains("***@evil.example.com"),
+            "redacted host kept for diagnosability: {err}"
+        );
+    }
+
+    /// Audit 2026-08-31, F5-3: JMS broker URLs must not leak credentials
+    /// through Debug output.
+    #[test]
+    fn redact_broker_url_masks_userinfo_and_sensitive_query() {
+        // userinfo form
+        let redacted = redact_broker_url("tcp://admin:secretpass@broker.example.com:61616");
+        assert!(
+            !redacted.contains("secretpass"),
+            "password masked: {redacted}"
+        );
+        assert!(
+            redacted.contains("broker.example.com"),
+            "host visible: {redacted}"
+        );
+
+        // failover + query-param form (ActiveMQ style)
+        let redacted = redact_broker_url(
+            "failover:(tcp://host:61616)?jms.userName=admin&jms.password=secret&keepAlive=true",
+        );
+        assert!(
+            !redacted.contains("secret"),
+            "password param masked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("=admin"),
+            "username param masked: {redacted}"
+        );
+        assert!(
+            redacted.contains("keepAlive=true"),
+            "benign param kept: {redacted}"
+        );
+
+        // clean URL untouched
+        assert_eq!(redact_broker_url("tcp://host:61616"), "tcp://host:61616");
+    }
+
+    #[test]
+    fn broker_config_debug_redacts_url_credentials() {
+        let cfg = BrokerConfig {
+            broker_url: "failover:(tcp://h:61616)?jms.password=topsecret".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            username: Some("admin".to_string()),
+            password: Some("topsecret".to_string()),
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("topsecret"), "Debug must not leak: {dbg}");
+    }
 
     #[test]
     fn parse_jms_queue_explicit() {

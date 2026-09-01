@@ -162,6 +162,14 @@ pub struct AggregatorConfig {
     /// Maximum number of correlation key buckets (memory protection).
     /// When limit is reached, new correlation keys are rejected.
     pub max_buckets: Option<usize>,
+    /// Maximum number of exchanges buffered inside ONE bucket (memory
+    /// protection, audit 2026-08-31 F6-2). `max_buckets` caps the bucket
+    /// COUNT only; without a per-bucket cap, a single hot correlation key
+    /// buffers unboundedly until completion fires. When the limit is
+    /// reached, the incoming exchange is rejected with an error.
+    /// `None` disables the cap (explicit opt-out, e.g. size-complete
+    /// configs where completion fires before the cap matters).
+    pub max_bucket_size: Option<usize>,
     /// Time-to-live for inactive buckets (memory protection).
     /// Buckets not updated for this duration are evicted.
     pub bucket_ttl: Option<Duration>,
@@ -184,6 +192,7 @@ impl std::fmt::Debug for AggregatorConfig {
             .field("correlation", &self.correlation)
             .field("strategy", &self.strategy)
             .field("max_buckets", &self.max_buckets)
+            .field("max_bucket_size", &self.max_bucket_size)
             .field("bucket_ttl", &self.bucket_ttl)
             .field("force_completion_on_stop", &self.force_completion_on_stop)
             .field("discard_on_timeout", &self.discard_on_timeout)
@@ -207,6 +216,8 @@ impl AggregatorConfig {
             // ceiling the operator may still override. The TTL (5 minutes) is
             // the inline-retain + background-sweep eviction window.
             max_buckets: Some(10_000),
+            // F6-2: per-bucket accumulation bound (hot-key OOM vector).
+            max_bucket_size: Some(10_000),
             bucket_ttl: Some(Duration::from_secs(300)),
             force_completion_on_stop: false,
             discard_on_timeout: false,
@@ -259,6 +270,7 @@ pub struct AggregatorConfigBuilder {
     correlation: CorrelationStrategy,
     strategy: AggregationStrategy,
     max_buckets: Option<usize>,
+    max_bucket_size: Option<usize>,
     bucket_ttl: Option<Duration>,
     force_completion_on_stop: bool,
     discard_on_timeout: bool,
@@ -333,6 +345,14 @@ impl AggregatorConfigBuilder {
         self
     }
 
+    /// Set the maximum number of exchanges buffered inside one bucket
+    /// (F6-2). Pass a value; the incoming exchange past the limit is
+    /// rejected with an error.
+    pub fn max_bucket_size(mut self, max: usize) -> Self {
+        self.max_bucket_size = Some(max);
+        self
+    }
+
     /// Set the time-to-live for inactive buckets.
     /// Buckets that haven't been updated for this duration will be evicted.
     pub fn bucket_ttl(mut self, ttl: Duration) -> Self {
@@ -361,6 +381,7 @@ impl AggregatorConfigBuilder {
             correlation: self.correlation,
             strategy: self.strategy,
             max_buckets: self.max_buckets,
+            max_bucket_size: self.max_bucket_size,
             bucket_ttl: self.bucket_ttl,
             force_completion_on_stop: self.force_completion_on_stop,
             discard_on_timeout: self.discard_on_timeout,
@@ -646,6 +667,7 @@ mod tests {
             correlation: CorrelationStrategy::HeaderName("k".into()),
             strategy: AggregationStrategy::CollectAll,
             max_buckets: None,
+            max_bucket_size: None,
             bucket_ttl: None,
             force_completion_on_stop: false,
             discard_on_timeout: false,
@@ -671,6 +693,7 @@ mod tests {
             correlation: CorrelationStrategy::HeaderName("k".into()),
             strategy: AggregationStrategy::CollectAll,
             max_buckets: None,
+            max_bucket_size: None,
             bucket_ttl: None,
             force_completion_on_stop: false,
             discard_on_timeout: false,
@@ -709,6 +732,7 @@ mod tests {
             correlation: CorrelationStrategy::HeaderName("k".into()),
             strategy: AggregationStrategy::CollectAll,
             max_buckets: Some(100),
+            max_bucket_size: None,
             bucket_ttl: None, // <-- missing ttl fallback
             force_completion_on_stop: false,
             discard_on_timeout: false,

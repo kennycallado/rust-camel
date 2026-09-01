@@ -881,6 +881,10 @@ pub struct AggregateData {
     pub strategy: String,
     #[serde(default)]
     pub max_buckets: Option<usize>,
+    /// Upper bound on exchanges buffered inside one correlation bucket
+    /// (audit 2026-08-31, F6-2). Absent = builder default (10_000).
+    #[serde(default)]
+    pub max_bucket_size: Option<usize>,
     #[serde(default)]
     pub bucket_ttl_ms: Option<u64>,
     #[serde(default)]

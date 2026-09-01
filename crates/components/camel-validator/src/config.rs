@@ -65,6 +65,19 @@ impl ValidatorConfig {
             .map_err(|e| CamelError::InvalidUri(format!("invalid UTF-8 in path: {e}")))?;
         let schema_path = PathBuf::from(decoded_path.as_ref());
 
+        // Audit 2026-08-31, F4-6: reject traversal components AFTER percent
+        // decoding (a raw `%2e%2e/` must not bypass the check). Defense-in-depth
+        // parity with camel-template; the schema path is operator config, but a
+        // `..` here only ever means a bad deploy.
+        if schema_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(CamelError::InvalidUri(
+                "schema path contains '..' traversal component".to_string(),
+            ));
+        }
+
         let schema_type = if let Some(q) = query {
             let type_val = q.split('&').find_map(|kv| kv.strip_prefix("type="));
             match type_val {
@@ -306,6 +319,15 @@ mod tests {
     fn test_fail_on_null_header_default_true() {
         let cfg = ValidatorConfig::from_uri("validator:schemas/order.xsd?headerName=X-H").unwrap();
         assert!(cfg.fail_on_null_header);
+    }
+
+    /// Audit 2026-08-31, F4-6: traversal rejected even percent-encoded.
+    #[test]
+    fn schema_path_rejects_traversal_raw_and_percent_encoded() {
+        assert!(ValidatorConfig::from_uri("validator:../etc/passwd.xsd").is_err());
+        assert!(ValidatorConfig::from_uri("validator:%2e%2e/etc/passwd.xsd").is_err());
+        assert!(ValidatorConfig::from_uri("validator:a/../../b.xsd").is_err());
+        assert!(ValidatorConfig::from_uri("validator:schemas/order.xsd").is_ok());
     }
 
     #[test]

@@ -43,6 +43,7 @@ use camel_component_api::tls_source::ServerTlsSource;
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, StreamBody, StreamMetadata};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
 use camel_component_api::{UriComponents, UriConfig, parse_uri};
+use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 
@@ -1044,6 +1045,14 @@ pub(crate) struct AppState {
     inflight: Arc<tokio::sync::Semaphore>,
 }
 
+/// Hard wall-clock limit for one inbound request on the consumer side
+/// (audit 2026-08-31, F2-1). A slow-drip client otherwise holds an
+/// `inflight` semaphore permit (and its connection) indefinitely, starving
+/// the consumer into 503s. 30s matches the documented component default
+/// timeouts. Applies to the whole dispatch; streaming bodies are additionally
+/// protected by the byte cap in `dispatch_handler`.
+const CONSUMER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn run_axum_server(
     listener: tokio::net::TcpListener,
     registry: HttpRouteRegistry,
@@ -1059,7 +1068,13 @@ async fn run_axum_server(
         max_response_body,
         inflight,
     };
-    let app = Router::new().fallback(dispatch_handler).with_state(state);
+    let app = Router::new()
+        .fallback(dispatch_handler)
+        .with_state(state)
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            CONSUMER_REQUEST_TIMEOUT,
+        ));
 
     axum::serve(listener, app).await.unwrap_or_else(|e| {
         runtime
@@ -1087,7 +1102,13 @@ async fn run_axum_server_tls(
         max_response_body,
         inflight,
     };
-    let app = Router::new().fallback(dispatch_handler).with_state(state);
+    let app = Router::new()
+        .fallback(dispatch_handler)
+        .with_state(state)
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            CONSUMER_REQUEST_TIMEOUT,
+        ));
 
     // RustlsConfig is now constructed once in get_or_spawn and retained on
     // ServerHandle so the reload handler can call reload_from_config() on it.
@@ -1246,15 +1267,36 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
             }
         };
 
-        // Build StreamBody from Axum body WITHOUT materializing
+        // Build StreamBody from Axum body WITHOUT materializing.
+        // SECURITY (audit 2026-08-31, F2-1): the Content-Length pre-check above
+        // cannot see chunked/no-length requests. Wrap the stream with a hard
+        // byte cap so ANY downstream consumption fails closed once
+        // max_request_body is exceeded — the cap travels with the body.
         let content_type = headers
             .get(http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
         let data_stream: BodyDataStream = req.into_body().into_data_stream();
-        let mapped_stream = data_stream.map_err(|e| CamelError::Io(e.to_string()));
-        let boxed: BoxStream<'static, Result<bytes::Bytes, CamelError>> = Box::pin(mapped_stream);
+        let max_body = state.max_request_body;
+        let mut seen: u64 = 0;
+        let capped_stream =
+            data_stream
+                .map_err(|e| CamelError::Io(e.to_string()))
+                .map(move |chunk| match chunk {
+                    Ok(bytes) => {
+                        seen = seen.saturating_add(bytes.len() as u64);
+                        if seen > max_body as u64 {
+                            Err(CamelError::ProcessorError(format!(
+                                "Request body exceeds configured limit of {max_body} bytes"
+                            )))
+                        } else {
+                            Ok(bytes)
+                        }
+                    }
+                    Err(e) => Err(e),
+                });
+        let boxed: BoxStream<'static, Result<bytes::Bytes, CamelError>> = Box::pin(capped_stream);
 
         let stream_body = StreamBody {
             stream: Arc::new(tokio::sync::Mutex::new(Some(boxed))),
@@ -1842,24 +1884,67 @@ pub(crate) fn build_client(
             builder = builder.danger_accept_invalid_certs(true);
         }
 
-        if let Some(ca_path) = &tls.ca_cert_path
-            && let Ok(ca_bytes) = std::fs::read(ca_path)
-        {
-            let cert = reqwest::Certificate::from_pem(&ca_bytes)
-                .or_else(|_| reqwest::Certificate::from_der(&ca_bytes));
-            if let Ok(ca_cert) = cert {
-                builder = builder.add_root_certificate(ca_cert);
+        if let Some(ca_path) = &tls.ca_cert_path {
+            // Audit 2026-08-31, F2-7: a configured CA that fails to load must
+            // never degrade silently to system roots. Loud warn (config error
+            // class: fail-fast would break existing deployments relying on the
+            // fallback; the warning is the operator signal).
+            match std::fs::read(ca_path) {
+                Ok(ca_bytes) => {
+                    match reqwest::Certificate::from_pem(&ca_bytes)
+                        .or_else(|_| reqwest::Certificate::from_der(&ca_bytes))
+                    {
+                        Ok(ca_cert) => {
+                            builder = builder.add_root_certificate(ca_cert);
+                        }
+                        Err(e) => {
+                            // log-policy: handler-owned
+                            tracing::warn!(
+                                error = %e,
+                                "configured CA certificate failed to parse — falling back to system roots"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    // log-policy: handler-owned
+                    tracing::warn!(
+                        error = %e,
+                        "configured CA certificate file unreadable — falling back to system roots"
+                    );
+                }
             }
         }
 
-        if let (Some(cert_path), Some(key_path)) = (&tls.client_cert_path, &tls.client_key_path)
-            && let (Ok(cert_bytes), Ok(key_bytes)) =
-                (std::fs::read(cert_path), std::fs::read(key_path))
-        {
-            let mut identity_pem = cert_bytes;
-            identity_pem.extend_from_slice(&key_bytes);
-            if let Ok(identity) = reqwest::Identity::from_pem(&identity_pem) {
-                builder = builder.identity(identity);
+        // mTLS identity: BOTH files must load and parse, or the identity is
+        // absent. A partial failure previously meant silently downgrading to
+        // non-mTLS — now loud.
+        if let (Some(cert_path), Some(key_path)) = (&tls.client_cert_path, &tls.client_key_path) {
+            match (std::fs::read(cert_path), std::fs::read(key_path)) {
+                (Ok(cert_bytes), Ok(key_bytes)) => {
+                    let mut identity_pem = cert_bytes;
+                    identity_pem.extend_from_slice(&key_bytes);
+                    match reqwest::Identity::from_pem(&identity_pem) {
+                        Ok(identity) => {
+                            builder = builder.identity(identity);
+                        }
+                        Err(e) => {
+                            // log-policy: handler-owned
+                            tracing::warn!(
+                                error = %e,
+                                "configured mTLS identity failed to parse — client certificate NOT used"
+                            );
+                        }
+                    }
+                }
+                (cert_r, key_r) => {
+                    // log-policy: handler-owned
+                    tracing::warn!(
+                        cert_ok = cert_r.is_ok(),
+                        key_ok = key_r.is_ok(),
+                        "configured mTLS cert/key file unreadable — client certificate NOT used"
+                    );
+                }
             }
         }
     }
@@ -2205,7 +2290,65 @@ impl HttpProducer {
     fn is_ok_status(status: u16, range: (u16, u16)) -> bool {
         status >= range.0 && status <= range.1
     }
+}
 
+/// Redact credentials from a URL before it reaches logs or error values
+/// (ADR-0051 redact-by-construction). Masks userinfo (`user:pass@`) and the
+/// query string (which commonly carries API keys/tokens). Host and path stay
+/// visible for diagnosability. Best-effort: on parse failure the raw string is
+/// returned truncated to 256 chars (never a secret-bearing suffix).
+fn redact_url_for_diagnostics(raw: &str) -> String {
+    const MAX_URL_LOG_LEN: usize = 256;
+    match url::Url::parse(raw) {
+        Ok(mut u) => {
+            if !u.username().is_empty() {
+                let _ = u.set_username("***");
+                let _ = u.set_password(None);
+            }
+            if u.query().is_some() {
+                u.set_query(None);
+                // Mark that a query was present without echoing it.
+                let mut s = u.to_string();
+                if let Some(stripped) = s.strip_suffix('?') {
+                    s = stripped.to_string();
+                }
+                s.push_str("?[redacted]");
+                if s.len() > MAX_URL_LOG_LEN {
+                    s.truncate(MAX_URL_LOG_LEN);
+                }
+                return s;
+            }
+            let mut s = u.to_string();
+            if s.len() > MAX_URL_LOG_LEN {
+                s.truncate(MAX_URL_LOG_LEN);
+            }
+            s
+        }
+        Err(_) => {
+            let mut s = raw.to_string();
+            s.truncate(MAX_URL_LOG_LEN);
+            s
+        }
+    }
+}
+
+/// Maximum bytes of an upstream error response body embedded into
+/// `CamelError::HttpOperationFailed`. The body is attacker-controllable (a
+/// malicious or compromised upstream), so it is truncated and lossy-decoded to
+/// bound log injection / DLQ payload size.
+const MAX_ERROR_RESPONSE_BODY_BYTES: usize = 4096;
+
+fn truncate_error_body(body: &[u8]) -> String {
+    if body.len() <= MAX_ERROR_RESPONSE_BODY_BYTES {
+        String::from_utf8_lossy(body).into_owned()
+    } else {
+        let mut s = String::from_utf8_lossy(&body[..MAX_ERROR_RESPONSE_BODY_BYTES]).into_owned();
+        s.push_str("...[truncated]");
+        s
+    }
+}
+
+impl HttpProducer {
     /// Whether the HTTP method is entity-enclosing (may carry a request
     /// body). Follows Apache Camel's `HttpMethods` set: POST, PUT, PATCH are
     /// entity-enclosing; GET, HEAD, DELETE, OPTIONS, TRACE are not (RFC 9110
@@ -2267,7 +2410,7 @@ impl Service<Exchange> for HttpProducer {
                 debug!(
                     correlation_id = %exchange.correlation_id(),
                     method = %method_str,
-                    url = %url,
+                    url = %redact_url_for_diagnostics(&url),
                     "HTTP request"
                 );
 
@@ -2535,10 +2678,12 @@ impl Service<Exchange> for HttpProducer {
                 {
                     return Err(CamelError::HttpOperationFailed {
                         method: method_str,
-                        url,
+                        // ADR-0051 redact-by-construction: never embed
+                        // userinfo/query credentials in the error value.
+                        url: redact_url_for_diagnostics(&url),
                         status_code,
                         status_text,
-                        response_body: Some(String::from_utf8_lossy(&response_body).to_string()),
+                        response_body: Some(truncate_error_body(&response_body)),
                     });
                 }
 
@@ -2549,7 +2694,7 @@ impl Service<Exchange> for HttpProducer {
                 debug!(
                     correlation_id = %exchange.correlation_id(),
                     status = status_code,
-                    url = %url,
+                    url = %redact_url_for_diagnostics(&url),
                     "HTTP response"
                 );
                 Ok(exchange)
@@ -2707,6 +2852,64 @@ mod tests {
 
     fn test_producer_ctx() -> ProducerContext {
         ProducerContext::new()
+    }
+
+    // -----------------------------------------------------------------------
+    // Security: credential redaction (audit 2026-08-31, finding F3-1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn redact_url_masks_userinfo_and_query() {
+        let redacted =
+            redact_url_for_diagnostics("http://user:secretpass@internal.example/api?token=abc123");
+        assert!(
+            !redacted.contains("secretpass"),
+            "password must be masked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("token=abc123"),
+            "query must be masked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("user@"),
+            "username must be masked: {redacted}"
+        );
+        assert!(
+            redacted.contains("internal.example"),
+            "host stays visible: {redacted}"
+        );
+        assert!(redacted.contains("[redacted]"), "query marked: {redacted}");
+    }
+
+    #[test]
+    fn redact_url_keeps_clean_urls_visible() {
+        let redacted = redact_url_for_diagnostics("https://api.example.com/v1/items");
+        assert_eq!(redacted, "https://api.example.com/v1/items");
+    }
+
+    #[test]
+    fn redact_url_truncates_unparseable() {
+        let long = "x".repeat(1000);
+        let redacted = redact_url_for_diagnostics(&long);
+        assert_eq!(redacted.len(), 256, "unparseable URL must be truncated");
+    }
+
+    #[test]
+    fn truncate_error_body_caps_attacker_body() {
+        let big = vec![b'A'; 10 * 1024 * 1024];
+        let truncated = truncate_error_body(&big);
+        assert!(
+            truncated.len() <= MAX_ERROR_RESPONSE_BODY_BYTES + 20,
+            "body must be capped near {} bytes, got {}",
+            MAX_ERROR_RESPONSE_BODY_BYTES,
+            truncated.len()
+        );
+        assert!(truncated.ends_with("...[truncated]"));
+    }
+
+    #[test]
+    fn truncate_error_body_keeps_small_body() {
+        assert_eq!(truncate_error_body(b"boom"), "boom");
     }
 
     #[test]
@@ -5246,6 +5449,81 @@ mod tests {
         token.cancel();
     }
 
+    /// Audit 2026-08-31, F2-1: a chunked (no Content-Length) request body must
+    /// still be capped — the byte limit travels with the stream, so any
+    /// downstream materialization fails closed past `max_request_body`.
+    #[tokio::test]
+    async fn test_http_consumer_chunked_body_is_capped() {
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
+            host: "127.0.0.1".to_string(),
+            port,
+            path: "/chunked-cap".to_string(),
+            max_request_body: 1024, // tiny cap for the test
+            max_response_body: 10 * 1024 * 1024,
+            max_inflight_requests: 16,
+            method: None,
+            tls_config: None,
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Chunked body: reqwest streams it without Content-Length.
+        let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = (0..8)
+            .map(|_| Ok(bytes::Bytes::from(vec![b'A'; 512])))
+            .collect();
+        let stream_body = reqwest::Body::wrap_stream(futures::stream::iter(chunks));
+
+        let client = reqwest::Client::new();
+        let send_fut = client
+            .post(format!("http://127.0.0.1:{port}/chunked-cap"))
+            .body(stream_body)
+            .send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                // The route materializes the body — the cap must fire.
+                let materialized = envelope
+                    .exchange
+                    .input
+                    .body
+                    .clone()
+                    .into_bytes(64 * 1024)
+                    .await;
+                assert!(
+                    materialized.is_err(),
+                    "materializing a 4 KiB chunked body under a 1 KiB cap must fail"
+                );
+                let err = materialized.unwrap_err().to_string();
+                assert!(
+                    err.contains("limit") || err.contains("exceeds"),
+                    "error should mention the limit: {err}"
+                );
+                if let Some(reply_tx) = envelope.reply_tx {
+                    envelope.exchange.input.body =
+                        camel_component_api::Body::Text("handled".to_string());
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        token.cancel();
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_http_consumer_enforces_max_response_body_for_bytes() {
@@ -6229,11 +6507,16 @@ mod tests {
         let (http_result, _) = tokio::join!(send_fut, consumer_fut);
 
         let resp = http_result.unwrap();
-        // Must NOT be 413; chunked uploads without Content-Length bypass the limit.
+        // Audit 2026-08-31 (F2-1): the request is no longer rejected at the door
+        // (no Content-Length to pre-check), but the byte cap now travels with the
+        // stream: ANY materialization past maxRequestBody fails closed. This test
+        // does not consume the body, so the request still completes with 200 —
+        // enforcement happens at consumption time (see
+        // test_http_consumer_chunked_body_is_capped).
         assert_ne!(
             resp.status().as_u16(),
             413,
-            "chunked upload must not be rejected by maxRequestBody"
+            "chunked upload has no Content-Length to pre-check"
         );
         assert_eq!(resp.status().as_u16(), 200);
 

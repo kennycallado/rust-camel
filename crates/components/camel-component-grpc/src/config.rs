@@ -588,9 +588,12 @@ fn parse_grpc_query_params(
         .transpose()?
         .unwrap_or_default();
 
-    // Warn about any unrecognized params
-    for (k, v) in &map {
-        tracing::warn!("unrecognized gRPC URI parameter '{k}={v}' — ignored");
+    // Warn about any unrecognized params. SECURITY (audit 2026-08-31, F5-1):
+    // log the KEY only — unknown params carry no metadata-driven redaction, so
+    // a mistyped secret param (`authToken=…`) would otherwise land in cleartext
+    // logs on every endpoint creation.
+    for k in map.keys() {
+        tracing::warn!("unrecognized gRPC URI parameter '{k}' — ignored");
     }
 
     Ok(GrpcConfig {

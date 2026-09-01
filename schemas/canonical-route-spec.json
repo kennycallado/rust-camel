@@ -122,6 +122,16 @@
         "header": {
           "type": "string"
         },
+        "max_bucket_size": {
+          "description": "Per-bucket accumulation bound (audit 2026-08-31, F6-2).\nAbsent = builder default (10_000).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
         "max_buckets": {
           "type": [
             "integer",

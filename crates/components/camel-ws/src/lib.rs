@@ -423,6 +423,22 @@ fn ws_upgrade_auth_error(e: &CamelError) -> axum::response::Response {
     (status, body).into_response()
 }
 
+/// Redact a producer-side WS URL for debug logs (audit 2026-08-31, F2-3).
+/// The endpoint path can carry a query string with tokens
+/// (`ws://host/path?token=…`); userinfo is not supported by the URI grammar
+/// but we mask any `@`-prefixed authority defensively. Returns
+/// `scheme://host:port/path` with the query stripped.
+fn redact_ws_url_for_log(url: &str) -> String {
+    let no_query = url.split('?').next().unwrap_or(url);
+    match no_query.split_once("://") {
+        Some((scheme, rest)) => match rest.split_once('@') {
+            Some((_, after)) => format!("{scheme}://***@{after}"),
+            None => no_query.to_string(),
+        },
+        None => no_query.to_string(),
+    }
+}
+
 /// ADR-0051 defense-in-depth: when the accepted credential came from a
 /// query param, log the redacted URI in the upgrade debug record. ws
 /// forbids `QueryParam` at compile time since Task 1.8; the redaction
@@ -1419,7 +1435,7 @@ impl Service<Exchange> for WsProducer {
                 cfg.inner.scheme, cfg.inner.host, cfg.inner.port, cfg.inner.path
             );
 
-            tracing::debug!(url = url, "WebSocket producer connecting");
+            tracing::debug!(url = %redact_ws_url_for_log(&url), "WebSocket producer connecting");
 
             #[allow(unused_mut)]
             let mut request = url
@@ -1495,11 +1511,11 @@ impl Service<Exchange> for WsProducer {
 
             match incoming {
                 Some(Ok(ClientWsMessage::Text(text))) => {
-                    tracing::debug!(url = url, "WebSocket producer received text response");
+                    tracing::debug!(url = %redact_ws_url_for_log(&url), "WebSocket producer received text response");
                     exchange.input.body = CamelBody::Text(text.to_string());
                 }
                 Some(Ok(ClientWsMessage::Binary(data))) => {
-                    tracing::debug!(url = url, "WebSocket producer received binary response");
+                    tracing::debug!(url = %redact_ws_url_for_log(&url), "WebSocket producer received binary response");
                     exchange.input.body = CamelBody::Bytes(data);
                 }
                 Some(Ok(ClientWsMessage::Close(frame))) => {
@@ -1512,12 +1528,12 @@ impl Service<Exchange> for WsProducer {
                         .unwrap_or(true);
 
                     if normal {
-                        tracing::debug!(url = url, "WebSocket producer received normal close");
+                        tracing::debug!(url = %redact_ws_url_for_log(&url), "WebSocket producer received normal close");
                         exchange.input.body = CamelBody::Empty;
                     } else if reconnect_policy.should_retry(attempts + 1) {
                         let delay = reconnect_policy.delay_for(0); // fresh delay on close
                         tracing::warn!(
-                            url = url,
+                            url = %redact_ws_url_for_log(&url),
                             attempt = attempts + 1,
                             delay_ms = delay.as_millis(),
                             "WebSocket closed by peer — reconnecting"
@@ -1545,7 +1561,7 @@ impl Service<Exchange> for WsProducer {
             }
 
             let _ = ws_stream.close(None).await;
-            tracing::debug!(url = url, "WebSocket producer connection closed");
+            tracing::debug!(url = %redact_ws_url_for_log(&url), "WebSocket producer connection closed");
             Ok(exchange)
         })
     }
@@ -1662,7 +1678,10 @@ fn map_connect_error(err: tungstenite::Error, url: &str) -> CamelError {
             } else if msg.to_lowercase().contains("tls") {
                 CamelError::ProcessorError(format!("WebSocket TLS handshake failed: {msg}"))
             } else {
-                CamelError::ProcessorError(format!("WebSocket connection failed ({url}): {msg}"))
+                CamelError::ProcessorError(format!(
+                    "WebSocket connection failed ({}): {msg}",
+                    redact_ws_url_for_log(url)
+                ))
             }
         }
     }
@@ -1699,7 +1718,8 @@ where
                     Ok(Ok((stream, _))) => Ok(stream),
                     Ok(Err(e)) => Err(map_connect_error(e, &url)),
                     Err(_) => Err(CamelError::ProcessorError(format!(
-                        "WebSocket connect timeout ({connect_timeout:?}) to {url}"
+                        "WebSocket connect timeout ({connect_timeout:?}) to {}",
+                        redact_ws_url_for_log(&url)
                     ))),
                 }
             }
@@ -1713,6 +1733,43 @@ where
 #[cfg(test)]
 mod tests {
     use camel_component_api::test_support::PanicRuntimeObservability;
+
+    /// Audit 2026-08-31, F2-3: producer debug logs must not leak query tokens.
+    #[test]
+    fn redact_ws_url_strips_query_and_userinfo() {
+        assert_eq!(
+            super::redact_ws_url_for_log("ws://broker.example.com:9292/chat?token=abc123"),
+            "ws://broker.example.com:9292/chat"
+        );
+        assert_eq!(
+            super::redact_ws_url_for_log("wss://user:pass@host:443/ws?api_key=xyz"),
+            "wss://***@host:443/ws"
+        );
+        assert_eq!(
+            super::redact_ws_url_for_log("ws://host:80/clean"),
+            "ws://host:80/clean"
+        );
+    }
+
+    /// Re-review of F2-3: connection errors must not echo the raw URL
+    /// (query tokens / userinfo) — only the redacted form.
+    #[test]
+    fn map_connect_error_redacts_url_in_error_value() {
+        let err = super::map_connect_error(
+            tungstenite::Error::Io(std::io::Error::other("peer reset mid-handshake")),
+            "wss://user:secret@broker.example.com/ws?token=abc123",
+        );
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("secret") && !msg.contains("abc123"),
+            "error must not carry credentials: {msg}"
+        );
+        assert!(
+            msg.contains("***@broker.example.com"),
+            "redacted host kept: {msg}"
+        );
+    }
+
     fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
         std::sync::Arc::new(PanicRuntimeObservability)
     }

@@ -137,6 +137,9 @@ impl Component for McpComponent {
                         "MCP remote '{server}' not found in config (URI '{uri}')"
                     ))
                 })?;
+                // Audit 2026-08-31, F2-4: SSRF/scheme policy on the remote URL
+                // (fail-closed at endpoint creation, before any connection).
+                remote.validate_url(server)?;
                 Ok(self.endpoint(uri, operation, Some(remote)))
             }
             // Consumer shapes carry the server-role configs; the named server

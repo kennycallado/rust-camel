@@ -40,6 +40,25 @@ pub struct MqttBrokerConfig {
     pub tls_ca_cert: Option<String>,
 }
 
+/// Redact credentials from an MQTT broker URL for diagnostics
+/// (audit 2026-08-31, F5-2). Masks userinfo in `mqtt://user:pass@host`
+/// authority positions and drops the query string. Scheme, host and port
+/// stay visible. String-based (no url crate dep in this component).
+pub(crate) fn redact_broker_url(raw: &str) -> String {
+    let (scheme, rest) = match raw.split_once("://") {
+        Some((s, r)) => (format!("{s}://"), r),
+        None => (String::new(), raw),
+    };
+    // Strip query entirely — it may carry tokens.
+    let rest = rest.split('?').next().unwrap_or(rest);
+    // Mask userinfo in the authority (anything before the first '@').
+    let rest = match rest.split_once('@') {
+        Some((_, after)) => format!("***@{after}"),
+        None => rest.to_string(),
+    };
+    format!("{scheme}{rest}")
+}
+
 impl MqttBrokerConfig {
     pub fn validate(&self) -> Result<(), CamelError> {
         if self.url.trim().is_empty() {
@@ -50,7 +69,7 @@ impl MqttBrokerConfig {
         if !self.url.starts_with("mqtt://") && !self.url.starts_with("mqtts://") {
             return Err(CamelError::Config(format!(
                 "MqttBrokerConfig.url must start with mqtt:// or mqtts://, got: {}",
-                self.url
+                redact_broker_url(&self.url)
             )));
         }
         Ok(())
@@ -83,7 +102,7 @@ impl MqttBrokerConfig {
         if host.is_empty() {
             return Err(CamelError::Config(format!(
                 "MqttBrokerConfig.url missing host: {}",
-                self.url
+                redact_broker_url(&self.url)
             )));
         }
         Ok((host, port))
@@ -93,7 +112,7 @@ impl MqttBrokerConfig {
 impl std::fmt::Debug for MqttBrokerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MqttBrokerConfig")
-            .field("url", &self.url)
+            .field("url", &redact_broker_url(&self.url))
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "***"))
             .field("tls_ca_cert", &self.tls_ca_cert)
@@ -198,6 +217,24 @@ pub(crate) fn check_payload_len(len: usize, max: usize) -> Result<(), CamelError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit 2026-08-31, F5-2/F5-3: broker URLs must never leak credentials
+    /// into Debug output or error messages.
+    #[test]
+    fn redact_broker_url_masks_userinfo_and_query() {
+        let redacted = redact_broker_url("mqtt://admin:secretpass@broker.example.com:1883");
+        assert!(
+            !redacted.contains("secretpass"),
+            "password masked: {redacted}"
+        );
+        assert!(
+            redacted.contains("broker.example.com:1883"),
+            "host visible: {redacted}"
+        );
+
+        let redacted = redact_broker_url("mqtts://broker.example.com?token=abc123");
+        assert!(!redacted.contains("abc123"), "query dropped: {redacted}");
+    }
 
     #[test]
     fn mqtt_config_defaults() {

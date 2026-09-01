@@ -9,7 +9,7 @@ use std::env;
 use std::fmt;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct CamelConfig {
     #[serde(default)]
     pub routes: Vec<String>,
@@ -99,6 +99,40 @@ pub struct CamelConfig {
     /// const silently false-warns as an "unselected profile".
     #[serde(flatten)]
     pub _extra: HashMap<String, toml::Value>,
+}
+
+// Audit 2026-08-31, F5-5: manual Debug so a stray `debug!(?config)` cannot
+// dump cleartext secrets. `_extra` collects UNKNOWN top-level keys (where
+// operators plausibly stash credentials) and is redacted wholesale; the
+// secrets-adjacent sub-structs already redact via their own manual impls.
+impl fmt::Debug for CamelConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CamelConfig")
+            .field("routes", &self.routes)
+            .field("watch", &self.watch)
+            .field("runtime_journal", &self.runtime_journal)
+            .field("idempotent_repo", &self.idempotent_repo)
+            .field("cache_repo", &self.cache_repo)
+            .field("log_level", &self.log_level)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("drain_timeout_ms", &self.drain_timeout_ms)
+            .field("watch_debounce_ms", &self.watch_debounce_ms)
+            .field("components", &self.components)
+            .field("observability", &self.observability)
+            .field("supervision", &self.supervision)
+            .field("platform", &self.platform)
+            .field("stream_caching", &self.stream_caching)
+            .field("beans", &self.beans)
+            .field("languages", &self.languages)
+            .field("security", &self.security)
+            .field("binds", &self.binds)
+            .field("datasources", &self.datasources)
+            .field(
+                "_extra",
+                &format_args!("<{} keys redacted>", self._extra.len()),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1293,16 +1327,32 @@ impl Default for StreamCachingConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[derive(Clone, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BeanConfig {
     pub plugin: String,
+    /// Arbitrary plugin key/value map — MAY carry credentials (F5-5);
+    /// redacted in Debug.
     #[serde(default)]
     pub config: HashMap<String, String>,
     /// WASM runtime limits for this bean. All `None` by default — runtime
     /// defaults apply. See `WasmLimitsConfig`.
     #[serde(default)]
     pub limits: crate::wasm_limits::WasmLimitsConfig,
+}
+
+// F5-5: `config` is an arbitrary plugin map that may hold credentials.
+impl fmt::Debug for BeanConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BeanConfig")
+            .field("plugin", &self.plugin)
+            .field(
+                "config",
+                &format_args!("<{} keys redacted>", self.config.len()),
+            )
+            .field("limits", &self.limits)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------

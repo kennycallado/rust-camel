@@ -114,8 +114,33 @@ pub fn is_ssrf_blocked_ip(ip: &IpAddr) -> bool {
                             || v4.octets()[0] >= 240
                     })
                     .unwrap_or(false)
+                // NAT64 Well-Known Prefix 64:ff9b::/96 (RFC 6052): the last
+                // 32 bits are an embedded IPv4 — recurse so a NAT64 address
+                // translating an internal IPv4 is blocked (IPv6-only fabrics
+                // reach internal v4 through the NAT64 gateway).
+                || nat64_embedded_blocked(v6)
+                // 6to4 2002::/16 (RFC 3056, deprecated by RFC 7526): embeds
+                // the relay's IPv4 in bits 16..48. Blocked outright — the
+                // mechanism is deprecated and only ever tunnels, so a legit
+                // deployment never needs it as an HTTP target.
+                || v6.segments()[0] == 0x2002
+                // Teredo 2001::/32 (RFC 4380): tunnels IPv4 through NATs.
+                // Blocked for the same reason as 6to4.
+                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0000)
         }
     }
+}
+
+/// NAT64 WKP `64:ff9b::/96` (RFC 6052): extract the embedded IPv4 from the
+/// last 32 bits and apply the IPv4 blocked-range classification.
+fn nat64_embedded_blocked(v6: &std::net::Ipv6Addr) -> bool {
+    let s = v6.segments();
+    // Prefix match on 64:ff9b::/96 (first six segments fixed).
+    if s[..6] != [0x0064, 0xff9b, 0, 0, 0, 0] {
+        return false;
+    }
+    let v4 = std::net::Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
+    is_ssrf_blocked_ip(&IpAddr::V4(v4))
 }
 
 #[cfg(test)]
@@ -299,6 +324,31 @@ mod tests {
     #[test]
     fn allows_public_documentation_v6() {
         assert!(!is_ssrf_blocked_ip(&v6("2001:db8::1")));
+    }
+
+    // ---- Audit 2026-08-31, F2-6: transition-mechanism ranges ----
+
+    #[test]
+    fn blocks_nat64_embedding_private_ipv4() {
+        // 64:ff9b::0a00:0001 = NAT64 of 10.0.0.1
+        assert!(is_ssrf_blocked_ip(&v6("64:ff9b::a00:1")));
+        // 64:ff9b::7f00:0001 = NAT64 of 127.0.0.1
+        assert!(is_ssrf_blocked_ip(&v6("64:ff9b::7f00:1")));
+    }
+
+    #[test]
+    fn allows_nat64_embedding_public_ipv4() {
+        // 64:ff9b::0808:0808 = NAT64 of 8.8.8.8 (public)
+        assert!(!is_ssrf_blocked_ip(&v6("64:ff9b::808:808")));
+    }
+
+    #[test]
+    fn blocks_6to4_and_teredo() {
+        assert!(is_ssrf_blocked_ip(&v6("2002:0a00:0001::1"))); // 6to4 of 10.0.0.1
+        assert!(is_ssrf_blocked_ip(&v6("2002:0808:0808::1"))); // 6to4 even for public v4
+        assert!(is_ssrf_blocked_ip(&v6(
+            "2001:0000:4136:e378:8000:63bf:3fff:fdd2"
+        ))); // Teredo
     }
 
     // ---- SsrfPolicy ----

@@ -11,7 +11,24 @@ use camel_component_api::CamelError;
 use crate::config::HttpConfig;
 use crate::{HttpEndpointConfig, build_client};
 
-/// Validate a URL against SSRF rules: blocked hosts and private IP ranges.
+/// Whether a header carries credentials that must not be replayed to a
+/// cross-origin redirect target (F2-5). Header names are case-insensitive
+/// per RFC 9110; `HeaderName` comparison is already normalized, so match on
+/// the lowercase string form.
+fn is_sensitive_redirect_header(name: &reqwest::header::HeaderName, is_downgrade: bool) -> bool {
+    let n = name.as_str();
+    n == "authorization"
+        || n == "cookie"
+        || n == "x-api-key"
+        || n == "x-apikey"
+        || n == "x-auth-token"
+        || n == "api-key"
+        || n == "apikey"
+        // Proxy credentials are additionally stripped on https→http downgrade
+        // (same-origin proxy creds must never ride a cleartext hop).
+        || (is_downgrade && n == "proxy-authorization")
+}
+
 pub(crate) fn validate_url_for_ssrf(
     url: &str,
     config: &HttpEndpointConfig,
@@ -30,14 +47,26 @@ pub(crate) fn validate_url_for_ssrf(
         }
     }
 
-    // Check blocked hosts
-    if let Some(host) = parsed.host_str()
-        && config.blocked_hosts.iter().any(|blocked| host == blocked)
-    {
-        return Err(CamelError::ProcessorError(format!(
-            "Host '{}' is blocked",
-            host
-        )));
+    // Check blocked hosts (audit 2026-08-31, F2-2). Matching normalizes case
+    // and a trailing root dot (`host.` == `host`, per DNS FQDN semantics), and
+    // treats a blocklist entry as covering its subdomains: blocking
+    // `internal.example` must also block `api.internal.example` — operators
+    // read a blocklist entry as "this host and everything under it".
+    if let Some(host) = parsed.host_str() {
+        let norm_host = host.trim_end_matches('.').to_ascii_lowercase();
+        let is_blocked = config.blocked_hosts.iter().any(|blocked| {
+            let norm_blocked = blocked.trim_end_matches('.').to_ascii_lowercase();
+            norm_host == norm_blocked
+                || norm_host
+                    .strip_suffix(norm_blocked.as_str())
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        });
+        if is_blocked {
+            return Err(CamelError::ProcessorError(format!(
+                "Host '{}' is blocked",
+                host
+            )));
+        }
     }
 
     // Check IP literals
@@ -354,14 +383,18 @@ pub(crate) async fn send_with_ssrf_safe_redirects(
             current_method.clone()
         };
 
-        // Strip sensitive headers on cross-origin redirects
+        // Strip sensitive headers on cross-origin redirects.
+        // Audit 2026-08-31, F2-5: Authorization+Cookie alone let custom
+        // credential headers (X-API-Key, X-Auth-Token, …) leak to the redirect
+        // target. Use the industry-standard sensitive-header set (matches
+        // curl/reqwest defaults) plus common API-key header names; scheme
+        // downgrades (https→http) additionally strip Proxy-Authorization.
+        let is_downgrade = current_parsed.scheme() == "https" && redirect_url.scheme() == "http";
         let new_headers: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)> =
             if is_cross_origin {
                 current_headers
                     .into_iter()
-                    .filter(|(name, _)| {
-                        name != reqwest::header::AUTHORIZATION && name != reqwest::header::COOKIE
-                    })
+                    .filter(|(name, _)| !is_sensitive_redirect_header(name, is_downgrade))
                     .collect()
             } else {
                 current_headers.clone()
@@ -409,6 +442,32 @@ mod tests {
     use crate::{PINNED_CLIENT_MAX_ENTRIES, PINNED_CLIENT_TTL, PinnedClientCache};
     use camel_component_api::UriConfig;
 
+    /// Audit 2026-08-31, F2-5: sensitive custom headers must be stripped
+    /// on cross-origin redirect replay.
+    #[test]
+    fn test_sensitive_redirect_headers() {
+        use reqwest::header::HeaderName;
+        let h = |s: &str| HeaderName::from_bytes(s.as_bytes()).unwrap();
+
+        assert!(is_sensitive_redirect_header(&h("authorization"), false));
+        assert!(is_sensitive_redirect_header(&h("cookie"), false));
+        assert!(is_sensitive_redirect_header(&h("x-api-key"), false));
+        assert!(is_sensitive_redirect_header(
+            &h("X-Auth-Token".to_lowercase().as_str()),
+            false
+        ));
+        assert!(is_sensitive_redirect_header(
+            &h("proxy-authorization"),
+            true
+        ));
+        assert!(!is_sensitive_redirect_header(
+            &h("proxy-authorization"),
+            false
+        ));
+        assert!(!is_sensitive_redirect_header(&h("content-type"), false));
+        assert!(!is_sensitive_redirect_header(&h("x-request-id"), false));
+    }
+
     #[test]
     fn test_validate_url_for_ssrf_blocks_and_allows_hosts() {
         let mut cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap();
@@ -424,6 +483,34 @@ mod tests {
         cfg.allow_internal = true;
         let allowed = validate_url_for_ssrf("http://127.0.0.1/api", &cfg);
         assert!(allowed.is_ok());
+    }
+
+    /// Audit 2026-08-31, F2-2: blocklist matching must not be bypassable by
+    /// trailing dots, case shifts, or subdomains.
+    #[test]
+    fn test_blocked_hosts_normalized_and_subdomain_aware() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap();
+        cfg.blocked_hosts = vec!["blocked.local".to_string()];
+        cfg.allow_internal = false;
+
+        for evil in [
+            "http://blocked.local/api",      // exact
+            "http://blocked.local./api",     // trailing root dot
+            "http://BLOCKED.LOCAL/api",      // case
+            "http://api.blocked.local/api",  // subdomain
+            "http://a.b.blocked.local./api", // nested subdomain + dot
+        ] {
+            assert!(
+                validate_url_for_ssrf(evil, &cfg).is_err(),
+                "{evil} must be blocked"
+            );
+        }
+
+        // Suffix-but-not-subdomain must NOT be blocked (evilblocked.local).
+        assert!(
+            validate_url_for_ssrf("http://evilblocked.local/api", &cfg).is_ok(),
+            "non-subdomain suffix must stay allowed"
+        );
     }
 
     /// Under allow_internal=true, public IPs over HTTP are rejected

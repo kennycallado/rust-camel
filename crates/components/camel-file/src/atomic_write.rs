@@ -28,6 +28,7 @@ pub(crate) async fn atomic_write(
     durable: bool,
     write_timeout: Duration,
     charset: &Option<String>,
+    max_write_bytes: u64,
 ) -> Result<(), CamelError> {
     let parent = target_path.parent().ok_or_else(|| {
         CamelError::ProcessorError(format!(
@@ -47,7 +48,14 @@ pub(crate) async fn atomic_write(
     // Bug C root cause: the old Override branch concatenated the prefix with the
     // full nested file_name (`a/b/c.bin`), producing a temp path whose parent
     // did not exist.
+    //
+    // Audit 2026-08-31, F4-4: add an unpredictable infix so a local attacker
+    // cannot pre-create the temp path to break writes (DoS). create_new(true)
+    // already makes a collision fail rather than hijack; randomness removes
+    // the ability to force that failure deterministically.
+    let random_infix: u64 = rand::random();
     let mut temp_name = prefix.to_string();
+    temp_name.push_str(&format!("{random_infix:016x}."));
     temp_name.push_str(&file_name.to_string_lossy());
     let temp_path = parent.join(&temp_name);
 
@@ -59,21 +67,29 @@ pub(crate) async fn atomic_write(
     // path — that's unsafe ownership (concurrent writer / stale external file
     // would be silently deleted). The guard is created ONLY after open
     // succeeds, so a failed open leaves any pre-existing file untouched.
-    let mut temp_file = tokio::time::timeout(
-        write_timeout,
-        tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path),
-    )
-    .await
-    .map_err(|_| CamelError::ProcessorError("Timeout creating temp file".into()))?
-    .map_err(CamelError::from)?;
+    let mut temp_open = tokio::fs::OpenOptions::new();
+    temp_open.write(true).create_new(true);
+    // Defense-in-depth: refuse to follow a symlinked temp path (temp names are
+    // predictable; create_new(true) already fails on an existing symlink, but
+    // O_NOFOLLOW makes the refusal explicit and independent of create semantics).
+    #[cfg(unix)]
+    temp_open.custom_flags(libc::O_NOFOLLOW);
+    let mut temp_file = tokio::time::timeout(write_timeout, temp_open.open(&temp_path))
+        .await
+        .map_err(|_| CamelError::ProcessorError("Timeout creating temp file".into()))?
+        .map_err(CamelError::from)?;
 
     // Open succeeded — THIS helper owns temp_path now. Arm the RAII guard.
     let mut guard = TempFileGuard::new(temp_path.clone());
 
-    write_body_with_charset(body, charset, &mut temp_file, write_timeout).await?;
+    write_body_with_charset(
+        body,
+        charset,
+        &mut temp_file,
+        write_timeout,
+        max_write_bytes,
+    )
+    .await?;
 
     // 2. Optional fsync of temp file contents (durable path).
     if durable {
@@ -215,6 +231,7 @@ mod tests {
             true, // durable
             Duration::from_secs(5),
             &None,
+            0,
         )
         .await
         .unwrap();
@@ -244,6 +261,7 @@ mod tests {
             false, // not durable
             Duration::from_secs(5),
             &None,
+            0,
         )
         .await
         .unwrap();
@@ -251,6 +269,43 @@ mod tests {
         assert!(target.exists());
         let bytes = std::fs::read(&target).unwrap();
         assert_eq!(bytes, vec![9u8, 8, 7]);
+    }
+
+    /// Audit 2026-08-31, F4-3: max_write_bytes caps the write.
+    #[tokio::test]
+    async fn atomic_write_respects_max_write_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("capped.bin");
+        let body = Body::from(vec![0u8; 1024]);
+
+        // Cap at 100 bytes — must fail.
+        let result = atomic_write(
+            &target,
+            body,
+            None,
+            false,
+            Duration::from_secs(5),
+            &None,
+            100,
+        )
+        .await;
+        assert!(result.is_err(), "write past the cap must fail");
+        assert!(!target.exists(), "no target after capped write");
+
+        // Cap above the body size — succeeds.
+        let body = Body::from(vec![0u8; 1024]);
+        atomic_write(
+            &target,
+            body,
+            None,
+            false,
+            Duration::from_secs(5),
+            &None,
+            2048,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), 1024);
     }
 
     #[tokio::test]
@@ -266,6 +321,7 @@ mod tests {
             false,
             Duration::from_secs(5),
             &None,
+            0,
         )
         .await
         .unwrap();
@@ -318,38 +374,51 @@ mod tests {
         // Oracle blessing condition #2: TempFileGuard is armed ONLY after
         // create_new(true).open() succeeds. If open fails (blocker exists),
         // no guard is constructed → the pre-existing blocker file is
-        // preserved untouched. Earlier draft of this test expected the guard
-        // to delete the blocker — that was the unsafe ownership bug e_gpt
-        // caught.
+        // preserved untouched.
+        //
+        // Post F4-4 the temp name carries a random infix, so we cannot
+        // pre-create the exact temp path; instead we plant a DIRECTORY at
+        // `<prefix>*` — impossible. The deterministic way to force an
+        // open failure without knowing the random infix is to make the
+        // parent directory read-only so create_new fails with EACCES.
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("cleanup.bin");
 
-        // Pre-create the temp file path so create_new(true) MUST fail with AlreadyExists.
-        let temp_path = dir.path().join(".tmp.cleanup.bin");
-        std::fs::write(&temp_path, b"blocker").unwrap();
+        // Pre-existing content that must survive the failed write.
+        let blocker = dir.path().join("precious.txt");
+        std::fs::write(&blocker, b"blocker").unwrap();
+
+        // Make the parent read-only: any create_new inside must fail.
+        let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o555);
+        }
+        std::fs::set_permissions(dir.path(), perms.clone()).unwrap();
 
         let body = Body::from(vec![1u8, 2, 3]);
-        let result = atomic_write(&target, body, None, false, Duration::from_secs(5), &None).await;
+        let result =
+            atomic_write(&target, body, None, false, Duration::from_secs(5), &None, 0).await;
+
+        // Restore writability before asserts (tempdir cleanup needs it).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = perms;
+            perms.set_mode(0o755);
+            std::fs::set_permissions(dir.path(), perms).unwrap();
+        }
 
         assert!(
             result.is_err(),
-            "expected atomic_write to fail because temp file already exists"
+            "expected atomic_write to fail in a read-only directory"
         );
-
-        // The target must NOT exist after a failed write.
         assert!(!target.exists(), "target must not exist after failed write");
-
-        // The pre-existing blocker file MUST be preserved — the guard was
-        // never constructed because open() failed before guard creation.
-        assert!(
-            temp_path.exists(),
-            "pre-existing blocker MUST be preserved (guard was not armed; \
-             open() failed before TempFileGuard::new)"
-        );
         assert_eq!(
-            std::fs::read(&temp_path).unwrap(),
+            std::fs::read(&blocker).unwrap(),
             b"blocker",
-            "blocker file content MUST be unchanged"
+            "pre-existing file content MUST be unchanged"
         );
     }
 
@@ -363,7 +432,6 @@ mod tests {
         // the temp file this helper created.
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("cleanup2.bin");
-        let temp_path = dir.path().join(".tmp.cleanup2.bin");
 
         // Body contains non-ASCII bytes that will force the charset encoder to
         // actually attempt transcoding and fail on the bogus charset name.
@@ -375,6 +443,7 @@ mod tests {
             false,
             Duration::from_secs(5),
             &Some("INVALID_CHARSET_XYZ".to_string()),
+            0,
         )
         .await;
 
@@ -387,11 +456,16 @@ mod tests {
         assert!(!target.exists(), "target must not exist after failed write");
 
         // Temp file MUST be cleaned up — the helper opened it (guard armed),
-        // then the write failed, so Drop removed it. This is the invariant
-        // the oracle asked us to actually prove.
+        // then the write failed, so Drop removed it. Post F4-4 the temp name
+        // carries a random infix, so assert by prefix scan.
+        let leftover_temps: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp."))
+            .collect();
         assert!(
-            !temp_path.exists(),
-            "temp file created by helper MUST be cleaned up when write fails after open"
+            leftover_temps.is_empty(),
+            "temp file created by helper MUST be cleaned up when write fails after open; found: {leftover_temps:?}"
         );
     }
 
@@ -464,7 +538,7 @@ mod tests {
         let target = nested_parent.join("deep.bin");
 
         let body = Body::from(b"deep".to_vec());
-        atomic_write(&target, body, None, false, Duration::from_secs(5), &None)
+        atomic_write(&target, body, None, false, Duration::from_secs(5), &None, 0)
             .await
             .unwrap();
 

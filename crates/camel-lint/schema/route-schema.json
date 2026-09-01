@@ -64,6 +64,16 @@
         "header": {
           "type": "string"
         },
+        "max_bucket_size": {
+          "default": null,
+          "description": "Upper bound on exchanges buffered inside one correlation bucket\n(audit 2026-08-31, F6-2). Absent = builder default (10_000).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "max_buckets": {
           "default": null,
           "format": "uint",

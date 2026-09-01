@@ -389,6 +389,7 @@ pub struct AggregateStepDef {
     pub completion_predicate: Option<LanguageExpressionDef>,
     pub strategy: AggregateStrategyDef,
     pub max_buckets: Option<usize>,
+    pub max_bucket_size: Option<usize>,
     pub bucket_ttl_ms: Option<u64>,
     pub force_completion_on_stop: Option<bool>,
     pub discard_on_timeout: Option<bool>,
