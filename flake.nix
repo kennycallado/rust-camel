@@ -46,6 +46,34 @@
           ];
         };
 
+        # Nightly is for cargo-fuzz instrumented builds of the
+        # workspace-excluded fuzz/ crate ONLY. The project itself stays on
+        # stable (rustToolchain above); no gate or crate build uses nightly.
+        # NOTE: nixpkgs cargo-fuzz is 0.13.1; CI pins 0.13.2 — the
+        # 0.13.1→0.13.2 changelog shows no tmin/minimize changes.
+        fuzzNightly = pkgs.rust-bin.nightly.latest.minimal;
+
+        # `cargo +nightly` needs a rustup-style proxy; rust-overlay toolchains
+        # are real toolchains. The shim dispatches +nightly to fuzzNightly and
+        # everything else to the stable toolchain. The PATH prepend inside the
+        # nightly branch also routes cargo-fuzz's nested bare `cargo build`
+        # and `rustc` (spawned via PATH, no toolchain arg) to nightly.
+        # Wired via shellHook PATH prepend: inside mkShell the packages PATH
+        # order is input order, and rustToolchain would shadow the shim.
+        fuzzCargoShim = pkgs.runCommandLocal "fuzz-cargo-shim" { } ''
+          mkdir -p $out/bin
+          cat > $out/bin/cargo <<'EOF'
+          #!/usr/bin/env bash
+          if [ "$1" = "+nightly" ]; then
+            shift
+            export PATH="${fuzzNightly}/bin:$PATH"
+            exec "${fuzzNightly}/bin/cargo" "$@"
+          fi
+          exec "${rustToolchain}/bin/cargo" "$@"
+          EOF
+          chmod +x $out/bin/cargo
+        '';
+
         src = craneLib.cleanCargoSource ./.;
 
         commonArgs = {
@@ -129,6 +157,12 @@
             (writeShellScriptBin "openspec" ''
               exec npx @fission-ai/openspec@1.7.0 "$@"
             '')
+            # Fuzz tooling: cargo-fuzz + nightly for instrumented builds of
+            # the workspace-excluded fuzz/ crate only. The cargo shim itself
+            # is activated by the shellHook PATH prepend below (see
+            # fuzzCargoShim for why it cannot live in this list).
+            pkgs.cargo-fuzz
+            fuzzNightly
           ];
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           LLVM_COV = "${pkgs.llvm}/bin/llvm-cov";
@@ -136,6 +170,7 @@
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
           BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include";
           shellHook = ''
+            export PATH="${fuzzCargoShim}/bin:$PATH"
             export RUSTC_WRAPPER=sccache
             if [ -d "/home/shared" ] && [ -w "/home/shared" ]; then
               # Per-checkout lock isolation on the big partition:

@@ -255,6 +255,20 @@ fn newest_file(paths: &[PathBuf]) -> Option<PathBuf> {
     paths.iter().max_by_key(|p| file_ts(p)).cloned()
 }
 
+/// Note logged when `tmin` succeeds but writes no minimized copy because the
+/// crash input is already minimal (0 bytes). The string doubles as the CI
+/// drill's `already minimal` marker — keep both in sync.
+const ALREADY_MINIMAL_NOTE: &str =
+    "fuzz: tmin wrote no minimized copy (input already minimal: 0 bytes); keeping original";
+
+/// Decide whether a `tmin` run that produced no fresh artifact should fall
+/// back to the original crash input. A zero-byte input cannot be minimized
+/// (there is nothing smaller than empty), and libFuzzer writes no
+/// `minimized-from-*` file for it, so the original is its own minimization.
+fn use_original_when_already_minimal(status_ok: bool, original_len: u64) -> bool {
+    status_ok && original_len == 0
+}
+
 /// Minimize a crash artifact with `cargo fuzz tmin`; returns the minimized
 /// file (written into the artifacts dir after `tmin` started) when found.
 fn minimize(
@@ -282,6 +296,14 @@ fn minimize(
             );
         }
         return Ok(Some(minimized));
+    }
+    let original_len = artifact
+        .metadata()
+        .map(|m| m.len())
+        .map_err(|e| format!("fuzz minimization cannot stat {}: {e}", artifact.display()))?;
+    if use_original_when_already_minimal(output.status.success(), original_len) {
+        eprintln!("{ALREADY_MINIMAL_NOTE}");
+        return Ok(Some(artifact.to_path_buf()));
     }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -341,6 +363,23 @@ mod tests {
                 "-max_total_time=120".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn already_minimal_only_for_empty_input_on_success() {
+        assert!(use_original_when_already_minimal(true, 0));
+        // tmin failed: keep the honest failure path, never claim minimality
+        assert!(!use_original_when_already_minimal(false, 0));
+        // non-empty input with no fresh artifact is unexpected, not minimal
+        assert!(!use_original_when_already_minimal(true, 4));
+        assert!(!use_original_when_already_minimal(false, 4));
+    }
+
+    #[test]
+    fn already_minimal_note_is_ci_drill_marker() {
+        // The CI drill greps tmin.log for "already minimal"; keep the
+        // wording anchored so the workflow and this note cannot drift.
+        assert!(ALREADY_MINIMAL_NOTE.contains("already minimal"));
     }
 
     #[test]

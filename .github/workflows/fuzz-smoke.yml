@@ -170,12 +170,20 @@ jobs:
               detail="${detail}log missing '${pat}'; "
             fi
           done
+          # An always-panicking harness crashes on the empty input first
+          # (crash-da39a3ee... is SHA1 of 0 bytes); `tmin -minimize_crash`
+          # writes no minimized-from-* for a 0-byte input — the wrapper
+          # reports the original as already minimal instead.
           if ! find "$RUNNER_TEMP/fuzz-wt/target-fuzz/artifacts/dsl_yaml" \
-            -maxdepth 1 -type f -name 'minimized-from-*' 2>/dev/null | grep -q .; then
-            detail="${detail}no minimized-from-* artifact under target-fuzz/artifacts/dsl_yaml/; "
+            -maxdepth 1 -type f -name 'minimized-from-*' 2>/dev/null | grep -q . \
+            && ! grep -qF 'already minimal' tmin.log; then
+            detail="${detail}no minimized-from-* artifact and no already-minimal marker; "
           fi
-          if [ -d "$RUNNER_TEMP/fuzz-wt/fuzz/artifacts" ]; then
-            detail="${detail}worktree fuzz/artifacts created (minimizer wrote outside target-fuzz/); "
+          # cargo-fuzz creates fuzz/artifacts/<target>/ unconditionally
+          # (project.rs artifacts_for does create_dir_all on every run);
+          # only FILES there indicate writes outside target-fuzz/.
+          if find "$RUNNER_TEMP/fuzz-wt/fuzz/artifacts" -type f 2>/dev/null | grep -q .; then
+            detail="${detail}files under fuzz/artifacts/ (minimizer wrote outside target-fuzz/); "
           fi
           cd "$GITHUB_WORKSPACE"
           if [ "$(git status --porcelain | wc -l)" -ne 0 ]; then
