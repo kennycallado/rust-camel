@@ -1,0 +1,284 @@
+name: fuzz-smoke
+
+# Non-blocking fuzz smoke (openspec/changes/fuzz-smoke-ci). CI runs the
+# `cargo xtask fuzz` wrapper exactly like a developer (design D2): the
+# refusal drill is free in the GitHub checkout; real runs execute from a
+# linked worktree so instrumented builds, corpus, and artifacts stay out
+# of the checkout. Drill/audit steps never fail themselves — they append
+# `PASS/FAIL <name>` lines to $RUNNER_TEMP/findings.md and end with
+# `exit 0`; only the summary step (if: always()) exits non-zero, which
+# job-level continue-on-error renders as an annotation, not a red X.
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "crates/camel-dsl/**"
+      - "fuzz/**"
+      - "scripts/xtask/**"
+      - ".github/workflows/fuzz-smoke.yml"
+  workflow_dispatch:
+    inputs:
+      time:
+        description: seconds per target
+        type: number
+        default: 60
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Newest crates.io stable cargo-fuzz (2026-06-09) — never `latest`.
+  CARGO_FUZZ_VERSION: "0.13.2"
+  SMOKE_TIME: ${{ inputs.time || 60 }}
+
+jobs:
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: cold-baseline
+        name: Cold baseline (fresh checkout has no ./target)
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuzz-smoke-state" && : > "$RUNNER_TEMP/findings.md"
+          if [ ! -d ./target ]; then
+            echo "PASS cold-baseline" >> "$RUNNER_TEMP/findings.md"
+          else
+            echo "FAIL cold-baseline ./target exists in fresh checkout" >> "$RUNNER_TEMP/findings.md"
+          fi
+
+      - id: nightly
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # nightly
+        with:
+          toolchain: nightly
+
+      - id: cache-cargo-fuzz
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin
+          key: cargo-fuzz-${{ env.CARGO_FUZZ_VERSION }}-${{ runner.os }}
+
+      - id: install-cargo-fuzz
+        if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
+        name: Install cargo-fuzz (single install path, pinned version)
+        run: cargo install cargo-fuzz --locked --version "${CARGO_FUZZ_VERSION}"
+
+      - id: verify-cargo-fuzz
+        name: Verify cargo-fuzz version (fails the job on drift, cached or fresh)
+        run: |
+          cargo +nightly fuzz --version | grep -q "${CARGO_FUZZ_VERSION}"
+
+      - id: rust-cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Registry/git cache only — a restored checkout ./target would
+          # violate the cold-main assertion, and the instrumented worktree
+          # build is deliberately scratch (design D5).
+          cache-targets: false
+
+      - id: refusal
+        name: Refusal drill (wrapper refuses the main checkout)
+        run: |
+          set +e
+          t0=$(date +%s)
+          CARGO_TARGET_DIR="$RUNNER_TEMP/xtask-refusal-target" \
+            cargo run --package xtask -- fuzz dsl_yaml \
+            > "$RUNNER_TEMP/fuzz-smoke-state/refusal.log" 2>&1
+          ec=$?
+          echo "refusal-drill $(( $(date +%s) - t0 ))s" >> "$RUNNER_TEMP/fuzz-smoke-state/durations.txt"
+          detail=""
+          if [ "$ec" -ne 1 ]; then
+            detail="exit=$ec (want 1); "
+          fi
+          if ! grep -q "refusing: cargo xtask fuzz must run in a linked worktree" \
+            "$RUNNER_TEMP/fuzz-smoke-state/refusal.log"; then
+            detail="${detail}guard message missing; "
+          fi
+          if [ -d ./target ]; then
+            detail="${detail}./target created in checkout; "
+          fi
+          if [ -z "$detail" ]; then
+            echo "PASS refusal-drill" >> "$RUNNER_TEMP/findings.md"
+          else
+            echo "FAIL refusal-drill $detail" >> "$RUNNER_TEMP/findings.md"
+          fi
+          exit 0
+
+      - id: worktree
+        name: Create linked worktree for real runs
+        run: git worktree add "$RUNNER_TEMP/fuzz-wt" HEAD
+
+      - id: smoke
+        name: Smoke drill (clean run from the worktree)
+        run: |
+          set +e
+          cd "$RUNNER_TEMP/fuzz-wt"
+          t0=$(date +%s)
+          cargo run --package xtask -- fuzz dsl_yaml --time "$SMOKE_TIME" > smoke.log 2>&1
+          ec=$?
+          echo "smoke $(( $(date +%s) - t0 ))s" >> "$RUNNER_TEMP/fuzz-smoke-state/durations.txt"
+          detail=""
+          if [ "$ec" -ne 0 ]; then
+            detail="exit=$ec (want 0); "
+          fi
+          if ! find target-fuzz/corpus/dsl_yaml -type f 2>/dev/null | grep -q .; then
+            detail="${detail}corpus target-fuzz/corpus/dsl_yaml not populated; "
+          fi
+          if ls target-fuzz/artifacts/dsl_yaml/crash-* >/dev/null 2>&1; then
+            detail="${detail}crash artifact produced; "
+          fi
+          cd "$GITHUB_WORKSPACE"
+          if [ -d ./target ]; then
+            detail="${detail}./target created in checkout; "
+          fi
+          if [ -z "$detail" ]; then
+            echo "PASS smoke" >> "$RUNNER_TEMP/findings.md"
+          else
+            echo "FAIL smoke $detail" >> "$RUNNER_TEMP/findings.md"
+          fi
+          exit 0
+
+      - id: tmin
+        name: tmin drill (injected panic is caught and minimized)
+        run: |
+          set +e
+          cd "$RUNNER_TEMP/fuzz-wt"
+          # Panic injection touches the WORKTREE copy only; the worktree is
+          # discarded after the job, so it can never reach any ref.
+          sed -i 's|camel_fuzz::dsl_yaml_harness(data);|panic!("fuzz-smoke drill"); camel_fuzz::dsl_yaml_harness(data);|' \
+            "$RUNNER_TEMP/fuzz-wt/fuzz/fuzz_targets/dsl_yaml.rs"
+          t0=$(date +%s)
+          # 20 s is intentionally fixed and independent of inputs.time:
+          # the drill wants a short bounded budget, not a long minimization.
+          cargo run --package xtask -- fuzz dsl_yaml --time 20 > tmin.log 2>&1
+          ec=$?
+          echo "tmin-drill $(( $(date +%s) - t0 ))s" >> "$RUNNER_TEMP/fuzz-smoke-state/durations.txt"
+          detail=""
+          if [ "$ec" -eq 0 ]; then
+            detail="exit=0 (want non-zero); "
+          fi
+          for pat in "new artifact(s):" "minimized artifact:" "promote this input"; do
+            if ! grep -qF "$pat" tmin.log; then
+              detail="${detail}log missing '${pat}'; "
+            fi
+          done
+          if ! find "$RUNNER_TEMP/fuzz-wt/target-fuzz/artifacts/dsl_yaml" \
+            -maxdepth 1 -type f -name 'minimized-from-*' 2>/dev/null | grep -q .; then
+            detail="${detail}no minimized-from-* artifact under target-fuzz/artifacts/dsl_yaml/; "
+          fi
+          if [ -d "$RUNNER_TEMP/fuzz-wt/fuzz/artifacts" ]; then
+            detail="${detail}worktree fuzz/artifacts created (minimizer wrote outside target-fuzz/); "
+          fi
+          cd "$GITHUB_WORKSPACE"
+          if [ "$(git status --porcelain | wc -l)" -ne 0 ]; then
+            detail="${detail}checkout dirty after worktree-only patch; "
+          fi
+          if [ -d ./target ]; then
+            detail="${detail}./target created in checkout; "
+          fi
+          if [ -z "$detail" ]; then
+            echo "PASS tmin-drill" >> "$RUNNER_TEMP/findings.md"
+          else
+            echo "FAIL tmin-drill $detail" >> "$RUNNER_TEMP/findings.md"
+          fi
+          exit 0
+
+      - id: install-cargo-audit
+        uses: taiki-e/install-action@eba66cc6f87204a1e73f96e528e759b6c1fcf573 # cargo-audit
+        with:
+          tool: cargo-audit
+
+      - id: audit
+        name: Fuzz lockfile audit (advisories are findings, not gates — design D4)
+        run: |
+          set +e
+          cargo audit --file fuzz/Cargo.lock > "$RUNNER_TEMP/fuzz-smoke-state/audit.log" 2>&1
+          ec=$?
+          detail=""
+          if [ "$ec" -ne 0 ]; then
+            detail="cargo audit exit=$ec (advisories — see audit.log); "
+          fi
+          if [ -d ./target ]; then
+            detail="${detail}./target created in checkout; "
+          fi
+          if [ -z "$detail" ]; then
+            echo "PASS fuzz-lock-audit" >> "$RUNNER_TEMP/findings.md"
+          else
+            echo "FAIL fuzz-lock-audit $detail" >> "$RUNNER_TEMP/findings.md"
+          fi
+          exit 0
+
+      - id: summary
+        if: always()
+        name: Summarize findings (only step that may exit non-zero)
+        run: |
+          if [ -d ./target ]; then
+            echo "FAIL cold-main-final ./target exists at summary" >> "$RUNNER_TEMP/findings.md"
+          else
+            echo "PASS cold-main-final" >> "$RUNNER_TEMP/findings.md"
+          fi
+          findings="$RUNNER_TEMP/findings.md"
+          missing=""
+          for name in cold-baseline refusal-drill smoke tmin-drill fuzz-lock-audit cold-main-final; do
+            if ! grep -qE "^(PASS|FAIL) $name( |$)" "$findings"; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            {
+              echo "## fuzz-smoke: infrastructure failure"
+              echo ""
+              echo "infrastructure failure — checks skipped:$missing"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "infrastructure failure — checks skipped:$missing"
+            exit 1
+          fi
+          failing=$(grep "^FAIL" "$findings" || true)
+          if [ -n "$failing" ]; then
+            {
+              echo "## fuzz-smoke: drill findings"
+              echo ""
+              echo "### Failing checks"
+              echo ""
+              echo '```'
+              echo "$failing"
+              echo '```'
+              echo ""
+              echo "### Artifact paths"
+              echo ""
+              echo "Under the worktree: \`target-fuzz/artifacts/dsl_yaml/\`"
+              echo ""
+              echo '```'
+              ls "$RUNNER_TEMP/fuzz-wt/target-fuzz/artifacts/dsl_yaml" 2>/dev/null || echo "(none)"
+              echo '```'
+              echo ""
+              echo "### Promotion instruction"
+              echo ""
+              echo "Promote a minimized input as a committed \`#[test]\` in \`crates/camel-dsl\` — never a raw corpus blob."
+              echo ""
+              echo "### Triage"
+              echo ""
+              echo "File the bug: \`bd create -t bug -p 1\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          {
+            echo "## fuzz-smoke: all clear"
+            echo ""
+            echo "All six checks passed."
+            echo ""
+            echo "### Measured durations"
+            echo ""
+            echo '```'
+            cat "$RUNNER_TEMP/fuzz-smoke-state/durations.txt" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0

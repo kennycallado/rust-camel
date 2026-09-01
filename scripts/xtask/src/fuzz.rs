@@ -40,6 +40,20 @@ fn libfuzzer_args(time: u64, prefix: &str) -> Vec<String> {
     ]
 }
 
+/// libFuzzer argument suffix for `cargo fuzz tmin`: separator plus the
+/// artifact prefix (so the minimized output lands in the scanned
+/// `target-fuzz/artifacts/<target>/` — cargo-fuzz's default is
+/// `fuzz/artifacts/`, which the wrapper never scans) plus a per-round
+/// time cap (each minimization round is bounded; total may span several
+/// rounds — the job's timeout is the hard ceiling).
+fn tmin_arg_suffix(prefix: &str, max_total_time: u64) -> Vec<String> {
+    vec![
+        "--".to_string(),
+        format!("-artifact_prefix={prefix}"),
+        format!("-max_total_time={max_total_time}"),
+    ]
+}
+
 /// Copy every regular file from `seeds_dir` into `corpus_dir` when the
 /// corpus dir is empty or missing; returns the count written. A no-op
 /// returning 0 when the corpus already has entries (existing corpora are
@@ -254,10 +268,21 @@ fn minimize(
     let output = Command::new("cargo")
         .args(["+nightly", "fuzz", "tmin", target])
         .arg(artifact)
+        .args(tmin_arg_suffix(&artifact_prefix(root, target), 120))
         .current_dir(root)
         .env("CARGO_TARGET_DIR", target_dir)
         .output()
         .map_err(|e| format!("fuzz minimization failed to launch: {e}"))?;
+    let fresh = entries_created_after(artifacts, started)?;
+    if let Some(minimized) = newest_file(&fresh) {
+        if !output.status.success() {
+            eprintln!(
+                "fuzz: tmin exited non-zero (code {}) but produced a minimized artifact; using it",
+                output.status.code().unwrap_or(-1)
+            );
+        }
+        return Ok(Some(minimized));
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stderr_note = if stderr.is_empty() {
@@ -271,8 +296,7 @@ fn minimize(
             artifact.display()
         ));
     }
-    let fresh = entries_created_after(artifacts, started)?;
-    Ok(newest_file(&fresh))
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -305,6 +329,24 @@ mod tests {
         let args = libfuzzer_args(90, "/wt/target-fuzz/artifacts/dsl_yaml/");
         assert!(args.contains(&"-max_total_time=90".to_string()));
         assert!(args.contains(&"-artifact_prefix=/wt/target-fuzz/artifacts/dsl_yaml/".to_string()));
+    }
+
+    #[test]
+    fn tmin_arg_suffix_forwards_prefix_and_cap() {
+        assert_eq!(
+            tmin_arg_suffix("/wt/target-fuzz/artifacts/dsl_yaml/", 120),
+            vec![
+                "--".to_string(),
+                "-artifact_prefix=/wt/target-fuzz/artifacts/dsl_yaml/".to_string(),
+                "-max_total_time=120".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tmin_arg_suffix_separator_first() {
+        let args = tmin_arg_suffix("/wt/target-fuzz/artifacts/dsl_yaml/", 120);
+        assert_eq!(args[0], "--");
     }
 
     #[test]
