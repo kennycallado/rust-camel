@@ -1272,7 +1272,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_json",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2202,7 +2202,7 @@ version = "0.38.0"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.4",
  "trybuild",
 ]
 
@@ -14559,7 +14559,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde_json",
  "sha2 0.11.0",
- "syn 2.0.119",
+ "syn 3.0.4",
  "tempfile",
  "ts-rs",
  "ureq",

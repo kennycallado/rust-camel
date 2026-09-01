@@ -243,7 +243,7 @@ rand = "0.10"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 sqlx = "0.8"
 sxd-document = "0.3"
-syn = "2.0"
+syn = "3.0"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
 ariadne = "0.4"
 ron = "0.12"
