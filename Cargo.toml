@@ -138,7 +138,7 @@ camel-component-surrealdb = { path = "crates/components/camel-component-surreald
 camel-redis-repo = { path = "crates/services/camel-redis-repo", version = "=0.38.0" }
 
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.29"
 tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 prost = { version = "0.14" }
 prost-reflect = { version = "0.16", features = ["serde"] }
