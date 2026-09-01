@@ -1113,7 +1113,20 @@ async fn run_axum_server_tls(
     // RustlsConfig is now constructed once in get_or_spawn and retained on
     // ServerHandle so the reload handler can call reload_from_config() on it.
 
-    axum_server::from_tcp_rustls(listener, tls_cfg)
+    // axum-server 0.8: from_tcp_rustls is fallible (TLS acceptor setup).
+    let server = match axum_server::from_tcp_rustls(listener, tls_cfg) {
+        Ok(server) => server,
+        Err(e) => {
+            runtime
+                .metrics()
+                .increment_errors(&route_id, "e:http:accept-tls");
+            // log-policy: outside-contract
+            tracing::error!(error = %e, "Axum TLS server setup error");
+            return;
+        }
+    };
+
+    server
         .serve(app.into_make_service())
         .await
         .unwrap_or_else(|e| {

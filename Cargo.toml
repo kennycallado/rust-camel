@@ -140,7 +140,7 @@ camel-component-surrealdb = { path = "crates/components/camel-component-surreald
 camel-redis-repo = { path = "crates/services/camel-redis-repo", version = "=0.38.0" }
 
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.29"
 tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 prost = { version = "0.14" }
 prost-reflect = { version = "0.16", features = ["serde"] }
@@ -207,7 +207,7 @@ rhai = { version = "1", features = ["sync", "no_module"] }
 # - urlencode: enables the |urlencode filter (used by HTTP query templates).
 minijinja = { version = "2", features = ["fuel", "json", "urlencode"] }
 # Pin to 0.21: Context is !Send + !Sync
-boa_engine = { version = "0.21", features = [] }
+boa_engine = { version = "0.22", features = [] }
 arc-swap = "1"
 humantime = "2"
 config = "0.15"
@@ -219,7 +219,7 @@ testcontainers-modules = { version = "0.15", features = ["kafka", "postgres", "r
 # windows-sys (windows) for `openat`-style relative path resolution to
 # enforce the dependency-closure contract. Feature-gated in the crate.
 rustix = { version = "0.38", features = ["fs"] }
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",

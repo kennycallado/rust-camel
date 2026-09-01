@@ -83,7 +83,7 @@ struct ServerHandle {
     /// `axum_server::Handle::listening()` to detect bind success or
     /// failure. `None` for the plain-ws path, which binds synchronously
     /// inside `spawn_server`.
-    listening_handle: Option<axum_server::Handle>,
+    listening_handle: Option<axum_server::Handle<std::net::SocketAddr>>,
 }
 
 struct ServerRegistryInner {
@@ -110,7 +110,13 @@ impl ServerRegistry {
         tls_config: Option<WsTlsConfig>,
         runtime: Arc<dyn RuntimeObservability>,
         route_id: String,
-    ) -> Result<(WsAppState, Option<axum_server::Handle>), CamelError> {
+    ) -> Result<
+        (
+            WsAppState,
+            Option<axum_server::Handle<std::net::SocketAddr>>,
+        ),
+        CamelError,
+    > {
         let wants_tls = tls_config.is_some();
         let host_owned = host.to_string();
 

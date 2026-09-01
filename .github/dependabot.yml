@@ -21,6 +21,11 @@ updates:
       cargo-security-updates:
         applies-to: security-updates
         patterns: ["*"]
+    # syn 3 is a breaking proc-macro migration (bd rc-tl6m); only its major
+    # is ignored, 2.x minors and patches keep flowing.
+    ignore:
+      - dependency-name: "syn"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"

@@ -53,7 +53,10 @@ fn value_to_js_inner(
         }
         Value::String(s) => Ok(JsValue::from(JsString::from(s.as_str()))),
         Value::Array(arr) => {
-            let js_arr = JsArray::new(ctx);
+            // boa 0.22: JsArray::new is fallible (allocations can trap).
+            let js_arr = JsArray::new(ctx).map_err(|e| JsLanguageError::TypeConversion {
+                message: format!("array creation error: {e}"),
+            })?;
             for (i, item) in arr.iter().enumerate() {
                 let js_item = value_to_js_inner(item, ctx, depth + 1)?;
                 js_arr.set(i as u32, js_item, false, ctx).map_err(|e| {
