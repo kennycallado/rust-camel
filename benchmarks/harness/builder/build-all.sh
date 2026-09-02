@@ -73,7 +73,11 @@ for standalone_dir in "$REPO_ROOT"/benchmarks/scenarios/*/camel-standalone; do
         [[ -d "$sub" ]] || continue
         sub_name=$(basename "$sub")
         # Locate this module's packaged standalone jar (task 3.3 / rc-ld1o).
-        jar=$(ls "$sub"/target/*-jar-with-dependencies.jar 2>/dev/null | head -n1)
+        # `|| true`: with no built jar yet (fresh checkout / after a clean),
+        # ls exits 2 and pipefail would fail this assignment, killing the
+        # script under set -e before the "(jar missing, building)" path can
+        # run. Every $(ls ...) in run.sh carries the same guard.
+        jar=$(ls "$sub"/target/*-jar-with-dependencies.jar 2>/dev/null | head -n1 || true)
         if [[ -n "$jar" ]]; then
             # Jar exists: rebuild only when a source/resource under src/ is
             # newer than it — otherwise a stale jar silently survives a

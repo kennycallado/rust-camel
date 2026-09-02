@@ -142,7 +142,7 @@ if [[ -z "${NATIVE_ZLIB_LINK:-}" ]] \
     else
         # Fallback: probe the existing nix-store zlib path (slower but works
         # without nixpkgs#zlib installed in the profile).
-        ZLIB_LIB_DIR="$(ls -d /nix/store/*-zlib-*/lib 2>/dev/null | head -1)"
+        ZLIB_LIB_DIR="$(ls -d /nix/store/*-zlib-*/lib 2>/dev/null | head -1 || true)"
         if [[ -d "$ZLIB_LIB_DIR" ]]; then
             NATIVE_ZLIB_LINK="-H:NativeLinkerOption=-L$ZLIB_LIB_DIR"
             echo "warning: using probed zlib path $ZLIB_LIB_DIR (fragile; install nixpkgs#zlib for stability)" >&2
