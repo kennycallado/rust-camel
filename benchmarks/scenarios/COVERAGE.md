@@ -53,6 +53,30 @@ identical regardless of route authoring format; T1/T2 already isolate YAML-parse
 Adding `camel-standalone-yaml` + `camel-quarkus-yaml-native` for bridges would re-measure a
 known-invariant quantity — recorded as `won't-measure` per e_opus round-5 verdict.
 
+## Consolidated builds (requirements)
+
+Build topology is a **requirement**, not a plan: the harness wiring
+resolves these locations and the completeness guard enforces them.
+
+- **rust-camel-lib** — one crate at `benchmarks/contenders/rust-camel-lib/`:
+  one build serves all 7 scenarios, dispatched by `argv[1]`; no
+  per-scenario workspace member (the crate stays a root-workspace
+  member so Pair A/B share the same `Cargo.lock`).
+- **node runtime** — one dir at `benchmarks/contenders/node/`:
+  `node-native/` + `node-fastify/` share a single `node_modules`.
+
+Consolidation changes build topology only — the contender×pairing
+matrix and report rows are unchanged. Per-scenario DATA (shared
+payloads, goldens, parity hashes) stays under `scenarios/<scn>/`.
+
+**Exemptions** — per-scenario builds remain, each with a reason:
+
+| Family | Build shape | Reason |
+|---|---|---|
+| `rust-camel-cli` | one workspace build + per-scenario YAML | Already the consolidated pattern — the one the lib crate copies. |
+| `camel-standalone-*` | per-scenario jars | Classpath-isolation fairness is load-bearing: a shared jar would let Camel Main auto-discover Pair B's `routes.yaml` from Pair A's classpath (`benchmarks/harness/CONTEXT.md` §3). |
+| `camel-quarkus-*-native` | per-scenario native artifacts | AOT bakes the route into the binary; per-scenario artifacts ARE the measurement, not waste. |
+
 ## Scenario axis (rows)
 
 Scenarios are route shapes that test a specific dimension of the framework. Each scenario

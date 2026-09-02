@@ -1,10 +1,15 @@
 package com.rustcamel.bench;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.camel.AggregationStrategy;
 import org.apache.camel.Exchange;
 import org.apache.camel.Processor;
@@ -39,60 +44,111 @@ import org.apache.camel.main.Main;
  * failure throws inside the processor — the route dies BEFORE the
  * marker, so the cell fails.
  *
- * <p>No self-instrumentation — timing and RSS are captured by the
- * harness from OUTSIDE this process. {@code delay=0} on the timer (v1
- * Fix 3) keeps idle wait out of the measurement.
+ * <p>Tick mode (OpenSpec change {@code bench-consol-tick} task 2.4,
+ * mirroring the consolidated lib crate's task 2.2 and the
+ * xsd-validation-bridge DSL reference): repeating warm timer {@code
+ * timer:bench?period=10&repeatCount=10000&delay=0}; the canonical array is
+ * prebuilt ONCE (digest logged once at startup — per-exchange SHA
+ * printing would spam 10000 lines) and set per exchange via {@code
+ * setBody(constant(...))}. The tick start is carried ROUTE-LOCALLY
+ * (AtomicLong nanoTime slot), NOT on the exchange — the lib crate
+ * verified empirically (task 2.2) that neither extensions nor
+ * properties reliably survive the split+aggregate boundary; ticks are
+ * sequential (10 ms period vs a sub-millisecond pipeline) so the shared
+ * slot cannot straddle ticks. The trailing step of the MAIN (timer)
+ * route appends {@code BENCH_LATENCY <id> <duration_ns>} to the {@code
+ * BENCH_LATENCY_FILE} path; the aggregator consumer route is NOT
+ * instrumented (blessed contract, tasks.md 2.3 ruling: its work happens
+ * inside the main route's synchronous direct-dispatch window). The
+ * marker keeps its completion-path position but is latched to the FIRST
+ * completed bucket — exactly one marker line per process lifetime.
+ *
+ * <p>No self-instrumentation for cold-start — timing and RSS are
+ * captured by the harness from OUTSIDE this process; the per-tick
+ * latency writer is the Protocol-B warm record, not self-timing.
  */
 public final class App {
     private App() {
     }
 
     public static void main(String[] args) throws Exception {
+        final String array = canonicalArray();
+        if (array.length() != CANONICAL_ARRAY_BYTES) {
+            throw new IllegalStateException(
+                    "split-aggregate array length " + array.length()
+                            + " != expected " + CANONICAL_ARRAY_BYTES);
+        }
+        System.out.println("BENCH_INPUT_SHA256=" + sha256Hex(array));
+
+        // Tick-mode latency sink — truncate at startup (no
+        // stale records leak across runs).
+        final Path latencyFile = Path.of(latencyFilePath());
+        Files.createDirectories(latencyFile.getParent());
+        Files.writeString(latencyFile, "",
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+
         Main main = new Main();
+        final AtomicBoolean markerEmitted = new AtomicBoolean(false);
+        final AtomicLong tickCounter = new AtomicLong(0);
+        final AtomicLong tickStartNanos = new AtomicLong(0);
         main.configure().addRoutesBuilder(new RouteBuilder() {
             @Override
             public void configure() {
-                // Outer route (design D3): one tick builds the canonical
-                // array and fans it out. The split fragments are the bare
-                // strings "b0".."b99"; each fragment exchange is sent to
-                // direct:agg-in.
-                from("timer:bench?repeatCount=1&delay=0")
-                        .process(buildArray())
+                // Outer route (design D3): one tick sets the canonical
+                // array and fans it out. The split fragments are the
+                // bare strings "b0".."b99"; each fragment exchange is
+                // sent to direct:agg-in. Tick mode (bench-consol-tick
+                // 2.4): the tick start is stored in the route-local
+                // AtomicLong slot (exchange-scoped state does not
+                // survive the split+aggregate boundary — lib lesson,
+                // task 2.2); the trailing processor of THIS route
+                // writes the per-tick record after the split scope
+                // completes.
+                from("timer:bench?period=10&repeatCount=10000&delay=0")
+                        .setBody(constant(array))
+                        .process(exchange ->
+                                tickStartNanos.set(System.nanoTime()))
                         .split(jsonpath("$"))
-                        .to("direct:agg-in");
+                        .to("direct:agg-in")
+                        .end()
+                        .process(exchange -> {
+                            long id = tickCounter.incrementAndGet();
+                            long durationNs = System.nanoTime() - tickStartNanos.get();
+                            String line = "BENCH_LATENCY " + id + " " + durationNs + "\n";
+                            try {
+                                Files.writeString(latencyFile, line,
+                                        StandardCharsets.UTF_8,
+                                        StandardOpenOption.APPEND);
+                            } catch (Exception e) {
+                                // Swallow — harness detects missing records.
+                            }
+                        });
 
                 // Aggregation route: constant correlation key, complete
                 // at exactly 100 items. forceCompletionOnStop stays at
                 // its DEFAULT false (Camel 4.8's DSL method is no-arg
                 // and would SET it true) — an incomplete bucket emits
                 // NO marker and the cell fails by the harness marker
-                // deadline, spec F2.
+                // deadline. NOT latency-instrumented (blessed
+                // contract: its work happens inside the main route's
+                // synchronous direct-dispatch window). The marker is
+                // latched to the FIRST completed bucket — tick mode
+                // completes one bucket per tick, the marker contract is
+                // exactly one line.
                 from("direct:agg-in")
                         .setHeader(BENCH_CORRELATION_HEADER, constant(BENCH_CORRELATION))
                         .aggregate(header(BENCH_CORRELATION_HEADER), appendToList())
                         .completionSize(BENCH_ITEMS)
                         .process(assertCompletion())
-                        .log("BENCH_ROUTE_READY items=${exchangeProperty.CamelAggregatedSize}");
+                        .process(exchange -> {
+                            if (markerEmitted.compareAndSet(false, true)) {
+                                System.out.println("BENCH_ROUTE_READY items="
+                                        + exchange.getProperty(AGGREGATED_SIZE_PROPERTY));
+                            }
+                        });
             }
         });
         main.run(args);
-    }
-
-    /// Builds the canonical 100-item JSON array and logs
-    /// `BENCH_INPUT_SHA256=<digest>` before any splitting. The length
-    /// assert fires here so a builder regression kills the cell before
-    /// the marker.
-    static Processor buildArray() {
-        return exchange -> {
-            String array = canonicalArray();
-            if (array.length() != CANONICAL_ARRAY_BYTES) {
-                throw new IllegalStateException(
-                        "split-aggregate array length " + array.length()
-                                + " != expected " + CANONICAL_ARRAY_BYTES);
-            }
-            System.out.println("BENCH_INPUT_SHA256=" + sha256Hex(array));
-            exchange.getMessage().setBody(array);
-        };
     }
 
     /// List-append aggregation strategy (README `collect_all`): the
@@ -147,6 +203,20 @@ public final class App {
 
     /// Canonical array size in bytes (["b0",...,"b99"]).
     static final int CANONICAL_ARRAY_BYTES = 591;
+
+    /// Tick-mode latency sink path: `BENCH_LATENCY_FILE` env when set,
+    /// else the canonical harness path the M2 protocol-B reader derives
+    /// for this cell (`${cell//\//_}` of
+    /// `split-aggregate/camel-standalone-dsl`) — the harness argv for
+    /// this cell is bare, so the default is what makes the reader find
+    /// the log (mirrors the lib crate, task 2.2).
+    static String latencyFilePath() {
+        String env = System.getenv("BENCH_LATENCY_FILE");
+        if (env == null || env.isBlank()) {
+            return "/tmp/v3-protocol-b-split-aggregate_camel-standalone-dsl.log";
+        }
+        return env.trim();
+    }
 
     /// Canonical array builder — same formula as the Rust fixtures'
     /// `split_aggregate_array_golden`: 100 items `b0`..`b99`, compact

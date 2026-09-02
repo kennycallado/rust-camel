@@ -8,6 +8,18 @@ Reads the REAL run.sh output layout — FLAT cell dirs (run.sh does
     $RUN_DIR/<scenario>_<contender>/m3-summary.json   (throughput)
     $RUN_DIR/<scenario>_<contender>/m4-summary.json   (RSS delta)
     $RUN_DIR/<scenario>_<contender>/samples.txt       (m1 cold-start raw)
+    $RUN_DIR/m2-round-<r>/<scenario>/<contender>/     (protocol B p99
+        m2-summary.json / m2-summary.txt                latency, per
+                                                       round; identity
+                                                       from the path)
+    $RUN_DIR/m2-round-<r>/<scenario>_<contender>/     (protocol A p99
+        protocol-a-summary.txt                          latency, per
+                                                       round; flat
+                                                       cell_safe dir;
+                                                       BENCH_MEASURE_A_RESULT
+                                                       sentinel; identity
+                                                       via longest-prefix
+                                                       split)
 
 m3/m4 cell identity comes from each summary JSON's own `cell` field
 (slash form `scenario/contender`) — never from parsing dir names. m2
@@ -33,12 +45,19 @@ Three modes (see `main`):
 
 - summarize (default): `--run-dir <raw> --meta <json> --out-dir <dir>`
   builds run.json + summary.md into out-dir.
-- publish: `--publish --run-dir <summarized>` copies a validated
-  record dir (must contain run.json) into records/<run_id>/ and
-  rebuilds records/index.json (SCHEMA.md object shape, date
-  ascending, same-date ties by run_id sequence). A duplicate run_id
-  with different content is refused; identical content is a no-op
-  success.
+- publish: `--publish --run-dir <summarized>` copies a validated,
+  COMPLETE record dir (must contain run.json) into records/<run_id>/
+  and rebuilds records/index.json (SCHEMA.md object shape, date
+  ascending, same-date ties by run_id sequence). Completeness is
+  fail-closed (spec: fail-closed complete-record publish): every
+  `expected_cells` identity must have m1 data, plus m2 data where the
+  scenario's warm concept applies — any gap prints each
+  scenario/contender/metric line to stderr and exits 1 (a cell with
+  n>0 records behind `status=failed insufficient-samples` counts as
+  PRESENT m2 data — `m2_attempted_cells`; that status shape is LEGACY,
+  pre-adaptive-window run dirs only). A duplicate
+  run_id with different content is refused; identical content is a
+  no-op success.
 - check: `--check <records-dir>` cross-checks index.json against the
   run dirs (every run dir must have an index entry, every entry must
   resolve to a run dir, and each entry's date/era/git_commit must
@@ -96,6 +115,56 @@ DEFAULT_PAYLOAD_DIGEST = (
 # `rust-camel-lib` whenever the scenario measured it, else the
 # alphabetically first contender.
 PREFERRED_NUMERATOR = "rust-camel-lib"
+
+# Warm-applicability vocabulary (spec: fail-closed complete-record
+# publish). `startup-minimal` is cold-only — warm absence there is
+# `n/a` by design, never a completeness gap.
+WARM_APPLICABLE = {
+    "http-server",
+    "t2-json",
+    "split-aggregate",
+    "t2-realistic-eip",
+    "xsd-validation-bridge",
+    "xslt-bridge",
+}
+
+# Registered contender roster, mirroring run.sh SCENARIO_ARTIFACT_SET:
+# full scenarios measure 8 contenders; bridge scenarios
+# (xsd-validation-bridge, xslt-bridge) measure 6 — core 4 + node 2
+# (YAML variants add no bridge-tax signal).
+BRIDGE_SCENARIOS = {"xsd-validation-bridge", "xslt-bridge"}
+FULL_CONTENDERS = (
+    "camel-quarkus-dsl-native",
+    "camel-quarkus-yaml-native",
+    "camel-standalone-dsl",
+    "camel-standalone-yaml",
+    "node-fastify",
+    "node-native",
+    "rust-camel-cli",
+    "rust-camel-lib",
+)
+BRIDGE_CONTENDERS = (
+    "camel-quarkus-dsl-native",
+    "camel-standalone-dsl",
+    "node-fastify",
+    "node-native",
+    "rust-camel-cli",
+    "rust-camel-lib",
+)
+
+# run.sh m2_measure_protocol_b writes one dir per round:
+# <run>/m2-round-<r>/<scenario>/<contender>/{m2-summary.json,.txt}
+_M2_ROUND_DIR = re.compile(r"m2-round-(\d+)")
+
+# Protocol-A summary (run.sh m2_measure_protocol_a mirrors
+# bench-loadgen measure-a stdout into
+# m2-round-<r>/<scenario>_<contender>/protocol-a-summary.txt). The
+# machine-readable sentinel carries the same round_p99s_ns field the
+# protocol-B merge machinery consumes:
+#   BENCH_MEASURE_A_RESULT rounds=1 median_p50_ns=… median_p99_ns=… \
+#       round_p99s_ns=[…] round_bca_lo_ns=[…] round_bca_hi_ns=[…]
+_MEASURE_A_SENTINEL = re.compile(r"^BENCH_MEASURE_A_RESULT\b.*$", re.MULTILINE)
+_MEASURE_A_ROUND_P99S = re.compile(r"\bround_p99s_ns=\[([^\]]*)\]")
 
 
 def _warn(msg):
@@ -362,6 +431,232 @@ def _m1_cell(entry, scenarios, digest_cache):
     }
 
 
+def _m2_txt_attempted_with_data(path):
+    """True when an m2-summary.txt reports a FAILED sample-count check
+    over real records (`status=failed reason=insufficient-samples` with
+    observed>0 — run.sh writes the .txt INSTEAD of the .json on that
+    path). LEGACY (pre-adaptive-window run dirs only; the harness now extends the sampling window for slow-ticking cells): the old fixed window under-counted slow-ticking
+    cells: n>0 records with a failed sample-count status are healthy
+    data, counted as PRESENT m2 evidence, while observed=0 stays a
+    genuine gap."""
+    try:
+        first = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not first:
+        return False
+    fields = dict(
+        token.split("=", 1)
+        for token in first[0].split()
+        if "=" in token
+    )
+    if fields.get("status") != "failed":
+        return False
+    if fields.get("reason") != "insufficient-samples":
+        return False
+    try:
+        return int(fields.get("observed", "0")) > 0
+    except ValueError:
+        return False
+
+
+def _protocol_a_round_p99s(path, identity):
+    """Round p99 values (ns) from a protocol-A summary's
+    BENCH_MEASURE_A_RESULT sentinel line, or None when the sentinel is
+    missing/unparseable — loud warn, the completeness gap stays
+    (never a silent pass, never a poisoning partial value)."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        _warn(f"cell {identity}/m2: unreadable protocol-a summary "
+              f"({e}); leaving gap")
+        return None
+    sentinel = _MEASURE_A_SENTINEL.search(text)
+    if not sentinel:
+        status = ""
+        failed = re.search(r"\bstatus=\S+", text)
+        if failed:
+            status = f" ({failed.group(0)})"
+        _warn(f"cell {identity}/m2: no BENCH_MEASURE_A_RESULT sentinel "
+              f"in {Path(path).name}{status}; leaving gap")
+        return None
+    # A file carrying both a sentinel and a failure status means run.sh
+    # appended status=failed AFTER a partial sentinel print — treat the
+    # round as failed, never harvest it (docstring contract).
+    if re.search(r"\bstatus=\S+", text):
+        _warn(f"cell {identity}/m2: sentinel present but status= line "
+              f"also in {Path(path).name}; leaving gap")
+        return None
+    raw = _MEASURE_A_ROUND_P99S.search(sentinel.group(0))
+    if not raw:
+        _warn(f"cell {identity}/m2: sentinel lacks round_p99s_ns; "
+              "leaving gap")
+        return None
+    vals = round_values(
+        [v.strip() for v in raw.group(1).split(",") if v.strip()],
+        f"{identity}/m2",
+    )
+    if not vals:
+        _warn(f"cell {identity}/m2: empty or all-malformed "
+              "round_p99s_ns; leaving gap")
+        return None
+    return vals
+
+
+def _load_m2_round_cells(run_dir, digest_cache, scenarios):
+    """(m2 cells, attempted identities) from the REAL per-round m2
+    layout run.sh writes for BOTH protocols:
+
+        <run>/m2-round-<r>/<scenario>/<contender>/m2-summary.json
+        <run>/m2-round-<r>/<scenario>/<contender>/m2-summary.txt
+            (protocol B — nested, identity from the path)
+        <run>/m2-round-<r>/<scenario>_<contender>/protocol-a-summary.txt
+            (protocol A — FLAT, run.sh writes
+             cell_safe="${cell//\//_}"; identity via longest-prefix
+             split against `scenarios`, round p99s parsed from the
+             BENCH_MEASURE_A_RESULT sentinel)
+
+    Each round's summary contributes its round_p99s_ns; rounds merge
+    in round-index order into ONE cell's round_values per identity
+    (median over the merged values), through the same `values` map
+    regardless of protocol. Failure statuses and invalidated rounds
+    contribute nothing (warn, no medians over partial data); a cell
+    whose only evidence is an insufficient-samples .txt with observed>0
+    (LEGACY shape — pre-adaptive-window run dirs only)
+    is recorded in the attempted identities instead (see
+    [`_m2_txt_attempted_with_data`]); a flat protocol-A dir without a
+    parseable sentinel warns and stays a gap.
+    """
+    run_dir = Path(run_dir)
+    rounds = []
+    for entry in sorted(run_dir.iterdir()):
+        match = _M2_ROUND_DIR.fullmatch(entry.name)
+        if entry.is_dir() and match:
+            rounds.append((int(match.group(1)), entry))
+    rounds.sort()
+    values = {}  # identity -> merged round p99s
+    attempted = set()
+    for _, rdir in rounds:
+        sdirs = sorted(p for p in rdir.iterdir() if p.is_dir())
+        for sdir in sdirs:
+            cdirs = sorted(p for p in sdir.iterdir() if p.is_dir())
+            if not cdirs:
+                # First-level dir with no contender children: a FLAT
+                # protocol-A cell dir. Split, parse the sentinel, feed
+                # the same values map — rounds merge identically.
+                try:
+                    scenario, contender = _split_flat_dir(
+                        sdir.name, scenarios
+                    )
+                except ValueError as e:
+                    _warn(
+                        f"{sdir.relative_to(run_dir)}: {e}; "
+                        "skipping (leaving gap)"
+                    )
+                    continue
+                identity = f"{scenario}/{contender}"
+                vals = _protocol_a_round_p99s(
+                    sdir / "protocol-a-summary.txt", identity
+                )
+                if vals:
+                    values.setdefault(identity, []).extend(vals)
+                continue
+            for cdir in cdirs:
+                identity = f"{sdir.name}/{cdir.name}"
+                data = None
+                jpath = cdir / "m2-summary.json"
+                if jpath.is_file():
+                    try:
+                        data = json.loads(
+                            jpath.read_text(encoding="utf-8")
+                        )
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        _warn(
+                            f"{cdir.relative_to(run_dir)}/m2-summary.json:"
+                            " unparseable summary; skipping"
+                        )
+                if isinstance(data, dict):
+                    if data.get("status", "ok") != "ok":
+                        _warn(f"cell {identity}/m2: status "
+                              f"{data.get('status')!r}; skipping round")
+                    elif data.get("is_invalidated", False):
+                        _warn(f"cell {identity}/m2: invalidated; "
+                              "skipping round")
+                    else:
+                        raw = data.get("round_p99s_ns")
+                        vals = (
+                            round_values(raw, f"{identity}/m2")
+                            if isinstance(raw, list)
+                            else []
+                        )
+                        if vals:
+                            values.setdefault(identity, []).extend(vals)
+                        else:
+                            _warn(f"cell {identity}/m2: empty or "
+                                  "all-malformed round values; skipping "
+                                  "round")
+                tpath = cdir / "m2-summary.txt"
+                if tpath.is_file() and _m2_txt_attempted_with_data(tpath):
+                    attempted.add(identity)
+    cells = []
+    for identity in sorted(values):
+        scenario, _, contender = identity.partition("/")
+        vals = values[identity]
+        cells.append({
+            "scenario": scenario,
+            "contender": contender,
+            "variant": "default",
+            "payload_class": "shared",
+            "metric": "m2",
+            "round_values": vals,
+            "median": float(statistics.median(vals)),
+            "unit": "ns",
+            "input_sha256": _cached_input_sha256(
+                digest_cache, scenario, "shared"
+            ),
+        })
+    return cells, sorted(attempted)
+
+
+def _meta_scenarios(meta):
+    """Scenario name list from meta's `scenarios` field (legacy metas:
+    `subset`). A meta without either cannot pin the expected roster —
+    a loud ValueError, never a silently vacuous roster."""
+    raw = meta.get("scenarios") or meta.get("subset")
+    scenarios = (
+        [s.strip() for s in str(raw).split(",") if s.strip()]
+        if raw
+        else []
+    )
+    if not scenarios:
+        raise ValueError(
+            "meta must set `scenarios` (or legacy `subset`) so the "
+            "expected-cell roster can be derived; without it record "
+            "completeness cannot be checked"
+        )
+    return scenarios
+
+
+def expected_roster(scenarios):
+    """Sorted `<scenario>/<contender>` identities for the scenario set.
+
+    Mirrors the harness asymmetry (run.sh SCENARIO_ARTIFACT_SET): full
+    scenarios expect FULL_CONTENDERS (8), bridge scenarios expect
+    BRIDGE_CONTENDERS (6: core 4 + node 2). Identities — not a count —
+    so the publisher can name a missing cell even when every cell of a
+    scenario is absent.
+    """
+    identities = []
+    for scenario in scenarios:
+        contenders = (
+            BRIDGE_CONTENDERS
+            if scenario in BRIDGE_SCENARIOS
+            else FULL_CONTENDERS
+        )
+        identities.extend(f"{scenario}/{c}" for c in contenders)
+    return sorted(identities)
+
+
 def _run_date(run_dir, meta):
     """(ISO date, YYYYMMDD) derived from the run dir name, meta fallback."""
     match = _RUN_DIR_TS.match(Path(run_dir).name)
@@ -385,9 +680,18 @@ def build_record(run_dir, meta):
     host_provenance (plus optional date). `run_id` is REQUIRED for
     new runs (the launch timestamp, emitted by run-all.sh). Legacy
     metas may still carry `run_seq`, from which a
-    `<YYYYMMDD>-v<N>` id is composed. Ratios are NOT computed here —
-    main() fills them via compute_ratios so the builder stays
-    subprocess-free and deterministic.
+    `<YYYYMMDD>-v<N>` id is composed. The expected-cell roster is
+    derived from meta's `scenarios` (legacy `subset`) and persisted as
+    `expected_cells`; m2 evidence is harvested from the per-round
+    layout (protocol B nested dirs; protocol A flat cell dirs — see
+    [`_load_m2_round_cells`]) and
+    insufficient-samples-with-data cells (LEGACY shape,
+    pre-adaptive-window run dirs only) are persisted as
+    `m2_attempted_cells`. Completeness is NOT judged here — publish
+    fails closed on gaps; summarize stays usable on partial/smoke
+    runs. Ratios are NOT computed here — main() fills them via
+    compute_ratios so the builder stays subprocess-free and
+    deterministic.
     """
     date, compact = _run_date(run_dir, meta)
     run_id = meta.get("run_id")
@@ -399,8 +703,23 @@ def build_record(run_dir, meta):
                 "<YYYYMMDD>-v<N>); no default sequence fallback"
             )
         run_id = f"{compact}-v{run_seq}"
+    digest_cache = {}
+    scenarios = set(_meta_scenarios(meta))
+    m2_cells, m2_attempted = _load_m2_round_cells(
+        run_dir, digest_cache, scenarios
+    )
+    try:
+        cells = load_cells(run_dir, meta)
+    except ValueError:
+        # A pure-m2 run dir holds no flat m1/m3/m4 evidence at all —
+        # the nested m2 walk above IS the record content. Any other
+        # 0-cell run dir stays a loud error (never an empty record).
+        if not m2_cells and not m2_attempted:
+            raise
+        cells = []
+    roster = expected_roster(sorted(scenarios))
     cells = sorted(
-        load_cells(run_dir, meta),
+        cells + m2_cells,
         key=lambda c: (
             c["scenario"],
             c["contender"],
@@ -419,6 +738,8 @@ def build_record(run_dir, meta):
         "host_provenance": meta["host_provenance"],
         "protocol": meta["protocol"],
         "cells": cells,
+        "expected_cells": roster,
+        "m2_attempted_cells": m2_attempted,
         "ratios": [],
     }
 
@@ -577,6 +898,21 @@ def emit_summary(record, out_dir):
                 )
             )
         lines.append("")
+    # Reader caveat (papal review finding C): rust-camel-cli warm medians
+    # are the interpreted-YAML + embedded-script-engine per-tick cost —
+    # categorically different from the compiled-lib path. Emit whenever a
+    # cli cell appears so no reader mis-reads it as "rust-camel is slow".
+    if any(c["contender"] == "rust-camel-cli" for c in record["cells"]):
+        lines += [
+            "## Reading the rust-camel-cli rows",
+            "",
+            "- warm (m2) medians for `rust-camel-cli` measure the",
+            "  interpreted-YAML route + embedded script-engine cost per",
+            "  exchange — the authoring-layer tax — not the compiled",
+            "  engine. Compare against `rust-camel-lib` for the engine",
+            "  itself.",
+            "",
+        ]
     path = out_dir / "summary.md"
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines))
@@ -650,14 +986,56 @@ def _dir_snapshot(path):
     }
 
 
+def completeness_gaps(record):
+    """Missing `<scenario>/<contender>/<metric>` names vs the roster.
+
+    A record is COMPLETE iff every expected cell (run.json
+    `expected_cells`) has m1 data, plus m2 data when the scenario's
+    warm concept applies (WARM_APPLICABLE; `startup-minimal` is
+    cold-only — n/a). A wholly absent cell yields its m1 line (and its
+    m2 line for warm scenarios): validation runs against the EXPECTED
+    roster, so a fully missing scenario still has every cell named. A
+    cell listed in `m2_attempted_cells` (n>0 records behind a failed
+    sample-count status — LEGACY shape, pre-adaptive-window run dirs
+  only) counts as having m2 data. Returns
+    the gap names in roster order (deterministic).
+    """
+    expected = record.get("expected_cells") or []
+    attempted = set(record.get("m2_attempted_cells") or [])
+    observed = {}  # identity -> {metric}
+    for cell in record.get("cells", []):
+        scenario = cell.get("scenario")
+        contender = cell.get("contender")
+        if not scenario or not contender:
+            continue
+        key = f"{scenario}/{contender}"
+        observed.setdefault(key, set()).add(cell.get("metric"))
+    gaps = []
+    for identity in expected:
+        scenario = str(identity).partition("/")[0]
+        metrics = observed.get(identity, set())
+        if "m1" not in metrics:
+            gaps.append(f"{identity}/m1")
+        if (
+            scenario in WARM_APPLICABLE
+            and "m2" not in metrics
+            and identity not in attempted
+        ):
+            gaps.append(f"{identity}/m2")
+    return gaps
+
+
 def publish_run(record_dir, records_dir):
     """Copy a summarized record dir into records/ and rebuild the index.
 
     The source must be a VALIDATED run dir (contains run.json with the
-    SCHEMA.md identity fields). A duplicate run_id with different
-    content is refused (exit 2); identical content is a no-op success
-    (exit 0) that also reconciles a missing index entry. Returns the
-    process exit code.
+    SCHEMA.md identity fields) AND complete against its
+    `expected_cells` roster (see [`completeness_gaps`]) — incomplete
+    records exit 1 naming every missing scenario/contender/metric; a
+    missing or malformed roster is a malformed record (exit 2). A
+    duplicate run_id with different content is refused (exit 2);
+    identical content is a no-op success (exit 0) that also reconciles
+    a missing index entry. Returns the process exit code.
     """
     record_dir = Path(record_dir)
     records_dir = Path(records_dir)
@@ -679,6 +1057,29 @@ def publish_run(record_dir, records_dir):
             print(f"error: {run_json}: missing {key!r}", file=sys.stderr)
             return 2
     run_id = record["run_id"]
+    roster = record.get("expected_cells")
+    if not isinstance(roster, list) or not all(
+        isinstance(identity, str) and "/" in identity
+        for identity in roster
+    ):
+        print(
+            f"error: {run_json}: missing or malformed 'expected_cells' "
+            "roster (sorted scenario/contender identities); re-run "
+            "summarize on the raw run dir",
+            file=sys.stderr,
+        )
+        return 2
+    gaps = completeness_gaps(record)
+    if gaps:
+        print(
+            f"error: refusing to publish incomplete record {run_id}: "
+            f"{len(gaps)} missing cell metric(s) against the expected "
+            "roster:",
+            file=sys.stderr,
+        )
+        for gap in gaps:
+            print(f"error:   missing {gap}", file=sys.stderr)
+        return 1
     dest = records_dir / run_id
     if dest.exists():
         if _dir_snapshot(dest) != _dir_snapshot(record_dir):

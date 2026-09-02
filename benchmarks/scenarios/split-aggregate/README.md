@@ -8,7 +8,7 @@ one collection under a constant correlation key, and the marker fires
 only from the aggregator's completion path.
 
 ```
-timer:bench?repeatCount=1&delay=0
+timer:bench?period=10&repeatCount=10000&delay=0
   -> set_body      (canonical array, exactly 591 bytes)
   -> BENCH_INPUT_SHA256 log
   -> unmarshal json   (Body::Text -> Body::Json: the parsed 100-item array)

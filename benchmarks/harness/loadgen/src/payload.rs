@@ -111,7 +111,7 @@ pub const SPLIT_AGGREGATE_ITEMS: usize = 100;
 /// `serde_json::to_string` produces for that value (591 bytes).
 /// Byte-identical across every split-aggregate fixture: the rust
 /// fixture pins the same construction in
-/// `scenarios/split-aggregate/rust-camel-lib/src/main.rs`
+/// `benchmarks/contenders/rust-camel-lib/src/scenarios/split-aggregate.rs`
 /// (`canonical_split_array`), the JVM fixtures in their
 /// `CanonicalArrayTest` goldens.
 pub fn canonical_split_aggregate_array() -> String {

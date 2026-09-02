@@ -24,7 +24,7 @@
 
 routes:
   - id: "bench-route"
-    from: "timer:bench?repeatCount=1&delay=0"
+    from: "timer:bench?period=10&repeatCount=10000&delay=0"
     steps:
       - set_body:
           value: "ping"
@@ -43,4 +43,15 @@ routes:
                 otherwise:
                   - set_body:
                       value: "pong-other"
-      - log: "BENCH_ROUTE_READY body=${body}"
+      # Marker gate (tick mode, bench-consol-tick task 2.3): the
+      # repeating timer completes this route once per tick, so the
+      # marker log is gated by a constant-key idempotent_consumer over
+      # the built-in "memory" repository — the first completed tick
+      # emits `BENCH_ROUTE_READY body=pong-bench` exactly once; later
+      # ticks are duplicates and skip the child log (harness m1
+      # requires exactly 1 marker; lib fixture: AtomicBool gate).
+      - idempotent_consumer:
+          repository: memory
+          expression: "bench-marker-once"
+          steps:
+            - log: "BENCH_ROUTE_READY body=${body}"

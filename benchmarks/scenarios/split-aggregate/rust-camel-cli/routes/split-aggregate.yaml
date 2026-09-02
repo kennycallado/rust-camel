@@ -10,10 +10,15 @@
 #
 # Flow (mirrors the lib fixture):
 #   route bench-split-route:
-#     timer -> set_body (rhai builds the canonical array string)
+#     timer -> set_body (FROZEN constant: the canonical array is a yaml
+#        literal — built once at route load, the same mechanism the xsd
+#        cli route uses for its payload; bench-consol-tick task 3.1)
 #     -> input assert (script, rhai: exact 591 length — errors
 #        propagate, no marker on failure)
-#     -> BENCH_INPUT_SHA256 log
+#     -> BENCH_INPUT_SHA256 log, gated ONCE per process by a
+#        constant-key idempotent_consumer (same DSL-native once-gate
+#        as the marker — task 3.1 hoists the digest log out of the
+#        per-tick window)
 #     -> unmarshal json (body becomes the parsed Body::Json array)
 #     -> split (expression json_array, sequential — NO parallel)
 #        -> to direct:agg-in (per fragment)
@@ -51,20 +56,16 @@
 
 routes:
   - id: "bench-split-route"
-    from: "timer:bench?repeatCount=1&delay=0"
+    from: "timer:bench?period=10&repeatCount=10000&delay=0"
     steps:
-      # Canonical array: 100 items, item i = "b<i>", compact JSON —
-      # exactly 591 bytes (README golden table). rhai has no
-      # string-repeat operator; build item by item.
+      # Canonical array, FROZEN at route load (bench-consol-tick task
+      # 3.1): 100 items, item i = "b<i>", compact JSON — exactly 591
+      # bytes (README golden table). A yaml literal value is the
+      # startup-constant mechanism the xsd cli route already uses for
+      # its payload; the per-tick window holds no body construction.
+      # sha256 = 123444b4…59316 (assert below guards the length).
       - set_body:
-          rhai: |
-            let s = "[";
-            for i in 0..100 {
-              if i > 0 { s += ","; }
-              s += "\"" + `b${i}` + "\"";
-            }
-            s += "]";
-            s
+          value: '["b0","b1","b2","b3","b4","b5","b6","b7","b8","b9","b10","b11","b12","b13","b14","b15","b16","b17","b18","b19","b20","b21","b22","b23","b24","b25","b26","b27","b28","b29","b30","b31","b32","b33","b34","b35","b36","b37","b38","b39","b40","b41","b42","b43","b44","b45","b46","b47","b48","b49","b50","b51","b52","b53","b54","b55","b56","b57","b58","b59","b60","b61","b62","b63","b64","b65","b66","b67","b68","b69","b70","b71","b72","b73","b74","b75","b76","b77","b78","b79","b80","b81","b82","b83","b84","b85","b86","b87","b88","b89","b90","b91","b92","b93","b94","b95","b96","b97","b98","b99"]'
       # Input assert: errors propagate — a wrong canonical array kills
       # the route before any marker.
       - script:
@@ -73,7 +74,16 @@ routes:
             if body.len() != 591 {
               throw "split-aggregate canonical array length mismatch: got " + body.len();
             }
-      - log: "BENCH_INPUT_SHA256=123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316"
+      # Input provenance, ONCE per process (bench-consol-tick task 3.1):
+      # the digest log sits at its original code-path position but is
+      # gated by a constant-key idempotent_consumer — the first tick
+      # reserves the key and logs; every later tick is a duplicate and
+      # skips silently. Same DSL-native once-gate as the marker below.
+      - idempotent_consumer:
+          repository: memory
+          expression: "bench-sha-once"
+          steps:
+            - log: "BENCH_INPUT_SHA256=123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316"
       # Body::Text -> Body::Json (the parsed 100-item array).
       - unmarshal: json
       # Sequential split (parallel defaults to false): each fragment
@@ -113,4 +123,15 @@ routes:
             - set_property:
                 name: "bench.aggregated.size"
                 value: 100
-            - log: "BENCH_ROUTE_READY items=${exchangeProperty.bench.aggregated.size}"
+            # Marker gate (tick mode, bench-consol-tick task 2.3): same
+            # mechanism as the t2-json gate — constant-key
+            # idempotent_consumer over the built-in "memory" repository
+            # admits the FIRST completed bucket only; every later
+            # tick's completion is a duplicate and skips the marker
+            # log. Keeps the harness m1 exactly-1 marker contract while
+            # the timer repeats (lib fixture: AtomicBool gate).
+            - idempotent_consumer:
+                repository: memory
+                expression: "bench-marker-once"
+                steps:
+                  - log: "BENCH_ROUTE_READY items=${exchangeProperty.bench.aggregated.size}"

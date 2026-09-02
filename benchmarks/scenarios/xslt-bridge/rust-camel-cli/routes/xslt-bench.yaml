@@ -32,7 +32,7 @@
 
 routes:
   - id: "bench-xslt"
-    from: "timer:bench?period=10&repeatCount=10000"
+    from: "timer:bench?period=10&repeatCount=10000&delay=0"
     steps:
       # 1KB XML payload — byte-identical to shared/bench-payload.xml.
       # The smoke runner (smoke/run.sh::verify_cli_payload_byte_equality)

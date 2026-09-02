@@ -94,6 +94,36 @@ $ bash benchmarks/bench run-all
   `*-cli-wrapper.sh`, not the contender, so RSS is invalid by
   construction there. Elapsed ms stays valid.
 
+Tick scenarios (`t2-json`, `split-aggregate`, `t2-realistic-eip`):
+their fixtures do not exit after the marker — the route keeps looping
+on a 10ms timer (`period=10`, first fire immediate, `delay=0` on JVM
+Camel) and appends one `BENCH_LATENCY <id> <ns>` record to
+`$BENCH_LATENCY_FILE` per tick. Warm M2 data for these three scenarios
+comes from that loop (protocol B: the harness launches the contender
+per round for the nominal window `warmup-time + samples-per-round ×
+10ms` — assuming 10ms ticks — and parses the records); M1 cold-start
+is unchanged — the clock still stops at the marker.
+
+Adaptive window (rc-tpig, fixed): cells whose genuine tick period
+exceeds 10ms (split-aggregate rust-camel-cli ticks at ~20-25ms) can
+never collect `samples-per-round` records inside the nominal window.
+When such a cell is still short of the nominal count at nominal-window
+end, the harness extends its collection window (1s poll on the latency
+log) until the count reaches `samples-per-round` or the cap (6× the
+nominal window, bounded by the 600s runaway guard). Fast cells never
+enter the extension. The health check hard-fails only on n=0 (dead
+cell, `status=failed reason=insufficient-samples observed=0`); a cell
+still short of the nominal count at the cap keeps its real n — the
+summary carries the data plus a `note=slow-tick …` line appended to
+`m2-summary.txt`.
+
+Cli tick bodies are frozen (rc-sgmk, fixed): the rust-camel-cli
+routes build their canonical bodies once per process (a yaml literal
+constant, or the cache-EIP first-tick latch where the body is
+size-parameterized) and log `BENCH_INPUT_SHA256` once, so the cli
+tick window contains only exchange processing — same as the other
+contenders.
+
 ## 5. Post-run: summarize, publish, check
 
 ```console

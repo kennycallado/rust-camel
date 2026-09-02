@@ -12,15 +12,37 @@
 // (README golden table); the transform mutates the PARSED Jackson tree
 // (ObjectNode) so `marshal` is the single serializer — the same
 // mechanism as the rust-camel-lib fixture's closure over Body::Json.
+//
+// Tick mode (OpenSpec change bench-consol-tick task 2.5, mirroring the
+// standalone fixtures' task 2.4 and the consolidated lib crate's task
+// 2.2): the timer is the repeating warm-tick form
+// timer:bench?period=10&repeatCount=10000&delay=0; the canonical body is
+// prebuilt ONCE (digest logged once at startup, before the first tick
+// — per-exchange SHA printing would spam 10000 lines) and set per
+// exchange via setBody(constant(...)). The marker keeps its
+// code-path position (right after the output assert) but is latched to
+// the FIRST completed exchange — exactly one marker line per process
+// lifetime. A BenchStart exchange property brackets each exchange (set
+// AFTER setBody, mirroring the lib crate); the trailing step appends
+// `BENCH_LATENCY <id> <duration_ns>` to the BENCH_LATENCY_FILE path
+// (env read once at startup; the canonical fallback matches the M2
+// protocol-B reader's ${cell//\//_} path, so the -D-property harness
+// argv needs no env wiring).
 
 package com.rustcamel.bench;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.camel.Exchange;
 import org.apache.camel.Processor;
 import org.apache.camel.builder.RouteBuilder;
@@ -33,31 +55,65 @@ public class BenchRoute extends RouteBuilder {
     @Override
     public void configure() {
         final int size = benchPayloadBytes();
-        from("timer:bench?repeatCount=1&delay=0")
-                .process(buildBody(size))
+        final String payload = canonicalJsonBody(size, CANONICAL_SELFTEST_TICK);
+        if (payload.length() != size) {
+            throw new IllegalStateException(
+                    "t2-json input length " + payload.length() + " != expected " + size);
+        }
+        System.out.println("BENCH_INPUT_SHA256=" + sha256Hex(payload));
+
+        // Tick-mode latency sink — truncate at startup (no
+        // stale records leak across runs).
+        final Path latencyFile = Path.of(latencyFilePath());
+        try {
+            Files.createDirectories(latencyFile.getParent());
+            Files.writeString(latencyFile, "",
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (IOException e) {
+            throw new IllegalStateException(
+                    "t2-json latency sink truncate failed: " + latencyFile, e);
+        }
+        final AtomicBoolean markerEmitted = new AtomicBoolean(false);
+        final AtomicLong tickCounter = new AtomicLong(0);
+
+        from("timer:bench?period=10&repeatCount=10000&delay=0")
+                .setBody(constant(payload))
+                // Records t_start immediately after the body is set
+                // (same bracket position as the lib crate's task-2.2
+                // route and the standalone dsl sibling). Long (boxed)
+                // so it round-trips through exchange property type
+                // erasure.
+                .process(exchange ->
+                        exchange.setProperty("BenchStart", System.nanoTime()))
                 .unmarshal().json(JsonLibrary.Jackson, ObjectNode.class)
                 .filter(jsonpath("$[?(@.id == 'bench')]"))
                 .process(insertBenchMember())
                 .end()
                 .marshal().json(JsonLibrary.Jackson)
                 .process(assertOutput(size))
-                .log("BENCH_ROUTE_READY bytes=${header.benchOutLen}");
-    }
-
-    /// Builds the canonical JSON document for (size, tick) and logs
-    /// `BENCH_INPUT_SHA256=<digest>` before any processing. The input
-    /// length assert fires here so a size mismatch kills the cell
-    /// before the marker.
-    static Processor buildBody(int size) {
-        return exchange -> {
-            String body = canonicalJsonBody(size, CANONICAL_SELFTEST_TICK);
-            if (body.length() != size) {
-                throw new IllegalStateException(
-                        "t2-json input length " + body.length() + " != expected " + size);
-            }
-            System.out.println("BENCH_INPUT_SHA256=" + sha256Hex(body));
-            exchange.getMessage().setBody(body);
-        };
+                // Marker fires on the FIRST completed exchange only —
+                // tick mode repeats this step per tick, the marker
+                // contract is exactly one line.
+                .process(exchange -> {
+                    if (markerEmitted.compareAndSet(false, true)) {
+                        System.out.println("BENCH_ROUTE_READY bytes="
+                                + exchange.getMessage().getHeader("benchOutLen"));
+                    }
+                })
+                .process(exchange -> {
+                    long id = tickCounter.incrementAndGet();
+                    long tEnd = System.nanoTime();
+                    Long tStart = exchange.getProperty("BenchStart", Long.class);
+                    long durationNs = tEnd - tStart;
+                    String line = "BENCH_LATENCY " + id + " " + durationNs + "\n";
+                    try {
+                        Files.writeString(latencyFile, line,
+                                StandardCharsets.UTF_8,
+                                StandardOpenOption.APPEND);
+                    } catch (Exception e) {
+                        // Swallow — harness detects missing records.
+                    }
+                });
     }
 
     /// Transform step: structured mutation of the PARSED tree — insert
@@ -139,6 +195,21 @@ public class BenchRoute extends RouteBuilder {
                     + "; valid sizes: [1024, 32768, 262144, 1048576]");
         }
         return parsed;
+    }
+
+    /// Tick-mode latency sink path: `BENCH_LATENCY_FILE` env when set,
+    /// else the canonical harness path the M2 protocol-B reader derives
+    /// for this cell (`${cell//\//_}` of
+    /// `t2-json/camel-quarkus-dsl-native`) — the harness argv passes
+    /// the path as a -D system property, so the env fallback is what
+    /// makes the reader find the log (mirrors the standalone fixtures,
+    /// task 2.4).
+    static String latencyFilePath() {
+        String env = System.getenv("BENCH_LATENCY_FILE");
+        if (env == null || env.isBlank()) {
+            return "/tmp/v3-protocol-b-t2-json_camel-quarkus-dsl-native.log";
+        }
+        return env.trim();
     }
 
     /// Canonical body builder — same formula as bench-loadgen's

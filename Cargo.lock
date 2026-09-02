@@ -5611,20 +5611,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "http-server-rust-camel-lib"
-version = "0.1.0"
-dependencies = [
- "camel-api",
- "camel-builder",
- "camel-component-http",
- "camel-core",
- "camel-processor",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "http-streaming"
 version = "0.38.0"
 dependencies = [
@@ -9613,6 +9599,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-camel-lib-fixture"
+version = "0.1.0"
+dependencies = [
+ "bench-loadgen",
+ "camel-api",
+ "camel-builder",
+ "camel-component-api",
+ "camel-component-direct",
+ "camel-component-http",
+ "camel-component-timer",
+ "camel-component-validator",
+ "camel-core",
+ "camel-processor",
+ "camel-xslt",
+ "hex",
+ "rustls",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rust-ini"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11306,27 +11317,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "split-aggregate-rust-camel-lib"
-version = "0.1.0"
-dependencies = [
- "bench-loadgen",
- "camel-api",
- "camel-builder",
- "camel-component-api",
- "camel-component-direct",
- "camel-component-timer",
- "camel-core",
- "camel-processor",
- "hex",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
- "tower 0.5.3",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "splitter"
 version = "0.38.0"
 dependencies = [
@@ -11607,20 +11597,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "startup-minimal-rust-camel-lib"
-version = "0.1.0"
-dependencies = [
- "camel-api",
- "camel-builder",
- "camel-component-timer",
- "camel-core",
- "camel-processor",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "static_assertions"
@@ -12088,38 +12064,6 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows",
-]
-
-[[package]]
-name = "t2-json-rust-camel-lib"
-version = "0.1.0"
-dependencies = [
- "bench-loadgen",
- "camel-api",
- "camel-builder",
- "camel-component-timer",
- "camel-core",
- "camel-processor",
- "hex",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "t2-realistic-eip-rust-camel-lib"
-version = "0.1.0"
-dependencies = [
- "camel-api",
- "camel-builder",
- "camel-component-timer",
- "camel-core",
- "camel-processor",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -14656,38 +14600,6 @@ dependencies = [
  "camel-api",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "xsd-validation-bridge-rust-camel-lib"
-version = "0.1.0"
-dependencies = [
- "camel-api",
- "camel-builder",
- "camel-component-timer",
- "camel-component-validator",
- "camel-core",
- "camel-processor",
- "rustls",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "xslt-bridge-rust-camel-lib"
-version = "0.1.0"
-dependencies = [
- "camel-api",
- "camel-builder",
- "camel-component-timer",
- "camel-core",
- "camel-processor",
- "camel-xslt",
- "rustls",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

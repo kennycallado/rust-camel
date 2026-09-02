@@ -27,8 +27,10 @@ Template: copy the SHAPE of `t2-json/` (never its content blindly).
 
 1. **Fixtures** — create `scenarios/<name>/` with one directory per
    contender:
-   - `rust-camel-lib/` — `Cargo.toml` + `src/` (fixture drives the
-     lib directly).
+   - `rust-camel-lib` — NO per-scenario crate: add a module under
+     `benchmarks/contenders/rust-camel-lib/src/scenarios/<name>.rs`
+     plus an argv dispatch entry in its `main.rs` (the crate is
+     already a workspace member; one build serves all scenarios).
    - `rust-camel-cli/` — `routes/*.yaml` (drives the CLI).
    - `camel-standalone/{dsl,yaml}/` — Maven projects.
    - `camel-quarkus/{dsl,yaml}(-native)/` — Gradle projects.
@@ -48,8 +50,10 @@ Template: copy the SHAPE of `t2-json/` (never its content blindly).
    `scenario_payload_digest` (this is what fills `input_sha256` in
    records). If the scenario consumes no payload body: do nothing —
    the record carries a documented `null`.
-5. **Workspace member** — add the rust fixture to the root
-   `Cargo.toml` members: `benchmarks/scenarios/<name>/rust-camel-lib`.
+5. **Workspace member** — add the rust route builder as a module in the
+   consolidated fixture `benchmarks/contenders/rust-camel-lib`
+   (change bench-consol-tick: one crate, scenario dispatch via
+   argv[1]; no per-scenario workspace member).
 6. **Smoke** — first `bash benchmarks/bench run --scenarios=<name>
    --dry-run` green (no JDK needed). Then the real smoke: every
    contender must produce the SAME input digest, byte-identical

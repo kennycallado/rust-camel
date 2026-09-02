@@ -1,30 +1,42 @@
 # split-aggregate scenario routes for camel-quarkus-yaml (JVM, Pair B,
-# OpenSpec change bench-missing-cells task 2.4).
+# OpenSpec change bench-missing-cells task 2.4; tick mode
+# bench-consol-tick 2.5).
 #
 # Same logical routes as the camel-quarkus-dsl BenchRoute (Pair A) but
 # authored in Apache Camel YAML DSL (design D3):
 #
-#   route 1: timer -> process(buildArray) -> split(jsonpath "$",
-#            sequential by default) -> to(direct:agg-in) per fragment
+#   route 1: timer -> process(buildArray) -> process(markStart) ->
+#            split(jsonpath "$", sequential by default) ->
+#            to(direct:agg-in) per fragment -> process(writeLatency)
 #   route 2: direct:agg-in -> setHeader(constant correlation) ->
 #            aggregate(completionSize=100, list-append strategy,
 #            forceCompletionOnStop=false) -> process(assertCompletion)
-#            -> log marker
+#            -> process(emitMarker)
 #
 # Discovered via the default classpath:camel/* scan (native mode uses
 # the pinned camel.main.routesIncludePattern from the -native sibling's
 # application.properties — Substrate VM cannot enumerate `camel/*`).
 #
-# The two `process` steps resolve CDI-produced named beans from
-# BenchBeans.java (buildArray / assertCompletion); the list-append
-# aggregation strategy is referenced via the documented `#class:` form.
-# The route STRUCTURE lives in this file, which is the property Pair B
-# measures. The marker `BENCH_ROUTE_READY items=<n>` is the exact
-# harness grep target and fires ONLY from the aggregator's completion
-# path; any processor assert failure kills the route BEFORE the marker
-# so the cell fails loudly. forceCompletionOnStop stays false — an
-# incomplete bucket emits NO marker (spec: the cell fails by marker
-# deadline).
+# The `process` steps resolve CDI-produced named beans from
+# BenchBeans.java (buildArray / markStart / assertCompletion /
+# emitMarker / writeLatency); the list-append aggregation strategy is
+# referenced via the documented `#class:` form. The route STRUCTURE
+# lives in this file, which is the property Pair B measures. The marker
+# `BENCH_ROUTE_READY items=<n>` is the exact harness grep target and
+# fires ONLY from the aggregator's completion path; any processor
+# assert failure kills the route BEFORE the marker so the cell fails
+# loudly. forceCompletionOnStop stays false — an incomplete bucket
+# emits NO marker (spec: the cell fails by marker deadline).
+#
+# Tick mode (bench-consol-tick 2.5): repeating warm timer
+# (period=10&repeatCount=10000&delay=0, same URI form as the dsl module). The
+# writeLatency bean ends the MAIN (timer) route and appends one
+# `BENCH_LATENCY <id> <duration_ns>` record per tick, reading the
+# route-local start slot the markStart bean fills; the aggregator
+# consumer route is NOT instrumented (blessed contract, tasks.md 2.3
+# ruling: its work happens inside the main route's synchronous
+# direct-dispatch window). The emitMarker bean is latched to the FIRST
+# completed bucket (one bucket completes per tick).
 #
 # Uses camelCase keys per Spike 1B finding that kebab-case is
 # deprecated in Quarkus 3.20.0 YAML DSL (still parses but warns).
@@ -33,15 +45,20 @@
     from:
       uri: "timer:bench"
       parameters:
-        repeatCount: 1
+        period: 10
+        repeatCount: 10000
         delay: 0
       steps:
         - process:
             ref: "buildArray"
+        - process:
+            ref: "markStart"
         - split:
             jsonpath: "$"
             steps:
               - to: "direct:agg-in"
+        - process:
+            ref: "writeLatency"
 
 - route:
     from:
@@ -64,5 +81,5 @@
             steps:
               - process:
                   ref: "assertCompletion"
-              - log:
-                  message: "BENCH_ROUTE_READY items=${exchangeProperty.CamelAggregatedSize}"
+              - process:
+                  ref: "emitMarker"

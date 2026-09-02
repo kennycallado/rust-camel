@@ -1,0 +1,78 @@
+{
+  "source_run": "20260901T185115Z",
+  "cells": {
+    "split-aggregate_camel-quarkus-dsl-native": {
+      "median_ms": 16.0
+    },
+    "split-aggregate_camel-quarkus-yaml-native": {
+      "median_ms": 16.0
+    },
+    "split-aggregate_camel-standalone-dsl": {
+      "median_ms": 488.5
+    },
+    "split-aggregate_camel-standalone-yaml": {
+      "median_ms": 530.0
+    },
+    "split-aggregate_node-fastify": {
+      "median_ms": 121.5
+    },
+    "split-aggregate_node-native": {
+      "median_ms": 28.0
+    },
+    "split-aggregate_rust-camel-cli": {
+      "median_ms": 50.0
+    },
+    "split-aggregate_rust-camel-lib": {
+      "median_ms": 8.0
+    },
+    "t2-json_camel-quarkus-dsl-native": {
+      "median_ms": 16.0
+    },
+    "t2-json_camel-quarkus-yaml-native": {
+      "median_ms": 16.0
+    },
+    "t2-json_camel-standalone-dsl": {
+      "median_ms": 498.0
+    },
+    "t2-json_camel-standalone-yaml": {
+      "median_ms": 535.0
+    },
+    "t2-json_node-fastify": {
+      "median_ms": 120.5
+    },
+    "t2-json_node-native": {
+      "median_ms": 27.5
+    },
+    "t2-json_rust-camel-cli": {
+      "median_ms": 34.0
+    },
+    "t2-json_rust-camel-lib": {
+      "median_ms": 8.0
+    },
+    "t2-realistic-eip_camel-quarkus-dsl-native": {
+      "median_ms": 16.0
+    },
+    "t2-realistic-eip_camel-quarkus-yaml-native": {
+      "median_ms": 16.0
+    },
+    "t2-realistic-eip_camel-standalone-dsl": {
+      "median_ms": 324.0
+    },
+    "t2-realistic-eip_camel-standalone-yaml": {
+      "median_ms": 366.5
+    },
+    "t2-realistic-eip_node-fastify": {
+      "median_ms": 120.0
+    },
+    "t2-realistic-eip_node-native": {
+      "median_ms": 24.0
+    },
+    "t2-realistic-eip_rust-camel-cli": {
+      "median_ms": 28.0
+    },
+    "t2-realistic-eip_rust-camel-lib": {
+      "median_ms": 8.0
+    }
+  },
+  "host_load_1min": 1.12
+}

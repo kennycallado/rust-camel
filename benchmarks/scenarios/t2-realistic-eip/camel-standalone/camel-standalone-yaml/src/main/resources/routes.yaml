@@ -1,11 +1,22 @@
-# T2 scenario route for camel-standalone-yaml (Pair B, bd rc-p9ki Task 3).
+# T2 scenario route for camel-standalone-yaml (Pair B, bd rc-p9ki
+# Task 3; tick mode bench-consol-tick 2.4).
 #
 # Same logical route as App.java (Pair A hardcoded Java-DSL) but
 # authored in Apache Camel YAML DSL. Implements spec §4.1 T2 route:
 # timer -> set_body -> set_header -> filter(simple) -> choice ->
-# log. The marker `BENCH_ROUTE_READY body=pong-bench` carries the
-# post-choice body — a wrong-branch run (otherwise -> `pong-other`)
-# is observable, not silent.
+# process(emitMarker) -> process(writeLatency). The marker
+# `BENCH_ROUTE_READY body=pong-bench` carries the post-choice body —
+# a wrong-branch run (otherwise -> `pong-other`) is observable, not
+# silent.
+#
+# Tick mode (bench-consol-tick 2.4): repeating warm timer
+# (period=10&repeatCount=10000&delay=0, same URI form as the dsl module). The
+# markStart/emitMarker/writeLatency steps resolve named beans bound by
+# AppYaml.java; the route STRUCTURE stays in this parsed file, which is
+# the property Pair B measures. The marker bean is latched to the FIRST
+# completed exchange — exactly one marker line per process lifetime;
+# the writeLatency bean appends one `BENCH_LATENCY <id> <duration_ns>`
+# record per tick.
 #
 # Behavioral equivalence: the rust-camel-cli YAML counterpart
 # (rust-camel-cli/routes/t2-realistic-eip.yaml) is language-subsystem-
@@ -19,9 +30,12 @@
     from:
       uri: "timer:bench"
       parameters:
-        repeatCount: 1
+        period: 10
+        repeatCount: 10000
         delay: 0
       steps:
+        - process:
+            ref: "markStart"
         - setBody:
             constant: "ping"
         - setHeader:
@@ -40,5 +54,7 @@
                     steps:
                       - setBody:
                           constant: "pong-other"
-        - log:
-            message: "BENCH_ROUTE_READY body=${body}"
+        - process:
+            ref: "emitMarker"
+        - process:
+            ref: "writeLatency"

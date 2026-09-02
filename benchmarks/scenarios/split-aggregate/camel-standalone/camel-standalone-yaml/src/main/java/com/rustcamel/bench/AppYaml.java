@@ -1,8 +1,13 @@
 package com.rustcamel.bench;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.camel.Exchange;
 import org.apache.camel.Processor;
 import org.apache.camel.main.Main;
@@ -14,48 +19,86 @@ import org.apache.camel.main.Main;
  * routes as the dsl-module {@link App}, authored in YAML DSL and
  * parsed at runtime via {@code camel-yaml-dsl}).
  *
- * <p>The route's two custom steps (build the canonical 100-item array
- * + log BENCH_INPUT_SHA256, assert the aggregated completion) are bound
- * as named beans; the route STRUCTURE stays in the parsed YAML file,
- * which is the property Pair B measures. The list-append aggregation
- * strategy is referenced from YAML via {@code #class:} (documented
- * Camel 4 XML/YAML form — stateless, no registry lookup needed). Kept
- * in this module only: Pair A's classpath carries no beans, no
- * routes.yaml.
+ * <p>The route's custom steps (set the canonical 100-item array,
+ * bracket the tick, assert the aggregated completion, gate the marker,
+ * write the per-tick latency record) are bound as named beans; the
+ * route STRUCTURE stays in the parsed YAML file, which is the property
+ * Pair B measures. The list-append aggregation strategy is referenced
+ * from YAML via {@code #class:} (documented Camel 4 XML/YAML form —
+ * stateless, no registry lookup needed). Kept in this module only:
+ * Pair A's classpath carries no beans, no routes.yaml.
  *
  * <p>Marker contract: one {@code BENCH_ROUTE_READY items=<n>} line,
  * emitted only from the aggregator's completion path; an assert failure
  * kills the route before the marker (cell fails). No
- * self-instrumentation — the harness owns the clock from outside.
+ * self-instrumentation for cold-start — the harness owns the clock from
+ * outside.
+ *
+ * <p>Tick mode (OpenSpec change {@code bench-consol-tick} task 2.4,
+ * mirroring the dsl module and the lib crate's task 2.2): repeating
+ * warm timer {@code timer:bench?period=10&repeatCount=10000&delay=0} (timer
+ * URI lives in routes.yaml); the canonical array is prebuilt ONCE
+ * (digest logged once at startup) and set per exchange by the {@code
+ * buildArray} bean; the tick start is carried ROUTE-LOCALLY
+ * (AtomicLong nanoTime slot — exchange-scoped state does not survive
+ * the split+aggregate boundary, lib lesson task 2.2); the {@code
+ * writeLatency} bean on the MAIN (timer) route appends {@code
+ * BENCH_LATENCY <id> <duration_ns>} per tick to the {@code
+ * BENCH_LATENCY_FILE} path (env read once at startup; canonical
+ * fallback matches the M2 protocol-B reader's path). The aggregator
+ * consumer route is NOT instrumented (blessed contract, tasks.md 2.3
+ * ruling); its {@code emitMarker} bean is latched to the FIRST
+ * completed bucket — exactly one marker line per process lifetime.
  */
 public final class AppYaml {
     private AppYaml() {
     }
 
     public static void main(String[] args) throws Exception {
+        final String array = canonicalArray();
+        if (array.length() != CANONICAL_ARRAY_BYTES) {
+            throw new IllegalStateException(
+                    "split-aggregate array length " + array.length()
+                            + " != expected " + CANONICAL_ARRAY_BYTES);
+        }
+        System.out.println("BENCH_INPUT_SHA256=" + sha256Hex(array));
+
+        // Tick-mode latency sink — truncate at startup (no
+        // stale records leak across runs).
+        final Path latencyFile = Path.of(latencyFilePath());
+        Files.createDirectories(latencyFile.getParent());
+        Files.writeString(latencyFile, "",
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+
+        final AtomicBoolean markerEmitted = new AtomicBoolean(false);
+        final AtomicLong tickCounter = new AtomicLong(0);
+        final AtomicLong tickStartNanos = new AtomicLong(0);
+
         Main main = new Main();
-        main.bind("buildArray", buildArray());
+        main.bind("buildArray", setCanonicalArray(array));
+        main.bind("markStart", markStart(tickStartNanos));
         main.bind("assertCompletion", assertCompletion());
+        main.bind("emitMarker", emitMarker(markerEmitted));
+        main.bind("writeLatency", writeLatency(latencyFile, tickCounter, tickStartNanos));
         main.configure()
                 .withRoutesIncludePattern("classpath:routes.yaml");
         main.run(args);
     }
 
-    /// Builds the canonical 100-item JSON array and logs
-    /// `BENCH_INPUT_SHA256=<digest>` before any splitting. The length
-    /// assert fires here so a builder regression kills the cell before
-    /// the marker.
-    static Processor buildArray() {
-        return exchange -> {
-            String array = canonicalArray();
-            if (array.length() != CANONICAL_ARRAY_BYTES) {
-                throw new IllegalStateException(
-                        "split-aggregate array length " + array.length()
-                                + " != expected " + CANONICAL_ARRAY_BYTES);
-            }
-            System.out.println("BENCH_INPUT_SHA256=" + sha256Hex(array));
-            exchange.getMessage().setBody(array);
-        };
+    /// Sets the prebuilt canonical array (built + asserted + digest
+    /// logged ONCE at startup in main). Per exchange this is the
+    /// {@code setBody(constant(...))} equivalent for the YAML route.
+    static Processor setCanonicalArray(String array) {
+        return exchange -> exchange.getMessage().setBody(array);
+    }
+
+    /// Bracket step: stores t_start in the ROUTE-LOCAL nanoTime slot —
+    /// exchange-scoped state does not survive the split+aggregate
+    /// boundary (lib lesson, task 2.2); ticks are sequential (10 ms
+    /// period vs a sub-millisecond pipeline) so the shared slot cannot
+    /// straddle ticks.
+    static Processor markStart(AtomicLong tickStartNanos) {
+        return exchange -> tickStartNanos.set(System.nanoTime());
     }
 
     /// Completion assert — the aggregated collection holds exactly 100
@@ -80,6 +123,39 @@ public final class AppYaml {
         };
     }
 
+    /// Marker step — fires ONLY from the aggregator's completion path
+    /// (right after the completion assert), latched to the FIRST
+    /// completed bucket: tick mode completes one bucket per tick, the
+    /// marker contract is exactly one line.
+    static Processor emitMarker(AtomicBoolean markerEmitted) {
+        return exchange -> {
+            if (markerEmitted.compareAndSet(false, true)) {
+                System.out.println("BENCH_ROUTE_READY items="
+                        + exchange.getProperty(AGGREGATED_SIZE_PROPERTY));
+            }
+        };
+    }
+
+    /// Trailing latency step of the MAIN (timer) route — appends
+    /// `BENCH_LATENCY <id> <duration_ns>` to the sink file per tick
+    /// (the Protocol-B warm record), reading the route-local start
+    /// slot. Write failures are swallowed — the harness detects
+    /// missing records.
+    static Processor writeLatency(
+            Path latencyFile, AtomicLong tickCounter, AtomicLong tickStartNanos) {
+        return exchange -> {
+            long id = tickCounter.incrementAndGet();
+            long durationNs = System.nanoTime() - tickStartNanos.get();
+            String line = "BENCH_LATENCY " + id + " " + durationNs + "\n";
+            try {
+                Files.writeString(latencyFile, line,
+                        StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+            } catch (Exception e) {
+                // Swallow — harness detects missing records.
+            }
+        };
+    }
+
     /// Number of split fragments / aggregation bucket size (README
     /// canonical route).
     static final int BENCH_ITEMS = 100;
@@ -90,6 +166,20 @@ public final class AppYaml {
 
     /// Canonical array size in bytes (["b0",...,"b99"]).
     static final int CANONICAL_ARRAY_BYTES = 591;
+
+    /// Tick-mode latency sink path: `BENCH_LATENCY_FILE` env when set,
+    /// else the canonical harness path the M2 protocol-B reader derives
+    /// for this cell (`${cell//\//_}` of
+    /// `split-aggregate/camel-standalone-yaml`) — the harness argv for
+    /// this cell is bare, so the default is what makes the reader find
+    /// the log (mirrors the lib crate, task 2.2).
+    static String latencyFilePath() {
+        String env = System.getenv("BENCH_LATENCY_FILE");
+        if (env == null || env.isBlank()) {
+            return "/tmp/v3-protocol-b-split-aggregate_camel-standalone-yaml.log";
+        }
+        return env.trim();
+    }
 
     /// Canonical array builder — same formula as the Rust fixtures'
     /// `split_aggregate_array_golden`: 100 items `b0`..`b99`, compact

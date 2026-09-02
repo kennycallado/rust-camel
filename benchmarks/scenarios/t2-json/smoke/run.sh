@@ -21,7 +21,8 @@
 #   5. Node fixtures   @ $PAYLOAD_BYTES  OPTIONAL (bench-node task 2.2):
 #                             node-native (needs a node binary) and
 #                             node-fastify (also needs node_modules —
-#                             run `npm ci --omit=dev` in its dir first).
+#                             run `npm ci --omit=dev` in
+#                             benchmarks/contenders/node first).
 #                             Same greps; golden digest parity is INPUT
 #                             parity only (output member order differs
 #                             across serializers).
@@ -59,15 +60,17 @@ PASS=0
 FAIL=0
 
 # ── Toolchain resolution ─────────────────────────────────────────────
-# Debug binaries match the `cargo build --workspace` gate artifacts.
-# A host CARGO_TARGET_DIR would move them — unset it for every cargo
-# call (same gotcha as the .cargo/config.toml fixtures document).
+# The lib fixture is the consolidated rust-camel-lib-fixture binary
+# (change bench-consol-tick task 1.2). A host CARGO_TARGET_DIR would
+# move it — unset it for every cargo call (same gotcha as the
+# .cargo/config.toml fixtures document).
 
-LIB_BIN="$WORKTREE/target/debug/t2-json"
+LIB_BIN="$WORKTREE/benchmarks/contenders/rust-camel-lib/target/release/rust-camel-lib-fixture"
 if [[ ! -x "$LIB_BIN" ]]; then
-    echo "--- building lib fixture (debug, worktree root) ---"
-    (cd "$WORKTREE" && env -u CARGO_TARGET_DIR cargo build -p t2-json-rust-camel-lib --bin t2-json) || {
-        echo "FAIL: cargo build -p t2-json-rust-camel-lib"
+    echo "--- building lib fixture (consolidated, release) ---"
+    (cd "$WORKTREE/benchmarks/contenders/rust-camel-lib" \
+        && env -u CARGO_TARGET_DIR cargo build --release -p rust-camel-lib-fixture) || {
+        echo "FAIL: cargo build -p rust-camel-lib-fixture"
         exit 1
     }
 fi
@@ -145,7 +148,7 @@ run_and_check() {
 echo "=== t2-json smoke (payload=$PAYLOAD_BYTES) ==="
 echo "--- rust-camel-lib @ $PAYLOAD_BYTES ---"
 LIB_LOG="$SCRIPT_DIR/rust-camel-lib-$PAYLOAD_BYTES.log"
-env BENCH_PAYLOAD_BYTES="$PAYLOAD_BYTES" "$LIB_BIN" > "$LIB_LOG" 2>&1 &
+env BENCH_PAYLOAD_BYTES="$PAYLOAD_BYTES" "$LIB_BIN" t2-json > "$LIB_LOG" 2>&1 &
 LIB_PID=$!
 run_and_check "rust-camel-lib@$PAYLOAD_BYTES" "$LIB_LOG" \
     "$((PAYLOAD_BYTES + 13))" "$GOLDEN_MAIN" "$LIB_PID"
@@ -180,7 +183,7 @@ fi
 # ── 3. lib fixture @ 1024 (per-class marker) ────────────────────────
 echo "--- rust-camel-lib @ 1024 (per-class) ---"
 LIB_LOG_1024="$SCRIPT_DIR/rust-camel-lib-1024.log"
-env BENCH_PAYLOAD_BYTES=1024 "$LIB_BIN" > "$LIB_LOG_1024" 2>&1 &
+env BENCH_PAYLOAD_BYTES=1024 "$LIB_BIN" t2-json > "$LIB_LOG_1024" 2>&1 &
 LIB_PID_1024=$!
 run_and_check "rust-camel-lib@1024" "$LIB_LOG_1024" 1037 "$GOLDEN_1024" "$LIB_PID_1024"
 
@@ -241,7 +244,9 @@ fi
 # ── 5. Node fixtures @ BENCH_PAYLOAD_BYTES (bench-node task 2.2) ─────
 # OPTIONAL legs: need a node binary (NODE_BIN override, runner install
 # path, PATH — same resolution chain as the harness); node-fastify
-# additionally needs node_modules (npm ci --omit=dev in its dir).
+# additionally needs node_modules (npm ci --omit=dev in
+# benchmarks/contenders/node). Entry scripts live in the consolidated
+# contender tree (change bench-consol-tick task 1.3).
 if [[ -n "${NODE_BIN:-}" ]]; then
     :
 elif [[ -x /opt/node/bin/node ]]; then
@@ -249,30 +254,32 @@ elif [[ -x /opt/node/bin/node ]]; then
 else
     NODE_BIN="$(command -v node 2>/dev/null || echo "")"
 fi
+NODE_CONTENDER_DIR="$WORKTREE/benchmarks/contenders/node"
 echo "--- node legs (node: ${NODE_BIN:-<missing>}) ---"
 if [[ ! -x "$NODE_BIN" ]]; then
     echo "SKIP (no node binary): node legs skipped"
 else
     echo "--- node-native @ $PAYLOAD_BYTES ---"
     NODE_LOG="$SCRIPT_DIR/node-native-$PAYLOAD_BYTES.log"
-    (cd "$SCENARIO_DIR/node-native" \
-        && env BENCH_PAYLOAD_BYTES="$PAYLOAD_BYTES" "$NODE_BIN" route.mjs) \
+    (cd "$NODE_CONTENDER_DIR/node-native" \
+        && env BENCH_PAYLOAD_BYTES="$PAYLOAD_BYTES" "$NODE_BIN" t2-json.mjs) \
         > "$NODE_LOG" 2>&1 &
     NODE_PID=$!
     run_and_check "node-native@$PAYLOAD_BYTES" "$NODE_LOG" \
         "$((PAYLOAD_BYTES + 13))" "$GOLDEN_MAIN" "$NODE_PID"
 
-    if [[ -d "$SCENARIO_DIR/node-fastify/node_modules" ]]; then
+    if [[ -d "$NODE_CONTENDER_DIR/node_modules" \
+        && -f "$NODE_CONTENDER_DIR/node-fastify/t2-json.mjs" ]]; then
         echo "--- node-fastify @ $PAYLOAD_BYTES ---"
         FASTIFY_LOG="$SCRIPT_DIR/node-fastify-$PAYLOAD_BYTES.log"
-        (cd "$SCENARIO_DIR/node-fastify" \
-            && env BENCH_PAYLOAD_BYTES="$PAYLOAD_BYTES" "$NODE_BIN" route.mjs) \
+        (cd "$NODE_CONTENDER_DIR/node-fastify" \
+            && env BENCH_PAYLOAD_BYTES="$PAYLOAD_BYTES" "$NODE_BIN" t2-json.mjs) \
             > "$FASTIFY_LOG" 2>&1 &
         FASTIFY_PID=$!
         run_and_check "node-fastify@$PAYLOAD_BYTES" "$FASTIFY_LOG" \
             "$((PAYLOAD_BYTES + 13))" "$GOLDEN_MAIN" "$FASTIFY_PID"
     else
-        echo "SKIP: node-fastify prerequisites not present (need npm ci --omit=dev in $SCENARIO_DIR/node-fastify)"
+        echo "SKIP: node-fastify prerequisites not present (need npm ci --omit=dev in $NODE_CONTENDER_DIR)"
     fi
 fi
 

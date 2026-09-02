@@ -1,28 +1,37 @@
 # t2-json scenario route for camel-standalone-yaml (Pair B, OpenSpec
-# change bench-missing-cells task 2.2).
+# change bench-missing-cells task 2.2; tick mode bench-consol-tick 2.4).
 #
 # Same logical route as the dsl-module App.java (Pair A hardcoded
 # Java-DSL) but authored in Apache Camel YAML DSL and parsed at runtime
-# via camel-yaml-dsl: timer -> process(benchBody) -> unmarshal(json) ->
-# filter(jsonpath) -> process(insertBench) -> marshal(json) ->
-# process(assertOutput) -> log marker.
+# via camel-yaml-dsl: timer -> process(benchBody) -> process(markStart)
+# -> unmarshal(json) -> filter(jsonpath) -> process(insertBench) ->
+# marshal(json) -> process(assertOutput) -> process(emitMarker) ->
+# process(writeLatency).
 #
-# The three `process` steps resolve named beans bound by AppYaml.java
-# (benchBody / insertBench / assertOutput); the route STRUCTURE lives
-# in this file, which is the property Pair B measures. The marker
-# `BENCH_ROUTE_READY bytes=<n>` is the exact harness grep target; any
-# processor assert failure kills the route BEFORE the marker so the
+# The `process` steps resolve named beans bound by AppYaml.java
+# (benchBody / markStart / insertBench / assertOutput / emitMarker /
+# writeLatency); the route STRUCTURE lives in this file, which is the
+# property Pair B measures. Tick mode: repeating warm timer
+# (period=10&repeatCount=10000&delay=0, same URI form as the dsl module and the
+# xsd-validation-bridge reference); the marker bean is latched to the
+# FIRST completed exchange — `BENCH_ROUTE_READY bytes=<n>` stays the
+# exact harness grep target, exactly once; the writeLatency bean
+# appends one `BENCH_LATENCY <id> <duration_ns>` record per tick.
+# Any processor assert failure kills the route BEFORE the marker so the
 # cell fails loudly.
 
 - route:
     from:
       uri: "timer:bench"
       parameters:
-        repeatCount: 1
+        period: 10
+        repeatCount: 10000
         delay: 0
       steps:
         - process:
             ref: "benchBody"
+        - process:
+            ref: "markStart"
         - unmarshal:
             json:
               library: "Jackson"
@@ -37,5 +46,7 @@
               library: "Jackson"
         - process:
             ref: "assertOutput"
-        - log:
-            message: "BENCH_ROUTE_READY bytes=${header.benchOutLen}"
+        - process:
+            ref: "emitMarker"
+        - process:
+            ref: "writeLatency"

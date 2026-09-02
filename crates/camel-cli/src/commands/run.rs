@@ -548,7 +548,9 @@ pub async fn run(
                 ctx.add_startup_check(check);
             }
             // Benchmark instrumentation: when BENCH_LATENCY_FILE is set,
-            // wrap every top-level `To` step with timing processors.
+            // wrap every top-level `To` step with timing processors
+            // (default), or bracket each whole route when
+            // BENCH_LATENCY_MODE=route (bench_instrument module).
             let defs = crate::commands::bench_instrument::maybe_instrument_routes(defs);
             for def in defs {
                 let id = def.route_id().to_string();

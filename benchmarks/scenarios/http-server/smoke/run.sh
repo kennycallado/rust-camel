@@ -32,7 +32,7 @@ GRADLE="${GRADLE:-/home/kenny/.gradle/wrapper/dists/gradle-8.10-bin/deqhafrv1nto
 M2_CACHE="${M2_CACHE:-/tmp/m2-cache}"
 DOCKER_MVN_IMAGE="${DOCKER_MVN_IMAGE:-maven:3.9-eclipse-temurin-21}"
 CAMEL_BIN="${CAMEL_BIN:-$WORKTREE/target/release/camel}"
-RUST_LIB_BIN="$SCENARIO_DIR/rust-camel-lib/target/release/http-server"
+RUST_LIB_BIN="$WORKTREE/benchmarks/contenders/rust-camel-lib/target/release/rust-camel-lib-fixture"
 # Node binary: same resolution chain as the harness (bench-node task
 # 1.1/1.2) — NODE_BIN env override, runner install path, PATH.
 if [[ -n "${NODE_BIN:-}" ]]; then
@@ -42,6 +42,9 @@ elif [[ -x /opt/node/bin/node ]]; then
 else
     NODE_BIN="$(command -v node 2>/dev/null || echo "<missing:node>")"
 fi
+# Consolidated node contender tree (change bench-consol-tick task
+# 1.3): per-scenario entry scripts, shared node_modules at its root.
+NODE_CONTENDER_DIR="$WORKTREE/benchmarks/contenders/node"
 RUST_CLI_WRAPPER="$SCENARIO_DIR/rust-camel-cli/http-server-cli-wrapper.sh"
 STAND_DSL_JAR="$SCENARIO_DIR/camel-standalone/camel-standalone-dsl/target/camel-standalone-dsl-1.0.0-jar-with-dependencies.jar"
 STAND_YAML_JAR="$SCENARIO_DIR/camel-standalone/camel-standalone-yaml/target/camel-standalone-yaml-1.0.0-jar-with-dependencies.jar"
@@ -133,7 +136,7 @@ smoke_artifact() {
 
     case "$label" in
         rust-camel-lib)
-            "$RUST_LIB_BIN" > "$log" 2>&1 &
+            "$RUST_LIB_BIN" http-server > "$log" 2>&1 &
             pid=$!
             ;;
         rust-camel-cli)
@@ -169,11 +172,11 @@ smoke_artifact() {
             pid=$!
             ;;
         node-native)
-            "$NODE_BIN" "$SCENARIO_DIR/node-native/route.mjs" > "$log" 2>&1 &
+            "$NODE_BIN" "$NODE_CONTENDER_DIR/node-native/http-server.mjs" > "$log" 2>&1 &
             pid=$!
             ;;
         node-fastify)
-            "$NODE_BIN" "$SCENARIO_DIR/node-fastify/route.mjs" > "$log" 2>&1 &
+            "$NODE_BIN" "$NODE_CONTENDER_DIR/node-fastify/http-server.mjs" > "$log" 2>&1 &
             pid=$!
             ;;
         *)
@@ -257,10 +260,10 @@ smoke_artifact() {
             pkill -9 -f 'camel-quarkus-yaml' 2>/dev/null || true
             ;;
         node-native)
-            pkill -9 -f 'node-native/route.mjs' 2>/dev/null || true
+            pkill -9 -f 'node-native/http-server.mjs' 2>/dev/null || true
             ;;
         node-fastify)
-            pkill -9 -f 'node-fastify/route.mjs' 2>/dev/null || true
+            pkill -9 -f 'node-fastify/http-server.mjs' 2>/dev/null || true
             ;;
     esac
     kill -9 "$pid" 2>/dev/null || true
@@ -336,14 +339,14 @@ else
     echo "SKIP: $QY_NATIVE not built"
 fi
 
-if [[ -x "$NODE_BIN" && -f "$SCENARIO_DIR/node-native/route.mjs" ]]; then
+if [[ -x "$NODE_BIN" && -f "$NODE_CONTENDER_DIR/node-native/http-server.mjs" ]]; then
     echo "--- node-native ---"
     smoke_artifact node-native
 else
     echo "SKIP: node binary or node-native fixture not present ($NODE_BIN)"
 fi
 
-if [[ -x "$NODE_BIN" && -f "$SCENARIO_DIR/node-fastify/route.mjs" && -d "$SCENARIO_DIR/node-fastify/node_modules" ]]; then
+if [[ -x "$NODE_BIN" && -f "$NODE_CONTENDER_DIR/node-fastify/http-server.mjs" && -d "$NODE_CONTENDER_DIR/node_modules" ]]; then
     echo "--- node-fastify ---"
     smoke_artifact node-fastify
 else

@@ -80,11 +80,12 @@ docker run --rm \
         cargo build --release -p bench-loadgen --bins
         echo '--- pre-build: camel CLI (rust-camel-cli) ---'
         cargo build --release -p camel-cli
-        echo '--- pre-build: rust-camel-lib fixture (http-server) ---'
-        (cd benchmarks/scenarios/http-server/rust-camel-lib && cargo build --release)
+        echo '--- pre-build: rust-camel-lib fixture (consolidated) ---'
+        (cd benchmarks/contenders/rust-camel-lib && \
+         env -u CARGO_TARGET_DIR cargo build --release -p rust-camel-lib-fixture)
         echo '--- pre-build: camel-standalone jars (Maven) ---'
         (cd benchmarks/scenarios/http-server/camel-standalone && \
-         mvn package -q -DskipTests -Dmaven.repo.local='$MAVEN_REPO')
+         mvn package -q -DskipTests -Dmaven.repo.local="$MAVEN_REPO")
         echo ''
         echo '--- launching harness ---'
         exec bash benchmarks/harness/run.sh \

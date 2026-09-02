@@ -1,0 +1,60 @@
+[package]
+name = "rust-camel-lib-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Consolidated rust-camel-lib fixture (OpenSpec change bench-consol-tick,
+# task 1.1): one crate, argv[1] scenario dispatch, ported verbatim from the
+# seven per-scenario fixtures under benchmarks/scenarios/<scn>/rust-camel-lib.
+# Deps below are the UNION of those fixtures' Cargo.toml deps.
+#
+# Path deps resolve to the worktree's own checkout of rust-camel crates
+# (3 levels up: rust-camel-lib/ -> contenders/ -> benchmarks/ -> worktree
+# root). The per-scenario fixtures sat one level deeper (4 levels up);
+# every path was rewritten accordingly — cargo fails loudly on stale depth.
+bench-loadgen = { path = "../../../benchmarks/harness/loadgen" }
+camel-api = { path = "../../../crates/camel-api" }
+camel-builder = { path = "../../../crates/camel-builder" }
+camel-core = { path = "../../../crates/camel-core" }
+camel-processor = { path = "../../../crates/camel-processor" }
+camel-component-timer = { path = "../../../crates/components/camel-timer" }
+camel-component-direct = { path = "../../../crates/components/camel-direct" }
+camel-component-http = { path = "../../../crates/components/camel-http" }
+camel-component-validator = { path = "../../../crates/components/camel-validator" }
+camel-xslt = { path = "../../../crates/components/camel-xslt" }
+# Output assert (t2-json) + canonical array digest (split-aggregate).
+serde_json = "1"
+sha2 = "0.11"
+hex = "0.4"
+# Feature union of the seven fixtures: startup/t2 fixtures carried only
+# rt-multi-thread/macros/signal; http-server added net/time; the bridge
+# fixtures added time/fs/io-util.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "fs", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+# Bridge fixtures (xsd-validation-bridge, xslt-bridge) install the rustls
+# CryptoProvider explicitly — camel-bridge / rcgen use rustls for ephemeral
+# mTLS to the bridge subprocess (same reason as those fixtures' Cargo.toml).
+rustls = { workspace = true }
+
+# Test-only (ported from the split-aggregate fixture): drive 99 fragments
+# through the real `direct:agg-in` route for the incomplete-bucket test.
+[dev-dependencies]
+camel-component-api = { path = "../../../crates/components/camel-component-api" }
+tower.workspace = true
+
+# Workspace member of the parent rust-camel workspace (see root Cargo.toml
+# `members`), but excluded from `default-members` so `cargo build` at root
+# does not pick it up. Build with
+# `env -u CARGO_TARGET_DIR cargo build --release -p rust-camel-lib-fixture`.
+# Sharing the workspace Cargo.lock guarantees that transitive dep versions
+# (tokio, futures, uuid, serde, ...) match what the CLI contender (Pair B)
+# sees, so Pair A vs Pair B isolates only parser/CLI overhead, not dep
+# drift. The release profile (lto/strip/codegen-units=1) is inherited
+# unchanged from the workspace root [profile.release].
+
+[[bin]]
+name = "rust-camel-lib-fixture"
+path = "src/main.rs"

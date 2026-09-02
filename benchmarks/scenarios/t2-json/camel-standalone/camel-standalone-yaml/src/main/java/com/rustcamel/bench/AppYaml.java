@@ -4,9 +4,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import org.apache.camel.Exchange;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.camel.Processor;
 import org.apache.camel.main.Main;
 
@@ -18,16 +22,29 @@ import org.apache.camel.main.Main;
  * authored in YAML DSL and parsed at runtime via {@code
  * camel-yaml-dsl}).
  *
- * <p>The route's three custom steps (build canonical body + log
- * BENCH_INPUT_SHA256, insert the {@code "bench": true} member on the
- * parsed tree, assert exact output length) are bound as named beans —
- * the route STRUCTURE stays in the parsed YAML file, which is the
- * property Pair B measures. Kept in this module only: Pair A's
- * classpath carries no beans, no routes.yaml.
+ * <p>The route's custom steps (set canonical body, bracket the tick,
+ * insert the {@code "bench": true} member on the parsed tree, assert
+ * exact output length, gate the marker, write the per-tick latency
+ * record) are bound as named beans — the route STRUCTURE stays in the
+ * parsed YAML file, which is the property Pair B measures. Kept in this
+ * module only: Pair A's classpath carries no beans, no routes.yaml.
  *
  * <p>Marker contract: one {@code BENCH_ROUTE_READY bytes=<n>} line; an
  * assert failure kills the route before the marker (cell fails). No
- * self-instrumentation — the harness owns the clock from outside.
+ * self-instrumentation for cold-start — the harness owns the clock from
+ * outside.
+ *
+ * <p>Tick mode (OpenSpec change {@code bench-consol-tick} task 2.4):
+ * repeating warm timer {@code timer:bench?period=10&repeatCount=10000&delay=0}
+ * (timer URI lives in routes.yaml); the canonical body is prebuilt ONCE
+ * (digest logged once at startup — per-exchange SHA printing would spam
+ * 10000 lines) and set per exchange by the {@code benchBody} bean; the
+ * marker bean is latched to the FIRST completed exchange (exactly one
+ * marker line per process lifetime); the {@code markStart}/{@code
+ * writeLatency} beans bracket each exchange and append {@code
+ * BENCH_LATENCY <id> <duration_ns>} to the {@code BENCH_LATENCY_FILE}
+ * path (env read once at startup; canonical fallback matches the M2
+ * protocol-B reader's path, mirroring the dsl module and the lib crate).
  */
 public final class AppYaml {
     private AppYaml() {
@@ -36,29 +53,50 @@ public final class AppYaml {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public static void main(String[] args) throws Exception {
+        final int size = benchPayloadBytes();
+        final String payload = canonicalJsonBody(size, CANONICAL_SELFTEST_TICK);
+        if (payload.length() != size) {
+            throw new IllegalStateException(
+                    "t2-json input length " + payload.length() + " != expected " + size);
+        }
+        System.out.println("BENCH_INPUT_SHA256=" + sha256Hex(payload));
+
+        // Tick-mode latency sink — truncate at startup (no
+        // stale records leak across runs).
+        final Path latencyFile = Path.of(latencyFilePath());
+        Files.createDirectories(latencyFile.getParent());
+        Files.writeString(latencyFile, "",
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+
+        final AtomicBoolean markerEmitted = new AtomicBoolean(false);
+        final AtomicLong tickCounter = new AtomicLong(0);
+
         Main main = new Main();
-        main.bind("benchBody", buildBody(benchPayloadBytes()));
+        main.bind("benchBody", setCanonicalBody(payload));
+        main.bind("markStart", markStart());
         main.bind("insertBench", insertBenchMember());
-        main.bind("assertOutput", assertOutput(benchPayloadBytes()));
+        main.bind("assertOutput", assertOutput(size));
+        main.bind("emitMarker", emitMarker(markerEmitted));
+        main.bind("writeLatency", writeLatency(latencyFile, tickCounter));
         main.configure()
                 .withRoutesIncludePattern("classpath:routes.yaml");
         main.run(args);
     }
 
-    /// Builds the canonical JSON document for (size, tick) and logs
-    /// `BENCH_INPUT_SHA256=<digest>` before any processing. The input
-    /// length assert fires here so a size mismatch kills the cell
-    /// before the marker.
-    static Processor buildBody(int size) {
-        return exchange -> {
-            String body = canonicalJsonBody(size, CANONICAL_SELFTEST_TICK);
-            if (body.length() != size) {
-                throw new IllegalStateException(
-                        "t2-json input length " + body.length() + " != expected " + size);
-            }
-            System.out.println("BENCH_INPUT_SHA256=" + sha256Hex(body));
-            exchange.getMessage().setBody(body);
-        };
+    /// Sets the prebuilt canonical body (built + asserted + digest
+    /// logged ONCE at startup in main). Per exchange this is the
+    /// {@code setBody(constant(...))} equivalent for the YAML route.
+    static Processor setCanonicalBody(String payload) {
+        return exchange -> exchange.getMessage().setBody(payload);
+    }
+
+    /// Bracket step: records t_start immediately after the body is set
+    /// (same position as the dsl module and the lib crate's task-2.2
+    /// route). Long (boxed) so it round-trips through exchange property
+    /// type erasure.
+    static Processor markStart() {
+        return exchange ->
+                exchange.setProperty("BenchStart", System.nanoTime());
     }
 
     /// Transform step: structured mutation of the PARSED tree — insert
@@ -113,6 +151,39 @@ public final class AppYaml {
         };
     }
 
+    /// Marker step — fires on the FIRST completed exchange only (tick
+    /// mode repeats the route per tick; the marker contract is exactly
+    /// one line). Reads the `benchOutLen` header the output assert set,
+    /// so an assert failure can never produce the marker.
+    static Processor emitMarker(AtomicBoolean markerEmitted) {
+        return exchange -> {
+            if (markerEmitted.compareAndSet(false, true)) {
+                System.out.println("BENCH_ROUTE_READY bytes="
+                        + exchange.getMessage().getHeader("benchOutLen"));
+            }
+        };
+    }
+
+    /// Trailing latency step — appends `BENCH_LATENCY <id> <duration_ns>`
+    /// to the sink file per exchange (the Protocol-B warm record).
+    /// Write failures are swallowed — the harness detects missing
+    /// records.
+    static Processor writeLatency(Path latencyFile, AtomicLong tickCounter) {
+        return exchange -> {
+            long id = tickCounter.incrementAndGet();
+            long tEnd = System.nanoTime();
+            Long tStart = exchange.getProperty("BenchStart", Long.class);
+            long durationNs = tEnd - tStart;
+            String line = "BENCH_LATENCY " + id + " " + durationNs + "\n";
+            try {
+                Files.writeString(latencyFile, line,
+                        StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+            } catch (Exception e) {
+                // Swallow — harness detects missing records.
+            }
+        };
+    }
+
     /// Canonical self-test tick — same value as the Rust fixtures and
     /// the harness golden table (`(size, 0)` entries).
     static final long CANONICAL_SELFTEST_TICK = 0L;
@@ -140,6 +211,19 @@ public final class AppYaml {
                     + "; valid sizes: [1024, 32768, 262144, 1048576]");
         }
         return parsed;
+    }
+
+    /// Tick-mode latency sink path: `BENCH_LATENCY_FILE` env when set,
+    /// else the canonical harness path the M2 protocol-B reader derives
+    /// for this cell (`${cell//\//_}` of `t2-json/camel-standalone-yaml`)
+    /// — the harness argv for this cell is bare, so the default is what
+    /// makes the reader find the log (mirrors the lib crate, task 2.2).
+    static String latencyFilePath() {
+        String env = System.getenv("BENCH_LATENCY_FILE");
+        if (env == null || env.isBlank()) {
+            return "/tmp/v3-protocol-b-t2-json_camel-standalone-yaml.log";
+        }
+        return env.trim();
     }
 
     /// Canonical body builder — same formula as bench-loadgen's

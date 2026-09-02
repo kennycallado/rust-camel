@@ -3,6 +3,8 @@ import contextlib
 import io
 import json
 import os
+import re
+import sys
 import shutil
 import stat
 import tempfile
@@ -17,6 +19,9 @@ META = {
     "git_commit": "a" * 40,
     "container_digest": None,
     "run_id": "20260905T150000Z",
+    # Roster vocabulary for expected_cells (run-all.sh records the
+    # ACTIVE scenario set; make_run measures exactly these two).
+    "scenarios": "startup-minimal,t2-json",
     "protocol": {
         "rounds": 2,
         "duration_secs": 10.0,
@@ -102,6 +107,24 @@ def make_run(root):
         "startup-ms rss-kb\n12 900\n14 950\n", encoding="utf-8"
     )
     return run
+
+
+def _protocol_a_summary(p99_ns):
+    """protocol-a-summary.txt body in the REAL bench-loadgen shape
+    (mirrors the on-disk shakeout evidence
+    out/20260831T142601Z/20260831T142605Z/m2-round-3/
+    http-server_rust-camel-lib/protocol-a-summary.txt, sentinel
+    included)."""
+    p95_ns = p99_ns + 40
+    return (
+        "warmup: stable p50_first=144221ns p50_second=147469ns\n"
+        f"measure-a: round 0 n=10000 p50={p99_ns}ns p95={p95_ns}ns"
+        f" p99={p99_ns}ns bca_lo={p99_ns}ns bca_hi={p95_ns}ns\n"
+        f"BENCH_MEASURE_A_RESULT rounds=1 median_p50_ns={p99_ns}"
+        f" median_p95_ns={p95_ns} median_p99_ns={p99_ns}"
+        f" round_p99s_ns=[{p99_ns}] round_bca_lo_ns=[{p99_ns}]"
+        f" round_bca_hi_ns=[{p95_ns}]\n"
+    )
 
 
 class SummarizeTest(unittest.TestCase):
@@ -240,6 +263,8 @@ class SummarizeTest(unittest.TestCase):
             "host_provenance",
             "protocol",
             "cells",
+            "expected_cells",
+            "m2_attempted_cells",
             "ratios",
         ):
             self.assertIn(key, record)
@@ -454,7 +479,8 @@ class SummarizeTest(unittest.TestCase):
         env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
         with mock.patch.dict(os.environ, env):
             record = summarize.build_record(
-                run, dict(META, run_id="20260723-v4")
+                run, dict(META, run_id="20260723-v4",
+                          scenarios="http-server")
             )
         cells = record["cells"]
         self.assertGreater(len(cells), 0)
@@ -529,6 +555,402 @@ class SummarizeTest(unittest.TestCase):
         f = self.root / "null-rss-samples.txt"
         f.write_text("34 null\n36 null\n32 null\n", encoding="utf-8")
         self.assertEqual(summarize._m1_samples(f), [34.0, 36.0, 32.0])
+
+    def test_expected_cells_roster_serialized(self):
+        # run.json persists the roster as sorted IDENTITY strings
+        # ("<scenario>/<contender>"), derived from meta.scenarios with
+        # the harness asymmetry (full scenarios = 8 contenders).
+        record = self._record()
+        full = (
+            "camel-quarkus-dsl-native", "camel-quarkus-yaml-native",
+            "camel-standalone-dsl", "camel-standalone-yaml",
+            "node-fastify", "node-native", "rust-camel-cli",
+            "rust-camel-lib",
+        )
+        self.assertEqual(
+            record["expected_cells"],
+            sorted(
+                f"{s}/{c}"
+                for s in ("startup-minimal", "t2-json")
+                for c in full
+            ),
+        )
+
+    def test_expected_cells_bridge_roster_is_six(self):
+        # Bridge scenarios (SCENARIO_ARTIFACT_SET=bridge) expect 6
+        # cells: core 4 + node 2 — the YAML variants carry no
+        # bridge-tax signal and must NOT be expected.
+        run = self.root / "20260905T190000Z"
+        cell = run / "xslt-bridge_rust-camel-lib"
+        cell.mkdir(parents=True)
+        (cell / "samples.txt").write_text(
+            "20 900\n22 950\n", encoding="utf-8"
+        )
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(
+                run, dict(META, scenarios="xslt-bridge",
+                          run_id="20260905T190000Z")
+            )
+        self.assertEqual(record["expected_cells"], [
+            "xslt-bridge/camel-quarkus-dsl-native",
+            "xslt-bridge/camel-standalone-dsl",
+            "xslt-bridge/node-fastify",
+            "xslt-bridge/node-native",
+            "xslt-bridge/rust-camel-cli",
+            "xslt-bridge/rust-camel-lib",
+        ])
+
+    def test_roster_requires_scenarios_in_meta(self):
+        # Without meta.scenarios (or legacy subset) the roster — and
+        # therefore completeness — cannot be derived: loud refusal,
+        # never a vacuous observed-cells roster.
+        meta = dict(META)
+        del meta["scenarios"]
+        with self.assertRaises(ValueError) as cm:
+            summarize.build_record(self.run_dir, meta)
+        self.assertIn("scenarios", str(cm.exception))
+
+    def test_m2_round_dirs_merge_into_one_cell(self):
+        # The REAL m2 evidence layout (run.sh m2_measure_protocol_b):
+        # <run>/m2-round-<r>/<scenario>/<contender>/m2-summary.json —
+        # identity from the PATH, per-round p99s merged in round-index
+        # order into one cell's round_values.
+        run = self.root / "20260905T200000Z"
+        for rnd, p99s in (("0", [100]), ("1", [300])):
+            d = run / f"m2-round-{rnd}" / "t2-json" / "rust-camel-lib"
+            d.mkdir(parents=True)
+            (d / "m2-summary.json").write_text(
+                json.dumps({
+                    "median_p99_ns": p99s[0],
+                    "round_p99s_ns": p99s,
+                    "total_samples": 700,
+                    "malformed_records": 0,
+                    "is_invalidated": False,
+                }),
+                encoding="utf-8",
+            )
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(
+                run, dict(META, scenarios="t2-json",
+                          run_id="20260905T200000Z")
+            )
+        m2 = [c for c in record["cells"] if c["metric"] == "m2"]
+        self.assertEqual(len(m2), 1)
+        cell = m2[0]
+        self.assertEqual(
+            (cell["scenario"], cell["contender"]),
+            ("t2-json", "rust-camel-lib"),
+        )
+        self.assertEqual(cell["round_values"], [100.0, 300.0])
+        self.assertEqual(cell["median"], 200.0)
+        self.assertEqual(cell["unit"], "ns")
+        self.assertEqual(record["m2_attempted_cells"], [])
+
+    def test_m2_insufficient_samples_counts_as_attempted(self):
+        # bd rc-tpig: run.sh writes m2-summary.txt (NOT .json) with
+        # status=failed reason=insufficient-samples when the window
+        # formula under-counts a slow-ticking cell. observed>0 means
+        # healthy data — recorded as attempted, not dropped silently;
+        # observed=0 is a genuine gap (no data).
+        run = self.root / "20260905T210000Z"
+        ok = run / "m2-round-0" / "split-aggregate" / "rust-camel-lib"
+        ok.mkdir(parents=True)
+        (ok / "m2-summary.json").write_text(
+            json.dumps({"round_p99s_ns": [500], "is_invalidated": False}),
+            encoding="utf-8",
+        )
+        slow = run / "m2-round-0" / "split-aggregate" / "rust-camel-cli"
+        slow.mkdir(parents=True)
+        (slow / "m2-summary.txt").write_text(
+            "status=failed reason=insufficient-samples"
+            " expected_min=300 observed=213\n",
+            encoding="utf-8",
+        )
+        dead = run / "m2-round-0" / "split-aggregate" / "node-fastify"
+        dead.mkdir(parents=True)
+        (dead / "m2-summary.txt").write_text(
+            "status=failed reason=insufficient-samples"
+            " expected_min=300 observed=0\n",
+            encoding="utf-8",
+        )
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(
+                run, dict(META, scenarios="split-aggregate",
+                          run_id="20260905T210000Z")
+            )
+        self.assertEqual(
+            record["m2_attempted_cells"], ["split-aggregate/rust-camel-cli"]
+        )
+        keys = {
+            (c["scenario"], c["contender"], c["metric"])
+            for c in record["cells"]
+        }
+        self.assertIn(("split-aggregate", "rust-camel-lib", "m2"), keys)
+        self.assertNotIn(
+            ("split-aggregate", "rust-camel-cli", "m2"), keys
+        )
+
+    def test_protocol_a_sentinel_with_status_leaves_gap(self):
+        # Task 2.8 review: a protocol-a summary carrying BOTH a printed
+        # sentinel and an appended status=failed line must never harvest
+        # (bench-consol-tick task 2.7 review guard) — regression test
+        # for the fail-closed branch.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        summary = Path(tmp.name) / "protocol-a-summary.txt"
+        summary.write_text(
+            "BENCH_MEASURE_A_RESULT rounds=1 median_p50_ns=1 "
+            "median_p99_ns=2 round_p99s_ns=[100]\n"
+            "status=failed reason=measure-a-error observed=5\n",
+            encoding="utf-8",
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            got = summarize._protocol_a_round_p99s(summary, "http-server/x")
+        self.assertIsNone(got)
+
+    def test_protocol_a_merges_like_b(self):
+        # Task 2.7.1: run.sh writes protocol-A (http-server) m2 cells
+        # FLAT as m2-round-<r>/<scenario>_<contender>/ holding a TEXT
+        # summary (BENCH_MEASURE_A_RESULT sentinel) — the REAL shakeout
+        # layout, previously silently skipped. Rounds must merge into
+        # the same run.json m2 fields the protocol-B equivalent
+        # produces; a flat dir without a parseable sentinel warns and
+        # stays a gap.
+        run = self.root / "20260905T220000Z"
+        for rnd, p99 in (("0", 100), ("1", 300)):
+            flat = run / f"m2-round-{rnd}" / "http-server_rust-camel-lib"
+            flat.mkdir(parents=True)
+            (flat / "protocol-a-summary.txt").write_text(
+                _protocol_a_summary(p99), encoding="utf-8"
+            )
+            nested = run / f"m2-round-{rnd}" / "t2-json" / "rust-camel-lib"
+            nested.mkdir(parents=True)
+            (nested / "m2-summary.json").write_text(
+                json.dumps({
+                    "median_p99_ns": p99,
+                    "round_p99s_ns": [p99],
+                    "total_samples": 700,
+                    "malformed_records": 0,
+                    "is_invalidated": False,
+                }),
+                encoding="utf-8",
+            )
+        # A failed protocol-A round (no sentinel): loud warn, gap stays.
+        dead = run / "m2-round-0" / "http-server_node-fastify"
+        dead.mkdir(parents=True)
+        (dead / "protocol-a-summary.txt").write_text(
+            "status=failed reason=launch-failed\n", encoding="utf-8"
+        )
+        err = io.StringIO()
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            with contextlib.redirect_stderr(err):
+                record = summarize.build_record(
+                    run, dict(META, scenarios="http-server,t2-json",
+                              run_id="20260905T220000Z")
+                )
+        by_identity = {
+            (c["scenario"], c["contender"]): c
+            for c in record["cells"]
+            if c["metric"] == "m2"
+        }
+        a_cell = by_identity[("http-server", "rust-camel-lib")]
+        b_cell = by_identity[("t2-json", "rust-camel-lib")]
+        self.assertEqual(a_cell["round_values"], [100.0, 300.0])
+        self.assertEqual(a_cell["median"], 200.0)
+        # Same merge contract as protocol B, field for field.
+        for field in ("variant", "payload_class", "metric",
+                      "round_values", "median", "unit"):
+            self.assertEqual(a_cell[field], b_cell[field], field)
+        # Failed protocol-A round: no cell, loud warn naming the gap.
+        self.assertNotIn(("http-server", "node-fastify"), by_identity)
+        self.assertIn("http-server/node-fastify/m2", err.getvalue())
+        self.assertIn("sentinel", err.getvalue())
+        self.assertEqual(record["m2_attempted_cells"], [])
+
+    def test_roster_mirror_no_drift(self):
+        # Task 2.7.1: summarize's roster tuples are a hand-maintained
+        # mirror of run.sh's bash registration — if the two drift, the
+        # expected-cell roster silently lies and the publish gate gaps
+        # the wrong cells. Grep the run.sh SOURCE (never executes it)
+        # and assert equality.
+        run_sh = (Path(__file__).resolve().parent / "run.sh").read_text(
+            encoding="utf-8"
+        )
+
+        def declare_block(name):
+            match = re.search(
+                rf"declare -A {name}=\((.*?)\n\)", run_sh, re.DOTALL
+            )
+            self.assertIsNotNone(match, f"run.sh: {name} not found")
+            return match.group(1)
+
+        # SCENARIO_ARTIFACT_SET declares only the bridge scenarios
+        # (full is the bash default): keys == BRIDGE_SCENARIOS.
+        bridge_keys = set(re.findall(
+            r'\["([^"]+)"\]="bridge"',
+            declare_block("SCENARIO_ARTIFACT_SET"),
+        ))
+        self.assertEqual(bridge_keys, set(summarize.BRIDGE_SCENARIOS))
+
+        # Full set: PAIR_A_CONTENDERS + PAIR_B_CONTENDERS — 4 + 4,
+        # disjoint, equal to FULL_CONTENDERS.
+        pairs = []
+        for pair in ("PAIR_A_CONTENDERS", "PAIR_B_CONTENDERS"):
+            match = re.search(rf"declare -a {pair}=\(([^)]*)\)", run_sh)
+            self.assertIsNotNone(match, f"run.sh: {pair} not found")
+            pairs.append(match.group(1).split())
+        self.assertEqual([len(members) for members in pairs], [4, 4])
+        self.assertEqual(len(set(pairs[0]) & set(pairs[1])), 0)
+        full = set(pairs[0]) | set(pairs[1])
+        self.assertEqual(full, set(summarize.FULL_CONTENDERS))
+
+        # WARM_APPLICABLE mirrors SCENARIO_M2_PROTOCOL (a new scenario
+        # registered with a warm protocol but missing from
+        # WARM_APPLICABLE would silently escape the m2 publish gate).
+        # Mapping: value "A" → warm; value "B" → warm EXCEPT the
+        # cold-only startup-minimal (protocol B but one-shot by design).
+        proto = re.search(
+            r'declare -A SCENARIO_M2_PROTOCOL=\((.*?)\n\)', run_sh,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(proto, "run.sh: SCENARIO_M2_PROTOCOL not found")
+        entries = dict(re.findall(
+            r'\["([^"]+)"\]="([AB-])"', proto.group(1)
+        ))
+        cold_only = {"startup-minimal"}
+        warm_keys = {
+            k for k, v in entries.items()
+            if v == "A" or (v == "B" and k not in cold_only)
+        }
+        self.assertEqual(warm_keys, summarize.WARM_APPLICABLE)
+
+        # checks/warm-24.py mirrors the same tuples — guard it too.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "warm_24",
+            Path(__file__).resolve().parent / "checks" / "warm-24.py",
+        )
+        assert spec is not None and spec.loader is not None
+        warm_24 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(warm_24)
+        self.assertEqual(
+            set(warm_24.TICK_SCENARIOS),
+            set(summarize.WARM_APPLICABLE) - {"http-server",
+                                             "xsd-validation-bridge",
+                                             "xslt-bridge"},
+        )
+        self.assertEqual(
+            tuple(sorted(warm_24.FULL_CONTENDERS)),
+            tuple(sorted(summarize.FULL_CONTENDERS)),
+        )
+
+        # Bridge set: the literal add_cell contender names inside
+        # resolve_bridge_scenario_cells + every registered
+        # FAMILY_COMPLETENESS family == BRIDGE_CONTENDERS.
+        resolver = re.search(
+            r"resolve_bridge_scenario_cells\(\) \{(.*?)\n\}",
+            run_sh, re.DOTALL,
+        )
+        self.assertIsNotNone(resolver, "run.sh: bridge resolver not found")
+        bridge_cells = set(re.findall(
+            r'add_cell "\$scenario" "([a-z0-9-]+)"', resolver.group(1)
+        ))
+        for members in re.findall(
+            r'\["[^"]+"\]="([^"]*)"',
+            declare_block("FAMILY_COMPLETENESS"),
+        ):
+            bridge_cells.update(members.split())
+        self.assertEqual(bridge_cells, set(summarize.BRIDGE_CONTENDERS))
+        # Bridge roster is the full roster minus the YAML pair.
+        self.assertEqual(bridge_cells - full,
+                         set(summarize.BRIDGE_CONTENDERS)
+                         - set(summarize.FULL_CONTENDERS))
+
+    def test_full_roster_zero_gaps_with_flat_protocol_a_m2(self):
+        # Task 2.7.1 acceptance: the canonical 52-cell roster (5 full
+        # scenarios + 2 bridge scenarios) with http-server m2 in the
+        # REAL flat protocol-A layout and every other warm cell nested
+        # protocol-B — completeness reports ZERO gaps and --publish
+        # exits 0 (before the fix http-server's 8 flat dirs were
+        # silently skipped → 8 permanent m2 gaps).
+        full = summarize.FULL_CONTENDERS
+        bridge = summarize.BRIDGE_CONTENDERS
+        scenarios = (
+            ("http-server", full),
+            ("t2-json", full),
+            ("split-aggregate", full),
+            ("t2-realistic-eip", full),
+            ("startup-minimal", full),
+            ("xsd-validation-bridge", bridge),
+            ("xslt-bridge", bridge),
+        )
+        run = self.root / "20260905T230000Z"
+        for scenario, contenders in scenarios:
+            for contender in contenders:
+                cell = run / f"{scenario}_{contender}"
+                cell.mkdir(parents=True)
+                (cell / "samples.txt").write_text(
+                    "startup-ms rss-kb\n12 900\n14 950\n",
+                    encoding="utf-8",
+                )
+        # m2: http-server flat protocol-A; every other warm cell
+        # nested protocol-B. startup-minimal is cold-only (no m2).
+        for contender in full:
+            flat = run / "m2-round-0" / f"http-server_{contender}"
+            flat.mkdir(parents=True)
+            (flat / "protocol-a-summary.txt").write_text(
+                _protocol_a_summary(500), encoding="utf-8"
+            )
+        for scenario, contenders in scenarios:
+            if scenario in ("http-server", "startup-minimal"):
+                continue
+            for contender in contenders:
+                nested = run / "m2-round-0" / scenario / contender
+                nested.mkdir(parents=True)
+                (nested / "m2-summary.json").write_text(
+                    json.dumps({
+                        "median_p99_ns": 400,
+                        "round_p99s_ns": [400],
+                        "total_samples": 700,
+                        "malformed_records": 0,
+                        "is_invalidated": False,
+                    }),
+                    encoding="utf-8",
+                )
+        meta = dict(
+            META,
+            scenarios=",".join(s for s, _ in scenarios),
+            run_id="20260905T230000Z",
+        )
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(run, meta)
+        self.assertEqual(len(record["expected_cells"]), 52)
+        self.assertEqual(summarize.completeness_gaps(record), [])
+        # End-to-end: the completed record publishes clean (exit 0).
+        records = self.root / "records"
+        records.mkdir()
+        (records / "index.json").write_text(
+            json.dumps({"index_schema_version": 1, "runs": []}) + "\n",
+            encoding="utf-8",
+        )
+        source = self.root / "summarized-20260905T230000Z"
+        summarize.emit_json(record, source)
+        summarize.emit_summary(record, source)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = summarize.main([
+                    "--publish",
+                    "--run-dir", str(source),
+                    "--records-dir", str(records),
+                ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(err.getvalue(), "")
 
     def test_zero_cells_is_loud(self):
         run = self.root / "20260905T170000Z"

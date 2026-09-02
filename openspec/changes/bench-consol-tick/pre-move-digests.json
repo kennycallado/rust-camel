@@ -1,0 +1,18 @@
+{
+  "split-aggregate_camel-quarkus-dsl-native": "123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316",
+  "split-aggregate_camel-quarkus-yaml-native": "123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316",
+  "split-aggregate_camel-standalone-dsl": "123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316",
+  "split-aggregate_camel-standalone-yaml": "123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316",
+  "split-aggregate_node-fastify": "123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316",
+  "split-aggregate_node-native": "123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316",
+  "split-aggregate_rust-camel-cli": "123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316",
+  "split-aggregate_rust-camel-lib": "123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316",
+  "t2-json_camel-quarkus-dsl-native": "a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9",
+  "t2-json_camel-quarkus-yaml-native": "a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9",
+  "t2-json_camel-standalone-dsl": "a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9",
+  "t2-json_camel-standalone-yaml": "a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9",
+  "t2-json_node-fastify": "a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9",
+  "t2-json_node-native": "a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9",
+  "t2-json_rust-camel-cli": "a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9",
+  "t2-json_rust-camel-lib": "a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9"
+}

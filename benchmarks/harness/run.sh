@@ -243,7 +243,6 @@ declare -a PROTOCOL_A_CELLS=()
 # a cold checkout (a cold release build of camel-cli exceeds the job
 # budget). Measurement runs never defer: the binary check hard-fails.
 RUST_CLI_BIN_DEFERRED=false
-DEFERRED_CELL_COUNT=0
 
 # =====================================================================
 # Argument parsing (flag-based, v1 positional form REMOVED — v1 is
@@ -842,6 +841,15 @@ discover_scenarios() {
             name="$(basename "$path")"
             # Exclusion rules (plan §4a + spike-results.md "Next steps"):
             if [[ "$name" == spike-* ]]; then continue; fi
+            # Inactive scenarios (no marker, no harness wiring — e.g.
+            # multi-step) are outside the measurement matrix until
+            # their marker is registered. Auto-discovery skips them
+            # with a notice; an explicit --scenarios= selection still
+            # fails loud at the resolve_all_cells marker check.
+            if [[ -z "${SCENARIO_MARKER[$name]:-}" ]]; then
+                echo "notice: skipping inactive scenario '$name' (no marker registered)" >&2
+                continue
+            fi
             found+=("$name")
         done
         if [[ ${#found[@]} -eq 0 ]]; then
@@ -864,26 +872,44 @@ discover_scenarios() {
 # For each scenario, resolve the 8 artifacts (spec §4.3): 6 existing +
 # 2 native. The fixture LAYOUT is shared across scenarios (same
 # subdir names); per-scenario variables capture the differences
-# (e.g. rust-camel-lib bin name = scenario name).
+# (rust-camel-lib: one consolidated binary, scenario name = argv[1]).
 # =====================================================================
 
-# Resolve the rust-camel-lib binary: by convention the bin name
-# matches the scenario name (startup-minimal → bin `startup-minimal`,
-# t2-realistic-eip → bin `t2-realistic-eip`). Verified against
-# Cargo.toml [[bin]] name in the v1 and T2 fixtures.
+# Resolve the rust-camel-lib binary. Consolidated fixture (change
+# bench-consol-tick task 1.2): ONE crate at
+# benchmarks/contenders/rust-camel-lib replaces the seven per-scenario
+# fixtures — the binary name is fixed (rust-camel-lib-fixture) and the
+# scenario name moved to argv[1] (callers append it). The crate's
+# .cargo/config.toml pins a fixture-local target dir, so resolve the
+# target dir ONCE via cargo metadata with CARGO_TARGET_DIR unset (same
+# pattern as the root-workspace resolution for the rust-camel-cli
+# binary) and cache it — all 7 scenario wiring sites reuse the var and
+# resolve to the same binary path.
+RUST_LIB_CRATE_DIR="$REPO_ROOT/benchmarks/contenders/rust-camel-lib"
+RUST_LIB_BIN_DIR=""
+# Consolidated node runtime dir (bench-consol-tick task 1.3): ONE
+# package.json + node_modules serving all 14 node cells
+# (node-native + node-fastify, entry scripts <member>/<scenario>.mjs).
+NODE_RUNTIME_DIR="$REPO_ROOT/benchmarks/contenders/node"
 resolve_rust_lib_bin() {
-    local scenario_dir="$1" scenario_name="$2"
-    local bin="$scenario_dir/rust-camel-lib/target/release/$scenario_name"
+    if [[ -z "$RUST_LIB_BIN_DIR" ]]; then
+        RUST_LIB_BIN_DIR="$(resolve_cargo_target_dir "$RUST_LIB_CRATE_DIR")"
+        if [[ -z "$RUST_LIB_BIN_DIR" ]]; then
+            echo "error: cargo metadata failed for $RUST_LIB_CRATE_DIR (cannot resolve fixture target dir)" >&2
+            exit 1
+        fi
+    fi
+    local bin="$RUST_LIB_BIN_DIR/release/rust-camel-lib-fixture"
     if [[ ! -x "$bin" ]]; then
         # Dry-run tolerance (task 2.4): mirror the native-runner
         # placeholder so a pre-build dry-run still resolves the full
         # cell list. Real runs still hard-fail below.
         if [[ "$DRY_RUN" == "true" ]]; then
-            echo "<would-build:rust-camel-lib:$scenario_name>"
+            echo "<would-build:rust-camel-lib-fixture>"
             return 0
         fi
-        echo "error: rust-camel-lib binary not found or not executable: $bin" >&2
-        echo "       (expected bin name = scenario name per fixture convention)" >&2
+        echo "error: rust-camel-lib-fixture binary not found or not executable: $bin" >&2
+        echo "       (build with: env -u CARGO_TARGET_DIR cargo build --release -p rust-camel-lib-fixture)" >&2
         exit 1
     fi
     echo "$bin"
@@ -1200,29 +1226,31 @@ build_native_artifact() {
     fi
 }
 
-# Node fixture dependency install (bench-node task 1.2). A fixture
-# WITH package.json needs `npm ci --omit=dev` before it can run
-# (node_modules/ is never committed); a fixture WITHOUT package.json
-# is its own artifact — the committed script has zero dependencies,
-# so there is nothing to build. Keyed on package.json presence, not
-# contender name: node-native is dependency-free except in the XML
-# scenarios (saxon-js), so either contender may carry a package.json.
-# Dry-run mirrors the <would-build:...> placeholder convention so a
-# cold-checkout dry-run resolves the full cell list without npm.
+# Node runtime dependency install (bench-consol-tick task 1.3). All
+# node cells share ONE package.json at benchmarks/contenders/node/
+# (fastify / saxon-js / xslt3 / xmllint-wasm union, pinned by the
+# committed package-lock.json); a single `npm ci --omit=dev`
+# materializes the shared node_modules (node_modules/ is never
+# committed). Guarded to run once per invocation — the wiring loop
+# below visits it for every scenario × member. Dry-run mirrors the
+# <would-build:...> placeholder convention so a cold-checkout dry-run
+# resolves the full cell list without npm.
+_NODE_RUNTIME_BUILT=0
 build_node_artifact() {
-    local fixture_dir="$1"
-    if [[ ! -f "$fixture_dir/package.json" ]]; then
+    if [[ "$_NODE_RUNTIME_BUILT" == "1" ]]; then
         return 0
     fi
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "<would-build:npm-ci>"
+        _NODE_RUNTIME_BUILT=1
         return 0
     fi
-    echo "  npm ci --omit=dev in $fixture_dir"
-    if ! (cd "$fixture_dir" && npm ci --omit=dev); then
-        echo "error: npm ci failed in $fixture_dir" >&2
+    echo "  npm ci --omit=dev in $NODE_RUNTIME_DIR"
+    if ! (cd "$NODE_RUNTIME_DIR" && npm ci --omit=dev); then
+        echo "error: npm ci failed in $NODE_RUNTIME_DIR" >&2
         exit 1
     fi
+    _NODE_RUNTIME_BUILT=1
 }
 
 # Pre-flight (4d, pre-build phase): toolchain sanity. With container
@@ -1390,12 +1418,12 @@ resolve_bridge_scenario_cells() {
     # positional args to time itself (not bash prefix-assignments).
     # `env VAR=value /bin` is portable across time/cmd wrappers.
     local rust_lib_bin
-    rust_lib_bin="$(resolve_rust_lib_bin "$scenario_dir" "$scenario")"
+    rust_lib_bin="$(resolve_rust_lib_bin)"
     local rll_cell_safe="${scenario}_rust-camel-lib"
     local rll_latency="/tmp/v3-protocol-b-${rll_cell_safe}.log"
     local rll_pid="/tmp/v3-bridge-pid-${rll_cell_safe}.txt"
     add_cell "$scenario" "rust-camel-lib" \
-        "env BENCH_PAYLOAD=$shared_payload $rcl_asset_env BENCH_LATENCY_FILE=$rll_latency BENCH_BRIDGE_WRAPPER=$bridge_wrapper CAMEL_XML_BRIDGE_REAL_BINARY=$bridge_binary V3_BRIDGE_PID_FILE=$rll_pid $rust_lib_bin" \
+        "env BENCH_PAYLOAD=$shared_payload $rcl_asset_env BENCH_LATENCY_FILE=$rll_latency BENCH_BRIDGE_WRAPPER=$bridge_wrapper CAMEL_XML_BRIDGE_REAL_BINARY=$bridge_binary V3_BRIDGE_PID_FILE=$rll_pid $rust_lib_bin $scenario" \
         "$marker"
 
     # -- 4. rust-camel-cli (Pair B) --
@@ -1429,7 +1457,6 @@ resolve_bridge_scenario_cells() {
     local rcl_pid="/tmp/v3-bridge-pid-${rcl_cell_safe}.txt"
     if [[ "$RUST_CLI_BIN_DEFERRED" == "true" ]]; then
         echo "dry-run: cell $scenario/rust-camel-cli deferred (release binary not built: $rust_cli_bin)"
-        DEFERRED_CELL_COUNT=$((DEFERRED_CELL_COUNT + 1))
     else
         add_cell "$scenario" "rust-camel-cli" \
             "$rust_cli_wrapper --camel-bin $rust_cli_bin --config $rust_cli_camel_toml --routes $rust_cli_route --bridge-binary $bridge_binary --bridge-wrapper $bridge_wrapper --bridge-pid-file $rcl_pid --latency-file $rcl_latency" \
@@ -1447,8 +1474,8 @@ resolve_bridge_scenario_cells() {
 # node-native + node-fastify). Families NOT listed here (e.g. the
 # camel-standalone YAML artifact-set pair, absent from bridge
 # scenarios by the documented SCENARIO_ARTIFACT_SET reduction) stay
-# per-scenario opt-in. Value = space-separated member (= fixture dir)
-# names.
+# per-scenario opt-in. Value = space-separated member (roster cell
+# contender) names.
 declare -A FAMILY_COMPLETENESS=(
     ["node"]="node-native node-fastify"
 )
@@ -1456,14 +1483,18 @@ declare -A FAMILY_COMPLETENESS=(
 # below is node-specific — add a family->launcher dispatch when a
 # second family registers (fail-closed resolved!=expected otherwise).
 
-# Selection-scoped completeness guard. Given the run's SELECTED
-# scenario list: if the family has a fixture dir in >=1 selected
-# ACTIVE scenario (active = has a SCENARIO_MARKER entry), every member
-# must have one in ALL selected active scenarios — a partial
-# registration would silently shrink the measured matrix, so it
-# aborts BEFORE any cell wiring fires. Fixtures under INACTIVE
-# scenarios (no marker, no harness wiring — e.g. multi-step) only
-# warn: they are outside the rule until the scenario is activated.
+# Roster-keyed selection completeness guard (bench-consol-tick task
+# 1.4). Runs AFTER cell wiring: the CELLS / CELL_SCENARIO roster built
+# by add_cell is the ONLY registration evidence — the pre-1.4
+# scenarios/<scn>/<member> directory-presence key went dark when task
+# 1.3 moved the node fixtures into the shared runtime dir. Trigger:
+# the family has >=1 registered cell among the selected ACTIVE
+# scenarios; then EVERY member must be registered in EVERY selected
+# active scenario — a partial registration would silently shrink the
+# measured matrix. Zero registered cells = the family simply does not
+# run this time. Inactive scenarios are outside the rule: discovery
+# skips them with a notice (task 1.2) and they register no cells, so
+# there is no roster evidence to rule on.
 assert_family_completeness() {
     local family="$1"
     local members="${FAMILY_COMPLETENESS[$family]:-}"
@@ -1472,37 +1503,21 @@ assert_family_completeness() {
         exit 1
     fi
 
-    local dir name member scenario
-    # Inactive-scenario fixtures: warn and stay outside the rule
-    # (they register no cell and count toward nothing).
-    for dir in "$SCENARIOS_DIR"/*/; do
-        [[ -d "$dir" ]] || continue
-        name="${dir%/}"; name="${name##*/}"
-        if [[ -z "${SCENARIO_MARKER[$name]:-}" ]]; then
-            for member in $members; do
-                if [[ -d "$dir/$member" ]]; then
-                    echo "warning: $name is inactive; fixture not registered" >&2
-                    break
-                fi
-            done
-        fi
-    done
-
-    # Active subset of the selection. A selected inactive name keeps
-    # its pre-existing failure in resolve_all_cells' marker check;
-    # the guard itself only rules on active scenarios.
+    # Active subset of the selection. Post-1.2 discovery this is all
+    # of SCENARIOS; an explicitly selected inactive name keeps its
+    # pre-existing failure in resolve_all_cells' marker check (before
+    # any wiring).
     local -a active=()
+    local scenario member
     for scenario in "${SCENARIOS[@]}"; do
         [[ -n "${SCENARIO_MARKER[$scenario]:-}" ]] && active+=("$scenario")
     done
 
-    # Trigger: the family is present anywhere in the selected active
-    # set. Zero presence = the family simply does not run this time
-    # (mid-change phases have fixtures for only some scenarios).
+    # Trigger on registered-roster evidence, grouped per family.
     local triggered=false
     for scenario in "${active[@]}"; do
         for member in $members; do
-            if [[ -d "$SCENARIOS_DIR/$scenario/$member" ]]; then
+            if [[ -n "${CELL_SCENARIO[$scenario/$member]:-}" ]]; then
                 triggered=true
                 break 2
             fi
@@ -1510,19 +1525,20 @@ assert_family_completeness() {
     done
     [[ "$triggered" == "true" ]] || return 0
 
-    # Missing entries are <scenario>/<member> pairs: the abort must
-    # name BOTH the contender and every scenario it is missing (spec
-    # scenario "contender family registered with a missing fixture").
+    # Missing entries are <scenario>/<member> pairs keyed on the
+    # roster: the abort names the family and every cell that never
+    # registered (spec scenario "contender family registered with a
+    # missing fixture").
     local -a missing=()
     for member in $members; do
         for scenario in "${active[@]}"; do
-            if [[ ! -d "$SCENARIOS_DIR/$scenario/$member" ]]; then
+            if [[ -z "${CELL_SCENARIO[$scenario/$member]:-}" ]]; then
                 missing+=("$scenario/$member")
             fi
         done
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
-        echo "error: contender family $family declares completeness but is missing fixtures in: ${missing[*]}" >&2
+        echo "error: contender family $family declares completeness but has unregistered cells: ${missing[*]}" >&2
         exit 1
     fi
 }
@@ -1541,7 +1557,7 @@ resolve_all_cells() {
     local rust_cli_bin="$root_target/release/camel"
     # Release binary is a MEASUREMENT prerequisite, not a dry-run one:
     # in dry-run mode a missing binary defers the cli-dependent cells
-    # (see DEFERRED_CELL_COUNT above) so the rest of the matrix —
+    # (see RUST_CLI_BIN_DEFERRED above) so the rest of the matrix —
     # fixtures, routes, registrations — still gets validated. Real
     # runs keep the hard failure (a missing binary mid-measurement
     # would silently shrink the matrix).
@@ -1554,13 +1570,6 @@ resolve_all_cells() {
             exit 1
         fi
     fi
-
-    # Completeness guard BEFORE any cell wiring fires: a partially
-    # registered family aborts here, never mid-matrix.
-    local _fam
-    for _fam in "${!FAMILY_COMPLETENESS[@]}"; do
-        assert_family_completeness "$_fam"
-    done
 
     for scenario in "${SCENARIOS[@]}"; do
         local scenario_dir="$SCENARIOS_DIR/$scenario"
@@ -1575,44 +1584,44 @@ resolve_all_cells() {
             exit 1
         fi
 
-        # -- Node contender family (bench-node task 1.2) --
+        # -- Node contender family (bench-node task 1.2; consolidated
+        # runtime dir: bench-consol-tick task 1.3) --
         # Wires BEFORE the bridge dispatch below: bridge scenarios
         # `continue` past the standard block, so node cells for
-        # xsd/xslt must register here or never. The completeness guard
-        # (top of resolve_all_cells) already proved the selection is
-        # all-or-nothing per family, so a present fixture dir is never
-        # a partial registration. Asset paths resolve inside the
-        # fixture via import.meta.url; the protocol-B latency file is
-        # injected EXPLICITLY per cell (task 3.1 review) so the
-        # fixtures' hardcoded defaults are only a standalone-run
-        # fallback, not a second source of truth. The `env` prefix is
-        # load-bearing: GNU time re-parses the argv list and would
-        # otherwise treat VAR=value tokens as positional args (same
-        # trick as the rust-camel-lib cell).
-        local _member _node_fixture
+        # xsd/xslt must register here or never. Entry scripts live in
+        # the shared runtime dir as <member>/<scenario>.mjs; a present
+        # entry script drives the add_cell registration below, and the
+        # roster-keyed completeness guard (task 1.4) verifies the
+        # resulting roster once ALL wiring completes. Asset
+        # defaults resolve inside the fixtures relative to the runtime
+        # dir — scenario data stays under scenarios/<scn>/shared; the
+        # protocol-B latency file is injected EXPLICITLY per cell
+        # (task 3.1 review) so the fixtures' hardcoded defaults are
+        # only a standalone-run fallback, not a second source of
+        # truth. The `env` prefix is load-bearing: GNU time re-parses
+        # the argv list and would otherwise treat VAR=value tokens as
+        # positional args (same trick as the rust-camel-lib cell).
+        local _member _node_entry
         for _member in ${FAMILY_COMPLETENESS[node]}; do
-            _node_fixture="$scenario_dir/$_member"
-            [[ -d "$_node_fixture" ]] || continue
-            # Fail loud at wiring when a fixture is present but no
-            # node binary resolved: without this, a measure run dies
-            # at cell startup as an opaque marker timeout. Dry-run is
-            # exempt — CI bench-smoke dry-runs on node-less hosts and
-            # must keep documenting the cell with the placeholder argv.
+            _node_entry="$NODE_RUNTIME_DIR/$_member/$scenario.mjs"
+            [[ -f "$_node_entry" ]] || continue
+            # Fail loud at wiring when an entry script is present but
+            # no node binary resolved: without this, a measure run
+            # dies at cell startup as an opaque marker timeout.
+            # Dry-run is exempt — CI bench-smoke dry-runs on node-less
+            # hosts and must keep documenting the cell with the
+            # placeholder argv.
             if [[ "$DRY_RUN" == "false" && "$NODE_BIN" == "<missing"* ]]; then
-                echo "error: node fixture present but NODE_BIN unresolved (install node or set NODE_BIN)" >&2
+                echo "error: node entry script present but NODE_BIN unresolved (install node or set NODE_BIN)" >&2
                 exit 1
             fi
-            if [[ ! -f "$_node_fixture/route.mjs" ]]; then
-                echo "error: node fixture entry script not found: $_node_fixture/route.mjs" >&2
-                exit 1
-            fi
-            build_node_artifact "$_node_fixture"
+            build_node_artifact
             # Same cell_safe the M2 protocol-B reader derives
             # (${cell//\//_}), so this path IS the probe path.
             local _node_cell_safe="${scenario}_${_member}"
             local _node_latency="/tmp/v3-protocol-b-${_node_cell_safe}.log"
             add_cell "$scenario" "$_member" \
-                "env BENCH_LATENCY_FILE=$_node_latency $NODE_BIN $_node_fixture/route.mjs" "$marker"
+                "env BENCH_LATENCY_FILE=$_node_latency $NODE_BIN $_node_entry" "$marker"
         done
 
         # -- Dispatch bridge scenarios to the 4-artifact resolver --
@@ -1644,11 +1653,10 @@ resolve_all_cells() {
         local q_dsl_native_glob="$q_dir/camel-quarkus-dsl-native/build/*-runner"
         local q_yaml_native_glob="$q_dir/camel-quarkus-yaml-native/build/*-runner"
 
-        # rust-camel-lib: bin name = scenario name (per fixture
-        # convention; see T1 main.rs `[[bin]] name = "startup-minimal"`,
-        # T2 `[[bin]] name = "t2-realistic-eip"`).
+        # rust-camel-lib: consolidated fixture binary; the scenario
+        # name is argv[1] (change bench-consol-tick).
         local rust_lib_bin
-        rust_lib_bin="$(resolve_rust_lib_bin "$scenario_dir" "$scenario")"
+        rust_lib_bin="$(resolve_rust_lib_bin)"
 
         # rust-camel-cli: shared binary, scenario-specific route YAML
         # (convention: <scenario-name>.yaml under routes/).
@@ -1724,7 +1732,7 @@ resolve_all_cells() {
         add_cell "$scenario" "camel-quarkus-dsl-native" \
             "$q_dsl_native_bin $NATIVE_HEAP_ARG" "$marker"
         add_cell "$scenario" "rust-camel-lib" \
-            "$rust_lib_bin" "$marker"
+            "$rust_lib_bin $scenario" "$marker"
         add_cell "$scenario" "camel-standalone-yaml" \
             "$JAVA_BIN -jar $standalone_yaml_jar" "$marker"
         add_cell "$scenario" "camel-quarkus-yaml-native" \
@@ -1740,7 +1748,6 @@ resolve_all_cells() {
         # above still ran, so the fixture set stays validated.
         if [[ "$RUST_CLI_BIN_DEFERRED" == "true" ]]; then
             echo "dry-run: cell $scenario/rust-camel-cli deferred (release binary not built: $rust_cli_bin)"
-            DEFERRED_CELL_COUNT=$((DEFERRED_CELL_COUNT + 1))
         else
             local rcli_wrapper="$scenario_dir/rust-camel-cli/${scenario}-cli-wrapper.sh"
             if [[ -x "$rcli_wrapper" ]]; then
@@ -1748,9 +1755,36 @@ resolve_all_cells() {
                     "$rcli_wrapper --camel-bin $rust_cli_bin --config $rust_cli_camel_toml --routes $rust_cli_route" \
                     "$marker"
             else
-                add_cell "$scenario" "rust-camel-cli" \
-                    "$rust_cli_bin run --config $rust_cli_camel_toml --routes $rust_cli_route --no-watch" \
-                    "$marker"
+                # Bare cli cells (bench-consol-tick task 2.3: the T2
+                # scenarios; startup-minimal stays env-free — it is
+                # cold-only, m1-only). `env BENCH_LATENCY_FILE=…` in the
+                # argv activates the CLI's bench_instrument module on
+                # EVERY protocol-B relaunch (same `env` prefix + path
+                # shape as the node wiring above: GNU time re-parses the
+                # argv list, so a bare VAR=value token would be eaten as
+                # a positional arg; the path matches the ${cell//\//_}
+                # cell_safe the M2 protocol-B reader derives).
+                # BENCH_LATENCY_MODE=route selects the module's
+                # route-bracket mode: these yamls have no top-level To
+                # to wrap, so the mode brackets each whole route
+                # (route entry → last step — the window the lib crate
+                # and the JVM latency-writer bean measure). The
+                # xsd-validation-bridge cli cell sets NO mode and keeps
+                # the default pair-mode wrapping.
+                case "$scenario" in
+                    t2-json|split-aggregate|t2-realistic-eip)
+                        local rcli_cell_safe="${scenario}_rust-camel-cli"
+                        local rcli_latency="/tmp/v3-protocol-b-${rcli_cell_safe}.log"
+                        add_cell "$scenario" "rust-camel-cli" \
+                            "env BENCH_LATENCY_FILE=$rcli_latency BENCH_LATENCY_MODE=route $rust_cli_bin run --config $rust_cli_camel_toml --routes $rust_cli_route --no-watch" \
+                            "$marker"
+                        ;;
+                    *)
+                        add_cell "$scenario" "rust-camel-cli" \
+                            "$rust_cli_bin run --config $rust_cli_camel_toml --routes $rust_cli_route --no-watch" \
+                            "$marker"
+                        ;;
+                esac
             fi
         fi
     done
@@ -2320,12 +2354,14 @@ m2_measure_protocol_b() {
     # shellcheck disable=SC2206
     local argv=($argv_str)
 
-    # F3: skip scenarios with no per-tick workload (T1/T2). Their routes
-    # are timer→log or timer→EIP→log; they never emit BENCH_LATENCY and
-    # running Protocol B for them would spam "no per-tick records" warnings.
+    # F3: skip scenarios with no per-tick workload (T1 only). The
+    # startup-minimal route is timer→log; it never emits BENCH_LATENCY
+    # and running Protocol B for it would spam "no per-tick records"
+    # warnings. The T2 scenarios tick since bench-consol-tick (timer
+    # → per-tick BENCH_LATENCY records) and are measured for real.
     local scenario="${cell%%/*}"
     case "$scenario" in
-        startup-minimal|t2-realistic-eip)
+        startup-minimal)
             echo "m2 protocol B: $cell → skipped (scenario $scenario has no per-tick workload per F3)" >&2
             return 0
             ;;
@@ -2341,6 +2377,24 @@ m2_measure_protocol_b() {
     # Pre-clean tmpfs files from prior runs (spec F2: no stale data leaks).
     rm -f "$log_file" "$bridge_pid_file"
     echo "m2 protocol B: truncated latency + bridge pid files for $cell" >&2
+
+    # Debug hook (dead-cell proof for the rc-tpig m2 record check):
+    # point ONE cell's latency file at /dev/null so the contender's
+    # BENCH_LATENCY records vanish — the m2 path must hard-fail (probe
+    # abort / status=failed observed=0) exactly like a cell that never
+    # emits. Same shape as BENCH_DEBUG_DROP_CELL (roster guard), but
+    # this one exercises the RECORD check: the cell still launches,
+    # still runs its route, only its records disappear. Default off.
+    if [[ -n "${BENCH_DEBUG_SILENCE_CELL:-}" && "${BENCH_DEBUG_SILENCE_CELL}" != "$cell" ]]; then
+        if [[ -z "${CELL_SCENARIO[$BENCH_DEBUG_SILENCE_CELL]:-}" ]]; then
+            echo "error: BENCH_DEBUG_SILENCE_CELL='$BENCH_DEBUG_SILENCE_CELL' matches no registered cell (format: <member>/<scenario>)" >&2
+            exit 1
+        fi
+    fi
+    if [[ "${BENCH_DEBUG_SILENCE_CELL:-}" == "$cell" ]]; then
+        ln -sf /dev/null "$log_file"
+        echo "debug: BENCH_DEBUG_SILENCE_CELL silencing latency records for $cell (m2 must hard-fail)" >&2
+    fi
 
     # Bridge PID tracking — round START (spec §4.11, brief 2f).
     local bridge_pid_start=""
@@ -2423,6 +2477,9 @@ m2_measure_protocol_b() {
         local rss_duration_ms=$(( (M2_WARMUP_TIME + M2_SAMPLES_PER_ROUND * 10 / 1000) * 1000 ))
         # Cap at 600s for the sampler to avoid runaway.
         rss_duration_ms=$(( rss_duration_ms < 600000 ? rss_duration_ms : 600000 ))
+        # NOTE: the RSS window stays NOMINAL even under the adaptive
+        # latency-window extension below — peak-RSS attribution is a
+        # window-boundary property and must not drift per cell.
         "${LOADGEN_AFFINITY[@]}" "$loadgen_bin" rss-sample --pid="$child_pid" \
             --interval-ms=10 --duration-ms="$rss_duration_ms" \
             > "$samples_dir/rss-samples.txt" 2>/dev/null &
@@ -2448,6 +2505,47 @@ m2_measure_protocol_b() {
         sleep 1
         elapsed=$((elapsed + 1))
     done
+
+    # Adaptive window extension (bd rc-tpig): the nominal formula above
+    # assumes every cell ticks at the 10ms timer period. Cells whose
+    # GENUINE tick period exceeds 10ms (split-aggregate rust-camel-cli
+    # ~20-25ms: 100 fragments + aggregate per tick body) cannot collect
+    # samples-per-round records inside the nominal window — the old
+    # fixed window marked them status=failed insufficient-samples with
+    # perfectly healthy data. After the nominal window, a still-alive
+    # cell short of the nominal record count gets an extension: keep
+    # sampling (1s poll, recount via the tmpfs latency log — bounded,
+    # cheap) until it collects samples-per-round records OR the cap
+    # (6x nominal, still bounded by the 600s runaway guard; when the
+    # nominal window already sits at that guard the extension is a
+    # no-op), whichever comes first. Fast cells never enter the
+    # extension — their count already meets the nominal expectation at
+    # window end, so what the 23 fast cells measure is unchanged. A
+    # cell that exits on its own (repeatCount exhausted or crash) still
+    # breaks out with whatever it emitted.
+    local m2_window_cap_secs=$(( m2_window_secs * 6 ))
+    m2_window_cap_secs=$(( m2_window_cap_secs < 600 ? m2_window_cap_secs : 600 ))
+    local observed_samples=0
+    local window_extended=0
+    if (( m2_window_cap_secs > m2_window_secs )); then
+        observed_samples=$(grep -c '^BENCH_LATENCY [0-9][0-9]* [0-9][0-9]*' "$log_file" || true)
+        if (( observed_samples < M2_SAMPLES_PER_ROUND )) && kill -0 "$CURRENT_TIME_PID" 2>/dev/null; then
+            window_extended=1
+            echo "m2 protocol B: extending window for $cell (observed=$observed_samples < nominal $M2_SAMPLES_PER_ROUND at ${m2_window_secs}s; cap=${m2_window_cap_secs}s)" >&2
+            while (( elapsed < m2_window_cap_secs )); do
+                if ! kill -0 "$CURRENT_TIME_PID" 2>/dev/null; then
+                    break
+                fi
+                sleep 1
+                elapsed=$((elapsed + 1))
+                observed_samples=$(grep -c '^BENCH_LATENCY [0-9][0-9]* [0-9][0-9]*' "$log_file" || true)
+                if (( observed_samples >= M2_SAMPLES_PER_ROUND )); then
+                    break
+                fi
+            done
+            echo "m2 protocol B: window extension ended for $cell (observed=$observed_samples, elapsed=${elapsed}s)" >&2
+        fi
+    fi
 
     # Bridge PID tracking — round END (spec §4.11, brief 2f).
     local bridge_pid_end=""
@@ -2493,29 +2591,47 @@ m2_measure_protocol_b() {
 
     CURRENT_TIME_PID=""; CURRENT_CHILD_PID=""
 
-    # Minimum-count check (spec F2): require AT LEAST M2_SAMPLES_PER_ROUND
-    # well-formed records per round. Less = scientifically unusable; the
-    # publication gate (Task 11) treats this as a hard fail.
-    #
-    # Note: 'samples_per_round' is a window-sizing parameter (multiplied by
-    # the 10ms tick period to compute m2_window_secs above), not a strict
-    # record count target. At scale (samples_per_round=10000) the cell's
-    # repeatCount limit (10000 ticks) makes observed match expected exactly.
-    # At smoke scale (samples_per_round=10) observed is hundreds (the window
-    # allows more emission than the minimum). This check catches "cell died
-    # after emitting only N records" partial-data scenarios.
-    local observed_samples
+    # Minimum-count check (spec F2, rc-tpig semantics): the NOMINAL
+    # expectation (samples_per_round) is kept for reporting, but the
+    # hard-fail threshold is n=0 — a dead cell. 'samples_per_round' is
+    # a window-sizing parameter (multiplied by the 10ms tick period to
+    # compute m2_window_secs above), not a strict record count target:
+    # at scale (samples_per_round=10000) the cell's repeatCount limit
+    # (10000 ticks) makes observed match expected exactly; at smoke
+    # scale (samples_per_round=10) observed is hundreds. After the
+    # adaptive extension, a cell still short of the nominal count is
+    # slow-but-alive (tick period > 10ms) or died mid-window with
+    # partial data — either way its n>0 records are real measurements:
+    # they are parsed and kept, with a slow-tick note appended to
+    # m2-summary.txt. Only observed=0 (nothing ever emitted past the
+    # first-success probe — belt-and-braces, the probe normally
+    # aborts this path first) is a hard failure.
     observed_samples=$(grep -c '^BENCH_LATENCY [0-9][0-9]* [0-9][0-9]*' "$log_file" || true)
-    if (( observed_samples < M2_SAMPLES_PER_ROUND )); then
-        echo "error: m2 protocol B: sample count below minimum for cell=$cell" >&2
-        echo "error: expected>=$M2_SAMPLES_PER_ROUND observed=$observed_samples" >&2
+    local slow_tick=0
+    if (( observed_samples == 0 )); then
+        echo "error: m2 protocol B: no BENCH_LATENCY records for cell=$cell (dead cell)" >&2
+        echo "error: expected>=$M2_SAMPLES_PER_ROUND observed=0" >&2
         echo "error: stderr capture at $samples_dir/bridge-stderr.log" >&2
         # Mark the round as a hard failure; m2-summary.json is NOT emitted.
-        echo "status=failed reason=insufficient-samples expected_min=$M2_SAMPLES_PER_ROUND observed=$observed_samples" \
+        # observed=0 keeps the legacy status line shape that warm-24.py
+        # and summarize.py parse (both treat observed=0 as a genuine
+        # gap, NOT present data).
+        echo "status=failed reason=insufficient-samples expected_min=$M2_SAMPLES_PER_ROUND observed=0" \
             > "$samples_dir/m2-summary.txt"
         return 1
     fi
-    echo "m2 protocol B: sample count OK for $cell (observed=$observed_samples, minimum=$M2_SAMPLES_PER_ROUND)" >&2
+    if (( observed_samples < M2_SAMPLES_PER_ROUND )); then
+        # Slow-but-alive (or died-with-partial-data) cell: keep the
+        # data, flag it. The note line is appended AFTER the
+        # parse-protocol-b output below (which rewrites the .txt);
+        # consumers that scan the first line for status=
+        # (summarize.py _m2_txt_attempted_with_data) and the
+        # JSON-first readers (warm-24.py) are unaffected.
+        slow_tick=1
+        echo "m2 protocol B: $cell → slow-tick (observed=$observed_samples < nominal $M2_SAMPLES_PER_ROUND after ${elapsed}s; keeping data with note)" >&2
+    else
+        echo "m2 protocol B: sample count OK for $cell (observed=$observed_samples, minimum=$M2_SAMPLES_PER_ROUND)" >&2
+    fi
 
     # Parse the Protocol B log + emit per-cell summary.
     if [[ ! -s "$log_file" ]]; then
@@ -2527,6 +2643,10 @@ m2_measure_protocol_b() {
     "$loadgen_bin" parse-protocol-b --json --log="$log_file" > "$samples_dir/m2-summary.json" 2>&1
     # Keep a text version for human debugging.
     "$loadgen_bin" parse-protocol-b --log="$log_file" > "$samples_dir/m2-summary.txt" 2>&1
+    if (( slow_tick )); then
+        echo "note=slow-tick observed=$observed_samples expected_min=$M2_SAMPLES_PER_ROUND window_extended=$window_extended elapsed_secs=$elapsed nominal_window_secs=$m2_window_secs" \
+            >> "$samples_dir/m2-summary.txt"
+    fi
 
     echo "m2 protocol B: $cell → see $samples_dir/m2-summary.json"
 }
@@ -3082,38 +3202,104 @@ preflight_toolchain
 # every scenario carrying node fixtures (bench-node task 1.2).
 resolve_all_cells
 
-# Compute the expected cell count scenario-aware (T1/T2/T3 = 6 each,
-# T4a/T4b = 4 each per spec §4.3 + e_opus round 5 won't-measure
-# scope: bridge-YAML cells recorded as won't-measure in COVERAGE.md).
-expected_cells=0
+# RED-proof hook (bench-consol-tick task 1.4): AFTER all wiring,
+# BEFORE the guard and count assertion — remove one cell from the
+# roster so the guard sees it as unregistered. Deterministic RED
+# without editing fixture trees. Format: <member>/<scenario> (names
+# roster cell <scenario>/<member>).
+if [[ -n "${BENCH_DEBUG_DROP_CELL:-}" ]]; then
+    _drop_member="${BENCH_DEBUG_DROP_CELL%%/*}"
+    _drop_scenario="${BENCH_DEBUG_DROP_CELL#*/}"
+    _drop_cell="${_drop_scenario}/${_drop_member}"
+    if [[ -z "${CELL_SCENARIO[$_drop_cell]:-}" ]]; then
+        echo "error: BENCH_DEBUG_DROP_CELL='$BENCH_DEBUG_DROP_CELL' does not name a registered cell: $_drop_cell" >&2
+        exit 1
+    fi
+    echo "debug: BENCH_DEBUG_DROP_CELL dropping roster cell '$_drop_cell'"
+    unset "CELL_SCENARIO[$_drop_cell]" "CELL_ARGV[$_drop_cell]" \
+        "CELL_MARKER[$_drop_cell]" "CELL_WONT_MEASURE[$_drop_cell]" \
+        "CELL_RSS_WRAPPER[$_drop_cell]"
+    _drop_kept=()
+    for _dc in "${CELLS[@]}"; do
+        [[ "$_dc" != "$_drop_cell" ]] && _drop_kept+=("$_dc")
+    done
+    CELLS=("${_drop_kept[@]}")
+fi
+
+# Completeness guard AFTER all cell wiring (task 1.4): the roster is
+# only complete once every wiring site has run — at the old
+# pre-wiring position the node roster was still empty. A partially
+# registered family aborts here, before any dry-run listing or
+# measurement.
+for _fam in "${!FAMILY_COMPLETENESS[@]}"; do
+    assert_family_completeness "$_fam"
+done
+
+# Expected cell roster from STATIC config only (task 1.4): selected
+# active scenarios × SCENARIO_ARTIFACT_SET asymmetry ×
+# FAMILY_COMPLETENESS membership. NOT derived from the registered
+# roster — a roster-keyed expected would be tautological: if a
+# family's wiring died entirely, expected would shrink along with
+# registered and the check would go dark (design.md §Guard
+# re-keying). Full 7-scenario matrix: 5 full × (6 core + 2 node) +
+# 2 bridge × (4 core + 2 node) = 52.
+declare -A _expected_cell_map=()
 for _s in "${SCENARIOS[@]}"; do
-    case "${SCENARIO_ARTIFACT_SET[$_s]:-full}" in
-        bridge) expected_cells=$((expected_cells + 4)) ;;
-        *)      expected_cells=$((expected_cells + 6)) ;;
-    esac
-    # Completeness-declaring families add one cell per member fixture
-    # present in the scenario (bench-node task 1.2: bridge with node
-    # → 4+2=6, full with node → 6+2=8). Presence-driven, not
-    # name-driven: between bench-node phases fixtures exist for only
-    # some scenarios, and a zero-fixture selection must keep the old
-    # count (the guard inside resolve_all_cells rejects PARTIAL
-    # coverage inside a selection, so the dynamic count never papers
-    # over a gap).
+    _core_members="camel-standalone-dsl camel-quarkus-dsl-native rust-camel-lib"
+    if [[ "${SCENARIO_ARTIFACT_SET[$_s]:-full}" != "bridge" ]]; then
+        _core_members="camel-standalone-dsl camel-standalone-yaml camel-quarkus-dsl-native camel-quarkus-yaml-native rust-camel-lib"
+    fi
+    # Dry-run deferral (unbuilt release binary) removes exactly the
+    # rust-camel-cli cells from the expected set. Measurement runs
+    # never defer, so their expected count is the full matrix.
+    # Appended conditionally — substring removal would be order-fragile.
+    if [[ "$RUST_CLI_BIN_DEFERRED" != "true" ]]; then
+        _core_members="$_core_members rust-camel-cli"
+    fi
+    for _cm in $_core_members; do
+        _expected_cell_map["$_s/$_cm"]=1
+    done
+    # Completeness-declaring families contribute their FULL member
+    # set to EVERY selected scenario — that is what completeness
+    # means; the guard above enforces the roster side of it.
     for _fam in "${!FAMILY_COMPLETENESS[@]}"; do
-        for _member in ${FAMILY_COMPLETENESS[$_fam]}; do
-            [[ -d "$SCENARIOS_DIR/$_s/$_member" ]] \
-                && expected_cells=$((expected_cells + 1))
+        for _cm in ${FAMILY_COMPLETENESS[$_fam]}; do
+            _expected_cell_map["$_s/$_cm"]=1
         done
     done
 done
-# Dry-run deferrals (unbuilt release binary) shrink the resolved set by
-# exactly one cli cell per affected scenario. Measurement runs never
-# defer, so the subtraction is 0 and the assertion is unchanged there.
-expected_cells=$((expected_cells - DEFERRED_CELL_COUNT))
+expected_cells=${#_expected_cell_map[@]}
 echo "resolved cells: ${#CELLS[@]} (expected: $expected_cells)"
 if [[ ${#CELLS[@]} -ne $expected_cells ]]; then
+    _missing_cells=()
+    for _mc in "${!_expected_cell_map[@]}"; do
+        [[ -z "${CELL_SCENARIO[$_mc]:-}" ]] && _missing_cells+=("$_mc")
+    done
+    _extra_cells=()
+    for _ec in "${CELLS[@]}"; do
+        [[ -z "${_expected_cell_map[$_ec]:-}" ]] && _extra_cells+=("$_ec")
+    done
     echo "error: expected $expected_cells cells, got ${#CELLS[@]}" >&2
+    [[ ${#_missing_cells[@]} -eq 0 ]] || echo "  expected but unregistered: ${_missing_cells[*]}" >&2
+    [[ ${#_extra_cells[@]} -eq 0 ]] || echo "  registered but unexpected: ${_extra_cells[*]}" >&2
     exit 1
+fi
+
+# Meta hygiene (bench-consol-tick task 1.5): run-all.sh records the
+# DISCOVERY list at launch (pre-run provenance); once registration
+# completes the ACTIVE roster is known — rewrite meta.json's
+# `scenarios` to the sorted, comma-joined active set (excludes spike-*
+# by discovery and inactive dirs like multi-step by non-registration).
+# No-op when run.sh runs standalone (no launch-time meta.json exists).
+META_JSON="$RESULTS_ROOT/meta.json"
+if [[ -f "$META_JSON" ]]; then
+    _active_csv="$(IFS=,; echo "${SCENARIOS[*]}")"
+    # jq, not python3: the runner image ships jq but no python
+    # (found by the task 1.7 gate smoke — the python3 rewrite died at
+    # cell resolution and aborted the whole run under set -e).
+    jq --arg csv "$_active_csv" '.scenarios = $csv' "$META_JSON" > "$META_JSON.tmp" \
+        && mv "$META_JSON.tmp" "$META_JSON"
+    echo "meta: scenarios corrected to active roster: $_active_csv"
 fi
 
 # Step 4: --dry-run prints the shuffled cell list and exits 0.

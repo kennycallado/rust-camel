@@ -5,7 +5,7 @@ tasks 2.1 rust artifacts / 2.2 JVM artifacts). The route is the T2
 "realistic EIP" shape applied to the canonical JSON document:
 
 ```
-timer:bench?repeatCount=1&delay=0
+timer:bench?period=10&repeatCount=10000&delay=0
   -> set_body      (canonical JSON document, exactly SIZE bytes)
   -> BENCH_INPUT_SHA256 log
   -> unmarshal json   (Body::Text -> Body::Json: the body IS the parsed value)

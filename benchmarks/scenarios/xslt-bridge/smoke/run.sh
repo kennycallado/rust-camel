@@ -24,7 +24,7 @@ M2_CACHE="${M2_CACHE:-/tmp/m2-cache}"
 CAMEL_BIN="${CAMEL_BIN:-$WORKTREE/target/release/camel}"
 BRIDGE_BINARY="${BRIDGE_BINARY:-$WORKTREE/bridges/xml/build/native/xml-bridge}"
 BRIDGE_WRAPPER="$SCENARIO_DIR/shared/bridge-wrapper.sh"
-RUST_LIB_BIN="$SCENARIO_DIR/rust-camel-lib/target/release/xslt-bridge"
+RUST_LIB_BIN="$WORKTREE/benchmarks/contenders/rust-camel-lib/target/release/rust-camel-lib-fixture"
 RUST_CLI_WRAPPER="$SCENARIO_DIR/rust-camel-cli/xslt-bridge-cli-wrapper.sh"
 STAND_DSL_JAR="$SCENARIO_DIR/camel-standalone/camel-standalone-dsl/target/camel-standalone-dsl-1.0.0-jar-with-dependencies.jar"
 QD_NATIVE="$SCENARIO_DIR/camel-quarkus/camel-quarkus-dsl-native/build/camel-quarkus-dsl-native-1.0.0-runner"
@@ -38,8 +38,12 @@ fi
 if [[ -z "$NODE_BIN" ]]; then
     NODE_BIN="$(command -v node 2>/dev/null || echo "<missing:node>")"
 fi
-NODE_NATIVE_DIR="$SCENARIO_DIR/node-native"
-NODE_FASTIFY_DIR="$SCENARIO_DIR/node-fastify"
+# Consolidated node contender tree (change bench-consol-tick task
+# 1.3): per-scenario entry scripts, shared node_modules at the tree
+# root.
+NODE_CONTENDER_DIR="$WORKTREE/benchmarks/contenders/node"
+NODE_NATIVE_DIR="$NODE_CONTENDER_DIR/node-native"
+NODE_FASTIFY_DIR="$NODE_CONTENDER_DIR/node-fastify"
 
 # Reduced tick count for smoke speed (production uses 10000).
 SMOKE_REPEAT_COUNT="${SMOKE_REPEAT_COUNT:-200}"
@@ -64,8 +68,8 @@ cleanup_cell_artifacts() {
     pkill -9 -f "$CAMEL_BIN" 2>/dev/null || true
     [[ -f "$STAND_DSL_JAR" ]] && pkill -9 -f "$STAND_DSL_JAR" 2>/dev/null || true
     [[ -x "$QD_NATIVE" ]] && pkill -9 -f "$QD_NATIVE" 2>/dev/null || true
-    pkill -9 -f "$NODE_NATIVE_DIR/route.mjs" 2>/dev/null || true
-    pkill -9 -f "$NODE_FASTIFY_DIR/route.mjs" 2>/dev/null || true
+    pkill -9 -f "$NODE_NATIVE_DIR/xslt-bridge.mjs" 2>/dev/null || true
+    pkill -9 -f "$NODE_FASTIFY_DIR/xslt-bridge.mjs" 2>/dev/null || true
     # Orphan tail/awk subprocesses from the CLI wrapper's latency tee.
     pkill -9 -f 'tail -n \+1 -F' 2>/dev/null || true
     pkill -9 -f 'awk -v lf=' 2>/dev/null || true
@@ -121,7 +125,7 @@ verify_cli_payload_byte_equality() {
 # bump) or shared-asset drift — fail loudly, the run is not
 # comparable to the recorded evidence. Cross-runtime parity is NOT
 # claimed: this pins THIS fixture's output against its own evidence
-# (Saxon-JS ≠ Saxon-HE serializers; see node-native/README.md).
+# (Saxon-JS ≠ Saxon-HE serializers; see contenders/node/README.md).
 # Args: label live_log committed_log
 assert_node_digest() {
     local label="$1" live_log="$2" committed_log="$3"
@@ -223,7 +227,7 @@ smoke_cell() {
 # the right env / args; smoke_cell redirects its stdout+stderr to the
 # log file and backgrounds it.
 launch_rust_camel_lib() {
-    cd "$SCENARIO_DIR/rust-camel-lib"
+    cd "$WORKTREE/benchmarks/contenders/rust-camel-lib"
     BENCH_PAYLOAD="$SCENARIO_DIR/shared/bench-payload.xml" \
     BENCH_STYLESHEET="$SCENARIO_DIR/shared/identity-transform.xsl" \
     BENCH_LATENCY_FILE="/tmp/v3-protocol-b-t4a-rust-camel-lib.log" \
@@ -231,7 +235,7 @@ launch_rust_camel_lib() {
     CAMEL_XML_BRIDGE_REAL_BINARY="$BRIDGE_BINARY" \
     V3_BRIDGE_PID_FILE="/tmp/v3-bridge-pid-t4a-rust-camel-lib.txt" \
     env -u CARGO_TARGET_DIR \
-    "$RUST_LIB_BIN"
+    "$RUST_LIB_BIN" xslt-bridge
 }
 
 launch_rust_camel_cli() {
@@ -264,7 +268,7 @@ launch_node_native() {
     BENCH_PAYLOAD="$SCENARIO_DIR/shared/bench-payload.xml" \
     BENCH_STYLESHEET="$SCENARIO_DIR/shared/identity-transform.xsl" \
     BENCH_LATENCY_FILE="/tmp/v3-protocol-b-t4a-node-native.log" \
-    "$NODE_BIN" "$NODE_NATIVE_DIR/route.mjs"
+    "$NODE_BIN" "$NODE_NATIVE_DIR/xslt-bridge.mjs"
 }
 
 launch_node_fastify() {
@@ -272,7 +276,7 @@ launch_node_fastify() {
     BENCH_PAYLOAD="$SCENARIO_DIR/shared/bench-payload.xml" \
     BENCH_STYLESHEET="$SCENARIO_DIR/shared/identity-transform.xsl" \
     BENCH_LATENCY_FILE="/tmp/v3-protocol-b-t4a-node-fastify.log" \
-    "$NODE_BIN" "$NODE_FASTIFY_DIR/route.mjs"
+    "$NODE_BIN" "$NODE_FASTIFY_DIR/xslt-bridge.mjs"
 }
 
 # launch_camel_quarkus_dsl_native intentionally omitted for T4a —
@@ -350,7 +354,7 @@ else
 fi
 
 # --- node-native (bench-node task 3.2) ---
-if [[ -x "$NODE_BIN" && -d "$NODE_NATIVE_DIR/node_modules/saxon-js" && -d "$NODE_NATIVE_DIR/node_modules/xslt3" ]]; then
+if [[ -x "$NODE_BIN" && -d "$NODE_CONTENDER_DIR/node_modules/saxon-js" && -d "$NODE_CONTENDER_DIR/node_modules/xslt3" && -f "$NODE_NATIVE_DIR/xslt-bridge.mjs" ]]; then
     if smoke_cell "node-native" \
         "/tmp/v3-smoke-t4a-node-native.log" \
         "/tmp/v3-protocol-b-t4a-node-native.log" \
@@ -362,11 +366,11 @@ if [[ -x "$NODE_BIN" && -d "$NODE_NATIVE_DIR/node_modules/saxon-js" && -d "$NODE
     fi
 else
     echo "SKIP: node-native prerequisites not present (node binary + node_modules"
-    echo "      — run: cd $NODE_NATIVE_DIR && npm ci --omit=dev)"
+    echo "      — run: cd $NODE_CONTENDER_DIR && npm ci --omit=dev)"
 fi
 
 # --- node-fastify (bench-node task 3.2) ---
-if [[ -x "$NODE_BIN" && -d "$NODE_FASTIFY_DIR/node_modules/fastify" && -d "$NODE_FASTIFY_DIR/node_modules/saxon-js" && -d "$NODE_FASTIFY_DIR/node_modules/xslt3" ]]; then
+if [[ -x "$NODE_BIN" && -d "$NODE_CONTENDER_DIR/node_modules/fastify" && -d "$NODE_CONTENDER_DIR/node_modules/saxon-js" && -d "$NODE_CONTENDER_DIR/node_modules/xslt3" && -f "$NODE_FASTIFY_DIR/xslt-bridge.mjs" ]]; then
     if smoke_cell "node-fastify" \
         "/tmp/v3-smoke-t4a-node-fastify.log" \
         "/tmp/v3-protocol-b-t4a-node-fastify.log" \
@@ -378,7 +382,7 @@ if [[ -x "$NODE_BIN" && -d "$NODE_FASTIFY_DIR/node_modules/fastify" && -d "$NODE
     fi
 else
     echo "SKIP: node-fastify prerequisites not present (node binary + node_modules"
-    echo "      — run: cd $NODE_FASTIFY_DIR && npm ci --omit=dev)"
+    echo "      — run: cd $NODE_CONTENDER_DIR && npm ci --omit=dev)"
 fi
 
 echo

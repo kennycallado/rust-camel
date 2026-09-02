@@ -1,6 +1,6 @@
-[2m2026-08-30T11:57:26.420180Z[0m [32m INFO[0m BENCH_INPUT_SHA256=a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9
-[2m2026-08-30T11:57:26.435866Z[0m [32m INFO[0m Starting CamelContext
-[2m2026-08-30T11:57:26.436570Z[0m [32m INFO[0m Starting route [3mroute_id[0m[2m=[0mbench-route
-[2m2026-08-30T11:57:26.436661Z[0m [32m INFO[0m Route started [3mroute_id[0m[2m=[0mbench-route
-[2m2026-08-30T11:57:26.436699Z[0m [32m INFO[0m CamelContext started
-[2m2026-08-30T11:57:26.439129Z[0m [32m INFO[0m BENCH_ROUTE_READY bytes=32781
+[2m2026-09-02T08:40:03.032073Z[0m [32m INFO[0m BENCH_INPUT_SHA256=a0db69e1146a29b0b25ca22435e51f39e271ecb1ac4ec1cee0ead3212eae10e9
+[2m2026-09-02T08:40:03.037291Z[0m [32m INFO[0m Starting CamelContext
+[2m2026-09-02T08:40:03.037802Z[0m [32m INFO[0m Starting route [3mroute_id[0m[2m=[0mbench-route
+[2m2026-09-02T08:40:03.037859Z[0m [32m INFO[0m Route started [3mroute_id[0m[2m=[0mbench-route
+[2m2026-09-02T08:40:03.037886Z[0m [32m INFO[0m CamelContext started
+[2m2026-09-02T08:40:03.039497Z[0m [32m INFO[0m BENCH_ROUTE_READY bytes=32781

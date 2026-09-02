@@ -28,6 +28,12 @@ Completed runs land in `records/`, one directory per run, indexed by date
 in `records/index.json`. Each record holds the run's summary and per-cell
 measurements.
 
+## Where contenders live
+
+`contenders/` holds the consolidated contender builds: the single
+`rust-camel-lib` crate and the shared node runtime dir (one
+`node_modules` for all node contenders).
+
 ## Where technical depth lives
 
 Methodology and design decisions are documented in

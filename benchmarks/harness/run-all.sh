@@ -217,6 +217,20 @@ mkdir -p "$CACHE_DIR/cargo" "$CACHE_DIR/m2" "$CACHE_DIR/gradle"
 #   host daemon. Without the mount every Quarkus native cell fails
 #   (see RUNBOOK.md).
 
+# Forward-if-set (bench-consol-tick task 1.4): the RED-proof
+# BENCH_DEBUG_DROP_CELL hook must reach the container when the host
+# exported it; when absent on the host, nothing is forwarded.
+# BENCH_DEBUG_SILENCE_CELL (task 3.2, rc-tpig dead-cell proof) rides
+# the same mechanism: it silences ONE cell's BENCH_LATENCY file so the
+# m2 record check can be proven to hard-fail in-container.
+DEBUG_DROP_CELL_ARGS=()
+if [[ -n "${BENCH_DEBUG_DROP_CELL:-}" ]]; then
+    DEBUG_DROP_CELL_ARGS+=(-e "BENCH_DEBUG_DROP_CELL=$BENCH_DEBUG_DROP_CELL")
+fi
+if [[ -n "${BENCH_DEBUG_SILENCE_CELL:-}" ]]; then
+    DEBUG_DROP_CELL_ARGS+=(-e "BENCH_DEBUG_SILENCE_CELL=$BENCH_DEBUG_SILENCE_CELL")
+fi
+
 echo "=== Launching $IMAGE_NAME ==="
 # Two-phase invocation inside the container:
 #   Phase 1: build all Rust + Maven artifacts (Quarkus native deferred to harness)
@@ -239,6 +253,7 @@ exec docker run --rm \
     -e BENCH_SEED="$ORDER_SEED" \
     -e BENCH_RESULTS_ROOT="$OUT_ROOT" \
     -e BENCH_SCRATCH_DIR="$OUT_ROOT/scratch" \
+    "${DEBUG_DROP_CELL_ARGS[@]}" \
     -e NATIVE_ZLIB_LINK="" \
     -e GRADLE_BIN=/opt/gradle/bin/gradle \
     "$IMAGE_NAME" \

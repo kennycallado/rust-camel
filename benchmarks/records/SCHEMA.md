@@ -24,8 +24,9 @@ exactly this representation.
 
 Array ordering is part of the contract. `cells` MUST be emitted sorted
 by `(scenario, contender, variant, payload_class, metric)`; `ratios`
-MUST be emitted sorted by `(numerator, denominator, metric)`. Two-invocation
-byte-identity depends on this order.
+MUST be emitted sorted by `(numerator, denominator, metric)`;
+`expected_cells` and `m2_attempted_cells` MUST be sorted
+lexicographically. Two-invocation byte-identity depends on this order.
 
 Top-level fields:
 
@@ -40,7 +41,18 @@ Top-level fields:
 | `host_provenance` | object | Host snapshot (see below). |
 | `protocol` | object | Run protocol (see below). |
 | `cells` | array | Per scenario/contender cell measurements (see below). |
+| `expected_cells` | array | Sorted list of `<scenario>/<contender>` identities — the EXPECTED registered roster, derived at build time from the run's `meta.json` `scenarios` (legacy `subset`). Identities, not a count: a wholly absent cell (or scenario) stays nameable. Derivation mirrors the harness asymmetry (`SCENARIO_ARTIFACT_SET` in `benchmarks/harness/run.sh`): 8 contenders per full scenario, 6 per bridge scenario (`xsd-validation-bridge`, `xslt-bridge` — core 4 + node 2; YAML variants carry no bridge-tax signal). |
+| `m2_attempted_cells` | array | Sorted identities whose m2 attempt produced records but no usable ok summary (`m2-summary.txt` `status=failed reason=insufficient-samples` with `observed>0`). LEGACY shape: since the adaptive m2 window (bench-consol-tick task 3.2, bd rc-tpig) the harness no longer emits this status with `observed>0` — slow-ticking cells get an extended collection window and, if still short of the nominal count, an ok summary with a `note=slow-tick` line. The field + summarize.py recognition stay for pre-fix run dirs; such cells count as PRESENT m2 data by the publish completeness gate. Post-fix `status=failed … observed=0` (dead cell) is NOT present data. |
 | `ratios` | array | Contender comparison ratios (see below). |
+
+Completeness rule (pinned): a record is COMPLETE iff every
+`expected_cells` identity has m1 data, plus m2 data when the
+scenario's warm concept applies. Warm applicability is declared
+scenario vocabulary: `startup-minimal` is cold-only (`warm: n/a` —
+absence is not a gap); `http-server`, `t2-json`, `split-aggregate`,
+`t2-realistic-eip`, `xsd-validation-bridge` and `xslt-bridge` are
+warm-applicable. `bench publish` fails closed on incomplete records:
+nonzero exit listing every missing `<scenario>/<contender>/<metric>`.
 
 ### `host_provenance`
 

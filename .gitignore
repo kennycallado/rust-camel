@@ -21,6 +21,7 @@ benchmarks/**/build/
 benchmarks/**/.gradle/
 # Node fixture dependencies (npm ci output; lockfiles stay committed)
 benchmarks/scenarios/**/node_modules/
+benchmarks/contenders/node/node_modules/
 # Per-subproject native-image fingerprint (64-byte hash written by
 # the harness's compute_and_check_fingerprint; regenerated per build).
 benchmarks/**/.bench-fingerprint
