@@ -21,7 +21,7 @@ camel-endpoint = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
-cron = "0.15"
+cron = "0.17"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
