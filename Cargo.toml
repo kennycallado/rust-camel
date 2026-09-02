@@ -245,7 +245,7 @@ sqlx = "0.8"
 sxd-document = "0.3"
 syn = "2.0"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
-ariadne = "0.4"
+ariadne = "0.6"
 ron = "0.12"
 noyalib = { version = "0.0.18", features = ["compat-serde-yaml"] }
 toml = "1"
