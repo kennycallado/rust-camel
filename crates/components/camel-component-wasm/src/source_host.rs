@@ -24,7 +24,7 @@ use camel_component_api::consumer::ConsumerContext;
 
 use crate::return_stream::{
     DEFAULT_DRAIN_CHANNEL_BOUND, DrainCoord, DrainEvent, StreamReturnable, TerminalSlot,
-    drain_guest_stream, receiver_to_body_stream,
+    drain_guest_stream, receiver_to_body_stream, write_terminal,
 };
 use crate::source_auth_edge::{EdgeAuthOutcome, authenticate_edge};
 use crate::source_bindings::camel::plugin::source_host::{HttpRequest, SubmitOutcome};
@@ -437,19 +437,20 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
             // concurrent event loop is already gone). On failure the drain
             // never runs, so the downstream body stream would hang forever —
             // fail fast by writing the terminal error the drain would have
-            // written; chunk_tx drops here, closing the channel.
+            // written; chunk_tx drops inside spawn, closing the channel.
+            // write_terminal is poison-safe: the error always surfaces.
             if let Err(spawn_err) = accessor.spawn(SubmitExchangeDrain {
                 stream_reader,
                 terminal,
                 chunk_tx,
                 coord,
-            })
-            // Poisoned lock = consumer already torn down; nothing to wake.
-            && let Ok(mut slot) = source_terminal.lock()
-            {
-                *slot = Some(Err(CamelError::ProcessorError(format!(
-                    "stream drain spawn failed: {spawn_err}"
-                ))));
+            }) {
+                write_terminal(
+                    &source_terminal,
+                    Err(CamelError::ProcessorError(format!(
+                        "stream drain spawn failed: {spawn_err}"
+                    ))),
+                );
             }
 
             // Attach the lazy body. Downstream reads from this receiver; the
