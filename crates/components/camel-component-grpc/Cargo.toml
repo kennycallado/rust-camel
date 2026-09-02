@@ -48,7 +48,7 @@ tokio-util.workspace = true
 tower.workspace = true
 tonic-prost.workspace = true
 futures.workspace = true
-rcgen = "0.13"
+rcgen = "0.14"
 
 [build-dependencies]
 tonic-prost-build.workspace = true

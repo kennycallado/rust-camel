@@ -433,12 +433,24 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
             // delivered. If we awaited drain completion before sending, the
             // bounded chunk channel would fill, backpressure-stall the drain,
             // and self-deadlock.
-            accessor.spawn(SubmitExchangeDrain {
+            // wasmtime 48: Accessor::spawn is fallible (returns Err when the
+            // concurrent event loop is already gone). On failure the drain
+            // never runs, so the downstream body stream would hang forever —
+            // fail fast by writing the terminal error the drain would have
+            // written; chunk_tx drops here, closing the channel.
+            if let Err(spawn_err) = accessor.spawn(SubmitExchangeDrain {
                 stream_reader,
                 terminal,
                 chunk_tx,
                 coord,
-            });
+            })
+            // Poisoned lock = consumer already torn down; nothing to wake.
+            && let Ok(mut slot) = source_terminal.lock()
+            {
+                *slot = Some(Err(CamelError::ProcessorError(format!(
+                    "stream drain spawn failed: {spawn_err}"
+                ))));
+            }
 
             // Attach the lazy body. Downstream reads from this receiver; the
             // spawned drain feeds it from the guest's stream.

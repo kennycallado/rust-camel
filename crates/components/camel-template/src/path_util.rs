@@ -80,7 +80,7 @@ pub(crate) struct FileIdentity {
 mod imp {
     use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
-    use rustix::fs::{Mode, OFlags, StatExt, fstat, openat};
+    use rustix::fs::{Mode, OFlags, fstat, openat};
 
     use super::{FileIdentity, OwnedHandle};
     use crate::error::TemplateReloadError;
@@ -203,9 +203,11 @@ mod imp {
         Ok(FileIdentity {
             inode: st.st_ino,
             length: st.st_size as u64,
-            // `StatExt::mtime` returns the signed second value; combine with the
-            // raw nanosecond fraction for full-resolution change detection.
-            mtime_nsec: st.mtime().saturating_mul(1_000_000_000) + st.st_mtime_nsec as i64,
+            // rustix 1.x: `Stat` exposes `st_mtime` (signed seconds) and
+            // `st_mtime_nsec` as plain fields (the StatExt trait is gone);
+            // combine for full-resolution change detection.
+            mtime_nsec: (st.st_mtime as i64).saturating_mul(1_000_000_000)
+                + st.st_mtime_nsec as i64,
         })
     }
 

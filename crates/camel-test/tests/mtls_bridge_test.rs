@@ -58,8 +58,9 @@ async fn wrong_ca_handshake_rejected() {
     wrong_client_params
         .distinguished_name
         .push(DnType::CommonName, "wrong-test-client");
+    let wrong_issuer = rcgen::Issuer::from_params(&wrong_ca_params, &wrong_ca_key);
     let wrong_client_cert = wrong_client_params
-        .signed_by(&wrong_client_key, &wrong_ca_cert, &wrong_ca_key)
+        .signed_by(&wrong_client_key, &wrong_issuer)
         .expect("wrong client cert");
 
     let wrong_ca_pem = wrong_ca_cert.pem().into_bytes();

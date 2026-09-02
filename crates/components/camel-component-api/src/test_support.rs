@@ -47,8 +47,11 @@ pub mod tls {
             rcgen::SanType::IpAddress(IpAddr::V4([127, 0, 0, 1].into())),
             rcgen::SanType::IpAddress("::1".parse().expect("::1 ip address")),
         ];
+        // rcgen 0.14: signing needs an Issuer built from the CA params + key
+        // (the old signed_by(key, ca_cert, ca_key) 3-arg form is gone).
+        let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
         let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
+            .signed_by(&server_key, &issuer)
             .expect("server cert sign");
 
         (ca_cert.pem(), server_cert.pem(), server_key.serialize_pem())

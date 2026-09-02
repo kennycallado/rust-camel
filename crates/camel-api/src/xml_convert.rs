@@ -120,7 +120,7 @@ pub fn xml_to_json_with_depth_limit(
                 }
                 got_root = true;
                 let name = local_name(&e);
-                let attrs = parse_attrs(&e, reader.decoder())?;
+                let attrs = parse_attrs(&e)?;
                 // R5-L3: cap nesting depth to bound stack/memory growth.
                 if stack.len() >= max_depth {
                     return Err(CamelError::TypeConversionFailed(format!(
@@ -142,7 +142,7 @@ pub fn xml_to_json_with_depth_limit(
                 }
                 got_root = true;
                 let name = local_name(&e);
-                let attrs = parse_attrs(&e, reader.decoder())?;
+                let attrs = parse_attrs(&e)?;
                 let value = if attrs.is_empty() {
                     serde_json::Value::Null
                 } else {
@@ -155,9 +155,8 @@ pub fn xml_to_json_with_depth_limit(
                 }
             }
             Ok(Event::Text(e)) => {
-                let raw = String::from_utf8(e.to_vec()).map_err(|err| {
-                    CamelError::TypeConversionFailed(format!("invalid UTF-8 in XML text: {err}"))
-                })?;
+                // quick-xml 0.42: text content is str-backed, no UTF-8 decode step.
+                let raw = e.into_inner().into_owned();
                 let text = quick_xml::escape::unescape(&raw).map_err(|err| {
                     CamelError::TypeConversionFailed(format!("cannot unescape XML text: {err}"))
                 })?;
@@ -166,9 +165,8 @@ pub fn xml_to_json_with_depth_limit(
                 }
             }
             Ok(Event::GeneralRef(e)) => {
-                let ref_name = String::from_utf8(e.to_vec()).map_err(|err| {
-                    CamelError::TypeConversionFailed(format!("invalid UTF-8 in XML ref: {err}"))
-                })?;
+                // quick-xml 0.42: refs are str-backed (Deref<Target = str>).
+                let ref_name = (*e).to_string();
                 let escaped = format!("&{ref_name};");
                 let text = quick_xml::escape::unescape(&escaped).map_err(|err| {
                     CamelError::TypeConversionFailed(format!(
@@ -180,7 +178,8 @@ pub fn xml_to_json_with_depth_limit(
                 }
             }
             Ok(Event::CData(e)) => {
-                let text = String::from_utf8_lossy(e.as_ref()).into_owned();
+                // quick-xml 0.42: CDATA is str-backed, no lossy conversion needed.
+                let text = e.into_inner().into_owned();
                 if let Some(node) = stack.last_mut() {
                     node.text.push_str(&text);
                 }
@@ -377,12 +376,11 @@ struct XmlNode {
 }
 
 fn local_name(e: &quick_xml::events::BytesStart<'_>) -> String {
-    String::from_utf8_lossy(e.local_name().as_ref()).into_owned()
+    e.local_name().into_inner().to_owned()
 }
 
 fn parse_attrs(
     e: &quick_xml::events::BytesStart<'_>,
-    decoder: quick_xml::Decoder,
 ) -> Result<serde_json::Map<String, serde_json::Value>, CamelError> {
     let mut map = serde_json::Map::new();
     for attr_result in e.attributes() {
@@ -390,17 +388,14 @@ fn parse_attrs(
             CamelError::TypeConversionFailed(format!("cannot parse attribute: {err}"))
         })?;
 
-        let full_name = String::from_utf8_lossy(attr.key.as_ref());
+        let full_name = attr.key.as_ref().to_string();
         if full_name == "xmlns" || full_name.starts_with("xmlns:") {
             continue;
         }
 
-        let key = format!(
-            "@{}",
-            String::from_utf8_lossy(attr.key.local_name().as_ref())
-        );
+        let key = format!("@{}", attr.key.local_name().into_inner());
         let val = attr
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|err| {
                 CamelError::TypeConversionFailed(format!("cannot unescape attribute value: {err}"))
             })?;

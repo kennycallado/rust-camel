@@ -174,10 +174,13 @@ fn render_diagnostic(diag: &Diagnostic, file_id: &str, source: &str) {
     };
     let range = clamp_range(diag.span.start, diag.span.end, source.len());
 
-    Report::build(kind, file_id, range.start)
+    // ariadne 0.6: the span carries the source id — (id, range) tuples
+    // replace the old build(kind, id, offset) + Label::new((id, range)) split.
+    let span = (file_id, range);
+    Report::build(kind, span.clone())
         .with_code(diag.code.to_string())
         .with_message(diag.message.as_str())
-        .with_label(Label::new((file_id, range)))
+        .with_label(Label::new(span))
         .finish()
         .eprint((file_id, Source::from(source)))
         .ok();

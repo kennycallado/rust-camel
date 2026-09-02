@@ -14,6 +14,8 @@ pub fn gen_mtls_certs() -> (String, String, String, String, String) {
     let mut ca_params = CertificateParams::new(vec!["Test CA".to_string()]).expect("ca params");
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     let ca_cert = ca_params.self_signed(&ca_key).expect("ca self-sign");
+    // rcgen 0.14: leaf certs sign via an Issuer built from CA params + key.
+    let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
 
     // Server cert signed by CA
     let server_key = KeyPair::generate().expect("server keygen");
@@ -21,7 +23,7 @@ pub fn gen_mtls_certs() -> (String, String, String, String, String) {
         CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
             .expect("server params");
     let server_cert = server_params
-        .signed_by(&server_key, &ca_cert, &ca_key)
+        .signed_by(&server_key, &ca_issuer)
         .expect("server cert sign");
 
     // Client cert signed by same CA
@@ -29,7 +31,7 @@ pub fn gen_mtls_certs() -> (String, String, String, String, String) {
     let client_params =
         CertificateParams::new(vec!["test-client".to_string()]).expect("client params");
     let client_cert = client_params
-        .signed_by(&client_key, &ca_cert, &ca_key)
+        .signed_by(&client_key, &ca_issuer)
         .expect("client cert sign");
 
     (

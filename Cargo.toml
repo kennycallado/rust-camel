@@ -138,7 +138,7 @@ camel-component-surrealdb = { path = "crates/components/camel-component-surreald
 camel-redis-repo = { path = "crates/services/camel-redis-repo", version = "=0.38.0" }
 
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 prost = { version = "0.14" }
 prost-reflect = { version = "0.16", features = ["serde"] }
@@ -165,6 +165,8 @@ dashmap = "6"
 indexmap = "2"
 blake3 = "1"
 filetime = "0.2"
+# Held at 0.20: testcontainers 0.27 (required by testcontainers-modules 0.15) needs bollard ^0.20;
+# bollard 0.21 pins bollard-stubs =1.53 which collides. Cluster moves together or not at all.
 bollard = "0.20"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
@@ -176,7 +178,7 @@ tracing-test = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.13", features = ["rustls", "stream"], default-features = false }
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 wiremock = "0.6"
 sha2 = "0.11"
 hex = "0.4"
@@ -191,7 +193,7 @@ regex = "1"
 moka = { version = "0.12", features = ["future"] }
 redb = "4"
 redis = "1"
-rumqttc = { version = "0.33.2", package = "rumqttc-v4-next", default-features = false }
+rumqttc = { version = "0.33.3", package = "rumqttc-v4-next", default-features = false }
 rustls = { version = "0.23", features = ["ring"] }
 axum = { version = "0.8" }
 http = "1"
@@ -211,12 +213,13 @@ humantime = "2"
 config = "0.15"
 glob = "0.3"
 notify = { version = "8", features = ["macos_fsevent"] }
+# Held at 0.27: testcontainers-modules 0.15 (latest) requires ^0.27; cannot resolve 0.28.
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka", "postgres", "redis"] }
 # ADR-0047 Stage 2: external template component uses rustix (unix) /
 # windows-sys (windows) for `openat`-style relative path resolution to
 # enforce the dependency-closure contract. Feature-gated in the crate.
-rustix = { version = "0.38", features = ["fs"] }
+rustix = { version = "1.1", features = ["fs"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Wdk_Foundation",
@@ -230,31 +233,31 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 csv = "1"
 proc-macro2 = "1.0"
 prometheus = "0.14"
-quick-xml = "0.41"
+quick-xml = "0.42"
 quote = "1.0"
 base64 = "0.23"
 pkcs1 = { version = "0.7", features = ["pem"] }
-pkcs8 = { version = "0.10", features = ["pem"] }
+pkcs8 = { version = "0.11", features = ["pem"] }
 serde_urlencoded = "0.7"
 zeroize = "1"
 rand = "0.10"
-rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 sqlx = "0.8"
 sxd-document = "0.3"
 syn = "2.0"
-jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
-ariadne = "0.4"
+jsonschema = { version = "0.52", default-features = false, features = ["resolve-file"] }
+ariadne = "0.6"
 ron = "0.12"
-noyalib = { version = "0.0.18", features = ["compat-serde-yaml"] }
+noyalib = { version = "0.0.29", features = ["compat-serde-yaml"] }
 toml = "1"
 percent-encoding = "2.3"
 schemars = "1"
 ts-rs = "12"
 
 # WASM dependencies
-wit-bindgen = "0.58"
-wasmtime = { version = "46.0.2", features = ["component-model", "component-model-async"] }
-wasmtime-wasi = "46.0.2"
+wit-bindgen = "0.61"
+wasmtime = { version = "48.0.1", features = ["component-model", "component-model-async"] }
+wasmtime-wasi = "48.0.1"
 
 # OpenTelemetry dependencies
 opentelemetry = { version = "0.32", features = ["trace", "logs", "metrics"] }

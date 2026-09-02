@@ -246,7 +246,11 @@ impl Service<Exchange> for KafkaProducer {
                 };
 
                 match delivery_result {
-                    Ok((partition_out, offset_out)) => {
+                    // rdkafka 0.39: delivery result is a Delivery struct
+                    // (partition/offset/timestamp), not a bare tuple.
+                    Ok(delivery) => {
+                        let partition_out = delivery.partition;
+                        let offset_out = delivery.offset;
                         debug!(
                             topic = %topic,
                             partition = partition_out,

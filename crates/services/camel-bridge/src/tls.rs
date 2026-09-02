@@ -41,6 +41,8 @@ impl BridgeTlsMaterial {
         let ca_cert = ca_params
             .self_signed(&ca_key)
             .map_err(|e| BridgeError::Config(format!("CA self-sign: {e}")))?;
+        // rcgen 0.14: leaf certs sign via an Issuer built from CA params + key.
+        let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
 
         // --- Server cert ---
         let server_key =
@@ -61,7 +63,7 @@ impl BridgeTlsMaterial {
             ),
         ];
         let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
+            .signed_by(&server_key, &ca_issuer)
             .map_err(|e| BridgeError::Config(format!("server cert sign: {e}")))?;
 
         // --- Client cert ---
@@ -74,7 +76,7 @@ impl BridgeTlsMaterial {
             .distinguished_name
             .push(DnType::CommonName, "camel-bridge client");
         let client_cert = client_params
-            .signed_by(&client_key, &ca_cert, &ca_key)
+            .signed_by(&client_key, &ca_issuer)
             .map_err(|e| BridgeError::Config(format!("client cert sign: {e}")))?;
 
         // --- Write PEMs to TempDir ---

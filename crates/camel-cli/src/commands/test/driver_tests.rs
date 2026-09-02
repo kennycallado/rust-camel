@@ -341,7 +341,8 @@ async fn no_flags_output_is_byte_identical() {
     );
     assert_eq!(out, expected_out, "stdout must be byte-identical");
     let expected_err = format!(
-        "{}: invalid test document: type mismatch: expected identifier, found non-scalar\n",
+        // noyalib 0.0.29 emits a libyaml-style parse message for flow mappings.
+        "{}: invalid test document: expected ',' or '}}' in flow mapping at line 2 column 1\n",
         bad.display()
     );
     assert_eq!(err, expected_err, "stderr must be byte-identical");
@@ -744,7 +745,8 @@ async fn junit_absent_writes_nothing() {
         b.display()
     );
     let expected_err = format!(
-        "{}: invalid test document: type mismatch: expected identifier, found non-scalar\n",
+        // noyalib 0.0.29 emits a libyaml-style parse message for flow mappings.
+        "{}: invalid test document: expected ',' or '}}' in flow mapping at line 2 column 1\n",
         bad.display()
     );
     assert_eq!(

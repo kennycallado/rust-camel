@@ -27,7 +27,7 @@ tracing  = { workspace = true }
 rand     = { workspace = true }
 chrono   = { workspace = true }
 chrono-tz = { workspace = true }
-rcgen    = { version = "0.13", optional = true }
+rcgen    = { version = "0.14", optional = true }
 rustls = { workspace = true }
 rustls-pemfile = "2"
 
