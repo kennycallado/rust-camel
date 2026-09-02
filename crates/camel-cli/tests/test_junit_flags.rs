@@ -126,7 +126,8 @@ fn no_flag_dispatch_byte_identical_e2e() {
     );
     assert_eq!(stdout, expected_out, "stdout must be byte-identical");
     let expected_err = format!(
-        "{}: invalid test document: type mismatch: expected identifier, found non-scalar\n",
+        // noyalib 0.0.29 emits a libyaml-style parse message for flow mappings.
+        "{}: invalid test document: expected ',' or '}}' in flow mapping at line 2 column 1\n",
         bad.display()
     );
     assert_eq!(stderr, expected_err, "stderr must be byte-identical");
