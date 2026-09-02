@@ -45,12 +45,14 @@ The bridges require a Java 21 toolchain with GraalVM CE for native compilation. 
 ### Prerequisites
 
 - Docker (or Podman with `alias docker=podman`)
-- Image: `quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21`
+- Image: `quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-25`
+  (tag MUST match the toolchain CI builds with — `java-version` in
+  `.github/workflows/*-bridge-release.yml`; keep both in sync)
 
 Pull once:
 
 ```bash
-docker pull quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21
+docker pull quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-25
 ```
 
 ### xml bridge tests
@@ -66,7 +68,7 @@ docker run --rm \
   --env=HOME=/tmp \
   --env=APP_HOME= \
   --entrypoint bash \
-  quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21 \
+  quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-25 \
   -c "rm -rf /project/build && ./gradlew test --no-daemon --project-cache-dir /tmp/gradle-project-cache 2>&1"
 ```
 
@@ -84,7 +86,7 @@ docker run --rm \
   --env=GRADLE_USER_HOME=/tmp/gradle-home \
   --env=HOME=/tmp \
   --entrypoint bash \
-  quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21 \
+  quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-25 \
   -c "rm -rf /project/build && ./gradlew test --no-daemon --project-cache-dir /tmp/gradle-project-cache 2>&1"
 ```
 
