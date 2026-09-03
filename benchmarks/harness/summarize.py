@@ -325,11 +325,17 @@ def load_cells(run_dir, meta=None):
                     scenario = cell.partition("/")[0]
                     if scenario:
                         scenarios.add(scenario)
-    if not scenarios and meta is not None and (
+    # Merge meta's declared scenarios into the vocabulary UNCONDITIONALLY,
+    # not just as a fallback: in a full-metric run only http-server carries
+    # m3/m4 summaries, so the summary-anchored vocabulary alone is
+    # {http-server} and the m1 flat-dir split raises on the first
+    # non-http cell (2026-09-03 run 20260903T084658Z). The meta's
+    # scenario list is the run's declared roster — authoritative.
+    if meta is not None and (
         meta.get("scenarios") or meta.get("subset")
     ):
-        # Pure m1 run: scenario vocabulary from meta's `scenarios`
-        # (legacy metas: `subset`).
+        # Vocabulary from meta's `scenarios` (legacy metas: `subset`) —
+        # the declared roster, authoritative over dir-name anchoring.
         raw = str(meta.get("scenarios") or meta.get("subset"))
         scenarios = {s.strip() for s in raw.split(",") if s.strip()}
     # Pass 2: emit cells (identity from `cell` fields; m1/m2 via
