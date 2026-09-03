@@ -3175,7 +3175,11 @@ echo "=== benchmark harness v2 (bd rc-p9ki) + v3 M2 extension (bd rc-2vxg) + v3.
 echo "scenarios: ${SCENARIOS_FILTER:-<auto-discover>}"
 echo "metric: $METRIC"
 echo "M1: n=$N (+ $WARMUP_N warmup, discarded)"
-if [[ "$METRIC" == "m2" || "$METRIC" == "m1+m2" ]]; then
+# Substring dispatch (not exact-match): the validator accepts combos
+# (m1+m2, m1+m2+m3+m4, ...); exact equality silently skipped arms for
+# the 4-metric combo (2026-09-03 run 20260903T054844Z: m3/m4 complete,
+# m1/m2 never launched, exit 0).
+if [[ "$METRIC" == *"m2"* ]]; then
     echo "M2: warmup_time=${M2_WARMUP_TIME}s warmup_msgs=${M2_WARMUP_MSGS} rounds=${M2_ROUNDS} samples_per_round=${M2_SAMPLES_PER_ROUND}"
 fi
 if [[ "$METRIC" == *"m3"* ]]; then
@@ -3342,7 +3346,7 @@ fi
 #    3 warmup discarded, 1ms polling, 30s deadline, scenario-aware marker
 #    validation, KILL after marker, env-var hygiene, GNU time RSS, raw
 #    samples per cell, randomized cell ordering across FULL cell set. --
-if [[ "$METRIC" == "m1" || "$METRIC" == "m1+m2" ]]; then
+if [[ "$METRIC" == *"m1"* ]]; then
     # -- warmup (v1 Fix 1: warmup failures are FATAL, not skipped) --
     # A failed warmup means the smoke test was lying — the real
     # measured runs would silently drop data points. Stop the whole run
@@ -3404,9 +3408,9 @@ if [[ "$METRIC" == "m1" || "$METRIC" == "m1+m2" ]]; then
 fi
 
 # -- M2 measurement (spec §4.1–4.11, brief task 2c–2k). Runs only when
-#    metric includes m2. Per-cell protocol (A or B) is registered in
-#    SCENARIO_M2_PROTOCOL. --
-if [[ "$METRIC" == "m2" || "$METRIC" == "m1+m2" ]]; then
+#    metric includes m2 (substring — see dispatch note above). Per-cell
+#    protocol (A or B) is registered in SCENARIO_M2_PROTOCOL. --
+if [[ "$METRIC" == *"m2"* ]]; then
     echo "--- M2 measurement (warmup ${M2_WARMUP_TIME}s OR ${M2_WARMUP_MSGS} msgs, $M2_ROUNDS rounds × $M2_SAMPLES_PER_ROUND samples) ---"
     local_loadgen_bin="$(resolve_loadgen_bin)"
 
