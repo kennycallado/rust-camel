@@ -58,22 +58,56 @@ jobs:
       - id: nightly
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # nightly
         with:
-          toolchain: nightly
+          # Pinned date, kept in lockstep with the flake fuzzNightly
+          # (rc-p957): one nightly across local and CI keeps crash repros
+          # portable and stops fingerprint churn from evicting warm caches
+          # on every run.
+          toolchain: nightly-2026-08-27
+
+      - id: cache-week
+        name: Weekly cache rotation suffix
+        run: echo "week=$(date -u +%GW%V)" >> "$GITHUB_OUTPUT"
 
       - id: cache-cargo-fuzz
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cargo/bin
-          key: cargo-fuzz-${{ env.CARGO_FUZZ_VERSION }}-${{ runner.os }}
+          # Dedicated --root, physically separated from the rustup proxies
+          # and from rust-cache's ~/.cargo domain: rust-cache's post-job
+          # (which runs before this action's post, post-jobs are reversed)
+          # prunes ~/.cargo/bin and once archived a cargo-fuzz-less dir
+          # (rc-md2b). The old cargo-fuzz-* key must never be reused —
+          # cache entries are immutable.
+          path: ${{ runner.temp }}/cargo-fuzz-root
+          key: cargo-fuzz-root-${{ env.CARGO_FUZZ_VERSION }}-${{ runner.os }}
 
       - id: install-cargo-fuzz
         if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
         name: Install cargo-fuzz (single install path, pinned version)
-        run: cargo install cargo-fuzz --locked --version "${CARGO_FUZZ_VERSION}"
+        run: |
+          cargo install cargo-fuzz --locked --version "${CARGO_FUZZ_VERSION}" \
+            --root "$RUNNER_TEMP/cargo-fuzz-root"
+
+      - id: cargo-fuzz-path
+        name: Put cargo-fuzz on PATH (restore or install, same location)
+        run: echo "$RUNNER_TEMP/cargo-fuzz-root/bin" >> "$GITHUB_PATH"
+
+      - id: cache-xtask
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Warm the xtask binary build (both drills share this target dir;
+          # the wrapper's instrumented builds override CARGO_TARGET_DIR
+          # explicitly, so this never touches target-fuzz). Weekly key
+          # rotation caps quota churn (e_opus amendment, rc-7rw2 closure).
+          path: ${{ runner.temp }}/xtask-build
+          key: xtask-nightly-2026-08-27-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-w${{ steps.cache-week.outputs.week }}
+          restore-keys: |
+            xtask-nightly-2026-08-27-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
 
       - id: verify-cargo-fuzz
         name: Verify cargo-fuzz version (fails the job on drift, cached or fresh)
         run: |
+          command -v cargo-fuzz || true
+          ls -l "$RUNNER_TEMP/cargo-fuzz-root/bin" || true
           cargo +nightly fuzz --version | grep -q "${CARGO_FUZZ_VERSION}"
 
       - id: rust-cache
@@ -89,7 +123,7 @@ jobs:
         run: |
           set +e
           t0=$(date +%s)
-          CARGO_TARGET_DIR="$RUNNER_TEMP/xtask-refusal-target" \
+          CARGO_TARGET_DIR="$RUNNER_TEMP/xtask-build" \
             cargo run --package xtask -- fuzz dsl_yaml \
             > "$RUNNER_TEMP/fuzz-smoke-state/refusal.log" 2>&1
           ec=$?
@@ -116,13 +150,29 @@ jobs:
         name: Create linked worktree for real runs
         run: git worktree add "$RUNNER_TEMP/fuzz-wt" HEAD
 
+      - id: cache-asan
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Scoped ASAN instrumented build cache (e_opus amendment):
+          # deps/build only — final binaries relink fast and would bloat
+          # the entry. Separate from rust-cache (which owns only
+          # registry/git here, cache-targets: false) and rotated weekly to
+          # cap quota churn against the 10 GB repo budget.
+          path: |
+            ${{ runner.temp }}/fuzz-wt/target-fuzz/x86_64-unknown-linux-gnu/release/deps
+            ${{ runner.temp }}/fuzz-wt/target-fuzz/x86_64-unknown-linux-gnu/release/build
+          key: fuzz-asan-nightly-2026-08-27-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.lock') }}-w${{ steps.cache-week.outputs.week }}
+          restore-keys: |
+            fuzz-asan-nightly-2026-08-27-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.lock') }}-
+
       - id: smoke
         name: Smoke drill (clean run from the worktree)
         run: |
           set +e
           cd "$RUNNER_TEMP/fuzz-wt"
           t0=$(date +%s)
-          cargo run --package xtask -- fuzz dsl_yaml --time "$SMOKE_TIME" > smoke.log 2>&1
+          CARGO_TARGET_DIR="$RUNNER_TEMP/xtask-build" \
+            cargo run --package xtask -- fuzz dsl_yaml --time "$SMOKE_TIME" > smoke.log 2>&1
           ec=$?
           echo "smoke $(( $(date +%s) - t0 ))s" >> "$RUNNER_TEMP/fuzz-smoke-state/durations.txt"
           detail=""
@@ -158,7 +208,8 @@ jobs:
           t0=$(date +%s)
           # 20 s is intentionally fixed and independent of inputs.time:
           # the drill wants a short bounded budget, not a long minimization.
-          cargo run --package xtask -- fuzz dsl_yaml --time 20 > tmin.log 2>&1
+          CARGO_TARGET_DIR="$RUNNER_TEMP/xtask-build" \
+            cargo run --package xtask -- fuzz dsl_yaml --time 20 > tmin.log 2>&1
           ec=$?
           echo "tmin-drill $(( $(date +%s) - t0 ))s" >> "$RUNNER_TEMP/fuzz-smoke-state/durations.txt"
           detail=""
