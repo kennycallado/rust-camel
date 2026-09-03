@@ -80,7 +80,7 @@ routes:
       # Delegate to bridges/xml (Saxon-HE 12.5 via gRPC mTLS). The
       # bridge spawns lazily on first invocation; bridge-wrapper.sh
       # writes its PID before exec'ing the real binary.
-      - to: "xslt:../shared/identity-transform.xsl"
+      - to: "xslt:shared/identity-transform.xsl"
       # Per-tick correctness signal (bd rc-2vxg I2): presence of this
       # log line proves the to:xslt step completed without throwing on
       # this tick. The smoke runner asserts ≥10 of these per artifact

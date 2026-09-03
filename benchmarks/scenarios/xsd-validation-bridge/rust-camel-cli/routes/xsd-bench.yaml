@@ -77,7 +77,7 @@ routes:
             </doc>
       # Delegate to bridges/xml (Xerces-J 2.12.2 via gRPC mTLS). The
       # bridge spawns lazily on first invocation.
-      - to: "validator:../shared/schema.xsd"
+      - to: "validator:shared/schema.xsd"
       # Per-tick correctness signal (bd rc-2vxg I2): presence of this
       # log line proves the to:validator step accepted the payload
       # without throwing on this tick (validation succeeded). The smoke

@@ -169,6 +169,18 @@ child_stderr="$work_dir/child.stderr"
 # Export BENCH_LATENCY_FILE so the CLI's bench_instrument module opens
 # this file and writes BENCH_LATENCY <id> <ns> records directly (no awk).
 export BENCH_LATENCY_FILE="$latency_file"
+# Route-bracket tick mode (bench-consol-tick 2.3): without this the CLI
+# child runs pair-mode default, which emits no BENCH_LATENCY records for
+# bridge routes — the m2 probe then times out on a healthy cell (found
+# 2026-09-03; core CLI cells got the explicit env at run.sh:1779, wrapper
+# cells missed it).
+export BENCH_LATENCY_MODE=route
+# The fixture routes use scenario-relative component URIs
+# (validator:shared/schema.xsd, xslt:shared/identity-transform.xsl):
+# the 2026-08-31 audit traversal ban rejects any `..` component, so
+# the wrapper must launch the CLI from the scenario dir for those
+# relative paths to resolve (wrapper lives at <scenario>/rust-camel-cli/).
+cd "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 
 setsid "$camel_bin" run \
     --config "$config" \
