@@ -340,8 +340,19 @@ public class BenchRoute extends RouteBuilder {
         // URL). Belt-and-suspenders for future stylesheet changes that might
         // re-introduce DOCTYPE; disallow-doctype-decl above is the primary
         // guard, this limits blast radius if that primary ever regresses.
-        reader.setProperty(
-                "http://www.oracle.com/xml/jaxp/properties/entityExpansionLimit", 100);
+        // Best-effort (standard JAXP pattern): the GraalVM-substituted Xerces
+        // under native-image does not recognize this Oracle-specific property
+        // and SAXNotRecognizedException here killed every stylesheet compile
+        // in the native build (m2 probe timeout, found 2026-09-03). Skipping
+        // it under native loses nothing: disallow-doctype-decl + the entity
+        // resolver denial + ALLOW_EXTERNAL_FUNCTIONS=false are the real
+        // guards; the JVM variant (real Xerces) still sets the cap.
+        try {
+            reader.setProperty(
+                    "http://www.oracle.com/xml/jaxp/properties/entityExpansionLimit", 100);
+        } catch (org.xml.sax.SAXNotRecognizedException | org.xml.sax.SAXNotSupportedException e) {
+            // substituted parser: property unsupported — proceed
+        }
         // Deny any external entity resolution — return an empty source.
         reader.setEntityResolver(
                 (publicId, systemId) ->
