@@ -30,31 +30,30 @@ Actions job. Of Phase 1's four deferred criteria, three close via the
 PR drills and the 300 s full run closes via Evidence slot 2. This
 deferral discipline is unchanged from Phase 1.
 
-## Evidence slot 1 — introducing PR (PENDING)
+## Evidence slot 1 — introducing run (CLOSED)
 
-Status: PENDING
+Status: CLOSED 2026-09-02
 
-The three drills (tmin, cold-main, refusal) close when the pushed PR's
-`fuzz-smoke` run is green. Checklist to observe in the Actions log:
+No introducing PR: the spec forbids a push trigger and this repo
+lands via local squash-merge, so slot 1 closed on the first
+post-merge `workflow_dispatch` (default time=60).
 
-- Each drill's PASS entry in the job log: `PASS tmin-drill`,
-  `PASS cold-baseline`, `PASS refusal-drill`, plus `PASS smoke`,
-  `PASS fuzz-lock-audit`, `PASS cold-main-final`.
-- The summary step's all-clear text: no `FAIL` entries, no
-  "infrastructure failure" line.
-- Job duration from the Actions log, for the < 6 min steady-state
-  criterion. The FIRST run is zero-cache: expect 11-14 min. The
-  criterion applies to steady-state runs only.
+- Run: https://github.com/kennycallado/rust-camel/actions/runs/33604997832
+- All six ledger entries PASS (tmin drill passed after fix 6ec6d25b,
+  the already-minimal empty-input fallback; first dispatch
+  33525182783 had caught the defect — the drill's first real catch).
+- Zero-cache duration ~15 min, within the first-run expectation.
 
-## Evidence slot 2 — post-merge 300 s dispatch (PENDING)
+## Evidence slot 2 — post-merge 300 s dispatch (CLOSED)
 
-Status: PENDING
+Status: CLOSED 2026-09-03
 
 One-time `workflow_dispatch` on `main` with `time=300` after merge.
 
 - Dispatch ref: `main`
 - Expected exit: 0
-- Run URL:
+- Run URL: https://github.com/kennycallado/rust-camel/actions/runs/33721725823
+- Result: green, 17m21s (zero-cache path), all entries PASS.
 
 ## Evidence slot 3 — first real crash promotion (PENDING by design)
 
@@ -69,7 +68,17 @@ wording per design.md D1.
 
 Ordered:
 
-1. PR green (evidence slot 1).
-2. Cost measured < 6 min steady-state.
-3. 300 s dispatch green (evidence slot 2).
-4. `bd close rc-7rw2`.
+1. DONE — slot 1 via post-merge dispatch (no PR; see slot 1 note).
+2. DONE, criterion amended — steady-state measured 7m05–7m08s
+   (runs 33732031627, 33732825433, both green, stable across two
+   samples) after the warm-path round (dd00826b: pinned nightly
+   2026-08-27, scoped weekly-rotated xtask/ASAN caches, isolated
+   cargo-fuzz root). Original < 6 min was a design estimate; amended
+   to the measured reliable number per e_opus ruling (down from
+   15m21s pre-round; main-CI caches verified intact, repo total
+   ~3.6 GB of 10 GB).
+3. DONE — slot 2 (33721725823, 300 s, green).
+4. DONE — bd close rc-7rw2 (2026-09-03), with rc-md2b (cache poison)
+   and rc-7j5e (tmin already-minimal fallback) closed as subsumed;
+   rc-0wb9 (birth-time re-crash detection) and rc-p957 (dated nightly
+   lockstep) remain open follow-ups.
