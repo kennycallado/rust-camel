@@ -23,6 +23,42 @@ handshake (`WsKernelAuth`) when the route carries a compiled security plan and p
 plan it passes through as Public with no credential extraction. Authorization runs in the pipeline
 security layer against the kernel carrier.
 
+## Client-consumer role
+
+**`WsClientConsumer`**:
+Consumer built when a route's `from:` endpoint carries `consumeAsClient=true`. It dials out to the
+endpoint's host/port/path as a WebSocket client and turns each pushed frame into one Exchange
+(`Text` → String body, `Binary` → bytes body, header `CamelWsMessageType` = `text`/`binary`;
+`Ping`/`Pong` are transparent). `consumeAsClient` is a strict boolean URI parameter, default
+`false`; absent or `false` keeps the existing server mode (`WsConsumer`), so the option is an
+applicability switch, not a third role. `heartbeatIntervalMs`/`idleTimeoutMs` do not apply in
+client mode: protocol-level pings are answered by the continuous read loop, and client-side
+heartbeat emission was deliberately excluded. Frames larger than `maxMessageSize` are dropped with a
+`warn!` and an error metric; the connection and subsequent frames keep flowing. Concurrency is
+`Sequential`; delivery goes through the bounded consumer-to-pipeline channel, so reads pause while
+the route is backpressured. Connect observability is owned solely by the retry helper
+(ADR-0066 D6/D13); frame outcomes flow through the lever-gated component-metrics facade
+(`observe("ws", "frame", failed)`).
+
+**`ClientConnState`**:
+Connection lifecycle published on a `watch` channel: `Connecting` (attempt in flight),
+`Connected` (handshake done, frames flow), `Reconnecting` (transient failure, bounded reconnect
+sequence in flight), `Exhausted` (reconnect policy exhausted). Each disconnect starts ONE fresh
+bounded sequence via `NetworkRetryPolicy` (`reconnect`/`reconnectMaxAttempts`/`reconnectDelayMs`
+URI bridging); exhaustion fails the consumer task so Route supervision sees it. Startup is
+`ConsumerStartupMode::Explicit`: `mark_ready` only after the first successful connect, fail-loud
+`Err` when the initial connect exhausts the policy. The passive `ws-client` health check reads the
+watch (no probe connections); `Connected` is healthy, every other state is unhealthy.
+
+**TLS posture**:
+Production `wss://` client connects use native root certificates (tokio-tungstenite
+`rustls-tls-native-roots` feature; connector `None`). The feature is crate-wide, so the unchanged
+producer's `connect_async` also becomes TLS-capable — an acknowledged side effect: `wss://`
+producer routes that previously failed on connect now work. Tests inject a test-CA connector for
+deterministic trust.
+
+Spec: [ws-component capability](../../../openspec/changes/ws-client-consumer/specs/ws-component/spec.md).
+
 ## Lifecycle and security invariants
 
 - `ServerRegistry::get_or_spawn` creates at most one server per port. The first registration fixes
@@ -65,5 +101,10 @@ Per ADR-0012, this component's `error!` sites are outside the handler contract:
 
 Kernel authentication rejections in `dispatch_handler` log at `warn!` and increment
 `e:ws:authn` first; the metric is the operator signal.
+
+Client-consumer oversized-frame drops log at `warn!` and increment
+`increment_errors(route_id, "ws_client_consumer")` first; the metric is the operator signal.
+Dispatch failure (route channel closed) increments the same metric and the task returns
+`Err` — no log, the error return is the signal.
 
 Each `error!` site keeps the level for loud log visibility and carries `// log-policy: outside-contract`.

@@ -58,6 +58,12 @@ struct WsUriConfig {
     )]
     send_to_all: bool,
     #[uri_param(
+        name = "consumeAsClient",
+        default = "false",
+        desc = "Consumer dials out as WebSocket client and creates one exchange per pushed frame"
+    )]
+    consume_as_client: bool,
+    #[uri_param(
         name = "heartbeatIntervalMs",
         default = "0",
         desc = "Heartbeat ping interval in milliseconds"
@@ -134,6 +140,7 @@ pub struct WsEndpointConfig {
     pub max_connections: u32,
     pub max_message_size: u32,
     pub send_to_all: bool,
+    pub consume_as_client: bool,
     pub heartbeat_interval: Duration,
     pub idle_timeout: Duration,
     pub connect_timeout: Duration,
@@ -168,6 +175,7 @@ impl std::fmt::Debug for WsEndpointConfig {
             .field("max_connections", &self.max_connections)
             .field("max_message_size", &self.max_message_size)
             .field("send_to_all", &self.send_to_all)
+            .field("consume_as_client", &self.consume_as_client)
             .field("heartbeat_interval", &self.heartbeat_interval)
             .field("idle_timeout", &self.idle_timeout)
             .field("connect_timeout", &self.connect_timeout)
@@ -196,6 +204,7 @@ impl Default for WsEndpointConfig {
             max_connections: 100,
             max_message_size: 65536,
             send_to_all: false,
+            consume_as_client: false,
             heartbeat_interval: Duration::ZERO,
             idle_timeout: Duration::ZERO,
             connect_timeout: Duration::from_secs(10),
@@ -326,6 +335,14 @@ impl WsEndpointConfig {
                 ))
             })?;
             cfg.send_to_all = v;
+        }
+        if let Some(raw) = params.get("consumeAsClient") {
+            let v = raw.parse::<bool>().map_err(|_| {
+                CamelError::InvalidUri(format!(
+                    "consumeAsClient must be a boolean ('true' or 'false'), got '{raw}'"
+                ))
+            })?;
+            cfg.consume_as_client = v;
         }
         if let Some(raw) = params.get("heartbeatIntervalMs") {
             let v = raw.parse::<u64>().map_err(|_| {
@@ -604,6 +621,48 @@ mod config_validation_tests {
         assert!(err.to_string().contains("binaryPayload"));
     }
 
+    // WS-020: consumeAsClient parsing
+    #[test]
+    fn consume_as_client_parses_true() {
+        let cfg =
+            WsEndpointConfig::from_uri("ws://localhost:8080/echo?consumeAsClient=true").unwrap();
+        assert!(cfg.consume_as_client);
+    }
+
+    #[test]
+    fn consume_as_client_parses_false() {
+        let cfg =
+            WsEndpointConfig::from_uri("ws://localhost:8080/echo?consumeAsClient=false").unwrap();
+        assert!(!cfg.consume_as_client);
+    }
+
+    #[test]
+    fn consume_as_client_defaults_false() {
+        let cfg = WsEndpointConfig::from_uri("ws://localhost:8080/echo").unwrap();
+        assert!(!cfg.consume_as_client);
+    }
+
+    #[test]
+    fn consume_as_client_invalid_rejected() {
+        let err =
+            WsEndpointConfig::from_uri("ws://localhost:8080/echo?consumeAsClient=yes").unwrap_err();
+        assert!(err.to_string().contains("consumeAsClient"));
+    }
+
+    #[test]
+    fn consume_as_client_in_metadata() {
+        let opts = WsEndpointConfig::uri_options();
+        assert!(
+            opts.iter().any(|o| o.name == "consumeAsClient"),
+            "uri_options() must list consumeAsClient"
+        );
+        let meta = WsEndpointConfig::metadata();
+        assert!(
+            meta.uri_options.iter().any(|o| o.name == "consumeAsClient"),
+            "metadata() must list consumeAsClient"
+        );
+    }
+
     // WS-007: subprotocols parsing
     #[test]
     fn test_from_uri_parses_subprotocols() {
@@ -800,7 +859,7 @@ mod uri_parity_tests {
     fn uri_options_count_parity() {
         assert_eq!(
             super::WsUriConfig::uri_options().len(),
-            16,
+            17,
             "WsUriConfig #[uri_param] count drifted from parser"
         );
     }

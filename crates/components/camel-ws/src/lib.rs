@@ -4,8 +4,14 @@
 //! Main modules: `bundle`, `config`, `health`.
 
 pub mod bundle;
+pub(crate) mod client_consumer;
 pub mod config;
+#[cfg(test)]
+#[path = "endpoint_wiring_tests.rs"]
+mod endpoint_wiring_tests;
 pub mod health;
+#[cfg(test)]
+pub(crate) mod test_doubles;
 pub(crate) mod tls_reload;
 
 pub use bundle::WsBundle;
@@ -36,12 +42,15 @@ use futures::{SinkExt, StreamExt};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::sync::{OnceCell, RwLock, mpsc};
+use tokio::sync::{OnceCell, RwLock, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Message as ClientWsMessage;
 use tower::Service;
+
+use client_consumer::{ClientConnState, WsClientConsumer};
+use health::ConnectionStateCheck;
 
 #[derive(Clone)]
 pub struct WsPathConfig {
@@ -948,11 +957,19 @@ impl Component for WsComponent {
         if let Some(ref v) = self.config.subprotocols {
             cfg.subprotocols = v.clone();
         }
-        let health_check = WsHealthCheck::new(cfg.host.clone(), cfg.port);
-        ctx.register_current_route_health_check(std::sync::Arc::new(health_check));
+        let conn_state_tx = if cfg.consume_as_client {
+            let (tx, rx) = watch::channel(ClientConnState::Connecting);
+            ctx.register_current_route_health_check(Arc::new(ConnectionStateCheck::new(rx)));
+            Some(tx)
+        } else {
+            let health_check = WsHealthCheck::new(cfg.host.clone(), cfg.port);
+            ctx.register_current_route_health_check(std::sync::Arc::new(health_check));
+            None
+        };
         Ok(Box::new(WsEndpoint {
             uri: uri.to_string(),
             cfg,
+            conn_state_tx,
         }))
     }
 }
@@ -1022,11 +1039,19 @@ impl Component for WssComponent {
         if let Some(ref v) = self.config.subprotocols {
             cfg.subprotocols = v.clone();
         }
-        let health_check = WsHealthCheck::new(cfg.host.clone(), cfg.port);
-        ctx.register_current_route_health_check(std::sync::Arc::new(health_check));
+        let conn_state_tx = if cfg.consume_as_client {
+            let (tx, rx) = watch::channel(ClientConnState::Connecting);
+            ctx.register_current_route_health_check(Arc::new(ConnectionStateCheck::new(rx)));
+            Some(tx)
+        } else {
+            let health_check = WsHealthCheck::new(cfg.host.clone(), cfg.port);
+            ctx.register_current_route_health_check(std::sync::Arc::new(health_check));
+            None
+        };
         Ok(Box::new(WsEndpoint {
             uri: uri.to_string(),
             cfg,
+            conn_state_tx,
         }))
     }
 }
@@ -1034,6 +1059,9 @@ impl Component for WssComponent {
 struct WsEndpoint {
     uri: String,
     cfg: WsEndpointConfig,
+    /// Client-mode only: publishes the `WsClientConsumer` connection
+    /// lifecycle consumed by `ConnectionStateCheck`. `None` in server mode.
+    conn_state_tx: Option<watch::Sender<ClientConnState>>,
 }
 
 impl Endpoint for WsEndpoint {
@@ -1045,6 +1073,18 @@ impl Endpoint for WsEndpoint {
         &self,
         rt: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Result<Box<dyn Consumer>, CamelError> {
+        if self.cfg.consume_as_client {
+            let conn_state_tx = self.conn_state_tx.clone().ok_or_else(|| {
+                CamelError::EndpointCreationFailed(
+                    "consumeAsClient requires a connection-state sender".into(),
+                )
+            })?;
+            return Ok(Box::new(WsClientConsumer::new(
+                self.cfg.client_config(),
+                rt,
+                conn_state_tx,
+            )));
+        }
         Ok(Box::new(WsConsumer::new(self.cfg.server_config(), rt)))
     }
 
@@ -1739,6 +1779,8 @@ where
 #[cfg(test)]
 mod tests {
     use camel_component_api::test_support::PanicRuntimeObservability;
+
+    use crate::test_doubles::RecordingMetrics;
 
     /// Audit 2026-08-31, F2-3: producer debug logs must not leak query tokens.
     #[test]
@@ -3531,26 +3573,10 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Recording metrics collector for testing increment_errors calls
-    // (pattern: camel-direct tests::RecordingMetrics)
+    // Recording runtime: injects a caller-owned errors collector so the test
+    // can assert on the recorded increment_errors calls after the consumer
+    // runs (double shared via crate::test_doubles).
     // -------------------------------------------------------------------
-
-    struct RecordingMetrics {
-        errors: Arc<Mutex<Vec<(String, String)>>>,
-    }
-
-    impl camel_api::MetricsCollector for RecordingMetrics {
-        fn record_exchange_duration(&self, _: &str, _: Duration) {}
-        fn increment_errors(&self, route_id: &str, error_type: &str) {
-            self.errors
-                .lock()
-                .expect("recording collector lock")
-                .push((route_id.to_string(), error_type.to_string()));
-        }
-        fn increment_exchanges(&self, _: &str) {}
-        fn set_queue_depth(&self, _: &str, _: usize) {}
-        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
-    }
 
     struct RecordingRuntime {
         metrics_collector: Arc<RecordingMetrics>,
@@ -3559,7 +3585,7 @@ mod tests {
     impl RecordingRuntime {
         fn new(errors: Arc<Mutex<Vec<(String, String)>>>) -> Self {
             Self {
-                metrics_collector: Arc::new(RecordingMetrics { errors }),
+                metrics_collector: Arc::new(RecordingMetrics::with_errors(errors)),
             }
         }
     }

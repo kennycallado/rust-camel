@@ -4,7 +4,7 @@
 
 ## Overview
 
-`camel-component-ws` adds WebSocket endpoints to rust-camel for both inbound server consumers and outbound client producers.
+`camel-component-ws` adds WebSocket endpoints to rust-camel for inbound server consumers, outbound client consumers, and outbound client producers.
 
 ## URI Format
 
@@ -16,6 +16,7 @@ wss://host:port/path[?options]
 ## Features
 
 - **Server Consumer**: accept incoming WebSocket connections and feed route exchanges
+- **Client Consumer**: dial out to a remote WebSocket server; each pushed frame becomes a route exchange (`consumeAsClient=true`)
 - **Client Producer**: connect to remote WebSocket endpoints and send/receive frames
 - **Server-send mode**: send to all local clients (broadcast) or specific connections
 - **TLS**: secure server/client URIs via `wss://` (rustls, no OpenSSL dependency)
@@ -37,6 +38,7 @@ camel-component-ws = "*"
 |-----------|---------|-------------|
 | `maxConnections` | `100` | Maximum concurrent connections for the endpoint path |
 | `maxMessageSize` | `65536` | Maximum inbound message size (bytes) |
+| `consumeAsClient` | `false` | Consumer dials out as a WebSocket client; each pushed frame becomes one exchange |
 | `sendToAll` | `false` | Default producer behavior for local server-send mode |
 | `heartbeatIntervalMs` | `0` | Ping interval in milliseconds (`0` disables heartbeat) |
 | `idleTimeoutMs` | `0` | Idle timeout in milliseconds (`0` disables timeout) |
@@ -55,7 +57,7 @@ camel-component-ws = "*"
 | `CamelWsRemoteAddress` | Consumer → route | Remote peer socket address |
 | `CamelWsSendToAll` | Route → producer | If `true`, producer broadcasts to all local clients |
 | `sendToAll` | Route → producer | Fallback for `CamelWsSendToAll` (checked if not set) |
-| `CamelWsMessageType` | Route → producer | Outbound type: `text` (default) or `binary` |
+| `CamelWsMessageType` | Route → producer; client consumer → route | Outbound type: `text` (default) or `binary`; client consumer sets it from the wire frame type |
 
 ## Usage (DSL)
 
@@ -78,6 +80,33 @@ ctx.add_route(
         .build()?
 ).await?;
 ```
+
+### WebSocket Client Consumer
+
+```rust
+let route = RouteBuilder::from("ws://127.0.0.1:9000/feeds?consumeAsClient=true")
+    .process(|ex| async move {
+        // ex.input contains the pushed frame body (String for text, bytes for binary)
+        // and CamelWsMessageType = "text" | "binary"
+        Ok(ex)
+    })
+    .build()?;
+```
+
+`consumeAsClient=true` turns the `from:` endpoint into an outbound client: the consumer dials the
+remote server and creates one exchange per pushed frame. Text frames arrive as String bodies,
+binary frames as bytes, with `CamelWsMessageType` set to `text` or `binary`; ping/pong frames are
+handled transparently. Frames larger than `maxMessageSize` are dropped (warn log + error metric)
+and the connection stays up.
+
+- **Reconnect**: on disconnect the consumer runs one fresh bounded reconnect sequence using the
+  endpoint's reconnect policy (`reconnect`, `reconnectMaxAttempts`, `reconnectDelayMs`). Frames
+  resume on the re-established connection without a route restart; policy exhaustion fails the
+  consumer task so route supervision sees it.
+- **Startup**: readiness is signalled only after the first successful connect. An unreachable
+  remote fails route start once the policy is exhausted (no silent no-op route).
+- **wss**: `wss://` client-consumer URIs work with native root certificates. As a crate-wide side
+  effect of the TLS feature, `wss://` producer routes also connect over TLS now.
 
 ### WebSocket Client Producer
 

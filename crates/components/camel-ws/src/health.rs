@@ -4,6 +4,9 @@ use camel_component_api::CamelError;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
+use tokio::sync::watch;
+
+use crate::client_consumer::ClientConnState;
 
 type ProbeFuture = Pin<Box<dyn Future<Output = Result<(), CamelError>> + Send>>;
 
@@ -77,6 +80,34 @@ impl AsyncHealthCheck for WsHealthCheck {
             Ok(Ok(())) => CheckResult::healthy(self.name()),
             Ok(Err(err)) => CheckResult::unhealthy(self.name(), &err.to_string()),
             Err(_) => CheckResult::unhealthy(self.name(), "WebSocket listener probe timed out"),
+        }
+    }
+}
+
+/// Passive health check for client-mode (`consumeAsClient=true`) endpoints:
+/// mirrors the [`crate::client_consumer::WsClientConsumer`] connection
+/// lifecycle published on its `watch` channel. Performs no network I/O —
+/// the watch state IS the probe.
+pub(crate) struct ConnectionStateCheck {
+    state_rx: watch::Receiver<ClientConnState>,
+}
+
+impl ConnectionStateCheck {
+    pub(crate) fn new(state_rx: watch::Receiver<ClientConnState>) -> Self {
+        Self { state_rx }
+    }
+}
+
+#[async_trait]
+impl AsyncHealthCheck for ConnectionStateCheck {
+    fn name(&self) -> &str {
+        "ws-client"
+    }
+
+    async fn check(&self) -> CheckResult {
+        match self.state_rx.borrow().clone() {
+            ClientConnState::Connected => CheckResult::healthy(self.name()),
+            other => CheckResult::unhealthy(self.name(), &format!("ws-client: {other:?}")),
         }
     }
 }
