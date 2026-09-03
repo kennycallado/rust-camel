@@ -12,7 +12,7 @@ path `records/index.json` (no execution environment required; the file
 is static JSON). Each published run lives in its own directory under
 `records/`, and `index.json` points to it with a relative `path`.
 
-## `run.json` — schema v1
+## `run.json` — schema v2
 
 `run.json` is the per-run record. It is deterministic: keys are sorted
 and floats use a fixed representation, so two invocations over the same
@@ -32,7 +32,7 @@ Top-level fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `schema_version` | integer | Schema version. `1` for this document. |
+| `schema_version` | integer | Schema version. `2` for this document. Version `1` records (pre-attempted-status) remain readable — see Forward compatibility. |
 | `run_id` | string | `<YYYYMMDDTHHMMSSZ>` — the launch timestamp, plain and chronological (records sort lexicographically). No sequence numbering (retired 2026-08-31: named subsets and `-v<N>` ids drifted from the owner's product definition — one command, one complete run, one record). Legacy era-1/era-2-pre ids keep the `<YYYYMMDD>-v<N>` shape. |
 | `era` | string | `"1"` or `"2"`. A string, not an integer, so the vocabulary can grow without a type change. |
 | `date` | string | ISO-8601 date of the run. |
@@ -101,6 +101,26 @@ Array of per-cell measurements. Each cell:
 | `unit` | string | Unit of the metric. Opaque string; vocabulary owned by the harness and `CONTEXT.md` (no enum in this schema). |
 | `input_sha256` | string or null | Canonical input digest via the loadgen payload contract (`sha256:` + lowercase hex). `null` when the scenario has no canonical payload contract — its measurement input is not a canonical body. |
 
+An m2 cell is either MEASURED (the shape above: latency fields, no
+`status`) or ATTEMPTED. An ATTEMPTED m2 cell carries exactly:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `scenario` | string | Scenario name. |
+| `contender` | string | Contender (system under test) name. |
+| `metric` | string | `m2`. |
+| `status` | string | `unconverged` or `attempted-timeout` — derived by the summarizer from harness-written evidence in the cell's round directories. |
+| `reason` | string | Nonempty evidence line (the verbatim harness sentinel line). |
+| `rounds` | integer | Positive count of round directories the attempt spanned. |
+
+ATTEMPTED cells carry NO latency fields (`round_values`, `median`,
+`unit`) and no `input_sha256` — no measurement happened. The publish
+gate enforces this closure: an unknown `status`, an empty/missing
+`reason`, a non-positive/non-integer `rounds`, or `status` mixed with
+latency fields is invalid and counts as MISSING (`bench publish` fails
+closed on it). Extra non-latency fields on a hand-built cell are not
+rejected by the gate (the summarizer never emits them).
+
 ### `ratios`
 
 Array of contender comparison ratios. Each ratio:
@@ -125,8 +145,15 @@ pinned as numerator so the headline row always reads
 ## Forward compatibility
 
 Consumers MUST ignore unknown fields. Producers MUST bump
-`schema_version` on any breaking change. Additive fields are minor and
-do not bump the version within v1.
+`schema_version` when a shape change would break existing consumers:
+the v1 → v2 bump (attempted-status m2 cells, 2026-09) added the
+ATTEMPTED m2 cell shape — an m2 cell with `status` instead of latency
+fields — which a v1 consumer reading every m2 cell as measured would
+mis-read. The extension is additive and one-way: measured-cell shape
+is identical to v1, v1 records remain valid and readable, and
+v2-reading tooling SHALL read v1 and v2 records (older tooling is not
+required to read v2). Additive fields are minor and do not bump the
+version within v2.
 
 ## `index.json` — versioned object
 

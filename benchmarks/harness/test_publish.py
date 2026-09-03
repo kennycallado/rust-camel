@@ -8,10 +8,13 @@ test_summarize.py which exercises the raw run-dir pipeline.
 import contextlib
 import io
 import json
+import os
+import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import summarize
 
@@ -59,8 +62,159 @@ def _metrics_cells(scenario, contenders, metrics=("m1", "m2")):
     ]
 
 
+_REASON = "warmup failed-stability: MessageBoundUnconverged"
+
+
+def _attempted_cell(scenario="split-aggregate", contender="rust-camel-lib",
+                    status="unconverged", reason=_REASON, rounds=2):
+    """ATTEMPTED m2 cell (schema_version 2): status/reason/rounds, NO
+    latency fields — the shape summarize.py emits from classified
+    attempt evidence."""
+    return {
+        "scenario": scenario,
+        "contender": contender,
+        "metric": "m2",
+        "status": status,
+        "reason": reason,
+        "rounds": rounds,
+    }
+
+
+def _split_roster():
+    return [f"split-aggregate/{c}" for c in FULL_CONTENDERS]
+
+
+def _split_cells_with_attempt(attempt_cell):
+    """Complete split-aggregate roster whose rust-camel-lib m2 cell is
+    `attempt_cell`; every other cell is measured m1+m2."""
+    others = [c for c in FULL_CONTENDERS if c != "rust-camel-lib"]
+    return (
+        _metrics_cells("split-aggregate", others)
+        + _metrics_cells("split-aggregate", ["rust-camel-lib"],
+                         metrics=("m1",))
+        + [attempt_cell]
+    )
+
+
+# Attempt-evidence sentinels, verbatim harness-written lines (the
+# artifact format is the contract — mirrors test_summarize.py).
+UNCONVERGED_EVIDENCE = (
+    "measure-a: error: warmup failed-stability: "
+    "MessageBoundUnconverged\n"
+    "status=failed reason=measure-a-error\n"
+)
+PROBE_TIMEOUT_EVIDENCE = (
+    "# probe reason: no BENCH_LATENCY within 30s timeout\n"
+)
+
+# meta.json for the e2e gap-family fixture: startup-minimal (cold-only,
+# warm n/a) + xslt-bridge (bridge roster, warm-applicable).
+E2E_META = {
+    "era": "2",
+    "git_commit": COMMIT,
+    "container_digest": None,
+    "run_id": "20260906T060000Z",
+    "scenarios": "startup-minimal,xslt-bridge",
+    "protocol": {
+        "rounds": 2,
+        "duration_secs": 10.0,
+        "warmup_secs": 2.0,
+        "order_seed": 0,
+    },
+    "host_provenance": {
+        "cpu_model": "test-cpu",
+        "cores": 8,
+        "kernel": "test-kernel",
+        "containerized": False,
+        "load": {
+            "one": 0.1,
+            "five": 0.2,
+            "fifteen": 0.3,
+        },
+    },
+}
+
+
+def make_e2e_gap_families_run(root, run_id="20260906T060000Z",
+                              with_timeout_evidence=True):
+    """Synthetic run dir for the canonical gap-family e2e (Task 3.1).
+
+    m1 evidence for EVERY roster identity: startup-minimal (full
+    roster, 8 contenders) + xslt-bridge (bridge roster, 6). xslt-bridge
+    m2: 4 measured cells (nested m2-summary.json), 1 unconverged cell
+    (nested protocol-a-summary.txt with both sentinel lines), 1
+    attempted-timeout cell (nested exit-codes.txt). With
+    `with_timeout_evidence=False` the exit-codes.txt files are omitted
+    — the timeout cell becomes evidence-less (no summary, no status).
+    """
+    run = root / run_id
+    for contender in FULL_CONTENDERS:
+        cell = run / f"startup-minimal_{contender}"
+        cell.mkdir(parents=True)
+        (cell / "samples.txt").write_text(
+            "startup-ms rss-kb\n12 900\n14 950\n", encoding="utf-8"
+        )
+    measured = (
+        "camel-quarkus-dsl-native", "camel-standalone-dsl",
+        "node-fastify", "node-native",
+    )
+    for contender in BRIDGE_CONTENDERS:
+        cell = run / f"xslt-bridge_{contender}"
+        cell.mkdir(parents=True)
+        (cell / "samples.txt").write_text(
+            "startup-ms rss-kb\n20 900\n22 950\n", encoding="utf-8"
+        )
+    for rnd in ("0", "1"):
+        for contender in measured:
+            d = run / f"m2-round-{rnd}" / "xslt-bridge" / contender
+            d.mkdir(parents=True)
+            (d / "m2-summary.json").write_text(
+                json.dumps({
+                    "median_p99_ns": 400,
+                    "round_p99s_ns": [400],
+                    "total_samples": 700,
+                    "malformed_records": 0,
+                    "is_invalidated": False,
+                }),
+                encoding="utf-8",
+            )
+        unconv = run / f"m2-round-{rnd}" / "xslt-bridge" / "rust-camel-lib"
+        unconv.mkdir(parents=True)
+        (unconv / "protocol-a-summary.txt").write_text(
+            UNCONVERGED_EVIDENCE, encoding="utf-8"
+        )
+        timeout = run / f"m2-round-{rnd}" / "xslt-bridge" / "rust-camel-cli"
+        timeout.mkdir(parents=True)
+        if with_timeout_evidence:
+            (timeout / "exit-codes.txt").write_text(
+                PROBE_TIMEOUT_EVIDENCE, encoding="utf-8"
+            )
+    return run
+
+
+def _unknown_scenario_digest_stub(root):
+    """payload-digest stub: every scenario exits 2 with `unknown
+    scenario` on stderr — the real binary's answer for scenarios
+    without a canonical payload contract (startup-minimal,
+    xslt-bridge) — so input_sha256 records null."""
+    stub = root / "stub-payload-digest.sh"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'echo "payload-digest: unknown scenario for this fixture" >&2\n'
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    stub.chmod(
+        stub.stat().st_mode
+        | stat.S_IXUSR
+        | stat.S_IXGRP
+        | stat.S_IXOTH
+    )
+    return stub
+
+
 def make_record_dir(root, run_id, date, cells=None, expected_cells=None,
-                    m2_attempted_cells=None):
+                    m2_attempted_cells=None, schema_version=1):
     """Synthetic summarized record dir: run.json + generated summary.md.
 
     `expected_cells` defaults to the roster implied by the given cells
@@ -75,7 +229,7 @@ def make_record_dir(root, run_id, date, cells=None, expected_cells=None,
             {f"{c['scenario']}/{c['contender']}" for c in cells}
         )
     record = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "run_id": run_id,
         "era": "2",
         "date": date,
@@ -127,11 +281,12 @@ class PublishTest(unittest.TestCase):
         seed_index(self.records)
 
     def _publish(self, run_id, date, cells=None, expected_cells=None,
-                 m2_attempted_cells=None):
+                 m2_attempted_cells=None, schema_version=1):
         source = make_record_dir(
             self.root, run_id, date, cells=cells,
             expected_cells=expected_cells,
             m2_attempted_cells=m2_attempted_cells,
+            schema_version=schema_version,
         )
         err = io.StringIO()
         out = io.StringIO()
@@ -359,6 +514,150 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(err, "")
 
+    # -- Attempted m2 cells (schema_version 2): the publisher
+    #    re-validates the derived shape — status/reason/rounds, no
+    #    latency fields — and invalid shapes fail closed as MISSING.
+
+    def test_publish_accepts_attempted_cells(self):
+        # One warm-applicable cell attempted (unconverged, nonempty
+        # reason, no latency fields, rounds=2): publish accepts and
+        # the success output splits measured vs attempted.
+        rc, out, err = self._publish(
+            "20260905T140000Z", "2026-09-05",
+            cells=_split_cells_with_attempt(_attempted_cell()),
+            expected_cells=_split_roster(),
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn("attempted", out)
+        self.assertIn("present m2 8/8: 7 measured, 1 attempted", out)
+        published = self.records / "20260905T140000Z"
+        self.assertTrue((published / "run.json").is_file())
+        self.assertTrue((published / "summary.md").is_file())
+        index = json.loads(
+            (self.records / "index.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            [r["run_id"] for r in index["runs"]], ["20260905T140000Z"]
+        )
+
+    def test_publish_rejects_unknown_status(self):
+        # An unknown status is not a publishable shape: fail closed
+        # naming the cell.
+        rc, _, err = self._publish(
+            "20260905T140001Z", "2026-09-05",
+            cells=_split_cells_with_attempt(_attempted_cell(status="weird")),
+            expected_cells=_split_roster(),
+        )
+        self.assertNotEqual(rc, 0)
+        self.assertIn("split-aggregate/rust-camel-lib/m2", err)
+
+    def test_publish_rejects_status_with_latency(self):
+        # status mixed with ANY latency field is invalid.
+        for i, (field, value) in enumerate((
+            ("unit", "ns"),
+            ("median", 11.0),
+            ("round_values", [10.0, 12.0]),
+        )):
+            with self.subTest(field=field):
+                cell = _attempted_cell()
+                cell[field] = value
+                rc, _, err = self._publish(
+                    f"20260905T1401{i:02d}Z", "2026-09-05",
+                    cells=_split_cells_with_attempt(cell),
+                    expected_cells=_split_roster(),
+                )
+                self.assertNotEqual(rc, 0)
+                self.assertIn("split-aggregate/rust-camel-lib/m2", err)
+
+    def test_publish_rejects_empty_reason(self):
+        rc, _, err = self._publish(
+            "20260905T140003Z", "2026-09-05",
+            cells=_split_cells_with_attempt(_attempted_cell(reason="")),
+            expected_cells=_split_roster(),
+        )
+        self.assertNotEqual(rc, 0)
+        self.assertIn("split-aggregate/rust-camel-lib/m2", err)
+
+    def test_publish_rejects_bare_metric_cell(self):
+        # A cell carrying only identity + metric validates nothing.
+        cell = {
+            "scenario": "split-aggregate",
+            "contender": "rust-camel-lib",
+            "metric": "m2",
+        }
+        rc, _, err = self._publish(
+            "20260905T140004Z", "2026-09-05",
+            cells=_split_cells_with_attempt(cell),
+            expected_cells=_split_roster(),
+        )
+        self.assertNotEqual(rc, 0)
+        self.assertIn("split-aggregate/rust-camel-lib/m2", err)
+
+    def test_publish_rejects_attempted_without_valid_rounds(self):
+        # rounds must be a positive integer — missing, 0, True (a
+        # bool) and "2" (a str) are all invalid.
+        variants = {"missing": None, "zero": 0, "bool": True, "str": "2"}
+        for i, (name, rounds) in enumerate(variants.items()):
+            with self.subTest(rounds=name):
+                cell = _attempted_cell()
+                if rounds is None:
+                    del cell["rounds"]
+                else:
+                    cell["rounds"] = rounds
+                rc, _, err = self._publish(
+                    f"20260905T1402{i:02d}Z", "2026-09-05",
+                    cells=_split_cells_with_attempt(cell),
+                    expected_cells=_split_roster(),
+                )
+                self.assertNotEqual(rc, 0)
+                self.assertIn("split-aggregate/rust-camel-lib/m2", err)
+
+    # -- Back-compat: the extension is additive and one-way; v1
+    #    records stay readable by v2 tooling.
+
+    def test_v1_record_still_validates(self):
+        # A complete schema_version 1 record (all measured, no status
+        # fields) publishes and checks accepted, unchanged.
+        cells = _metrics_cells("t2-json", FULL_CONTENDERS)
+        rc, out, err = self._publish(
+            "20260901-v5", "2026-09-01", cells=cells, schema_version=1
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = summarize.main(["--check", str(self.records)])
+        self.assertEqual(rc, 0)
+
+    def test_mixed_v1_v2_index_rebuild(self):
+        # One v1 + one v2 record (with an attempted cell) in the same
+        # records dir: the rebuild succeeds, index_schema_version stays
+        # 1, both entries present.
+        rc1, _, err1 = self._publish(
+            "20260901-v5", "2026-09-01",
+            cells=_metrics_cells("t2-json", FULL_CONTENDERS),
+            schema_version=1,
+        )
+        self.assertEqual(rc1, 0)
+        self.assertEqual(err1, "")
+        rc2, _, err2 = self._publish(
+            "20260905T140000Z", "2026-09-05",
+            cells=_split_cells_with_attempt(_attempted_cell()),
+            expected_cells=_split_roster(),
+            schema_version=2,
+        )
+        self.assertEqual(rc2, 0)
+        self.assertEqual(err2, "")
+        index = json.loads(
+            (self.records / "index.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(index["index_schema_version"], 1)
+        self.assertEqual(
+            [r["run_id"] for r in index["runs"]],
+            ["20260901-v5", "20260905T140000Z"],
+        )
+
     def test_index_dir_crosscheck(self):
         # A run dir without an index entry is an orphan: --check must
         # exit 1 naming it.
@@ -382,6 +681,113 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertNotIn("not implemented", proc.stderr)
         self.assertIn("usage", proc.stderr.lower())
+
+    # -- End-to-end replica of the canonical-run gap families (Task
+    #    3.1): the REAL summarize -> publish chain over a synthetic run
+    #    dir — no hand-built run.json. Chain-guards: both FAIL if the
+    #    classifier wiring (summarize) or the attempted-shape gate
+    #    (publish) is broken.
+
+    def _summarize_e2e(self, run, run_id):
+        """Real summarize path (main(), summarize mode) over the
+        synthetic run dir; returns the summarized record dir."""
+        meta_path = self.root / "meta.json"
+        meta_path.write_text(
+            json.dumps(dict(E2E_META, run_id=run_id)), encoding="utf-8"
+        )
+        out = self.root / f"summarized-{run_id}"
+        err = io.StringIO()
+        with mock.patch.dict(
+            os.environ,
+            {"BENCH_PAYLOAD_DIGEST_BIN": str(
+                _unknown_scenario_digest_stub(self.root))},
+        ):
+            with contextlib.redirect_stderr(err):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = summarize.main([
+                        "--run-dir", str(run),
+                        "--meta", str(meta_path),
+                        "--out-dir", str(out),
+                    ])
+        self.assertEqual(rc, 0, err.getvalue())
+        return out
+
+    def test_e2e_canonical_gap_families_publish(self):
+        # startup-minimal (cold-only) + xslt-bridge (6 contenders):
+        # m1 everywhere; xslt-bridge m2 = 4 measured + 1 unconverged +
+        # 1 attempted-timeout. Summarize -> publish: exit 0, split
+        # line exact, both attempted statuses in run.json, one index
+        # entry.
+        run = make_e2e_gap_families_run(self.root)
+        source = self._summarize_e2e(run, "20260906T060000Z")
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with contextlib.redirect_stdout(out):
+                rc = summarize.main([
+                    "--publish",
+                    "--run-dir", str(source),
+                    "--records-dir", str(self.records),
+                ])
+        self.assertEqual(rc, 0, err.getvalue())
+        self.assertIn(
+            "present m2 6/6: 4 measured, 2 attempted", out.getvalue()
+        )
+        published = self.records / "20260906T060000Z"
+        record = json.loads(
+            (published / "run.json").read_text(encoding="utf-8")
+        )
+        by_identity = {
+            (c["scenario"], c["contender"]): c
+            for c in record["cells"] if c["metric"] == "m2"
+        }
+        unconv = by_identity[("xslt-bridge", "rust-camel-lib")]
+        self.assertEqual(unconv["status"], "unconverged")
+        self.assertEqual(
+            unconv["reason"], "status=failed reason=measure-a-error"
+        )
+        self.assertEqual(unconv["rounds"], 2)
+        timeout = by_identity[("xslt-bridge", "rust-camel-cli")]
+        self.assertEqual(timeout["status"], "attempted-timeout")
+        self.assertEqual(
+            timeout["reason"],
+            "# probe reason: no BENCH_LATENCY within 30s timeout",
+        )
+        self.assertEqual(timeout["rounds"], 2)
+        for latency in ("round_values", "median", "unit"):
+            self.assertNotIn(latency, unconv)
+            self.assertNotIn(latency, timeout)
+        index = json.loads(
+            (self.records / "index.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            [r["run_id"] for r in index["runs"]], ["20260906T060000Z"]
+        )
+
+    def test_e2e_evidenceless_gap_blocks(self):
+        # Same fixture minus the exit-codes.txt evidence: the timeout
+        # cell is evidence-less (no summary, no status) -> publish
+        # exits nonzero naming exactly that cell.
+        run = make_e2e_gap_families_run(
+            self.root, run_id="20260906T070000Z",
+            with_timeout_evidence=False,
+        )
+        source = self._summarize_e2e(run, "20260906T070000Z")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = summarize.main([
+                "--publish",
+                "--run-dir", str(source),
+                "--records-dir", str(self.records),
+            ])
+        self.assertNotEqual(rc, 0)
+        gaps = [
+            line for line in err.getvalue().splitlines()
+            if line.startswith("error:   missing ")
+        ]
+        self.assertEqual(
+            gaps, ["error:   missing xslt-bridge/rust-camel-cli/m2"]
+        )
 
 
 if __name__ == "__main__":

@@ -144,7 +144,10 @@ $ python3 benchmarks/harness/summarize.py --check benchmarks/records
 - `summarize` builds `run.json` + `summary.md` into `--out-dir`;
   `run_id` comes straight from meta (the launch timestamp).
 - `publish` copies the record into `records/` and rebuilds
-  `records/index.json`.
+  `records/index.json`. On success it prints a
+  `present m2 <P>/<T>` split line: attempted m2 cells
+  (`unconverged` / `attempted-timeout`, derived from on-disk
+  evidence) count as present with status.
 - `--check` is the mechanical post-run guard (index/dir identity,
   digest pinning, summary regeneration).
 - If you overrode harness flags (for example `--rounds`), edit
@@ -196,11 +199,9 @@ as bd rc-f4po. No earlier task discharges the postcondition.
 - [ ] (b) `records/index.json` gained its first era-2 entry: `era`
       `"2"`, `run_id` in `<YYYYMMDD>-v5` form (date-first, sequence 5).
 - [ ] (c) The published `run.json` conforms to `records/SCHEMA.md`:
-      `schema_version` 1; every top-level key present;
-      `container_digest` is the `sha256:<64hex>` form recorded in
-      `runner/DIGEST`; `protocol.order_seed` present; every cell
-      carries `input_sha256` (a digest, or a documented `null` for
-      scenarios without a canonical payload contract).
+      every top-level key present; `container_digest` is the
+      `sha256:<64hex>` form recorded in `runner/DIGEST`;
+      `protocol.order_seed` present.
 - [ ] (d) Gauges ON evidence: metric fields in the cells include the
       gauge readings (memory gauges enabled per ADR-0066 — section 6).
 - [ ] (e) Summary tables contain no number absent from `run.json` —

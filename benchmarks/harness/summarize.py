@@ -55,9 +55,12 @@ Three modes (see `main`):
   scenario/contender/metric line to stderr and exits 1 (a cell with
   n>0 records behind `status=failed insufficient-samples` counts as
   PRESENT m2 data — `m2_attempted_cells`; that status shape is LEGACY,
-  pre-adaptive-window run dirs only). A duplicate
-  run_id with different content is refused; identical content is a
-  no-op success.
+  pre-adaptive-window run dirs only; a valid ATTEMPTED m2 cell —
+  status/reason/rounds, no latency fields, see `m2_cell_present` —
+  counts as PRESENT too). On success it prints a
+  `present m2 <P>/<T>: <M> measured, <A> attempted` split line. A
+  duplicate run_id with different content is refused; identical
+  content is a no-op success.
 - check: `--check <records-dir>` cross-checks index.json against the
   run dirs (every run dir must have an index entry, every entry must
   resolve to a run dir, and each entry's date/era/git_commit must
@@ -72,7 +75,7 @@ Three modes (see `main`):
   (exit 1), never a silent green. Zero run.json files with an empty
   index is a green no-op.
 
-Contract: benchmarks/records/SCHEMA.md (run.json v1, index.json v1).
+Contract: benchmarks/records/SCHEMA.md (run.json v2, index.json v1).
 Stdlib only.
 """
 from __future__ import annotations
@@ -89,7 +92,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 INDEX_SCHEMA_VERSION = 1
 
 # benchmarks/harness/summarize.py -> benchmarks/records
@@ -127,6 +130,22 @@ WARM_APPLICABLE = {
     "xsd-validation-bridge",
     "xslt-bridge",
 }
+
+# Publishable ATTEMPTED m2 cell statuses (run.json schema_version 2,
+# additive one-way extension of the v1 measured shape). Status is
+# granted ONLY for exact harness-written evidence — see
+# `classify_m2_attempt`; the publisher re-validates the derived shape.
+ATTEMPT_STATUSES = ("unconverged", "attempted-timeout")
+
+# Attempt-evidence sentinels, verbatim harness-written lines (the
+# artifact format is the contract):
+# - protocol-a-summary.txt: warmup failed-stability + the failed
+#   status line (BOTH must appear — unconverged warmup).
+# - exit-codes.txt: the probe timed out before any BENCH_LATENCY
+#   record (attempted-timeout).
+_UNCONVERGED_MARKER = "warmup failed-stability: MessageBoundUnconverged"
+_UNCONVERGED_STATUS = "status=failed reason=measure-a-error"
+_ATTEMPT_TIMEOUT_MARKER = "# probe reason: no BENCH_LATENCY within 30s timeout"
 
 # Registered contender roster, mirroring run.sh SCENARIO_ARTIFACT_SET:
 # full scenarios measure 8 contenders; bridge scenarios
@@ -509,6 +528,95 @@ def _protocol_a_round_p99s(path, identity):
     return vals
 
 
+def _attempt_reason_line(text, marker):
+    """First line containing `marker` (stripped), or None."""
+    for line in text.splitlines():
+        if marker in line:
+            return line.strip()
+    return None
+
+
+def classify_m2_attempt(cell_round_dirs, identity):
+    """Classify harness-written attempt evidence for one m2 cell.
+
+    `cell_round_dirs` lists every existing round directory of the cell
+    (nested and flat walk layouts alike); `identity` is the
+    `<scenario>/<contender>` name used in warnings. Rules — exact
+    substrings, never guesses:
+
+    - `unconverged`: some round dir's protocol-a-summary.txt contains
+      BOTH `warmup failed-stability: MessageBoundUnconverged` AND
+      `status=failed reason=measure-a-error`; reason is the exact
+      status=failed line.
+    - `attempted-timeout`: some round dir's exit-codes.txt contains
+      `# probe reason: no BENCH_LATENCY within 30s timeout`; reason is
+      that exact line.
+
+    Returns `{"status": ..., "reason": ...}` for exactly one matched
+    status, else None (the cell stays absent/MISSING). Fail-closed:
+    both statuses across rounds (conflict), or evidence files matching
+    neither rule (malformed/unrecognized), warn loudly naming the cell
+    identity and artifact paths and return None — no publishable
+    unknown status exists. Round dirs with no evidence files at all
+    return None silently (a plain gap; the publish gate names it).
+    """
+    found = {}  # status -> (reason, artifact path); first match wins
+    evidence = []
+    for rdir in sorted(Path(p) for p in cell_round_dirs):
+        ppath = rdir / "protocol-a-summary.txt"
+        if ppath.is_file():
+            evidence.append(ppath)
+            try:
+                text = ppath.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                text = ""
+            if (
+                "unconverged" not in found
+                and _UNCONVERGED_MARKER in text
+                and _UNCONVERGED_STATUS in text
+            ):
+                found["unconverged"] = (
+                    _attempt_reason_line(text, _UNCONVERGED_STATUS),
+                    ppath,
+                )
+        epath = rdir / "exit-codes.txt"
+        if epath.is_file():
+            evidence.append(epath)
+            try:
+                text = epath.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                text = ""
+            if (
+                "attempted-timeout" not in found
+                and _ATTEMPT_TIMEOUT_MARKER in text
+            ):
+                found["attempted-timeout"] = (
+                    _attempt_reason_line(text, _ATTEMPT_TIMEOUT_MARKER),
+                    epath,
+                )
+    if len(found) > 1:
+        artifacts = ", ".join(
+            str(found[status][1])
+            for status in ATTEMPT_STATUSES
+            if status in found
+        )
+        _warn(
+            f"cell {identity}/m2: conflicting attempt evidence "
+            f"({' + '.join(sorted(found))}) in {artifacts}; leaving gap"
+        )
+        return None
+    if found:
+        status, (reason, _) = next(iter(found.items()))
+        return {"status": status, "reason": reason}
+    if evidence:
+        _warn(
+            f"cell {identity}/m2: attempt evidence matches no known "
+            f"status in {', '.join(str(p) for p in evidence)}; "
+            "leaving gap"
+        )
+    return None
+
+
 def _load_m2_round_cells(run_dir, digest_cache, scenarios):
     """(m2 cells, attempted identities) from the REAL per-round m2
     layout run.sh writes for BOTH protocols:
@@ -532,6 +640,15 @@ def _load_m2_round_cells(run_dir, digest_cache, scenarios):
     is recorded in the attempted identities instead (see
     [`_m2_txt_attempted_with_data`]); a flat protocol-A dir without a
     parseable sentinel warns and stays a gap.
+
+    Returns (measured m2 cells, LEGACY attempted identities,
+    ATTEMPTED m2 cells). Every warm-applicable identity with at least
+    one round dir in either layout but zero parsed summaries has its
+    on-disk evidence classified (`classify_m2_attempt`); a non-None
+    verdict appends an attempted cell `{scenario, contender,
+    metric: "m2", status, reason, rounds}` — NO latency fields.
+    Measured identities keep today's shape; attempt evidence is
+    ignored for them.
     """
     run_dir = Path(run_dir)
     rounds = []
@@ -542,6 +659,7 @@ def _load_m2_round_cells(run_dir, digest_cache, scenarios):
     rounds.sort()
     values = {}  # identity -> merged round p99s
     attempted = set()
+    round_dirs = {}  # identity -> [round dir Paths, walk order]
     for _, rdir in rounds:
         sdirs = sorted(p for p in rdir.iterdir() if p.is_dir())
         for sdir in sdirs:
@@ -561,6 +679,7 @@ def _load_m2_round_cells(run_dir, digest_cache, scenarios):
                     )
                     continue
                 identity = f"{scenario}/{contender}"
+                round_dirs.setdefault(identity, []).append(sdir)
                 vals = _protocol_a_round_p99s(
                     sdir / "protocol-a-summary.txt", identity
                 )
@@ -569,6 +688,7 @@ def _load_m2_round_cells(run_dir, digest_cache, scenarios):
                 continue
             for cdir in cdirs:
                 identity = f"{sdir.name}/{cdir.name}"
+                round_dirs.setdefault(identity, []).append(cdir)
                 data = None
                 jpath = cdir / "m2-summary.json"
                 if jpath.is_file():
@@ -621,7 +741,28 @@ def _load_m2_round_cells(run_dir, digest_cache, scenarios):
                 digest_cache, scenario, "shared"
             ),
         })
-    return cells, sorted(attempted)
+    # Attempted cells: warm-applicable identities with round dirs but
+    # zero parsed summaries get their evidence classified. Measured
+    # identities (in `values`) keep today's shape — evidence ignored.
+    attempt_cells = []
+    for identity, rdirs in sorted(round_dirs.items()):
+        if identity in values:
+            continue
+        if identity.partition("/")[0] not in WARM_APPLICABLE:
+            continue
+        verdict = classify_m2_attempt(rdirs, identity)
+        if verdict is None:
+            continue
+        scenario, _, contender = identity.partition("/")
+        attempt_cells.append({
+            "scenario": scenario,
+            "contender": contender,
+            "metric": "m2",
+            "status": verdict["status"],
+            "reason": verdict["reason"],
+            "rounds": len(rdirs),
+        })
+    return cells, sorted(attempted), attempt_cells
 
 
 def _meta_scenarios(meta):
@@ -693,7 +834,11 @@ def build_record(run_dir, meta):
     [`_load_m2_round_cells`]) and
     insufficient-samples-with-data cells (LEGACY shape,
     pre-adaptive-window run dirs only) are persisted as
-    `m2_attempted_cells`. Completeness is NOT judged here — publish
+    `m2_attempted_cells`. Warm-applicable m2 identities whose evidence
+    classifies (unconverged / attempted-timeout sentinels, see
+    `classify_m2_attempt`) enter `cells` as ATTEMPTED cells
+    (status/reason/rounds, no latency fields; schema_version 2).
+    Completeness is NOT judged here — publish
     fails closed on gaps; summarize stays usable on partial/smoke
     runs. Ratios are NOT computed here — main() fills them via
     compute_ratios so the builder stays subprocess-free and
@@ -711,7 +856,7 @@ def build_record(run_dir, meta):
         run_id = f"{compact}-v{run_seq}"
     digest_cache = {}
     scenarios = set(_meta_scenarios(meta))
-    m2_cells, m2_attempted = _load_m2_round_cells(
+    m2_cells, m2_attempted, m2_attempt_cells = _load_m2_round_cells(
         run_dir, digest_cache, scenarios
     )
     try:
@@ -720,17 +865,20 @@ def build_record(run_dir, meta):
         # A pure-m2 run dir holds no flat m1/m3/m4 evidence at all —
         # the nested m2 walk above IS the record content. Any other
         # 0-cell run dir stays a loud error (never an empty record).
-        if not m2_cells and not m2_attempted:
+        if not m2_cells and not m2_attempted and not m2_attempt_cells:
             raise
         cells = []
     roster = expected_roster(sorted(scenarios))
+    # Attempted cells carry status/reason/rounds instead of the
+    # measured latency fields, so the sort key falls back to "" for
+    # the shape-only variant/payload_class keys.
     cells = sorted(
-        cells + m2_cells,
+        cells + m2_cells + m2_attempt_cells,
         key=lambda c: (
             c["scenario"],
             c["contender"],
-            c["variant"],
-            c["payload_class"],
+            c.get("variant", ""),
+            c.get("payload_class", ""),
             c["metric"],
         ),
     )
@@ -873,15 +1021,44 @@ def emit_summary(record, out_dir):
             by_metric[metric],
             key=lambda c: (c["scenario"], c["contender"]),
         )
-        lines.append(f"## Metric {metric} ({rows[0]['unit']})")
-        lines.append("")
-        lines.append("| scenario | contender | median |")
-        lines.append("| --- | --- | --- |")
-        for c in rows:
+        # Measured rows carry a median. Valid attempted cells render
+        # in the attempted section below. A cell with neither (an
+        # invalid hand-built shape) renders nowhere here — publish
+        # rejects it, so it never reaches a published summary.
+        measured = [
+            c for c in rows if "status" not in c and "median" in c
+        ]
+        attempted = [c for c in rows if "status" in c]
+        if measured:
             lines.append(
-                f"| {c['scenario']} | {c['contender']} | {_fmt(c['median'])} |"
+                f"## Metric {metric} ({measured[0].get('unit', '')})"
             )
-        lines.append("")
+            lines.append("")
+            lines.append("| scenario | contender | median |")
+            lines.append("| --- | --- | --- |")
+            for c in measured:
+                lines.append(
+                    f"| {c['scenario']} | {c['contender']}"
+                    f" | {_fmt(c['median'])} |"
+                )
+            lines.append("")
+        if attempted:
+            # ATTEMPTED cells (schema_version 2): no numeric columns —
+            # identity, derived status and the exact sentinel reason
+            # line, sorted by scenario/contender after the measured
+            # rows of this metric. Status/reason via .get: invalid
+            # hand-built shapes render, publish rejects them.
+            lines.append(f"## Metric {metric} attempted")
+            lines.append("")
+            lines.append("| cell | metric | status | reason |")
+            lines.append("| --- | --- | --- | --- |")
+            for c in attempted:
+                lines.append(
+                    f"| {c['scenario']}/{c['contender']} | {metric}"
+                    f" | attempted ({c.get('status', '')})"
+                    f" | {c.get('reason', '')} |"
+                )
+            lines.append("")
     if record["ratios"]:
         lines.append("## Ratios")
         lines.append("")
@@ -992,6 +1169,37 @@ def _dir_snapshot(path):
     }
 
 
+def m2_cell_present(cell: dict) -> bool:
+    """Valid m2 cell shape (schema_version 2): MEASURED or ATTEMPTED.
+
+    MEASURED — `round_values`, `median` and `unit` all present and no
+    `status` field (identical to the v1 shape). ATTEMPTED — `status`
+    in ATTEMPT_STATUSES, a nonempty string `reason`, a positive
+    integer `rounds` count (bools excluded), and NO latency fields.
+    Everything else — unknown status, empty/missing reason, status
+    mixed with latency fields, missing/non-positive/boolean rounds, a
+    bare {scenario, contender, metric} cell — is invalid and counts
+    as MISSING (the publish gate fails closed on it).
+    """
+    if not isinstance(cell, dict):
+        return False
+    latency = ("round_values", "median", "unit")
+    has_latency = any(key in cell for key in latency)
+    if "status" not in cell:
+        return all(key in cell for key in latency)
+    if cell.get("status") not in ATTEMPT_STATUSES or has_latency:
+        return False
+    reason = cell.get("reason")
+    rounds = cell.get("rounds")
+    return (
+        isinstance(reason, str)
+        and bool(reason)
+        and isinstance(rounds, int)
+        and not isinstance(rounds, bool)
+        and rounds > 0
+    )
+
+
 def completeness_gaps(record):
     """Missing `<scenario>/<contender>/<metric>` names vs the roster.
 
@@ -1000,35 +1208,88 @@ def completeness_gaps(record):
     warm concept applies (WARM_APPLICABLE; `startup-minimal` is
     cold-only — n/a). A wholly absent cell yields its m1 line (and its
     m2 line for warm scenarios): validation runs against the EXPECTED
-    roster, so a fully missing scenario still has every cell named. A
-    cell listed in `m2_attempted_cells` (n>0 records behind a failed
-    sample-count status — LEGACY shape, pre-adaptive-window run dirs
-  only) counts as having m2 data. Returns
-    the gap names in roster order (deterministic).
+    roster, so a fully missing scenario still has every cell named.
+    An m2 identity is present iff one of its m2 cells has a valid
+    shape (see [`m2_cell_present`]) or the identity is listed in
+    `m2_attempted_cells` (n>0 records behind a failed sample-count
+    status — LEGACY shape, pre-adaptive-window run dirs only). An
+    invalid attempted shape (unknown status, empty reason, status
+    mixed with latency fields) counts as MISSING. Returns the gap
+    names in roster order (deterministic).
     """
     expected = record.get("expected_cells") or []
     attempted = set(record.get("m2_attempted_cells") or [])
-    observed = {}  # identity -> {metric}
+    observed = {}  # identity -> {metric: [cell, ...]}
     for cell in record.get("cells", []):
         scenario = cell.get("scenario")
         contender = cell.get("contender")
         if not scenario or not contender:
             continue
         key = f"{scenario}/{contender}"
-        observed.setdefault(key, set()).add(cell.get("metric"))
+        observed.setdefault(key, {}).setdefault(
+            cell.get("metric"), []
+        ).append(cell)
     gaps = []
     for identity in expected:
         scenario = str(identity).partition("/")[0]
-        metrics = observed.get(identity, set())
+        metrics = observed.get(identity, {})
         if "m1" not in metrics:
             gaps.append(f"{identity}/m1")
+        m2_present = any(
+            m2_cell_present(cell) for cell in metrics.get("m2", [])
+        )
         if (
             scenario in WARM_APPLICABLE
-            and "m2" not in metrics
+            and not m2_present
             and identity not in attempted
         ):
             gaps.append(f"{identity}/m2")
     return gaps
+
+
+def _m2_presence_counts(record):
+    """(total, measured, attempted) over the warm-applicable roster.
+
+    total counts every `expected_cells` identity whose scenario is
+    warm-applicable (WARM_APPLICABLE). measured counts identities
+    present through a valid MEASURED m2 cell (attempt evidence is
+    ignored — measured wins); attempted counts those present through
+    a valid ATTEMPTED m2 cell or the LEGACY `m2_attempted_cells`
+    list. On a publishable (complete) record,
+    measured + attempted == total.
+    """
+    expected = record.get("expected_cells") or []
+    legacy = set(record.get("m2_attempted_cells") or [])
+    m2_by_identity = {}
+    for cell in record.get("cells", []):
+        if cell.get("metric") != "m2":
+            continue
+        identity = f"{cell.get('scenario')}/{cell.get('contender')}"
+        m2_by_identity.setdefault(identity, []).append(cell)
+    total = measured = attempted = 0
+    for identity in expected:
+        if str(identity).partition("/")[0] not in WARM_APPLICABLE:
+            continue
+        total += 1
+        present = [
+            cell for cell in m2_by_identity.get(identity, [])
+            if m2_cell_present(cell)
+        ]
+        if any("status" not in cell for cell in present):
+            measured += 1
+        elif present or identity in legacy:
+            attempted += 1
+    return total, measured, attempted
+
+
+def _print_m2_split(record):
+    """Success-output split line: present warm-applicable m2 cells,
+    measured vs attempted."""
+    total, measured, attempted = _m2_presence_counts(record)
+    print(
+        f"present m2 {measured + attempted}/{total}: "
+        f"{measured} measured, {attempted} attempted"
+    )
 
 
 def publish_run(record_dir, records_dir):
@@ -1101,6 +1362,7 @@ def publish_run(record_dir, records_dir):
         index = load_index(records_dir)
         if any(r.get("run_id") == run_id for r in index["runs"]):
             print(f"already published, identical: {dest}")
+            _print_m2_split(record)
             return 0
         entry = index_entry(record)
         runs = [r for r in index["runs"] if r.get("run_id") != run_id]
@@ -1111,6 +1373,7 @@ def publish_run(record_dir, records_dir):
         ) as f:
             f.write(_dump(index))
         print(f"already published, identical: {dest}")
+        _print_m2_split(record)
         print(f"reconciled missing index entry for {run_id}")
         return 0
     records_dir.mkdir(parents=True, exist_ok=True)
@@ -1125,6 +1388,7 @@ def publish_run(record_dir, records_dir):
     ) as f:
         f.write(_dump(index))
     print(f"published {dest}")
+    _print_m2_split(record)
     print(f"updated {records_dir / 'index.json'}")
     return 0
 

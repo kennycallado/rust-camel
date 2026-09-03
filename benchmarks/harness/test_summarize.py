@@ -127,6 +127,72 @@ def _protocol_a_summary(p99_ns):
     )
 
 
+# Real attempt-evidence shapes (design bench-m2-attempted-status: the
+# artifact format is the contract, replicated verbatim).
+UNCONVERGED_EVIDENCE = (
+    "measure-a: error: warmup failed-stability: "
+    "MessageBoundUnconverged\n"
+    "status=failed reason=measure-a-error\n"
+)
+UNCONVERGED_MALFORMED_EVIDENCE = (
+    "measure-a: error: warmup failed-stability: "
+    "MessageBoundUnconverged\n"
+)
+PROBE_TIMEOUT_EVIDENCE = (
+    "# probe reason: no BENCH_LATENCY within 30s timeout\n"
+)
+
+
+def make_full_roster_m2_run(root, run_id="20260906T010000Z"):
+    r"""http-server,t2-json run: m1 for every roster identity, m2
+    MEASURED for every warm cell except http-server/
+    camel-standalone-dsl, whose FLAT round dirs
+    m2-round-{0,1}/http-server_camel-standalone-dsl/ carry the real
+    unconverged protocol-A sentinel lines and no m2-summary.json."""
+    run = root / run_id
+    roster = (
+        "camel-quarkus-dsl-native", "camel-quarkus-yaml-native",
+        "camel-standalone-dsl", "camel-standalone-yaml",
+        "node-fastify", "node-native", "rust-camel-cli",
+        "rust-camel-lib",
+    )
+    for scenario in ("http-server", "t2-json"):
+        for contender in roster:
+            cell = run / f"{scenario}_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "samples.txt").write_text(
+                "startup-ms rss-kb\n12 900\n14 950\n", encoding="utf-8"
+            )
+    for contender in roster:
+        if contender == "camel-standalone-dsl":
+            continue  # the attempted cell below
+        for rnd in ("0", "1"):
+            flat = run / f"m2-round-{rnd}" / f"http-server_{contender}"
+            flat.mkdir(parents=True)
+            (flat / "protocol-a-summary.txt").write_text(
+                _protocol_a_summary(500), encoding="utf-8"
+            )
+            nested = run / f"m2-round-{rnd}" / "t2-json" / contender
+            nested.mkdir(parents=True)
+            (nested / "m2-summary.json").write_text(
+                json.dumps({
+                    "median_p99_ns": 400,
+                    "round_p99s_ns": [400],
+                    "total_samples": 700,
+                    "malformed_records": 0,
+                    "is_invalidated": False,
+                }),
+                encoding="utf-8",
+            )
+    for rnd in ("0", "1"):
+        d = run / f"m2-round-{rnd}" / "http-server_camel-standalone-dsl"
+        d.mkdir(parents=True)
+        (d / "protocol-a-summary.txt").write_text(
+            UNCONVERGED_EVIDENCE, encoding="utf-8"
+        )
+    return run
+
+
 class SummarizeTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -268,7 +334,9 @@ class SummarizeTest(unittest.TestCase):
             "ratios",
         ):
             self.assertIn(key, record)
-        self.assertEqual(record["schema_version"], 1)
+        # run.json schema_version 2 (bench-m2-attempted-status: the
+        # additive attempted-m2-cell shape); the index stays v1.
+        self.assertEqual(record["schema_version"], 2)
         self.assertIsInstance(record["era"], str)
         # run_id comes straight from meta (launch timestamp; no
         # sequence composition for new runs).
@@ -770,6 +838,241 @@ class SummarizeTest(unittest.TestCase):
         self.assertIn("http-server/node-fastify/m2", err.getvalue())
         self.assertIn("sentinel", err.getvalue())
         self.assertEqual(record["m2_attempted_cells"], [])
+
+    def test_m2_unconverged_cell_emits_status(self):
+        run = make_full_roster_m2_run(self.root)
+        meta_path = self.root / "meta.json"
+        meta_path.write_text(
+            json.dumps(dict(
+                META,
+                scenarios="http-server,t2-json",
+                run_id="20260906T010000Z",
+            )),
+            encoding="utf-8",
+        )
+        out = self.root / "out"
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            rc = summarize.main([
+                "--run-dir", str(run),
+                "--meta", str(meta_path),
+                "--out-dir", str(out),
+            ])
+        self.assertEqual(rc, 0)
+        record = json.loads(
+            (out / "run.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(record["schema_version"], 2)
+        cell = next(
+            c for c in record["cells"]
+            if c["metric"] == "m2"
+            and c["scenario"] == "http-server"
+            and c["contender"] == "camel-standalone-dsl"
+        )
+        self.assertEqual(cell["status"], "unconverged")
+        self.assertIn("measure-a-error", cell["reason"])
+        self.assertEqual(cell["rounds"], 2)
+        for latency in ("round_values", "median", "unit"):
+            self.assertNotIn(latency, cell)
+        summary = (out / "summary.md").read_text(encoding="utf-8")
+        self.assertIn("http-server/camel-standalone-dsl", summary)
+        self.assertIn("attempted (unconverged)", summary)
+
+    def test_m2_probe_timeout_cell_emits_status(self):
+        run = self.root / "20260906T020000Z"
+        bridge = (
+            "camel-quarkus-dsl-native", "camel-standalone-dsl",
+            "node-fastify", "node-native", "rust-camel-cli",
+            "rust-camel-lib",
+        )
+        for contender in bridge:
+            cell = run / f"xslt-bridge_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "samples.txt").write_text(
+                "startup-ms rss-kb\n20 900\n22 950\n", encoding="utf-8"
+            )
+        for rnd in ("0", "1"):
+            d = run / f"m2-round-{rnd}" / "xslt-bridge" / "rust-camel-cli"
+            d.mkdir(parents=True)
+            (d / "exit-codes.txt").write_text(
+                PROBE_TIMEOUT_EVIDENCE, encoding="utf-8"
+            )
+        meta_path = self.root / "meta-timeout.json"
+        meta_path.write_text(
+            json.dumps(dict(
+                META,
+                scenarios="xslt-bridge",
+                run_id="20260906T020000Z",
+            )),
+            encoding="utf-8",
+        )
+        out = self.root / "out-timeout"
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            rc = summarize.main([
+                "--run-dir", str(run),
+                "--meta", str(meta_path),
+                "--out-dir", str(out),
+            ])
+        self.assertEqual(rc, 0)
+        record = json.loads(
+            (out / "run.json").read_text(encoding="utf-8")
+        )
+        cell = next(
+            c for c in record["cells"]
+            if c["metric"] == "m2"
+            and c["scenario"] == "xslt-bridge"
+            and c["contender"] == "rust-camel-cli"
+        )
+        self.assertEqual(cell["status"], "attempted-timeout")
+        self.assertEqual(
+            cell["reason"],
+            "# probe reason: no BENCH_LATENCY within 30s timeout",
+        )
+        self.assertEqual(cell["rounds"], 2)
+        for latency in ("round_values", "median", "unit"):
+            self.assertNotIn(latency, cell)
+
+    def test_m2_measured_wins_over_evidence(self):
+        # One valid m2-summary.json (round 1) beats the unconverged
+        # sentinel left in round 0: the cell is MEASURED, no status
+        # key, attempt evidence ignored.
+        run = self.root / "20260906T030000Z"
+        for contender in ("rust-camel-lib", "camel-standalone-dsl"):
+            cell = run / f"t2-json_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "samples.txt").write_text(
+                "startup-ms rss-kb\n12 900\n14 950\n", encoding="utf-8"
+            )
+        stale = run / "m2-round-0" / "t2-json" / "rust-camel-lib"
+        stale.mkdir(parents=True)
+        (stale / "protocol-a-summary.txt").write_text(
+            UNCONVERGED_EVIDENCE, encoding="utf-8"
+        )
+        good = run / "m2-round-1" / "t2-json" / "rust-camel-lib"
+        good.mkdir(parents=True)
+        (good / "m2-summary.json").write_text(
+            json.dumps({
+                "median_p99_ns": 300,
+                "round_p99s_ns": [300],
+                "total_samples": 700,
+                "malformed_records": 0,
+                "is_invalidated": False,
+            }),
+            encoding="utf-8",
+        )
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(
+                run, dict(META, scenarios="t2-json",
+                          run_id="20260906T030000Z")
+            )
+        cell = next(
+            c for c in record["cells"]
+            if c["metric"] == "m2" and c["contender"] == "rust-camel-lib"
+        )
+        self.assertEqual(cell["round_values"], [300.0])
+        self.assertEqual(cell["median"], 300.0)
+        self.assertNotIn("status", cell)
+
+    def test_m2_conflicting_statuses_stay_missing(self):
+        # Unconverged sentinel (round 0) + timeout exit-codes.txt
+        # (round 1), no summary anywhere: fail-closed — cell stays
+        # MISSING, loud warning names the cell.
+        run = self.root / "20260906T040000Z"
+        for contender in ("rust-camel-lib", "camel-standalone-dsl"):
+            cell = run / f"t2-json_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "samples.txt").write_text(
+                "startup-ms rss-kb\n12 900\n14 950\n", encoding="utf-8"
+            )
+        r0 = run / "m2-round-0" / "t2-json" / "camel-standalone-dsl"
+        r0.mkdir(parents=True)
+        (r0 / "protocol-a-summary.txt").write_text(
+            UNCONVERGED_EVIDENCE, encoding="utf-8"
+        )
+        r1 = run / "m2-round-1" / "t2-json" / "camel-standalone-dsl"
+        r1.mkdir(parents=True)
+        (r1 / "exit-codes.txt").write_text(
+            PROBE_TIMEOUT_EVIDENCE, encoding="utf-8"
+        )
+        err = io.StringIO()
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            with contextlib.redirect_stderr(err):
+                record = summarize.build_record(
+                    run, dict(META, scenarios="t2-json",
+                              run_id="20260906T040000Z")
+                )
+        m2 = {
+            (c["scenario"], c["contender"])
+            for c in record["cells"] if c["metric"] == "m2"
+        }
+        self.assertNotIn(("t2-json", "camel-standalone-dsl"), m2)
+        self.assertIn("t2-json/camel-standalone-dsl", err.getvalue())
+
+    def test_m2_malformed_evidence_stay_missing(self):
+        # Truncated sentinel (missing the status=failed line): no
+        # status may be invented — cell stays MISSING, warning names
+        # the cell.
+        run = self.root / "20260906T050000Z"
+        for contender in ("rust-camel-lib", "camel-standalone-dsl"):
+            cell = run / f"t2-json_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "samples.txt").write_text(
+                "startup-ms rss-kb\n12 900\n14 950\n", encoding="utf-8"
+            )
+        r0 = run / "m2-round-0" / "t2-json" / "camel-standalone-dsl"
+        r0.mkdir(parents=True)
+        (r0 / "protocol-a-summary.txt").write_text(
+            UNCONVERGED_MALFORMED_EVIDENCE, encoding="utf-8"
+        )
+        err = io.StringIO()
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            with contextlib.redirect_stderr(err):
+                record = summarize.build_record(
+                    run, dict(META, scenarios="t2-json",
+                              run_id="20260906T050000Z")
+                )
+        m2 = {
+            (c["scenario"], c["contender"])
+            for c in record["cells"] if c["metric"] == "m2"
+        }
+        self.assertNotIn(("t2-json", "camel-standalone-dsl"), m2)
+        self.assertIn("t2-json/camel-standalone-dsl", err.getvalue())
+
+    def test_summary_deterministic_with_attempted_cells(self):
+        run = make_full_roster_m2_run(self.root)
+        meta_path = self.root / "meta-det.json"
+        meta_path.write_text(
+            json.dumps(dict(
+                META,
+                scenarios="http-server,t2-json",
+                run_id="20260906T010000Z",
+            )),
+            encoding="utf-8",
+        )
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        outs = []
+        for name in ("out-det-a", "out-det-b"):
+            out = self.root / name
+            with mock.patch.dict(os.environ, env):
+                rc = summarize.main([
+                    "--run-dir", str(run),
+                    "--meta", str(meta_path),
+                    "--out-dir", str(out),
+                ])
+            self.assertEqual(rc, 0)
+            outs.append(out)
+        self.assertEqual(
+            (outs[0] / "run.json").read_bytes(),
+            (outs[1] / "run.json").read_bytes(),
+        )
+        self.assertEqual(
+            (outs[0] / "summary.md").read_bytes(),
+            (outs[1] / "summary.md").read_bytes(),
+        )
 
     def test_roster_mirror_no_drift(self):
         # Task 2.7.1: summarize's roster tuples are a hand-maintained
