@@ -1,1 +1,13 @@
-{"index_schema_version": 1, "runs": []}
+{
+  "index_schema_version": 1,
+  "runs": [
+    {
+      "date": "2026-09-03",
+      "era": "2",
+      "git_commit": "9e8f36f67d5cac1496e2a14271c168b2edb06a93",
+      "path": "20260903T084658Z/",
+      "run_id": "20260903T084658Z",
+      "scenarios": "http-server,split-aggregate,startup-minimal,t2-json,t2-realistic-eip,xsd-validation-bridge,xslt-bridge"
+    }
+  ]
+}
