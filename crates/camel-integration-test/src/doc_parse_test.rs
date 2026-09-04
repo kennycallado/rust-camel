@@ -6,6 +6,7 @@
 //! temporary `.test.yaml` document and parses it through
 //! [`crate::parse_scenario_document`].
 
+use crate::document::is_http_token;
 use crate::{
     DocError, Expectation, ScenarioAction, ScenarioDocument, ScenarioTarget,
     parse_scenario_document,
@@ -109,6 +110,138 @@ scenario:
             );
         }
         other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn send_method_explicit_put_resolves() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+    method: PUT
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.first().expect("one action");
+    match action {
+        ScenarioAction::Send { method, .. } => {
+            assert_eq!(method, "PUT", "explicit method must resolve verbatim");
+        }
+        other => panic!("expected Send, got {other:?}"),
+    }
+}
+
+#[test]
+fn send_method_inferred_post_with_body() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: http://127.0.0.1:9999/hook
+    body: hello
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.first().expect("one action");
+    match action {
+        ScenarioAction::Send { method, .. } => {
+            assert_eq!(method, "POST", "a send with a body infers POST");
+        }
+        other => panic!("expected Send, got {other:?}"),
+    }
+}
+
+#[test]
+fn send_method_inferred_get_bodyless() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: http://127.0.0.1:9999/hook
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.first().expect("one action");
+    match action {
+        ScenarioAction::Send { method, .. } => {
+            assert_eq!(method, "GET", "a bodyless send infers GET");
+        }
+        other => panic!("expected Send, got {other:?}"),
+    }
+}
+
+#[test]
+fn send_method_lowercase_normalizes() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: http://127.0.0.1:9999/hook
+    method: delete
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.first().expect("one action");
+    match action {
+        ScenarioAction::Send { method, .. } => {
+            assert_eq!(method, "DELETE", "method must normalize to uppercase");
+        }
+        other => panic!("expected Send, got {other:?}"),
+    }
+}
+
+#[test]
+fn send_method_invalid_token_is_doc_validation() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+    method: "P UT"
+"#,
+    )
+    .expect_err("parse must fail");
+    let rendered = err.to_string();
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("HTTP method name"),
+                "message must name the HTTP method name requirement: {message}"
+            );
+            assert!(
+                message.contains("P UT"),
+                "message must name the offending value: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+    assert!(
+        rendered.contains("doc-validation"),
+        "rendered error must name the doc-validation class: {rendered}"
+    );
+}
+
+#[test]
+fn send_method_token_predicate_accepts_and_rejects() {
+    for accepted in ["PUT", "X-Custom", "PATCH2"] {
+        assert!(
+            is_http_token(accepted),
+            "predicate must accept `{accepted}`"
+        );
+    }
+    for rejected in ["", "P UT", "PUT/", "put;", "café"] {
+        assert!(
+            !is_http_token(rejected),
+            "predicate must reject `{rejected}`"
+        );
     }
 }
 

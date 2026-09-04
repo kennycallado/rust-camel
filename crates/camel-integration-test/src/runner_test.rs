@@ -71,6 +71,7 @@ async fn send_then_receive_within_deadline() {
             to: endpoint("partner://fake"),
             body: Some(Value::String("hello".to_string())),
             headers: None,
+            method: "POST".to_string(),
         },
         ScenarioAction::Receive {
             from: endpoint("partner://fake"),
@@ -172,6 +173,7 @@ async fn transport_error_is_apparatus_failure() {
         to: endpoint("partner://fake"),
         body: None,
         headers: None,
+        method: "GET".to_string(),
     }]);
     let mut vars = ScenarioVars::new();
     let failure = run_scenario(&doc, &router, &mut vars)
@@ -226,6 +228,7 @@ async fn router_dispatches_and_fake_records_sends() {
     let sent = OutgoingMessage {
         body: Value::String("recorded".to_string()),
         headers: BTreeMap::from([("X-Trace".to_string(), Value::String("t1".to_string()))]),
+        method: "POST".to_string(),
     };
     PartnerAdapter::send(&router, &endpoint("partner://fake"), sent)
         .await
@@ -248,6 +251,7 @@ async fn router_dispatches_and_fake_records_sends() {
         OutgoingMessage {
             body: Value::Null,
             headers: BTreeMap::new(),
+            method: "GET".to_string(),
         },
     )
     .await

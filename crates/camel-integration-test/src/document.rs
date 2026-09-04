@@ -97,6 +97,9 @@ pub enum ScenarioAction {
         body: Option<Value>,
         /// Message headers.
         headers: Option<BTreeMap<String, Value>>,
+        /// Resolved method: explicit or inferred (`POST` with a body,
+        /// `GET` without), uppercase.
+        method: String,
     },
     /// Receive a message from an endpoint before the deadline passes.
     Receive {
@@ -248,6 +251,10 @@ struct RawSend {
     to: RawEndpointRef,
     body: Option<Value>,
     headers: Option<BTreeMap<String, Value>>,
+    /// Raw `method` string; optional. Validation resolves it (explicit
+    /// or inferred from body presence) so errors can name the action
+    /// index.
+    method: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -623,10 +630,29 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
         "send" => {
             let raw: RawSend =
                 serde_yaml::from_value(content.clone()).map_err(action_error_from_serde)?;
+            let method = match raw.method {
+                Some(method) => {
+                    let upper = method.trim().to_ascii_uppercase();
+                    if !is_http_token(&upper) {
+                        return Err(action_error(format!(
+                            "send action `method` must be a valid HTTP method name, got `{method}`"
+                        )));
+                    }
+                    upper
+                }
+                None => {
+                    if raw.body.is_some() {
+                        "POST".to_string()
+                    } else {
+                        "GET".to_string()
+                    }
+                }
+            };
             Ok(ScenarioAction::Send {
                 to: endpoint_from_raw(raw.to)?,
                 body: raw.body,
                 headers: raw.headers,
+                method,
             })
         }
         "receive" => {
@@ -724,6 +750,33 @@ fn parse_duration(raw: &str, index: usize, field: &str) -> Result<Duration, DocE
         index,
         message: format!("invalid {field} `{raw}`: {e}"),
     })
+}
+
+/// Whether `s` is a valid HTTP token: non-empty and composed only of
+/// ASCII alphanumerics or one of ``!#$%&'*+-.^_`|~``. Crate-visible
+/// for the parse-test module.
+pub(crate) fn is_http_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '!' | '#'
+                        | '$'
+                        | '%'
+                        | '&'
+                        | '\''
+                        | '*'
+                        | '+'
+                        | '-'
+                        | '.'
+                        | '^'
+                        | '_'
+                        | '`'
+                        | '|'
+                        | '~'
+                )
+        })
 }
 
 /// Recognized expectation matcher keys.

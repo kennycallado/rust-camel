@@ -38,6 +38,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -463,11 +464,8 @@ async fn perform_request(
         .map_err(|e| transport(format!("http connection not ready: {e}")))?;
 
     let body = value_to_wire(&msg.body);
-    let method = if msg.body.is_null() {
-        Method::GET
-    } else {
-        Method::POST
-    };
+    let method = Method::from_str(&msg.method)
+        .map_err(|e| transport(format!("invalid http method `{}`: {e}", msg.method)))?;
     let mut builder = Request::builder()
         .method(method)
         .uri(target.target.clone())

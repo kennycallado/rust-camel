@@ -54,3 +54,23 @@ PASS orders.test.yaml#scenario[6] validate
 The full exit contract: 0 when all actions pass, 1 on a verdict failure
 (receive timeout, validation mismatch), 2 on a parse, boot, or apparatus
 failure.
+
+## Inbound method example
+
+`inbound-put.test.yaml` shows the other direction: the scenario is the
+client, and an inbound route is the oracle. The `send` performs a real
+`method: PUT` into the booted consumer route, and the `receive` awaits
+the route's response (client role: the response parked by the send).
+The route registers PUT /orders only (`httpMethod=PUT` in
+`routes/inbound-orders.yaml`), so the response body `put-accepted`
+proves the wire method. A legacy GET misses the endpoint, and the
+status validation fails on the unmatched 404.
+
+```bash
+cd examples/integration-testing
+../../target/debug/camel test inbound-put.test.yaml
+```
+
+The route pins loopback port 18097 in the route URI: no bound-address
+API exists in v1, so a CI job that shares loopback with other jobs can
+collide on that port.

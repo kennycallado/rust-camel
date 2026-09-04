@@ -234,8 +234,13 @@ async fn run_action(
     vars: &mut ScenarioVars,
 ) -> Result<(), ScenarioFailure> {
     match action {
-        ScenarioAction::Send { to, body, headers } => {
-            send_action(index, to, body.as_ref(), headers.as_ref(), router).await?;
+        ScenarioAction::Send {
+            to,
+            body,
+            headers,
+            method,
+        } => {
+            send_action(index, to, body.as_ref(), headers.as_ref(), method, router).await?;
         }
         ScenarioAction::Receive {
             from,
@@ -263,11 +268,13 @@ async fn send_action(
     to: &EndpointRef,
     body: Option<&Value>,
     headers: Option<&BTreeMap<String, Value>>,
+    method: &str,
     router: &PartnerRouter,
 ) -> Result<(), ScenarioFailure> {
     let msg = OutgoingMessage {
         body: body.cloned().unwrap_or(Value::Null),
         headers: headers.cloned().unwrap_or_default(),
+        method: method.to_string(),
     };
     let bounded = tokio::time::timeout(SEND_DEADLINE, router.send(to, msg)).await;
     let sent = bounded.map_err(|_| ScenarioFailure::ActionTransport {

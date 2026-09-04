@@ -245,3 +245,7 @@ camel test . --junit shard-1.xml --filter-file './src/**/shard-1*'
 ```
 
 Annotating pull requests from the report requires the CI platform's JUnit publisher or report-ingest integration. On GitHub Actions, upload the report as an artifact and pass it to a JUnit-annotation action of your choice.
+
+### Scenario documents
+
+A `scenario:` document is the integration-tier contract of [ADR-0069](../adr/0069-integration-tier-testing-contract.md). The document declares an action list. The runner executes four actions in order: `send`, `receive`, `sleep`, and `validate`. A `send` takes an optional `method` field, for example `method: PUT`. The field is uppercased at load. Without the field, a body implies `POST` and no body implies `GET`. The [README](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/README.md) of the `camel-integration-test` crate is the grammar reference.

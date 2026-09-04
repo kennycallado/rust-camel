@@ -1,0 +1,20 @@
+# Inbound method-discriminating route: the system under test serves
+# PUT /orders on a pinned loopback port and answers `put-accepted`.
+# `httpMethod=PUT` registers the path under the REST matcher, so a
+# request with any other method misses the endpoint and gets the
+# component's unmatched response, never this body. This route is the
+# method oracle for inbound-put.test.yaml.
+#
+# v1 pins the port in the route URI: no bound-address API exists
+# (rc-gz2r tracks the router-key gap for client-role sends). A CI
+# collision on 18097 is the accepted pinned-port bound; fork this demo
+# on an uncommon high port when your CI shares loopback with other
+# jobs.
+routes:
+  - id: inbound-orders
+    from: http://127.0.0.1:18097/orders?httpMethod=PUT
+    steps:
+      - set_header:
+          key: CamelHttpResponseCode
+          value: 200
+      - set_body: put-accepted

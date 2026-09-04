@@ -1,0 +1,31 @@
+# Inbound method scenario: the scenario itself is the client, and an
+# inbound route is the method oracle. The `send` performs a real PUT
+# into the booted consumer route, and the `receive` awaits the SUT's
+# response (client role: the response parked by the send). The route
+# registers PUT /orders only (`httpMethod=PUT` in
+# routes/inbound-orders.yaml), so the response proves the wire
+# method: a legacy GET would miss the endpoint and never see
+# `put-accepted`.
+#
+# The endpoint here is the SUT's own listener, so the reference is a
+# bare URI: no `provisioning` and no `bindVar`. The harness partner
+# adapter acts as the HTTP client only. Responses, not requests,
+# carry status, so status validation lives here.
+routeFiles:
+  - routes/inbound-orders.yaml
+profile: default
+scenario:
+  - send:
+      to: http://127.0.0.1:18097/orders
+      method: PUT
+  - receive:
+      from: http://127.0.0.1:18097/orders
+      deadline: 2s
+      extract:
+        status: status
+  - validate:
+      target: { variable: status }
+      expectation: 200
+  - validate:
+      target: { lastReceived: http://127.0.0.1:18097/orders }
+      expectation: put-accepted

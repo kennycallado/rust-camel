@@ -46,6 +46,10 @@ pub struct OutgoingMessage {
     pub body: Value,
     /// Message headers; empty when the action declares none.
     pub headers: BTreeMap<String, Value>,
+    /// The resolved HTTP method for client-role sends (explicit from
+    /// the action's `method`, or the inferred `GET`/`POST`). Validated
+    /// as an HTTP token at parse time.
+    pub method: String,
 }
 
 /// A message the harness received from a partner endpoint.

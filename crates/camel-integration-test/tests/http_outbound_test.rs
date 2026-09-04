@@ -6,6 +6,11 @@
 //! start), stimulates the booted route at `direct:start` through the
 //! context's producer path, and validates the request that reaches
 //! the harness-owned partner on the wire — the normative proof.
+//!
+//! The method-field tests drive the partner's client role instead:
+//! the scenario `send` performs a real HTTP request to the partner's
+//! bound address, and `receive` consumes the parked response — the
+//! scripted matcher is the oracle for the wire method.
 #![cfg(feature = "http")]
 
 use std::collections::BTreeMap;
@@ -21,15 +26,16 @@ use camel_core::CamelContext;
 use camel_integration_test::adapters::DirectStimulus;
 use camel_integration_test::env_layers::ambient_std;
 use camel_integration_test::{
-    DocumentOutcome, Expectation, HttpPartner, LayeredEnv, PartnerAdapter, PartnerRouter,
-    ScenarioAction, ScenarioDocument, ScenarioFailure, ScenarioTarget, ScenarioVars,
-    ScenarioVerdict, ScriptedResponse, boot_scenario, parse_scenario_document,
-    run_scenario_document,
+    DocumentOutcome, EndpointRef, Expectation, HttpPartner, LayeredEnv, PartnerAdapter,
+    PartnerRouter, Provisioning, RouteSource, ScenarioAction, ScenarioDocument, ScenarioFailure,
+    ScenarioTarget, ScenarioVars, ScenarioVerdict, ScriptedResponse, boot_scenario,
+    parse_scenario_document, run_scenario_document,
 };
 
 /// The doc endpoint URI the fixture declares for the partner. The `:0`
 /// port is the router key (dispatch by endpoint equality); the arrival
-/// lane keys by request path.
+/// lane keys by request path, so the `:0` form addresses the partner's
+/// listener — only the client-role send needs the bound address.
 const PARTNER_ENDPOINT: &str = "http://127.0.0.1:0/orders";
 
 /// The fixture root: Camel.toml, routes/, and the scenario document.
@@ -37,16 +43,17 @@ fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/outbound")
 }
 
-/// The scripted response the partner serves for the bridge POST: the
-/// status is harness-known, so the scenario validates arrivals, not
-/// responses (status validation is inbound work, Task 3.3).
-fn scripted_partner_response() -> ScriptedResponse {
+/// A scripted partner response matching one request method on the
+/// bridge path. The matcher (method + path) is the oracle: a request
+/// that does not match is served the unmatched-500 with an empty body,
+/// so the parked-response body validation below is the proof.
+fn scripted_response(method: &str, body: &[u8]) -> ScriptedResponse {
     ScriptedResponse {
-        method: Some("POST".to_string()),
+        method: Some(method.to_string()),
         path: Some("/orders".to_string()),
         status: 200,
         headers: BTreeMap::new(),
-        body: b"accepted".to_vec(),
+        body: body.to_vec(),
     }
 }
 
@@ -98,16 +105,15 @@ struct BootedFixture {
     boot: BootHandle,
 }
 
-/// Boots the fixture scenario with a freshly bound partner: parse the
-/// document, bind the partner on `127.0.0.1:0`, inject
-/// `PARTNER=http://127.0.0.1:<bound>` into the harness-provisioned
-/// tier, boot through [`boot_scenario`], and wire the router.
-async fn boot_fixture() -> BootedFixture {
-    let doc = parse_scenario_document(&fixture_root().join("bridge.test.yaml"))
-        .expect("fixture document must parse");
-    let partner = HttpPartner::start(vec![scripted_partner_response()])
-        .await
-        .expect("partner must bind 127.0.0.1:0");
+/// Boots the given scenario document with the given partner registered
+/// under `partner_key`: inject `PARTNER=http://127.0.0.1:<bound>` into
+/// the harness-provisioned tier, boot through [`boot_scenario`], and
+/// wire the router (the `direct:start` stimulus plus the partner).
+async fn boot_with(
+    doc: ScenarioDocument,
+    partner: HttpPartner,
+    partner_key: String,
+) -> BootedFixture {
     let harness_provisioned = BTreeMap::from([(
         "PARTNER".to_string(),
         format!("http://{}", partner.bound_addr()),
@@ -123,12 +129,80 @@ async fn boot_fixture() -> BootedFixture {
         "direct:start".to_string(),
         Box::new(DirectStimulus::new(Arc::clone(&ctx))),
     );
-    adapters.insert(PARTNER_ENDPOINT.to_string(), Box::new(partner));
+    adapters.insert(partner_key, Box::new(partner));
     BootedFixture {
         doc,
         router: PartnerRouter::new(adapters),
         ctx,
         boot: run.boot,
+    }
+}
+
+/// Boots a method-under-test scenario: bind the partner with the
+/// scripted response for `method`, build the document against the
+/// partner's bound address (the client-role send connects to it), and
+/// boot.
+async fn boot_method_fixture(method: &str, expected_body: &str) -> BootedFixture {
+    let partner = HttpPartner::start(vec![scripted_response(method, expected_body.as_bytes())])
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let bound_endpoint = format!("http://{}/orders", partner.bound_addr());
+    let doc = method_scenario_document(method, expected_body, &bound_endpoint);
+    boot_with(doc, partner, bound_endpoint).await
+}
+
+/// Boots the fixture scenario with a freshly bound partner: parse the
+/// document, bind the partner on `127.0.0.1:0`, inject
+/// `PARTNER=http://127.0.0.1:<bound>` into the harness-provisioned
+/// tier, boot through [`boot_scenario`], and wire the router.
+async fn boot_fixture() -> BootedFixture {
+    let doc = parse_scenario_document(&fixture_root().join("bridge.test.yaml"))
+        .expect("fixture document must parse");
+    let partner = HttpPartner::start(vec![scripted_response("POST", b"accepted")])
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    boot_with(doc, partner, PARTNER_ENDPOINT.to_string()).await
+}
+
+/// A scenario document over the bridge fixture: send to the partner
+/// endpoint with an explicit `method` and no body, receive the parked
+/// response, and validate the scripted payload the partner served for
+/// that method. The explicit method is the field under test; the
+/// parked-response body is the oracle. `partner_endpoint` is the
+/// partner's bound address — the client-role send connects to it.
+fn method_scenario_document(
+    method: &str,
+    expected_body: &str,
+    partner_endpoint: &str,
+) -> ScenarioDocument {
+    let partner = EndpointRef {
+        endpoint: partner_endpoint.to_string(),
+        provisioning: Some(Provisioning::Harness),
+        bind_var: Some("PARTNER".to_string()),
+    };
+    let scenario = vec![
+        ScenarioAction::Send {
+            to: partner.clone(),
+            body: None,
+            headers: None,
+            method: method.to_string(),
+        },
+        ScenarioAction::Receive {
+            from: partner.clone(),
+            deadline: Duration::from_secs(2),
+            extract: None,
+        },
+        ScenarioAction::Validate {
+            target: ScenarioTarget::LastReceived(partner),
+            expectation: Expectation::Equals(Value::String(expected_body.to_string())),
+        },
+    ];
+    ScenarioDocument {
+        route_source: RouteSource::RouteFiles(vec![PathBuf::from("routes/bridge.yaml")]),
+        scenario,
+        env: None,
+        env_passthrough: None,
+        profile: Some("default".to_string()),
     }
 }
 
@@ -147,6 +221,56 @@ async fn outbound_bridge_validates_wire() {
     );
 
     // Teardown: the normal variant asserts clean completion.
+    let mut ctx = fixture.ctx.lock().await;
+    fixture
+        .boot
+        .shutdown(&mut ctx)
+        .await
+        .expect("clean shutdown must complete");
+}
+
+/// The explicit `method: PUT` field reaches the partner end to end:
+/// the partner's scripted matcher demands PUT, so the parked response
+/// body `put-ok` is served only when the wire request really was PUT.
+/// Under the legacy `body?POST:GET` rule the send would be GET, the
+/// matcher would miss, and the partner would serve the unmatched-500
+/// with an empty body — the body validation would fail.
+#[tokio::test]
+async fn explicit_put_reaches_partner() {
+    let fixture = boot_method_fixture("PUT", "put-ok").await;
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the PUT send must reach the partner and validate: {outcome:?}"
+    );
+
+    let mut ctx = fixture.ctx.lock().await;
+    fixture
+        .boot
+        .shutdown(&mut ctx)
+        .await
+        .expect("clean shutdown must complete");
+}
+
+/// The explicit `method: POST` field reaches the partner end to end:
+/// the partner's scripted matcher demands POST, so the parked response
+/// body `post-ok` is served only when the wire request really was POST.
+/// Under the legacy `body?POST:GET` rule a bodyless send would be GET,
+/// the matcher would miss, and the partner would serve the unmatched-500
+/// with an empty body — the body validation would fail.
+#[tokio::test]
+async fn bodyless_post_reaches_partner() {
+    let fixture = boot_method_fixture("POST", "post-ok").await;
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the bodyless POST send must reach the partner and validate: {outcome:?}"
+    );
+
     let mut ctx = fixture.ctx.lock().await;
     fixture
         .boot

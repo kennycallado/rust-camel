@@ -51,6 +51,7 @@ async fn permissive_default_serves_every_unmatched_request() {
             OutgoingMessage {
                 body: Value::String(format!("req-{round}")),
                 headers: BTreeMap::new(),
+                method: "POST".to_string(),
             },
         )
         .await
@@ -108,6 +109,7 @@ async fn outbound_partner_records_wire_request() {
                     Value::String("text/plain".to_string()),
                 ),
             ]),
+            method: "POST".to_string(),
         },
     )
     .await
@@ -171,6 +173,7 @@ async fn inbound_client_receives_status_headers_body() {
         OutgoingMessage {
             body: Value::Null,
             headers: BTreeMap::new(),
+            method: "GET".to_string(),
         },
     )
     .await
@@ -255,6 +258,7 @@ async fn outbound_arrival_reaches_receive() {
                 "Content-Type".to_string(),
                 Value::String("text/plain".to_string()),
             )]),
+            method: "POST".to_string(),
         },
     )
     .await
@@ -308,6 +312,7 @@ async fn arrivals_queue_per_endpoint() {
                 OutgoingMessage {
                     body: Value::String(body.to_string()),
                     headers: BTreeMap::new(),
+                    method: "POST".to_string(),
                 },
             )
             .await

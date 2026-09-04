@@ -4,8 +4,11 @@
 
 Owns the scenario document model and parser behind the integration tier
 of `camel test` (ADR-0069). A scenario document runs one action
-vocabulary: `send`, `receive`, `sleep`, and `validate`. The parser bans
-the unit-tier keys (`inputs`, `expects`, `intercepts`) at load time, and
+vocabulary: `send`, `receive`, `sleep`, and `validate`. A `send` takes
+an optional `method` HTTP token, uppercased at load. An invalid token
+fails doc validation with exit 2. A `send` with a body defaults to
+`POST`. A bodyless `send` defaults to `GET`. The parser bans the
+unit-tier keys (`inputs`, `expects`, `intercepts`) at load time, and
 it rejects `env` keys that collide with a declared `bindVar`. The
 harness provisions each `http:` partner on `127.0.0.1:0` and folds the
 partner's `bindVar` into a layered environment. Config and route
@@ -24,6 +27,7 @@ routeFiles:
 scenario:
   - send:
       to: direct:start
+      method: PUT
       body: order-payload-7f3a
   - receive:
       from:
