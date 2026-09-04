@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
 
+mod common;
+
 fn entry() -> CacheEntry {
     CacheEntry {
         bytes: vec![1, 2, 3],
@@ -375,6 +377,7 @@ backend = "memory"
 
 #[test]
 fn profile_section_loads() {
+    let _guard = common::env_lock();
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
 
@@ -403,6 +406,7 @@ stale_retention = "24h"
 
 #[test]
 fn profile_section_loads_defaults_when_minimal() {
+    let _guard = common::env_lock();
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
 
@@ -1445,6 +1449,7 @@ url = "redis://127.0.0.1:6379/0"
 
 #[test]
 fn example_camel_toml_round_trips_validate_and_endpoints() {
+    let _guard = common::env_lock();
     // The checked-in example config must load, validate, and map to both
     // redis endpoints — the exact path `cargo run` exercises at startup.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1756,6 +1761,7 @@ payload_max_ttl = "999ms"
 
 #[test]
 fn payload_dir_env_placeholder_resolves() {
+    let _guard = common::env_lock();
     // cache_repo is a strict-interpolation section (STRICT_PREFIXES), so a
     // `${env:}` placeholder on payload_dir must resolve at load time and
     // leave a literal path that validate() accepts. Mirrors the placeholder

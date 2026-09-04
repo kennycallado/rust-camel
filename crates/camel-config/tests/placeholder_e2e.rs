@@ -7,6 +7,8 @@
 
 use camel_config::CamelConfig;
 
+mod common;
+
 /// Sets a uniquely-named env var and removes it on drop (panic-safe restore).
 struct EnvCleanup(&'static str);
 
@@ -56,6 +58,7 @@ fn load(dir: &tempfile::TempDir) -> Result<CamelConfig, config::ConfigError> {
 /// retired hand-enumerated allowlist class).
 #[test]
 fn future_section_resolves_without_code_change() {
+    let _guard = common::env_lock();
     let _env = EnvCleanup::set("RUST_CAMEL_TEST_FUT_A", "fut-val");
     let dir = write_main(
         r#"[future_section]
@@ -80,6 +83,7 @@ value = "${env:RUST_CAMEL_TEST_FUT_A}"
 /// runs on the POST-merge builder output, not the pre-builder main-file value.
 #[test]
 fn placeholder_in_include_file_resolves() {
+    let _guard = common::env_lock();
     ensure_unset("RUST_CAMEL_TEST_INC_A");
     let dir = write_main(
         r#"include = ["inc.toml"]"#,
@@ -104,6 +108,7 @@ endpoint = "${env:RUST_CAMEL_TEST_INC_A:-http://localhost:4317}"
 /// credential leaf fails closed, never installs the literal.
 #[test]
 fn security_bearer_token_e2e_never_literal() {
+    let _guard = common::env_lock();
     ensure_unset("RUST_CAMEL_TEST_E2E_A");
     let dir = write_main(
         r#"[security.native]
@@ -128,6 +133,7 @@ bearer_token = "${env:RUST_CAMEL_TEST_E2E_A}"
 /// `${env:NAME:-default}` on a plain leaf honors the default when unset.
 #[test]
 fn otel_endpoint_default_honored_e2e() {
+    let _guard = common::env_lock();
     ensure_unset("RUST_CAMEL_TEST_E2E_B");
     let dir = write_main(
         r#"[observability.otel]
@@ -145,6 +151,7 @@ endpoint = "${env:RUST_CAMEL_TEST_E2E_B:-http://localhost:4317}"
 /// fails closed naming `security.native.credentials[1].secret`.
 #[test]
 fn nested_array_leaves_walked() {
+    let _guard = common::env_lock();
     let _env = EnvCleanup::set("RUST_CAMEL_TEST_CRED0", "cred-0-secret");
     ensure_unset("RUST_CAMEL_TEST_CRED1");
     let dir = write_main(
@@ -174,6 +181,7 @@ secret = "${env:RUST_CAMEL_TEST_CRED1}"
 /// quoted numeric (previously coerced by the config crate) is now rejected.
 #[test]
 fn quoted_numeric_root_field_is_rejected_after_materialization() {
+    let _guard = common::env_lock();
     let dir = write_main(
         r#"timeout_ms = "1000"
 "#,
@@ -193,6 +201,7 @@ fn quoted_numeric_root_field_is_rejected_after_materialization() {
 /// (successor of the old `test_from_file_unresolved_placeholder_keeps_original_string`).
 #[test]
 fn legacy_braces_rejected_on_load_path() {
+    let _guard = common::env_lock();
     let dir = write_main(
         r#"[components.redis]
 url = "redis://{{MISSING_PLACEHOLDER}}"

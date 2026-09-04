@@ -2,8 +2,11 @@ use camel_config::CamelConfig;
 use std::fs;
 use tempfile::tempdir;
 
+mod common;
+
 #[test]
 fn test_load_basic_config() {
+    let _guard = common::env_lock();
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
 
@@ -25,6 +28,7 @@ timeout_ms = 10000
 
 #[test]
 fn test_load_config_with_defaults() {
+    let _guard = common::env_lock();
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
 
@@ -43,6 +47,7 @@ fn test_load_config_with_defaults() {
 
 #[test]
 fn test_load_config_with_profile() {
+    let _guard = common::env_lock();
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
 
@@ -67,6 +72,7 @@ timeout_ms = 30000
 
 #[test]
 fn test_env_var_override() {
+    let _guard = common::env_lock();
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
 
@@ -96,6 +102,7 @@ timeout_ms = 5000
 
 #[test]
 fn test_nested_profile_merge() {
+    let _guard = common::env_lock();
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
 
@@ -140,6 +147,7 @@ pool_max_idle_per_host = 1000
 
 #[test]
 fn test_otel_config_from_toml() {
+    let _guard = common::env_lock();
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
 
@@ -168,6 +176,7 @@ service_name = "my-app"
 
 #[test]
 fn test_otel_config_defaults() {
+    let _guard = common::env_lock();
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
 
@@ -185,6 +194,7 @@ fn test_otel_config_defaults() {
 
 #[test]
 fn test_otel_config_partial_defaults() {
+    let _guard = common::env_lock();
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
 

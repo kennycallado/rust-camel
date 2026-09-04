@@ -3,7 +3,10 @@ use std::io::Write;
 use std::time::Duration;
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_from_file_async_completes_without_blocking_executor() {
+    // Held across the `.await` because placeholder resolution inside
+    // `from_file_async` reads env vars (see ENV_OVERRIDE_LOCK).
     let _guard = super::env_lock();
     let mut f = tempfile::NamedTempFile::new().expect("temp file");
     write!(

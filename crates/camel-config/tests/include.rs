@@ -4,6 +4,8 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
+mod common;
+
 fn write(dir: &Path, name: &str, content: &str) {
     let p = dir.join(name);
     if let Some(parent) = p.parent() {
@@ -18,6 +20,7 @@ fn path(dir: &Path) -> String {
 
 #[test]
 fn include_basic_key_visible() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "base.toml", r#"timeout_ms = 9999"#);
     write(dir.path(), "Camel.toml", r#"include = ["base.toml"]"#);
@@ -27,6 +30,7 @@ fn include_basic_key_visible() {
 
 #[test]
 fn include_last_wins() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "a.toml", r#"timeout_ms = 1000"#);
     write(dir.path(), "b.toml", r#"timeout_ms = 2000"#);
@@ -41,6 +45,7 @@ fn include_last_wins() {
 
 #[test]
 fn include_root_wins_over_includes() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "base.toml", r#"timeout_ms = 1000"#);
     write(
@@ -54,6 +59,7 @@ fn include_root_wins_over_includes() {
 
 #[test]
 fn include_profile_propagates() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(
         dir.path(),
@@ -67,6 +73,7 @@ fn include_profile_propagates() {
 
 #[test]
 fn include_profile_not_leaked() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(
         dir.path(),
@@ -81,6 +88,7 @@ fn include_profile_not_leaked() {
 
 #[test]
 fn include_flat_file_with_active_profile() {
+    let _guard = common::env_lock();
     // Flat include (no profile sections) must not error when a profile is active
     let dir = TempDir::new().unwrap();
     write(dir.path(), "flat.toml", r#"timeout_ms = 42"#);
@@ -91,6 +99,7 @@ fn include_flat_file_with_active_profile() {
 
 #[test]
 fn include_path_traversal_is_error() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     let outside = dir.path().parent().unwrap().join("secret.toml");
     fs::write(&outside, r#"timeout_ms = 999"#).unwrap();
@@ -105,6 +114,7 @@ fn include_path_traversal_is_error() {
 
 #[test]
 fn include_absolute_path_is_error() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "Camel.toml", r#"include = ["/etc/passwd"]"#);
     let err = CamelConfig::from_file(&path(dir.path())).unwrap_err();
@@ -116,6 +126,7 @@ fn include_absolute_path_is_error() {
 
 #[test]
 fn include_not_found_is_error() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(
         dir.path(),
@@ -131,6 +142,7 @@ fn include_not_found_is_error() {
 
 #[test]
 fn include_duplicate_path_is_error() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "base.toml", r#"timeout_ms = 1000"#);
     write(
@@ -147,6 +159,7 @@ fn include_duplicate_path_is_error() {
 
 #[test]
 fn include_nested_include_is_ignored() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(
         dir.path(),
@@ -161,6 +174,7 @@ fn include_nested_include_is_ignored() {
 
 #[test]
 fn include_env_wins_over_include_and_root() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "base.toml", r#"timeout_ms = 1000"#);
     write(
@@ -181,6 +195,7 @@ fn include_env_wins_over_include_and_root() {
 
 #[test]
 fn include_ordering_three_files() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "a.toml", r#"timeout_ms = 1"#);
     write(dir.path(), "b.toml", r#"timeout_ms = 2"#);
@@ -196,6 +211,7 @@ fn include_ordering_three_files() {
 
 #[test]
 fn include_invalid_value_type_is_error() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "Camel.toml", "include = 42\n");
     let err = CamelConfig::from_file(&path(dir.path())).unwrap_err();
@@ -209,6 +225,7 @@ fn include_invalid_value_type_is_error() {
 
 #[test]
 fn include_inside_default_section_loads() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "sec.toml", "timeout_ms = 4242\n");
     write(
@@ -223,6 +240,7 @@ fn include_inside_default_section_loads() {
 
 #[test]
 fn include_inside_default_section_values_visible() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "sec.toml", "watch_debounce_ms = 111\n");
     write(
@@ -238,6 +256,7 @@ fn include_inside_default_section_values_visible() {
 
 #[test]
 fn include_inside_active_profile_section_loads() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(
         dir.path(),
@@ -258,6 +277,7 @@ fn include_inside_active_profile_section_loads() {
 
 #[test]
 fn include_top_level_and_profile_section_union() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "global.toml", "timeout_ms = 7\n");
     write(dir.path(), "prod.toml", "timeout_ms = 500\n");
@@ -275,6 +295,7 @@ fn include_top_level_and_profile_section_union() {
 
 #[test]
 fn include_inside_inactive_profile_section_is_not_loaded() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     // staging.toml intentionally NOT created — it must never be read
     write(
@@ -288,6 +309,7 @@ fn include_inside_inactive_profile_section_is_not_loaded() {
 
 #[test]
 fn include_invalid_type_inside_section_is_error() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "Camel.toml", "[default]\ninclude = 42\n");
     let err = CamelConfig::from_file(&path(dir.path())).unwrap_err();
@@ -299,6 +321,7 @@ fn include_invalid_type_inside_section_is_error() {
 
 #[test]
 fn include_same_file_in_top_level_and_section_is_error() {
+    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "base.toml", "timeout_ms = 1\n");
     write(
