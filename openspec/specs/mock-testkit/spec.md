@@ -5,18 +5,24 @@ TBD - created by archiving change mock-declarative-testkit. Update Purpose after
 ## Requirements
 ### Requirement: Declarative test document parsing
 
-`camel test` SHALL accept one or more test documents (`*.test.yaml`). A test
+`camel test` SHALL accept one or more test documents (reserved suffix
+predicate `camel_dsl::discovery::is_test_document`: `*.test.yaml`, with
+`*.test.yml` as an alias of the same format). A test
 document SHALL contain exactly one route source: `routeFiles` (paths to
 route YAML files, resolved relative to the test document's directory),
 `routeFilesFromRoot` (paths resolved against the nearest ancestor
 `Camel.toml` directory), or inline `routes` (same schema as route files).
-It MAY contain optional `inputs` (each input MAY declare an optional
+A document SHALL contain exactly one vocabulary: either the unit-tier
+vocabulary (`inputs`, `expects`, `intercepts`) or the integration-tier
+vocabulary (`scenario`, per the integration-tier spec). A document mixing
+both vocabularies SHALL be rejected as `doc-validation`.
+A unit-tier document MAY contain optional `inputs` (each input MAY declare an optional
 `expectReply` block, see Reply capture and assertion) and SHALL contain a
 mandatory non-empty `expects` map keyed by mock endpoint name — except that
-a document MAY omit `expects` (or leave it empty) when at least one input
-declares `expectReply`; a document with neither endpoint expectations nor any
-`expectReply` SHALL be rejected. It MAY contain an optional
-`intercepts` map keyed by real endpoint URI (any scheme except `mock:`),
+a unit-tier document MAY omit `expects` (or leave it empty) when at least one input
+declares `expectReply`; a unit-tier document with neither endpoint expectations nor any
+`expectReply` SHALL be rejected. A unit-tier document MAY contain an
+optional `intercepts` map keyed by real endpoint URI (any scheme except `mock:`),
 where each key is used verbatim (no trimming or normalization; query
 parameters are significant and participate in exact matching) and each value
 carries exactly one action: `skipTo` (a `mock:` URI with a non-empty
@@ -24,7 +30,9 @@ endpoint path that replaces the send before component resolution) or
 `divertCopyTo` (a `mock:` URI with a non-empty endpoint path that receives
 a copy while the real send continues). Documents declaring
 two or three route sources, or none, SHALL be rejected. Unknown fields
-SHALL be rejected, including inside intercept action objects.
+SHALL be rejected, including inside intercept action objects. A scenario
+document MAY contain an optional `env` map and an optional ambient
+passthrough allowlist, per the integration-tier spec.
 
 Matcher grammar. Body matcher keys: `equals`, `regex`, `contains`,
 `startsWith`, `endsWith`, `exists`, `jsonSubset`. Header matcher keys:
@@ -238,15 +246,43 @@ rejected (exit 2); any other JSON object is a literal `equals` value
 - **When** `camel test` parses and executes the document against the JSON reply body `{"status": "ok"}`
 - **Then** parsing succeeds without matcher interpretation and the reply assertion passes by structural equality
 
+#### Scenario: mixed vocabulary rejected at load
+
+- **Given** a document declaring both `scenario:` and `inputs:`
+- **When** `camel test` parses the document
+- **Then** the run reports `doc-validation` and exits 2 before any boot
+
+#### Scenario: scenario document with unit-tier fields rejected
+
+- **Given** a document declaring `scenario:` and `expects:`
+- **When** `camel test` parses the document
+- **Then** the run reports `doc-validation` and exits 2
+
+#### Scenario: scenario-only document with env accepted
+
+- **Given** a scenario document declaring `scenario:` and an `env` map
+- **When** `camel test` parses the document
+- **Then** parsing succeeds under the integration-tier vocabulary
+
 ### Requirement: In-process route execution
 
-`camel test` SHALL boot a `CamelContext` in-process per document, register the
-real mock component (plus direct, timer, log, seda), load referenced or inline
-routes through the same per-file YAML parser `camel run` uses, and SHALL NOT
-start WASM plugins, file-watch, or network servers, and SHALL NOT load user
-beans (including WASM or native beans); it MAY register built-in in-process
-stub beans declared in the test document's `beans:` block. Route execution
-SHALL involve no IPC and no RuntimeBus/QueryBus traffic.
+`camel test` SHALL boot one `CamelContext` in-process per document. LEAN
+documents (per the integration-tier tier derivation) boot the lean
+registration: the real mock component (plus direct, timer, log, seda), with
+routes loaded through the same per-file YAML parser `camel run` uses, and
+SHALL NOT start WASM plugins, file-watch, or network servers, and SHALL NOT
+load user beans (including WASM or native beans); they MAY register built-in
+in-process stub beans declared in the test document's `beans:` block. Route
+execution SHALL involve no IPC and no RuntimeBus/QueryBus traffic. FULL
+documents whose scenario endpoints declare any real wire scheme boot
+through the shared `camel-bundles` cascade in-process, driven
+by the document's nearest `Camel.toml`; FULL documents whose scenario
+endpoints are all in-memory (`fake:` scheme) run the in-memory smoke
+path in every build — they exercise document shape and action grammar,
+not the system under test, so no boot adds information. The harness MAY bind partner-side
+loopback listeners on `127.0.0.1` for FULL documents, which is traffic under
+test, not a control channel. No document tier ever drives a separately
+deployed `camel run` process.
 
 #### Scenario: routes run in-process
 - **Given** a test document referencing a route file with `from: direct:start` → `to: mock:result`
@@ -257,6 +293,12 @@ SHALL involve no IPC and no RuntimeBus/QueryBus traffic.
 - **Given** a test document whose route uses `timer:tick?period=50&repeatCount=3` → `to: mock:result` and `expects: {mock:result: {count: 3}}`
 - **When** `camel test` executes the document with no `inputs`
 - **Then** the timer drives 3 exchanges and the count expectation is evaluated against them
+
+#### Scenario: full document boots the shared cascade in-process
+
+- **Given** a scenario document whose routes need the http bundle
+- **When** `camel test` executes it
+- **Then** the boot registers bundles through `camel-bundles` from the nearest `Camel.toml`, in-process, and any harness partner listener binds on loopback
 
 ### Requirement: Input delivery restriction
 
@@ -367,11 +409,18 @@ SHALL be reported and execution SHALL continue with the next document; a
 document whose input delivery failed SHALL skip settling, endpoint
 evaluation, and reply evaluation for that document. Exit codes: 0 when every
 expectation of every document passes; 1 when any expectation (endpoint or
-reply) fails or a settle timeout occurs; 2 for misuse, unreadable files,
-document/route parse errors, and input delivery failures. When classes
+reply) fails, a settle timeout occurs, or a scenario verdict fails
+(`receive-timeout`, `validation-mismatch`, runtime `scenario-var-unresolved`);
+2 for misuse, unreadable files, document/route parse errors, input delivery
+failures, and apparatus failures (`doc-validation`, `tier-filter-collision`,
+`partner-bind-failure`, `partner-startup-failure`, `action-transport-failure`,
+`infra-unavailable`, `full-boot-failure`, `shutdown-failure`). When classes
 coexist, precedence is 2 > 1 > 0. stdout SHALL carry one `PASS`/`FAIL` line
 per endpoint per document, one `PASS`/`FAIL` line per asserted reply per
-document, and a final `N passed, M failed` summary.
+document, one line per scenario action verdict for scenario documents, a tier
+annotation (`lean` or `full`) per document, and a final `N passed, M failed`
+summary. A `shutdown-failure` after a recorded verdict SHALL NOT mask the
+verdict.
 
 #### Scenario: all pass
 - **Given** a document whose expectations all hold
@@ -397,6 +446,24 @@ document, and a final `N passed, M failed` summary.
 - **Given** a document whose route input delivery fails (for example a bean processor returning an error with no error handler configured)
 - **When** `camel test <doc>` runs
 - **Then** the failure is reported, no endpoint lines are printed for that document, and the exit code is 2
+
+#### Scenario: scenario receive timeout exits 1
+
+- **Given** a scenario `receive` action whose partner never sends
+- **When** the deadline elapses
+- **Then** the action line reports `receive-timeout` and the exit code is 1
+
+#### Scenario: tier annotation appears per document
+
+- **Given** a run of one lean and one full document
+- **When** `camel test` executes both
+- **Then** each document's output line carries its derived tier annotation
+
+#### Scenario: apparatus failure keeps precedence over verdict failure
+
+- **Given** a first document with a failing expectation and a second document failing with `partner-bind-failure`
+- **When** `camel test a.test.yaml b.test.yaml` runs
+- **Then** both failures are reported and the exit code is 2
 
 ### Requirement: camel run non-interference
 
@@ -943,8 +1010,14 @@ are never read or parsed. `camel test --filter-endpoint <NAME>`
 `expects` map contains at least one of the given names, evaluated after
 parsing; a file-admitted document that fails to parse SHALL still report
 its error and set the exit code to 2 regardless of the endpoint filter,
-and SHALL count as a survivor. When both kinds are given, both SHALL
-apply (AND); repeats of one kind are OR. When at least one filter is
+and SHALL count as a survivor. `camel test --unit` and `camel test
+--integration` SHALL narrow the set by derived tier, symmetrically: a
+nonmatching document admitted through directory expansion is excluded
+silently, while a nonmatching document named explicitly as a CLI argument
+fails with `tier-filter-collision` and exit 2; supplying both flags is misuse
+with exit 2. With no filter flags, every expanded document runs at its
+derived tier. When filters of different kinds are given, all SHALL apply
+(AND); repeats of one kind are OR. When at least one filter is
 given and no document survives, `camel test` SHALL report a misuse error
 naming the filters and exit 2. An invalid glob pattern SHALL exit 2
 before any document runs. Filtered-out documents SHALL produce no stdout
@@ -985,4 +1058,34 @@ identical to running them directly.
 - **Given** a broken document and a filter-endpoint that would exclude it had it parsed
 - **When** `camel test . --filter-endpoint orders` runs
 - **Then** the broken document's parse error is reported to stderr and the exit code is 2
+
+#### Scenario: unit filter excludes full documents silently
+
+- **Given** a directory holding lean and full documents
+- **When** `camel test . --unit` runs
+- **Then** only lean documents run and no error is reported for the excluded full documents
+
+#### Scenario: explicitly named full document collides under unit filter
+
+- **Given** a document deriving FULL
+- **When** `camel test doc.test.yaml --unit` runs with that explicit path
+- **Then** the run reports `tier-filter-collision` and exits 2
+
+#### Scenario: both tier flags are misuse
+
+- **Given** any document set
+- **When** `camel test . --unit --integration` runs
+- **Then** the run exits 2 without reading any document
+
+#### Scenario: tier filter composes with file filter
+
+- **Given** lean and full documents where one lean document matches a glob
+- **When** `camel test . --unit --filter-file 'sub/**'` runs
+- **Then** only the lean glob-matching document runs
+
+#### Scenario: no filter runs everything at derived tier
+
+- **Given** a directory holding lean and full documents
+- **When** `camel test .` runs
+- **Then** every document executes at its derived tier
 
