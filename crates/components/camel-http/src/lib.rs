@@ -3668,7 +3668,10 @@ mod tests {
                             let _ = stream.write_all(response.as_bytes()).await;
                         } else {
                             // Redirect to /final
-                            let response = "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n";
+                            // Connection: close stops the client pooling the
+                            // connection the server drops right after this
+                            // response (pooled-race, rc-u3aw class).
+                            let response = "HTTP/1.1 302 Found\r\nLocation: /final\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
                             let _ = stream.write_all(response.as_bytes()).await;
                         }
                     });
@@ -3834,8 +3837,11 @@ mod tests {
                         };
 
                         let response = match location {
+                            // Connection: close stops the client pooling the
+                            // connection this handler drops right after the
+                            // response (pooled-race, rc-u3aw class).
                             Some(loc) => format!(
-                                "{status_line}\r\nLocation: {loc}\r\nContent-Length: 0\r\n\r\n"
+                                "{status_line}\r\nLocation: {loc}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
                             ),
                             None => format!("{status_line}\r\nContent-Length: 0\r\n\r\n"),
                         };
@@ -4426,8 +4432,10 @@ mod tests {
                         let mut buf = vec![0u8; 4096];
                         let _ = stream.read(&mut buf).await;
                         // Always redirect to /loop
-                        let response =
-                            "HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n";
+                        // Connection: close stops the client pooling the
+                        // connection the server drops right after this
+                        // response (pooled-race, rc-u3aw).
+                        let response = "HTTP/1.1 302 Found\r\nLocation: /loop\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
                         let _ = stream.write_all(response.as_bytes()).await;
                     });
                 }

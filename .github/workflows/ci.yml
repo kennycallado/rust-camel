@@ -17,9 +17,11 @@ jobs:
   unit-tests:
     name: Unit Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Normal run 41-56 min; hangs must fail fast (rc-qdt3).
+    timeout-minutes: 90
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
@@ -40,6 +42,24 @@ jobs:
         run: cargo build --workspace
       - name: Test (unit only — no Docker required)
         run: cargo test --workspace --lib
+
+  macos-build-smoke:
+    # macOS full unit suite runs weekly (ci-weekly.yml): macos minutes
+    # cost 10x and the suite is slow (rc-wk29). Per-push keeps a build
+    # gate plus a minimal smoke so platform compile breaks surface fast.
+    name: macOS Build + Smoke
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Build
+        run: cargo build --workspace
+      - name: Smoke (camel-core lib)
+        run: cargo test -p camel-core --lib
 
   full-tests-linux:
     name: Full Tests (ubuntu-latest)
@@ -82,7 +102,11 @@ jobs:
           CAMEL_JMS_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/jms/build/native/jms-bridge
         run: cargo test -p camel-test --features integration-tests --test jms_test
       - name: Reclaim JMS bridge artifacts
-        run: rm -rf bridges/jms/build bridges/jms/.gradle-docker-cache
+        # Kill the bridge process too: orphans hold ports and pollute
+        # later steps (rc-qdt3).
+        run: |
+          pkill -x jms-bridge || true
+          rm -rf bridges/jms/build bridges/jms/.gradle-docker-cache
       - name: Build XML bridge binary
         run: cargo xtask build-xml-bridge
       - name: XML bridge integration tests
@@ -90,7 +114,9 @@ jobs:
           CAMEL_XML_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/xml/build/native/xml-bridge
         run: cargo test -p camel-test --features integration-tests --test xml_bridge_validator_test --test xml_bridge_xslt_test
       - name: Reclaim XML bridge artifacts
-        run: rm -rf bridges/xml/build bridges/xml/.gradle-docker-cache
+        run: |
+          pkill -x xml-bridge || true
+          rm -rf bridges/xml/build bridges/xml/.gradle-docker-cache
       - name: Build CXF bridge binary
         run: cargo xtask build-cxf-bridge
       - name: CXF bridge integration tests
@@ -98,7 +124,9 @@ jobs:
           CAMEL_CXF_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/cxf/build/native/cxf-bridge
         run: cargo test -p camel-test --features integration-tests --test cxf_test
       - name: Reclaim CXF bridge artifacts
-        run: rm -rf bridges/cxf/build bridges/cxf/.gradle-docker-cache
+        run: |
+          pkill -x cxf-bridge || true
+          rm -rf bridges/cxf/build bridges/cxf/.gradle-docker-cache
       - name: Container integration tests
         run: cargo test -p camel-test --features integration-tests --test container_test
       - name: Kafka integration tests (testcontainers)
@@ -132,6 +160,8 @@ jobs:
   docker-smoke-test:
     name: Docker Smoke Test
     runs-on: ubuntu-latest
+    # Normal run ~17 min (rc-qdt3).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
@@ -186,6 +216,8 @@ jobs:
   coverage:
     name: Coverage Check
     runs-on: ubuntu-latest
+    # Cold-cache observed at 55 min (rc-qdt3).
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
@@ -213,6 +245,8 @@ jobs:
   quality:
     name: Quality Gates
     runs-on: ubuntu-latest
+    # Normal run 8-17 min (rc-qdt3).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
@@ -302,6 +336,8 @@ jobs:
   wasm-integration:
     name: WASM Integration (ubuntu-latest)
     runs-on: ubuntu-latest
+    # Normal run 6-14 min (rc-qdt3).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space

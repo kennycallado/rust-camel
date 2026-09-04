@@ -1,0 +1,35 @@
+name: CI Weekly
+
+# Full macOS unit suite on a weekly cadence instead of per-push:
+# macos minutes cost 10x, but the platform catches timing races ubuntu
+# never sees (rc-u3aw was macos-only) — keep the coverage, drop the
+# per-push cost (rc-wk29).
+
+on:
+  schedule:
+    - cron: "0 5 * * 1" # Mondays 05:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  macos-unit-full:
+    name: Unit Tests (macos-latest, weekly)
+    runs-on: macos-latest
+    # Observed 41-56 min per-push; weekly cold cache gets headroom (rc-wk29).
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Build
+        run: cargo build --workspace
+      - name: Test (unit only — no Docker required)
+        run: cargo test --workspace --lib
