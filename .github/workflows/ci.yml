@@ -287,6 +287,8 @@ jobs:
         run: cargo xtask lint-context-citations
       - name: lint-metric-labels
         run: cargo xtask lint-metric-labels
+      - name: lint-gate-forwarding
+        run: cargo xtask lint-gate-forwarding
       - name: lint-commits
         # Fail if any commit in the PR range mentions breaking in prose
         # without the conventional `!:` subject marker. Default checkout

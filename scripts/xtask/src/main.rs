@@ -2,6 +2,7 @@ mod changelog;
 mod fuzz;
 mod lint_component_deps;
 mod lint_context_citations;
+mod lint_gate_forwarding;
 mod lint_metric_labels;
 mod lint_single_source;
 
@@ -104,6 +105,10 @@ enum Commands {
     /// annotated `// allow-open-label <bd-ref>`. Exits non-zero on
     /// violations.
     LintMetricLabels,
+    /// Enforce bundle gate forwarding: every workspace crate depending on
+    /// `camel-bundles` must forward the bundle gates it names, and boot
+    /// consumers must forward all of them. Exits non-zero on violations.
+    LintGateForwarding,
     /// Scan component crate source for `UriOption::new` calls outside
     /// `#[cfg(test)]` modules. Enforces the single-source-of-truth
     /// invariant: metadata MUST be macro-derived, not hand-written.
@@ -313,6 +318,25 @@ fn main() {
                 Err(e) => {
                     eprintln!("lint-metric-labels error: {e}");
                     std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintGateForwarding => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_gate_forwarding::lint_gate_forwarding(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-gate-forwarding: OK (0 violations)");
+                }
+                Ok(violations) => {
+                    for v in &violations {
+                        println!("{v}");
+                    }
+                    eprintln!("lint-gate-forwarding: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-gate-forwarding error: {e}");
+                    std::process::exit(2);
                 }
             }
         }

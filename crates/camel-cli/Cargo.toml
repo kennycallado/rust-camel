@@ -11,6 +11,9 @@ readme = "README.md"
 keywords = ["camel", "cli", "integration", "messaging"]
 categories = ["command-line-utilities", "development-tools"]
 
+[package.metadata.camel-bundles]
+boot-consumer = true
+
 [lib]
 name = "camel_cli"
 path = "src/lib.rs"

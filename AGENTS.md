@@ -59,6 +59,8 @@
   run: cargo xtask lint-publish-cycles
 - name: lint-component-deps
   run: cargo xtask lint-component-deps
+- name: lint-gate-forwarding
+  run: cargo xtask lint-gate-forwarding
 - name: lint-context-citations
   run: cargo xtask lint-context-citations
 - name: lint-metric-labels
