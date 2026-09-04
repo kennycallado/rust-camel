@@ -1852,6 +1852,25 @@ mod tests {
             .port()
     }
 
+    /// Retry `connect_async` until the server accepts, bounded by 5s.
+    /// Unbounded retries hang the whole test binary when the consumer's
+    /// bind silently failed on crowded CI port space (rc-y24l).
+    async fn connect_until_ready(
+        url: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match connect_async(url).await {
+                    Ok((stream, _)) => break stream,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("server at {url} never accepted a connection within 5s"))
+    }
+
     #[test]
     fn ws_component_scheme_is_ws() {
         assert_eq!(WsComponent::new().scheme(), "ws");
@@ -2054,12 +2073,7 @@ mod tests {
         });
 
         let url = format!("ws://127.0.0.1:{port}/echo");
-        let (mut client, _) = loop {
-            match connect_async(&url).await {
-                Ok(ok) => break ok,
-                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
-            }
-        };
+        let mut client = connect_until_ready(&url).await;
 
         client
             .send(ClientMessage::Text("hello-ws".into()))
@@ -2106,12 +2120,7 @@ mod tests {
         consumer.start(ctx).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/shutdown");
-        let (mut client, _) = loop {
-            match connect_async(&url).await {
-                Ok(ok) => break ok,
-                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
-            }
-        };
+        let mut client = connect_until_ready(&url).await;
 
         client
             .send(ClientMessage::Text("keepalive".into()))
@@ -2319,12 +2328,7 @@ mod tests {
         consumer.start(ctx).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/limited");
-        let (_client1, _) = loop {
-            match connect_async(&url).await {
-                Ok(ok) => break ok,
-                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
-            }
-        };
+        let _client1 = connect_until_ready(&url).await;
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -2373,12 +2377,7 @@ mod tests {
         consumer.start(ctx).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/sizelimit");
-        let (mut client, _) = loop {
-            match connect_async(&url).await {
-                Ok(ok) => break ok,
-                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
-            }
-        };
+        let mut client = connect_until_ready(&url).await;
 
         let oversized = "x".repeat(100);
         client
@@ -2485,12 +2484,7 @@ mod tests {
 
         let url = format!("ws://127.0.0.1:{port}/bc");
 
-        let (mut client1, _) = loop {
-            match connect_async(&url).await {
-                Ok(ok) => break ok,
-                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
-            }
-        };
+        let mut client1 = connect_until_ready(&url).await;
 
         let (mut client2, _) = connect_async(&url).await.unwrap();
 
@@ -2826,12 +2820,7 @@ mod tests {
 
         // Connect a client so the registry has an entry
         let url = format!("ws://127.0.0.1:{port}/backpressure");
-        let (mut client, _) = loop {
-            match connect_async(&url).await {
-                Ok(ok) => break ok,
-                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
-            }
-        };
+        let mut client = connect_until_ready(&url).await;
 
         // Don't consume messages — let the channel fill up
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2883,12 +2872,7 @@ mod tests {
         consumer.start(ctx).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/pingpong");
-        let (mut client, _) = loop {
-            match connect_async(&url).await {
-                Ok(ok) => break ok,
-                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
-            }
-        };
+        let mut client = connect_until_ready(&url).await;
 
         // Send a ping
         client
@@ -3627,12 +3611,7 @@ mod tests {
         consumer.start(ctx).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/dispatch");
-        let (mut client, _) = loop {
-            match connect_async(&url).await {
-                Ok(ok) => break ok,
-                Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
-            }
-        };
+        let mut client = connect_until_ready(&url).await;
         client
             .send(ClientMessage::Text("lost dispatch".into()))
             .await
