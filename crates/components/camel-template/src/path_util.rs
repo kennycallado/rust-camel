@@ -322,14 +322,13 @@ mod imp {
 // with a chained `OBJECT_ATTRIBUTES.RootDirectory` and reparse-point rejection
 // at every component — NOT `CreateFileW` (which only checks the trailing
 // component). This path CANNOT be fully validated on a Linux CI host; the
-// Unix path is the primary CI gate. The windows-sys 0.59 features required
+// Unix path is the primary CI gate. The windows-sys features required
 // here are now all enabled in the workspace Cargo.toml:
 //   - `Wdk_Foundation`           (OBJECT_ATTRIBUTES)
 //   - `Win32_System_IO`          (IO_STATUS_BLOCK)
-//   - `Win32_System_Kernel`      (OBJ_CASE_INSENSITIVE)
+//   - `Win32_Foundation`         (HANDLE, UNICODE_STRING, CloseHandle, NTSTATUS, FILETIME, OBJ_CASE_INSENSITIVE)
 //   - `Wdk_Storage_FileSystem`   (NtCreateFile, FILE_OPEN, create-options)
 //   - `Win32_Storage_FileSystem` (BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle)
-//   - `Win32_Foundation`         (HANDLE, UNICODE_STRING, CloseHandle, NTSTATUS, FILETIME)
 // File identity is collected via a single `GetFileInformationByHandle` call
 // (volume serial, file id, size, last-write) rather than the multi-call
 // `GetFileInformationByHandleEx` route, because windows-sys 0.59 does not
@@ -349,14 +348,14 @@ mod imp {
         FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
     };
     use windows_sys::Win32::Foundation::{
-        CloseHandle, HANDLE, INVALID_HANDLE_VALUE, STATUS_SUCCESS, UNICODE_STRING,
+        CloseHandle, HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, STATUS_SUCCESS,
+        UNICODE_STRING,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
         SYNCHRONIZE,
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
-    use windows_sys::Win32::System::Kernel::OBJ_CASE_INSENSITIVE;
 
     use super::{FileIdentity, OwnedHandle};
     use crate::error::TemplateReloadError;

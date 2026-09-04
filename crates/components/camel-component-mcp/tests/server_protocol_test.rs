@@ -321,7 +321,10 @@ async fn legacy_initialize_rejected_fail_closed() {
 }
 
 #[tokio::test]
-async fn initialize_with_baseline_version_succeeds() {
+async fn initialize_with_baseline_version_rejected() {
+    // rmcp 3.2 serves the 2026-07-28 revision only over `discover`; the
+    // legacy `initialize` handshake cannot negotiate it, so even a request
+    // naming the supported baseline is answered with -32022.
     let addr = spawn_server("127.0.0.10:0").await;
     let initialize = serde_json::json!({
         "jsonrpc": "2.0",
@@ -338,8 +341,20 @@ async fn initialize_with_baseline_version_succeeds() {
     let value: serde_json::Value =
         serde_json::from_str(&response.body).expect("reply must be JSON");
     assert_eq!(
-        value["result"]["protocolVersion"],
-        serde_json::json!("2026-07-28")
+        value["error"]["code"],
+        serde_json::json!(-32022),
+        "initialize must not serve the baseline version, got: {value}"
+    );
+    assert_eq!(
+        value["error"]["data"]["supported"],
+        serde_json::json!(["2026-07-28"]),
+        "error data must list the supported versions: {value}"
+    );
+    assert!(
+        !value
+            .as_object()
+            .expect("reply must be an object")
+            .contains_key("result")
     );
 }
 

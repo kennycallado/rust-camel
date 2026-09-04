@@ -57,8 +57,6 @@ producer's `connect_async` also becomes TLS-capable — an acknowledged side eff
 producer routes that previously failed on connect now work. Tests inject a test-CA connector for
 deterministic trust.
 
-Spec: [ws-component capability](../../../openspec/changes/ws-client-consumer/specs/ws-component/spec.md).
-
 ## Lifecycle and security invariants
 
 - `ServerRegistry::get_or_spawn` creates at most one server per port. The first registration fixes
