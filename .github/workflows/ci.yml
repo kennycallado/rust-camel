@@ -164,8 +164,8 @@ jobs:
   docker-smoke-test:
     name: Docker Smoke Test
     runs-on: ubuntu-latest
-    # Normal run ~17 min (rc-qdt3).
-    timeout-minutes: 40
+    # ~18 min warm, ~41 min cold cache (run 33801679630); cancelled jobs skip cache save (run 33887809098).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
