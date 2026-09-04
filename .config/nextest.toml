@@ -1,0 +1,11 @@
+# Adjudicated pilot policy (bd rc-mhsn, epic rc-99d5): the ubuntu
+# Rust library-test job runs under this profile. retries are
+# diagnostic — flaky-result = "fail" makes a retry-pass fail the
+# gating job. slow-timeout ceiling is period x terminate-after
+# (~90s), not the period alone.
+[profile.ci]
+retries = 1
+flaky-result = "fail"
+slow-timeout = { period = "30s", terminate-after = 3 }
+failure-output = "immediate-final"
+fail-fast = false

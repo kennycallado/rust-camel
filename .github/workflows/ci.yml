@@ -40,8 +40,12 @@ jobs:
         run: sudo apt-get install -y libclang-dev
       - name: Build
         run: cargo build --workspace
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@eba66cc6f87204a1e73f96e528e759b6c1fcf573 # cargo-nextest
+        with:
+          tool: cargo-nextest@0.9.143
       - name: Test (unit only — no Docker required)
-        run: cargo test --workspace --lib
+        run: cargo nextest run --workspace --lib --profile ci
 
   macos-build-smoke:
     # macOS full unit suite runs weekly (ci-weekly.yml): macos minutes
