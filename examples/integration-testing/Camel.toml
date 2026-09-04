@@ -1,0 +1,13 @@
+# Integration-testing example (ADR-0069 sections 4-5): a minimal project
+# config for the scenario boot. The harness loads it through the sealed
+# loader (`from_file_sealed`): the pinned profile applies, and ambient
+# CAMEL_* overrides never do.
+#
+# The partner binds 127.0.0.1; the http producer's SSRF guard rejects
+# internal addresses unless the operator allows them. `allow_internal`
+# is that operator opt-in, exactly as a real loopback scenario project
+# declares it.
+log_level = "info"
+
+[components.http]
+allow_internal = true

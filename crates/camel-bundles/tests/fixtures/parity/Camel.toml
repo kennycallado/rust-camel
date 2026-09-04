@@ -1,0 +1,10 @@
+# Parity fixture for tests/parity_test.rs (ADR-0069 task 1.3): a minimal but
+# complete `camel run` project. Tables for http, file, container, and template
+# are present and empty on purpose — each bundle parses them through its serde
+# defaults, exactly as a production Camel.toml would.
+routes = ["routes/*.yaml"]
+
+[components.http]
+[components.file]
+[components.container]
+[components.template]

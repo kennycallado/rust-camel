@@ -116,17 +116,13 @@ impl std::fmt::Display for MaterializationFailure {
     }
 }
 
-/// Maximum size for individual route files (YAML/JSON) during discovery.
-/// Prevents OOM from abnormally large files.
-const MAX_ROUTE_FILE_SIZE: u64 = 16 * 1024 * 1024;
-
 /// Read a file with a size cap. Stats first, rejects if too large.
 fn read_file_capped(path: &Path) -> Result<String, DiscoveryError> {
     let metadata = fs::metadata(path).map_err(|e| DiscoveryError::Io {
         path: path.to_string_lossy().to_string(),
         source: e,
     })?;
-    if metadata.len() > MAX_ROUTE_FILE_SIZE {
+    if metadata.len() > crate::MAX_ROUTE_FILE_SIZE {
         return Err(DiscoveryError::Io {
             path: path.to_string_lossy().to_string(),
             source: io::Error::new(
@@ -135,7 +131,7 @@ fn read_file_capped(path: &Path) -> Result<String, DiscoveryError> {
                     "Route file `{}` is {} bytes, exceeds max {} bytes",
                     path.display(),
                     metadata.len(),
-                    MAX_ROUTE_FILE_SIZE
+                    crate::MAX_ROUTE_FILE_SIZE
                 ),
             ),
         });

@@ -363,3 +363,69 @@ token = "${env:RUST_CAMEL_TEST_TOKEN:-abc123}"
 // (legacy warn-and-keep passthrough, retired) lives in
 // `tests/placeholder_e2e.rs::legacy_braces_rejected_on_load_path`: the
 // walk-level rejection is covered by `tests/placeholder_walk.rs`.
+
+// ---------------------------------------------------------------------------
+// Sealed scenario loader (ADR-0069 section 4: environment parity and
+// hermeticity)
+// ---------------------------------------------------------------------------
+
+/// The sealed loader ignores allowlisted `CAMEL_*` ambient overrides: an
+/// ambient `CAMEL_LOG_LEVEL` set in the test process must not reach the
+/// scenario's loaded config (hermeticity seal, ADR-0069 section 4). The
+/// unsealed `from_file_with_env` entry applies the same override as the
+/// control arm.
+#[test]
+fn from_file_sealed_ignores_ambient_env_overrides() {
+    let _guard = super::env_lock();
+    let file = write_temp_config(
+        r#"
+[default]
+log_level = "info"
+"#,
+    );
+    let path = file.path().to_str().unwrap().to_string();
+
+    super::set_env("CAMEL_LOG_LEVEL", "trace");
+    let sealed = CamelConfig::from_file_sealed(&path, "default", &|_| None);
+    let unsealed = CamelConfig::from_file_with_env(&path);
+    super::unset_env("CAMEL_LOG_LEVEL");
+
+    let sealed = sealed.expect("sealed load must succeed");
+    assert_eq!(
+        sealed.log_level, "info",
+        "ambient CAMEL_LOG_LEVEL must not reach the sealed config"
+    );
+    let unsealed = unsealed.expect("unsealed control load must succeed");
+    assert_eq!(
+        unsealed.log_level, "trace",
+        "control: the unsealed entry applies the ambient override"
+    );
+}
+
+/// The sealed loader pins the profile by value: an ambient `CAMEL_PROFILE`
+/// must not leak into profile selection (hermeticity seal, ADR-0069
+/// section 4).
+#[test]
+fn from_file_sealed_ignores_ambient_profile() {
+    let _guard = super::env_lock();
+    let file = write_temp_config(
+        r#"
+[default]
+timeout_ms = 1000
+
+[production]
+timeout_ms = 9999
+"#,
+    );
+    let path = file.path().to_str().unwrap().to_string();
+
+    super::set_env("CAMEL_PROFILE", "production");
+    let sealed = CamelConfig::from_file_sealed(&path, "default", &|_| None);
+    super::unset_env("CAMEL_PROFILE");
+
+    let sealed = sealed.expect("sealed load must succeed");
+    assert_eq!(
+        sealed.timeout_ms, 1000,
+        "ambient CAMEL_PROFILE must not leak into the sealed config"
+    );
+}

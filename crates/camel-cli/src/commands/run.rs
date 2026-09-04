@@ -1,46 +1,21 @@
 //! `camel run` subcommand body.
 //!
-//! Owns the 7 ADR-0012 `error!` sites migrated in Phase C (see ADR-0012 +
-//! Phase C plan). Each site has a `// log-policy: …` annotation that
-//! classifies it per the ADR taxonomy.
+//! Owns ADR-0012 category (d) `error!` sites for the CLI-owned lifecycle:
+//! config/context bootstrap, route discovery/loading, context start, the
+//! file watcher, and shutdown. Each site carries a `// log-policy: …`
+//! annotation classifying it per the ADR taxonomy.
 //!
-//! All sites in this file are category (c) or (d) — system-broken /
-//! bootstrap. The annotations are added in the Infra cluster task (Task 9),
-//! NOT in this split commit.
+//! The component bundle cascade and the JMS/CXF pool teardown moved to
+//! `camel_bundles` (ADR-0069 section 10); `camel run` prepares the context,
+//! calls `camel_bundles::boot`, and drives the returned `BootHandle` at
+//! shutdown. The handle logs teardown failures; the exit code never
+//! changes.
 
-use camel_api::datasource::DatasourceCatalog;
 #[cfg(feature = "wasm")]
 use camel_bean::BeanProcessor;
-use camel_core::datasource::RuntimeDatasourceCatalog;
+#[cfg(feature = "wasm")]
 use std::sync::Arc;
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-
-struct BridgeCleanup {
-    xslt: Arc<camel_xslt::XsltBridgeRuntime>,
-    xj: Arc<camel_xj::XjBridgeRuntime>,
-    validator: Option<Arc<camel_component_validator::xsd_bridge::XsdBridgeBackend>>,
-}
-
-#[async_trait::async_trait]
-impl camel_api::lifecycle::Lifecycle for BridgeCleanup {
-    fn name(&self) -> &str {
-        "bridge-cleanup"
-    }
-
-    async fn start(&mut self) -> Result<(), camel_api::CamelError> {
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<(), camel_api::CamelError> {
-        self.xslt.shutdown().await;
-        self.xj.shutdown().await;
-        if let Some(validator) = &self.validator {
-            validator.shutdown().await;
-        }
-        Ok(())
-    }
-}
 
 /// Load the Camel.toml at `config_path`, falling back to serde defaults
 /// ONLY when the main file does not exist.
@@ -77,6 +52,30 @@ fn load_config_or_default(
             })
         }
     }
+}
+
+/// Resolve the project root from the config path: the canonicalized parent
+/// directory, with an empty parent (a bare `Camel.toml` file name) mapped to
+/// the current directory. Both wasm consumers use it: the bean loader and
+/// the camel-bundles wasm base dir. Exits with code 1 when the parent cannot
+/// be canonicalized; a dangling `--config` parent must fail fast instead of
+/// booting on defaults with a broken root.
+fn canonical_project_root(config_path: &std::path::Path) -> std::path::PathBuf {
+    config_path
+        .parent()
+        .map(|p| {
+            if p.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                p
+            }
+        })
+        .unwrap_or(std::path::Path::new("."))
+        .canonicalize()
+        .unwrap_or_else(|e| {
+            eprintln!("Error: cannot resolve project root: {e}");
+            std::process::exit(1);
+        })
 }
 
 pub async fn run(
@@ -138,8 +137,7 @@ pub async fn run(
     )
     .await
     .unwrap_or_else(|e| {
-        eprintln!("Failed to configure CamelContext: {e}");
-        std::process::exit(1);
+        crate::commands::errors::report_cli_failure_and_exit("run", &e);
     });
 
     // R4-L4: CWD trust model — camel run executes route scripts/WASM/beans
@@ -157,13 +155,6 @@ pub async fn run(
         Err(e) => tracing::warn!("Function runtime disabled: {e}"),
     }
 
-    // 3a. Create datasource catalog from configured datasources, wiring health registry
-    let datasource_catalog: Arc<dyn DatasourceCatalog> = {
-        let catalog = RuntimeDatasourceCatalog::new(camel_config.datasources.clone())
-            .with_health_registry(ctx.health_registry());
-        Arc::new(catalog)
-    };
-
     // Load WASM beans after context is created (needs component registry)
     #[cfg(feature = "wasm")]
     if let Some(ref bean_reg) = beans_registry {
@@ -175,20 +166,7 @@ pub async fn run(
             .and_then(|v| v.get("plugins_dir"))
             .and_then(|v| v.as_str())
             .unwrap_or("plugins");
-        let config_dir = std::path::Path::new(&config_path)
-            .parent()
-            .map(|p| {
-                if p.as_os_str().is_empty() {
-                    std::path::Path::new(".")
-                } else {
-                    p
-                }
-            })
-            .unwrap_or(std::path::Path::new("."));
-        let camel_root = config_dir.canonicalize().unwrap_or_else(|e| {
-            eprintln!("Error: cannot resolve project root: {e}");
-            std::process::exit(1);
-        });
+        let camel_root = canonical_project_root(std::path::Path::new(&config_path));
         crate::commands::plugin::validate_plugins_dir(&camel_root, plugins_dir_raw).unwrap_or_else(
             |e| {
                 eprintln!("Error: invalid plugins_dir: {e}");
@@ -306,207 +284,17 @@ pub async fn run(
     ))
     .await;
 
-    // Define register_bundle! macro — looks up config key in ComponentsConfig::raw,
-    // falling back to an empty table so bundles always register with their serde defaults.
-    // Uses UFCS to invoke ComponentBundle methods without requiring trait in scope
-    macro_rules! register_bundle {
-        ($ctx:expr, $cfg:expr, $Bundle:ty) => {
-            let raw = $cfg
-                .components
-                .raw
-                .get(<$Bundle as camel_component_api::ComponentBundle>::config_key())
-                .cloned()
-                .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
-            match <$Bundle as camel_component_api::ComponentBundle>::from_toml(raw) {
-                Ok(bundle) => <$Bundle as camel_component_api::ComponentBundle>::register_all(
-                    bundle, &mut $ctx,
-                ),
-                Err(e) => {
-                    return Err(camel_api::CamelError::Config(format!(
-                        "Failed to load {} config: {}",
-                        <$Bundle as camel_component_api::ComponentBundle>::config_key(),
-                        e
-                    )));
-                }
-            }
-        };
-    }
-
-    // Register built-in components (no config needed)
-    ctx.register_component(camel_component_timer::TimerComponent::new());
-    ctx.register_component(camel_component_cron::CronComponent::new());
-    ctx.register_component(camel_component_log::LogComponent::new());
-    ctx.register_component(camel_component_direct::DirectComponent::new());
-    ctx.register_component(camel_component_seda::SedaComponent::new());
-    ctx.register_component(camel_component_mock::MockComponent::new());
-    ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
-    let validator_component = camel_component_validator::ValidatorComponent::new();
-    let validator_backend = validator_component.xsd_bridge_backend();
-    ctx.register_component(validator_component);
-
-    let xslt_component = camel_xslt::XsltComponent::default();
-    let xslt_runtime = xslt_component.bridge_runtime();
-    ctx.register_component(xslt_component);
-
-    let xj_component = camel_xj::XjComponent::default();
-    let xj_runtime = xj_component.bridge_runtime();
-    ctx.register_component(xj_component);
-
-    ctx = ctx.with_lifecycle(BridgeCleanup {
-        xslt: xslt_runtime,
-        xj: xj_runtime,
-        validator: validator_backend,
-    });
-
-    // Register HTTP, WS, File, Container (always-on in camel-cli, no feature flag)
-    register_bundle!(ctx, camel_config, camel_component_http::HttpBundle);
-    #[cfg(feature = "http-static")]
-    register_bundle!(ctx, camel_config, camel_component_http::HttpStaticBundle);
-    register_bundle!(ctx, camel_config, camel_component_ws::WsBundle);
-    register_bundle!(ctx, camel_config, camel_component_file::FileBundle);
-    register_bundle!(
-        ctx,
-        camel_config,
-        camel_component_container::ContainerBundle
-    );
-    // External template renderer (ADR-0047 Stage 2): always-on built-in.
-    register_bundle!(ctx, camel_config, camel_template::TemplateBundle);
-
-    // Register optional/feature-gated bundles
-    let jms_pool = {
-        let raw = camel_config
-            .components
-            .raw
-            .get("jms")
-            .cloned()
-            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
-        match <camel_component_jms::JmsBundle as camel_component_api::ComponentBundle>::from_toml(
-            raw,
-        ) {
-            Ok(bundle) => {
-                let pool = bundle.pool();
-                <camel_component_jms::JmsBundle as camel_component_api::ComponentBundle>::register_all(bundle, &mut ctx);
-                pool
-            }
-            Err(e) => {
-                return Err(camel_api::CamelError::Config(format!(
-                    "Failed to load jms config: {e}"
-                )));
-            }
-        }
-    };
-
-    let cxf_pool = {
-        let raw = camel_config
-            .components
-            .raw
-            .get("cxf")
-            .cloned()
-            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
-        match <camel_component_cxf::CxfBundle as camel_component_api::ComponentBundle>::from_toml(
-            raw,
-        ) {
-            Ok(bundle) => {
-                let pool = bundle.pool();
-                <camel_component_cxf::CxfBundle as camel_component_api::ComponentBundle>::register_all(bundle, &mut ctx);
-                pool
-            }
-            Err(e) => {
-                return Err(camel_api::CamelError::Config(format!(
-                    "Failed to load cxf config: {e}"
-                )));
-            }
-        }
-    };
-
-    #[cfg(feature = "kafka")]
-    register_bundle!(ctx, camel_config, camel_component_kafka::KafkaBundle);
-    #[cfg(feature = "mqtt")]
-    register_bundle!(ctx, camel_config, camel_component_mqtt::MqttBundle);
-    register_bundle!(ctx, camel_config, camel_master::MasterBundle);
-    register_bundle!(
-        ctx,
-        camel_config,
-        camel_component_opensearch::OpenSearchBundle
-    );
-    register_bundle!(ctx, camel_config, camel_component_redis::RedisBundle);
-    {
-        let sql_raw = camel_config
-            .components
-            .raw
-            .get(<camel_component_sql::SqlBundle as camel_component_api::ComponentBundle>::config_key())
-            .cloned()
-            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
-        match <camel_component_sql::SqlBundle as camel_component_api::ComponentBundle>::from_toml(
-            sql_raw,
-        ) {
-            Ok(bundle) => {
-                let bundle = bundle.with_catalog(Arc::clone(&datasource_catalog));
-                <camel_component_sql::SqlBundle as camel_component_api::ComponentBundle>::register_all(bundle, &mut ctx);
-            }
-            Err(e) => {
-                // log-policy: system-broken
-                tracing::error!("failed to initialize SQL bundle: {}", e);
-            }
-        }
-    }
-    #[cfg(feature = "surrealdb")]
-    {
-        let surrealdb_raw = camel_config
-            .components
-            .raw
-            .get(<camel_component_surrealdb::SurrealDbBundle as camel_component_api::ComponentBundle>::config_key())
-            .cloned()
-            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
-        match <camel_component_surrealdb::SurrealDbBundle as camel_component_api::ComponentBundle>::from_toml(
-            surrealdb_raw,
-        ) {
-            Ok(bundle) => {
-                let bundle = bundle.with_catalog(Arc::clone(&datasource_catalog));
-                <camel_component_surrealdb::SurrealDbBundle as camel_component_api::ComponentBundle>::register_all(
-                    bundle, &mut ctx,
-                );
-            }
-            Err(e) => {
-                // log-policy: system-broken
-                tracing::error!("failed to initialize SurrealDB bundle: {}", e);
-            }
-        }
-    }
-    #[cfg(feature = "grpc")]
-    register_bundle!(ctx, camel_config, camel_component_grpc::GrpcBundle);
-
-    #[cfg(feature = "llm")]
-    register_bundle!(ctx, camel_config, camel_component_llm::LlmBundle);
-
-    #[cfg(feature = "mcp")]
-    register_bundle!(ctx, camel_config, camel_component_mcp::McpBundle);
-
-    #[cfg(feature = "wasm")]
-    {
-        let base_dir = std::path::Path::new(&config_path)
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .to_path_buf();
-        let wasm_bundle = camel_component_wasm::WasmBundle::new(
-            Arc::new(camel_core::RegistryComponentContext::new(
-                ctx.registry_arc(),
-                Some(ctx.metrics()),
-                camel_component_api::ComponentContext::component_metrics_enabled(&ctx),
-            )),
-            base_dir,
-        );
-        <camel_component_wasm::WasmBundle as camel_component_api::ComponentBundle>::register_all(
-            wasm_bundle,
-            &mut ctx,
-        );
-    }
-
-    // Languages are registered in `configure_context_with_beans` (camel-config)
-    // via `camel_core::languages_from_config(&config.languages)`, which applies
-    // Camel.toml [languages.*.limits] and registers js/javascript/rhai/
-    // jsonpath/xpath under feature gates. A direct `CamelContext::builder().build()`
-    // caller gets `LanguagesConfig::default()` (rust-camel runtime defaults).
+    // 4. Boot the component bundle cascade via camel-bundles (ADR-0069
+    //    section 10). Boot registers the built-ins, every bundle of the
+    //    cascade, the datasource catalog, and the BridgeCleanup lifecycle
+    //    on this prepared context, and returns the BootHandle that owns
+    //    pool teardown. Route loading, discovery, startup checks, and
+    //    ctx.start() stay with the CLI.
+    //
+    //    project_root feeds the wasm bundle base dir; resolution is shared
+    //    with the wasm bean loader through `canonical_project_root`.
+    let project_root = canonical_project_root(std::path::Path::new(&config_path));
+    let boot_handle = camel_bundles::boot(&mut ctx, &camel_config, &project_root).await?;
 
     // 5. Discover and load initial routes
     match camel_dsl::discover_routes_with_threshold_and_security(
@@ -527,6 +315,9 @@ pub async fn run(
             }
             // Conditionally register ExecBundle: only when a discovered route
             // references `exec:` or the operator declared `[components.exec]`.
+            // CLI-owned (route-content-conditional), so it stays outside the
+            // camel-bundles boot cascade (ADR-0069 section 10) and goes
+            // through the single-bundle seam instead.
             #[cfg(feature = "exec")]
             {
                 let exec_used = camel_core::startup_validation::route_definitions_reference_scheme(
@@ -534,7 +325,10 @@ pub async fn run(
                 );
                 let exec_configured = camel_config.components.raw.contains_key("exec");
                 if exec_used || exec_configured {
-                    register_bundle!(ctx, camel_config, camel_component_exec::ExecBundle);
+                    camel_bundles::register_bundle::<camel_component_exec::ExecBundle>(
+                        &mut ctx,
+                        &camel_config,
+                    )?;
                 }
             }
 
@@ -594,7 +388,10 @@ pub async fn run(
                     tracing::error!("Failed to discover routes: {}", e);
                 }
             }
-            std::process::exit(1);
+            crate::commands::errors::report_cli_failure_and_exit(
+                "run",
+                &camel_api::CamelError::RouteError(e.to_string()),
+            );
         }
     }
 
@@ -602,7 +399,7 @@ pub async fn run(
     if let Err(e) = ctx.start().await {
         // log-policy: system-broken
         tracing::error!("Failed to start CamelContext: {}", e);
-        std::process::exit(1);
+        crate::commands::errors::report_cli_failure_and_exit("run", &e);
     }
 
     tracing::info!("camel-cli: context started");
@@ -693,36 +490,12 @@ pub async fn run(
     tracing::info!("camel-cli: shutting down...");
     watcher_shutdown.cancel();
 
-    // Signal pools to stop restarting BEFORE context shutdown
-    jms_pool.begin_shutdown();
-    cxf_pool.begin_shutdown();
-
-    // Stop context (routes + lifecycle services)
-    ctx.stop().await.unwrap_or_else(|e| {
-        // log-policy: system-broken
-        tracing::error!("Error during shutdown: {}", e);
-    });
-
-    // Tear down bridge pools with timeouts
-    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-
-    match tokio::time::timeout(SHUTDOWN_TIMEOUT, jms_pool.shutdown()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            // log-policy: system-broken
-            tracing::error!("JMS pool shutdown failed: {}", e);
-        }
-        Err(_) => tracing::warn!("JMS pool shutdown timed out after 30s"),
-    }
-
-    match tokio::time::timeout(SHUTDOWN_TIMEOUT, cxf_pool.shutdown()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            // log-policy: system-broken
-            tracing::error!("CXF pool shutdown failed: {}", e);
-        }
-        Err(_) => tracing::warn!("CXF pool shutdown timed out after 30s"),
-    }
+    // Pool begin_shutdown, ctx.stop, and the deadline-wrapped pool
+    // teardown moved into the BootHandle (ADR-0069 section 10). The handle
+    // logs each failure (system-broken); `camel run` teardown is non-fatal,
+    // so the value is discarded and a teardown failure never changes the
+    // exit code.
+    let _ = boot_handle.shutdown(&mut ctx).await;
 
     force_exit.abort();
 

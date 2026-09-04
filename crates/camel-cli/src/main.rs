@@ -185,8 +185,12 @@ async fn main() {
                     std::process::exit(2);
                 }
             };
-            let mut out = std::io::stdout().lock();
-            let mut err = std::io::stderr().lock();
+            // `Stdout`/`Stderr` (not `.lock()` guards): the full-boot
+            // scenario run spans worker-thread tasks whose tracing writer
+            // takes the same std locks; a guard held across the awaited
+            // run deadlocks them against the parked main thread.
+            let mut out = std::io::stdout();
+            let mut err = std::io::stderr();
             let summary = commands::test::run_tests_full(&config, &mut out, &mut err).await;
             std::process::exit(summary.exit_code);
         }

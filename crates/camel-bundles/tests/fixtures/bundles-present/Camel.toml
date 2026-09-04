@@ -1,0 +1,9 @@
+# Fixture for the camel-bundles lib tests: per-bundle tables present for the
+# always-registered cascade members. Tables are empty on purpose: each bundle
+# parses them through its serde defaults, exactly as a production Camel.toml
+# would.
+[components.http]
+[components.ws]
+[components.file]
+[components.container]
+[components.template]

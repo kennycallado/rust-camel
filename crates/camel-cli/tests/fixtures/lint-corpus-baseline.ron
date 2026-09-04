@@ -83,6 +83,15 @@
         [("R-URI-known:unverified-scheme", "info")],
     ),
 
+    // integration-testing example (ADR-0069 scenario tier). The partner
+    // URI is an env placeholder (`${env:PARTNER}/orders`), so the scheme
+    // cannot be verified at lint time. By-design, harness-resolved at
+    // boot.
+    (
+        "examples/integration-testing/routes/bridge.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
+    ),
+
     // intercepts-demo (declarative-intercepts, bd rc-7f0n). The `kafka:`
     // scheme is not registered by `register_builtin_components_for_lint`,
     // so unverified-scheme Info is by-design. The route file deliberately
@@ -131,5 +140,16 @@
     (
         "crates/camel-cli/tests/fixtures/lint-corpus/parameters-secret.yaml",
         [("R-SECRET", "warning")],
+    ),
+
+    // Outbound-bridge scenario fixture (integration-tier-contract, Task 3.2).
+    // The producer URI is `${env:PARTNER}/orders`: the scheme head is an
+    // interpolation placeholder, so the catalog cannot verify it and
+    // unverified-scheme Info is by-design. Same precedent as
+    // env-interpolation/routes.yaml. Carry-forward from the 3.2 fixture
+    // commit (caught by this gate when the CLI suite runs whole).
+    (
+        "crates/camel-integration-test/tests/fixtures/outbound/routes/bridge.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
     ),
 ]

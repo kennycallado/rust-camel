@@ -21,6 +21,9 @@ pub(crate) struct DocReport {
     pub rows: Vec<EndpointResult>,
     /// Document-level error; `None` when the document ran to evaluation.
     pub doc_error: Option<String>,
+    /// Derived tier annotation (`lean` / `full`); `None` when the tier
+    /// could not be derived (read or parse failure).
+    pub tier: Option<&'static str>,
 }
 
 /// One expansion-level error (unreadable directory entry, zero-document
@@ -115,6 +118,13 @@ pub(crate) fn write_report(
                 r#"<testsuite name="{path_str}" tests="{suite_tests}" failures="{suite_failures}" errors="{suite_errors}">"#
             ),
         )?;
+        if let Some(tier) = report.tier {
+            write_line(
+                &mut file,
+                path,
+                &format!(r#"<properties><property name="tier" value="{tier}"/></properties>"#),
+            )?;
+        }
         for row in &report.rows {
             let name = escape_xml(&row.endpoint);
             match &row.outcome {
@@ -197,10 +207,11 @@ mod tests {
                 outcome: Ok(()),
             }],
             doc_error: None,
+            tier: Some("lean"),
         };
         write_report(&path, &[], &[report]).expect("write report"); // allow-unwrap
         let bytes = std::fs::read(&path).expect("read report"); // allow-unwrap
-        let expected = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuites tests=\"1\" failures=\"0\" errors=\"0\">\n<testsuite name=\"a.test.yaml\" tests=\"1\" failures=\"0\" errors=\"0\">\n<testcase name=\"out\" classname=\"a.test.yaml\" />\n</testsuite>\n</testsuites>\n";
+        let expected = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuites tests=\"1\" failures=\"0\" errors=\"0\">\n<testsuite name=\"a.test.yaml\" tests=\"1\" failures=\"0\" errors=\"0\">\n<properties><property name=\"tier\" value=\"lean\"/></properties>\n<testcase name=\"out\" classname=\"a.test.yaml\" />\n</testsuite>\n</testsuites>\n";
         assert_eq!(
             String::from_utf8(bytes).expect("utf8"), // allow-unwrap
             expected,
@@ -219,11 +230,13 @@ mod tests {
                 outcome: Err("mismatch: line1\nline2".to_string()),
             }],
             doc_error: None,
+            tier: Some("lean"),
         };
         let report_b = DocReport {
             path: PathBuf::from("b.test.yaml"),
             rows: vec![],
             doc_error: Some("boot failed\ncause".to_string()),
+            tier: None,
         };
         let expansion = vec![ExpansionReport {
             name: "./empty".to_string(),
@@ -268,9 +281,14 @@ mod tests {
                 outcome: Ok(()),
             }],
             doc_error: None,
+            tier: Some("full"),
         };
         write_report(&path, &[], &[report]).expect("write report"); // allow-unwrap
         let text = std::fs::read_to_string(&path).expect("read report"); // allow-unwrap
+        assert!(
+            text.contains(r#"<property name="tier" value="full"/>"#),
+            "tier property must render: {text}"
+        );
         assert!(
             text.contains(r#"name="tmp/a&amp;b&lt;c&gt;.test.yaml""#),
             "suite name attribute must escape &: {text}"

@@ -1,0 +1,63 @@
+[package]
+name = "camel-integration-test"
+description = "Scenario document model, parser, and integration-tier test harness for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-integration-test"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-dsl.workspace = true
+futures.workspace = true
+humantime.workspace = true
+noyalib.workspace = true
+regex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# FULL-tier scenario boot (boot_scenario): the sealed config loader and
+# the `camel run` component-bundle cascade, so the scenario boots the
+# real composition root (ADR-0069 sections 4-5, 10).
+camel-bundles.workspace = true
+camel-config.workspace = true
+# DirectStimulus delivers route stimulus through the booted context's
+# producer path — the same mechanism camel-test / camel run use.
+camel-component-api.workspace = true
+tower.workspace = true
+# HTTP partner adapter (feature `http`): the same hyper 1 stack that
+# sits under the workspace's reqwest users, driven directly so the
+# partner plays both wire roles without a client framework.
+bytes = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true, features = ["http1", "client", "server"] }
+hyper-util = { workspace = true, optional = true, features = ["tokio"] }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+
+[features]
+# Demand-gated HTTP activation (ADR-0069 §8): the HttpPartner adapter
+# and its hyper dependency compile only when scenarios need scheme
+# http endpoints.
+http = [
+    "dep:bytes",
+    "dep:http",
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:serde_json",
+]
+
+[lints]
+workspace = true

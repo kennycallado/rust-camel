@@ -1290,6 +1290,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-bundles"
+version = "0.39.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-component-api",
+ "camel-component-container",
+ "camel-component-controlbus",
+ "camel-component-cron",
+ "camel-component-cxf",
+ "camel-component-direct",
+ "camel-component-file",
+ "camel-component-grpc",
+ "camel-component-http",
+ "camel-component-jms",
+ "camel-component-kafka",
+ "camel-component-llm",
+ "camel-component-log",
+ "camel-component-mcp",
+ "camel-component-mock",
+ "camel-component-mqtt",
+ "camel-component-opensearch",
+ "camel-component-redis",
+ "camel-component-seda",
+ "camel-component-sql",
+ "camel-component-surrealdb",
+ "camel-component-timer",
+ "camel-component-validator",
+ "camel-component-wasm",
+ "camel-component-ws",
+ "camel-config",
+ "camel-core",
+ "camel-master",
+ "camel-template",
+ "camel-xj",
+ "camel-xslt",
+ "tempfile",
+ "tokio",
+ "toml 1.1.5+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "camel-cli"
 version = "0.39.0"
 dependencies = [
@@ -1298,6 +1341,7 @@ dependencies = [
  "camel-api",
  "camel-auth",
  "camel-bean",
+ "camel-bundles",
  "camel-component-api",
  "camel-component-container",
  "camel-component-controlbus",
@@ -1330,6 +1374,7 @@ dependencies = [
  "camel-dataformat-protobuf",
  "camel-dsl",
  "camel-function",
+ "camel-integration-test",
  "camel-lint",
  "camel-lsp",
  "camel-master",
@@ -2199,6 +2244,36 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "tracing-test",
+]
+
+[[package]]
+name = "camel-integration-test"
+version = "0.39.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "camel-api",
+ "camel-bundles",
+ "camel-component-api",
+ "camel-config",
+ "camel-core",
+ "camel-dsl",
+ "futures",
+ "http",
+ "http-body-util",
+ "humantime",
+ "hyper",
+ "hyper-util",
+ "noyalib",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml 1.1.5+spec-1.1.0",
+ "tower 0.5.3",
+ "tracing",
 ]
 
 [[package]]

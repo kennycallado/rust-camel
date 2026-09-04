@@ -4,7 +4,7 @@ use super::*;
 /// path (profile handling, deserialization, placeholder resolution, validation).
 fn load_config(toml_text: &str) -> Result<CamelConfig, ConfigError> {
     let value: toml::Value = toml::from_str(toml_text).expect("test TOML must parse");
-    super::build_from_toml_value_inner(value, None, false, Vec::new())
+    super::build_from_toml_value_inner(value, None, false, Vec::new(), &super::ambient_lookup())
 }
 
 #[test]

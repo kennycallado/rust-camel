@@ -2387,20 +2387,63 @@ impl CamelConfig {
     }
 
     pub fn from_file_with_profile(path: &str, profile: Option<&str>) -> Result<Self, ConfigError> {
-        Self::load_from_file_inner(path, profile, false)
+        Self::load_from_file_inner(path, profile, false, &ambient_lookup())
     }
 
     pub fn from_file_with_profile_and_env(
         path: &str,
         profile: Option<&str>,
     ) -> Result<Self, ConfigError> {
-        Self::load_from_file_inner(path, profile, true)
+        Self::load_from_file_inner(path, profile, true, &ambient_lookup())
+    }
+
+    /// Lookup-injectable loader for the integration-tier scenario path
+    /// (ADR-0069): `${env:}` placeholders resolve through `lookup`
+    /// (typically a `LayeredEnv` from `camel-integration-test`) instead
+    /// of the process environment.
+    ///
+    /// Pass the scenario's pinned profile explicitly (`Some`, defaulting
+    /// to `"default"`) so ambient `CAMEL_PROFILE` never applies; `None`
+    /// falls back to the ambient profile exactly like
+    /// [`Self::from_file_with_profile_and_env`]. Behavior is otherwise
+    /// identical to `from_file_with_env`, including the `CAMEL_*`
+    /// override merge.
+    pub fn from_file_with_env_and_lookup(
+        path: &str,
+        profile: Option<&str>,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        Self::load_from_file_inner(path, profile, true, lookup)
+    }
+
+    /// Sealed loader for the integration-tier scenario boot (ADR-0069
+    /// section 4: hermeticity seal).
+    ///
+    /// Two seals, both structural:
+    ///
+    /// - `profile` is `&str`, not `Option<&str>` — the scenario's pinned
+    ///   profile is always `Some`, so ambient `CAMEL_PROFILE` never
+    ///   applies (profile selection, include selection, and profile
+    ///   merging all see the pinned value).
+    /// - The `CAMEL_*` allowlist override merge is off
+    ///   (`merge_env = false`): ambient overrides never reach the
+    ///   scenario's loaded config. `${env:}` placeholders still resolve,
+    ///   through `lookup` (typically a `LayeredEnv` from
+    ///   `camel-integration-test`), never through the process
+    ///   environment.
+    pub fn from_file_sealed(
+        path: &str,
+        profile: &str,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        Self::load_from_file_inner(path, Some(profile), false, lookup)
     }
 
     fn load_from_file_inner(
         path: &str,
         profile: Option<&str>,
         merge_env: bool,
+        lookup: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, ConfigError> {
         let content = read_capped(path, MAX_CONFIG_FILE_SIZE)?;
 
@@ -2416,7 +2459,7 @@ impl CamelConfig {
 
         let pre_sources = crate::include::load_includes(base_dir, &includes, effective_profile)?;
 
-        build_from_toml_value_inner(root_value, profile, merge_env, pre_sources)
+        build_from_toml_value_inner(root_value, profile, merge_env, pre_sources, lookup)
     }
 
     /// Validates and extracts `include` lists from a parsed TOML value.
@@ -2491,7 +2534,7 @@ impl CamelConfig {
         let pre_sources =
             crate::include::load_includes(&base_dir_owned, &includes, effective_profile)?;
 
-        build_from_toml_value_inner(root_value, profile, false, pre_sources)
+        build_from_toml_value_inner(root_value, profile, false, pre_sources, &ambient_lookup())
     }
 
     /// Async version of [`Self::from_file_with_env`] — uses `tokio::fs`.
@@ -2519,7 +2562,7 @@ impl CamelConfig {
         let pre_sources =
             crate::include::load_includes(&base_dir_owned, &includes, effective_profile)?;
 
-        build_from_toml_value_inner(root_value, profile, true, pre_sources)
+        build_from_toml_value_inner(root_value, profile, true, pre_sources, &ambient_lookup())
     }
 }
 
@@ -2725,6 +2768,7 @@ fn build_from_toml_value_inner(
     profile: Option<&str>,
     merge_env: bool,
     pre_sources: Vec<String>,
+    lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<CamelConfig, ConfigError> {
     // CAMEL_PROFILE is read directly (not through the allowlist) because it's
     // needed before the config source is built — the profile determines which
@@ -2889,7 +2933,7 @@ fn build_from_toml_value_inner(
     // and env overrides, which the builder merges internally — walking the
     // pre-builder value would miss them.
     let mut merged_tree: toml::Value = built.try_deserialize()?;
-    resolve_tree_placeholders(&mut merged_tree)?;
+    resolve_tree_with(&mut merged_tree, lookup)?;
 
     // Strict deserialization: unlike the config crate's lenient coercion,
     // `toml::Value::try_into` rejects type mismatches (e.g. a quoted numeric
@@ -2956,26 +3000,47 @@ pub(crate) const STRICT_PREFIXES: &[&str] =
 /// Recursively resolve every string leaf of a TOML tree in place.
 ///
 /// Leaves whose top-level path segment is in [`STRICT_PREFIXES`] resolve via
-/// [`resolve_strict_leaf`]; every other leaf via [`resolve_plain_leaf`].
+/// [`resolve_strict_leaf_with`]; every other leaf via
+/// [`resolve_plain_leaf_with`].
 /// Path segments join with `.`; array indices render as `[i]`
 /// (e.g. `security.native.credentials[1].secret`).
 pub fn resolve_tree_placeholders(root: &mut toml::Value) -> Result<(), ConfigError> {
-    resolve_tree_walk(root, "")
+    resolve_tree_with(root, &ambient_lookup())
 }
 
-fn resolve_tree_walk(value: &mut toml::Value, path: &str) -> Result<(), ConfigError> {
+/// Lookup-injectable variant of [`resolve_tree_placeholders`]:
+/// `${env:}` placeholders resolve through `lookup` instead of the
+/// process environment. Same strict/plain dispatch, legacy-brace
+/// rejection, and error shapes.
+pub fn resolve_tree_with(
+    root: &mut toml::Value,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), ConfigError> {
+    resolve_tree_walk(root, "", lookup)
+}
+
+/// The process-ambient lookup used by the `camel run` loader family.
+fn ambient_lookup() -> impl Fn(&str) -> Option<String> {
+    |name| std::env::var(name).ok()
+}
+
+fn resolve_tree_walk(
+    value: &mut toml::Value,
+    path: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), ConfigError> {
     match value {
         toml::Value::String(s) => {
             let top = path.split('.').next().unwrap_or_default();
             if STRICT_PREFIXES.contains(&top) {
-                resolve_strict_leaf(s, path)?;
+                resolve_strict_leaf_with(s, path, lookup)?;
             } else {
-                resolve_plain_leaf(s, path)?;
+                resolve_plain_leaf_with(s, path, lookup)?;
             }
         }
         toml::Value::Array(arr) => {
             for (i, item) in arr.iter_mut().enumerate() {
-                resolve_tree_walk(item, &format!("{path}[{i}]"))?;
+                resolve_tree_walk(item, &format!("{path}[{i}]"), lookup)?;
             }
         }
         toml::Value::Table(table) => {
@@ -2985,7 +3050,7 @@ fn resolve_tree_walk(value: &mut toml::Value, path: &str) -> Result<(), ConfigEr
                 } else {
                     format!("{path}.{k}")
                 };
-                resolve_tree_walk(v, &child_path)?;
+                resolve_tree_walk(v, &child_path, lookup)?;
             }
         }
         _ => {}
@@ -3011,13 +3076,18 @@ fn reject_legacy_braces(value: &str, path: &str) -> Result<(), ConfigError> {
 /// Ordering is the contract: interpolation runs first, so a consumed
 /// `${env:NAME}` leaves no `${` and passes the residual gate; malformed,
 /// truncated, or escaped forms (`$${env:NAME}` → literal residue) die there.
-fn resolve_strict_leaf(value: &mut String, path: &str) -> Result<(), ConfigError> {
+fn resolve_strict_leaf_with(
+    value: &mut String,
+    path: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), ConfigError> {
     reject_legacy_braces(value, path)?;
-    let resolved = camel_dsl::env_interpolation::interpolate_env(value).map_err(|var| {
-        ConfigError::Message(format!(
-            "placeholder unresolved: {path}: env var {var} not set"
-        ))
-    })?;
+    let resolved =
+        camel_dsl::env_interpolation::interpolate_env_with(value, lookup).map_err(|var| {
+            ConfigError::Message(format!(
+                "placeholder unresolved: {path}: env var {var} not set"
+            ))
+        })?;
     if resolved.contains("${") || resolved.contains("{{") {
         return Err(ConfigError::Message(format!(
             "unresolved placeholder marker in {path}"
@@ -3033,14 +3103,19 @@ fn resolve_strict_leaf(value: &mut String, path: &str) -> Result<(), ConfigError
 ///
 /// Fail-closed is uniform with the strict path (Q9): an unset referenced var
 /// surfaces as an error naming the field, never a warn-and-continue.
-fn resolve_plain_leaf(value: &mut String, path: &str) -> Result<(), ConfigError> {
+fn resolve_plain_leaf_with(
+    value: &mut String,
+    path: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), ConfigError> {
     reject_legacy_braces(value, path)?;
     if value.contains("${env:") || value.contains("$$") {
-        let resolved = camel_dsl::env_interpolation::interpolate_env(value).map_err(|var| {
-            ConfigError::Message(format!(
-                "placeholder unresolved: {path}: env var {var} not set"
-            ))
-        })?;
+        let resolved =
+            camel_dsl::env_interpolation::interpolate_env_with(value, lookup).map_err(|var| {
+                ConfigError::Message(format!(
+                    "placeholder unresolved: {path}: env var {var} not set"
+                ))
+            })?;
         *value = resolved;
     }
     Ok(())

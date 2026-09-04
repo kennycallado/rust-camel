@@ -931,6 +931,26 @@ async fn test_context_starts_lifecycle_services() {
     assert_eq!(stop_count.load(Ordering::SeqCst), 1);
 }
 
+/// The `&mut self` seam (`add_lifecycle`) wires services identically to the
+/// consuming builder (`with_lifecycle`): start/stop still drive the service
+/// (ADR-0069 section 10, camel-bundles boot path).
+#[tokio::test]
+async fn test_add_lifecycle_drives_service_like_builder() {
+    let (service, start_count, stop_count) = MockService::new();
+
+    let mut ctx = CamelContext::builder().build().await.unwrap();
+    ctx.add_lifecycle(service);
+
+    ctx.start().await.unwrap();
+
+    assert_eq!(start_count.load(Ordering::SeqCst), 1);
+    assert_eq!(stop_count.load(Ordering::SeqCst), 0);
+
+    ctx.stop().await.unwrap();
+
+    assert_eq!(stop_count.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn test_context_abort_stops_lifecycle_services() {
     let (service, _start_count, stop_count) = MockService::new();

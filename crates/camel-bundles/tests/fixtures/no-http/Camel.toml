@@ -1,0 +1,3 @@
+# Fixture for the camel-bundles lib tests: no [components] tables at all.
+# Every bundle must register through the cascade's empty-table fallback with
+# its serde defaults.

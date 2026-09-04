@@ -211,15 +211,32 @@ The example pair lives in [`examples/yaml-dsl/config/repositories-demo.yaml`](ht
 
 ### CI output and filters
 
-`camel test` accepts three flags for CI use: `--junit`, `--filter-file`, and `--filter-endpoint`.
+`camel test` accepts five flags for CI use: `--junit`, `--filter-file`, `--filter-endpoint`, `--unit`, and `--integration`.
 
-`--junit <FILE>` writes a JUnit XML report after the run. The report holds one `testsuite` per attempted document, named by the document path as displayed in stdout. Each assertion row becomes one `testcase` with the same label as its `PASS`/`FAIL` line (endpoint name, `reply[i] <to>` reply label, `<settle>`). A failing row carries a `<failure>` element. A document-level error (unreadable file, parse error, boot failure, route load failure, input delivery failure) becomes one `<error>` testcase named `<document>` in that document's suite. An expansion-level error (unreadable directory entry, zero-document directory) becomes one synthetic suite named by the path in the error, with a single `<error>` testcase named `<expansion>`. The report is written on exit-0, exit-1, and exit-2 runs alike. It is not written when a filter flag fails validation (see below). A report write failure prints to stderr and exits 2.
+`--junit <FILE>` writes a JUnit XML report after the run. The report holds one `testsuite` per attempted document, named by the document path as displayed in stdout. Each suite carries a `<property name="tier">` row with the derived tier (`lean` or `full`) when the tier is known. Each assertion row becomes one `testcase` with the same label as its `PASS`/`FAIL` line (endpoint name, `reply[i] <to>` reply label, `<settle>`). A failing row carries a `<failure>` element. A document-level error (unreadable file, parse error, boot failure, route load failure, input delivery failure) becomes one `<error>` testcase named `<document>` in that document's suite. An expansion-level error (unreadable directory entry, zero-document directory) becomes one synthetic suite named by the path in the error, with a single `<error>` testcase named `<expansion>`. The report is written on exit-0, exit-1, and exit-2 runs alike. It is not written when a filter flag fails validation (see below). A report write failure prints to stderr and exits 2.
 
 `--filter-file <GLOB>` narrows the expanded document set to documents whose entire displayed-path string matches the glob. The glob follows `glob`-crate semantics: `*` does not cross `/`, and `**` does. The match happens before reading, so filtered-out documents are never read or parsed. Directory arguments display the paths as collected: a `.` argument yields `./`-prefixed paths, and an absolute argument yields absolute paths. Patterns must account for the prefix. For example, `--filter-file './sub/**'` matches the `./sub/`-prefixed paths a `.` argument produces.
 
-`--filter-endpoint <NAME>` narrows the set to file-admitted documents whose `expects` map contains the given name. The match is exact against the bare endpoint name (the URI suffix after `mock:`). A file-admitted document that fails to parse still reports its error and sets exit 2, regardless of the endpoint filter.
+`--filter-endpoint <NAME>` narrows the set to file-admitted documents whose `expects` map contains the given name. The match is exact against the bare endpoint name (the URI suffix after `mock:`). Scenario documents declare no `expects`, so an endpoint filter excludes them. Select scenario documents with `--filter-file` or by naming them on the command line. A file-admitted document that fails to parse still reports its error and sets exit 2, regardless of the endpoint filter.
 
-Filters combine as AND across kinds and OR within repeats of one kind. When at least one filter is given and no document survives, `camel test` prints a misuse error naming the filters and exits 2. An invalid glob pattern prints to stderr and exits 2 before any document runs.
+`--unit` and `--integration` are symmetric tier filters. `--unit` runs only documents that derive the lean tier. `--integration` runs only documents that derive the full tier. The tier is content-derived, so the filter applies after parsing and tier derivation. A nonmatching document found through directory expansion is excluded silently. A nonmatching document named explicitly on the command line fails with `tier-filter-collision` and exits 2. Supplying both flags together is misuse. `camel test` rejects it before any document is read and exits 2.
+
+Every executed document prints one tier annotation line before its `PASS`/`FAIL` rows: `[lean]` for the unit tier, `[full]` for the integration tier. CI parsers that consume stdout must account for these lines.
+
+Exit codes follow a fixed contract. Verdict failures exit 1: expectation mismatch, settle timeout, reply assertion failure, scenario `receive-timeout`, `validation-mismatch`, and runtime `scenario-var-unresolved`. Apparatus failures exit 2: `action-transport-failure`, `partner-startup-failure`, `shutdown-failure`, and `infra-unavailable`. Document validation failures exit 2: unreadable file, parse error, boot failure, and harness wiring errors. Precedence is 2 over 1 over 0.
+
+Scenario documents run through one of two execution paths. The build selects the path.
+
+| Build | Endpoint schemes | Execution path |
+|-------|------------------|----------------|
+| default | `fake:` only | No-boot smoke path. Any other scheme reports `infra-unavailable`, names the adapter, and exits 2. |
+| `integration-http` | `fake:`, `direct:`, `http:` | Embedded full boot. Real composition root, real wire, harness partner listeners. Any other scheme reports `infra-unavailable`, names the adapter, and exits 2. |
+
+The default build provides only the in-memory `fake:` partner adapter. A scenario whose endpoints are all `fake:` runs the no-boot smoke path. A `fake:`-only scenario keeps that path in any build.
+
+The `integration-http` build boots the real composition root. A scenario whose endpoints are all `fake:`, `direct:`, or `http:` qualifies. Each `http:` endpoint binds a harness partner listener on `127.0.0.1:0`. A `direct:` send stimulates the booted context through its own producer path. The document runs over the real wire.
+
+Filters combine as AND across kinds and OR within repeats of one kind. The tier filter counts as a kind. When at least one filter is given and no document survives, `camel test` prints a misuse error naming the filters and exits 2. An invalid glob pattern prints to stderr and exits 2 before any document runs.
 
 Split a large suite across CI jobs with `--filter-file`. Each job runs one shard and writes its own report. Example: a job that runs only the `shard-1` documents:
 

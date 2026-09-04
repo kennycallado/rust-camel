@@ -120,9 +120,9 @@ fn no_flag_dispatch_byte_identical_e2e() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     let expected_out = format!(
-        "PASS {}#out\nFAIL {}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed\n",
-        a.display(),
-        b.display()
+        "{a} [lean]\nPASS {a}#out\n{b} [lean]\nFAIL {b}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed\n",
+        a = a.display(),
+        b = b.display()
     );
     assert_eq!(stdout, expected_out, "stdout must be byte-identical");
     let expected_err = format!(
@@ -176,7 +176,13 @@ fn dispatch_help_lists_flags() {
         .expect("spawn camel test --help"); // allow-unwrap
     assert!(output.status.success(), "camel test --help must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for flag in ["--junit", "--filter-file", "--filter-endpoint"] {
+    for flag in [
+        "--junit",
+        "--filter-file",
+        "--filter-endpoint",
+        "--unit",
+        "--integration",
+    ] {
         assert!(stdout.contains(flag), "help must list {flag}: {stdout}");
     }
 }

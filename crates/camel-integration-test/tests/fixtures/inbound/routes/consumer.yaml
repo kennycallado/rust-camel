@@ -1,0 +1,21 @@
+# Inbound consumer fixture route (ADR-0069 sections 4-5): the system
+# under test CONSUMES http — the consumer binds the pinned loopback
+# port at `ctx.start()` (rc-w1u9: Explicit startup mode, `mark_ready`
+# after bind, so the harness may connect the moment the boot returns).
+#
+# v1 pins the port in the route URI: no bound-address API exists, so
+# the explicit port (through the `PORT` placeholder default) is the
+# contract the scenario document addresses. The placeholder resolves
+# through the scenario's layered environment at boot, never the
+# process environment.
+routes:
+  - id: inbound-consumer
+    from: http://127.0.0.1:${env:PORT:-18180}/in
+    steps:
+      - set_header:
+          key: CamelHttpResponseCode
+          value: 201
+      - set_header:
+          key: X-Scenario-Role
+          value: sut
+      - set_body: inbound-acknowledged

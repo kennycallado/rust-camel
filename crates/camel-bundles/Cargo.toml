@@ -1,0 +1,69 @@
+[package]
+name = "camel-bundles"
+description = "Component-bundle registration cascade and boot lifecycle handle for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-bundles"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+camel-api.workspace = true
+camel-config.workspace = true
+camel-component-api.workspace = true
+camel-core.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+camel-component-container.workspace = true
+camel-component-controlbus.workspace = true
+camel-component-cron.workspace = true
+camel-component-cxf.workspace = true
+camel-component-direct.workspace = true
+camel-component-file.workspace = true
+camel-component-http.workspace = true
+camel-component-jms.workspace = true
+camel-component-log.workspace = true
+camel-component-mock.workspace = true
+camel-component-opensearch.workspace = true
+camel-component-redis.workspace = true
+camel-component-seda.workspace = true
+camel-component-sql.workspace = true
+camel-component-timer.workspace = true
+camel-component-validator.workspace = true
+camel-component-ws.workspace = true
+camel-master.workspace = true
+camel-template.workspace = true
+camel-xj.workspace = true
+camel-xslt.workspace = true
+# Feature-gated bundles; gates mirror the `camel run` cfg lines 1:1
+# (ADR-0069 section 10). `kafka` stays opt-in; the rest are default-on.
+camel-component-grpc = { workspace = true, optional = true }
+camel-component-kafka = { workspace = true, optional = true }
+camel-component-llm = { workspace = true, optional = true }
+camel-component-mcp = { workspace = true, optional = true }
+camel-component-mqtt = { workspace = true, optional = true }
+camel-component-surrealdb = { workspace = true, optional = true }
+camel-component-wasm = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+default = ["grpc", "wasm", "http-static", "llm", "surrealdb", "mqtt", "mcp"]
+http-static = []
+kafka = ["dep:camel-component-kafka"]
+mqtt = ["dep:camel-component-mqtt"]
+surrealdb = ["dep:camel-component-surrealdb"]
+grpc = ["dep:camel-component-grpc"]
+llm = ["dep:camel-component-llm"]
+mcp = ["dep:camel-component-mcp"]
+wasm = ["dep:camel-component-wasm"]
+
+[lints]
+workspace = true

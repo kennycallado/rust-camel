@@ -215,7 +215,7 @@ fn dir_expansion_recursive_sorted() {
     fs::write(root.join("a.test.yaml"), "").expect("write a"); // allow-unwrap
     fs::create_dir_all(root.join("sub")).expect("create sub"); // allow-unwrap
     fs::write(root.join("sub/c.test.yml"), "").expect("write c"); // allow-unwrap
-    let (docs, errors) = expand_test_paths(&[root.to_path_buf()]);
+    let (docs, _explicit, errors) = expand_test_paths(&[root.to_path_buf()]);
     assert!(errors.is_empty(), "errors: {errors:?}");
     let expected = [
         root.join("a.test.yaml"),
@@ -235,7 +235,7 @@ fn dir_expansion_skips_excluded_dirs() {
     fs::write(root.join("ok.test.yaml"), "").expect("write ok"); // allow-unwrap
     fs::create_dir_all(root.join("target")).expect("create target"); // allow-unwrap
     fs::write(root.join("target/gen.test.yaml"), "").expect("write gen"); // allow-unwrap
-    let (docs, errors) = expand_test_paths(&[root.to_path_buf()]);
+    let (docs, _explicit, errors) = expand_test_paths(&[root.to_path_buf()]);
     assert!(errors.is_empty(), "errors: {errors:?}");
     assert_eq!(
         docs,
@@ -249,7 +249,7 @@ fn dir_expansion_empty_dir_is_error() {
     let dir = tempfile::tempdir().expect("create tempdir"); // allow-unwrap
     let root = dir.path();
     fs::write(root.join(".keep"), "").expect("write keep"); // allow-unwrap
-    let (docs, errors) = expand_test_paths(&[root.to_path_buf()]);
+    let (docs, _explicit, errors) = expand_test_paths(&[root.to_path_buf()]);
     assert!(docs.is_empty(), "docs: {docs:?}");
     assert_eq!(errors.len(), 1, "errors: {errors:?}");
     assert_eq!(
@@ -268,7 +268,7 @@ fn dir_expansion_dedupes_first_occurrence() {
     let root = dir.path();
     let a = root.join("a.test.yaml");
     fs::write(&a, "").expect("write a"); // allow-unwrap
-    let (docs, errors) = expand_test_paths(&[root.to_path_buf(), a.clone()]);
+    let (docs, _explicit, errors) = expand_test_paths(&[root.to_path_buf(), a.clone()]);
     assert!(errors.is_empty(), "errors: {errors:?}");
     assert_eq!(
         docs,
@@ -280,7 +280,7 @@ fn dir_expansion_dedupes_first_occurrence() {
 #[test]
 fn dir_expansion_file_args_verbatim() {
     let args = vec![PathBuf::from("foo.yaml")];
-    let (docs, errors) = expand_test_paths(&args);
+    let (docs, _explicit, errors) = expand_test_paths(&args);
     assert!(errors.is_empty(), "errors: {errors:?}");
     assert_eq!(docs, args, "file args pass through unchanged");
 }
@@ -335,9 +335,9 @@ async fn no_flags_output_is_byte_identical() {
     let out = String::from_utf8(out).unwrap();
     let err = String::from_utf8(err).unwrap();
     let expected_out = format!(
-        "PASS {}#out\nFAIL {}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed\n",
-        a.display(),
-        b.display()
+        "{a} [lean]\nPASS {a}#out\n{b} [lean]\nFAIL {b}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed\n",
+        a = a.display(),
+        b = b.display()
     );
     assert_eq!(out, expected_out, "stdout must be byte-identical");
     let expected_err = format!(
@@ -740,9 +740,9 @@ async fn junit_absent_writes_nothing() {
     assert!(!would_be.exists(), "junit None must not write a report");
 
     let expected_out = format!(
-        "PASS {}#out\nFAIL {}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed\n",
-        a.display(),
-        b.display()
+        "{a} [lean]\nPASS {a}#out\n{b} [lean]\nFAIL {b}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed\n",
+        a = a.display(),
+        b = b.display()
     );
     let expected_err = format!(
         // noyalib 0.0.29 emits a libyaml-style parse message for flow mappings.
@@ -824,6 +824,8 @@ fn invalid_glob_config_is_misuse() {
         junit: None,
         filter_files: vec!["[".to_string()],
         filter_endpoints: vec![],
+        unit: false,
+        integration: false,
     };
     let err = config_from_args(&args).expect_err("invalid glob must fail"); // allow-unwrap
     assert!(
@@ -840,6 +842,8 @@ fn valid_flags_build_config() {
         junit: Some(PathBuf::from("r.xml")),
         filter_files: vec!["*.test.yaml".to_string()],
         filter_endpoints: vec!["orders".to_string()],
+        unit: false,
+        integration: false,
     };
     let config = config_from_args(&args).expect("valid flags must build"); // allow-unwrap
     assert_eq!(config.files, args.files, "files must pass through");

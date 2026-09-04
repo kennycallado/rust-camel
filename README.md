@@ -461,6 +461,10 @@ cargo bench --workspace     # Criterion reports; camel-bench covers pipelines
 scripts/coverage.sh         # needs cargo-llvm-cov; baseline enforced in coverage.toml
 ```
 
+Integration-tier scenario tests: `camel test --integration`
+([Testing chapter](docs/src/testing/index.md); runnable example in
+`examples/integration-testing/`).
+
 Local lint and schema tools: `cargo fmt --check`, `cargo clippy -- -D warnings`,
 and the `cargo xtask` subcommands (`lint-unwrap`, `lint-secrets`,
 `lint-log-levels`, `schema --check`). See [`AGENTS.md`](AGENTS.md) for the exact

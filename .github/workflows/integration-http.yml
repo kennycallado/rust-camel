@@ -1,0 +1,48 @@
+name: Integration HTTP
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "crates/camel-integration-test/**"
+      - "crates/camel-bundles/**"
+      - "crates/camel-cli/src/commands/**"
+      - "crates/components/camel-http/**"
+      - ".github/workflows/integration-http.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # ENOSPC mitigation: strip debug info from dev/test profiles.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  integration-http:
+    name: Integration HTTP (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Maximize disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/google/chrome /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          sudo apt-get clean
+          df -h /
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Install libclang for bindgen
+        run: sudo apt-get install -y libclang-dev
+      - name: Integration-tier http scenarios (camel-integration-test)
+        run: cargo test -p camel-integration-test --features http
+      - name: Bundles with kafka feature (camel-bundles)
+        run: cargo test -p camel-bundles --features kafka
+      - name: CLI tier filter tests (camel-cli)
+        run: cargo test -p camel-cli --features integration-http --test test_tier_filters
+      - name: Bundles default suite (camel-bundles)
+        run: cargo test -p camel-bundles

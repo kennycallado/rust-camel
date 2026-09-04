@@ -1,0 +1,12 @@
+# http route for the parity fixture: pins an explicit loopback port for
+# fixture realism — a real `camel run` project would bind 127.0.0.1:17619
+# when the http consumer starts. This suite never starts routes, so no
+# socket is bound here; the port documents the project shape and does not
+# exercise socket-leak teardown (cross-process, out of parity_test.rs scope).
+routes:
+  - id: "http-loop"
+    from: "http://127.0.0.1:17619/loop"
+    steps:
+      - to: "log:loop"
+        parameters:
+          showBody: "true"

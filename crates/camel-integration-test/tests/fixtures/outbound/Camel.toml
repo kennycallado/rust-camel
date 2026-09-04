@@ -1,0 +1,13 @@
+# Outbound-bridge scenario fixture (ADR-0069 sections 4-5): an
+# intentionally minimal project config. The scenario boot loads it
+# through the sealed loader (`from_file_sealed`): the pinned profile
+# applies, and ambient CAMEL_* overrides never do.
+#
+# The partner binds 127.0.0.1; the http producer's SSRF guard rejects
+# internal addresses unless the operator allows them — the fixture is
+# that operator opt-in, exactly as a real loopback-scenario project
+# would declare it.
+log_level = "info"
+
+[components.http]
+allow_internal = true

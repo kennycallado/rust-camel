@@ -45,6 +45,7 @@ pub use model::{
     ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use openapi::generate_openapi;
+pub use util::MAX_ROUTE_FILE_SIZE;
 pub use yaml::{
     RouteDslRoute, RouteDslRoutes, RouteDslStep, load_from_file, parse_yaml,
     parse_yaml_to_canonical, parse_yaml_to_declarative, parse_yaml_with_threshold,

@@ -1,0 +1,45 @@
+# Outbound bridge scenario: stimulate the booted route at direct:start,
+# receive the request that reaches the harness-owned partner, and
+# validate the wire arrival: method, path, headers, body. Requests carry
+# no status; the partner's recorded request is the normative proof.
+#
+# The partner endpoint declares `provisioning: harness` and `bindVar:
+# PARTNER`. The harness binds the partner on 127.0.0.1:0 and injects
+# PARTNER=http://127.0.0.1:<bound> into the layered environment. The
+# endpoint URI's `:0` port is the router key, not an address. PARTNER
+# must not appear under `env:`; the parser rejects the reserved key.
+routeFiles:
+  - routes/bridge.yaml
+profile: default
+scenario:
+  - send:
+      to: direct:start
+      body: order-payload-7f3a
+      headers:
+        X-Scenario-Tag: adoption-example
+  - receive:
+      from:
+        endpoint: http://127.0.0.1:0/orders
+        provisioning: harness
+        bindVar: PARTNER
+      deadline: 2s
+      extract:
+        method: method
+        path: path
+        orderType: headers.X-Order-Type
+        scenarioTag: headers.X-Scenario-Tag
+  - validate:
+      target: { variable: method }
+      expectation: POST
+  - validate:
+      target: { variable: path }
+      expectation: /orders
+  - validate:
+      target: { variable: orderType }
+      expectation: priority
+  - validate:
+      target: { variable: scenarioTag }
+      expectation: adoption-example
+  - validate:
+      target: { lastReceived: http://127.0.0.1:0/orders }
+      expectation: order-payload-7f3a

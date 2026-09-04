@@ -6,8 +6,9 @@ use std::path::Path;
 use camel_api::CamelError;
 
 /// Maximum size for individual route files (YAML/JSON) loaded via file-based parsers.
-/// Prevents OOM from abnormally large files.
-pub(crate) const MAX_ROUTE_FILE_SIZE: u64 = 16 * 1024 * 1024;
+/// Prevents OOM from abnormally large files. Single source of truth: route discovery
+/// and the integration-tier scenario boot reference this cap.
+pub const MAX_ROUTE_FILE_SIZE: u64 = 16 * 1024 * 1024;
 
 /// Read a file with a size cap. Stats first, rejects if too large.
 pub(crate) fn read_route_file_capped(path: &Path) -> Result<String, CamelError> {

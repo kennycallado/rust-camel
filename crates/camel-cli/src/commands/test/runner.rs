@@ -145,7 +145,10 @@ pub(crate) fn find_camel_toml_root(start: &Path) -> Option<PathBuf> {
 /// `camel_dsl::load_from_file` (the same per-file parser `camel run` uses,
 /// including the 16 MiB size cap and path-annotated errors). Inline `routes`
 /// are re-serialized to YAML and parsed through `camel_dsl::parse_yaml`.
-async fn load_routes(
+///
+/// Visible to the driver (`commands::test`), which loads routes once to
+/// derive the document's tier before running it.
+pub(super) async fn load_routes(
     doc: &TestDocument,
     doc_dir: &Path,
 ) -> Result<Vec<camel_core::RouteDefinition>, String> {
@@ -532,10 +535,23 @@ pub async fn run_test_doc(doc: &TestDocument, doc_dir: &Path) -> (TestDocResult,
             );
         }
     };
+    run_test_doc_with_defs(doc, defs).await
+}
 
-    // Stub beans: cross-validate and register BEFORE boot so `bean:` steps
-    // resolve at route-add time; undeclared methods exit 2 here, not at
-    // runtime.
+/// Run one already-loaded unit-tier document: builds the stub-bean
+/// registry when the document declares `beans`, boots the context, runs
+/// the phases, then unconditionally stops the context on every exit
+/// path after a successful boot (mirrors camel-test's `TestGuard` —
+/// prevents doc N's live timers polluting doc N+1 in the multi-doc
+/// driver). The driver calls this with the route definitions it loaded
+/// for tier derivation, so routes parse exactly once per document.
+pub(super) async fn run_test_doc_with_defs(
+    doc: &TestDocument,
+    defs: Vec<camel_core::RouteDefinition>,
+) -> (TestDocResult, MockComponent) {
+    // Stub beans: cross-validate and register BEFORE boot so `bean:`
+    // steps resolve at route-add time; undeclared methods exit 2 here,
+    // not at runtime.
     let beans = match stub_registry(doc, &defs) {
         Ok(beans) => beans,
         Err(e) => {

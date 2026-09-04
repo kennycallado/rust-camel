@@ -1,0 +1,29 @@
+# Inbound consumer scenario (ADR-0069 sections 4-5): the partner
+# plays CLIENT — the `send` performs a real HTTP request into the
+# booted consumer route, and the `receive` awaits the SUT's response
+# (client role: the response parked by the send). Status validation
+# lives here: responses, not requests, carry status.
+routeFiles:
+  - routes/consumer.yaml
+profile: default
+scenario:
+  - send:
+      to: http://127.0.0.1:18180/in
+      body: partner-request-5f2c
+      headers:
+        X-Scenario-Tag: e2e-inbound
+  - receive:
+      from: http://127.0.0.1:18180/in
+      deadline: 2s
+      extract:
+        status: status
+        replyRole: headers.X-Scenario-Role
+  - validate:
+      target: { variable: status }
+      expectation: 201
+  - validate:
+      target: { variable: replyRole }
+      expectation: sut
+  - validate:
+      target: { lastReceived: http://127.0.0.1:18180/in }
+      expectation: inbound-acknowledged

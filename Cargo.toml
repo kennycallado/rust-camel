@@ -47,6 +47,8 @@ exclude = [
     "examples/wasm-source-webhook",
     # Config-only demo (Camel.toml + routes, no Rust crate).
     "examples/allocator-demo",
+    # Config-only demo (Camel.toml + route + scenario doc, no Rust crate).
+    "examples/integration-testing",
     # cargo-fuzz crate: excluded to keep the production lockfile frozen.
     "fuzz",
 ]
@@ -80,10 +82,12 @@ camel-cli = { path = "crates/camel-cli", version = "=0.39.0" }
 camel-core = { path = "crates/camel-core", version = "=0.39.0" }
 camel-processor = { path = "crates/camel-processor", version = "=0.39.0" }
 camel-health = { path = "crates/camel-health", version = "=0.39.0" }
+camel-integration-test = { path = "crates/camel-integration-test", version = "=0.39.0" }
 camel-bridge = { path = "crates/services/camel-bridge", version = "=0.39.0" }
 camel-function = { path = "crates/services/camel-function", version = "=0.39.0" }
 camel-dsl = { path = "crates/camel-dsl", version = "=0.39.0" }
 camel-builder = { path = "crates/camel-builder", version = "=0.39.0" }
+camel-bundles = { path = "crates/camel-bundles", version = "=0.39.0", default-features = false }
 camel-lint = { path = "crates/camel-lint", version = "=0.39.0" }
 camel-lsp = { path = "crates/camel-lsp", version = "=0.39.0" }
 camel-component-api = { path = "crates/components/camel-component-api", version = "=0.39.0" }
@@ -197,6 +201,12 @@ rumqttc = { version = "0.33.3", package = "rumqttc-v4-next", default-features = 
 rustls = { version = "0.23", features = ["ring"] }
 axum = { version = "0.8" }
 http = "1"
+# hyper 1 core, feature-less by default: each crate opts into the
+# exact role features it needs (http1/client/server) so unrelated
+# builds never compile them.
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false }
+http-body-util = { version = "0.1", default-features = false }
 url = "2"
 libc = "0.2"
 uuid = { version = "1", features = ["v4"] }

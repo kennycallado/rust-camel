@@ -524,6 +524,15 @@ impl CamelContext {
     /// Prefer [`CamelContextBuilder::with_lifecycle`] when possible, which wires
     /// the invoker at build time before any routes are added.
     pub fn with_lifecycle<L: Lifecycle + 'static>(mut self, service: L) -> Self {
+        self.add_lifecycle(service);
+        self
+    }
+
+    /// `&mut self` sibling of [`Self::with_lifecycle`]: register a lifecycle
+    /// service on a context the caller still owns. Required by the
+    /// `camel_bundles::boot` path (ADR-0069 section 10), which receives a
+    /// `&mut CamelContext` and cannot run the consuming builder.
+    pub fn add_lifecycle<L: Lifecycle + 'static>(&mut self, service: L) {
         if let Some(collector) = service.as_metrics_collector() {
             // Late-bound registration (compose, never replace): the shared
             // handle fans the collector into every emission path seeded at
@@ -546,7 +555,6 @@ impl CamelContext {
         }
 
         self.services.push(Box::new(service));
-        self
     }
 
     /// Register a component with this context.

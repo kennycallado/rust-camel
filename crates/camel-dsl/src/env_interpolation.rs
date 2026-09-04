@@ -43,6 +43,18 @@ fn sanitize_env_value(val: &str) -> String {
 ///
 /// Returns `Err(var_name)` if any referenced variable is not set.
 pub fn interpolate_env(src: &str) -> Result<String, String> {
+    interpolate_env_with(src, &|name| env::var(name).ok())
+}
+
+/// Lookup-injectable variant of [`interpolate_env`]: `${env:VAR_NAME}`
+/// placeholders resolve through `lookup` instead of the process
+/// environment. Same escape forms, sanitization, and error shape.
+///
+/// Returns `Err(var_name)` if any referenced variable is not resolved.
+pub fn interpolate_env_with(
+    src: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
     let re = env_regex();
     let mut error: Option<String> = None;
 
@@ -60,9 +72,9 @@ pub fn interpolate_env(src: &str) -> Result<String, String> {
         }
         let var_name = &caps[4];
         let default_value = caps.get(5).map(|m| m.as_str());
-        match env::var(var_name) {
-            Ok(val) => sanitize_env_value(&val),
-            Err(_) => {
+        match lookup(var_name) {
+            Some(val) => sanitize_env_value(&val),
+            None => {
                 if let Some(default) = default_value {
                     sanitize_env_value(default)
                 } else {

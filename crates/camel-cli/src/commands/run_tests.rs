@@ -297,3 +297,48 @@ allow_public_exposure = true
         "run wiring must install wasm bind acks from CamelConfig.binds"
     );
 }
+
+/// Task 1.2 fix-up: `camel run` must fail fast when the `--config` parent
+/// directory cannot be canonicalized (project-root resolution, shared by
+/// the wasm bean loader and the camel-bundles wasm base dir). The guard
+/// terminates the process, so the assertion runs in a child copy of this
+/// test binary, gated by an env sentinel; the child re-enters this test,
+/// calls the guard on a dangling path, and never returns normally.
+#[test]
+fn dangling_config_parent_fails_fast() {
+    if std::env::var("RUST_CAMEL_TEST_PROJECT_ROOT_EXIT").is_ok() {
+        // Child branch: the dangling parent must hit the exit(1) guard.
+        let dangling = std::env::temp_dir()
+            .join(format!("rust-camel-project-root-{}", std::process::id()))
+            .join("missing")
+            .join("Camel.toml");
+        canonical_project_root(&dangling);
+        return; // Unreachable in practice: the guard exits the process.
+    }
+
+    // Parent branch: re-exec this test binary on the single test with the
+    // sentinel set. --nocapture keeps the guard's stderr message visible
+    // (process::exit skips the harness capture flush).
+    let exe = std::env::current_exe().expect("current_exe"); // allow-unwrap
+    let output = std::process::Command::new(exe)
+        .args([
+            "commands::run::tests::dangling_config_parent_fails_fast",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("RUST_CAMEL_TEST_PROJECT_ROOT_EXIT", "1")
+        .output()
+        .expect("spawn child test process"); // allow-unwrap
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "dangling config parent must exit 1: {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot resolve project root"),
+        "stderr must name the project-root failure: {stderr}"
+    );
+}

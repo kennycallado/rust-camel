@@ -40,6 +40,8 @@ tracing.workspace = true
 tower = { workspace = true, features = ["util"] }
 camel-api.workspace = true
 camel-bean.workspace = true
+camel-bundles.workspace = true
+camel-integration-test.workspace = true
 camel-dsl.workspace = true
 camel-core = { workspace = true, features = ["lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath", "lang-minijinja"] }
 camel-config = { workspace = true, features = ["otel", "kubernetes"] }
@@ -112,31 +114,37 @@ otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # Use `kafka` alone (rdkafka will build from source via cmake by default),
 # `kafka,dynamic-linking` to link against a system librdkafka, or
 # `kafka-static` to force a cmake source build explicitly.
-kafka = ["dep:camel-component-kafka"]
+kafka = ["dep:camel-component-kafka", "camel-bundles/kafka"]
 grpc = [
   "dep:camel-component-grpc",
   "dep:camel-dataformat-protobuf",
   "dep:camel-proto-compiler",
   "camel-dsl/protobuf",
+  "camel-bundles/grpc",
 ]
-wasm = ["dep:camel-component-wasm"]
+wasm = ["dep:camel-component-wasm", "camel-bundles/wasm"]
 # LLM component. Default enables mock plus all real providers (openai,
 # ollama) so the release binary works with real models out of the box.
-llm = ["dep:camel-component-llm", "camel-component-llm/all-providers"]
+llm = ["dep:camel-component-llm", "camel-component-llm/all-providers", "camel-bundles/llm"]
 # MCP component (Model Context Protocol, scheme `mcp:`): Consumer (server)
 # tool/resource routes + Producer (client) call/read dispatch.
-mcp = ["dep:camel-component-mcp"]
-http-static = []
+mcp = ["dep:camel-component-mcp", "camel-bundles/mcp"]
+http-static = ["camel-bundles/http-static"]
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]
 kafka-static = ["dep:camel-component-kafka", "cmake-build"]
 # mqtt activates the MQTT component (rumqttc, no TLS by default).
 # Use mqtt-tls to enable TLS support (mqtts:// URIs).
-mqtt = ["dep:camel-component-mqtt"]
+mqtt = ["dep:camel-component-mqtt", "camel-bundles/mqtt"]
 mqtt-tls = ["mqtt", "camel-component-mqtt/tls"]
-surrealdb = ["dep:camel-component-surrealdb"]
+surrealdb = ["dep:camel-component-surrealdb", "camel-bundles/surrealdb"]
 # exec activates the fail-closed system command execution component.
 exec = ["dep:camel-component-exec"]
+# Integration-tier HTTP partner activation (ADR-0069 §8): non-default
+# and demand-gated. The scenario harness itself is always present;
+# without this feature, scenario endpoints of scheme http keep the
+# infra-unavailable path.
+integration-http = ["camel-integration-test/http"]
 # Global allocator overrides for the `camel` release binary. Additive and
 # independent; if both are enabled, jemalloc wins. Soak/migration plan: bd rc-vnm8.
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]

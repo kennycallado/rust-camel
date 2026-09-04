@@ -1,0 +1,12 @@
+# Inbound consumer scenario fixture (ADR-0069 sections 4-5): the same
+# minimal project config shape as the outbound bridge. The scenario
+# boot loads it through the sealed loader (`from_file_sealed`): the
+# pinned profile applies, and ambient CAMEL_* overrides never do.
+#
+# The consumer route binds 127.0.0.1; the fixture opts the http
+# component into loopback addresses (`allow_internal`) exactly as a
+# real loopback-scenario project would declare the operator opt-in.
+log_level = "info"
+
+[components.http]
+allow_internal = true

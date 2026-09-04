@@ -18,12 +18,14 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 
 use camel_api::Body;
 use camel_component_mock::BodyMatcher;
 use camel_component_mock::HeaderMatcher;
 use camel_core::intercept::{InterceptAction, InterceptRule, InterceptRules};
+use camel_integration_test::ScenarioDocument;
 use noyalib::compat::serde_yaml;
 use regex::Regex;
 use serde::de::Error as _;
@@ -191,6 +193,24 @@ pub struct InterceptActionDoc {
     pub skip_to: Option<String>,
     /// Copy the exchange to the target `mock:` URI while the real send continues.
     pub divert_copy_to: Option<String>,
+}
+
+impl InterceptActionDoc {
+    /// Converts to the core intercept action by key presence.
+    ///
+    /// [`parse_test_document`] admits exactly one of `skipTo` /
+    /// `divertCopyTo` and rejects `both`/`neither` with
+    /// [`TestDocError::InterceptActionKeys`], so parsed documents only
+    /// exercise the first two arms; the mapping stays total (skipTo
+    /// wins; neither degrades to an empty target) with no panic and no
+    /// log.
+    pub(crate) fn to_core_action(&self) -> InterceptAction {
+        match (&self.skip_to, &self.divert_copy_to) {
+            (Some(uri), _) => InterceptAction::SkipTo { uri: uri.clone() },
+            (None, Some(uri)) => InterceptAction::DivertCopyTo { uri: uri.clone() },
+            (None, None) => InterceptAction::DivertCopyTo { uri: String::new() },
+        }
+    }
 }
 
 /// Expected reply assertion for one input delivery: matcher-based against the
@@ -694,6 +714,45 @@ impl fmt::Display for TestDocError {
 
 impl std::error::Error for TestDocError {}
 
+/// One parsed test document in whichever vocabulary it declares: the
+/// unit-tier mock vocabulary or the integration-tier `scenario:`
+/// vocabulary. Dispatch sniffs the `scenario:` key, so a document can
+/// never be parsed by both parsers.
+pub(crate) enum ParsedDocument {
+    /// A unit-tier document (`inputs` / `expects` / `intercepts`).
+    Unit(Box<TestDocument>),
+    /// A full-tier scenario document (`scenario:` section).
+    Scenario(ScenarioDocument),
+}
+
+/// Whether the text declares a top-level `scenario:` section. Text that
+/// does not deserialize at all carries no scenario section; the
+/// unit-tier parser then produces the document error.
+fn declares_scenario(text: &str) -> bool {
+    serde_yaml::from_str::<serde_yaml::Value>(text)
+        .ok()
+        .and_then(|value| value.get("scenario").map(|_| true))
+        .unwrap_or(false)
+}
+
+/// Parses one test document in whichever vocabulary it declares: a
+/// `scenario:` section routes to the scenario parser (which re-reads
+/// the file from `path` and enforces the suffix and mixing rules);
+/// anything else routes to the unit-tier parser. Errors are rendered
+/// `Display` strings — every parse failure of both parsers is a
+/// load-time, exit-2 class.
+pub(crate) fn parse_document(path: &Path, text: &str) -> Result<ParsedDocument, String> {
+    if declares_scenario(text) {
+        camel_integration_test::parse_scenario_document(path)
+            .map(ParsedDocument::Scenario)
+            .map_err(|e| e.to_string())
+    } else {
+        parse_test_document(text)
+            .map(|doc| ParsedDocument::Unit(Box::new(doc)))
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Classifies a noyalib (serde_yaml compat) error text. The body-scalar and
 /// matcher sentinels are extracted first — they originate inside field
 /// deserializers and must not be swallowed by the generic branches. The
@@ -803,20 +862,18 @@ pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
                     key: source.clone(),
                 });
             }
-            let (target, rule_action) = match (&action.skip_to, &action.divert_copy_to) {
-                (Some(t), None) => (t.as_str(), InterceptAction::SkipTo { uri: t.clone() }),
-                (None, Some(t)) => (t.as_str(), InterceptAction::DivertCopyTo { uri: t.clone() }),
-                (Some(_), Some(_)) => {
-                    return Err(TestDocError::InterceptActionKeys {
-                        key: source.clone(),
-                        problem: "both",
-                    });
-                }
-                (None, None) => {
-                    return Err(TestDocError::InterceptActionKeys {
-                        key: source.clone(),
-                        problem: "neither",
-                    });
+            let both = action.skip_to.is_some() && action.divert_copy_to.is_some();
+            let neither = action.skip_to.is_none() && action.divert_copy_to.is_none();
+            if both || neither {
+                return Err(TestDocError::InterceptActionKeys {
+                    key: source.clone(),
+                    problem: if both { "both" } else { "neither" },
+                });
+            }
+            let rule_action = action.to_core_action();
+            let target = match &rule_action {
+                InterceptAction::SkipTo { uri } | InterceptAction::DivertCopyTo { uri } => {
+                    uri.as_str()
                 }
             };
             if target == "mock:" || target.starts_with("mock:?") {

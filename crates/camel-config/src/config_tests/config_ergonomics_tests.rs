@@ -140,8 +140,9 @@ log_level = "warn"
 "#,
     );
 
-    let (_result, warns) =
-        capture_warns(|| build_from_toml_value_inner(tree, None, false, Vec::new()));
+    let (_result, warns) = capture_warns(|| {
+        build_from_toml_value_inner(tree, None, false, Vec::new(), &super::ambient_lookup())
+    });
 
     let hits: Vec<&String> = warns
         .iter()
@@ -171,8 +172,9 @@ log_level = "warn"
 "#,
     );
 
-    let (_result, warns) =
-        capture_warns(|| build_from_toml_value_inner(tree, None, false, Vec::new()));
+    let (_result, warns) = capture_warns(|| {
+        build_from_toml_value_inner(tree, None, false, Vec::new(), &super::ambient_lookup())
+    });
 
     let hits: Vec<&String> = warns
         .iter()
@@ -200,8 +202,9 @@ log_level = "warn"
 "#,
     );
 
-    let (result, warns) =
-        capture_warns(|| build_from_toml_value_inner(tree, None, false, Vec::new()));
+    let (result, warns) = capture_warns(|| {
+        build_from_toml_value_inner(tree, None, false, Vec::new(), &super::ambient_lookup())
+    });
 
     unset_env("CAMEL_PROFILE");
     let cfg = result.expect("staging profile must load");
@@ -224,7 +227,9 @@ fn camel_profile_and_config_file_never_reported_as_ignored() {
     set_env("CAMEL_ERGONOMICS_TYPO_PROBE", "1"); // positive control
 
     let tree = parse_table("log_level = \"debug\"");
-    let (_, warns) = capture_warns(|| build_from_toml_value_inner(tree, None, true, Vec::new()));
+    let (_, warns) = capture_warns(|| {
+        build_from_toml_value_inner(tree, None, true, Vec::new(), &super::ambient_lookup())
+    });
 
     // unset_env requires ENV_OVERRIDE_LOCK to be held: restore env while
     // the guard is alive, only then release it.

@@ -1,0 +1,13 @@
+# Outbound bridge fixture route: the stimulus enters at `direct:start`,
+# the route stamps its header, and the producer posts the exchange to
+# the harness-provisioned partner. `${env:PARTNER}` resolves through the
+# scenario's layered environment at boot, never the process
+# environment (ADR-0069 section 4).
+routes:
+  - id: outbound-bridge
+    from: direct:start
+    steps:
+      - set_header:
+          key: X-Order-Type
+          value: priority
+      - to: ${env:PARTNER}/orders
