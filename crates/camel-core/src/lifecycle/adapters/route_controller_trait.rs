@@ -18,6 +18,7 @@ use camel_component_api::{ConcurrencyModel, ConsumerContext, consumer::ExchangeE
 
 use crate::lifecycle::adapters::consumer_management;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
+use crate::lifecycle::adapters::inline_dispatcher::RouteInlineDispatcher;
 use crate::lifecycle::adapters::route_compiler::CANCEL_TOKEN;
 use crate::lifecycle::adapters::route_controller::DefaultRouteController;
 #[cfg(test)]
@@ -355,6 +356,26 @@ impl camel_api::RouteController for DefaultRouteController {
         // Clone sender for storage (to reuse on resume)
         let tx_for_storage = tx.clone();
         let consumer_ctx = ConsumerContext::new(tx, consumer_cancel.clone(), route_id.to_string());
+
+        // direct-inline-dispatch Task 2.2: publish the inline dispatcher
+        // capability for every non-Concurrent topology. Sequential and the
+        // `#[non_exhaustive]` wildcard arm (the spawn match below) are
+        // Sequential-equivalent, and aggregate routes reach this site before
+        // their early-return branch — the startup-cohort gate inside
+        // dispatch keeps the consumer-activation barrier coverage true for
+        // the inline topology. Concurrent models keep the capability `None`
+        // (channel path). Published before the consumer spawns, i.e. before
+        // any `mark_ready`, per the set-once contract.
+        if !matches!(effective_concurrency, ConcurrencyModel::Concurrent { .. }) {
+            let dispatcher = RouteInlineDispatcher::new(
+                route_id.to_string(),
+                Arc::clone(&pipeline),
+                pipeline_cancel.clone(),
+                Arc::clone(&drain_in_flight),
+                Arc::clone(&self.cohort),
+            );
+            consumer_ctx.set_inline_dispatcher(Arc::new(dispatcher));
+        }
 
         // --- Aggregator v2: check for aggregate route with timeout ---
         let split_clone = managed.aggregate_split.clone();
@@ -750,8 +771,11 @@ impl camel_api::RouteController for DefaultRouteController {
             CamelError::RouteError("Suspended route has no channel sender".into())
         })?;
 
-        // Get from_uri and concurrency for creating new consumer
+        // Get from_uri and the concurrency override for creating the new
+        // consumer (the override feeds the inline-dispatcher gate below,
+        // mirroring the start path's effective-model resolution).
         let from_uri = managed.from_uri.clone();
+        let concurrency_override = managed.concurrency.clone();
 
         // ADR-0061 per-bind exposure gate on resume too (see start path).
         if let Some(bind) = bind_key_from_uri(&from_uri) {
@@ -781,7 +805,7 @@ impl camel_api::RouteController for DefaultRouteController {
         ));
         let consumer_rt: Arc<dyn camel_component_api::RuntimeObservability> =
             Arc::clone(&consumer_component_ctx) as Arc<_>;
-        let (mut consumer, _) = consumer_management::create_route_consumer(
+        let (mut consumer, consumer_concurrency) = consumer_management::create_route_consumer(
             consumer_rt,
             &self.registry,
             &from_uri,
@@ -811,6 +835,41 @@ impl camel_api::RouteController for DefaultRouteController {
         // Create ConsumerContext with the stored sender
         let consumer_ctx =
             ConsumerContext::new(sender, consumer_cancel.clone(), route_id.to_string());
+
+        // direct-inline-dispatch Task 3.3 (bd rc-y4vk): mirror the
+        // start_route publication on the resume path. Without this the
+        // fresh resume ConsumerContext carries no capability and the
+        // resumed consumer's registry entry silently falls back to the
+        // channel path. Same gate as start (non-Concurrent only, wildcard
+        // = Sequential-equivalent), same handle captures (pipeline swap
+        // source, pipeline_cancel child scope, shared drain counter), and
+        // published before the resumed consumer spawns — a fresh ctx means
+        // a fresh OnceLock, so the set-once keep-first contract cannot
+        // interfere with the pre-suspend publication.
+        if !matches!(
+            concurrency_override.unwrap_or(consumer_concurrency),
+            ConcurrencyModel::Concurrent { .. }
+        ) {
+            let (pipeline, pipeline_cancel, drain_in_flight) = {
+                let managed = self
+                    .routes
+                    .get(route_id)
+                    .expect("invariant: route must exist after prior existence check"); // allow-unwrap
+                (
+                    Arc::clone(&managed.pipeline),
+                    managed.pipeline_cancel_token.child_token(),
+                    Arc::clone(&managed.drain_in_flight),
+                )
+            };
+            let dispatcher = RouteInlineDispatcher::new(
+                route_id.to_string(),
+                pipeline,
+                pipeline_cancel,
+                drain_in_flight,
+                Arc::clone(&self.cohort),
+            );
+            consumer_ctx.set_inline_dispatcher(Arc::new(dispatcher));
+        }
 
         // Spawn consumer task
         let (consumer_handle, startup_rx, watcher_inputs, outer_inputs) =

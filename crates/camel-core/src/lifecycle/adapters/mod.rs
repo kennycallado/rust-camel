@@ -8,6 +8,7 @@ pub(crate) mod endpoint_index;
 pub(crate) mod endpoint_resolver_factory;
 pub mod exchange_uow;
 pub mod in_memory;
+pub(crate) mod inline_dispatcher;
 pub(crate) mod outcome_composition;
 pub(crate) mod pipeline_runtime;
 pub mod redb_journal;

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -8,6 +8,8 @@ use tokio_util::sync::CancellationToken;
 use camel_api::security_policy::SecurityPolicy;
 use camel_api::{CamelError, Exchange};
 use camel_auth::CredentialSource;
+
+use crate::dispatch::InlineRouteDispatcher;
 
 /// A message sent from a consumer to the route pipeline.
 ///
@@ -177,6 +179,10 @@ pub struct ConsumerContext {
     cancel_token: CancellationToken,
     route_id: String,
     startup: StartupSignal,
+    /// Inline dispatch capability slot, shared by all clones of this
+    /// context (`Arc<OnceLock<_>>`). Set once by the camel-core runtime
+    /// before the consumer starts; every clone observes the same value.
+    inline_dispatcher: Arc<OnceLock<Arc<dyn InlineRouteDispatcher>>>,
 }
 
 impl ConsumerContext {
@@ -204,6 +210,7 @@ impl ConsumerContext {
             cancel_token,
             route_id,
             startup,
+            inline_dispatcher: Arc::new(OnceLock::new()),
         }
     }
 
@@ -280,6 +287,29 @@ impl ConsumerContext {
     /// For simple consumers, prefer `send()` or `send_and_wait()` instead.
     pub fn sender(&self) -> mpsc::Sender<ExchangeEnvelope> {
         self.sender.clone()
+    }
+
+    /// Publish the inline dispatch capability on this context.
+    ///
+    /// Set once by the camel-core runtime before the consumer starts, when
+    /// the route's effective concurrency model permits the inline fast path.
+    ///
+    /// Set-once, KEEP-FIRST contract: if a dispatcher was already published,
+    /// the first one stays in place, the second call is ignored with a
+    /// warning (it is not an error). All clones of this context share the
+    /// same slot, so a dispatcher set through any clone is visible through
+    /// all of them.
+    pub fn set_inline_dispatcher(&self, dispatcher: Arc<dyn InlineRouteDispatcher>) {
+        if self.inline_dispatcher.set(dispatcher).is_err() {
+            tracing::warn!("inline dispatcher already set; ignoring second set");
+        }
+    }
+
+    /// Returns the inline dispatch capability published by the camel-core
+    /// runtime, if any. See [`Self::set_inline_dispatcher`] for the
+    /// set-once-keep-first contract.
+    pub fn inline_dispatcher(&self) -> Option<Arc<dyn InlineRouteDispatcher>> {
+        self.inline_dispatcher.get().cloned()
     }
 
     /// Send an exchange into the route pipeline (fire-and-forget).

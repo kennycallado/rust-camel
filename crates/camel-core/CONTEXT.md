@@ -145,6 +145,17 @@ Terminates route processing successfully. `run_steps` converts it to `PipelineOu
 **Segment**:
 Wraps an `OutcomeSegment` — a structural EIP sub-pipeline (Filter, Choice, Loop, Throttle, doTry, Split, StreamingSplit, Multicast, LoadBalance) that returns `PipelineOutcome` directly. Enables `Stopped(ex)` propagation with nested-before-Stop mutations intact.
 
+## Inline dispatch capability publication
+
+At consumer start and resume (route_controller_trait), for non-Concurrent
+route shapes, the controller publishes an `InlineRouteDispatcher`
+(`lifecycle/adapters/inline_dispatcher.rs`) onto the fresh `ConsumerContext`:
+the live `SharedPipeline` swap source, a child of the pipeline cancellation
+token, the shared drain counter, and the cohort gate. Sequential dispatch
+through the capability runs admission + snapshot + `pipeline.call` on the
+caller's task; consumer stop surfaces `CamelError::ConsumerStopping`. See
+CONTEXT-MAP.md "Inline dispatch" (rc-wijd).
+
 ## ADR-0012 log-policy annotations
 
 | File | Line | Category | Reason |

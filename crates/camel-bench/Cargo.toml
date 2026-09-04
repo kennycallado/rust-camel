@@ -19,6 +19,16 @@ serde_json.workspace = true
 criterion.workspace = true
 camel-language-simple.workspace = true
 camel-language-api.workspace = true
+camel-component-direct.workspace = true
+camel-component-api.workspace = true
+
+[[bench]]
+name = "direct"
+harness = false
+
+[[bench]]
+name = "direct_decompose"
+harness = false
 
 [[bench]]
 name = "pipeline"

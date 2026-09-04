@@ -91,6 +91,22 @@ pub struct AggregatorService {
     /// clones (the pipeline clones the service per `poll_ready`) must not
     /// abort the shared sweep task; only the final owner's drop may.
     clone_guard: Arc<()>,
+    /// Memoized correlation-key serialization: the last STRING key value
+    /// paired with its `serde_json::to_string` form. Split-aggregate streams
+    /// re-send the same constant key for every fragment; the memo turns
+    /// per-fragment serialization into one string equality check. Shared via
+    /// `Arc` (cloned into every `call` future) so all clones of the service
+    /// share one memo slot. ONLY string keys are memoizable: their `Value`
+    /// equality exactly tracks their serialization. Every other shape
+    /// serializes per fragment (see `call` — e.g. float `0.0`/`-0.0` compare
+    /// equal but serialize differently, so memoizing numbers could merge
+    /// buckets that serde keeps distinct).
+    cached_key: Arc<Mutex<Option<(serde_json::Value, String)>>>,
+    /// Test-only count of correlation-key serializations actually performed
+    /// (fast-path misses + per-fragment object bypass). Asserted by the memo
+    /// tests; compiles out of non-test builds.
+    #[cfg(test)]
+    key_serializations: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl std::fmt::Debug for AggregatorService {
@@ -183,6 +199,9 @@ impl AggregatorService {
             sweep_handle: Arc::new(Mutex::new(None)),
             queue_metrics: None,
             clone_guard: Arc::new(()),
+            cached_key: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            key_serializations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -408,13 +427,45 @@ impl Service<Exchange> for AggregatorService {
         let timeout_handles = Arc::clone(&self.timeout_handles);
         let late_tx = self.late_tx.clone();
         let language_registry = Arc::clone(&self.language_registry);
+        let cached_key = Arc::clone(&self.cached_key);
+        #[cfg(test)]
+        let key_serializations = Arc::clone(&self.key_serializations);
 
         Box::pin(async move {
             let key_value =
                 extract_correlation_key(&exchange, &config.correlation, &language_registry).await?;
 
-            let key_str = serde_json::to_string(&key_value)
-                .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+            // Constant-key fast path: STRING keys only are memoized — one
+            // string equality check replaces per-fragment serde, and string
+            // equality exactly tracks its `serde_json::to_string` output.
+            // Every other shape serializes per fragment exactly as before:
+            // `Value` equality can diverge from serialization (float
+            // `0.0` and `-0.0` compare equal but serialize as "0.0" and
+            // "-0.0"; object/array `Value` equality is key-order-insensitive
+            // while output is not), so memoizing them could merge buckets
+            // that serde keeps distinct. Bool/Null serialize to a constant,
+            // so their per-fragment serde cost is trivial.
+            let key_is_memoizable = matches!(key_value, serde_json::Value::String(_));
+            let key_str = if key_is_memoizable {
+                let mut memo = cached_key.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((v, s)) = memo.as_ref()
+                    && *v == key_value
+                {
+                    s.clone()
+                } else {
+                    #[cfg(test)]
+                    key_serializations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let s = serde_json::to_string(&key_value)
+                        .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+                    *memo = Some((key_value.clone(), s.clone()));
+                    s
+                }
+            } else {
+                #[cfg(test)]
+                key_serializations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                serde_json::to_string(&key_value)
+                    .map_err(|e| CamelError::ProcessorError(e.to_string()))?
+            };
 
             // Pre-evaluate the completion predicate (if any) BEFORE taking the
             // buckets lock — expression evaluation is async + uses the language
@@ -462,7 +513,10 @@ impl Service<Exchange> for AggregatorService {
                     )));
                 }
 
-                let bucket = guard.entry(key_str.clone()).or_insert_with(Bucket::new);
+                let bucket = match guard.get_mut(&key_str) {
+                    Some(b) => b,
+                    None => guard.entry(key_str.clone()).or_insert_with(Bucket::new),
+                };
                 bucket.push(exchange);
 
                 let (is_complete, reason) = check_sync_completion(
@@ -471,12 +525,12 @@ impl Service<Exchange> for AggregatorService {
                     predicate_satisfied,
                 );
 
-                if is_complete {
-                    let exchanges = guard.remove(&key_str).map(|b| b.exchanges);
-                    (exchanges, reason)
+                let exchanges = if is_complete {
+                    guard.remove(&key_str).map(|b| b.exchanges)
                 } else {
-                    (None, CompletionReason::Size) // placeholder; reason unused when None
-                }
+                    None
+                };
+                (exchanges, reason)
             };
 
             if completed_bucket.0.is_none() && has_timeout_condition(&config.completion) {
@@ -2413,5 +2467,152 @@ mod tests {
         );
 
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // ── Task 4.1 (direct-inline-dispatch): constant-key memo fast path ──
+
+    /// A constant scalar correlation key must serialize exactly ONCE: the
+    /// first fragment fills the memo, later fragments reuse the memoized
+    /// string via a scalar equality check. All fragments still land in ONE
+    /// bucket (the size-3 completion with `CamelAggregatedSize == 3` proves
+    /// a single bucket held all three).
+    #[tokio::test]
+    async fn constant_key_skips_reserialization() {
+        let mut svc = new_test_svc(config_size(3));
+        let mut result = None;
+        for body in ["first", "second", "third"] {
+            result = Some(
+                svc.ready()
+                    .await
+                    .unwrap()
+                    .call(make_exchange("orderId", "A", body))
+                    .await
+                    .unwrap(),
+            );
+        }
+        let result = result.unwrap();
+        assert_eq!(
+            result.property(CAMEL_AGGREGATED_SIZE),
+            Some(&serde_json::json!(3u64)),
+            "all 3 fragments must aggregate out of a single bucket"
+        );
+        assert!(svc.buckets.lock().unwrap().is_empty());
+        assert_eq!(
+            svc.key_serializations
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "constant scalar key must serialize exactly once"
+        );
+    }
+
+    /// Alternating scalar keys keep byte-identical bucket names to direct
+    /// `serde_json::to_string` calls: k1, k2, k1 → exactly two buckets named
+    /// `"k1"` and `"k2"` (including the JSON quotes).
+    #[tokio::test]
+    async fn divergent_keys_keep_serde_semantics() {
+        let mut svc = new_test_svc(config_size(10)); // never completes
+        for key in ["k1", "k2", "k1"] {
+            svc.ready()
+                .await
+                .unwrap()
+                .call(make_exchange("orderId", key, "body"))
+                .await
+                .unwrap();
+        }
+        let guard = svc.buckets.lock().unwrap();
+        assert_eq!(guard.len(), 2, "k1/k2/k1 → exactly two buckets");
+        for key in ["k1", "k2"] {
+            let expected = serde_json::to_string(&serde_json::json!(key)).unwrap();
+            assert!(
+                guard.contains_key(expected.as_str()),
+                "bucket name must be byte-identical to serde_json::to_string: \
+                 expected {expected}, have {:?}",
+                guard.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Object correlation keys bypass the memo entirely — every fragment
+    /// serializes, and bucketing stays byte-identical to direct
+    /// `serde_json::to_string` of the objects. The two fixtures share an
+    /// equal key-set but are built in different insertion orders; the
+    /// expected bucket-key set is DERIVED from serde_json itself so the pin
+    /// holds under both order-canonicalizing (BTreeMap) and
+    /// order-preserving (`preserve_order`) serde_json builds.
+    #[tokio::test]
+    async fn object_keys_bypass_cache() {
+        let mut svc = new_test_svc(config_size(10)); // never completes
+        let obj_a = serde_json::json!({"a": 1, "b": 2});
+        let obj_b = serde_json::json!({"b": 2, "a": 1});
+        for obj in [&obj_a, &obj_b, &obj_a] {
+            let mut msg = Message {
+                headers: Default::default(),
+                body: Body::Text("body".into()),
+            };
+            msg.headers.insert("orderId".to_string(), obj.clone());
+            svc.ready()
+                .await
+                .unwrap()
+                .call(Exchange::new(msg))
+                .await
+                .unwrap();
+        }
+        let expected_keys: std::collections::HashSet<String> = [&obj_a, &obj_b]
+            .into_iter()
+            .map(|o| serde_json::to_string(o).unwrap())
+            .collect();
+        let guard = svc.buckets.lock().unwrap();
+        let actual_keys: std::collections::HashSet<String> = guard.keys().cloned().collect();
+        assert_eq!(
+            actual_keys, expected_keys,
+            "object keys must bucket exactly per serde_json::to_string (cache bypassed)"
+        );
+        assert_eq!(
+            svc.key_serializations
+                .load(std::sync::atomic::Ordering::Relaxed),
+            3,
+            "each object fragment must serialize (memo never consulted for objects)"
+        );
+    }
+
+    /// Float ±0.0 regression: `json!(0.0) == json!(-0.0)` under `Value`
+    /// equality, but serde serializes them as "0.0" and "-0.0". Numbers are
+    /// NOT memoizable — every fragment serializes, and the two zero signs
+    /// stay in distinct buckets named byte-identically to
+    /// `serde_json::to_string` of each value.
+    #[tokio::test]
+    async fn float_zero_sign_keys_stay_distinct() {
+        let mut svc = new_test_svc(config_size(10)); // never completes
+        for key in [0.0_f64, -0.0, 0.0] {
+            let mut msg = Message {
+                headers: Default::default(),
+                body: Body::Text("body".into()),
+            };
+            msg.headers
+                .insert("orderId".to_string(), serde_json::json!(key));
+            svc.ready()
+                .await
+                .unwrap()
+                .call(Exchange::new(msg))
+                .await
+                .unwrap();
+        }
+        let guard = svc.buckets.lock().unwrap();
+        assert_eq!(guard.len(), 2, "±0.0 must stay in distinct buckets");
+        for key in [0.0_f64, -0.0] {
+            let expected = serde_json::to_string(&serde_json::json!(key)).unwrap();
+            assert!(
+                guard.contains_key(expected.as_str()),
+                "bucket name must be byte-identical to serde_json::to_string: \
+                 expected {expected}, have {:?}",
+                guard.keys().collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            svc.key_serializations
+                .load(std::sync::atomic::Ordering::Relaxed),
+            3,
+            "number keys serialize per fragment (never memoized)"
+        );
     }
 }

@@ -27,6 +27,7 @@
 
 - **DSL → Runtime**: DSL compiles route definitions into `RouteDefinition` objects consumed by `CamelContext`
 - **Components → Runtime**: Components register by URI scheme into `CamelContext`; Consumers submit `ExchangeEnvelope` into Route pipelines
+- **camel-core → camel-component-api → camel-direct (inline capability)**: the route controller publishes an `InlineRouteDispatcher` onto `ConsumerContext` at consumer start/resume (Sequential only); camel-direct's producer reads it and dispatches inline (see ADR-0012 error taxonomy for the b′ boundary)
 - **Runtime → Components**: Runtime resolves a Component by scheme, creates an Endpoint, and starts a Consumer for each Route's `from:` URI
 - **Languages → Runtime**: Language implementations register into `CamelContext`; the runtime resolves them to evaluate expressions and predicates within Pipeline steps
 - **Functions → Runtime**: A `FunctionInvoker` is registered in `CamelContext`; the `function:` Pipeline step calls it with an Exchange and applies the returned patch
@@ -115,6 +116,7 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 - **Message** — body+headers container inside an Exchange (`exchange.input`, `exchange.output`). Not the same as Exchange.
 - **ErrorHandler / ErrorHandlerConfig / ExceptionPolicy** — DSL declares `ErrorHandler` and `OnException`; runtime compiles them into `ErrorHandlerConfig` and `ExceptionPolicy`. (camel-dsl + camel-core)
 - **CircuitBreaker** — DSL-declared fault tolerance pattern. Not a Pipeline Step — compiles into error-handling middleware. (camel-dsl)
+- **Inline dispatch / InlineRouteDispatcher** — Zero-handoff `direct:` dispatch. camel-core publishes an `InlineRouteDispatcher` capability onto the consumer's `ConsumerContext` (Sequential live consumers only); `DirectProducer` runs the consumer pipeline inline on the producer's own task under a task-local cycle/depth guard. Concurrent consumers and missing capability fall back to channel submission. (camel-component-api + camel-core + camel-direct, rc-wijd)
 - **Supervision / ConsumerRestart** — Route-level crash recovery. Consumer task failure sends CrashNotification; RuntimeBus records route as Failed; optional restart policy recreates the whole Route with backoff. Consumers must not self-supervise. (camel-core)
 - **ForcedHealthFailure / HealthCheckRegistry** — When a Consumer crashes (stop() never called), HealthCheckRegistry pins the route's entry to `Unhealthy` via `force_unhealthy_for_route()` until ConsumerRestart replaces it with a live probe. (services)
 - **Degraded / Unhealthy** — Semantic rule for health and readiness: `Degraded` = HTTP 200 on /readyz, pod Ready (component can still process Exchanges). `Unhealthy` = HTTP 503, pod NotReady. Both `Healthy` and `Degraded` map to Ready; only `Unhealthy` maps to NotReady.

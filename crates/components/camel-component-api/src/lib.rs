@@ -4,13 +4,14 @@
 //! that every rust-camel component implements. Also re-exports commonly-used types
 //! from `camel-api` and `camel-endpoint` for component convenience.
 //!
-//! Main types: `Component`, `Endpoint`, `Consumer`, `ProducerContext`, `ExchangeEnvelope`, `ComponentBundle`, `PollingConsumer`.
+//! Main types: `Component`, `Endpoint`, `Consumer`, `ProducerContext`, `ExchangeEnvelope`, `ComponentBundle`, `PollingConsumer`, `InlineRouteDispatcher`.
 //! Main modules: `component`, `endpoint`, `consumer`, `producer`, `registrar`.
 
 pub mod bundle;
 pub mod component;
 pub mod component_context;
 pub mod consumer;
+pub mod dispatch;
 pub mod endpoint;
 pub mod health_registry;
 pub mod runtime_observability;
@@ -31,6 +32,7 @@ pub use consumer::{
     ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, ExchangeEnvelope,
     SecurityContext, StartupReceiver, StartupSignal,
 };
+pub use dispatch::InlineRouteDispatcher;
 pub use endpoint::{Endpoint, PollingConsumer};
 pub use health_registry::{
     HealthCheckRegistry, NoOpHealthCheckRegistry, noop_health_check_registry,

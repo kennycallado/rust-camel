@@ -29,6 +29,18 @@ Concrete component crates own all I/O.
 `mark_failed()` are idempotent. The Runtime also detects an `Explicit` consumer that returns without
 sending a signal. This fallback prevents the route controller from waiting forever.
 
+## Inline dispatch capability
+
+`InlineRouteDispatcher` (camel-component-api `dispatch`) is the SPI a runtime
+implements to let a producer execute the consumer's pipeline inline — zero
+inter-task handoffs, JVM `direct:` parity (rc-wijd). `ConsumerContext` carries
+an optional capability slot (`set_inline_dispatcher` / `inline_dispatcher`,
+first-write-wins). camel-core's route controller publishes the capability at
+consumer start AND resume for non-Concurrent route shapes; camel-direct's
+producer dispatches through it when present and falls back to the channel
+submission otherwise. Errors follow ADR-0012 taxonomy: the b-prime branch
+sits after path selection in the producer.
+
 ## Shutdown contract
 
 The Runtime owns each Consumer and applies this sequence:

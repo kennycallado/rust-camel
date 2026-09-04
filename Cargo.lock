@@ -1232,6 +1232,8 @@ name = "camel-bench"
 version = "0.39.0"
 dependencies = [
  "camel-api",
+ "camel-component-api",
+ "camel-component-direct",
  "camel-core",
  "camel-language-api",
  "camel-language-simple",
