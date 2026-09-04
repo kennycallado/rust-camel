@@ -64,6 +64,7 @@ type = "kubernetes"
 
 #[test]
 fn platform_parses_kubernetes_from_file_with_profile() {
+    let _guard = super::env_lock();
     use std::io::Write;
     let mut f = tempfile::NamedTempFile::new().expect("temp file");
     f.write_all(

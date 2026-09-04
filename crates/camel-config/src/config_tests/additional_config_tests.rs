@@ -122,6 +122,7 @@ fn from_env_or_default_applies_env_overrides() {
 
 #[test]
 fn from_file_with_profile_and_env_unknown_profile_errors() {
+    let _guard = super::env_lock();
     use std::io::Write;
 
     let mut file = tempfile::NamedTempFile::new().unwrap();

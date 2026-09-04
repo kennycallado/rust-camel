@@ -3,6 +3,7 @@ use std::io::Write;
 
 #[test]
 fn from_file_rejects_oversized_config() {
+    let _guard = super::env_lock();
     // A single key with a very long string value — valid TOML, > 16 MiB
     let val = "a".repeat(17 * 1024 * 1024);
     let big_content = format!("x = \"{val}\"\n");

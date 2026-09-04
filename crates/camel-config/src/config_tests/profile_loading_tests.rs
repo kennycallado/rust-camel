@@ -50,6 +50,7 @@ pool_max_idle_per_host = 99
 
 #[test]
 fn test_from_file_with_profile_merges_default_and_profile() {
+    let _guard = super::env_lock();
     let file = write_temp_config(
         r#"
 [default]
@@ -83,6 +84,7 @@ pool_max_idle_per_host = 200
 
 #[test]
 fn test_from_file_with_profile_uses_profile_when_no_default() {
+    let _guard = super::env_lock();
     let file = write_temp_config(
         r#"
 [dev]
@@ -103,6 +105,7 @@ fn redb_idempotent_config_loads_via_profile_section() {
     // active profile as [default.idempotent_repo] (mirrors [default.supervision]),
     // NOT top-level. This verifies the profile path that the flat-parsing
     // redb_idempotent_config_* tests above do not cover.
+    let _guard = super::env_lock();
     let file = write_temp_config(
         r#"
 [default]
@@ -124,6 +127,7 @@ durability = "eventual"
 
 #[test]
 fn test_from_file_with_profile_unknown_profile_returns_error() {
+    let _guard = super::env_lock();
     let file = write_temp_config(
         r#"
 [default]
@@ -138,6 +142,7 @@ watch = false
 
 #[test]
 fn test_from_file_without_profile_uses_default_section() {
+    let _guard = super::env_lock();
     let file = write_temp_config(
         r#"
 [default]
@@ -330,6 +335,7 @@ drain_timeout_ms = 5000
 
 #[test]
 fn test_from_file_resolves_placeholders_in_components_and_beans() {
+    let _guard = super::env_lock();
     let file = write_temp_config(
         r#"
 [default]
