@@ -46,10 +46,11 @@ runs the event loop inline, so readiness is signalled by the explicit
 ### Requirement: poll_ready behavior unchanged
 
 The `DirectProducer::poll_ready()` SHALL retain its registry-based readiness
-behavior: when the registry contains `None` for the producer's name and
+behavior: when the registry contains no entry for the producer's name and
 `fail_if_no_consumers` is not `Some(false)`, it SHALL return
-`Poll::Ready(Err(EndpointCreationFailed))`, and when the registered sender is
-closed it SHALL return `Poll::Ready(Err(EndpointCreationFailed))`. The
+`Poll::Ready(Err(EndpointCreationFailed))`, and when the registry entry is
+closed (the consumer is gone) it SHALL return
+`Poll::Ready(Err(EndpointCreationFailed))`. The
 semaphore permit acquisition SHALL move out of `poll_ready` into `call()`'s
 future (see stateful-producer-readiness specification) — `poll_ready` SHALL NOT
 acquire or hold a semaphore permit. The startup handshake eliminates the
