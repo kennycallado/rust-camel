@@ -775,6 +775,9 @@ type ServerKey = (String, u16);
 /// Handle to a running Axum server on one interface/port.
 struct ServerHandle {
     registry: HttpRouteRegistry,
+    /// Actual local address of the served listening socket (differs from the
+    /// configured `host:port` when spawning from a staged/pre-bound listener).
+    bound_addr: std::net::SocketAddr,
     max_request_body: usize,
     max_response_body: usize,
     max_inflight_requests: usize,
@@ -790,9 +793,17 @@ struct ServerHandle {
     tls_source: Option<ServerTlsSource>,
 }
 
+/// Internal registry state: live server entries plus pre-bound listeners
+/// staged for consumption by the next spawn on the same key.
+#[derive(Default)]
+struct RegistryState {
+    entries: HashMap<ServerKey, Arc<OnceCell<ServerHandle>>>,
+    staged: HashMap<ServerKey, tokio::net::TcpListener>,
+}
+
 /// Process-global registry mapping (host, port) → running Axum server handle.
 pub struct ServerRegistry {
-    inner: Mutex<HashMap<ServerKey, Arc<OnceCell<ServerHandle>>>>,
+    inner: Mutex<RegistryState>,
 }
 
 impl ServerRegistry {
@@ -800,7 +811,7 @@ impl ServerRegistry {
     pub fn global() -> &'static Self {
         static INSTANCE: OnceLock<ServerRegistry> = OnceLock::new();
         INSTANCE.get_or_init(|| ServerRegistry {
-            inner: Mutex::new(HashMap::new()),
+            inner: Mutex::new(RegistryState::default()),
         })
     }
 
@@ -818,17 +829,119 @@ impl ServerRegistry {
         route_id: String,
         tls_config: Option<crate::config::ServerTlsConfig>,
     ) -> Result<HttpRouteRegistry, CamelError> {
+        self.get_or_spawn_internal(
+            host,
+            port,
+            max_request_body,
+            max_response_body,
+            max_inflight_requests,
+            runtime,
+            route_id,
+            tls_config,
+            None,
+        )
+        .await
+    }
+
+    /// Like [`ServerRegistry::get_or_spawn`], but serves `listener` instead
+    /// of binding `host:port`. The registry key is derived from the listener's
+    /// actual local address, so callers must query that port afterwards. If an
+    /// entry for the key already holds a live server, the same compatibility
+    /// checks as `get_or_spawn` apply and the entry is reused; the passed
+    /// listener is simply dropped.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn get_or_spawn_with_listener(
+        &'static self,
+        listener: tokio::net::TcpListener,
+        max_request_body: usize,
+        max_response_body: usize,
+        max_inflight_requests: usize,
+        runtime: Arc<dyn RuntimeObservability>,
+        route_id: String,
+        tls_config: Option<crate::config::ServerTlsConfig>,
+    ) -> Result<HttpRouteRegistry, CamelError> {
+        let addr = listener
+            .local_addr()
+            .map_err(|e| CamelError::EndpointCreationFailed(format!("listener local_addr: {e}")))?;
+        self.get_or_spawn_internal(
+            &addr.ip().to_string(),
+            addr.port(),
+            max_request_body,
+            max_response_body,
+            max_inflight_requests,
+            runtime,
+            route_id,
+            tls_config,
+            Some(listener),
+        )
+        .await
+    }
+
+    /// Stage a pre-bound listener so the next `get_or_spawn` for its
+    /// `(ip, port)` key serves this socket instead of binding a new one.
+    ///
+    /// The staged listener is consumed by exactly one spawn: the exact-key
+    /// `get_or_spawn` takes it under the registry lock, eliminating the bind
+    /// window between a port probe and server startup (itest-bound-ports).
+    pub async fn stage_listener(
+        &'static self,
+        listener: tokio::net::TcpListener,
+    ) -> Result<(), CamelError> {
+        let addr = listener
+            .local_addr()
+            .map_err(|e| CamelError::EndpointCreationFailed(format!("listener local_addr: {e}")))?;
+        let host = addr.ip().to_string();
+        use std::collections::hash_map::Entry;
+        let mut guard = self.inner.lock().map_err(|_| {
+            CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
+        })?;
+        match guard.staged.entry((host.clone(), addr.port())) {
+            Entry::Occupied(_) => Err(CamelError::EndpointCreationFailed(format!(
+                "listener already staged for {host}:{}",
+                addr.port()
+            ))),
+            Entry::Vacant(slot) => {
+                slot.insert(listener);
+                Ok(())
+            }
+        }
+    }
+
+    /// Returns the bound address of the live server entry for `(host, port)`,
+    /// if one is initialized.
+    pub fn bound_addr(&'static self, host: &str, port: u16) -> Option<std::net::SocketAddr> {
+        let guard = self.inner.lock().ok()?;
+        guard
+            .entries
+            .get(&(host.to_string(), port))
+            .and_then(|cell| cell.get())
+            .map(|handle| handle.bound_addr)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn get_or_spawn_internal(
+        &'static self,
+        host: &str,
+        port: u16,
+        max_request_body: usize,
+        max_response_body: usize,
+        max_inflight_requests: usize,
+        runtime: Arc<dyn RuntimeObservability>,
+        route_id: String,
+        tls_config: Option<crate::config::ServerTlsConfig>,
+        provided: Option<tokio::net::TcpListener>,
+    ) -> Result<HttpRouteRegistry, CamelError> {
         let host_owned = host.to_string();
+        let key = (host.to_string(), port);
 
         let cell = {
             let mut guard = self.inner.lock().map_err(|_| {
                 CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
             })?;
-            let key = (host.to_string(), port);
             // Evict dead server so a fresh one can spawn (matches gRPC D-L2 pattern).
             // The monitor task awaits the server task, so monitor_task.is_finished()
             // is a reliable proxy for the server being gone (either crashed or aborted).
-            if let Some(existing) = guard.get(&key)
+            if let Some(existing) = guard.entries.get(&key)
                 && let Some(handle) = existing.get()
                 && handle.monitor_task.is_finished()
             {
@@ -839,9 +952,10 @@ impl ServerRegistry {
                     camel_component_api::tls_source::TlsReloadRegistry::global()
                         .unregister(scheme, host, port);
                 }
-                guard.remove(&key);
+                guard.entries.remove(&key);
             }
             guard
+                .entries
                 .entry(key)
                 .or_insert_with(|| Arc::new(OnceCell::new()))
                 .clone()
@@ -899,97 +1013,68 @@ impl ServerRegistry {
             .get_or_try_init(|| {
                 let rt = Arc::clone(&runtime);
                 let rid = route_id.clone();
+                let key = (host_owned.clone(), port);
                 async move {
-                    let addr = format!("{host_owned}:{port}");
-                    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-                        CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
-                    })?;
-                    let registry = HttpRouteRegistry::new();
-                    let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
-                    // Constructed once in the TLS branch so they can be retained
-                    // on ServerHandle for the reload handler (Task 7).
-                    let tls_rustls_cfg: Option<axum_server::tls_rustls::RustlsConfig>;
-                    let tls_source: Option<ServerTlsSource>;
-                    let server_task = if let Some(ref tls) = tls_config {
-                        let rustls_config = load_tls_config(&tls.cert_path, &tls.key_path)?;
-                        let source = ServerTlsSource {
-                            cert_path: std::path::PathBuf::from(&tls.cert_path),
-                            key_path: std::path::PathBuf::from(&tls.key_path),
-                            client_ca_path: None,
-                        };
-                        // Build the RustlsConfig once — clone() is cheap (Arc
-                        // internally) and shares the ArcSwap the reload handler
-                        // will mutate via reload_from_config().
-                        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(
-                            std::sync::Arc::new(rustls_config),
-                        );
-                        tls_rustls_cfg = Some(rustls_cfg.clone());
-                        tls_source = Some(source);
-                        // Convert tokio listener to std for axum-server
-                        let std_listener = listener.into_std().map_err(|e| {
-                            CamelError::EndpointCreationFailed(format!(
-                                "TLS listener conversion: {e}"
-                            ))
-                        })?;
-                        tokio::spawn(run_axum_server_tls(
-                            std_listener,
-                            rustls_cfg,
-                            registry.clone(),
-                            max_request_body,
-                            max_response_body,
-                            Arc::clone(&inflight),
-                            Arc::clone(&rt),
-                            rid.clone(),
-                        ))
-                    } else {
-                        tls_rustls_cfg = None;
-                        tls_source = None;
-                        tokio::spawn(run_axum_server(
-                            listener,
-                            registry.clone(),
-                            max_request_body,
-                            max_response_body,
-                            Arc::clone(&inflight),
-                            Arc::clone(&rt),
-                            rid.clone(),
-                        ))
+                    // Resolve the listener source inside the init body so
+                    // exactly one caller — the init winner — consumes a
+                    // staged listener. Resolving it before the cell init let
+                    // a racing caller strand the staged socket in the
+                    // loser's hands: the winner then bound the same port and
+                    // failed with EADDRINUSE. The sync registry lock here is
+                    // never held across an await. Occupied cells never run
+                    // this body, so they never touch the staged map.
+                    let source = match provided {
+                        Some(listener) => ListenerSource::Staged(listener),
+                        None => {
+                            let mut guard = self.inner.lock().map_err(|_| {
+                                CamelError::EndpointCreationFailed(
+                                    "ServerRegistry lock poisoned".into(),
+                                )
+                            })?;
+                            match guard.staged.remove(&key) {
+                                Some(listener) => ListenerSource::Staged(listener),
+                                // Conflict check before any entry is
+                                // initialized so the error leaves the staged
+                                // slot untouched.
+                                None => {
+                                    if let Some((staged_host, _)) = guard
+                                        .staged
+                                        .keys()
+                                        .find(|(_, staged_port)| *staged_port == port)
+                                    {
+                                        let staged_host = staged_host.clone();
+                                        return Err(CamelError::EndpointCreationFailed(
+                                            format!(
+                                                "staged listener conflict on port {port}: staged under host {staged_host}, requested {host_owned}"
+                                            ),
+                                        ));
+                                    }
+                                    ListenerSource::Bind
+                                }
+                            }
+                        }
                     };
-                    let addr_for_monitor = format!("{host_owned}:{port}");
-                    let monitor_task = tokio::spawn(monitor_axum_task(
-                        server_task,
-                        addr_for_monitor,
-                        Arc::clone(&rt),
-                        rid,
-                    ));
-                    let handle = ServerHandle {
-                        registry,
+                    spawn_entry(
+                        key,
+                        source,
                         max_request_body,
                         max_response_body,
                         max_inflight_requests,
-                        is_tls: tls_config.is_some(),
-                        tls_cert_path: tls_config.as_ref().map(|t| t.cert_path.clone()),
-                        tls_key_path: tls_config.as_ref().map(|t| t.key_path.clone()),
-                        monitor_task,
-                        tls_config: tls_rustls_cfg,
-                        tls_source,
-                    };
-                    // Register reload handler (exactly-once: inside OnceCell init closure).
-                    // Note: HTTP servers are process-lifetime (no release/eviction path),
-                    // so handlers are never unregistered. If eviction is added later,
-                    // add TlsReloadRegistry::global().unregister() there.
-                    if let (Some(tls_cfg), Some(source)) =
-                        (handle.tls_config.as_ref(), handle.tls_source.as_ref())
-                    {
-                        let handler = Arc::new(crate::tls_reload::HttpReloadHandler::new(
-                            tls_cfg.clone(),
-                            source.clone(),
-                            host_owned.clone(),
-                            port,
-                        ));
-                        camel_component_api::tls_source::TlsReloadRegistry::global()
-                            .register(handler);
-                    }
-                    Ok::<ServerHandle, CamelError>(handle)
+                        rt,
+                        rid,
+                        tls_config,
+                    )
+                    .await
+                    .and_then(|handle| {
+                        // spawn_entry returns a freshly created Arc (refcount
+                        // 1), so unwrapping it back into the owned handle for
+                        // the cell always succeeds here.
+                        Arc::try_unwrap(handle).map_err(|_| {
+                            CamelError::EndpointCreationFailed(
+                                "spawned server handle has dangling clones".into(),
+                            )
+                        })
+                    })
                 }
             })
             .await?;
@@ -1021,8 +1106,130 @@ impl ServerRegistry {
             .inner
             .lock()
             .expect("ServerRegistry lock poisoned during test reset");
-        guard.clear();
+        guard.entries.clear();
+        guard.staged.clear();
     }
+}
+
+/// Where a spawned server's listening socket comes from: a fresh bind on
+/// `key`, or a listener pre-bound (staged or passed) by the caller.
+enum ListenerSource {
+    Bind,
+    Staged(tokio::net::TcpListener),
+}
+
+/// Create the server handle for a vacant registry entry: serve `key` via a
+/// freshly bound or caller-provided listener. This is the OnceCell init body
+/// of `get_or_spawn`, extracted so the legacy and staged entry points share
+/// one spawn path.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_entry(
+    key: ServerKey,
+    source: ListenerSource,
+    max_request_body: usize,
+    max_response_body: usize,
+    max_inflight_requests: usize,
+    runtime: Arc<dyn RuntimeObservability>,
+    route_id: String,
+    tls_config: Option<crate::config::ServerTlsConfig>,
+) -> Result<Arc<ServerHandle>, CamelError> {
+    let rt = Arc::clone(&runtime);
+    let rid = route_id.clone();
+    let (host_owned, port) = key;
+    let listener = match source {
+        ListenerSource::Bind => {
+            let addr = format!("{host_owned}:{port}");
+            tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+                CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
+            })?
+        }
+        ListenerSource::Staged(listener) => listener,
+    };
+    let bound_addr = listener
+        .local_addr()
+        .map_err(|e| CamelError::EndpointCreationFailed(format!("listener local_addr: {e}")))?;
+    let registry = HttpRouteRegistry::new();
+    let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
+    // Constructed once in the TLS branch so they can be retained
+    // on ServerHandle for the reload handler (Task 7).
+    let tls_rustls_cfg: Option<axum_server::tls_rustls::RustlsConfig>;
+    let tls_source: Option<ServerTlsSource>;
+    let server_task = if let Some(ref tls) = tls_config {
+        let rustls_config = load_tls_config(&tls.cert_path, &tls.key_path)?;
+        let source = ServerTlsSource {
+            cert_path: std::path::PathBuf::from(&tls.cert_path),
+            key_path: std::path::PathBuf::from(&tls.key_path),
+            client_ca_path: None,
+        };
+        // Build the RustlsConfig once — clone() is cheap (Arc
+        // internally) and shares the ArcSwap the reload handler
+        // will mutate via reload_from_config().
+        let rustls_cfg =
+            axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(rustls_config));
+        tls_rustls_cfg = Some(rustls_cfg.clone());
+        tls_source = Some(source);
+        // Convert tokio listener to std for axum-server
+        let std_listener = listener.into_std().map_err(|e| {
+            CamelError::EndpointCreationFailed(format!("TLS listener conversion: {e}"))
+        })?;
+        tokio::spawn(run_axum_server_tls(
+            std_listener,
+            rustls_cfg,
+            registry.clone(),
+            max_request_body,
+            max_response_body,
+            Arc::clone(&inflight),
+            Arc::clone(&rt),
+            rid.clone(),
+        ))
+    } else {
+        tls_rustls_cfg = None;
+        tls_source = None;
+        tokio::spawn(run_axum_server(
+            listener,
+            registry.clone(),
+            max_request_body,
+            max_response_body,
+            Arc::clone(&inflight),
+            Arc::clone(&rt),
+            rid.clone(),
+        ))
+    };
+    let addr_for_monitor = format!("{host_owned}:{port}");
+    let monitor_task = tokio::spawn(monitor_axum_task(
+        server_task,
+        addr_for_monitor,
+        Arc::clone(&rt),
+        rid,
+    ));
+    let handle = ServerHandle {
+        registry,
+        bound_addr,
+        max_request_body,
+        max_response_body,
+        max_inflight_requests,
+        is_tls: tls_config.is_some(),
+        tls_cert_path: tls_config.as_ref().map(|t| t.cert_path.clone()),
+        tls_key_path: tls_config.as_ref().map(|t| t.key_path.clone()),
+        monitor_task,
+        tls_config: tls_rustls_cfg,
+        tls_source,
+    };
+    // Register reload handler (exactly-once: inside OnceCell init closure).
+    // Note: HTTP servers are process-lifetime (no release/eviction path),
+    // so handlers are never unregistered. If eviction is added later,
+    // add TlsReloadRegistry::global().unregister() there.
+    if let (Some(tls_cfg), Some(source)) = (handle.tls_config.as_ref(), handle.tls_source.as_ref())
+    {
+        let handler = Arc::new(crate::tls_reload::HttpReloadHandler::new(
+            tls_cfg.clone(),
+            source.clone(),
+            host_owned.clone(),
+            port,
+        ));
+        camel_component_api::tls_source::TlsReloadRegistry::global().register(handler);
+    }
+    Ok(Arc::new(handle))
 }
 
 // ---------------------------------------------------------------------------
@@ -5022,7 +5229,7 @@ mod tests {
 
             // Verify entry exists
             let guard = ServerRegistry::global().inner.lock().expect("lock");
-            assert!(guard.contains_key(&("127.0.0.1".to_string(), 9992)));
+            assert!(guard.entries.contains_key(&("127.0.0.1".to_string(), 9992)));
             drop(guard);
 
             // Reset
@@ -5031,9 +5238,9 @@ mod tests {
             // Verify cleared
             let guard = ServerRegistry::global().inner.lock().expect("lock");
             assert!(
-                guard.is_empty(),
+                guard.entries.is_empty(),
                 "registry should be empty after reset, has {} entries",
-                guard.len()
+                guard.entries.len()
             );
         });
     }
@@ -5124,7 +5331,7 @@ mod tests {
         let key = ("127.0.0.1".to_string(), port);
         let cell = {
             let guard = registry.inner.lock().expect("lock");
-            guard.get(&key).expect("entry should exist").clone()
+            guard.entries.get(&key).expect("entry should exist").clone()
         };
 
         // Unregister first route -> monitor still alive (count = 1).
@@ -5156,10 +5363,489 @@ mod tests {
         {
             let guard = registry.inner.lock().expect("lock");
             assert!(
-                guard.get(&key).is_some(),
+                guard.entries.contains_key(&key),
                 "entry should remain in registry — server kept alive for restart"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Staged listeners (itest-bound-ports Task 1)
+    // -----------------------------------------------------------------------
+
+    /// CLONE-FIXTURE: bind a std listener on `127.0.0.1:0`, retain a blocking
+    /// std clone (`probe`) so the port stays reserved, and hand the original
+    /// socket to tokio as a non-blocking listener. `tokio::net::TcpListener`
+    /// has no `try_clone`, so clones come from the std handle.
+    async fn clone_fixture_listener() -> (
+        tokio::net::TcpListener,
+        std::net::TcpListener,
+        std::net::SocketAddr,
+    ) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind std listener");
+        let probe = l.try_clone().expect("clone probe");
+        l.set_nonblocking(true).expect("set_nonblocking");
+        let listener = tokio::net::TcpListener::from_std(l).expect("from_std");
+        let addr = listener.local_addr().expect("local_addr");
+        (listener, probe, addr)
+    }
+
+    /// Default-limit constants the existing registry tests in this file use.
+    fn staged_limits() -> (usize, usize, usize) {
+        (1024 * 1024, 10 * 1024 * 1024, 1024)
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn staged_listener_first_spawn_serves_without_second_bind() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+        let registry = ServerRegistry::global();
+        let (listener, _probe, addr) = clone_fixture_listener().await;
+        let port = addr.port();
+        registry
+            .stage_listener(listener)
+            .await
+            .expect("stage listener");
+
+        let (max_req, max_res, max_inflight) = staged_limits();
+        let routes = registry
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "staged-first-spawn".into(),
+                None,
+            )
+            .await
+            .expect("spawn from staged listener must succeed");
+
+        assert_eq!(
+            registry.bound_addr("127.0.0.1", port),
+            Some(addr),
+            "served socket must be the staged listener's addr"
+        );
+        // The probe clone shares the socket, so service is proven by an HTTP
+        // response, not by accepting on the probe.
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/__staged_probe__"))
+            .await
+            .expect("http request against staged listener must connect");
+        assert!(
+            resp.status().as_u16() >= 200,
+            "any status proves the staged socket serves"
+        );
+        drop(routes);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn staged_entry_reused_by_second_caller() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+        let registry = ServerRegistry::global();
+        let (listener, _probe, addr) = clone_fixture_listener().await;
+        let port = addr.port();
+        registry
+            .stage_listener(listener)
+            .await
+            .expect("stage listener");
+
+        let (max_req, max_res, max_inflight) = staged_limits();
+        let first = registry
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "staged-reuse-1".into(),
+                None,
+            )
+            .await
+            .expect("first spawn from staged listener");
+        let second = registry
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "staged-reuse-2".into(),
+                None,
+            )
+            .await
+            .expect("second caller must reuse the entry");
+        assert_eq!(
+            registry.bound_addr("127.0.0.1", port),
+            Some(addr),
+            "entry reused — bound addr unchanged, no second bind"
+        );
+        drop(first);
+        drop(second);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn staged_race_two_callers_single_resolver() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+        let registry = ServerRegistry::global();
+        let (listener, _probe, addr) = clone_fixture_listener().await;
+        let port = addr.port();
+        registry
+            .stage_listener(listener)
+            .await
+            .expect("stage listener");
+
+        // Two racing callers for the exact staged key: the staged listener
+        // must be consumed by the single cell-init winner and served to
+        // both — never leave the winner binding a port the loser still
+        // holds (EADDRINUSE).
+        let (max_req, max_res, max_inflight) = staged_limits();
+        let (first, second) = tokio::join!(
+            registry.get_or_spawn(
+                "127.0.0.1",
+                port,
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "staged-race-1".into(),
+                None,
+            ),
+            registry.get_or_spawn(
+                "127.0.0.1",
+                port,
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "staged-race-2".into(),
+                None,
+            ),
+        );
+        let first = first.expect("first racing caller must succeed");
+        let second = second.expect("second racing caller must succeed");
+        assert_eq!(
+            registry.bound_addr("127.0.0.1", port),
+            Some(addr),
+            "single entry must be served from the staged socket — no EADDRINUSE path"
+        );
+        drop(first);
+        drop(second);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn unstaged_spawn_binds_legacy() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+        let registry = ServerRegistry::global();
+        // Fresh port P2: reserve then release — the legacy path rebinds.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+        let port = probe.local_addr().expect("local addr").port();
+        drop(probe);
+
+        let (max_req, max_res, max_inflight) = staged_limits();
+        registry
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "legacy-bind".into(),
+                None,
+            )
+            .await
+            .expect("legacy bind spawn");
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/__legacy_probe__"))
+            .await
+            .expect("connect to freshly bound port must succeed");
+        assert!(resp.status().as_u16() >= 200);
+        assert_eq!(
+            registry.bound_addr("127.0.0.1", port),
+            Some(std::net::SocketAddr::from(([127, 0, 0, 1], port))),
+            "bound addr must be the legacy bound (host, port)"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn wrong_host_staged_port_fails_deterministically() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+        let registry = ServerRegistry::global();
+        let (listener, _probe, addr) = clone_fixture_listener().await;
+        let port = addr.port();
+        registry
+            .stage_listener(listener)
+            .await
+            .expect("stage listener under 127.0.0.1");
+
+        let (max_req, max_res, max_inflight) = staged_limits();
+        let err = registry
+            .get_or_spawn(
+                "localhost",
+                port,
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "conflict-probe".into(),
+                None,
+            )
+            .await
+            .expect_err("wrong host on staged port must fail deterministically");
+        assert!(
+            err.to_string().contains("staged listener conflict on port"),
+            "unexpected error: {err}"
+        );
+
+        // Slot untouched by the failed call: the correct host now consumes it.
+        registry
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "conflict-after".into(),
+                None,
+            )
+            .await
+            .expect("correct host must serve the staged listener");
+        assert_eq!(
+            registry.bound_addr("127.0.0.1", port),
+            Some(addr),
+            "staged slot must be untouched by the conflicting call"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn duplicate_stage_same_key_rejected() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+        let registry = ServerRegistry::global();
+        let (listener, probe, addr) = clone_fixture_listener().await;
+        registry
+            .stage_listener(listener)
+            .await
+            .expect("stage listener A");
+
+        // Second tokio handle to the SAME socket: clone the std probe handle.
+        let dup = probe.try_clone().expect("clone2");
+        dup.set_nonblocking(true).expect("set_nonblocking2");
+        let b = tokio::net::TcpListener::from_std(dup).expect("from_std2");
+
+        let err = registry
+            .stage_listener(b)
+            .await
+            .expect_err("duplicate stage must be rejected");
+        assert!(
+            err.to_string().contains("listener already staged"),
+            "unexpected error: {err}"
+        );
+
+        let (max_req, max_res, max_inflight) = staged_limits();
+        registry
+            .get_or_spawn(
+                "127.0.0.1",
+                addr.port(),
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "dup-stage-after".into(),
+                None,
+            )
+            .await
+            .expect("spawn from first staged listener");
+        assert_eq!(
+            registry.bound_addr("127.0.0.1", addr.port()),
+            Some(addr),
+            "first staged listener retained"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn distinct_keys_stage_independently() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+        let registry = ServerRegistry::global();
+        let (l1, _p1, addr1) = clone_fixture_listener().await;
+        let (l2, _p2, addr2) = clone_fixture_listener().await;
+        registry.stage_listener(l1).await.expect("stage P1");
+        registry.stage_listener(l2).await.expect("stage P2");
+
+        let (max_req, max_res, max_inflight) = staged_limits();
+        registry
+            .get_or_spawn(
+                "127.0.0.1",
+                addr1.port(),
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "distinct-1".into(),
+                None,
+            )
+            .await
+            .expect("spawn P1");
+        registry
+            .get_or_spawn(
+                "127.0.0.1",
+                addr2.port(),
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "distinct-2".into(),
+                None,
+            )
+            .await
+            .expect("spawn P2");
+        assert_eq!(
+            registry.bound_addr("127.0.0.1", addr1.port()),
+            Some(addr1),
+            "P1 bound addr must be its own listener"
+        );
+        assert_eq!(
+            registry.bound_addr("127.0.0.1", addr2.port()),
+            Some(addr2),
+            "P2 bound addr must be its own listener"
+        );
+        let r1 = reqwest::get(format!("http://127.0.0.1:{}/__distinct__", addr1.port()))
+            .await
+            .expect("connect P1");
+        assert!(r1.status().as_u16() >= 200);
+        let r2 = reqwest::get(format!("http://127.0.0.1:{}/__distinct__", addr2.port()))
+            .await
+            .expect("connect P2");
+        assert!(r2.status().as_u16() >= 200);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn tls_prebound_listener_served() {
+        use camel_component_api::test_support::tls;
+
+        // Install rustls crypto provider (aws-lc-rs — matches the existing
+        // TLS registry tests).
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+        let registry = ServerRegistry::global();
+        let (listener, _probe, addr) = clone_fixture_listener().await;
+        let port = addr.port();
+
+        let (ca_pem, cert_pem, key_pem) = tls::gen_server_cert();
+        let cert_path = tls::write_pem_tmp("http-staged-tls-cert.pem", &cert_pem);
+        let key_path = tls::write_pem_tmp("http-staged-tls-key.pem", &key_pem);
+        let ca_path = tls::write_pem_tmp("http-staged-tls-ca.pem", &ca_pem);
+
+        let (max_req, max_res, max_inflight) = staged_limits();
+        let routes = registry
+            .get_or_spawn_with_listener(
+                listener,
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "staged-tls".into(),
+                Some(crate::config::ServerTlsConfig {
+                    cert_path: cert_path.to_string_lossy().into_owned(),
+                    key_path: key_path.to_string_lossy().into_owned(),
+                }),
+            )
+            .await
+            .expect("spawn TLS server from pre-bound listener");
+
+        // Client with CA cert — REAL verification (no danger_accept_invalid),
+        // same helper pattern as the existing TLS registry tests.
+        let ca_bytes = std::fs::read(&ca_path).expect("read ca pem");
+        let client = reqwest::Client::builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(&ca_bytes).expect("parse ca pem"))
+            .build()
+            .expect("build tls client");
+
+        let resp = client
+            .get(format!("https://127.0.0.1:{port}/__staged_tls__"))
+            .send()
+            .await
+            .expect("TLS handshake + request must succeed");
+        assert_eq!(resp.status().as_u16(), 404, "unknown path 404s through TLS");
+        assert_eq!(
+            registry.bound_addr("127.0.0.1", port),
+            Some(addr),
+            "bound addr equals the pre-bound listener addr"
+        );
+        drop(routes);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn with_listener_direct_spawn_keyed_by_actual_addr() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+        let registry = ServerRegistry::global();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind un-staged listener");
+        let addr = listener.local_addr().expect("local addr");
+        let port = addr.port();
+
+        let (max_req, max_res, max_inflight) = staged_limits();
+        registry
+            .get_or_spawn_with_listener(
+                listener,
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "with-listener".into(),
+                None,
+            )
+            .await
+            .expect("direct spawn from un-staged listener");
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/__with_listener__"))
+            .await
+            .expect("connect on actual port");
+        assert!(resp.status().as_u16() >= 200);
+        assert_eq!(
+            registry.bound_addr("127.0.0.1", port),
+            Some(addr),
+            "registry key is the listener's actual port"
+        );
+
+        registry
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                max_req,
+                max_res,
+                max_inflight,
+                test_rt(),
+                "with-listener-reuse".into(),
+                None,
+            )
+            .await
+            .expect("legacy caller must reuse the entry");
+        assert_eq!(
+            registry.bound_addr("127.0.0.1", port),
+            Some(addr),
+            "entry reused — no second bind"
+        );
     }
 
     // -----------------------------------------------------------------------

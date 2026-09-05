@@ -27,8 +27,8 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
-use support::find_free_port;
 use support::install_crypto_provider;
+use support::{stage_http_listener, stage_ws_listener};
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -161,7 +161,7 @@ async fn build_http_route(
     route_audiences: Option<Vec<String>>,
 ) -> (CamelTestContext, u16) {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
 
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -205,7 +205,7 @@ async fn build_ws_route(
     provider: &str,
 ) -> (CamelTestContext, u16) {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_ws_listener("127.0.0.1").await;
 
     let h = CamelTestContext::builder()
         .with_component(WsComponent::new())

@@ -106,6 +106,9 @@ struct ServerRegistryInner {
 
 pub struct ServerRegistry {
     inner: Mutex<HashMap<u16, ServerRegistryInner>>,
+    /// Pre-bound listeners staged for consumption by the next vacant-entry
+    /// `get_or_spawn` on the same `(host, port)` key.
+    staged: Mutex<HashMap<(String, u16), tokio::net::TcpListener>>,
 }
 
 impl ServerRegistry {
@@ -113,7 +116,41 @@ impl ServerRegistry {
         static REG: OnceLock<ServerRegistry> = OnceLock::new();
         REG.get_or_init(|| Self {
             inner: Mutex::new(HashMap::new()),
+            staged: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Stage a pre-bound listener so the next `get_or_spawn` for its exact
+    /// `(host, port)` key serves this socket instead of binding a new one.
+    ///
+    /// Staging is one-shot per exact key: a duplicate `stage_listener` for
+    /// an already-staged key is rejected. The staged listener is consumed
+    /// by exactly one vacant-entry spawn — the init winner — eliminating
+    /// the bind window between a port probe and server startup
+    /// (itest-bound-ports). A listener staged but never claimed is dropped
+    /// at process exit: a test bug, not a runtime hazard.
+    pub async fn stage_listener(
+        &'static self,
+        listener: tokio::net::TcpListener,
+    ) -> Result<(), CamelError> {
+        let addr = listener
+            .local_addr()
+            .map_err(|e| CamelError::EndpointCreationFailed(format!("listener local_addr: {e}")))?;
+        let host = addr.ip().to_string();
+        use std::collections::hash_map::Entry;
+        let mut guard = self.staged.lock().map_err(|_| {
+            CamelError::EndpointCreationFailed("ServerRegistry staged lock poisoned".into())
+        })?;
+        match guard.entry((host.clone(), addr.port())) {
+            Entry::Occupied(_) => Err(CamelError::EndpointCreationFailed(format!(
+                "listener already staged for {host}:{}",
+                addr.port()
+            ))),
+            Entry::Vacant(slot) => {
+                slot.insert(listener);
+                Ok(())
+            }
+        }
     }
 
     pub async fn get_or_spawn(
@@ -147,12 +184,52 @@ impl ServerRegistry {
 
         let handle = cell
             .get_or_try_init(|| async {
-                // Legacy paths bind BEFORE delegating: spawn_server serves an
-                // already-bound listener and no longer binds.
-                let addr = format!("{host_owned}:{port}");
-                let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-                    CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
-                })?;
+                // Resolve the listener source inside the init body so
+                // exactly one caller — the init winner — consumes a staged
+                // listener. Resolving it before the cell init would let a
+                // racing caller strand the staged socket in the loser's
+                // hands: the winner then bound the same port and failed
+                // with EADDRINUSE. The entries guard is already released
+                // here and the sync staged lock is never held across an
+                // await, so no nested guards. Occupied cells never run
+                // this body, so reuse never touches the staged map.
+                let staged = {
+                    let mut guard = self.staged.lock().map_err(|_| {
+                        CamelError::EndpointCreationFailed(
+                            "ServerRegistry staged lock poisoned".into(),
+                        )
+                    })?;
+                    match guard.remove(&(host_owned.clone(), port)) {
+                        Some(listener) => Some(listener),
+                        // Conflict check before any bind so the error
+                        // leaves the staged slot untouched.
+                        None => {
+                            if let Some((staged_host, _)) =
+                                guard.keys().find(|(_, staged_port)| *staged_port == port)
+                            {
+                                let staged_host = staged_host.clone();
+                                return Err(CamelError::EndpointCreationFailed(format!(
+                                    "staged listener conflict on port {port}: staged under host {staged_host}, requested {host_owned}"
+                                )));
+                            }
+                            None
+                        }
+                    }
+                };
+                let listener = match staged {
+                    Some(listener) => listener,
+                    None => {
+                        // Legacy path binds BEFORE delegating: spawn_server
+                        // serves an already-bound listener and no longer
+                        // binds.
+                        let addr = format!("{host_owned}:{port}");
+                        tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+                            CamelError::EndpointCreationFailed(format!(
+                                "Failed to bind {addr}: {e}"
+                            ))
+                        })?
+                    }
+                };
                 let handle =
                     spawn_server(listener, tls_config, runtime.clone(), route_id.clone()).await?;
                 // Register reload handler (exactly-once: inside OnceCell init closure).
@@ -305,13 +382,22 @@ impl ServerRegistry {
     /// Reset the global registry — **test-only**.
     #[cfg(test)]
     pub fn reset() {
-        let mut guard = Self::global().inner.lock().expect("ServerRegistry lock");
-        for entry in guard.values() {
-            if let Some(handle) = entry.cell.get() {
-                handle._task.abort();
+        {
+            let mut guard = Self::global().inner.lock().expect("ServerRegistry lock");
+            for entry in guard.values() {
+                if let Some(handle) = entry.cell.get() {
+                    handle._task.abort();
+                }
             }
+            guard.clear();
         }
-        guard.clear();
+        // Drop any listeners staged but never claimed so a failed test does
+        // not leak staged slots into the next test.
+        Self::global()
+            .staged
+            .lock()
+            .expect("ServerRegistry staged lock")
+            .clear();
     }
 
     /// Current ref count for the entry on `port` — **test-only**.
@@ -319,6 +405,16 @@ impl ServerRegistry {
     pub fn ref_count_for_test(&'static self, port: u16) -> usize {
         let guard = Self::global().inner.lock().expect("ServerRegistry lock");
         guard.get(&port).map(|entry| entry.ref_count).unwrap_or(0)
+    }
+
+    /// Bound address of the live server entry on `port` — **test-only**.
+    #[cfg(test)]
+    pub fn bound_addr_for_test(&'static self, port: u16) -> Option<std::net::SocketAddr> {
+        let guard = Self::global().inner.lock().expect("ServerRegistry lock");
+        guard
+            .get(&port)
+            .and_then(|entry| entry.cell.get())
+            .map(|handle| handle.bound_addr)
     }
 }
 
@@ -2880,6 +2976,233 @@ mod tests {
             .expect("re-spawn on the fresh listener must succeed");
         assert_eq!(addr2.port(), port);
         assert_tcp_connectable(addr2).await;
+    }
+
+    // ── Staged listener consumption (itest-bound-ports) ───────────────────
+    //
+    // `stage_listener` parks a pre-bound listener under its exact
+    // `(host, port)` key so the next vacant-entry `get_or_spawn` serves
+    // that socket instead of binding — eliminating the bind window
+    // between a port probe and server startup.
+
+    #[tokio::test]
+    async fn ws_staged_listener_consumed_on_vacant_entry() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let staged_addr = std_listener.local_addr().unwrap();
+        let port = staged_addr.port();
+        ServerRegistry::global()
+            .stage_listener(tokio_listener_from_std(std_listener))
+            .await
+            .expect("staging a fresh (host, port) key must succeed");
+
+        let (_state, _) = ServerRegistry::global()
+            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
+            .await
+            .expect("vacant-entry spawn must consume the staged listener");
+
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            1,
+            "a single caller holds one reference on the consumed entry"
+        );
+        assert_eq!(
+            ServerRegistry::global().bound_addr_for_test(port),
+            Some(staged_addr),
+            "the served socket must BE the staged listener (one-shot vacant-path consumption)"
+        );
+        assert_tcp_connectable(staged_addr).await;
+    }
+
+    #[tokio::test]
+    async fn ws_staged_not_consumed_when_entry_exists() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        // One socket, three handles: the entry is created from the original,
+        // the two probes stage the same port without a second bind.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let probe1 = std_listener.try_clone().unwrap();
+        let probe2 = std_listener.try_clone().unwrap();
+        let port = std_listener.local_addr().unwrap().port();
+
+        // Create the entry via the injected-listener path (a second bind on
+        // this port is impossible).
+        let (_s, addr, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(
+                tokio_listener_from_std(std_listener),
+                None,
+                test_rt(),
+                "test-route".into(),
+            )
+            .await
+            .expect("entry creation must succeed");
+
+        // Stage while the entry already exists: the staged slot is empty, so
+        // staging succeeds even though no vacant-entry spawn will claim it.
+        ServerRegistry::global()
+            .stage_listener(tokio_listener_from_std(probe1))
+            .await
+            .expect("staging on an existing entry must succeed (slot empty)");
+
+        let (_s2, _) = ServerRegistry::global()
+            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
+            .await
+            .expect("existing entry must be reused, not rebind");
+
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            2,
+            "entry reused: two callers hold two references"
+        );
+        assert_tcp_connectable(addr).await;
+
+        // The reuse path must NOT touch the staged map: the staged listener
+        // is still parked, so a duplicate stage on the key is rejected.
+        let err = ServerRegistry::global()
+            .stage_listener(tokio_listener_from_std(probe2))
+            .await
+            .expect_err("duplicate stage must be rejected");
+        assert!(
+            err.to_string().contains("listener already staged"),
+            "expected 'listener already staged', got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_wrong_host_staged_port_fails() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let staged_addr = std_listener.local_addr().unwrap();
+        let port = staged_addr.port();
+        ServerRegistry::global()
+            .stage_listener(tokio_listener_from_std(std_listener))
+            .await
+            .expect("staging must succeed");
+
+        let result = ServerRegistry::global()
+            .get_or_spawn("localhost", port, None, test_rt(), "test-route".into())
+            .await;
+        let err = match result {
+            Ok(_) => panic!("wrong-host spawn on a staged port must fail deterministically"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("staged listener conflict on port"),
+            "expected staged listener conflict error, got: {err}"
+        );
+
+        // The conflicting call left the staged slot untouched: the exact-key
+        // call consumes it and serves the staged socket.
+        let (_state, _) = ServerRegistry::global()
+            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
+            .await
+            .expect("exact-key spawn must serve the staged listener");
+        assert_eq!(
+            ServerRegistry::global().bound_addr_for_test(port),
+            Some(staged_addr),
+            "staged slot untouched: served socket must be the staged listener"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_duplicate_stage_rejected() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let probe = std_listener.try_clone().unwrap();
+        let staged_addr = std_listener.local_addr().unwrap();
+        let port = staged_addr.port();
+        ServerRegistry::global()
+            .stage_listener(tokio_listener_from_std(std_listener))
+            .await
+            .expect("first stage must succeed");
+
+        let err = ServerRegistry::global()
+            .stage_listener(tokio_listener_from_std(probe))
+            .await
+            .expect_err("duplicate stage on the same key must be rejected");
+        assert!(
+            err.to_string().contains("listener already staged"),
+            "expected 'listener already staged', got: {err}"
+        );
+
+        // The first staged listener is retained: get_or_spawn serves its
+        // socket, not a fresh bind.
+        let (_state, _) = ServerRegistry::global()
+            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
+            .await
+            .expect("spawn must consume the first staged listener");
+        assert_eq!(
+            ServerRegistry::global().bound_addr_for_test(port),
+            Some(staged_addr),
+            "served socket must be the first staged listener"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_distinct_keys_stage_independently() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        let std1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let std2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr1 = std1.local_addr().unwrap();
+        let addr2 = std2.local_addr().unwrap();
+        assert_ne!(
+            addr1.port(),
+            addr2.port(),
+            "precondition: distinct ports for distinct staged keys"
+        );
+        ServerRegistry::global()
+            .stage_listener(tokio_listener_from_std(std1))
+            .await
+            .expect("stage P1");
+        ServerRegistry::global()
+            .stage_listener(tokio_listener_from_std(std2))
+            .await
+            .expect("stage P2");
+
+        let (_s1, _) = ServerRegistry::global()
+            .get_or_spawn(
+                "127.0.0.1",
+                addr1.port(),
+                None,
+                test_rt(),
+                "test-route".into(),
+            )
+            .await
+            .expect("P1 spawn must consume staged P1");
+        let (_s2, _) = ServerRegistry::global()
+            .get_or_spawn(
+                "127.0.0.1",
+                addr2.port(),
+                None,
+                test_rt(),
+                "test-route".into(),
+            )
+            .await
+            .expect("P2 spawn must consume staged P2");
+
+        // Each entry serves its own staged socket: a connect to each staged
+        // address succeeds against the socket that was parked for it.
+        assert_tcp_connectable(addr1).await;
+        assert_tcp_connectable(addr2).await;
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(addr1.port()),
+            1,
+            "P1 entry holds exactly one reference"
+        );
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(addr2.port()),
+            1,
+            "P2 entry holds exactly one reference"
+        );
     }
 
     #[tokio::test]

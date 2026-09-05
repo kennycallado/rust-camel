@@ -14,8 +14,8 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
-use support::find_free_port;
 use support::install_crypto_provider;
+use support::stage_http_listener;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,7 +32,7 @@ use camel_test::{CamelTestContext, SecurityConfigFixture};
 /// provider `idp-e2e` (token `test-token-idp-e2e`), body → `mock:result`.
 async fn build_secured_route() -> (CamelTestContext, u16) {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
 
     let fixture = SecurityConfigFixture::single_static_provider("idp-e2e");
     let provider_registry = Arc::new(fixture.providers());
@@ -189,7 +189,7 @@ async fn http_kernel_grants_with_token() {
 /// delivered.
 async fn build_secured_rest_block() -> (CamelTestContext, u16) {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
 
     let fixture = SecurityConfigFixture::single_static_provider("idp-e2e");
     let provider_registry = fixture.providers();

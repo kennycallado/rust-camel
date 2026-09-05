@@ -82,6 +82,14 @@ deterministic trust.
   URI's host:port is informational; the listener is authoritative for
   binding (connection-registry keys use the bound address, see the
   in-code note on the `canonical_host` asymmetry).
+- Staged listeners (bd rc-h0aw): `ServerRegistry::stage_listener` parks a
+  pre-bound listener under its exact `(host, port)` key, one-shot.
+  `get_or_spawn` consumes it only when creating a vacant entry (single
+  resolver inside the init winner); an existing entry never touches the
+  staged slot. A staged listener on the same port under a different host
+  string fails the spawn deterministically (`staged listener conflict on
+  port …`) instead of risking `EADDRINUSE`. Unclaimed staged listeners
+  are dropped at process end (test bug, not runtime hazard).
 - When a security plan exists, the kernel handshake fails closed: missing or invalid credentials
   reject the upgrade (401) and install no carrier, and the strict dispatch check denies a
   non-Public route whose exchange lacks the carrier. Query-token values are redacted before

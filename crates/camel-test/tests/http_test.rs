@@ -8,8 +8,8 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
-use support::find_free_port;
 use support::install_crypto_provider;
+use support::stage_http_listener;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +35,7 @@ use tower::ServiceExt;
 #[tokio::test(flavor = "multi_thread")]
 async fn http_consumer_lifecycle_start_stop_cleanup() {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
         .with_direct()
@@ -122,7 +122,7 @@ fn http_config_from_toml_custom_values() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_multiple_mounts_same_port_isolation() {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
         .with_mock()
@@ -326,7 +326,7 @@ fn http_bearer_token_extraction() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_request_response_flow() {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
         .with_mock()
@@ -373,7 +373,7 @@ async fn http_request_response_flow() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_pipeline_error_returns_500() {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
         .with_mock()
@@ -406,7 +406,7 @@ async fn http_pipeline_error_returns_500() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_concurrent_requests() {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
         .with_mock()
@@ -464,7 +464,7 @@ async fn http_concurrent_requests() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_shutdown_deregisters_path() {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
         .with_mock()
@@ -626,7 +626,7 @@ async fn http_custom_ok_status_code_range() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_headers_forwarded_to_exchange() {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
         .with_mock()
@@ -922,7 +922,7 @@ fn http_config_validates_proxy_url() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_route_stop_returns_204() {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
         .with_mock()
@@ -1187,7 +1187,7 @@ async fn build_secure_route(
     sources: Option<Vec<CredentialSource>>,
 ) -> (CamelTestContext, u16) {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("0.0.0.0").await;
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
         .with_mock()
@@ -1544,7 +1544,7 @@ async fn error_context_redacts_custom_header_sentinel() {
 #[tokio::test(flavor = "multi_thread")]
 async fn yaml_compiled_cookie_route_authenticates() {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("0.0.0.0").await;
 
     let principal = Principal {
         subject: "tiles-user".into(),

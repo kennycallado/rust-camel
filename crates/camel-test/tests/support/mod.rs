@@ -1,13 +1,50 @@
 pub mod wait;
 
-/// Binds an ephemeral loopback port and returns it. The listener is dropped
-/// immediately; a race between drop and rebind is possible but loud (bind
-/// failure) rather than silent, matching the historical per-test copies.
+/// Binds an ephemeral port on `host` and stages the listener with the HTTP
+/// component's `ServerRegistry`, so the next spawn for the listener's own
+/// `(ip, port)` key serves this exact socket. No probe/rebind window
+/// (itest-bound-ports). Panics on bind or staging failure. Returns the port.
 #[allow(dead_code)] // not every test binary including `support` uses it
-pub fn find_free_port() -> u16 {
-    use std::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind to free port");
-    listener.local_addr().unwrap().port()
+pub async fn stage_http_listener(host: &str) -> u16 {
+    let listener = tokio::net::TcpListener::bind(format!("{host}:0"))
+        .await
+        .unwrap_or_else(|e| panic!("stage_http_listener: bind {host}:0 failed: {e}"));
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("stage_http_listener: local_addr for {host}: {e}"));
+    camel_component_http::ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "stage_http_listener: staging {}:{} failed: {e}",
+                addr.ip(),
+                addr.port()
+            )
+        });
+    addr.port()
+}
+
+/// Same as [`stage_http_listener`] against the WS component's registry.
+#[allow(dead_code)] // not every test binary including `support` uses it
+pub async fn stage_ws_listener(host: &str) -> u16 {
+    let listener = tokio::net::TcpListener::bind(format!("{host}:0"))
+        .await
+        .unwrap_or_else(|e| panic!("stage_ws_listener: bind {host}:0 failed: {e}"));
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("stage_ws_listener: local_addr for {host}: {e}"));
+    camel_component_ws::ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "stage_ws_listener: staging {}:{} failed: {e}",
+                addr.ip(),
+                addr.port()
+            )
+        });
+    addr.port()
 }
 
 #[cfg(feature = "integration-tests")]

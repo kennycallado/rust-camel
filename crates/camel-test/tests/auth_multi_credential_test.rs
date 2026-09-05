@@ -12,8 +12,8 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
-use support::find_free_port;
 use support::install_crypto_provider;
+use support::stage_http_listener;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -109,7 +109,7 @@ async fn build_secure_route(
     sources: Vec<CredentialSource>,
 ) -> (CamelTestContext, u16) {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("0.0.0.0").await;
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
         .with_mock()

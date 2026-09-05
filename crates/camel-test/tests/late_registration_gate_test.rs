@@ -25,8 +25,8 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
-use support::find_free_port;
 use support::install_crypto_provider;
+use support::stage_http_listener;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,7 +61,7 @@ fn public_route(
 #[tokio::test(flavor = "multi_thread")]
 async fn late_public_route_real_loopback_served_e2e() {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("127.0.0.1").await;
 
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -138,7 +138,7 @@ async fn late_public_route_real_loopback_served_e2e() {
 #[tokio::test(flavor = "multi_thread")]
 async fn late_public_route_real_nonloopback_refused_e2e() {
     install_crypto_provider();
-    let port = find_free_port();
+    let port = stage_http_listener("0.0.0.0").await;
 
     let fixture = SecurityConfigFixture::single_static_provider("idp-e2e");
     let provider_registry = Arc::new(fixture.providers());
