@@ -331,4 +331,8 @@ that; the change is NOT archived while this checkbox is open.
 - Worktree shows no tracked-file changes from this task.
 - Gates-block check (Task 3 phrasing) still holds on the rebased tree.
 
-- [ ] 4. formal-baseline-post-rc-fvah
+- [x] 4. formal-baseline-post-rc-fvah — 2026-09-05 tree e4315d22: 185
+  mutants, 148 caught / 36 missed / 1 unviable (kill 80.4%), survivor set
+  byte-identical to preliminary (rc-fvah adds no coverage on these files),
+  all 36 deduped onto existing bds, 0 new. Wall 1498s cold scratch (warm
+  ref 909s). Numbers in rc-eba8.
