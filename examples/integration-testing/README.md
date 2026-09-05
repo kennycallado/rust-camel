@@ -102,3 +102,23 @@ with an empty body, and fail the final `contains: ord-7` validation.
 cd examples/integration-testing
 ../../target/debug/camel test partner-crud.test.yaml
 ```
+
+## Partner retry: fault to healthy
+
+`partner-retry-route.test.yaml` runs a real retrying route against a
+scripted partner. The route file `partner-retry.routes.yaml` pins
+loopback port 18231 and dials `${env:PARTNER_URL}/order`. The
+`partners:` section scripts the first attempt to `fault: close` and the
+second to a healthy 200 body. The route-level `error_handler.retry`
+redials after the fault, so the client-role receive validates the
+healthy roundtrip and the partner count validation proves both attempts
+on the wire.
+
+The `validate` partner target is exact-count: `{count: 2, path: /order}`
+must equal the recorded arrivals after the path filter, never a subset.
+The `deadline` polls until the count settles or the deadline passes.
+
+```bash
+cd examples/integration-testing
+../../target/debug/camel test partner-retry-route.test.yaml
+```

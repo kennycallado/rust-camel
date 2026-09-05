@@ -5,7 +5,8 @@
 //! dispatches through the adapter, `receive` awaits with the action's
 //! deadline and applies `extract` into [`ScenarioVars`], `sleep` uses
 //! tokio time, and `validate` evaluates the matcher grammar against
-//! the last received message or an extracted variable.
+//! the last received message or an extracted variable, or asserts a
+//! partner's recorded-request count (feature `http`).
 //!
 //! Failure taxonomy (ADR-0069 §7), encoded by variant and named in
 //! `Display`, never by message text alone:
@@ -31,16 +32,26 @@ use std::time::Duration;
 
 use camel_api::Value;
 
+#[cfg(feature = "http")]
+use crate::adapters::http::HttpWireRequest;
 use crate::adapters::{
     IncomingMessage, OutgoingMessage, PartnerRouter, ReceiveError, TransportError,
 };
 use crate::document::{
-    EndpointRef, Expectation, Provisioning, ScenarioAction, ScenarioDocument, ScenarioTarget,
+    EndpointRef, Expectation, PartnerExpectation, Provisioning, ScenarioAction, ScenarioDocument,
+    ScenarioTarget, ValidateExpectation,
 };
 
 /// The bounded deadline for every `send` action (ADR-0069 §7: every
 /// adapter operation carries a deadline).
 const SEND_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The poll interval of a partner validate with a deadline
+/// (feature `http`): a fresh recorded-request snapshot every 100 ms
+/// until the filtered count settles or the deadline passes. The sleep
+/// between snapshots means the poll never busy-waits.
+#[cfg(feature = "http")]
+const PARTNER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Mutable run state carried across actions: scenario variables set by
 /// `extract`, and the last message received per endpoint for
@@ -386,8 +397,9 @@ async fn run_action(
         ScenarioAction::Validate {
             target,
             expectation,
+            deadline,
         } => {
-            validate_action(index, target, expectation, vars)?;
+            validate_action(index, target, expectation, *deadline, router, vars).await?;
         }
     }
     Ok(())
@@ -490,94 +502,255 @@ async fn receive_action(
     Ok(())
 }
 
-/// Evaluates a `validate` action against the target value in `vars`.
-/// Mismatch details name the validation subject — the variable's
-/// name, or the receiving endpoint — so a corrupted-header regression
-/// is diagnosable from the failure text.
-fn validate_action(
+/// Evaluates a `validate` action (ADR-0069 §5).
+///
+/// The `partner` target asserts the exact filtered count of the
+/// requests the harness partner recorded, read as the router's
+/// snapshot — one immediate read without a deadline, a polled one
+/// with it ([`partner_validate_action`]). Every other target applies
+/// the message grammar against `vars`; the deadline is partner-only
+/// (the grammar rejected it on these targets at parse time, so the
+/// message arm ignores it). Mismatch details name the validation
+/// subject — the variable's name, the receiving endpoint, or the
+/// partner URI — so a corrupted-header regression is diagnosable from
+/// the failure text.
+async fn validate_action(
     index: usize,
     target: &ScenarioTarget,
-    expectation: &Expectation,
+    expectation: &ValidateExpectation,
+    deadline: Option<Duration>,
+    router: &PartnerRouter,
     vars: &ScenarioVars,
 ) -> Result<(), ScenarioFailure> {
-    let (value, subject) = match target {
-        ScenarioTarget::LastReceived(endpoint) => (
-            vars.last_received(&endpoint.endpoint)
-                .map(|message| message.body.clone())
-                .ok_or_else(|| ScenarioFailure::ValidationMismatch {
-                    action: index,
-                    detail: format!(
-                        "no message has been received on {} to validate",
-                        endpoint.endpoint
-                    ),
-                })?,
-            format!("body last received on {}", endpoint.endpoint),
-        ),
-        ScenarioTarget::Variable(name) => (
-            vars.get(name)
-                .cloned()
-                .ok_or_else(|| ScenarioFailure::VarUnresolved { name: name.clone() })?,
-            format!("variable `{name}`"),
-        ),
-    };
-    match expectation {
-        Expectation::Equals(expected) => {
-            if &value == expected {
-                Ok(())
-            } else {
-                Err(ScenarioFailure::ValidationMismatch {
-                    action: index,
-                    detail: format!("{subject}: expected {expected}, got {value}"),
-                })
-            }
+    match (target, expectation) {
+        // The parser pairs a `partner` target with the partner count
+        // grammar; this arm reads the router's snapshot and owns the
+        // deadline.
+        (ScenarioTarget::Partner(endpoint), ValidateExpectation::Partner(expected)) => {
+            partner_validate_action(index, &endpoint.endpoint, expected, deadline, router).await
         }
-        Expectation::Regex(pattern) => {
-            let regex = regex::Regex::new(pattern).map_err(|error| {
-                ScenarioFailure::ValidationMismatch {
-                    action: index,
-                    detail: format!("invalid regex `{pattern}`: {error}"),
+        (_, ValidateExpectation::Message(expectation)) => {
+            let (value, subject) = match target {
+                ScenarioTarget::LastReceived(endpoint) => (
+                    vars.last_received(&endpoint.endpoint)
+                        .map(|message| message.body.clone())
+                        .ok_or_else(|| ScenarioFailure::ValidationMismatch {
+                            action: index,
+                            detail: format!(
+                                "no message has been received on {} to validate",
+                                endpoint.endpoint
+                            ),
+                        })?,
+                    format!("body last received on {}", endpoint.endpoint),
+                ),
+                ScenarioTarget::Variable(name) => (
+                    vars.get(name)
+                        .cloned()
+                        .ok_or_else(|| ScenarioFailure::VarUnresolved { name: name.clone() })?,
+                    format!("variable `{name}`"),
+                ),
+                // Taken by the arm above: the grammar never pairs a
+                // `partner` target with the message expectation.
+                ScenarioTarget::Partner(_) => return Err(unpaired_validate(index)),
+            };
+            match expectation {
+                Expectation::Equals(expected) => {
+                    if &value == expected {
+                        Ok(())
+                    } else {
+                        Err(ScenarioFailure::ValidationMismatch {
+                            action: index,
+                            detail: format!("{subject}: expected {expected}, got {value}"),
+                        })
+                    }
                 }
-            })?;
-            if regex.is_match(&stringify(&value)) {
-                Ok(())
-            } else {
-                Err(ScenarioFailure::ValidationMismatch {
-                    action: index,
-                    detail: format!("{subject}: `{pattern}` did not match {value}"),
-                })
+                Expectation::Regex(pattern) => {
+                    let regex = regex::Regex::new(pattern).map_err(|error| {
+                        ScenarioFailure::ValidationMismatch {
+                            action: index,
+                            detail: format!("invalid regex `{pattern}`: {error}"),
+                        }
+                    })?;
+                    if regex.is_match(&stringify(&value)) {
+                        Ok(())
+                    } else {
+                        Err(ScenarioFailure::ValidationMismatch {
+                            action: index,
+                            detail: format!("{subject}: `{pattern}` did not match {value}"),
+                        })
+                    }
+                }
+                Expectation::Contains(needle) => check(
+                    index,
+                    stringify(&value).contains(needle),
+                    format!("{subject}: did not contain `{needle}`: {value}"),
+                ),
+                Expectation::StartsWith(prefix) => check(
+                    index,
+                    stringify(&value).starts_with(prefix),
+                    format!("{subject}: did not start with `{prefix}`: {value}"),
+                ),
+                Expectation::EndsWith(suffix) => check(
+                    index,
+                    stringify(&value).ends_with(suffix),
+                    format!("{subject}: did not end with `{suffix}`: {value}"),
+                ),
+                Expectation::Exists => {
+                    if value == Value::Null {
+                        Err(ScenarioFailure::ValidationMismatch {
+                            action: index,
+                            detail: format!("{subject}: expected a value, got null"),
+                        })
+                    } else {
+                        Ok(())
+                    }
+                }
+                Expectation::JsonSubset(pattern) => check(
+                    index,
+                    json_subset(pattern, &value),
+                    format!("{subject}: not a superset of {pattern}: {value}"),
+                ),
             }
         }
-        Expectation::Contains(needle) => check(
-            index,
-            stringify(&value).contains(needle),
-            format!("{subject}: did not contain `{needle}`: {value}"),
-        ),
-        Expectation::StartsWith(prefix) => check(
-            index,
-            stringify(&value).starts_with(prefix),
-            format!("{subject}: did not start with `{prefix}`: {value}"),
-        ),
-        Expectation::EndsWith(suffix) => check(
-            index,
-            stringify(&value).ends_with(suffix),
-            format!("{subject}: did not end with `{suffix}`: {value}"),
-        ),
-        Expectation::Exists => {
-            if value == Value::Null {
-                Err(ScenarioFailure::ValidationMismatch {
-                    action: index,
-                    detail: format!("{subject}: expected a value, got null"),
-                })
-            } else {
-                Ok(())
-            }
-        }
-        Expectation::JsonSubset(pattern) => check(
-            index,
-            json_subset(pattern, &value),
-            format!("{subject}: not a superset of {pattern}: {value}"),
-        ),
+        // The parser never pairs a partner expectation with a
+        // non-partner target.
+        _ => Err(unpaired_validate(index)),
     }
+}
+
+/// The failure for a target/expectation pairing the grammar never
+/// produces: the parser pairs `partner` targets with the partner
+/// count grammar and every other target with the message grammar, so
+/// only a caller bypassing the parser reaches these arms.
+fn unpaired_validate(index: usize) -> ScenarioFailure {
+    ScenarioFailure::ValidationMismatch {
+        action: index,
+        detail: "validate target kind does not pair with the expectation kind".to_string(),
+    }
+}
+
+/// Counts the recorded requests that pass both filters (feature
+/// `http`): `method` compares ASCII-case-insensitively (wire records
+/// are uppercased; the expectation may declare any casing), `path`
+/// compares the path-and-query exactly, and `None` passes everything.
+#[cfg(feature = "http")]
+pub(crate) fn matching_requests(
+    requests: &[HttpWireRequest],
+    method: Option<&str>,
+    path: Option<&str>,
+) -> usize {
+    requests
+        .iter()
+        .filter(|request| {
+            method.is_none_or(|m| m.eq_ignore_ascii_case(&request.method))
+                && path.is_none_or(|p| p == request.path)
+        })
+        .count()
+}
+
+/// Asserts the partner count expectation against the router's
+/// recorded-request snapshot for the declared endpoint key
+/// (ADR-0069 §5: what crossed the wire is the normative proof).
+///
+/// The snapshot filters by the expectation's `method` and `path`
+/// ([`matching_requests`]) and asserts exact equality on the filtered
+/// count — arrivals only add, so a count above the expected one fails
+/// at every snapshot and never settles back. Without a deadline the
+/// assertion reads one immediate snapshot. With one it polls at
+/// [`PARTNER_POLL_INTERVAL`] and, on expiry, one final snapshot
+/// decides with its own count the reported actual. Every snapshot
+/// clones out of the recorder's lock before any await, so no lock
+/// spans an await point and the poll sleeps between snapshots.
+#[cfg(feature = "http")]
+async fn partner_validate_action(
+    index: usize,
+    uri: &str,
+    expected: &PartnerExpectation,
+    deadline: Option<Duration>,
+    router: &PartnerRouter,
+) -> Result<(), ScenarioFailure> {
+    let expected_count = usize::try_from(expected.count).unwrap_or(usize::MAX);
+    let count = || {
+        matching_requests(
+            &router.recorded_requests(uri),
+            expected.method.as_deref(),
+            expected.path.as_deref(),
+        )
+    };
+    let mismatch = |actual: usize| ScenarioFailure::ValidationMismatch {
+        action: index,
+        detail: partner_mismatch_detail(uri, expected, actual),
+    };
+    match deadline {
+        // No deadline: one immediate snapshot decides.
+        None => {
+            let actual = count();
+            if actual == expected_count {
+                Ok(())
+            } else {
+                Err(mismatch(actual))
+            }
+        }
+        // Poll until some snapshot's count equals the expectation or
+        // the deadline passes; the final snapshot then decides.
+        Some(deadline) => {
+            let until = tokio::time::Instant::now() + deadline;
+            loop {
+                if count() == expected_count {
+                    return Ok(());
+                }
+                let now = tokio::time::Instant::now();
+                if now >= until {
+                    let actual = count();
+                    return if actual == expected_count {
+                        Ok(())
+                    } else {
+                        Err(mismatch(actual))
+                    };
+                }
+                tokio::time::sleep((until - now).min(PARTNER_POLL_INTERVAL)).await;
+            }
+        }
+    }
+}
+
+/// Partner verification needs the http adapter's recording (feature
+/// `http`); without the feature the arm fails with the verdict-class
+/// mismatch instead of passing silently.
+#[cfg(not(feature = "http"))]
+async fn partner_validate_action(
+    index: usize,
+    uri: &str,
+    expected: &PartnerExpectation,
+    deadline: Option<Duration>,
+    router: &PartnerRouter,
+) -> Result<(), ScenarioFailure> {
+    let _ = (uri, expected, deadline, router);
+    Err(ScenarioFailure::ValidationMismatch {
+        action: index,
+        detail: "partner validation requires the `http` feature".to_string(),
+    })
+}
+
+/// The mismatch detail of a failed partner count assertion: the
+/// partner URI, the applied filters (`method`, `path`) when set, and
+/// the expected-versus-actual counts.
+#[cfg(feature = "http")]
+fn partner_mismatch_detail(uri: &str, expected: &PartnerExpectation, actual: usize) -> String {
+    let mut detail = format!("partner {uri}");
+    if expected.method.is_some() || expected.path.is_some() {
+        let filters = [
+            expected
+                .method
+                .as_deref()
+                .map(|method| format!("method {method}")),
+            expected.path.as_deref().map(|path| format!("path {path}")),
+        ];
+        let joined = filters.into_iter().flatten().collect::<Vec<_>>().join(", ");
+        detail.push_str(&format!(" ({joined})"));
+    }
+    detail.push_str(&format!(", expected {}, actual {actual}", expected.count));
+    detail
 }
 
 /// Turns a validation predicate into a [`ScenarioFailure`] on `false`.

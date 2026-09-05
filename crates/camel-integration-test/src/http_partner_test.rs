@@ -9,12 +9,15 @@
 //! probing (ADR-0069 §8).
 
 use std::collections::BTreeMap;
+use std::io;
 use std::time::Duration;
 
 use camel_api::Value;
+use tokio::net::TcpStream;
 
 use crate::adapters::http::{HttpPartner, ScriptedResponse};
 use crate::adapters::{OutgoingMessage, PartnerAdapter, PartnerRouter};
+use crate::document::PartnerFault;
 
 /// The permissive default is non-consuming: every request no scripted
 /// response matches is answered with the permissive status for the
@@ -83,6 +86,7 @@ async fn outbound_partner_records_wire_request() {
         status: 201,
         headers: BTreeMap::from([("X-Accepted".to_string(), "yes".to_string())]),
         body: b"accepted".to_vec(),
+        ..Default::default()
     }])
     .await
     .expect("partner must bind 127.0.0.1:0");
@@ -153,6 +157,7 @@ async fn inbound_client_receives_status_headers_body() {
         status: 200,
         headers: BTreeMap::from([("X-Canned".to_string(), "yes".to_string())]),
         body: b"canned-body".to_vec(),
+        ..Default::default()
     }])
     .await
     .expect("server partner must bind 127.0.0.1:0");
@@ -237,6 +242,7 @@ async fn outbound_arrival_reaches_receive() {
         status: 200,
         headers: BTreeMap::new(),
         body: b"ok".to_vec(),
+        ..Default::default()
     }])
     .await
     .expect("server partner must bind 127.0.0.1:0");
@@ -295,6 +301,7 @@ async fn arrivals_queue_per_endpoint() {
             status: 200,
             headers: BTreeMap::new(),
             body: b"ok".to_vec(),
+            ..Default::default()
         };
         2
     ])
@@ -420,5 +427,273 @@ async fn plain_string_send_dials_literal_without_partner() {
     assert!(
         recorded.starts_with("POST /x "),
         "the literal dial must carry the request line, got {recorded:?}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Serve semantics: times consume, delay, fault
+// -------------------------------------------------------------------------
+
+/// Dials one raw HTTP/1.1 request on a fresh connection and reads to
+/// EOF. The request carries `Connection: close` so the served
+/// response is followed by a server-side close; the returned bytes
+/// are exactly what the server wrote. Bytes without an HTTP status
+/// line — or a socket error — are a transport-level failure, never an
+/// HTTP response.
+async fn raw_request(target: &str, request: &[u8]) -> io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    // Dial the authority (host:port) only; the request path lives in
+    // the request line.
+    let authority = target
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .expect("the target URI must carry a host:port authority");
+    let mut stream = TcpStream::connect(authority).await?;
+    stream.write_all(request).await?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 512];
+    loop {
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(bytes);
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+}
+
+/// A `times: 2` entry serves the first two matching requests and is
+/// then exhausted; the third request falls through to the next entry.
+#[tokio::test]
+async fn times_two_serves_two_then_falls_through() {
+    let partner = HttpPartner::start(vec![
+        ScriptedResponse {
+            status: 201,
+            body: b"two-times".to_vec(),
+            times: 2,
+            ..Default::default()
+        },
+        ScriptedResponse {
+            status: 200,
+            body: b"fallback".to_vec(),
+            ..Default::default()
+        },
+    ])
+    .await
+    .expect("partner must bind 127.0.0.1:0");
+    let target = format!("http://{}/any", partner.bound_addr());
+    let request = b"GET /any HTTP/1.1\r\nHost: partner\r\nConnection: close\r\n\r\n";
+
+    let first = raw_request(&target, request)
+        .await
+        .expect("the first request must complete");
+    let second = raw_request(&target, request)
+        .await
+        .expect("the second request must complete");
+    let third = raw_request(&target, request)
+        .await
+        .expect("the third request must complete");
+
+    assert!(
+        first.starts_with(b"HTTP/1.1 201"),
+        "the times:2 entry must serve the first request, got {first:?}"
+    );
+    assert!(
+        second.starts_with(b"HTTP/1.1 201"),
+        "the times:2 entry must serve twice, got {second:?}"
+    );
+    assert!(
+        third.starts_with(b"HTTP/1.1 200"),
+        "the third request must fall through to the next entry, got {third:?}"
+    );
+    assert!(
+        third.ends_with(b"fallback"),
+        "the third request must get the second entry's body, got {third:?}"
+    );
+}
+
+/// A `delay` holds the response back by at least the scripted
+/// duration before serving it.
+#[tokio::test]
+async fn delay_holds_response() {
+    let partner = HttpPartner::start(vec![ScriptedResponse {
+        delay: Some(Duration::from_millis(300)),
+        status: 200,
+        body: b"slow".to_vec(),
+        ..Default::default()
+    }])
+    .await
+    .expect("partner must bind 127.0.0.1:0");
+    let target = format!("http://{}/slow", partner.bound_addr());
+
+    let started = std::time::Instant::now();
+    let bytes = raw_request(
+        &target,
+        b"GET /slow HTTP/1.1\r\nHost: partner\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .expect("the delayed response must arrive");
+
+    assert!(
+        started.elapsed() >= Duration::from_millis(300),
+        "the response must be held by the delay, got {:?}",
+        started.elapsed()
+    );
+    assert!(
+        bytes.starts_with(b"HTTP/1.1 200"),
+        "the delayed response must still serve, got {bytes:?}"
+    );
+}
+
+/// The close fault surfaces as a transport-level failure on the
+/// client — the connection closes with no HTTP status line — while
+/// the faulted request is still recorded.
+#[tokio::test]
+async fn fault_close_yields_transport_error_and_records() {
+    let partner = HttpPartner::start(vec![ScriptedResponse {
+        fault: Some(PartnerFault::Close),
+        status: 200,
+        ..Default::default()
+    }])
+    .await
+    .expect("partner must bind 127.0.0.1:0");
+    let recorder = partner.recorder();
+    let target = format!("http://{}/boom", partner.bound_addr());
+    let request = b"GET /boom HTTP/1.1\r\nHost: partner\r\nConnection: close\r\n\r\n";
+
+    // A transport-level failure: an abrupt disconnect may also error
+    // the socket; either way, no HTTP status may surface.
+    if let Ok(bytes) = raw_request(&target, request).await {
+        assert!(
+            !bytes.starts_with(b"HTTP/"),
+            "a close fault must not surface an HTTP status, got {bytes:?}"
+        );
+    }
+
+    let recorded = recorder.recorded_requests();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the faulted request must still be recorded, got {recorded:?}"
+    );
+    assert_eq!(recorded[0].path, "/boom");
+}
+
+/// The delay applies before the fault: the connection closes only
+/// after the scripted delay elapsed.
+#[tokio::test]
+async fn delay_before_fault() {
+    let partner = HttpPartner::start(vec![ScriptedResponse {
+        delay: Some(Duration::from_millis(200)),
+        fault: Some(PartnerFault::Close),
+        status: 200,
+        ..Default::default()
+    }])
+    .await
+    .expect("partner must bind 127.0.0.1:0");
+    let target = format!("http://{}/boom", partner.bound_addr());
+    let request = b"GET /boom HTTP/1.1\r\nHost: partner\r\nConnection: close\r\n\r\n";
+
+    let started = std::time::Instant::now();
+    if let Ok(bytes) = raw_request(&target, request).await {
+        assert!(
+            !bytes.starts_with(b"HTTP/"),
+            "a close fault must not surface an HTTP status, got {bytes:?}"
+        );
+    }
+    assert!(
+        started.elapsed() >= Duration::from_millis(200),
+        "the fault must wait for the delay first, got {:?}",
+        started.elapsed()
+    );
+}
+
+/// A fault entry with `times: 2` faults the first two matching
+/// requests (transport-level failures, no HTTP status) and is then
+/// spent: the third request falls through to the fallback entry's
+/// 200. Every faulted request is still recorded.
+#[tokio::test]
+async fn fault_with_times_faults_twice_then_spends() {
+    let partner = HttpPartner::start(vec![
+        ScriptedResponse {
+            fault: Some(PartnerFault::Close),
+            times: 2,
+            ..Default::default()
+        },
+        ScriptedResponse {
+            status: 200,
+            ..Default::default()
+        },
+    ])
+    .await
+    .expect("partner must bind 127.0.0.1:0");
+    let recorder = partner.recorder();
+    let target = format!("http://{}/any", partner.bound_addr());
+    let request = b"GET /any HTTP/1.1\r\nHost: partner\r\nConnection: close\r\n\r\n";
+
+    // The first two requests must not surface an HTTP status. An
+    // abrupt disconnect may also error the socket; either way, no
+    // status line may arrive.
+    for round in 1..=2 {
+        if let Ok(bytes) = raw_request(&target, request).await {
+            assert!(
+                !bytes.starts_with(b"HTTP/"),
+                "close fault round {round} must not surface an HTTP status, got {bytes:?}"
+            );
+        }
+    }
+    let third = raw_request(&target, request)
+        .await
+        .expect("the third request must complete after the entry is spent");
+    assert!(
+        third.starts_with(b"HTTP/1.1 200"),
+        "the third request must fall through to the fallback, got {third:?}"
+    );
+
+    let recorded = recorder.recorded_requests();
+    assert_eq!(
+        recorded.len(),
+        3,
+        "every faulted request must still be recorded, got {recorded:?}"
+    );
+}
+
+/// Entries without `times` still serve exactly once each: two
+/// identical plain entries answer in script order — the first
+/// request gets entry one's body, the second entry two's.
+#[tokio::test]
+async fn matched_entries_without_times_still_serve_once() {
+    let partner = HttpPartner::start(vec![
+        ScriptedResponse {
+            status: 200,
+            body: b"first".to_vec(),
+            ..Default::default()
+        },
+        ScriptedResponse {
+            status: 200,
+            body: b"second".to_vec(),
+            ..Default::default()
+        },
+    ])
+    .await
+    .expect("partner must bind 127.0.0.1:0");
+    let target = format!("http://{}/any", partner.bound_addr());
+    let request = b"GET /any HTTP/1.1\r\nHost: partner\r\nConnection: close\r\n\r\n";
+
+    let first = raw_request(&target, request)
+        .await
+        .expect("the first request must complete");
+    let second = raw_request(&target, request)
+        .await
+        .expect("the second request must complete");
+
+    assert!(
+        first.ends_with(b"first"),
+        "the first request must get entry one's body, got {first:?}"
+    );
+    assert!(
+        second.ends_with(b"second"),
+        "the second request must get entry two's body, got {second:?}"
     );
 }

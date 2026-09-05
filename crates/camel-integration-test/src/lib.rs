@@ -21,6 +21,10 @@ pub mod env_layers;
 pub mod runner;
 pub mod tier;
 
+/// Partner-script grammar of the scenario document's `partners:` map;
+/// its public types are re-exported through [`crate::document`].
+mod partner_script;
+
 #[cfg(feature = "http")]
 pub use adapters::http::{HttpPartner, HttpRecorder, HttpWireRequest, ScriptedResponse};
 pub use adapters::{
@@ -31,8 +35,9 @@ pub use boot_scenario::{ScenarioRun, boot_scenario};
 #[cfg(feature = "http")]
 pub use document::partner_scripts_for;
 pub use document::{
-    DocError, EndpointRef, Expectation, PartnerScript, PartnerScriptResponse, Provisioning,
-    RouteSource, ScenarioAction, ScenarioDocument, ScenarioTarget, parse_scenario_document,
+    DocError, EndpointRef, Expectation, PartnerExpectation, PartnerFault, PartnerScript,
+    PartnerScriptResponse, Provisioning, RouteSource, ScenarioAction, ScenarioDocument,
+    ScenarioTarget, ValidateExpectation, parse_scenario_document,
 };
 pub use env_layers::{AmbientLookup, LayeredEnv, ambient_std};
 pub use runner::{

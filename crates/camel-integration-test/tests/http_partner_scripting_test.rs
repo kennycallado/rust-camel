@@ -24,7 +24,7 @@ use camel_integration_test::runner::fill_bind_vars;
 use camel_integration_test::{
     DirectStimulus, DocumentOutcome, EndpointRef, HttpPartner, HttpRecorder, LayeredEnv,
     PartnerAdapter, PartnerRouter, Provisioning, ScenarioAction, ScenarioDocument, ScenarioFailure,
-    ScenarioTarget, ScenarioVars, ScenarioVerdict, ambient_std, boot_scenario,
+    ScenarioTarget, ScenarioVars, ScenarioVerdict, TransportError, ambient_std, boot_scenario,
     parse_scenario_document, partner_scripts_for, run_scenario_document,
 };
 
@@ -260,6 +260,191 @@ partners:
     response:
       status: 200
       body: parked-ok
+"#;
+
+/// Delay document: one entry with `delay: 100ms` serving a 200 with
+/// body `slow-ok`. The scenario sends, receives (which parks the
+/// delayed roundtrip), and validates status 200 plus the body. The
+/// timing itself is proven at adapter level in Task 1.2; this e2e
+/// proves the delayed response still reaches the scenario's receive.
+const DELAY_RESPONSE_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    method: PUT
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    deadline: 5s
+    extract:
+      status: status
+- validate:
+    target: {variable: status}
+    expectation: 200
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:0/orders
+    expectation: slow-ok
+partners:
+  http://127.0.0.1:0/orders:
+  - method: PUT
+    path: /orders
+    delay: 100ms
+    response:
+      status: 200
+      headers:
+        content-type: application/json
+      body: slow-ok
+"#;
+
+/// Fault document: the partner scripted `fault: close` records the
+/// request and then aborts the connection with no response bytes. The
+/// send dials and parks the failing roundtrip; the receive consumes
+/// it and surfaces the transport-class failure.
+const FAULT_CLOSE_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    method: PUT
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    deadline: 5s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: PUT
+    path: /orders
+    fault: close
+"#;
+
+/// Delay-before-fault document: the connection is held for `delay:
+/// 100ms` and then aborted, so the receive's parked roundtrip fails
+/// after the delay. The failure is the same transport-class
+/// `ActionTransport` as a bare fault; the delay ordering is proven at
+/// adapter level in Task 1.2.
+const DELAY_BEFORE_FAULT_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    method: PUT
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    deadline: 5s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: PUT
+    path: /orders
+    delay: 100ms
+    fault: close
+"#;
+
+/// Times document: an entry served `times: 2` (201, body `A`) then a
+/// fallback entry (200, body `B`), both matching the same PUT. The
+/// scenario sends and receives three times, validating status and
+/// body in order: 201/A, 201/A, 200/B — the third exchange proves the
+/// `times` entry spent itself and the fallback served.
+const TIMES_TWO_FALLBACK_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    method: PUT
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    deadline: 5s
+    extract:
+      status: status
+- validate:
+    target: {variable: status}
+    expectation: 201
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:0/orders
+    expectation: A
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    method: PUT
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    deadline: 5s
+    extract:
+      status: status
+- validate:
+    target: {variable: status}
+    expectation: 201
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:0/orders
+    expectation: A
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    method: PUT
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    deadline: 5s
+    extract:
+      status: status
+- validate:
+    target: {variable: status}
+    expectation: 200
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:0/orders
+    expectation: B
+partners:
+  http://127.0.0.1:0/orders:
+  - method: PUT
+    path: /orders
+    times: 2
+    response:
+      status: 201
+      headers:
+        content-type: application/json
+      body: A
+  - method: PUT
+    path: /orders
+    response:
+      status: 200
+      headers:
+        content-type: application/json
+      body: B
 "#;
 
 /// Two-layer document: the same variable name `PARTNER` must be
@@ -498,6 +683,103 @@ async fn receive_endpoint_interpolates() {
         Some(ScenarioVerdict::Pass),
         "the interpolated receive must find the parked roundtrip: {outcome:?}"
     );
+}
+
+/// The delayed response serves end to end: the scripted `delay` holds
+/// the 200, and the receive validates the scripted status and body.
+/// Timing itself is proven at adapter level (Task 1.2); here the
+/// delayed response is proven to reach the scenario's receive.
+#[tokio::test]
+async fn delay_response_serves_e2e() {
+    let (outcome, recorders) = run_doc(DELAY_RESPONSE_DOC).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the delayed response must serve: {outcome:?}"
+    );
+
+    let recorded = recorders[ORDERS].recorded_requests();
+    assert_eq!(recorded.len(), 1, "exactly one request must reach the wire");
+    assert_eq!(recorded[0].method, "PUT");
+    assert_eq!(recorded[0].path, "/orders");
+}
+
+/// Asserts a faulted roundtrip surfaced on the receive as the
+/// transport-class failure naming its own action index: the send
+/// passed and the partner recorded exactly one PUT on `/orders` (the
+/// request reached the wire before the abort), the receive failed with
+/// `ActionTransport` on action 1, and the transport message names the
+/// connection closure.
+fn assert_receive_transport_failure(outcome: &DocumentOutcome, recorder: &HttpRecorder) {
+    assert_eq!(outcome.verdict, None, "the receive must fail");
+
+    assert!(
+        matches!(&outcome.per_action[0], Ok(ScenarioVerdict::Pass)),
+        "the send must dial and park the roundtrip: {outcome:?}"
+    );
+    let recorded = recorder.recorded_requests();
+    assert_eq!(recorded.len(), 1, "exactly one request must reach the wire");
+    assert_eq!(recorded[0].method, "PUT");
+    assert_eq!(recorded[0].path, "/orders");
+
+    let failure = outcome
+        .per_action
+        .get(1)
+        .and_then(|result| result.as_ref().err())
+        .expect("the receive must fail");
+    let ScenarioFailure::ActionTransport { action, source } = failure else {
+        panic!("expected ActionTransport, got {failure:?}");
+    };
+    assert_eq!(*action, 1, "the receive is the failing action");
+    let TransportError::Other { message } = source else {
+        panic!("expected a transport failure, got {source:?}");
+    };
+    assert!(
+        message.contains("connection closed"),
+        "the transport message should name the connection closure: {message}"
+    );
+}
+
+/// A `fault: close` partner aborts the connection with no response
+/// bytes. The send dials and parks the failing roundtrip, so the
+/// scenario observes the fault on the receive: the roundtrip of the
+/// send fails, and the receive surfaces the transport-class failure
+/// naming its own action index.
+#[tokio::test]
+async fn fault_close_fails_receive_e2e() {
+    let (outcome, recorders) = run_doc(FAULT_CLOSE_DOC).await;
+    assert_receive_transport_failure(&outcome, &recorders[ORDERS]);
+}
+
+/// The `delay` applies before the `fault`: the connection is held then
+/// aborted, and the receive's parked roundtrip fails with the same
+/// transport-class failure. The delay ordering itself is proven at
+/// adapter level (Task 1.2).
+#[tokio::test]
+async fn delay_before_fault_fails_receive_e2e() {
+    let (outcome, recorders) = run_doc(DELAY_BEFORE_FAULT_DOC).await;
+    assert_receive_transport_failure(&outcome, &recorders[ORDERS]);
+}
+
+/// The `times: 2` entry serves two matching requests then spends
+/// itself, and the fallback entry answers the third: the scenario
+/// receives and validates 201/A, 201/A, then 200/B in order — the
+/// third exchange proves the times entry was spent.
+#[tokio::test]
+async fn times_two_then_fallback_e2e() {
+    let (outcome, recorders) = run_doc(TIMES_TWO_FALLBACK_DOC).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the times-then-fallback chain must pass: {outcome:?}"
+    );
+
+    let recorded = recorders[ORDERS].recorded_requests();
+    assert_eq!(recorded.len(), 3, "three sends must reach the wire");
+    for request in &recorded {
+        assert_eq!(request.method, "PUT");
+        assert_eq!(request.path, "/orders");
+    }
 }
 
 /// One run, one partner, one variable name on two tiers: the scenario

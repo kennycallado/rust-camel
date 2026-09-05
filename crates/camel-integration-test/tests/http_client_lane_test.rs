@@ -33,6 +33,7 @@ async fn orders_partner(body: &str) -> HttpPartner {
         status: 200,
         headers: BTreeMap::new(),
         body: body.as_bytes().to_vec(),
+        ..Default::default()
     }])
     .await
     .expect("partner binds 127.0.0.1:0")

@@ -1,0 +1,49 @@
+# Partner retry scenario (partner-retry-route.test.yaml): a
+# fault-to-healthy failure-path test. The
+# scenario dials the pinned route listener as a plain string, the
+# route's producer faults against the scripted partner (first entry
+# `fault: close`), the route-level `error_handler.retry` redials and
+# the second entry serves the healthy body, the client-role receive
+# validates the healthy roundtrip, the server-role receive consumes
+# the faulted arrival, and the partner count validation proves both
+# attempts on the wire.
+#
+# The partner is declared ONLY through the action endpoint ref: the
+# harness folds `bindVar: PARTNER_URL` into the layered environment,
+# and the route file interpolates `${env:PARTNER_URL}` at boot.
+#
+# The `validate` partner target is exact-count: the count must equal
+# the recorded arrivals after the `path` filter, never a subset. The
+# deadline polls until the count settles or the deadline passes.
+routeFiles: [partner-retry.routes.yaml]
+scenario:
+  - send:
+      to: http://127.0.0.1:18231/order
+  - receive:
+      from: http://127.0.0.1:18231/order
+      deadline: 5s
+      extract:
+        reply: body
+  - validate:
+      target: {variable: reply}
+      expectation: ok
+  - receive:
+      from:
+        endpoint: http://127.0.0.1:0/order
+        provisioning: harness
+        bindVar: PARTNER_URL
+      deadline: 5s
+  - validate:
+      target: {partner: http://127.0.0.1:0/order}
+      expectation: {count: 2, path: /order}
+      deadline: 5s
+partners:
+  http://127.0.0.1:0/order:
+    - fault: close
+      path: /order
+    - path: /order
+      response:
+        status: 200
+        headers:
+          content-type: application/json
+        body: ok

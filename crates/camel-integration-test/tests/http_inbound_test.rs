@@ -26,7 +26,7 @@ use camel_integration_test::env_layers::ambient_std;
 use camel_integration_test::{
     Expectation, HttpPartner, LayeredEnv, PartnerAdapter, PartnerRouter, ScenarioAction,
     ScenarioDocument, ScenarioFailure, ScenarioTarget, ScenarioVars, ScenarioVerdict,
-    boot_scenario, parse_scenario_document, run_scenario_document,
+    ValidateExpectation, boot_scenario, parse_scenario_document, run_scenario_document,
 };
 
 /// The pinned consumer port: the fixture route's `PORT` placeholder
@@ -185,9 +185,10 @@ async fn inbound_response_validated_on_wire() {
                 {
                     ScenarioAction::Validate {
                         target: target.clone(),
-                        expectation: Expectation::Equals(Value::String(
-                            "never-the-served-body".to_string(),
+                        expectation: ValidateExpectation::Message(Expectation::Equals(
+                            Value::String("never-the-served-body".to_string()),
                         )),
+                        deadline: None,
                     }
                 } else {
                     action.clone()

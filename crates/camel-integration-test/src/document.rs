@@ -28,6 +28,10 @@ use noyalib::compat::serde_yaml;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 
+// The partner-script grammar lives in its own module; the public
+// types are re-exported here so the document API stays one surface.
+pub use crate::partner_script::{PartnerFault, PartnerScript, PartnerScriptResponse};
+
 // ---------------------------------------------------------------------------
 // Public model
 // ---------------------------------------------------------------------------
@@ -122,10 +126,16 @@ pub enum ScenarioAction {
     /// Assert an expectation against a scenario target.
     Validate {
         /// What to validate: the last message received on an endpoint,
-        /// or a scenario variable.
+        /// a scenario variable, or a partner's recorded traffic.
         target: ScenarioTarget,
-        /// Matcher expectation.
-        expectation: Expectation,
+        /// Matcher expectation: the message grammar for `lastReceived`
+        /// and `variable` targets, the partner count grammar for
+        /// `partner` targets.
+        expectation: ValidateExpectation,
+        /// Optional poll deadline. Only valid on `partner` targets,
+        /// whose counts settle asynchronously; without it the partner
+        /// assertion reads one immediate snapshot.
+        deadline: Option<Duration>,
     },
 }
 
@@ -141,6 +151,7 @@ impl ScenarioAction {
             Self::Receive { from, .. } => endpoint_bindings(from),
             Self::Validate { target, .. } => match target {
                 ScenarioTarget::LastReceived(endpoint) => endpoint_bindings(endpoint),
+                ScenarioTarget::Partner(_) => Vec::new(),
                 ScenarioTarget::Variable(_) => Vec::new(),
             },
             Self::Sleep { .. } => Vec::new(),
@@ -157,6 +168,11 @@ pub enum ScenarioTarget {
     /// A scenario variable set by an earlier `extract`. Variable
     /// existence is validated at run time.
     Variable(String),
+    /// A partner endpoint: the assertion reads the partner's recorded
+    /// request traffic. The URI must equal a harness endpoint
+    /// reference declared by the scenario's own `send`/`receive`
+    /// actions.
+    Partner(EndpointRef),
 }
 
 /// An endpoint reference: a bare endpoint string or a map with
@@ -194,36 +210,13 @@ pub enum Provisioning {
     Harness,
 }
 
-/// One partner script of a `partners:` entry: the response a partner
-/// serves when the system under test reaches its endpoint. Grammar
-/// only; the runner consumes the map.
-#[derive(Debug, Clone)]
-pub struct PartnerScript {
-    /// Request method the script applies to; optional.
-    pub method: Option<String>,
-    /// Request path the script applies to; optional.
-    pub path: Option<String>,
-    /// The scripted response.
-    pub response: PartnerScriptResponse,
-}
-
-/// The response a partner script serves.
-#[derive(Debug, Clone)]
-pub struct PartnerScriptResponse {
-    /// HTTP status code, validated to the 100-599 range at load.
-    pub status: Option<u16>,
-    /// Response headers.
-    pub headers: Option<BTreeMap<String, String>>,
-    /// Response body.
-    pub body: Option<Value>,
-}
-
 /// The scripted responses a document's `partners:` entry maps to, for
 /// one endpoint key. `None` when the document declares no entry for
 /// the endpoint — the caller binds a permissive partner. `Some` maps
 /// each script grammar entry to its wire form: absent `status`
-/// defaults to 200, absent headers to the empty map, and the body is
-/// the JSON serialization (empty when absent).
+/// defaults to 200, absent `times` to 1 (serve once), absent headers
+/// to the empty map, and the body is the JSON serialization (empty
+/// when absent); `delay` and `fault` map through.
 ///
 /// The canonical `PartnerScript` → wire-form mapping; the CLI driver
 /// and library-level scenarios bind partners through this function so
@@ -238,18 +231,30 @@ pub fn partner_scripts_for(
     Some(
         scripts
             .iter()
-            .map(|script| ScriptedResponse {
-                method: script.method.clone(),
-                path: script.path.clone(),
-                status: script.response.status.unwrap_or(200),
-                headers: script.response.headers.clone().unwrap_or_default(),
-                body: script
-                    .response
-                    .body
-                    .as_ref()
-                    .map_or_else(Vec::new, |value| {
-                        serde_json::to_vec(value).unwrap_or_default()
-                    }),
+            .map(|script| {
+                let (status, headers, body) = match script.response.as_ref() {
+                    Some(response) => (
+                        response.status.unwrap_or(200),
+                        response.headers.clone().unwrap_or_default(),
+                        response.body.as_ref().map_or_else(Vec::new, |value| {
+                            serde_json::to_vec(value).unwrap_or_default()
+                        }),
+                    ),
+                    // Fault entries carry no response; the placeholder
+                    // keeps the wire form — serve checks the fault
+                    // first, so the placeholder never reaches the wire.
+                    None => (200, BTreeMap::new(), Vec::new()),
+                };
+                ScriptedResponse {
+                    method: script.method.clone(),
+                    path: script.path.clone(),
+                    times: script.times.unwrap_or(1),
+                    delay: script.delay,
+                    fault: script.fault.clone(),
+                    status,
+                    headers,
+                    body,
+                }
             })
             .collect(),
     )
@@ -283,6 +288,32 @@ pub enum Expectation {
     Exists,
     /// Recursive-subset match against an object.
     JsonSubset(Value),
+}
+
+/// The partner-count expectation of a `validate` action with a
+/// `partner` target: an exact recorded-request count plus optional
+/// `method` and `path` filters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartnerExpectation {
+    /// Exact number of matching requests the partner must have
+    /// recorded.
+    pub count: u64,
+    /// Optional request-method filter.
+    pub method: Option<String>,
+    /// Optional request-path filter (path-and-query, exact).
+    pub path: Option<String>,
+}
+
+/// The expectation of a `validate` action, keyed by its target: the
+/// message matcher grammar for `lastReceived` and `variable` targets,
+/// the partner count grammar for `partner` targets.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ValidateExpectation {
+    /// Message matcher expectation (`lastReceived` / `variable`).
+    Message(Expectation),
+    /// Partner request-count expectation (`partner`).
+    Partner(PartnerExpectation),
 }
 
 // ---------------------------------------------------------------------------
@@ -347,25 +378,12 @@ struct RawSleep {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RawValidate {
     /// Raw `target` node; the single-key form (`lastReceived` /
-    /// `variable`) converts during validation.
+    /// `variable` / `partner`) converts during validation.
     target: serde_yaml::Value,
     expectation: Value,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct RawPartnerScript {
-    method: Option<String>,
-    path: Option<String>,
-    response: RawPartnerScriptResponse,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct RawPartnerScriptResponse {
-    status: Option<u16>,
-    headers: Option<BTreeMap<String, String>>,
-    body: Option<Value>,
+    /// Raw humantime string; partner targets only, parsed during
+    /// validation so the error can name the action index.
+    deadline: Option<String>,
 }
 
 /// Raw endpoint reference: bare string or map with `endpoint`,
@@ -579,7 +597,9 @@ fn classify_yaml_error(raw: &str) -> DocError {
 /// endpoint provisioning, expectation grammar) with action-index
 /// errors; (g) each `partners` entry converts (script grammar, response
 /// status range) with entry-key errors; (h) no `env` key collides with
-/// a declared `bindVar`.
+/// a declared `bindVar`; (i) each `partner` validate target URI equals
+/// a harness endpoint reference declared by the scenario's own
+/// `send`/`receive` actions.
 pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError> {
     if !camel_dsl::discovery::is_test_document(path) {
         return Err(DocError::NotTestDocument {
@@ -666,42 +686,9 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
     }
     // (g) Partner scripting: entries convert from the raw sequence
     // with the entry key named on every failure; an empty sequence is
-    // a valid, inert entry.
-    let partners = match raw.partners {
-        Some(raw_partners) => {
-            let mut partners = BTreeMap::new();
-            for (endpoint, raw_scripts) in raw_partners {
-                let entry_error = |message: String| DocError::Partners {
-                    endpoint: endpoint.clone(),
-                    message,
-                };
-                let scripts = serde_yaml::from_value::<Vec<RawPartnerScript>>(raw_scripts)
-                    .map_err(|e| entry_error(e.to_string()))?;
-                let mut converted = Vec::with_capacity(scripts.len());
-                for script in scripts {
-                    if let Some(status) = script.response.status
-                        && !(100..=599).contains(&status)
-                    {
-                        return Err(entry_error(format!(
-                            "response `status` {status} is out of range; expected 100-599"
-                        )));
-                    }
-                    converted.push(PartnerScript {
-                        method: script.method,
-                        path: script.path,
-                        response: PartnerScriptResponse {
-                            status: script.response.status,
-                            headers: script.response.headers,
-                            body: script.response.body,
-                        },
-                    });
-                }
-                partners.insert(endpoint, converted);
-            }
-            Some(partners)
-        }
-        None => None,
-    };
+    // a valid, inert entry. The grammar conversion lives in the
+    // partner-script module.
+    let partners = crate::partner_script::partners_from_raw(raw.partners)?;
     // (h) Reserved env keys: the harness binding wins over document
     // fixtures.
     if let Some(env) = raw.env.as_ref() {
@@ -714,6 +701,43 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
                     });
                 }
             }
+        }
+    }
+    // (i) Partner-target cross-check: a `partner` validate target URI
+    // must equal a harness endpoint reference declared by the
+    // scenario's own `send`/`receive` actions (URI string equality).
+    // A typo'd URI would otherwise assert against traffic nobody
+    // records.
+    let mut harness_uris: Vec<&str> = Vec::new();
+    let mut partner_targets: Vec<(usize, &EndpointRef)> = Vec::new();
+    for (index, action) in scenario.iter().enumerate() {
+        match action {
+            ScenarioAction::Send { to, .. } => {
+                if to.provisioning == Some(Provisioning::Harness) {
+                    harness_uris.push(to.endpoint.as_str());
+                }
+            }
+            ScenarioAction::Receive { from, .. } => {
+                if from.provisioning == Some(Provisioning::Harness) {
+                    harness_uris.push(from.endpoint.as_str());
+                }
+            }
+            ScenarioAction::Validate {
+                target: ScenarioTarget::Partner(endpoint),
+                ..
+            } => partner_targets.push((index, endpoint)),
+            _ => {}
+        }
+    }
+    for (index, endpoint) in partner_targets {
+        if !harness_uris.contains(&endpoint.endpoint.as_str()) {
+            return Err(DocError::Validation {
+                index,
+                message: format!(
+                    "validate `partner` target `{}` does not match any harness endpoint reference declared by this scenario's `send`/`receive` actions",
+                    endpoint.endpoint
+                ),
+            });
         }
     }
     Ok(ScenarioDocument {
@@ -815,9 +839,31 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
         "validate" => {
             let raw: RawValidate =
                 serde_yaml::from_value(content.clone()).map_err(action_error_from_serde)?;
+            let target = build_target(&raw.target, index)?;
+            let deadline = match raw.deadline.as_deref() {
+                None => None,
+                // The poll deadline exists because a partner count
+                // settles asynchronously; on any other target it has
+                // no meaning and is a grammar error.
+                Some(raw_deadline) if matches!(target, ScenarioTarget::Partner(_)) => {
+                    Some(parse_duration(raw_deadline, index, "deadline")?)
+                }
+                Some(raw_deadline) => {
+                    return Err(action_error(format!(
+                        "`deadline` is only valid on a `partner` validate target, got `{raw_deadline}`"
+                    )));
+                }
+            };
+            let expectation = match &target {
+                ScenarioTarget::Partner(_) => ValidateExpectation::Partner(
+                    partner_expectation_from_value(&raw.expectation, index)?,
+                ),
+                _ => ValidateExpectation::Message(expectation_from_value(&raw.expectation, index)?),
+            };
             Ok(ScenarioAction::Validate {
-                target: build_target(&raw.target, index)?,
-                expectation: expectation_from_value(&raw.expectation, index)?,
+                target,
+                expectation,
+                deadline,
             })
         }
         other => Err(action_error(format!(
@@ -827,17 +873,17 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
 }
 
 /// Builds a `validate` target from the raw `target` node: a single-key
-/// map (`lastReceived` or `variable`).
+/// map (`lastReceived`, `variable`, or `partner`).
 fn build_target(value: &serde_yaml::Value, index: usize) -> Result<ScenarioTarget, DocError> {
     let action_error = |message: String| DocError::Validation { index, message };
     let serde_yaml::Value::Mapping(map) = value else {
         return Err(action_error(format!(
-            "validate `target` must be a single-key map (`lastReceived`, `variable`), got {value:?}"
+            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`), got {value:?}"
         )));
     };
     let Some((key, content)) = map.iter().next() else {
         return Err(action_error(
-            "validate `target` must be a single-key map (`lastReceived`, `variable`), got an empty map"
+            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`), got an empty map"
                 .to_string(),
         ));
     };
@@ -853,8 +899,13 @@ fn build_target(value: &serde_yaml::Value, index: usize) -> Result<ScenarioTarge
                 "validate `variable` target must be a string, got {content:?}"
             ))),
         },
+        "partner" => {
+            let raw: RawEndpointRef =
+                serde_yaml::from_value(content.clone()).map_err(|e| action_error(e.to_string()))?;
+            Ok(ScenarioTarget::Partner(endpoint_from_raw(raw)?))
+        }
         other => Err(action_error(format!(
-            "unknown validate target `{other}`; expected `lastReceived` or `variable`"
+            "unknown validate target `{other}`; expected `lastReceived`, `variable`, or `partner`"
         ))),
     }
 }
@@ -971,6 +1022,62 @@ fn expectation_from_value(value: &Value, index: usize) -> Result<Expectation, Do
         };
     }
     Ok(Expectation::Equals(value.clone()))
+}
+
+/// Applies the partner expectation grammar: a map with a required
+/// `count` (non-negative integer) and optional `method` / `path`
+/// string filters; unknown keys fail. Field-by-field extraction, like
+/// the endpoint-reference reader, so errors name the offending key.
+fn partner_expectation_from_value(
+    value: &Value,
+    index: usize,
+) -> Result<PartnerExpectation, DocError> {
+    const FIELD: &str = "partner expectation";
+    let invalid = |message: String| DocError::Validation { index, message };
+    let Value::Object(map) = value else {
+        return Err(invalid(format!(
+            "{FIELD} must be a map with a `count` key, got {value:?}"
+        )));
+    };
+    let mut count: Option<u64> = None;
+    let mut method: Option<String> = None;
+    let mut path: Option<String> = None;
+    for (key, payload) in map {
+        match key.as_str() {
+            "count" => {
+                count = Some(payload.as_u64().ok_or_else(|| {
+                    invalid(format!(
+                        "{FIELD}: `count` must be a non-negative integer, got {payload}"
+                    ))
+                })?);
+            }
+            "method" | "path" => {
+                let text = payload.as_str().ok_or_else(|| {
+                    invalid(format!("{FIELD}: `{key}` must be a string, got {payload}"))
+                })?;
+                if key == "method" {
+                    method = Some(text.to_string());
+                } else {
+                    path = Some(text.to_string());
+                }
+            }
+            other => {
+                return Err(invalid(format!(
+                    "{FIELD}: unknown field `{other}`; expected `count`, `method`, or `path`"
+                )));
+            }
+        }
+    }
+    let count = count.ok_or_else(|| {
+        invalid(format!(
+            "{FIELD}: requires a `count` (non-negative integer)"
+        ))
+    })?;
+    Ok(PartnerExpectation {
+        count,
+        method,
+        path,
+    })
 }
 
 /// Backticks and comma-joins field names for error messages.

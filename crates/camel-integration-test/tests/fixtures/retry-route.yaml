@@ -1,0 +1,29 @@
+# Flagship retry fixture (Task 2.3 of itest-partner-faults-and-asserts):
+# the system under test is a REAL retrying route. The consumer binds a
+# pinned loopback port (the inbound-put pattern the shipped inbound
+# e2e tests use), the producer dials the harness-provisioned partner
+# through the env-tier `bindVar` form, and the route-level error
+# handler redelivers the faulted first attempt once (`max_attempts`
+# counts redeliveries: 1 original + 1 retry = the 2 wire attempts the
+# flagship validates).
+#
+# The consumer stamps every exchange with its own `CamelHttpPath` and
+# `CamelHttpQuery`; the http producer appends both onto the `to` URL,
+# so the steps strip them first to dial the endpoint path verbatim.
+#
+# `${env:PARTNER_URL}` resolves through the scenario's layered
+# environment at boot (the harness folds the bound `http://host:port`
+# authority in); it is never set under the document's own `env`.
+routes:
+  - id: retry-bridge
+    from: http://127.0.0.1:18221/order
+    error_handler:
+      retry:
+        max_attempts: 1
+        initial_delay_ms: 50
+    steps:
+      - remove_header:
+          key: CamelHttpPath
+      - remove_header:
+          key: CamelHttpQuery
+      - to: ${env:PARTNER_URL}/order

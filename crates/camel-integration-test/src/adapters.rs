@@ -180,6 +180,15 @@ pub trait PartnerAdapter: Send + Sync {
     fn bound_authority(&self) -> Option<String> {
         None
     }
+
+    /// The wire requests this adapter recorded, in arrival order —
+    /// the recorded-traffic snapshot a `partner` validate asserts
+    /// against (feature `http`). The default is empty: adapters
+    /// without a listener record nothing.
+    #[cfg(feature = "http")]
+    fn recorded_requests(&self) -> Vec<http::HttpWireRequest> {
+        Vec::new()
+    }
 }
 
 /// Dispatches adapter calls by declared endpoint key to the
@@ -226,6 +235,19 @@ impl PartnerRouter {
     /// The adapter registered under `key`, if any.
     pub fn adapter(&self, key: &str) -> Option<&dyn PartnerAdapter> {
         self.adapters.get(key).map(|boxed| boxed.as_ref())
+    }
+
+    /// The wire requests the partner registered under `key` recorded,
+    /// in arrival order (feature `http`); empty when no adapter is
+    /// registered under `key` or the registered adapter records
+    /// nothing — an unregistered key reads as an empty snapshot, so
+    /// a partner validate on it fails the count, never the run.
+    #[cfg(feature = "http")]
+    pub fn recorded_requests(&self, key: &str) -> Vec<http::HttpWireRequest> {
+        self.adapters
+            .get(key)
+            .map(|adapter| adapter.recorded_requests())
+            .unwrap_or_default()
     }
 
     /// Every registered partner that owns a bound authority, as

@@ -3,9 +3,10 @@
 //! [`HttpPartner`] is the harness-owned SERVER side of an HTTP wire:
 //! it binds a loopback listener (`127.0.0.1:0` only — no free-port
 //! probing, ADR-0069 §8) that records every request that reaches the
-//! wire, serves the first scripted response whose method and path
-//! match, and queues the arrival per request path for the server-role
-//! `receive`.
+//! wire, serves the first matching scripted response (each entry
+//! `times` requests, after its `delay`, or applying its `fault`
+//! instead), and queues the arrival per request path for the
+//! server-role `receive`.
 //!
 //! The CLIENT role lives one level up: [`PartnerRouter`]'s
 //! [`ClientLane`] performs every http client-role send (the dial and
@@ -20,7 +21,8 @@
 //!
 //! - Outbound (the system under test sends): the partner's listener
 //!   records method, path, headers, and exact body bytes, serves the
-//!   first scripted response whose method and path match, and queues
+//!   first matching scripted response (each entry `times` requests,
+//!   after its `delay`, or applying its fault instead), and queues
 //!   the arrival per request path; `receive` dequeues it as an
 //!   [`IncomingMessage`] carrying the request line (`method`, `path`)
 //!   with `status: None` (requests carry no status). The recording and
@@ -85,6 +87,7 @@ use crate::adapters::ReceiveError;
 use crate::adapters::ReceiveTimeout;
 use crate::adapters::TransportError;
 use crate::adapters::lock_through;
+use crate::document::PartnerFault;
 
 /// The status served when no scripted response matches a request:
 /// a scripting gap is a partner-side defect, never a verdict.
@@ -98,15 +101,16 @@ const UNMATCHED_STATUS: u16 = 500;
 /// defect, not a workload.
 const ARRIVAL_LANE_CAPACITY: usize = 64;
 
-/// One scripted partner response, served to the first wire request
-/// that matches.
+/// One scripted partner response, served to the matching wire
+/// requests: the first matching entry with remaining `times` serves
+/// (after its `delay`, if any) or applies its `fault` instead.
 ///
 /// A `None` matcher field matches any request. When no scripted
 /// response matches, the listener serves status 500 with an empty
 /// body and still records the request — unless the partner started
 /// with a permissive default ([`HttpPartner::start_permissive`]),
 /// which answers every unmatched request non-consumingly.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ScriptedResponse {
     /// Match this request method, case-insensitive; `None` matches
     /// any method.
@@ -114,12 +118,40 @@ pub struct ScriptedResponse {
     /// Match this request path (and query, when present) exactly;
     /// `None` matches any path.
     pub path: Option<String>,
+    /// How many matching requests this entry serves before it is
+    /// exhausted (removed from the script). `Default` is 1: serve
+    /// once.
+    pub times: u32,
+    /// How long the partner waits before serving the response or
+    /// applying the fault; `None` acts immediately.
+    pub delay: Option<Duration>,
+    /// The fault applied instead of serving the response; `None`
+    /// serves `status`, `headers`, and `body`.
+    pub fault: Option<PartnerFault>,
     /// Response status to serve. `Default` is 200.
     pub status: u16,
     /// Response headers to serve.
     pub headers: BTreeMap<String, String>,
     /// Response body bytes to serve.
     pub body: Vec<u8>,
+}
+
+impl Default for ScriptedResponse {
+    /// Manual because the derived `Default` would zero `status` and
+    /// `times`: the well-formed default is serve `status: 200` once,
+    /// matching any request, with no delay and no fault.
+    fn default() -> Self {
+        Self {
+            method: None,
+            path: None,
+            times: 1,
+            delay: None,
+            fault: None,
+            status: 200,
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        }
+    }
 }
 
 impl ScriptedResponse {
@@ -261,7 +293,7 @@ impl HttpPartner {
                         tokio::spawn(async move {
                             let service = service_fn(move |request| {
                                 let server = Arc::clone(&server);
-                                async move { Ok::<_, std::convert::Infallible>(serve(server, request).await) }
+                                async move { serve(server, request).await }
                             });
                             // A peer that misbehaves mid-connection
                             // only ends that connection; the partner
@@ -358,6 +390,10 @@ impl PartnerAdapter for HttpPartner {
 
     fn bound_authority(&self) -> Option<String> {
         Some(self.bound_addr().to_string())
+    }
+
+    fn recorded_requests(&self) -> Vec<HttpWireRequest> {
+        self.recorder().recorded_requests()
     }
 }
 
@@ -697,8 +733,14 @@ fn enqueue_arrival(
 }
 
 /// Serves one connection request: record the wire request, then
-/// answer with the first matching scripted response.
-async fn serve(state: Arc<ServerState>, request: Request<Incoming>) -> Response<Full<Bytes>> {
+/// answer with the first matching scripted response — consuming one
+/// of its `times`, honoring its `delay`, or applying its fault. A
+/// service error drops the connection without a response byte; the
+/// close fault relies on exactly that hyper behavior.
+async fn serve(
+    state: Arc<ServerState>,
+    request: Request<Incoming>,
+) -> io::Result<Response<Full<Bytes>>> {
     let (parts, body) = request.into_parts();
     // An unreadable body (peer disconnected mid-send) records as
     // empty: the partial request still crossed the wire.
@@ -721,18 +763,45 @@ async fn serve(state: Arc<ServerState>, request: Request<Incoming>) -> Response<
     enqueue_arrival(&state.arrivals, &wire, &parts.headers, &bytes);
 
     let scripted = {
+        // Consume under the lock: the first matching entry with
+        // remaining times serves this request, and the entry leaves
+        // the script at zero. The lock never spans an await — the
+        // guard drops with the block, before the delay sleep.
         let mut queue = lock_through(&state.scripted);
-        queue
-            .iter()
-            .position(|s| s.matches(&wire))
-            .map(|idx| queue.remove(idx))
+        let idx = queue.iter().position(|s| s.matches(&wire) && s.times > 0);
+        idx.map(|idx| {
+            queue[idx].times -= 1;
+            let entry = queue[idx].clone();
+            if queue[idx].times == 0 {
+                queue.remove(idx);
+            }
+            entry
+        })
     };
     let Some(scripted) = scripted else {
         // A permissive default (when the partner started with one) is
         // non-consuming: it holds for every unmatched request.
-        return empty_response(state.fallback_status.unwrap_or(UNMATCHED_STATUS));
+        return Ok(empty_response(
+            state.fallback_status.unwrap_or(UNMATCHED_STATUS),
+        ));
     };
-    build_response(scripted.status, scripted.headers, scripted.body)
+    if let Some(delay) = scripted.delay {
+        tokio::time::sleep(delay).await;
+    }
+    if scripted.fault == Some(PartnerFault::Close) {
+        // The fault replaces the response: the service error makes
+        // hyper drop the connection with no HTTP response bytes, so
+        // the client sees a transport-level failure, never a status.
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "partner fault: close",
+        ));
+    }
+    Ok(build_response(
+        scripted.status,
+        scripted.headers,
+        scripted.body,
+    ))
 }
 
 /// Builds a response with exact status, headers, and body bytes.
@@ -833,6 +902,22 @@ fn wire_body_to_value(content_type: Option<&str>, bytes: &[u8]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default scripted response is well-formed serve-once OK:
+    /// the derived `Default` would zero both `status` and `times`,
+    /// so the manual impl must be pinned by assertion.
+    #[test]
+    fn scripted_response_default_is_ok_once() {
+        let scripted = ScriptedResponse::default();
+        assert_eq!(scripted.status, 200);
+        assert_eq!(scripted.times, 1);
+        assert_eq!(scripted.method, None);
+        assert_eq!(scripted.path, None);
+        assert_eq!(scripted.delay, None);
+        assert_eq!(scripted.fault, None);
+        assert!(scripted.headers.is_empty());
+        assert!(scripted.body.is_empty());
+    }
 
     /// The replace-then-fail race contract, deterministic: the
     /// failure transition lands only on the entry still carrying its

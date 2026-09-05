@@ -726,4 +726,37 @@ partners:
             "the cross-check must fail before any partner binds: {err}"
         );
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn undeclared_partner_target_exits_two() {
+        let project = TempProject::new("undeclared-partner-target");
+        let doc_path = write_project(
+            project.root(),
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+- validate:
+    target: {partner: http://127.0.0.1:0/nowhere}
+    expectation: {count: 1}
+"#,
+        );
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let summary = super::super::run_tests(&[doc_path], &mut out, &mut err).await;
+        assert_eq!(
+            summary.exit_code, 2,
+            "doc-validation is apparatus class, exit 2"
+        );
+        let err = String::from_utf8(err).expect("stderr is utf-8"); // allow-unwrap
+        assert!(
+            err.contains("doc-validation"),
+            "doc-validation class: {err}"
+        );
+        assert!(
+            err.contains("http://127.0.0.1:0/nowhere"),
+            "the error must name the undeclared partner URI: {err}"
+        );
+    }
 }

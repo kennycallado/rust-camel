@@ -152,4 +152,23 @@
         "crates/camel-integration-test/tests/fixtures/outbound/routes/bridge.yaml",
         [("R-URI-known:unverified-scheme", "info")],
     ),
+
+    // Flagship retry fixture (itest-partner-faults-and-asserts, Task 2.3).
+    // The producer URI is `${env:PARTNER_URL}/order`: the scheme head is
+    // an interpolation placeholder, so the catalog cannot verify it and
+    // unverified-scheme Info is by-design. Same precedent as the
+    // outbound-bridge fixture above.
+    (
+        "crates/camel-integration-test/tests/fixtures/retry-route.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
+    ),
+
+    // Runnable retry example (itest-partner-faults-and-asserts, Task 2.4).
+    // Mirrors the flagship fixture: the producer URI is
+    // `${env:PARTNER_URL}/order`, an interpolation placeholder the
+    // catalog cannot verify. Same by-design unverified-scheme Info.
+    (
+        "examples/integration-testing/partner-retry.routes.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
+    ),
 ]

@@ -28,8 +28,8 @@ use camel_integration_test::env_layers::ambient_std;
 use camel_integration_test::{
     DocumentOutcome, EndpointRef, Expectation, HttpPartner, LayeredEnv, PartnerAdapter,
     PartnerRouter, Provisioning, RouteSource, ScenarioAction, ScenarioDocument, ScenarioFailure,
-    ScenarioTarget, ScenarioVars, ScenarioVerdict, ScriptedResponse, boot_scenario,
-    parse_scenario_document, run_scenario_document,
+    ScenarioTarget, ScenarioVars, ScenarioVerdict, ScriptedResponse, ValidateExpectation,
+    boot_scenario, parse_scenario_document, run_scenario_document,
 };
 
 /// The doc endpoint URI the fixture declares for the partner. The `:0`
@@ -54,6 +54,7 @@ fn scripted_response(method: &str, body: &[u8]) -> ScriptedResponse {
         status: 200,
         headers: BTreeMap::new(),
         body: body.to_vec(),
+        ..Default::default()
     }
 }
 
@@ -194,7 +195,10 @@ fn method_scenario_document(
         },
         ScenarioAction::Validate {
             target: ScenarioTarget::LastReceived(partner),
-            expectation: Expectation::Equals(Value::String(expected_body.to_string())),
+            expectation: ValidateExpectation::Message(Expectation::Equals(Value::String(
+                expected_body.to_string(),
+            ))),
+            deadline: None,
         },
     ];
     ScenarioDocument {
@@ -299,7 +303,10 @@ async fn outbound_bridge_header_corruption_fails() {
                 {
                     ScenarioAction::Validate {
                         target: target.clone(),
-                        expectation: Expectation::Equals(Value::String("express".to_string())),
+                        expectation: ValidateExpectation::Message(Expectation::Equals(
+                            Value::String("express".to_string()),
+                        )),
+                        deadline: None,
                     }
                 } else {
                     action.clone()

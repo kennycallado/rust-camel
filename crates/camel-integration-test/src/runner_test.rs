@@ -18,7 +18,7 @@ use crate::adapters::{
 };
 use crate::document::{
     EndpointRef, Expectation, Provisioning, RouteSource, ScenarioAction, ScenarioDocument,
-    ScenarioTarget,
+    ScenarioTarget, ValidateExpectation,
 };
 use crate::runner::{
     DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, fill_bind_vars,
@@ -26,7 +26,11 @@ use crate::runner::{
 };
 
 #[cfg(feature = "http")]
-use crate::adapters::http::HttpPartner;
+use crate::adapters::http::{HttpPartner, HttpWireRequest};
+#[cfg(feature = "http")]
+use crate::document::PartnerExpectation;
+#[cfg(feature = "http")]
+use crate::runner::matching_requests;
 
 /// A bare endpoint reference with no provisioning and no bind variable.
 fn endpoint(uri: &str) -> EndpointRef {
@@ -86,7 +90,10 @@ async fn send_then_receive_within_deadline() {
         },
         ScenarioAction::Validate {
             target: ScenarioTarget::LastReceived(endpoint("partner://fake")),
-            expectation: Expectation::Equals(Value::String("hello".to_string())),
+            expectation: ValidateExpectation::Message(Expectation::Equals(Value::String(
+                "hello".to_string(),
+            ))),
+            deadline: None,
         },
     ]);
     let mut vars = ScenarioVars::new();
@@ -140,7 +147,10 @@ async fn variable_extraction_flows_forward() {
             },
             ScenarioAction::Validate {
                 target: ScenarioTarget::Variable("id".to_string()),
-                expectation: Expectation::Equals(Value::String("abc-123".to_string())),
+                expectation: ValidateExpectation::Message(Expectation::Equals(Value::String(
+                    "abc-123".to_string(),
+                ))),
+                deadline: None,
             },
         ])
     }
@@ -311,15 +321,24 @@ async fn selector_extracts_status_method_and_path() {
         },
         ScenarioAction::Validate {
             target: ScenarioTarget::Variable("status".to_string()),
-            expectation: Expectation::Equals(Value::Number(201.into())),
+            expectation: ValidateExpectation::Message(Expectation::Equals(Value::Number(
+                201.into(),
+            ))),
+            deadline: None,
         },
         ScenarioAction::Validate {
             target: ScenarioTarget::Variable("method".to_string()),
-            expectation: Expectation::Equals(Value::String("POST".to_string())),
+            expectation: ValidateExpectation::Message(Expectation::Equals(Value::String(
+                "POST".to_string(),
+            ))),
+            deadline: None,
         },
         ScenarioAction::Validate {
             target: ScenarioTarget::Variable("path".to_string()),
-            expectation: Expectation::Equals(Value::String("/orders".to_string())),
+            expectation: ValidateExpectation::Message(Expectation::Equals(Value::String(
+                "/orders".to_string(),
+            ))),
+            deadline: None,
         },
     ]);
     let mut vars = ScenarioVars::new();
@@ -353,7 +372,10 @@ async fn selector_header_lookup_is_case_insensitive() {
             },
             ScenarioAction::Validate {
                 target: ScenarioTarget::Variable("trace".to_string()),
-                expectation: Expectation::Equals(Value::String("t-42".to_string())),
+                expectation: ValidateExpectation::Message(Expectation::Equals(Value::String(
+                    "t-42".to_string(),
+                ))),
+                deadline: None,
             },
         ])
     }
@@ -396,7 +418,8 @@ async fn document_run_all_pass_records_verdict() {
         },
         ScenarioAction::Validate {
             target: ScenarioTarget::Variable("unset".to_string()),
-            expectation: Expectation::Exists,
+            expectation: ValidateExpectation::Message(Expectation::Exists),
+            deadline: None,
         },
     ]);
     // Seed the variable so the `Exists` validation passes.
@@ -480,7 +503,10 @@ async fn variable_mismatch_names_the_variable() {
         },
         ScenarioAction::Validate {
             target: ScenarioTarget::Variable("orderType".to_string()),
-            expectation: Expectation::Equals(Value::String("express".to_string())),
+            expectation: ValidateExpectation::Message(Expectation::Equals(Value::String(
+                "express".to_string(),
+            ))),
+            deadline: None,
         },
     ]);
     let mut vars = ScenarioVars::new();
@@ -799,5 +825,331 @@ fn fill_bind_vars_sets_authority_without_scheme() {
         vars.get("PARTNER"),
         Some(&Value::String("127.0.0.1:45678".to_string())),
         "the bind variable must carry the bare host:port authority"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Partner validation (recorded-request counts, ADR-0069 §5)
+// -------------------------------------------------------------------------
+
+/// The declared harness endpoint every partner validate here reads.
+#[cfg(feature = "http")]
+const ORDERS: &str = "http://127.0.0.1:0/orders";
+
+/// A single-entry router with `partner` registered under the declared
+/// `:0` orders endpoint.
+#[cfg(feature = "http")]
+fn orders_router(partner: HttpPartner) -> PartnerRouter {
+    PartnerRouter::new(BTreeMap::from([(
+        ORDERS.to_string(),
+        Box::new(partner) as Box<dyn PartnerAdapter>,
+    )]))
+}
+
+/// A POST send to the declared `:0` orders endpoint.
+#[cfg(feature = "http")]
+fn orders_send() -> ScenarioAction {
+    ScenarioAction::Send {
+        to: endpoint(ORDERS),
+        body: None,
+        headers: None,
+        method: "POST".to_string(),
+    }
+}
+
+/// A partner validate on the declared orders endpoint: the count
+/// expectation with optional method/path filters and an optional poll
+/// deadline.
+#[cfg(feature = "http")]
+fn partner_validate(
+    count: u64,
+    method: Option<&str>,
+    path: Option<&str>,
+    deadline: Option<Duration>,
+) -> ScenarioAction {
+    ScenarioAction::Validate {
+        target: ScenarioTarget::Partner(endpoint(ORDERS)),
+        expectation: ValidateExpectation::Partner(PartnerExpectation {
+            count,
+            method: method.map(str::to_string),
+            path: path.map(str::to_string),
+        }),
+        deadline,
+    }
+}
+
+/// One raw HTTP/1.1 exchange straight to the partner's bound address —
+/// the foreign-client arrival path no router lane owns.
+/// `connection: close` makes it one write and one drained read, and
+/// the partner records the request before it answers, so a completed
+/// call means a recorded arrival.
+#[cfg(feature = "http")]
+async fn raw_request(authority: &str, method: &str, path: &str) {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    let mut stream = tokio::net::TcpStream::connect(authority)
+        .await
+        .expect("the partner's bound address must accept");
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nhost: {authority}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("the raw request must leave");
+    let mut sink = Vec::new();
+    stream
+        .read_to_end(&mut sink)
+        .await
+        .expect("the partner must close after its response");
+}
+
+/// The first failure of an outcome that must have failed.
+#[cfg(feature = "http")]
+fn first_failure(outcome: &DocumentOutcome) -> &ScenarioFailure {
+    outcome
+        .per_action
+        .iter()
+        .find_map(|result| result.as_ref().err())
+        .expect("the document must have failed")
+}
+
+/// Filter semantics of `matching_requests`: the method filter folds
+/// ASCII case, the path filter is the exact path-and-query, and `None`
+/// filters pass everything.
+#[test]
+#[cfg(feature = "http")]
+fn matching_requests_filters_method_case_insensitive_and_exact_path() {
+    let wire = |method: &str, path: &str| HttpWireRequest {
+        method: method.to_string(),
+        path: path.to_string(),
+        headers: BTreeMap::new(),
+        body: Vec::new(),
+    };
+    let requests = vec![
+        wire("POST", "/orders"),
+        wire("GET", "/orders"),
+        wire("GET", "/orders?page=2"),
+        wire("GET", "/health"),
+        wire("delete", "/orders"),
+    ];
+    // `None` filters pass every request.
+    assert_eq!(matching_requests(&requests, None, None), 5);
+    // The method filter folds ASCII case in both directions.
+    assert_eq!(matching_requests(&requests, Some("get"), None), 3);
+    assert_eq!(matching_requests(&requests, Some("DELETE"), None), 1);
+    // The path filter is the exact path-and-query: no prefix and no
+    // query-blind matching.
+    assert_eq!(matching_requests(&requests, None, Some("/orders")), 3);
+    assert_eq!(
+        matching_requests(&requests, None, Some("/orders?page=2")),
+        1
+    );
+    // Both filters combine conjunctively.
+    assert_eq!(
+        matching_requests(&requests, Some("get"), Some("/orders")),
+        1
+    );
+}
+
+/// The immediate snapshot: exact equality passes without a deadline,
+/// and a mismatch names the partner URI and both counts. The receive
+/// synchronizes the send's spawned client-lane exchange, so the
+/// validates read a settled recorder.
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn immediate_count_passes_and_mismatch_names_counts() {
+    let partner = HttpPartner::start_permissive(200)
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let router = orders_router(partner);
+    let doc = doc_with(vec![
+        orders_send(),
+        ScenarioAction::Receive {
+            from: endpoint(ORDERS),
+            deadline: Duration::from_secs(5),
+            extract: None,
+        },
+        partner_validate(1, None, None, None),
+        partner_validate(2, None, None, None),
+    ]);
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+
+    assert!(
+        matches!(outcome.per_action[2], Ok(ScenarioVerdict::Pass)),
+        "the exact immediate count must pass: {outcome:?}"
+    );
+    assert_eq!(outcome.verdict, None, "the count: 2 validate must fail");
+    let ScenarioFailure::ValidationMismatch { detail, .. } = first_failure(&outcome) else {
+        panic!(
+            "expected ValidationMismatch, got {:?}",
+            first_failure(&outcome)
+        );
+    };
+    assert!(
+        detail.contains("partner http://127.0.0.1:0/orders"),
+        "the mismatch must name the partner URI: {detail}"
+    );
+    assert!(
+        detail.contains("expected 2, actual 1"),
+        "the mismatch must name both counts: {detail}"
+    );
+}
+
+/// A filtered count mismatch names the applied filter clauses: the one
+/// recorded POST to `/orders` matches both filters, so an expectation
+/// of 2 fails with `method post, path /orders` spelled out in the
+/// detail.
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn filtered_mismatch_names_method_and_path_clauses() {
+    let partner = HttpPartner::start_permissive(200)
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let router = orders_router(partner);
+    let doc = doc_with(vec![
+        orders_send(),
+        ScenarioAction::Receive {
+            from: endpoint(ORDERS),
+            deadline: Duration::from_secs(5),
+            extract: None,
+        },
+        partner_validate(2, Some("post"), Some("/orders"), None),
+    ]);
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+
+    assert_eq!(outcome.verdict, None, "the filtered count must fail");
+    let ScenarioFailure::ValidationMismatch { detail, .. } = first_failure(&outcome) else {
+        panic!(
+            "expected ValidationMismatch, got {:?}",
+            first_failure(&outcome)
+        );
+    };
+    assert!(
+        detail.contains("method post"),
+        "the mismatch must name the method filter: {detail}"
+    );
+    assert!(
+        detail.contains("path /orders"),
+        "the mismatch must name the path filter: {detail}"
+    );
+    assert!(
+        detail.contains("expected 2, actual 1"),
+        "the mismatch must name both counts: {detail}"
+    );
+}
+
+/// The polled snapshot settles: one arrival lands before the run, two
+/// more at 300 ms while the validate polls, and the count reaches its
+/// expectation long before the 5 s deadline — the pass comes from a
+/// poll seeing the settle, not from waiting the deadline out.
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn poll_passes_once_count_settles() {
+    let partner = HttpPartner::start_permissive(200)
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let authority = partner.bound_addr().to_string();
+    // One arrival before the run: every early snapshot reads 1, below
+    // the expectation, so the validate must keep polling.
+    raw_request(&authority, "POST", "/orders").await;
+    let router = orders_router(partner);
+    let settling = tokio::spawn({
+        let authority = authority.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            raw_request(&authority, "POST", "/orders").await;
+            raw_request(&authority, "POST", "/orders").await;
+        }
+    });
+    let doc = doc_with(vec![partner_validate(
+        3,
+        None,
+        None,
+        Some(Duration::from_secs(5)),
+    )]);
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    settling.await.expect("the settling task must finish");
+
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the polled count must settle to 3: {outcome:?}"
+    );
+}
+
+/// A count above the expectation never passes: arrivals only add, so
+/// every polled snapshot and the final one read 4 against an
+/// expectation of 3.
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn overshoot_never_passes() {
+    let partner = HttpPartner::start_permissive(200)
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let authority = partner.bound_addr().to_string();
+    for _ in 0..4 {
+        raw_request(&authority, "POST", "/orders").await;
+    }
+    let router = orders_router(partner);
+    let doc = doc_with(vec![partner_validate(
+        3,
+        None,
+        None,
+        Some(Duration::from_secs(1)),
+    )]);
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+
+    assert_eq!(
+        outcome.verdict, None,
+        "a count above the expectation must never pass: {outcome:?}"
+    );
+    let ScenarioFailure::ValidationMismatch { detail, .. } = first_failure(&outcome) else {
+        panic!(
+            "expected ValidationMismatch, got {:?}",
+            first_failure(&outcome)
+        );
+    };
+    assert!(
+        detail.contains("expected 3, actual 4"),
+        "the mismatch must name the final counts: {detail}"
+    );
+}
+
+/// Deadline expiry reports the final snapshot's count as the actual:
+/// one arrival, an expectation of 3, and after the 1 s deadline the
+/// failure names actual 1.
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn deadline_expiry_reports_final_actual() {
+    let partner = HttpPartner::start_permissive(200)
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let authority = partner.bound_addr().to_string();
+    raw_request(&authority, "POST", "/orders").await;
+    let router = orders_router(partner);
+    let doc = doc_with(vec![partner_validate(
+        3,
+        None,
+        None,
+        Some(Duration::from_secs(1)),
+    )]);
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+
+    assert_eq!(outcome.verdict, None, "the count must never reach 3");
+    let ScenarioFailure::ValidationMismatch { detail, .. } = first_failure(&outcome) else {
+        panic!(
+            "expected ValidationMismatch, got {:?}",
+            first_failure(&outcome)
+        );
+    };
+    assert!(
+        detail.contains("actual 1"),
+        "the mismatch must report the final snapshot's count: {detail}"
     );
 }
