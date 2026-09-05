@@ -8,6 +8,9 @@ name: fuzz-smoke
 # `PASS/FAIL <name>` lines to $RUNNER_TEMP/findings.md and end with
 # `exit 0`; only the summary step (if: always()) exits non-zero, which
 # job-level continue-on-error renders as an annotation, not a red X.
+# On findings, the summary also renders per-leg panic excerpts (the WHY)
+# and an upload step preserves findings + logs + crash inputs as a
+# workflow artifact — evidence collection, not gating.
 
 on:
   pull_request:
@@ -160,7 +163,7 @@ jobs:
           if [ -z "$detail" ]; then
             echo "PASS refusal-drill" >> "$RUNNER_TEMP/findings.md"
           else
-            echo "FAIL refusal-drill $detail" >> "$RUNNER_TEMP/findings.md"
+            echo "FAIL refusal-drill ${detail%; }" >> "$RUNNER_TEMP/findings.md"
           fi
           exit 0
 
@@ -222,7 +225,7 @@ jobs:
           if [ -z "$detail" ]; then
             echo "PASS smoke" >> "$RUNNER_TEMP/findings.md"
           else
-            echo "FAIL smoke $detail" >> "$RUNNER_TEMP/findings.md"
+            echo "FAIL smoke ${detail%; }" >> "$RUNNER_TEMP/findings.md"
           fi
           exit 0
 
@@ -276,7 +279,7 @@ jobs:
           if [ -z "$detail" ]; then
             echo "PASS tmin-drill" >> "$RUNNER_TEMP/findings.md"
           else
-            echo "FAIL tmin-drill $detail" >> "$RUNNER_TEMP/findings.md"
+            echo "FAIL tmin-drill ${detail%; }" >> "$RUNNER_TEMP/findings.md"
           fi
           exit 0
 
@@ -301,7 +304,7 @@ jobs:
           if [ -z "$detail" ]; then
             echo "PASS fuzz-lock-audit" >> "$RUNNER_TEMP/findings.md"
           else
-            echo "FAIL fuzz-lock-audit $detail" >> "$RUNNER_TEMP/findings.md"
+            echo "FAIL fuzz-lock-audit ${detail%; }" >> "$RUNNER_TEMP/findings.md"
           fi
           exit 0
 
@@ -322,16 +325,20 @@ jobs:
             fi
           done
           if [ -n "$missing" ]; then
+            echo "has_findings=true" >> "$GITHUB_OUTPUT"
             {
               echo "## fuzz-smoke: infrastructure failure"
               echo ""
               echo "infrastructure failure — checks skipped:$missing"
+              echo ""
+              echo "Partial evidence (if any) is uploaded as workflow artifact \`fuzz-smoke-findings-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}\`."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "infrastructure failure — checks skipped:$missing"
             exit 1
           fi
           failing=$(grep "^FAIL" "$findings" || true)
           if [ -n "$failing" ]; then
+            echo "has_findings=true" >> "$GITHUB_OUTPUT"
             {
               echo "## fuzz-smoke: drill findings"
               echo ""
@@ -341,6 +348,21 @@ jobs:
               echo "$failing"
               echo '```'
               echo ""
+              echo "### Panic excerpts (why the legs failed)"
+              echo ""
+              echo "First panic lines per crashing leg, deduplicated — full context in the evidence bundle."
+              echo ""
+              for leg in $FUZZ_LEGS; do
+                log="$RUNNER_TEMP/fuzz-wt/smoke-$leg.log"
+                if [ -f "$log" ] && grep -qE 'panicked at|parity divergence|assertion' "$log"; then
+                  echo "#### $leg"
+                  echo ""
+                  echo '```'
+                  grep -E 'panicked at|parity divergence|assertion' "$log" | sort -u | head -8
+                  echo '```'
+                  echo ""
+                fi
+              done
               echo "### Artifact paths"
               echo ""
               for leg in $FUZZ_LEGS; do
@@ -357,6 +379,10 @@ jobs:
                   echo ""
                 fi
               done
+              echo "### Evidence bundle"
+              echo ""
+              echo "Findings, every log (smoke per leg, tmin, audit, refusal), and all crash inputs are uploaded as workflow artifact \`fuzz-smoke-findings-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}\` (7-day retention). Runner paths above do not outlive this job — download the bundle instead."
+              echo ""
               echo "### Promotion instruction"
               echo ""
               echo "Promote a minimized input as a committed \`#[test]\` in \`crates/camel-dsl\` — never a raw corpus blob."
@@ -379,3 +405,23 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit 0
+
+      - id: upload-findings
+        name: Upload findings evidence bundle (collection, not gating)
+        # Runs only when the summary step recorded findings; always() is
+        # required because the summary step exits non-zero by design.
+        if: always() && steps.summary.outputs.has_findings == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # run_attempt in the name: re-run attempts share run_number but
+          # artifact names are unique per run in v4+ — a collision would
+          # fail the attempt-2 upload silently (r_glm review).
+          name: fuzz-smoke-findings-${{ github.run_number }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/findings.md
+            ${{ runner.temp }}/fuzz-smoke-state/
+            ${{ runner.temp }}/fuzz-wt/smoke-*.log
+            ${{ runner.temp }}/fuzz-wt/tmin.log
+            ${{ runner.temp }}/fuzz-wt/target-fuzz/artifacts/
