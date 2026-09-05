@@ -45,6 +45,23 @@ The public structs are test helpers, not contract enums that external implementa
 
 ## Architecture notes
 
+### `start()` returns only when consumers are ready
+
+`CamelTestContext::start()` awaits the context start, and every inbound
+consumer opts into `ConsumerStartupMode::Explicit` (bd rc-w1u9): the
+consumer binds its listener and registers its routes before it reports
+ready. When `start()` returns, listeners accept connections and routes
+are matchable. Tests MUST NOT sleep after `start()` to "give the server
+time" — such a sleep hides a real regression if a component ever returns
+`Immediate`.
+
+To wait for async effects, poll a condition with
+`tests/support/wait.rs::wait_until`. A `sleep` is valid only to simulate
+work inside a processor closure, never to wait for system state. For
+listening ports, use `tests/support::stage_http_listener` (binds `:0` and
+stages the socket with the component registry) instead of hard-coded
+ports.
+
 ### Drop guard uses best-effort shutdown
 
 `TestGuard::drop()` blocks for cleanup on a Tokio multi-thread Runtime. On a current-thread Runtime,

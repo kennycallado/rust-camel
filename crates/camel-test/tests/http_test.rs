@@ -54,9 +54,6 @@ async fn http_consumer_lifecycle_start_stop_cleanup() {
     h.add_route(route).await.unwrap();
     h.start().await;
 
-    // Give the server time to bind
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     // Verify the server is listening
     let client = reqwest::Client::new();
     let resp = client

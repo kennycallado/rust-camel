@@ -6,6 +6,8 @@
 //! All assertions use the `MockComponent` shared registry instead of manual
 //! capture closures.
 
+mod support;
+
 use camel_api::Value;
 use camel_api::aggregator::AggregatorConfig;
 use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
@@ -14,6 +16,7 @@ use camel_component_file::FileComponent;
 use camel_component_http::HttpComponent;
 use camel_component_log::LogComponent;
 use camel_test::CamelTestContext;
+use support::wait::wait_until;
 
 // ---------------------------------------------------------------------------
 // Test 1: Timer → Mock (verify exchanges received)
@@ -2627,9 +2630,6 @@ async fn http_concurrent_pipeline() {
     h.add_route(route).await.unwrap();
     h.start().await;
 
-    // Give server time to start
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
     // Fire 5 requests concurrently
     let client = reqwest::Client::new();
     let mut handles = Vec::new();
@@ -2840,9 +2840,6 @@ async fn http_concurrent_with_circuit_breaker() {
     h.add_route(route).await.unwrap();
     h.start().await;
 
-    // Give server time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     // Send 5 requests concurrently
     let client = reqwest::Client::new();
     let mut handles = Vec::new();
@@ -2914,11 +2911,21 @@ async fn http_concurrent_shutdown_drains_inflight() {
         .build()
         .await;
 
+    let in_flight = Arc::new(AtomicU32::new(0));
     let route = RouteBuilder::from("http://127.0.0.1:18084/shutdown-test")
         .route_id("test-route-42")
-        .process(|ex| async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            Ok(ex)
+        .process({
+            let in_flight = Arc::clone(&in_flight);
+            move |ex| {
+                let in_flight = Arc::clone(&in_flight);
+                async move {
+                    in_flight.fetch_add(1, Ordering::SeqCst);
+                    // Simulate slow processing so requests are still in flight
+                    // when stop() is called below.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Ok(ex)
+                }
+            }
         })
         .to("mock:shutdown-result")
         .build()
@@ -2926,9 +2933,6 @@ async fn http_concurrent_shutdown_drains_inflight() {
 
     h.add_route(route).await.unwrap();
     h.start().await;
-
-    // Give server time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Send 3 requests concurrently
     let client = reqwest::Client::new();
@@ -2944,8 +2948,16 @@ async fn http_concurrent_shutdown_drains_inflight() {
         }));
     }
 
-    // Wait 50ms (some requests started but not completed)
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait until all 3 requests are inside the processor (observed, not
+    // assumed): stop() must then drain them instead of 404-ing late arrivals.
+    wait_until(
+        "3 requests to enter the processor",
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        || async { Ok(in_flight.load(Ordering::SeqCst) == 3) },
+    )
+    .await
+    .expect("requests should be in flight before stop");
 
     // Stop should wait for in-flight exchanges to drain (default 30s timeout)
     h.stop().await;
@@ -2996,9 +3008,6 @@ async fn http_concurrent_error_propagation() {
 
     h.add_route(route).await.unwrap();
     h.start().await;
-
-    // Give server time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Send 4 requests concurrently: 2 with fail=true, 2 with fail=false
     let client = reqwest::Client::new();

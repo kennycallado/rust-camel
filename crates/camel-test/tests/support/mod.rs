@@ -87,6 +87,7 @@ pub fn bridge_bg_rt() -> &'static tokio::runtime::Handle {
 #[cfg(feature = "integration-tests")]
 use camel_component_api::CamelError;
 
+#[allow(dead_code)] // not every test binary including `support` uses it
 pub fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
     std::sync::Arc::new(camel_component_api::NoOpComponentContext)
 }
