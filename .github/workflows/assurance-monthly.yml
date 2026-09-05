@@ -339,6 +339,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # upload-artifact preserves the least-common ancestor of its
+          # path list (baseline: mutants.out/...; rotating:
+          # mut-wt/target-mutants/...), so NEVER hardcode flat paths —
+          # resolve by filename (post-mortem of run 33984285881 report).
+          OUT_BASE=$(find art-mutants-baseline -name outcomes.json -print -quit)
+          OUT_ROT=$(find art-mutants-rotating -name outcomes.json -print -quit)
+          FUZZF=$(find art-fuzz-deep -name fuzz-findings.txt -print -quit)
+          RATIONALE=$(find art-mutants-rotating -name rotation-rationale.txt -print -quit)
+          # Shared with the infra-check step below.
+          {
+            echo "OUT_BASE=${OUT_BASE:-}"
+            echo "OUT_ROT=${OUT_ROT:-}"
+            echo "FUZZF=${FUZZF:-}"
+          } >> "$GITHUB_ENV"
           STAMP=$(date -u +%Y-%m)
           {
             echo "# assurance-monthly: ${STAMP}"
@@ -357,13 +371,14 @@ jobs:
             echo "## Fuzz deep (target matrix, ${FUZZ_SECS}s each)"
             echo
             echo '```'
-            cat art-fuzz-deep/deep-state/fuzz-findings.txt 2>/dev/null \
+            cat "${FUZZF:-/nonexistent}" 2>/dev/null \
               || echo "(no fuzz findings artifact — infra failure)"
             echo '```'
             echo
-            for name in baseline rotating; do
-              f="art-mutants-${name}/outcomes.json"
-              if [ ! -f "$f" ]; then
+            for pair in "baseline:${OUT_BASE:-}" "rotating:${OUT_ROT:-}"; do
+              name=${pair%%:*}
+              f=${pair#*:}
+              if [ -z "$f" ] || [ ! -f "$f" ]; then
                 echo "## Mutants ${name}: MISSING OUTCOMES (infra failure)"
                 echo
                 continue
@@ -377,9 +392,10 @@ jobs:
               echo "tested=${tested} caught=${caught} missed=${missed} unviable=${unviable}"
               echo
               echo '```'
+              # .name is self-contained ("file:line: mutation") — avoids
+              # null-line duplication from separately joined fields.
               jq -r '.outcomes[] | select(.summary=="MissedMutant")
-                | .scenario.Mutant.file + ":" + (.scenario.Mutant.line|tostring)
-                  + " " + .scenario.Mutant.name' "$f" | sort -u || true
+                | .scenario.Mutant.name' "$f" | sort -u || true
               echo '```'
               echo
             done
@@ -395,7 +411,7 @@ jobs:
             echo "## Rotation"
             echo
             echo '```'
-            cat art-mutants-rotating/rotation-rationale.txt 2>/dev/null || echo "(no rationale)"
+            cat "${RATIONALE:-/nonexistent}" 2>/dev/null || echo "(no rationale)"
             echo '```'
             echo
             echo "Next window: minimal PR editing \`.github/assurance-monthly.json\`"
@@ -404,13 +420,14 @@ jobs:
           } > "$RUNNER_TEMP/issue-body.md"
 
           # Machine-readable survivor set for NEXT month's diff, between
-          # HTML comment markers (robust to markdown renderers).
+          # HTML comment markers (robust to markdown renderers). Same
+          # .name form as the display block so diffs are stable.
           {
             echo "<!--baseline-data-start-->"
-            jq -r '.outcomes[] | select(.summary=="MissedMutant")
-              | .scenario.Mutant.file + ":" + (.scenario.Mutant.line|tostring)
-                + " " + .scenario.Mutant.name' art-mutants-baseline/outcomes.json \
-              | sort -u
+            if [ -n "${OUT_BASE:-}" ] && [ -f "$OUT_BASE" ]; then
+              jq -r '.outcomes[] | select(.summary=="MissedMutant")
+                | .scenario.Mutant.name' "$OUT_BASE" | sort -u
+            fi
             echo "<!--baseline-data-end-->"
           } >> "$RUNNER_TEMP/issue-body.md"
 
@@ -443,10 +460,11 @@ jobs:
         run: |
           # Anti-obstruction: survivors/crashes above never fail the run.
           # Missing artifacts from a failed tool job = infra failure = red.
+          # Paths resolved by filename in the body step (layout lesson).
           ok=1
-          [ -f art-fuzz-deep/deep-state/fuzz-findings.txt ] || ok=0
-          [ -f art-mutants-baseline/outcomes.json ] || ok=0
-          [ -f art-mutants-rotating/outcomes.json ] || ok=0
+          [ -n "${FUZZF:-}" ] && [ -f "$FUZZF" ] || ok=0
+          [ -n "${OUT_BASE:-}" ] && [ -f "$OUT_BASE" ] || ok=0
+          [ -n "${OUT_ROT:-}" ] && [ -f "$OUT_ROT" ] || ok=0
           if [ "$ok" -ne 1 ]; then
             echo "infra failure: at least one tool job produced no evidence (see run summary)"
             exit 1
