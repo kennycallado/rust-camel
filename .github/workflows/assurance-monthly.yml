@@ -181,14 +181,21 @@ jobs:
 
       - id: install-mutants
         if: steps.cache-mutants.outputs.cache-hit != 'true'
-        name: Install cargo-mutants (pinned; wrapper verifies version too)
+        name: Install cargo-mutants (pinned)
         run: |
           cargo install cargo-mutants --locked --version "${CARGO_MUTANTS_VERSION}" \
             --root "$RUNNER_TEMP/cargo-mutants-root"
-          "$RUNNER_TEMP/cargo-mutants-root/bin/cargo-mutants" --version
 
-      - name: cargo-mutants on PATH
-        run: echo "$RUNNER_TEMP/cargo-mutants-root/bin" >> "$GITHUB_PATH"
+      - name: cargo-mutants on PATH + version check
+        run: |
+          echo "$RUNNER_TEMP/cargo-mutants-root/bin" >> "$GITHUB_PATH"
+          # Subcommand binaries misparse standalone `--version` — it lands
+          # in cargo's own usage error (same class as cargo-fuzz; observed
+          # in run 33981853326 and locally). Verify through cargo after
+          # exposing the root on PATH; this also proves subcommand
+          # discovery works for the xtask wrapper's probe.
+          export PATH="$RUNNER_TEMP/cargo-mutants-root/bin:$PATH"
+          cargo mutants --version | grep -q "${CARGO_MUTANTS_VERSION}"
 
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
@@ -266,10 +273,15 @@ jobs:
         run: |
           cargo install cargo-mutants --locked --version "${CARGO_MUTANTS_VERSION}" \
             --root "$RUNNER_TEMP/cargo-mutants-root"
-          "$RUNNER_TEMP/cargo-mutants-root/bin/cargo-mutants" --version
 
-      - name: cargo-mutants on PATH
-        run: echo "$RUNNER_TEMP/cargo-mutants-root/bin" >> "$GITHUB_PATH"
+      - name: cargo-mutants on PATH + version check
+        run: |
+          echo "$RUNNER_TEMP/cargo-mutants-root/bin" >> "$GITHUB_PATH"
+          # Standalone `cargo-mutants --version` misparses (cargo usage
+          # error) — verify via the subcommand form, mirroring the
+          # baseline job (run 33981853326 post-mortem).
+          export PATH="$RUNNER_TEMP/cargo-mutants-root/bin:$PATH"
+          cargo mutants --version | grep -q "${CARGO_MUTANTS_VERSION}"
 
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
