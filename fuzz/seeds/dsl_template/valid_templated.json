@@ -1,0 +1,33 @@
+{
+    "routes": [],
+    "templates": [
+        {
+            "id": "http-route",
+            "parameters": [
+                {
+                    "name": "path",
+                    "default_value": "/api",
+                    "description": "The REST path"
+                }
+            ],
+            "routes": [
+                {
+                    "id": "my-route",
+                    "from": "rest:{{path}}",
+                    "steps": [
+                        {"to": "log:info"}
+                    ]
+                }
+            ]
+        }
+    ],
+    "templated_routes": [
+        {
+            "route_template_ref": "http-route",
+            "route_id": "my-http-route",
+            "parameters": {
+                "path": "/users"
+            }
+        }
+    ]
+}

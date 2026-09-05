@@ -40,10 +40,16 @@ jobs:
   fuzz-smoke:
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 20
+    # Dispatch runs all four legs plus the drills; PRs run only the
+    # selected legs, so the budget scales with the event.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 30 || 20 }}
     steps:
       - id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so leg selection can diff the PR against its
+          # base commit (scripts/fuzz-legs.sh consumes the path list).
+          fetch-depth: 0
 
       - id: cold-baseline
         name: Cold baseline (fresh checkout has no ./target)
@@ -118,6 +124,18 @@ jobs:
           # build is deliberately scratch (design D5).
           cache-targets: false
 
+      - id: select-legs
+        name: Select smoke legs from changed paths
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            legs=$(./scripts/fuzz-legs.sh --dispatch)
+          else
+            git fetch origin "${{ github.event.pull_request.base.sha }}"
+            legs=$(git diff --name-only "${{ github.event.pull_request.base.sha }}"..HEAD \
+              | ./scripts/fuzz-legs.sh)
+          fi
+          echo "FUZZ_LEGS=$legs" >> "$GITHUB_ENV"
+
       - id: refusal
         name: Refusal drill (wrapper refuses the main checkout)
         run: |
@@ -166,24 +184,36 @@ jobs:
             fuzz-asan-nightly-2026-08-27-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.lock') }}-
 
       - id: smoke
-        name: Smoke drill (clean run from the worktree)
+        name: Smoke drill (serial legs from the worktree)
         run: |
           set +e
           cd "$RUNNER_TEMP/fuzz-wt"
-          t0=$(date +%s)
-          CARGO_TARGET_DIR="$RUNNER_TEMP/xtask-build" \
-            cargo run --package xtask -- fuzz dsl_yaml --time "$SMOKE_TIME" > smoke.log 2>&1
-          ec=$?
-          echo "smoke $(( $(date +%s) - t0 ))s" >> "$RUNNER_TEMP/fuzz-smoke-state/durations.txt"
           detail=""
-          if [ "$ec" -ne 0 ]; then
-            detail="exit=$ec (want 0); "
-          fi
-          if ! find target-fuzz/corpus/dsl_yaml -type f 2>/dev/null | grep -q .; then
-            detail="${detail}corpus target-fuzz/corpus/dsl_yaml not populated; "
-          fi
-          if ls target-fuzz/artifacts/dsl_yaml/crash-* >/dev/null 2>&1; then
-            detail="${detail}crash artifact produced; "
+          smoked=0
+          for leg in $FUZZ_LEGS; do
+            smoked=$((smoked + 1))
+            t0=$(date +%s)
+            ec=0
+            CARGO_TARGET_DIR="$RUNNER_TEMP/xtask-build" \
+              cargo run --package xtask -- fuzz "$leg" --time "$SMOKE_TIME" \
+              > "smoke-$leg.log" 2>&1 || ec=$?
+            echo "smoke:$leg $(( $(date +%s) - t0 ))s" >> "$RUNNER_TEMP/fuzz-smoke-state/durations.txt"
+            leg_detail=""
+            if [ "$ec" -ne 0 ]; then
+              leg_detail="exit=$ec (want 0); "
+            fi
+            if ! find "target-fuzz/corpus/$leg" -type f 2>/dev/null | grep -q .; then
+              leg_detail="${leg_detail}corpus target-fuzz/corpus/$leg not populated; "
+            fi
+            if ls "target-fuzz/artifacts/$leg"/crash-* >/dev/null 2>&1; then
+              leg_detail="${leg_detail}crash artifact produced; "
+            fi
+            if [ -n "$leg_detail" ]; then
+              detail="${detail}$leg: $leg_detail"
+            fi
+          done
+          if [ "$smoked" -eq 0 ]; then
+            detail="no legs selected (FUZZ_LEGS empty); "
           fi
           cd "$GITHUB_WORKSPACE"
           if [ -d ./target ]; then
@@ -203,13 +233,13 @@ jobs:
           cd "$RUNNER_TEMP/fuzz-wt"
           # Panic injection touches the WORKTREE copy only; the worktree is
           # discarded after the job, so it can never reach any ref.
-          sed -i 's|camel_fuzz::dsl_yaml_harness(data);|panic!("fuzz-smoke drill"); camel_fuzz::dsl_yaml_harness(data);|' \
-            "$RUNNER_TEMP/fuzz-wt/fuzz/fuzz_targets/dsl_yaml.rs"
+          sed -i 's|camel_fuzz::dsl_json_harness(data);|panic!("fuzz-smoke drill"); camel_fuzz::dsl_json_harness(data);|' \
+            "$RUNNER_TEMP/fuzz-wt/fuzz/fuzz_targets/dsl_json.rs"
           t0=$(date +%s)
           # 20 s is intentionally fixed and independent of inputs.time:
           # the drill wants a short bounded budget, not a long minimization.
           CARGO_TARGET_DIR="$RUNNER_TEMP/xtask-build" \
-            cargo run --package xtask -- fuzz dsl_yaml --time 20 > tmin.log 2>&1
+            cargo run --package xtask -- fuzz dsl_json --time 20 > tmin.log 2>&1
           ec=$?
           echo "tmin-drill $(( $(date +%s) - t0 ))s" >> "$RUNNER_TEMP/fuzz-smoke-state/durations.txt"
           detail=""
@@ -225,7 +255,7 @@ jobs:
           # (crash-da39a3ee... is SHA1 of 0 bytes); `tmin -minimize_crash`
           # writes no minimized-from-* for a 0-byte input — the wrapper
           # reports the original as already minimal instead.
-          if ! find "$RUNNER_TEMP/fuzz-wt/target-fuzz/artifacts/dsl_yaml" \
+          if ! find "$RUNNER_TEMP/fuzz-wt/target-fuzz/artifacts/dsl_json" \
             -maxdepth 1 -type f -name 'minimized-from-*' 2>/dev/null | grep -q . \
             && ! grep -qF 'already minimal' tmin.log; then
             detail="${detail}no minimized-from-* artifact and no already-minimal marker; "
@@ -313,12 +343,20 @@ jobs:
               echo ""
               echo "### Artifact paths"
               echo ""
-              echo "Under the worktree: \`target-fuzz/artifacts/dsl_yaml/\`"
-              echo ""
-              echo '```'
-              ls "$RUNNER_TEMP/fuzz-wt/target-fuzz/artifacts/dsl_yaml" 2>/dev/null || echo "(none)"
-              echo '```'
-              echo ""
+              for leg in $FUZZ_LEGS; do
+                if find "$RUNNER_TEMP/fuzz-wt/target-fuzz/artifacts/$leg" \
+                  -maxdepth 1 -type f 2>/dev/null | grep -q .; then
+                  echo "Under the worktree: \`target-fuzz/artifacts/$leg/\`"
+                  if [ "$leg" = "dsl_json" ]; then
+                    echo "Note: crash-da39a3ee5e6b4b0d3255bfef95601890afd80709 is the tmin drill's known empty-input artifact (injected panic), not a product crash."
+                  fi
+                  echo ""
+                  echo '```'
+                  ls "$RUNNER_TEMP/fuzz-wt/target-fuzz/artifacts/$leg" 2>/dev/null || echo "(none)"
+                  echo '```'
+                  echo ""
+                fi
+              done
               echo "### Promotion instruction"
               echo ""
               echo "Promote a minimized input as a committed \`#[test]\` in \`crates/camel-dsl\` — never a raw corpus blob."

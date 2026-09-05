@@ -1,0 +1,40 @@
+{
+    "routes": [],
+    "templates": [
+        {
+            "id": "multi-param-tpl",
+            "parameters": [
+                {"name": "host"},
+                {"name": "port"},
+                {"name": "path"}
+            ],
+            "routes": [
+                {
+                    "id": "multi-param-route",
+                    "from": "http:{{host}}:{{port}}/{{path}}",
+                    "steps": [
+                        {
+                            "set_header": {
+                                "key": "X-Host",
+                                "value": "{{host}}"
+                            }
+                        },
+                        {
+                            "to": "log:{{path}}"
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "templated_routes": [
+        {
+            "route_template_ref": "multi-param-tpl",
+            "parameters": {
+                "host": "example.com",
+                "port": "8080",
+                "path": "api"
+            }
+        }
+    ]
+}

@@ -11,9 +11,29 @@ cargo-fuzz = true
 camel-dsl = { path = "../crates/camel-dsl" }
 camel-api = { path = "../crates/camel-api" }
 libfuzzer-sys = "0.4"
+serde_json = "1"
+noyalib = { version = "0.0.29", features = ["compat-serde-yaml"] }
 
 [[bin]]
 name = "dsl_yaml"
 path = "fuzz_targets/dsl_yaml.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "dsl_json"
+path = "fuzz_targets/dsl_json.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "dsl_template"
+path = "fuzz_targets/dsl_template.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "dsl_parity"
+path = "fuzz_targets/dsl_parity.rs"
 test = false
 doc = false
