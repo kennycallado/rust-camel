@@ -148,7 +148,10 @@ Wraps an `OutcomeSegment` — a structural EIP sub-pipeline (Filter, Choice, Loo
 ## Inline dispatch capability publication
 
 At consumer start and resume (route_controller_trait), for non-Concurrent
-route shapes, the controller publishes an `InlineRouteDispatcher`
+route shapes EXCEPT top-level aggregate splits (rc-2sba: a split route's
+`managed.pipeline` is an identity shell over `compose_pipeline(vec![])` and
+must never be inline-executed — aggregate entries stay channel-dispatched),
+the controller publishes an `InlineRouteDispatcher`
 (`lifecycle/adapters/inline_dispatcher.rs`) onto the fresh `ConsumerContext`:
 the live `SharedPipeline` swap source, a child of the pipeline cancellation
 token, the shared drain counter, and the cohort gate. Sequential dispatch

@@ -673,12 +673,17 @@ async fn concurrent_consumer_gets_no_capability() {
 }
 
 #[tokio::test]
-async fn aggregate_route_gets_capability() {
+async fn aggregate_route_never_publishes_capability() {
     let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut controller = probe_controller(Arc::clone(&captured));
 
+    // force_completion_on_stop(true) is what materializes the aggregate
+    // split (find_top_level_aggregate_requiring_split requires a timeout
+    // or force-completion) — complete_when_size(10) alone compiles a
+    // plain pipeline and never exercises the split topology.
     let agg_config = camel_api::AggregatorConfig::correlate_by("key")
         .complete_when_size(10)
+        .force_completion_on_stop(true)
         .build()
         .unwrap();
 
@@ -697,15 +702,76 @@ async fn aggregate_route_gets_capability() {
     controller.add_route(route).await.unwrap();
     controller.start_route("rt-probe-agg").await.unwrap();
 
-    // The aggregator-v2 branch early-returns from start_route AFTER the
-    // publication site — the captured context must carry the capability.
+    // rc-2sba: a split route's `managed.pipeline` is an identity shell
+    // (`compose_pipeline(vec![])`) and must never be exposed to inline
+    // execution — no capability is published, so producers take the
+    // channel path where the aggregate engine drives the split
+    // pre/agg/post pipelines.
     let ctx = await_captured(&captured).await;
     assert!(
-        ctx.inline_dispatcher().is_some(),
-        "aggregate routes take the early-return branch after publication"
+        ctx.inline_dispatcher().is_none(),
+        "aggregate-split routes must never publish the inline dispatcher"
     );
 
     controller.stop_route("rt-probe-agg").await.unwrap();
+}
+
+#[tokio::test]
+async fn aggregate_route_resume_never_publishes_capability() {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut controller = probe_controller(Arc::clone(&captured));
+
+    // Timeout-based split fixture: materializes the aggregate split like
+    // force_completion_on_stop does, but keeps the pipeline plane alive
+    // across suspend — a force-completion split tears the pipeline down
+    // when the consumer exits (the aggregate force-completion monitor
+    // cancels it), so the route reaches Stopped, not Suspended, and
+    // resume_route would reject it. The guard under test only reads
+    // `aggregate_split.is_some()`, which both fixtures set.
+    let agg_config = camel_api::AggregatorConfig::correlate_by("key")
+        .complete_on_timeout(Duration::from_secs(600))
+        .build()
+        .unwrap();
+
+    let route = RouteDefinition::new(
+        "probe:src",
+        vec![
+            BuilderStep::DeclarativeSetHeader {
+                key: "key".into(),
+                value: camel_api::ValueSourceDef::Literal(Value::String("k1".into())),
+            },
+            BuilderStep::Aggregate { config: agg_config },
+            BuilderStep::To("probe:sink".into()),
+        ],
+    )
+    .with_route_id("rt-probe-agg-resume");
+    controller.add_route(route).await.unwrap();
+    controller.start_route("rt-probe-agg-resume").await.unwrap();
+
+    let ctx1 = await_nth_capture(&captured, 0).await;
+    assert!(
+        ctx1.inline_dispatcher().is_none(),
+        "aggregate-split routes must never publish the inline dispatcher"
+    );
+
+    // The resume publication site mirrors start — the split topology
+    // must stay channel-dispatched across the suspend/resume window too.
+    controller
+        .suspend_route("rt-probe-agg-resume")
+        .await
+        .unwrap();
+    controller
+        .resume_route("rt-probe-agg-resume")
+        .await
+        .unwrap();
+
+    let ctx2 = await_nth_capture(&captured, 1).await;
+    assert!(
+        ctx2.inline_dispatcher().is_none(),
+        "resumed aggregate-split routes must not republish the capability"
+    );
+
+    controller.stop_route("rt-probe-agg-resume").await.unwrap();
 }
 
 // ------------------------------------------------------------------

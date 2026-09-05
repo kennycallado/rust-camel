@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use camel_api::{CamelError, Exchange, Lifecycle, Message, MetricsCollector};
+use camel_api::{CamelError, Exchange, Lifecycle, Message, MetricsCollector, RuntimeCommand};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::{NoOpComponentContext, RuntimeObservability};
 use camel_component_direct::DirectComponent;
@@ -215,6 +215,21 @@ async fn drive_exchange(
     ctx: &CamelContext,
     retry_window: Duration,
 ) -> Result<Exchange, CamelError> {
+    drive_exchange_to(ctx, "direct:entry", retry_window).await
+}
+
+/// Drive one InOut exchange through the given `direct:<name>` entry via a
+/// fresh direct producer. `retry_window` of `Duration::ZERO` means
+/// SINGLE-SHOT: the first Err returns immediately, so exactly-once
+/// assertions count real dispatch invocations, not retry artifacts
+/// (the default failing-exchange driver retries every Err for a second,
+/// which would yield dozens of b′ emissions and make exactly-once
+/// unassertable).
+async fn drive_exchange_to(
+    ctx: &CamelContext,
+    endpoint: &str,
+    retry_window: Duration,
+) -> Result<Exchange, CamelError> {
     let deadline = tokio::time::Instant::now() + retry_window;
     loop {
         let producer = {
@@ -224,7 +239,7 @@ async fn drive_exchange(
                 .get("direct")
                 .expect("direct component not registered");
             let endpoint = component
-                .create_endpoint("direct:entry", ctx)
+                .create_endpoint(endpoint, ctx)
                 .expect("failed to create direct endpoint");
             endpoint
                 .create_producer(test_rt(), &producer_ctx)
@@ -442,6 +457,298 @@ async fn late_registration_after_routes_observed() {
     // component path: the direct consumer's error increment through the
     // runtime handle the context threaded into the controller.
     wait_for_calls(&collector, &["increment_errors:"]).await;
+
+    ctx.stop().await.expect("context stops");
+}
+
+// ---------------------------------------------------------------------------
+// b′ failure-signal contract for direct dispatches (direct-inline-fixes
+// Fix B, rc-y5nn): every unhandled direct-dispatch failure emits
+// `increment_errors` exactly once per failing dispatch invocation through
+// the producer's context-threaded handle. Unhandled covers the initial
+// registry lookup failure, admission failure, in-pipeline errors, and the
+// dispatch timeout; `ConsumerStopping` surrenders emit nothing. All
+// exactly-once cases drive SINGLE-SHOT (`Duration::ZERO` retry window)
+// after `wait_for_started` so retries cannot multiply emissions.
+// ---------------------------------------------------------------------------
+
+/// The recording lifecycle is registered BEFORE `start()` compiles routes,
+/// so the producer's controller-threaded `self.runtime.metrics()` reaches
+/// the collector even though the producing route's pipeline tracing is
+/// unwired (no observability config → tracer pipeline stays off).
+async fn unwired_context_with_collector(toml: &str) -> (CamelContext, Arc<RecordingCollector>) {
+    let mut ctx = context_from_toml(toml).await;
+    let collector = RecordingCollector::new();
+    ctx = ctx.with_lifecycle(RecordingLifecycle {
+        collector: Arc::clone(&collector),
+    });
+    (ctx, collector)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_lookup_failure_emits_b_prime_once() {
+    let (mut ctx, collector) = unwired_context_with_collector("").await;
+    let route = RouteBuilder::from("direct:entry2")
+        .route_id("entry2")
+        .to("direct:missing2?failIfNoConsumers=false")
+        .build()
+        .expect("producing route builds");
+    ctx.add_route_definition(route)
+        .await
+        .expect("producing route registers");
+    ctx.start().await.expect("context starts");
+    wait_for_started(&ctx, &["entry2"]).await;
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_exchange_to(&ctx, "direct:entry2", Duration::ZERO),
+    )
+    .await
+    .expect("single-shot exchange completes within 5s");
+    assert!(
+        outcome.is_err(),
+        "dispatch to direct:missing2 must fail at registry lookup"
+    );
+
+    // The no-entry failure emits through the endpoint-derived attribution
+    // `direct:missing2` — distinguishing the component signal from the
+    // producing route's traced wrapper.
+    let calls = collector.snapshot();
+    let component = calls
+        .iter()
+        .filter(|c| **c == "increment_errors:direct:missing2")
+        .count();
+    assert_eq!(
+        component, 1,
+        "lookup failure must emit exactly one component b′ signal; got {calls:?}"
+    );
+
+    ctx.stop().await.expect("context stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_pipeline_error_emits_b_prime_once() {
+    let (mut ctx, collector) = unwired_context_with_collector("").await;
+    let boom = RouteBuilder::from("direct:boom")
+        .route_id("boom")
+        .process(|_| async {
+            Err::<Exchange, CamelError>(CamelError::ProcessorError("bench boom".into()))
+        })
+        .build()
+        .expect("failing consumer route builds");
+    ctx.add_route_definition(boom)
+        .await
+        .expect("failing consumer route registers");
+    let entry = RouteBuilder::from("direct:entry3")
+        .route_id("entry3")
+        .to("direct:boom")
+        .build()
+        .expect("producing route builds");
+    ctx.add_route_definition(entry)
+        .await
+        .expect("producing route registers");
+    ctx.start().await.expect("context starts");
+    wait_for_started(&ctx, &["boom", "entry3"]).await;
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_exchange_to(&ctx, "direct:entry3", Duration::ZERO),
+    )
+    .await
+    .expect("single-shot exchange completes within 5s");
+    assert!(
+        matches!(outcome, Err(CamelError::ProcessorError(_))),
+        "dispatch to direct:boom must surface the unhandled pipeline error"
+    );
+
+    // Entry-present failures attribute to the consumer entry's route id.
+    let calls = collector.snapshot();
+    let component = calls
+        .iter()
+        .filter(|c| **c == "increment_errors:boom")
+        .count();
+    assert_eq!(
+        component, 1,
+        "in-pipeline error must emit exactly one b′ signal; got {calls:?}"
+    );
+
+    ctx.stop().await.expect("context stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_timeout_error_emits_b_prime_once() {
+    let (mut ctx, collector) = unwired_context_with_collector("").await;
+    let slow = RouteBuilder::from("direct:slow")
+        .route_id("slow")
+        .process(|ex| async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(ex)
+        })
+        .build()
+        .expect("slow consumer route builds");
+    ctx.add_route_definition(slow)
+        .await
+        .expect("slow consumer route registers");
+    // timeout_ms is the snake_case URI param DirectConfig::from_uri reads;
+    // the single timed section (lookup + admission + execution) expires at
+    // 1ms while the consumer pipeline sleeps for 50ms.
+    let entry = RouteBuilder::from("direct:entry4")
+        .route_id("entry4")
+        .to("direct:slow?timeout_ms=1")
+        .build()
+        .expect("producing route builds");
+    ctx.add_route_definition(entry)
+        .await
+        .expect("producing route registers");
+    ctx.start().await.expect("context starts");
+    wait_for_started(&ctx, &["slow", "entry4"]).await;
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_exchange_to(&ctx, "direct:entry4", Duration::ZERO),
+    )
+    .await
+    .expect("single-shot exchange completes within 5s");
+    assert!(
+        outcome
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.to_string().contains("timed out")),
+        "dispatch to direct:slow must fail with the dispatch timeout, got {outcome:?}"
+    );
+
+    // The timeout branch (outer timeout wrapper — tokio drops the inner
+    // future, so the inner emission site never ran) emits through the same
+    // handle with the endpoint-derived attribution.
+    let calls = collector.snapshot();
+    let component = calls
+        .iter()
+        .filter(|c| **c == "increment_errors:direct:slow")
+        .count();
+    assert_eq!(
+        component, 1,
+        "timeout failure must emit exactly one b′ signal; got {calls:?}"
+    );
+
+    ctx.stop().await.expect("context stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_consumer_stopping_no_emit() {
+    let (mut ctx, collector) = unwired_context_with_collector("").await;
+    // Stop-race shape (mirrors camel-core inline_dispatcher_tests.rs
+    // `inline_consumer_stop_yields_consumer_stopping`): an inline dispatch
+    // parks inside the target consumer's pipeline, the target route stops
+    // mid-flight, and the dispatch fails with the ConsumerStopping
+    // surrender. The drain grace (~5s) elapses before the pipeline token
+    // cancels, so the surrender surfaces only after the stop's grace.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let probe = Arc::clone(&entered);
+    let target = RouteBuilder::from("direct:target5")
+        .route_id("target5")
+        .process(move |ex| {
+            let entered = Arc::clone(&probe);
+            async move {
+                entered.notify_one();
+                std::future::pending::<()>().await;
+                Ok(ex)
+            }
+        })
+        .build()
+        .expect("parking consumer route builds");
+    ctx.add_route_definition(target)
+        .await
+        .expect("parking consumer route registers");
+    let entry = RouteBuilder::from("direct:entry5")
+        .route_id("entry5")
+        .to("direct:target5")
+        .build()
+        .expect("producing route builds");
+    ctx.add_route_definition(entry)
+        .await
+        .expect("producing route registers");
+    ctx.start().await.expect("context starts");
+    wait_for_started(&ctx, &["target5", "entry5"]).await;
+
+    let runtime = ctx.runtime();
+    let stopper = async move {
+        entered.notified().await;
+        runtime
+            .execute(RuntimeCommand::StopRoute {
+                route_id: "target5".to_string(),
+                command_id: "test:stop:target5".to_string(),
+                causation_id: None,
+            })
+            .await
+            .expect("stopping target5 succeeds");
+    };
+    let drive = drive_exchange_to(&ctx, "direct:entry5", Duration::ZERO);
+    let (outcome, _) = tokio::join!(drive, stopper);
+    let err = outcome.expect_err("parked dispatch must fail when the consumer stops");
+    assert!(
+        matches!(err, CamelError::ConsumerStopping),
+        "expected the consumer-stop surrender, got {err:?}"
+    );
+
+    // The surrender is not an operator-visible failure: zero b′ emissions
+    // are attributable to it. The emission (had it fired) would precede
+    // the error surfacing, so the snapshot is final here.
+    let calls = collector.snapshot();
+    assert!(
+        calls.iter().all(|c| !c.starts_with("increment_errors:")),
+        "ConsumerStopping surrender must not emit b′; got {calls:?}"
+    );
+
+    ctx.stop().await.expect("context stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_wired_route_no_double_count() {
+    // Producing route WITH pipeline tracing wired (otel enabled forces the
+    // tracer pipeline on; the recording lifecycle registered post-build
+    // mirrors the real OtelService registration point).
+    let (mut ctx, collector) =
+        unwired_context_with_collector("[observability.otel]\nenabled = true\n").await;
+    let route = RouteBuilder::from("direct:entry6")
+        .route_id("entry6")
+        .to("direct:missing3?failIfNoConsumers=false")
+        .build()
+        .expect("wired producing route builds");
+    ctx.add_route_definition(route)
+        .await
+        .expect("wired producing route registers");
+    ctx.start().await.expect("context starts");
+    wait_for_started(&ctx, &["entry6"]).await;
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_exchange_to(&ctx, "direct:entry6", Duration::ZERO),
+    )
+    .await
+    .expect("single-shot exchange completes within 5s");
+    assert!(
+        outcome.is_err(),
+        "dispatch to direct:missing3 must fail at registry lookup"
+    );
+
+    // The component b′ signal is counted by its endpoint-derived
+    // attribution — exactly once. The traced wrapper's own pipeline-error
+    // recording (attributed to the producing route) is separate, additive
+    // telemetry: it neither suppresses nor duplicates the component signal.
+    let calls = collector.snapshot();
+    let component = calls
+        .iter()
+        .filter(|c| **c == "increment_errors:direct:missing3")
+        .count();
+    assert_eq!(
+        component, 1,
+        "wired route must record the component b′ signal exactly once; got {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c.starts_with("increment_errors:")
+            && c.as_str() != "increment_errors:direct:missing3"),
+        "the traced wrapper's own recording must be present as additive telemetry; got {calls:?}"
+    );
 
     ctx.stop().await.expect("context stops");
 }

@@ -1,6 +1,6 @@
 # camel-direct
 
-Direct component for rust-camel — synchronous, in-memory communication between routes sharing the same CamelContext. When a Producer sends to a `direct:name` endpoint, it blocks until the Consumer registered on the same name finishes processing the Exchange. The Producer submits each Exchange to the consumer route without any per-message channel or oneshot inside camel-direct: when the registered consumer is live and Sequential, the dispatch runs INLINE in the producer's task through the `InlineRouteDispatcher` capability (zero inter-task handoffs, JVM `direct:` parity); every other case (Concurrent consumer, capability unavailable) falls back to the consumer context's `send_and_wait` channel submission.
+Direct component for rust-camel — synchronous, in-memory communication between routes sharing the same CamelContext. When a Producer sends to a `direct:name` endpoint, it blocks until the Consumer registered on the same name finishes processing the Exchange. The Producer submits each Exchange to the consumer route without any per-message channel or oneshot inside camel-direct: when the registered consumer is live and Sequential, the dispatch runs INLINE in the producer's task through the `InlineRouteDispatcher` capability (zero inter-task handoffs, JVM `direct:` parity); every other case (Concurrent consumer, capability unavailable, aggregate-split consumer — its entry pipeline is an identity shell, rc-2sba) falls back to the consumer context's `send_and_wait` channel submission.
 
 ## Language
 
@@ -24,11 +24,19 @@ Per ADR-0012.
 - `b-prime:direct:send-and-wait` identifies the `DirectProducer::call` `Err` branch after
   path selection (inline dispatch or `send_and_wait`). ADR-0012 §Migration scope classifies it as category (b′)
   outside-contract. The normal-data call returned an error, so the route handler did not
-  absorb the failure. This branch owns the ERROR signal. It calls
-  `runtime.metrics().increment_errors(route_id, label)` — with the consumer route's id
-  (from the registry entry's context) as the b′ owner — then logs at `error!` with
-  `// log-policy: outside-contract`. Regression test:
-  `tests::test_send_and_wait_error_increments_errors_metric`.
+  absorb the failure. This branch owns the ERROR signal. Attribution is
+  two-shaped: failures with a live registry entry attribute to the consumer
+  route's id (`ctx.route_id()`, from the entry's context) as the b′ owner;
+  no-entry failures (registry lookup miss) and dispatch-timeout failures
+  (the outer timeout arm — the inner emission site is dropped by tokio on
+  expiry) attribute to the endpoint-derived id `direct:{name}`. Both sites
+  call `runtime.metrics().increment_errors(...)` through the producer's
+  context-threaded handle, log once at `error!` with
+  `// log-policy: outside-contract`, and exclude `ConsumerStopping`
+  (stop-time surrender is not an operator-visible failure). Regression
+  tests: `tests::test_send_and_wait_error_increments_errors_metric` and
+  the `metrics_wiring_test` contract cases (lookup/timeout/stopping/
+  no-double-count).
 
 ## Startup handshake
 

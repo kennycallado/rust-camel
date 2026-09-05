@@ -1451,6 +1451,102 @@ async fn aggregate_force_completion_on_stop_emits_pending_bucket_without_timeout
 }
 
 #[tokio::test]
+async fn direct_entry_aggregate_delivers_single_aggregated_reply() {
+    let mock = Arc::new(camel_component_mock::MockComponent::new());
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    {
+        let mut guard = registry.lock().expect("registry lock");
+        guard.register(Arc::new(camel_component_timer::TimerComponent::new()));
+        guard.register(Arc::new(camel_component_direct::DirectComponent::new()));
+        guard.register(Arc::clone(&mock) as Arc<dyn camel_component_api::Component>);
+    }
+    let mut controller = DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+
+    // Timeout in the completion policy materializes the pre/agg/post split;
+    // natural completion at size 5 delivers without waiting the 2s ceiling.
+    let agg_config = camel_api::AggregatorConfig::correlate_by("key")
+        .complete_on_size_or_timeout(5, Duration::from_secs(2))
+        .build()
+        .unwrap();
+
+    let agg_route = RouteDefinition::new(
+        "direct:agg-in",
+        vec![
+            BuilderStep::Aggregate { config: agg_config },
+            BuilderStep::To("mock:sink".into()),
+        ],
+    )
+    .with_route_id("agg-split");
+    controller.add_route(agg_route).await.unwrap();
+    controller.start_route("agg-split").await.unwrap();
+
+    // Producing route: one timer tick, split into 5 distinct fragments
+    // sharing the correlation header, each dispatched via direct:agg-in.
+    let fragment_bodies: Vec<String> = (0..5).map(|i| format!("frag-{i}")).collect();
+    let split_config =
+        camel_api::splitter::SplitterConfig::new(Arc::new(move |exchange: &Exchange| {
+            Ok(fragment_bodies
+                .iter()
+                .map(|body| {
+                    camel_api::splitter::fragment_exchange(
+                        exchange,
+                        camel_api::Body::Text(body.clone()),
+                    )
+                })
+                .collect())
+        }));
+    let producer_route = RouteDefinition::new(
+        "timer:drive?period=10&repeatCount=1",
+        vec![
+            BuilderStep::DeclarativeSetHeader {
+                key: "key".into(),
+                value: camel_api::ValueSourceDef::Literal(camel_api::Value::String(
+                    "order-1".into(),
+                )),
+            },
+            BuilderStep::Split {
+                config: split_config,
+                steps: vec![BuilderStep::To("direct:agg-in".into())],
+            },
+        ],
+    )
+    .with_route_id("agg-producer");
+    controller.add_route(producer_route).await.unwrap();
+    controller.start_route("agg-producer").await.unwrap();
+    // rc-jxkj: fresh controller → cohort gate closed; open for dispatch.
+    controller.cohort.open();
+
+    let sink = mock.get_endpoint("sink").expect("mock sink endpoint");
+    sink.await_exchanges(1, Duration::from_millis(500)).await;
+    let received = sink.get_received_exchanges().await;
+    assert_eq!(
+        received.len(),
+        1,
+        "expected exactly 1 aggregated reply, got {}",
+        received.len()
+    );
+    let aggregated = match &received[0].input.body {
+        camel_api::Body::Json(serde_json::Value::Array(items)) => items.clone(),
+        other => panic!("expected aggregated JSON array body, got {other:?}"),
+    };
+    assert_eq!(
+        aggregated.len(),
+        5,
+        "aggregated reply should carry all 5 fragments: {aggregated:?}"
+    );
+    for i in 0..5 {
+        let expected = serde_json::json!(format!("frag-{i}"));
+        assert!(
+            aggregated.contains(&expected),
+            "aggregated reply missing body of frag-{i}: {aggregated:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn aggregate_without_force_completion_on_stop_discards_pending_bucket() {
     let mock = Arc::new(camel_component_mock::MockComponent::new());
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));

@@ -27,7 +27,7 @@ use camel_component_api::{
     Component, ComponentMetadata, Consumer, ConsumerContext, ConsumerStartupMode, Endpoint,
     ProducerContext,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 mod inline_guard;
 
@@ -469,60 +469,84 @@ impl Service<Exchange> for DirectProducer {
             // registry lookup, the per-path serialization wait (channel
             // permit or dispatcher admission), and the dispatch itself,
             // so neither path's timeout can drift (inline timeout parity).
-            tokio::time::timeout(timeout, async {
-                let (ctx, dispatcher) = {
+            let timed = tokio::time::timeout(timeout, async {
+                // Registry lookup: a missing entry is an unhandled dispatch
+                // failure like any other — it flows through the same
+                // emission site below instead of `?`-exiting before it
+                // (b′ visibility for the no-consumer case).
+                let looked_up = {
                     let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
-                    let entry = reg.get(&name).ok_or_else(|| {
+                    reg.get(&name)
+                        .map(|entry| (entry.ctx.clone(), entry.dispatcher.clone()))
+                };
+
+                let (result, entry_ctx) = match looked_up {
+                    None => {
                         let err = CamelError::EndpointCreationFailed(format!(
                             "no consumer registered for direct:{name}"
                         ));
-                        // log-policy: handler-owned
-                        // (category a: producer send failure inside the route pipeline)
-                        warn!(endpoint_name = %name, error = %err, "direct send failed");
-                        err
-                    })?;
-                    (entry.ctx.clone(), entry.dispatcher.clone())
+                        // No warn here: the shared emission site below logs
+                        // at error! with the b′ increment for this failure
+                        // (single log per failed dispatch — review finding).
+                        (Err(err), None)
+                    }
+                    Some((ctx, dispatcher)) => {
+                        let result = match dispatcher {
+                            // Inline fast path: run the consumer pipeline on this
+                            // task. The endpoint semaphore is skipped — the
+                            // dispatcher's admission mutex is the single
+                            // serializer for inline dispatches. Cycle/depth guard
+                            // rejection maps straight out; there is no channel
+                            // fallback on guard rejection.
+                            Some(d) => {
+                                let dispatch_future = d.dispatch(exchange);
+                                let guard_name = name.clone();
+                                inline_guard::with_inline_stack(async move {
+                                    // Per-dispatch guard: drops after the dispatch
+                                    // completes, unwinding before the reply.
+                                    let _guard = inline_guard::enter(&guard_name)?;
+                                    dispatch_future.await
+                                })
+                                .await
+                            }
+                            // Channel path (Phase 1 semantics): submit through the
+                            // consumer context under the endpoint's sole permit.
+                            // Covers Concurrent consumers and
+                            // capability-unavailable entries.
+                            None => {
+                                let _permit = semaphore
+                                    .acquire_owned()
+                                    .await
+                                    .map_err(|_| CamelError::ChannelClosed)?;
+                                ctx.send_and_wait(exchange).await
+                            }
+                        };
+                        (result, Some(ctx))
+                    }
                 };
 
-                let result = match dispatcher {
-                    // Inline fast path: run the consumer pipeline on this
-                    // task. The endpoint semaphore is skipped — the
-                    // dispatcher's admission mutex is the single
-                    // serializer for inline dispatches. Cycle/depth guard
-                    // rejection maps straight out; there is no channel
-                    // fallback on guard rejection.
-                    Some(d) => {
-                        let dispatch_future = d.dispatch(exchange);
-                        let guard_name = name.clone();
-                        inline_guard::with_inline_stack(async move {
-                            // Per-dispatch guard: drops after the dispatch
-                            // completes, unwinding before the reply.
-                            let _guard = inline_guard::enter(&guard_name)?;
-                            dispatch_future.await
-                        })
-                        .await
-                    }
-                    // Channel path (Phase 1 semantics): submit through the
-                    // consumer context under the endpoint's sole permit.
-                    // Covers Concurrent consumers and
-                    // capability-unavailable entries.
-                    None => {
-                        let _permit = semaphore
-                            .acquire_owned()
-                            .await
-                            .map_err(|_| CamelError::ChannelClosed)?;
-                        ctx.send_and_wait(exchange).await
-                    }
-                };
-
-                if let Err(ref err) = result {
-                    // (category b′: send_and_wait returned Err on a normal-data send,
-                    // meaning the route handler did NOT absorb the failure —
-                    // see ADR-0012 "b-bridged discriminator". This emitter is the
-                    // only ERROR signal for the unhandled failure; must stay loud.)
+                if let Err(ref err) = result
+                    && !matches!(err, CamelError::ConsumerStopping)
+                {
+                    // (category b′: the dispatch invocation returned Err for a
+                    // normal-data send — lookup failure, admission failure, or
+                    // an in-pipeline error the route handler did NOT absorb —
+                    // see ADR-0012 "b-bridged discriminator". This emitter is
+                    // the only ERROR signal for the unhandled failure; must
+                    // stay loud. ConsumerStopping is a stop-time surrender,
+                    // not an operator-visible failure, and does not emit.
+                    // Attribution: entry-present failures record under the
+                    // consumer entry's route id; the no-entry case has no
+                    // entry context and records under the endpoint-derived id
+                    // `direct:<name>`, distinguishing the component signal
+                    // from the producing route's traced wrapper.)
+                    let attribution = match entry_ctx.as_ref() {
+                        Some(ctx) => ctx.route_id().to_string(),
+                        None => format!("direct:{name}"),
+                    };
                     runtime
                         .metrics()
-                        .increment_errors(ctx.route_id(), "b-prime:direct:send-and-wait");
+                        .increment_errors(&attribution, "b-prime:direct:send-and-wait");
                     // log-policy: outside-contract
                     error!(
                         endpoint_name = %name,
@@ -534,8 +558,30 @@ impl Service<Exchange> for DirectProducer {
                 debug!(endpoint_name = %name, "direct message sent");
                 result
             })
-            .await
-            .map_err(|_| dispatch_timeout_error(&name))?
+            .await;
+
+            match timed {
+                Ok(result) => result,
+                Err(_) => {
+                    // Timeout branch: tokio dropped the inner future on
+                    // expiry, so the emission site above never ran — an
+                    // expired dispatch emitted nothing pre-fix. Emit here
+                    // through the same context-threaded handle (the freshly
+                    // constructed timeout error is never ConsumerStopping).
+                    let err = dispatch_timeout_error(&name);
+                    runtime.metrics().increment_errors(
+                        &format!("direct:{name}"),
+                        "b-prime:direct:send-and-wait",
+                    );
+                    // log-policy: outside-contract
+                    error!(
+                        endpoint_name = %name,
+                        error = %err,
+                        "direct dispatch timed out"
+                    );
+                    Err(err)
+                }
+            }
         })
     }
 }

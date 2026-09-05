@@ -360,13 +360,19 @@ impl camel_api::RouteController for DefaultRouteController {
         // direct-inline-dispatch Task 2.2: publish the inline dispatcher
         // capability for every non-Concurrent topology. Sequential and the
         // `#[non_exhaustive]` wildcard arm (the spawn match below) are
-        // Sequential-equivalent, and aggregate routes reach this site before
-        // their early-return branch — the startup-cohort gate inside
-        // dispatch keeps the consumer-activation barrier coverage true for
-        // the inline topology. Concurrent models keep the capability `None`
-        // (channel path). Published before the consumer spawns, i.e. before
-        // any `mark_ready`, per the set-once contract.
-        if !matches!(effective_concurrency, ConcurrencyModel::Concurrent { .. }) {
+        // Sequential-equivalent; Concurrent models keep the capability
+        // `None` (channel path). Published before the consumer spawns,
+        // i.e. before any `mark_ready`, per the set-once contract.
+        //
+        // rc-2sba publication guard: an aggregate-split route's
+        // `managed.pipeline` is an identity shell (`compose_pipeline(vec![])`
+        // — the real work lives in the split pre/agg/post pipelines driven
+        // by the aggregate engine) and must never be exposed to inline
+        // execution. The capability is skipped entirely, so producers take
+        // the existing capability-unavailable channel path.
+        if !matches!(effective_concurrency, ConcurrencyModel::Concurrent { .. })
+            && managed.aggregate_split.is_none()
+        {
             let dispatcher = RouteInlineDispatcher::new(
                 route_id.to_string(),
                 Arc::clone(&pipeline),
@@ -846,10 +852,18 @@ impl camel_api::RouteController for DefaultRouteController {
         // published before the resumed consumer spawns — a fresh ctx means
         // a fresh OnceLock, so the set-once keep-first contract cannot
         // interfere with the pre-suspend publication.
+        //
+        // rc-2sba publication guard (mirrors start): an aggregate-split
+        // route's `managed.pipeline` is an identity shell
+        // (`compose_pipeline(vec![])`) and must never be exposed to inline
+        // execution — the split pre/agg/post pipelines stay driven by the
+        // aggregate engine over the channel path, so no capability is
+        // published here either.
         if !matches!(
             concurrency_override.unwrap_or(consumer_concurrency),
             ConcurrencyModel::Concurrent { .. }
-        ) {
+        ) && managed.aggregate_split.is_none()
+        {
             let (pipeline, pipeline_cancel, drain_in_flight) = {
                 let managed = self
                     .routes
