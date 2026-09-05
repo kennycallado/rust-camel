@@ -5,6 +5,7 @@ mod lint_context_citations;
 mod lint_gate_forwarding;
 mod lint_metric_labels;
 mod lint_single_source;
+mod mutants;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -173,6 +174,18 @@ enum Commands {
         /// Max total fuzzing time in seconds
         #[arg(long, default_value_t = 60)]
         time: u64,
+    },
+    /// Run cargo-mutants in this worktree only (informational, never a gate)
+    Mutants {
+        /// Mutate only this file (bypasses .cargo/mutants.toml globs)
+        #[arg(long)]
+        file: Option<String>,
+        /// Mutate only code touched by the diff against the merge base
+        #[arg(long)]
+        diff: bool,
+        /// Emit survivor JSON lines on stdout (child output goes to stderr)
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -468,6 +481,14 @@ fn main() {
         Commands::Fuzz { target, time } => {
             let root = workspace_root_or_exit();
             if let Err(msg) = fuzz::run(&root, &target, time) {
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Mutants { file, diff, json } => {
+            let root = workspace_root_or_exit();
+            let args = mutants::MutantsArgs { file, diff, json };
+            if let Err(msg) = mutants::run(&root, &args) {
                 eprintln!("error: {msg}");
                 std::process::exit(1);
             }

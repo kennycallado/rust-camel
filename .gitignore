@@ -1,5 +1,6 @@
 /target
 /target-fuzz/
+/target-mutants/
 /.worktrees
 /pages-artifact/
 docs/*

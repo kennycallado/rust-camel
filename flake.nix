@@ -163,6 +163,11 @@
             # fuzzCargoShim for why it cannot live in this list).
             pkgs.cargo-fuzz
             fuzzNightly
+            # Mutation tooling: cargo-mutants from the locked nixpkgs
+            # (27.1.0) == the version the mutants wrapper pins (schema and
+            # exit codes match). Stable toolchain, no cargo shim needed
+            # (unlike cargo-fuzz above).
+            pkgs.cargo-mutants
           ];
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           LLVM_COV = "${pkgs.llvm}/bin/llvm-cov";

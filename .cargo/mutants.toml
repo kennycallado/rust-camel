@@ -1,0 +1,8 @@
+# Scoped, informational mutation testing (bd rc-eba8, ADR context: audit R1
+# adoption decision). Never a gate, never a threshold — see
+# openspec/changes/mutation-testing-tooling.
+examine_globs = [
+  "crates/camel-api/src/ssrf.rs",
+  "crates/components/camel-mqtt/src/config.rs",
+  "crates/components/camel-jms/src/config.rs",
+]
