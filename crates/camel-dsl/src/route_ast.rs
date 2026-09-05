@@ -119,23 +119,90 @@ where
     deserializer.deserialize_map(StringParametersVisitor)
 }
 
-#[derive(Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
+/// A route document AST.
+///
+/// The document root must be a mapping (JSON object / YAML mapping) per
+/// `schemas/dsl/route-schema.json` (`type: object`). Deserialization
+/// deliberately rejects positional sequences: the derive-generated
+/// `visit_seq` accepted any seq whose elements satisfy the field order
+/// when every field carries a default (e.g. the 2-byte JSON `[]`),
+/// while the YAML front-end rejected the same documents (rc-m5ah).
+#[derive(Clone)]
 pub struct RouteDslRoutes {
     /// Optional JSON Schema URL (ignored by the parser; consumed by SDKs/editors).
-    #[serde(default, skip_serializing, rename = "$schema")]
     pub schema_url: Option<String>,
 
-    #[serde(default)]
     pub routes: Vec<RouteDslRoute>,
-    #[serde(default)]
     pub templates: Vec<RouteDslTemplate>,
-    #[serde(default)]
     pub templated_routes: Vec<RouteDslTemplatedRoute>,
-    #[serde(default)]
     pub rest: Vec<RouteDslRest>,
-    #[serde(default)]
     pub mcp: Vec<RouteDslMcp>,
+}
+
+/// Field-for-field mirror of [`RouteDslRoutes`] carrying the serde field
+/// attributes; the mapping-only enforcement lives in the manual
+/// `Deserialize` impl below.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteDslRoutesMapping {
+    #[serde(default, rename = "$schema")]
+    schema_url: Option<String>,
+
+    #[serde(default)]
+    routes: Vec<RouteDslRoute>,
+    #[serde(default)]
+    templates: Vec<RouteDslTemplate>,
+    #[serde(default)]
+    templated_routes: Vec<RouteDslTemplatedRoute>,
+    #[serde(default)]
+    rest: Vec<RouteDslRest>,
+    #[serde(default)]
+    mcp: Vec<RouteDslMcp>,
+}
+
+impl From<RouteDslRoutesMapping> for RouteDslRoutes {
+    fn from(mapping: RouteDslRoutesMapping) -> Self {
+        Self {
+            schema_url: mapping.schema_url,
+            routes: mapping.routes,
+            templates: mapping.templates,
+            templated_routes: mapping.templated_routes,
+            rest: mapping.rest,
+            mcp: mapping.mcp,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RouteDslRoutes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Accepts mappings only. Sequences, scalars, and `null` fail with
+        /// the visitor's `expecting` message, so both serde front-ends
+        /// reject the same document shapes by construction.
+        struct RouteDslRoutesVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RouteDslRoutesVisitor {
+            type Value = RouteDslRoutes;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a route document mapping (JSON object or YAML mapping)")
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                RouteDslRoutesMapping::deserialize(serde::de::value::MapAccessDeserializer::new(
+                    map,
+                ))
+                .map(Into::into)
+            }
+        }
+
+        deserializer.deserialize_map(RouteDslRoutesVisitor)
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

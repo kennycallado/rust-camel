@@ -778,3 +778,27 @@ routes:
         other => panic!("expected Cache, got {other:?}"),
     }
 }
+
+/// Promoted fuzz regression (rc-m5ah, dsl_parity crash on the 2-byte
+/// input `[]`): the route document root must be a mapping in BOTH
+/// front-ends. Serde's derived `visit_seq` made the JSON front-end
+/// accept positional sequences whenever every field carries a default,
+/// while the YAML front-end rejected them — a parity divergence the
+/// `dsl_parity` harness reports as
+/// `parity divergence: yaml rejects json-valid document`.
+#[test]
+fn seq_shaped_document_rejected_by_both_frontends() {
+    for input in ["[]", "[\"https://example.com/route-schema.json\"]"] {
+        assert!(
+            serde_json::from_str::<RouteDslRoutes>(input).is_err(),
+            "JSON front-end must reject seq-shaped document: {input}"
+        );
+        assert!(
+            serde_yml::from_str::<RouteDslRoutes>(input).is_err(),
+            "YAML front-end must reject seq-shaped document: {input}"
+        );
+    }
+    // Sanity: the empty mapping stays valid in both front-ends.
+    assert!(serde_json::from_str::<RouteDslRoutes>("{}").is_ok());
+    assert!(serde_yml::from_str::<RouteDslRoutes>("{}").is_ok());
+}

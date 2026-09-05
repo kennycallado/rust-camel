@@ -592,6 +592,21 @@ mod tests {
         );
     }
 
+    /// Promoted fuzz regression (rc-m5ah): seq-shaped JSON documents
+    /// (`[]`) must be rejected — a route document is a mapping per
+    /// `schemas/dsl/route-schema.json` (`type: object`), never a
+    /// positional sequence. The YAML front-end already rejects them.
+    #[test]
+    fn test_seq_shaped_document_rejected() {
+        let result = parse_json_to_declarative("[]");
+        assert!(result.is_err(), "JSON front-end must reject `[]`");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid type: sequence"),
+            "expected seq-type rejection, got: {err}"
+        );
+    }
+
     #[test]
     fn json_parse_error_carries_format_prefix() {
         let json = "{ not valid json }}}";
