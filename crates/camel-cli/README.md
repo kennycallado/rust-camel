@@ -264,6 +264,23 @@ are skipped, so a glob matching only test documents yields no routes.
 See [`examples/yaml-dsl/config/mock-demo.test.yaml`](../../examples/yaml-dsl/config/mock-demo.test.yaml)
 for a runnable example paired with its route file.
 
+### Integration tier (`scenario:`)
+
+The same `camel test` command runs integration-tier documents: a
+`scenario:` section drives ordered `send`, `receive`, `sleep`, and
+`validate` actions against harness-provisioned HTTP partners, scripted
+through a `partners:` section with delays, faults, and timed responses.
+The `integration-http` feature is default-on, so the shipped binary runs
+these documents with no extra flags:
+
+```bash
+camel test examples/integration-testing/partner-retry-route.test.yaml
+```
+
+The grammar reference lives in the
+[camel-integration-test README](../camel-integration-test/README.md),
+the book's testing chapter, and `examples/integration-testing/`.
+
 ## Configuration reference
 
 | Key | Type | Default | Description |

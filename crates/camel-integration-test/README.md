@@ -45,9 +45,8 @@ scenario:
 The partner endpoint binds on the harness and injects
 `PARTNER=http://127.0.0.1:<bound>` into the layered environment, so the
 route's `${env:PARTNER}` reaches the local listener. Run the document
-with the CLI; the `http:` partner adapter rides the non-default
-`integration-http` feature (enabled by default in `camel-cli` since
-2026-09-05; the explicit flag remains valid):
+with the CLI; the `http:` partner adapter rides the `integration-http`
+Cargo feature, default-on in `camel-cli` since 2026-09-05:
 
 ```sh
 cargo run -p camel-cli -- test --integration orders.test.yaml
@@ -65,7 +64,7 @@ matches an entry when its method and path match. An entry with no
 `method` or `path` matches any request.
 
 An entry declares exactly one of `response` or `fault: close`. The
-`response` holds optional `status`, `headers`, and `body`. The
+`response` holds optional `status` (100-599), `headers`, and `body`. The
 `fault: close` drops the connection without an HTTP response. The
 request is still recorded before the fault.
 
@@ -110,9 +109,21 @@ reference. A key that matches no wired reference fails load with a
 any partner binds. A typo of a real key, for example `http://127.0.0.1:0/order` for
 `:0/orders`, fails here. It never falls silently to permissive.
 
-## `validate` partner target
+## `validate` targets
 
-A `validate` action with a `partner` target asserts the recorded-request
+A `validate` action asserts against one of three targets, chosen by the
+single key of its `target` map:
+
+- `lastReceived`: the last message a `receive` action collected on that
+  endpoint. The expectation is a subset match, as in the usage example
+  above.
+- `variable`: a scenario variable set by an earlier `extract`. Variable
+  existence is checked at run time. The expectation is a subset match
+  against the variable's value.
+- `partner`: the recorded-request count of a harness partner, described
+  next.
+
+A `partner` target asserts the recorded-request
 count of a harness partner. The expectation holds `count`, an exact
 non-negative integer, plus optional `method` and `path` filters. The
 `method` filter compares ASCII-case-insensitively. The `path` filter
@@ -152,6 +163,12 @@ wire as `${literal}` is written `$${literal}`.
 The `receive` resolves by the interpolated authority. The path and
 query need not match the `send`. A receive declared as
 `http://${PARTNER}/orders` finds the roundtrip a map-form send parked.
+
+## Minimal route source
+
+An integration document may declare `routeFiles: []`. The empty list is
+the minimal route source: no routes boot, and the scenario drives only
+harness partners.
 
 ## Two layers, one name: `PARTNER`
 
