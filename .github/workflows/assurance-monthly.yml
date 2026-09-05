@@ -1,0 +1,441 @@
+name: assurance-monthly
+
+# Monthly deep assurance run (bd rc-2srh, post-epic rc-4g9j cadence decision).
+# Three PARALLEL tool jobs — each owns its own 6h budget with a 330min cap —
+# plus a report job that turns findings into a GitHub Issue. The issue is the
+# durable alarm + generated work order; bd remains the tracker.
+#
+# BINDING anti-obstruction policy (inherited from epic rc-4g9j):
+# - Findings NEVER fail the workflow: survivors/crashes become issue content
+#   and bd triage material, not red X's. Only infrastructure errors (missing
+#   artifacts, config drift, wrapper refusal) may fail a job.
+# - No mutation-score threshold anywhere; kill rates are informational.
+#
+# Rotation: the mutants-rotating job mutates ONE broad-tier file read from
+# .github/assurance-monthly.json. Rotating the window = minimal PR editing
+# that file (versioned history of every window). The issue recommends the
+# next window; it never edits scope silently.
+
+on:
+  schedule:
+    # 5th of each month, 09:00 UTC. GitHub disables schedules after 60 days
+    # of repo inactivity — irrelevant for an active repo, noted for the
+    # archive reader.
+    - cron: "0 9 5 * *"
+  workflow_dispatch:
+    inputs:
+      fuzz_secs:
+        description: seconds per fuzz target (deep run)
+        type: number
+        default: 900
+      rotating_file:
+        description: override the rotating mutants file (path from repo root)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: assurance-monthly
+  # Never cancel a monthly run mid-flight; a queued duplicate is noise.
+  cancel-in-progress: false
+
+env:
+  # Keep in lockstep with fuzz-smoke.yml (rc-p957): same nightly + same
+  # cargo-fuzz so crash repros stay portable across workflows.
+  CARGO_FUZZ_VERSION: "0.13.2"
+  NIGHTLY: nightly-2026-08-27
+  # Pinned by the xtask mutants wrapper (schema + exit codes are 27.x-bound).
+  CARGO_MUTANTS_VERSION: "27.1.0"
+  FUZZ_SECS: ${{ inputs.fuzz_secs || 900 }}
+
+jobs:
+  fuzz-deep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+
+      - id: cache-week
+        name: Weekly cache rotation suffix
+        run: echo "week=$(date -u +%GW%V)" >> "$GITHUB_OUTPUT"
+
+      - id: cache-cargo-fuzz
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Dedicated --root, physically separated from rust-cache's
+          # ~/.cargo domain (rc-md2b, same rationale as fuzz-smoke).
+          path: ${{ runner.temp }}/cargo-fuzz-root
+          key: cargo-fuzz-root-${{ env.CARGO_FUZZ_VERSION }}-${{ runner.os }}
+
+      - id: install-cargo-fuzz
+        if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
+        run: |
+          cargo install cargo-fuzz --locked --version "${CARGO_FUZZ_VERSION}" \
+            --root "$RUNNER_TEMP/cargo-fuzz-root"
+
+      - name: cargo-fuzz on PATH
+        run: echo "$RUNNER_TEMP/cargo-fuzz-root/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          # Registry/git only: a restored ./target would break the cold-check
+          # assertion and the wrapper's worktree isolation model.
+          cache-targets: false
+
+      - name: Select legs (full matrix, like a dispatch smoke)
+        run: |
+          legs=$(./scripts/fuzz-legs.sh --dispatch)
+          echo "FUZZ_LEGS=$legs" >> "$GITHUB_ENV"
+
+      - id: cache-asan
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Same scope/key family as fuzz-smoke (deps/build only, weekly
+          # rotation): a monthly cold ASAN build wastes ~30 runner minutes
+          # this cache recovers for free.
+          path: |
+            ${{ runner.temp }}/fuzz-wt/target-fuzz/x86_64-unknown-linux-gnu/release/deps
+            ${{ runner.temp }}/fuzz-wt/target-fuzz/x86_64-unknown-linux-gnu/release/build
+          key: fuzz-asan-${{ env.NIGHTLY }}-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.lock') }}-w${{ steps.cache-week.outputs.week }}
+          restore-keys: |
+            fuzz-asan-${{ env.NIGHTLY }}-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.lock') }}-
+
+      - name: Linked worktree for instrumented runs
+        run: |
+          mkdir -p "$RUNNER_TEMP/deep-state"
+          : > "$RUNNER_TEMP/deep-state/fuzz-findings.txt"
+          git worktree add "$RUNNER_TEMP/fuzz-wt" HEAD
+
+      - name: Deep fuzz (serial legs from the worktree)
+        run: |
+          set -o pipefail
+          cd "$RUNNER_TEMP/fuzz-wt"
+          for leg in $FUZZ_LEGS; do
+            echo "=== $leg (${FUZZ_SECS}s) ==="
+            ec=0
+            CARGO_TARGET_DIR="$RUNNER_TEMP/xtask-build" \
+              cargo run --package xtask -- fuzz "$leg" --time "$FUZZ_SECS" \
+              > "deep-$leg.log" 2>&1 || ec=$?
+            if [ "$ec" -ne 0 ]; then
+              echo "CRASH-OR-ERROR $leg exit=$ec (see deep-$leg.log excerpt below)" \
+                >> "$RUNNER_TEMP/deep-state/fuzz-findings.txt"
+              grep -E 'panicked at|parity divergence|assertion|minimized artifact' \
+                "deep-$leg.log" | sort -u | head -8 \
+                >> "$RUNNER_TEMP/deep-state/fuzz-findings.txt" || true
+            else
+              echo "CLEAN $leg" >> "$RUNNER_TEMP/deep-state/fuzz-findings.txt"
+            fi
+          done
+          # Findings are issue content, not a job failure (anti-obstruction).
+          exit 0
+
+      - name: Cold-checkout assertion
+        if: always()
+        run: |
+          if [ -d ./target ]; then
+            echo "./target created in checkout" >> "$RUNNER_TEMP/deep-state/fuzz-findings.txt"
+            exit 1
+          fi
+
+      - name: Upload fuzz evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: art-fuzz-deep
+          retention-days: 90
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/deep-state/
+            ${{ runner.temp }}/fuzz-wt/deep-*.log
+            ${{ runner.temp }}/fuzz-wt/target-fuzz/artifacts/
+
+  mutants-baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          # cargo-mutants runs on stable (design D7) — no nightly shim here.
+          toolchain: stable
+
+      - id: cache-week
+        name: Weekly cache rotation suffix
+        run: echo "week=$(date -u +%GW%V)" >> "$GITHUB_OUTPUT"
+
+      - id: cache-mutants
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/cargo-mutants-root
+          key: cargo-mutants-root-${{ env.CARGO_MUTANTS_VERSION }}-${{ runner.os }}
+
+      - id: install-mutants
+        if: steps.cache-mutants.outputs.cache-hit != 'true'
+        name: Install cargo-mutants (pinned; wrapper verifies version too)
+        run: |
+          cargo install cargo-mutants --locked --version "${CARGO_MUTANTS_VERSION}" \
+            --root "$RUNNER_TEMP/cargo-mutants-root"
+          "$RUNNER_TEMP/cargo-mutants-root/bin/cargo-mutants" --version
+
+      - name: cargo-mutants on PATH
+        run: echo "$RUNNER_TEMP/cargo-mutants-root/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          # Registry/git only. The mutants scratch tree (target-mutants/) is
+          # deliberately NOT cached: a multi-GB entry would blow the 10GB
+          # repo cache quota shared with the fuzz ASAN caches, and the 330min
+          # budget already absorbs a cold build.
+          cache-targets: false
+
+      - name: Build xtask (prebuild discipline — Task 3 lesson)
+        run: |
+          git worktree add "$RUNNER_TEMP/mut-wt" HEAD
+          cd "$RUNNER_TEMP/mut-wt"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/xtask-build" cargo build -p xtask
+
+      - name: Baseline run (3-file .cargo/mutants.toml scope)
+        run: |
+          set -o pipefail
+          cd "$RUNNER_TEMP/mut-wt"
+          mkdir -p target-mutants
+          # Wrapper exits 0 regardless of survivors; non-zero means
+          # infra/schema drift and IS a legitimate job failure.
+          "$RUNNER_TEMP/xtask-build/debug/xtask" mutants --json \
+            | tee target-mutants/run.json
+
+      - name: Cold-checkout assertion
+        if: always()
+        run: if [ -d ./target ]; then echo "./target created in checkout"; exit 1; fi
+
+      - name: Upload baseline evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: art-mutants-baseline
+          retention-days: 90
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/mut-wt/target-mutants/mutants.out/outcomes.json
+            ${{ runner.temp }}/mut-wt/target-mutants/run.json
+
+  mutants-rotating:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+
+      - id: cache-week
+        name: Weekly cache rotation suffix
+        run: echo "week=$(date -u +%GW%V)" >> "$GITHUB_OUTPUT"
+
+      - id: pick-file
+        name: Resolve rotating file (input override > versioned json)
+        run: |
+          f="${{ inputs.rotating_file }}"
+          if [ -z "$f" ]; then
+            f=$(jq -r '.mutants_rotating_file' .github/assurance-monthly.json)
+          fi
+          # Config drift is an infra error: fail the job, never skip quietly.
+          test -n "$f" && test -f "$f"
+          echo "file=$f" >> "$GITHUB_OUTPUT"
+          jq -r '.rationale' .github/assurance-monthly.json > "$RUNNER_TEMP/rotation-rationale.txt"
+
+      - id: cache-mutants
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/cargo-mutants-root
+          key: cargo-mutants-root-${{ env.CARGO_MUTANTS_VERSION }}-${{ runner.os }}
+
+      - id: install-mutants
+        if: steps.cache-mutants.outputs.cache-hit != 'true'
+        run: |
+          cargo install cargo-mutants --locked --version "${CARGO_MUTANTS_VERSION}" \
+            --root "$RUNNER_TEMP/cargo-mutants-root"
+          "$RUNNER_TEMP/cargo-mutants-root/bin/cargo-mutants" --version
+
+      - name: cargo-mutants on PATH
+        run: echo "$RUNNER_TEMP/cargo-mutants-root/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          cache-targets: false
+
+      - name: Build xtask
+        run: |
+          git worktree add "$RUNNER_TEMP/mut-wt" HEAD
+          cd "$RUNNER_TEMP/mut-wt"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/xtask-build" cargo build -p xtask
+
+      - name: Rotating run (${{ steps.pick-file.outputs.file }})
+        run: |
+          set -o pipefail
+          cd "$RUNNER_TEMP/mut-wt"
+          mkdir -p target-mutants
+          "$RUNNER_TEMP/xtask-build/debug/xtask" mutants \
+            --file "${{ steps.pick-file.outputs.file }}" --json \
+            | tee target-mutants/run.json
+
+      - name: Cold-checkout assertion
+        if: always()
+        run: if [ -d ./target ]; then echo "./target created in checkout"; exit 1; fi
+
+      - name: Upload rotating evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: art-mutants-rotating
+          retention-days: 90
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/mut-wt/target-mutants/mutants.out/outcomes.json
+            ${{ runner.temp }}/mut-wt/target-mutants/run.json
+            ${{ runner.temp }}/rotation-rationale.txt
+
+  report:
+    needs: [fuzz-deep, mutants-baseline, mutants-rotating]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Job results for the issue table (needs context).
+      FUZZ_RESULT: ${{ needs.fuzz-deep.result }}
+      BASE_RESULT: ${{ needs.mutants-baseline.result }}
+      ROT_RESULT: ${{ needs.mutants-rotating.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+
+      - name: Build issue body
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          STAMP=$(date -u +%Y-%m)
+          {
+            echo "# assurance-monthly: ${STAMP}"
+            echo
+            echo "Generated work order. bd stays the tracker — file follow-ups there."
+            echo
+            echo "## Tool jobs"
+            echo
+            echo "| job | result |"
+            echo "|---|---|"
+            echo "| fuzz-deep | ${FUZZ_RESULT} |"
+            echo "| mutants-baseline | ${BASE_RESULT} |"
+            echo "| mutants-rotating | ${ROT_RESULT} |"
+            echo
+            echo "failure here means infrastructure, not findings."
+            echo "## Fuzz deep (target matrix, ${FUZZ_SECS}s each)"
+            echo
+            echo '```'
+            cat art-fuzz-deep/deep-state/fuzz-findings.txt 2>/dev/null \
+              || echo "(no fuzz findings artifact — infra failure)"
+            echo '```'
+            echo
+            for name in baseline rotating; do
+              f="art-mutants-${name}/outcomes.json"
+              if [ ! -f "$f" ]; then
+                echo "## Mutants ${name}: MISSING OUTCOMES (infra failure)"
+                echo
+                continue
+              fi
+              echo "## Mutants ${name}"
+              echo
+              tested=$(jq '.outcomes | length' "$f")
+              missed=$(jq '[.outcomes[] | select(.summary=="MissedMutant")] | length' "$f")
+              caught=$(jq '[.outcomes[] | select(.summary=="CaughtMutant")] | length' "$f")
+              unviable=$(jq '[.outcomes[] | select(.summary=="UnviableMutant")] | length' "$f")
+              echo "tested=${tested} caught=${caught} missed=${missed} unviable=${unviable}"
+              echo
+              echo '```'
+              jq -r '.outcomes[] | select(.summary=="MissedMutant")
+                | .scenario.Mutant.file + ":" + (.scenario.Mutant.line|tostring)
+                  + " " + .scenario.Mutant.name' "$f" | sort -u || true
+              echo '```'
+              echo
+            done
+            echo "## Triage checklist (dedup is mandatory)"
+            echo
+            echo "- bd create ONLY for survivors NOT already tracked — check the"
+            echo "  existing \`discovered-from:rc-eba8\` bds first (rc-tb93, rc-kkwh,"
+            echo "  rc-j5zp, rc-jtsw, rc-6f62, rc-ldvm, rc-e83t, rc-blcy, rc-xv4e)."
+            echo "- Fuzz crashes: promote minimized inputs as committed #[test]s,"
+            echo "  never raw corpus blobs; \`bd create -t bug\` ranked by exposure."
+            echo "- Kill rates are informational: no threshold, no gate."
+            echo
+            echo "## Rotation"
+            echo
+            echo '```'
+            cat art-mutants-rotating/rotation-rationale.txt 2>/dev/null || echo "(no rationale)"
+            echo '```'
+            echo
+            echo "Next window: minimal PR editing \`.github/assurance-monthly.json\`"
+            echo "(mutants_rotating_file from next_candidates + rotate rotated_on)."
+            echo "Candidates: $(jq -r '.next_candidates | join(", ")' .github/assurance-monthly.json)"
+          } > "$RUNNER_TEMP/issue-body.md"
+
+          # Machine-readable survivor set for NEXT month's diff, between
+          # HTML comment markers (robust to markdown renderers).
+          {
+            echo "<!--baseline-data-start-->"
+            jq -r '.outcomes[] | select(.summary=="MissedMutant")
+              | .scenario.Mutant.file + ":" + (.scenario.Mutant.line|tostring)
+                + " " + .scenario.Mutant.name' art-mutants-baseline/outcomes.json \
+              | sort -u
+            echo "<!--baseline-data-end-->"
+          } >> "$RUNNER_TEMP/issue-body.md"
+
+          # Diff vs previous month's issue when one exists.
+          PREV=$(gh issue list --state all --search "assurance-monthly in:title" \
+            --json number,createdAt --jq 'sort_by(.createdAt) | last | .number' || true)
+          if [ -n "${PREV:-}" ] && [ "${PREV}" != "null" ]; then
+            gh issue view "$PREV" --json body --jq .body \
+              | sed -n '/<!--baseline-data-start-->/,/<!--baseline-data-end-->/p' \
+              | grep -v '<!--' > "$RUNNER_TEMP/prev-survivors.txt" || true
+            sed -n '/<!--baseline-data-start-->/,/<!--baseline-data-end-->/p' \
+              "$RUNNER_TEMP/issue-body.md" | grep -v '<!--' \
+              > "$RUNNER_TEMP/curr-survivors.txt"
+            {
+              echo
+              echo "## Baseline survivor diff vs issue #${PREV}"
+              echo
+              echo '```diff'
+              diff -u "$RUNNER_TEMP/prev-survivors.txt" \
+                "$RUNNER_TEMP/curr-survivors.txt" | tail -n +3 || true
+              echo '```'
+            } >> "$RUNNER_TEMP/issue-body.md"
+          fi
+
+          gh issue create \
+            --title "assurance-monthly: ${STAMP}" \
+            --body-file "$RUNNER_TEMP/issue-body.md"
+
+      - name: Fail only on infra (missing evidence)
+        run: |
+          # Anti-obstruction: survivors/crashes above never fail the run.
+          # Missing artifacts from a failed tool job = infra failure = red.
+          ok=1
+          [ -f art-fuzz-deep/deep-state/fuzz-findings.txt ] || ok=0
+          [ -f art-mutants-baseline/outcomes.json ] || ok=0
+          [ -f art-mutants-rotating/outcomes.json ] || ok=0
+          if [ "$ok" -ne 1 ]; then
+            echo "infra failure: at least one tool job produced no evidence (see run summary)"
+            exit 1
+          fi

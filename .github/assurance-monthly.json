@@ -1,0 +1,11 @@
+{
+  "mutants_rotating_file": "crates/camel-dsl/src/route_ast.rs",
+  "rationale": "AST core under the differential fuzz harness lens; 2347 LoC ~= 280 mutants ~= 2h on a 2-core runner — fills the monthly budget headroom without approaching the 6h job limit. Too big for the baseline tier (compile.rs/yaml.rs at 5k+ LoC exceed one month's window).",
+  "next_candidates": [
+    "crates/camel-core/src/lifecycle/adapters/route_controller.rs",
+    "crates/camel-dsl/src/model.rs",
+    "crates/camel-dsl/src/discovery.rs",
+    "crates/camel-dsl/src/rest.rs"
+  ],
+  "rotated_on": "2026-09-05"
+}
