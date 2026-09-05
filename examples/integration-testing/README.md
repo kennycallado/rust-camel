@@ -23,13 +23,14 @@ Files:
 
 ```bash
 # from the workspace root
-cargo build -p camel-cli --features integration-http
+cargo build -p camel-cli
 
 cd examples/integration-testing
 ../../target/debug/camel test orders.test.yaml
 ```
 
-The `integration-http` feature is non-default. It supplies the harness
+The `integration-http` feature is enabled by default in `camel-cli`
+since 2026-09-05 (builds before that need the explicit flag). It supplies the harness
 HTTP partner adapter. Without it, the run names the missing adapter on
 stderr (`infra-unavailable`) and exits 2. `--integration` is the tier
 filter; a single named scenario document does not need it.

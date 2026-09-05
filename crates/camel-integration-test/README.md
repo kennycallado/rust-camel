@@ -46,10 +46,11 @@ The partner endpoint binds on the harness and injects
 `PARTNER=http://127.0.0.1:<bound>` into the layered environment, so the
 route's `${env:PARTNER}` reaches the local listener. Run the document
 with the CLI; the `http:` partner adapter rides the non-default
-`integration-http` feature:
+`integration-http` feature (enabled by default in `camel-cli` since
+2026-09-05; the explicit flag remains valid):
 
 ```sh
-cargo run -p camel-cli --features integration-http -- test --integration orders.test.yaml
+cargo run -p camel-cli -- test --integration orders.test.yaml
 ```
 
 ## `partners:` section

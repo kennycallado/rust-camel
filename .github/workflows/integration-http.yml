@@ -43,6 +43,8 @@ jobs:
       - name: Bundles with kafka feature (camel-bundles)
         run: cargo test -p camel-bundles --features kafka
       - name: CLI tier filter tests (camel-cli)
-        run: cargo test -p camel-cli --features integration-http --test test_tier_filters
+        run: cargo test -p camel-cli --features integration-http,itest-e2e --test test_tier_filters
+      - name: CLI scenario e2e (camel-cli)
+        run: cargo test -p camel-cli --features integration-http,itest-e2e --test test_scenario_cli_e2e
       - name: Bundles default suite (camel-bundles)
         run: cargo test -p camel-bundles

@@ -235,6 +235,13 @@ needed, is a separate decision.
 
 The tier activates adapters only when a concrete regression justifies them.
 
+Update 2026-09-05: the demand signal arrived, so the `camel-cli` binary now
+enables `integration-http` by default. The gate itself is unchanged: the
+adapter still compiles only behind the Cargo feature, featureless builds
+keep the `infra-unavailable` path, and the e2e suites that spawn the real
+binary stay behind the non-default `itest-e2e` test feature so the default
+suite keeps its runtime and composition.
+
 1. HTTP, both directions. Outbound bridge and proxy regressions justify it
    (rc-eoft, rc-f0cn). The rc-w1u9 readiness work is already satisfied.
 2. WS, after the consumer-client role lands (rc-39d6).

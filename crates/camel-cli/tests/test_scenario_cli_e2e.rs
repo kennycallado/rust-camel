@@ -9,7 +9,7 @@
 //! `receive`/`validate` actions are the wire proof: the partner's
 //! recorded request must match the sent body, method, path, and the
 //! route-stamped header for the run to exit 0.
-#![cfg(feature = "integration-http")]
+#![cfg(feature = "itest-e2e")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

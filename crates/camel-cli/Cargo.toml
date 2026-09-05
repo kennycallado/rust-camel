@@ -111,7 +111,7 @@ ron = { workspace = true }
 jsonwebtoken.workspace = true
 
 [features]
-default = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp"]
+default = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http"]
 otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # kafka activates the kafka component code only — linking strategy is orthogonal.
 # Use `kafka` alone (rdkafka will build from source via cmake by default),
@@ -148,6 +148,10 @@ exec = ["dep:camel-component-exec"]
 # without this feature, scenario endpoints of scheme http keep the
 # infra-unavailable path.
 integration-http = ["camel-integration-test/http"]
+# Test-only: the e2e suites that spawn the real `camel` binary against
+# scenario documents stay out of the default suite (runtime and spawn
+# cost); the integration-http CI job enables them explicitly.
+itest-e2e = []
 # Global allocator overrides for the `camel` release binary. Additive and
 # independent; if both are enabled, jemalloc wins. Soak/migration plan: bd rc-vnm8.
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
