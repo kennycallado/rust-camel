@@ -8,22 +8,39 @@ TBD - created by archiving change fuzz-smoke-ci. Update Purpose after archive.
 The `fuzz-smoke.yml` workflow SHALL run on `pull_request` events whose
 changed files match at least one of: `crates/camel-dsl/**`, `fuzz/**`,
 `scripts/xtask/**`, `.github/workflows/fuzz-smoke.yml`; and on manual
-`workflow_dispatch`. It SHALL NOT run on pushes to `main`.
+`workflow_dispatch`. It SHALL NOT run on pushes to `main`. Within a run,
+the workflow SHALL select the smoke legs by applying these ordered rules
+to the changed-path set, combining selections by union:
+`fuzz/seeds/dsl_yaml/**` selects `dsl_yaml`; `fuzz/seeds/dsl_json/**`
+selects `dsl_json`; `fuzz/seeds/dsl_template/**` selects `dsl_template`;
+`fuzz/seeds/dsl_parity/**` selects `dsl_parity`;
+`crates/camel-dsl/src/yaml.rs` selects `dsl_yaml` and `dsl_parity`;
+`crates/camel-dsl/src/json.rs` selects `dsl_json` and `dsl_parity`;
+`crates/camel-dsl/src/template/**` selects `dsl_template` and
+`dsl_parity`; any other changed path matching the workflow trigger
+selects all legs. `workflow_dispatch` SHALL run all legs.
 
 #### Scenario: workflow triggers on a PR touching the wrapper
 
 - **WHEN** a PR modifies `scripts/xtask/src/fuzz.rs`
-- **THEN** the `fuzz-smoke` workflow runs for that PR
+- **THEN** the `fuzz-smoke` workflow runs for that PR with all legs
+  selected
 
 #### Scenario: workflow skips unrelated PRs
 
 - **WHEN** a PR modifies only `crates/camel-core/**`
 - **THEN** the `fuzz-smoke` workflow does not run
 
+#### Scenario: front-end change selects its leg plus the parity leg
+
+- **WHEN** a PR modifies `crates/camel-dsl/src/json.rs`
+- **THEN** the run smokes `dsl_json` and `dsl_parity` and skips
+  `dsl_yaml` and `dsl_template`
+
 #### Scenario: manual drill run
 
 - **WHEN** a maintainer dispatches the workflow from the Actions tab
-- **THEN** the drills execute on the selected ref
+- **THEN** the drills execute on the selected ref with all legs
 
 ### Requirement: never blocks PR merge
 
@@ -48,21 +65,27 @@ message `refusing: cargo xtask fuzz must run in a linked worktree`.
 
 ### Requirement: worktree-isolated 60-second smoke
 
-The workflow SHALL create a linked worktree (`git worktree add`) and run
-`cargo xtask fuzz dsl_yaml --time 60` from it on PRs (a
-`workflow_dispatch` input MAY raise the budget — the deferred 300 s
-full-run criterion closes on such a dispatch). On a clean run the step
-SHOULD exit 0 with the corpus populated and no crash artifact.
+The workflow SHALL create a linked worktree (`git worktree add`) and,
+for each selected leg, run `cargo xtask fuzz <target> --time 60` from it
+serially (a `workflow_dispatch` input MAY raise the per-leg budget — the
+deferred 300 s full-run criterion closes on such a dispatch). On a clean
+run each leg SHOULD exit 0 with that target's corpus populated and no
+crash artifact. The job timeout SHALL be 20 minutes for `pull_request`
+events and 30 minutes for `workflow_dispatch`.
 
 #### Scenario: clean smoke run
 
-- **WHEN** the target runs 60 s without finding a crash
-- **THEN** the wrapper exits 0 and the worktree `target-fuzz/corpus/dsl_yaml/` contains the staged seeds
+- **WHEN** a selected target runs 60 s without finding a crash
+- **THEN** the wrapper exits 0 and the worktree
+  `target-fuzz/corpus/<target>/` contains the staged seeds
 
 #### Scenario: build and run outputs stay worktree-local
 
 - **WHEN** the smoke run completes
-- **THEN** all fuzz build, corpus, and artifact outputs land under the worktree's `target-fuzz/` directory (worktree metadata, the temporary drill patch, and the worktree's own `./target` xtask build dir excluded — the wrapper redirects only cargo-fuzz target dirs)
+- **THEN** all fuzz build, corpus, and artifact outputs land under the
+  worktree's `target-fuzz/` directory (worktree metadata, the temporary
+  drill patch, and the worktree's own `./target` xtask build dir
+  excluded — the wrapper redirects only cargo-fuzz target dirs)
 
 ### Requirement: cold-main assertion
 
@@ -78,22 +101,28 @@ xtask build SHALL redirect its target dir outside the checkout).
 ### Requirement: tmin drill with injected panic
 
 The workflow SHALL, inside the linked worktree only, inject a temporary
-panic into the `dsl_yaml` harness, run the wrapper with a short budget,
+panic into the `dsl_json` harness, run the wrapper with a short budget,
 and SHALL assert: non-zero exit, `new artifact(s):` in output, a
 `minimized artifact:` path in output whose file exists under
-`target-fuzz/artifacts/dsl_yaml/`, that no `fuzz/artifacts/` directory
-is created, and the promotion instruction line. The injection SHALL NOT
+`target-fuzz/artifacts/dsl_json/`, that no crash files exist under
+cargo-fuzz's default `fuzz/artifacts/` location (cargo-fuzz 0.13.x
+creates that directory unconditionally at startup — emptiness, not
+absence, is the contract), and the promotion instruction line. The injection SHALL NOT
 touch the checkout working tree.
 
 #### Scenario: injected panic is caught and minimized
 
-- **WHEN** the harness panics on every input and the wrapper runs with a 20 s budget
-- **THEN** a crash artifact is detected, tmin produces a minimized artifact under `target-fuzz/artifacts/`, no `fuzz/artifacts/` directory exists, and the promotion instruction is printed
+- **WHEN** the harness panics on every input and the wrapper runs with
+  a 20 s budget
+- **THEN** a crash artifact is detected, tmin produces a minimized
+  artifact under `target-fuzz/artifacts/`, no crash files exist under
+  `fuzz/artifacts/`, and the promotion instruction is printed
 
 #### Scenario: no leakage to the checkout
 
 - **WHEN** the drill completes
-- **THEN** `git status --porcelain` in the checkout is empty (the panic existed only in the discarded worktree)
+- **THEN** `git status --porcelain` in the checkout is empty (the panic
+  existed only in the discarded worktree)
 
 ### Requirement: fuzz lockfile audit
 
@@ -108,13 +137,22 @@ same non-blocking contract.
 ### Requirement: findings summary with triage instructions
 
 A final workflow step SHALL write a step summary that, on any finding,
-lists artifact paths and includes the triage command
-(`bd create -t bug -p 1`) and the promotion rule (minimized input becomes
-a committed `#[test]`, never a raw corpus blob). The workflow SHALL NOT
-create issues or bd entries automatically.
+lists the artifact directory of each selected leg that produced findings
+(`target-fuzz/artifacts/<target>/` for that leg's target) and includes
+the triage command (`bd create -t bug -p 1`) and the promotion rule
+(minimized input becomes a committed `#[test]`, never a raw corpus
+blob). The workflow SHALL NOT create issues or bd entries
+automatically.
 
 #### Scenario: summary renders on drill failure
 
 - **WHEN** any drill step fails
-- **THEN** the PR shows a summary with artifact paths and triage instructions, and no issue automation ran
+- **THEN** the PR shows a summary with artifact paths and triage
+  instructions, and no issue automation ran
+
+#### Scenario: non-YAML crash reports its own leg's artifact directory
+
+- **WHEN** a leg other than `dsl_yaml` produces a crash artifact
+- **THEN** the summary lists `target-fuzz/artifacts/<that-leg>/` (not
+  the `dsl_yaml` directory) alongside the triage instructions
 
