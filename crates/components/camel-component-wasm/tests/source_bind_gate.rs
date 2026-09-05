@@ -28,6 +28,8 @@
 //! cargo test -p camel-component-wasm --test source_bind_gate -- --ignored
 //! ```
 
+mod common;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -57,6 +59,15 @@ const BIND_WAIT: Duration = Duration::from_secs(5);
 
 /// Timeout for stop() to complete cleanly.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Serializes every ack-mutating phase in this binary. The ack store
+/// (`WasmSourceBindAcks::global()`) is process-global, and tests run in
+/// parallel threads: the two ack-mutating siblings already raced each
+/// other latently (their doc comment only covered phases within one
+/// test), and `refused_route_preserves_staged_slot` mutates the store
+/// too. Each ack-mutating region holds this lock from the `set()` until
+/// the `start()` that observes the store has returned.
+static ACK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -133,16 +144,6 @@ fn make_consumer(
     )
 }
 
-/// Allocate a unique port by binding to port 0 and reading the assigned port.
-async fn free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind ephemeral port");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
 /// Wait until the given TCP port accepts connections, or panic after timeout.
 async fn wait_for_bind(port: u16, timeout: Duration) {
     let start = std::time::Instant::now();
@@ -200,6 +201,40 @@ async fn capture_logs<F: Future>(fut: F) -> (F::Output, String) {
     (output, captured)
 }
 
+/// Send a raw HTTP POST request over TCP and return the response status
+/// line (same minimal-dependency dial as `tests/source_integration.rs`).
+async fn send_http_post(port: u16, path: &str, body: &[u8]) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("failed to connect to source HTTP listener");
+
+    let request = format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         \r\n",
+        body.len()
+    );
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("failed to write request headers");
+    stream
+        .write_all(body)
+        .await
+        .expect("failed to write request body");
+
+    let mut buf = vec![0u8; 1024];
+    let n = stream
+        .read(&mut buf)
+        .await
+        .expect("failed to read response");
+    String::from_utf8_lossy(&buf[..n]).to_string()
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 /// Operator `bind` equal to the guest-declared bind → one listener, start
@@ -209,7 +244,7 @@ async fn capture_logs<F: Future>(fut: F) -> (F::Output, String) {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn matching_binds_produce_one_listener() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let bind = format!("127.0.0.1:{port}");
     let uri = format!("wasm:webhook.wasm?bind={bind}&path=/webhook");
     let guest_config = vec![
@@ -242,8 +277,11 @@ async fn matching_binds_produce_one_listener() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn conflicting_binds_fail_before_socket() {
-    let port_a = free_port().await;
-    let port_b = free_port().await;
+    let port_a = common::stage_wasm_source_listener("127.0.0.1").await;
+    // Fixed reserved address: the assertion below requires an unbound
+    // address (a staged listener is bound by definition), and port 1 is
+    // never bound by tests or CI services.
+    let port_b = 1u16;
     let guest_bind = format!("0.0.0.0:{port_a}");
     let operator_bind = format!("127.0.0.1:{port_b}");
     let uri = format!("wasm:conflict.wasm?bind={operator_bind}");
@@ -290,8 +328,9 @@ async fn conflicting_binds_fail_before_socket() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn guest_only_non_loopback_bind_gated() {
-    let port_a = free_port().await;
+    let port_a = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_bind = format!("0.0.0.0:{port_a}");
+    let _ack_guard = ACK_TEST_LOCK.lock().await;
     WasmSourceBindAcks::global().set(HashMap::new());
 
     // No `bind` query param — operator bind absent.
@@ -324,8 +363,9 @@ async fn guest_only_non_loopback_bind_gated() {
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn non_loopback_public_gate_with_and_without_ack() {
     // Phase 1 — no ack: start() fails naming the bind.
-    let port_a = free_port().await;
+    let port_a = common::stage_wasm_source_listener("127.0.0.1").await;
     let bind_a = format!("0.0.0.0:{port_a}");
+    let _ack_guard = ACK_TEST_LOCK.lock().await;
     WasmSourceBindAcks::global().set(HashMap::new());
 
     let uri = format!("wasm:webhook.wasm?bind={bind_a}");
@@ -342,8 +382,13 @@ async fn non_loopback_public_gate_with_and_without_ack() {
         "error must name the bind '{bind_a}': {err}"
     );
 
-    // Phase 2 — ack for a fresh bind: start() succeeds and warns.
-    let port_b = free_port().await;
+    // Phase 2 — ack for a fresh bind: start() succeeds and warns. The
+    // ack-store guard from phase 1 is still held: both phases sit inside
+    // one serialized ack-mutating region.
+    // Staged under 0.0.0.0: this phase's bind is `0.0.0.0:{port_b}` and
+    // reaches the bind site (acked), so the staged host must match the
+    // resolved bind exactly (no host normalization).
+    let port_b = common::stage_wasm_source_listener("0.0.0.0").await;
     let bind_b = format!("0.0.0.0:{port_b}");
     let mut acks = HashMap::new();
     acks.insert(bind_b.clone(), true);
@@ -384,7 +429,7 @@ async fn non_loopback_public_gate_with_and_without_ack() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn loopback_public_needs_no_ack() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let bind = format!("127.0.0.1:{port}");
     let uri = format!("wasm:webhook.wasm?bind={bind}");
     let guest_config = vec![("bind".into(), bind)];
@@ -399,6 +444,112 @@ async fn loopback_public_needs_no_ack() {
     wait_for_bind(port, BIND_WAIT).await;
 
     tokio::time::timeout(STOP_TIMEOUT, consumer.stop())
+        .await
+        .expect("stop timed out")
+        .expect("stop should succeed");
+}
+
+/// A route refused at the bind agreement never consumes a staged slot;
+/// a later route whose config resolves to the staged address takes the
+/// parked socket and serves it (wasm-bound-address, Task WASM-1).
+///
+/// Route A pairs an operator `bind` of `127.0.0.1:1` with a
+/// guest-declared `0.0.0.0:{P}` (the conflicting-bind guest derives its
+/// declared bind ONLY from `conflict_port`, which is what makes the
+/// disagreement constructible) → refused at the 12b agreement, before
+/// the bind site. Route B then starts with NO operator `bind`: the
+/// guest-declared `0.0.0.0:{P}` wins, the ack passes the ADR-0061
+/// exposure gate, and the bind site consumes the staged socket —
+/// `Ok(start)` is itself the consumption proof, since a fresh bind
+/// would have failed with `EADDRINUSE` against the parked socket. The
+/// conflicting-bind guest implements the source-world `accept-http`
+/// serving path, so the webhook POST below also satisfies the serving
+/// clause end-to-end.
+///
+/// The ack store is process-global; this test holds [`ACK_TEST_LOCK`]
+/// across its ack-mutating region so it cannot interleave with the
+/// ack-mutating siblings.
+///
+/// Prerequisites: pre-built conflicting-bind guest wasm.
+#[tokio::test]
+#[ignore = "requires pre-built guest wasm (see module docs)"]
+async fn refused_route_preserves_staged_slot() {
+    let _ack_guard = ACK_TEST_LOCK.lock().await;
+
+    let port = common::stage_wasm_source_listener("0.0.0.0").await;
+    let guest_bind = format!("0.0.0.0:{port}");
+
+    // Route A — operator bind disagrees with the guest-declared bind:
+    // refused at the 12b agreement, before the bind site (the
+    // `conflicting_binds_fail_before_socket` shape).
+    let operator_bind = "127.0.0.1:1".to_string();
+    let uri = format!("wasm:conflict.wasm?bind={operator_bind}");
+    let guest_config = vec![
+        ("bind".into(), operator_bind.clone()),
+        ("conflict_port".into(), port.to_string()),
+    ];
+    let mut consumer_a = make_consumer(uri, require_conflict_guest_wasm(), guest_config);
+    let (ctx_a, _rx_a, _cancel_a) = make_consumer_context("staged-refused-a", 16);
+
+    let err = consumer_a
+        .start(ctx_a)
+        .await
+        .expect_err("conflicting operator/guest binds must fail start()");
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&guest_bind),
+        "error must name the guest bind '{guest_bind}': {msg}"
+    );
+    assert!(
+        msg.contains(&operator_bind),
+        "error must name the operator bind '{operator_bind}': {msg}"
+    );
+
+    // Route B — no operator `bind`: the guest-declared `0.0.0.0:{P}` wins
+    // and the ack satisfies the exposure gate for it.
+    let mut acks = HashMap::new();
+    acks.insert(guest_bind.clone(), true);
+    WasmSourceBindAcks::global().set(acks);
+
+    let uri = "wasm:conflict.wasm?path=/webhook".to_string();
+    let guest_config = vec![
+        ("conflict_port".into(), port.to_string()),
+        ("path".into(), "/webhook".into()),
+    ];
+    let mut consumer_b = make_consumer(uri, require_conflict_guest_wasm(), guest_config);
+    let (ctx_b, mut rx_b, _cancel_b) = make_consumer_context("staged-refused-b", 16);
+
+    // Ok(start) IS the staged-consumption proof: the slot was preserved
+    // through route A's refusal and taken here — a fresh bind on this
+    // address would have hit EADDRINUSE.
+    consumer_b
+        .start(ctx_b)
+        .await
+        .expect("staged socket must be consumable by the matching route");
+
+    // Serving clause: POST through the consumed staged socket and assert
+    // the guest received the exchange.
+    wait_for_bind(port, BIND_WAIT).await;
+    let body = b"{\"event\":\"staged-refused\"}";
+    let response = send_http_post(port, "/webhook", body).await;
+    assert!(
+        response.contains("202"),
+        "expected 202 response from the consumed staged socket, got: {response}"
+    );
+
+    let envelope = tokio::time::timeout(BIND_WAIT, rx_b.recv())
+        .await
+        .expect("timed out waiting for exchange")
+        .expect("channel closed before exchange arrived");
+    assert!(
+        envelope
+            .exchange
+            .properties
+            .contains_key("camel.http.method"),
+        "staged-socket exchange should reach the pipeline with HTTP metadata"
+    );
+
+    tokio::time::timeout(STOP_TIMEOUT, consumer_b.stop())
         .await
         .expect("stop timed out")
         .expect("stop should succeed");

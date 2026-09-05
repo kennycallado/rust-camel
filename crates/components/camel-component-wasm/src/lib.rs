@@ -38,6 +38,7 @@ mod source_auth_edge;
 pub mod source_bindings;
 pub mod source_consumer;
 pub mod source_host;
+pub mod staged_listener;
 pub mod state_store;
 pub mod stream_bridge;
 mod wasi_surface;

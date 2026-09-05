@@ -13,6 +13,8 @@
 //! cargo test -p camel-component-wasm --test source_stream_integration -- --ignored
 //! ```
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -99,15 +101,6 @@ fn make_consumer(guest_config: Vec<(String, String)>) -> WasmSourceConsumer {
     )
 }
 
-async fn free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind ephemeral port");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
 async fn wait_for_bind(port: u16, timeout: Duration) {
     let start = std::time::Instant::now();
     loop {
@@ -172,7 +165,7 @@ async fn send_http_post(port: u16, path: &str, body: &[u8]) -> (String, TcpStrea
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn accept_http_streams_large_body() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),
@@ -268,7 +261,7 @@ async fn accept_http_streams_large_body() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn accept_http_mid_stream_abort_surfaces_error() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),
@@ -371,7 +364,7 @@ async fn accept_http_mid_stream_abort_surfaces_error() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn submit_exchange_streams_body_larger_than_buffers() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),
@@ -444,7 +437,7 @@ async fn submit_exchange_streams_body_larger_than_buffers() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn submit_exchange_surfaces_terminal_error() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),
@@ -521,7 +514,7 @@ async fn submit_exchange_surfaces_terminal_error() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn backpressure_propagates_to_http_client() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),
@@ -593,7 +586,7 @@ async fn backpressure_propagates_to_http_client() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn stop_mid_drain_exits_cleanly() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),
@@ -665,7 +658,7 @@ async fn stop_mid_drain_exits_cleanly() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn idle_source_survives_past_timeout() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),

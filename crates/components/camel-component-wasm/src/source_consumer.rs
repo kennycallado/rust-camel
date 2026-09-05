@@ -27,6 +27,7 @@ use crate::source_host::{
     DEFAULT_MAX_REQUEST_BODY_BYTES, HttpListenerHandle, SourceChannels, SourceHostState,
     WasmSourceKernelAuth, add_to_linker, run_http_listener, run_pipeline_bridge,
 };
+use crate::staged_listener;
 
 /// Epoch deadline (in ticks) granted to the guest's `configure()` call.
 ///
@@ -281,13 +282,24 @@ impl Consumer for WasmSourceConsumer {
         // failure (port in use, permission denied) surfaces as a start()
         // error rather than a background warning. Without this the guest
         // exits cleanly and the route looks healthy with nothing accepting.
-        let tcp_listener = tokio::net::TcpListener::bind(bind_addr)
-            .await
-            .map_err(|e| {
-                CamelError::Io(format!(
-                    "failed to bind source HTTP listener {bind_addr}: {e}"
-                ))
-            })?;
+        //
+        // Staged consumption first (wasm-bound-address): a test-tier helper
+        // may have parked a pre-bound listener under this exact address;
+        // taking it is one-shot. Ordering is load-bearing — this runs AFTER
+        // the 12b agreement and the 12c exposure gate, so a refused route
+        // never consumes a staged slot. `take`'s Err (same-port
+        // different-host conflict) is already `EndpointCreationFailed` and
+        // propagates via `?`.
+        let tcp_listener = match staged_listener::take(bind_addr)? {
+            Some(listener) => listener,
+            None => tokio::net::TcpListener::bind(bind_addr)
+                .await
+                .map_err(|e| {
+                    CamelError::Io(format!(
+                        "failed to bind source HTTP listener {bind_addr}: {e}"
+                    ))
+                })?,
+        };
         tracing::info!(%bind_addr, "source HTTP listener bound");
 
         // 14. Spawn HTTP listener task (serve on the already-bound listener).

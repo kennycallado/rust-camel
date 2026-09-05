@@ -20,6 +20,8 @@
 //! cargo test -p camel-component-wasm --test source_integration -- --ignored
 //! ```
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -181,16 +183,6 @@ async fn wait_for_bind(port: u16, timeout: Duration) {
     }
 }
 
-/// Allocate a unique port by binding to port 0 and reading the assigned port.
-async fn free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind ephemeral port");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 /// Verify that start → stop completes cleanly without panics or hangs.
@@ -199,7 +191,7 @@ async fn free_port() -> u16 {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn test_source_lifecycle_start_stop() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),
@@ -229,7 +221,7 @@ async fn test_source_lifecycle_start_stop() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn test_source_webhook_e2e() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),
@@ -293,7 +285,7 @@ async fn test_source_webhook_e2e() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn test_source_cancellation_channel_close() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),
@@ -332,7 +324,7 @@ async fn test_source_cancellation_channel_close() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn test_source_backpressure_sequential() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),
@@ -408,7 +400,7 @@ async fn test_source_backpressure_sequential() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn test_source_crash_recovery() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_config = vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),
@@ -453,7 +445,7 @@ async fn test_source_crash_recovery() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn source_task_exits_on_context_token_cancel() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let mut consumer = make_consumer(vec![
         ("bind".into(), format!("127.0.0.1:{port}")),
         ("path".into(), "/webhook".into()),

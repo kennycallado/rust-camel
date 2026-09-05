@@ -28,6 +28,8 @@
 //! cargo test -p camel-component-wasm --test source_auth_e2e -- --ignored
 //! ```
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -205,16 +207,6 @@ fn make_consumer_context(
     (ctx, rx, cancel)
 }
 
-/// Allocate a unique port by binding to port 0 and reading the assigned port.
-async fn free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind ephemeral port");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
 /// Wait until the given TCP port accepts connections, or panic after timeout.
 async fn wait_for_bind(port: u16, timeout: Duration) {
     let start = std::time::Instant::now();
@@ -321,7 +313,7 @@ async fn expect_exchange_with_carrier(rx: &mut mpsc::Receiver<ExchangeEnvelope>)
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn authenticated_route_missing_credential_401() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let mut consumer = make_consumer(port);
     // Same fixture shape as tests/source_auth.rs: policy-backed context with
     // the compiled plan plus a (provider-less) registry.
@@ -358,7 +350,7 @@ async fn authenticated_route_missing_credential_401() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn authenticated_route_invalid_credential_401() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let mut consumer = make_consumer(port);
     consumer.set_security_context(
         SecurityContext::new(RolePolicy::new(vec![], true))
@@ -401,7 +393,7 @@ async fn authenticated_route_invalid_credential_401() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn public_plan_pass_through_unchanged() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let mut consumer = make_consumer(port);
     consumer.set_security_context(SecurityContext::from_plan(public_plan()));
 
@@ -450,7 +442,7 @@ async fn public_plan_pass_through_unchanged() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn missing_wiring_non_public_denies() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let mut consumer = make_consumer(port);
     consumer.set_security_context(SecurityContext::from_plan(authenticated_plan()));
 
@@ -488,7 +480,7 @@ async fn missing_wiring_non_public_denies() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn auth_via_authorization_header() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let mut consumer = make_consumer(port);
     consumer.set_security_context(
         SecurityContext::new(RolePolicy::new(vec![], true))
@@ -523,7 +515,7 @@ async fn auth_via_authorization_header() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn auth_via_named_header() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let mut consumer = make_consumer(port);
     consumer.set_security_context(
         SecurityContext::new(RolePolicy::new(vec![], true))
@@ -563,7 +555,7 @@ async fn auth_via_named_header() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn auth_via_cookie() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let mut consumer = make_consumer(port);
     consumer.set_security_context(
         SecurityContext::new(RolePolicy::new(vec![], true))
@@ -603,7 +595,7 @@ async fn auth_via_cookie() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn auth_via_query_param() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let mut consumer = make_consumer(port);
     consumer.set_security_context(
         SecurityContext::new(RolePolicy::new(vec![], true))
@@ -640,7 +632,7 @@ async fn auth_via_query_param() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn provider_substitution_denied() {
-    let port = free_port().await;
+    let port = common::stage_wasm_source_listener("127.0.0.1").await;
     let mut consumer = make_consumer(port);
     consumer.set_security_context(
         SecurityContext::new(RolePolicy::new(vec![], true))

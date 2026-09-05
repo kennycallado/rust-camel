@@ -94,6 +94,15 @@ Loopback binds permit `Public` silently. The gate keeps the ADR-0052 rule-3
 posture: the acknowledgment is permanent and never silences the `warn!`
 emitted at every boot (ADR-0061 Rule 4; ADR-0052).
 
+- Staged listeners (bd rc-wgba; capability spec `staged-listener-binding`):
+  `stage_listener` in the `staged_listener` module parks a pre-bound
+  listener under its exact `(host, port)` key, one-shot. The consumer
+  consults it only at the bind site, after the operator/guest agreement
+  and the exposure gate. A same-port staging under a different host
+  string fails the bind deterministically (`staged listener conflict
+  on port …`) instead of risking `EADDRINUSE`. The map is empty by
+  default and exists for the test tier; production routes never stage.
+
 The sandbox guest model is unchanged and orthogonal. Operators trust the plugin
 they install. The sandbox limits damage from guest defects. It is not a security
 boundary for intentionally malicious plugins. See Capability posture above.

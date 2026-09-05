@@ -5,4 +5,5 @@ crates/components/camel-component-wasm/tests/source_integration.rs
 crates/components/camel-component-wasm/tests/source_stream_integration.rs
 crates/components/camel-component-wasm/tests/source_bind_gate.rs
 crates/components/camel-component-wasm/tests/source_auth_e2e.rs
+crates/components/camel-component-wasm/tests/staged_listener_source.rs
 crates/components/camel-component-wasm/tests/integration.rs
