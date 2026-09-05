@@ -88,10 +88,14 @@ struct ServerHandle {
     _task: JoinHandle<()>,
     tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
     tls_source: Option<ServerTlsSource>,
+    /// Actual bound address, captured from the served listener at spawn
+    /// time. Every holder reads this stored value instead of re-reading a
+    /// listener.
+    bound_addr: std::net::SocketAddr,
     /// Present for the TLS (wss) path so callers can await
-    /// `axum_server::Handle::listening()` to detect bind success or
-    /// failure. `None` for the plain-ws path, which binds synchronously
-    /// inside `spawn_server`.
+    /// `axum_server::Handle::listening()` to detect serve readiness.
+    /// `None` for the plain-ws path, which serves an already-bound
+    /// listener and is live as soon as spawn returns.
     listening_handle: Option<axum_server::Handle<std::net::SocketAddr>>,
 }
 
@@ -143,14 +147,14 @@ impl ServerRegistry {
 
         let handle = cell
             .get_or_try_init(|| async {
-                let handle = spawn_server(
-                    &host_owned,
-                    port,
-                    tls_config,
-                    runtime.clone(),
-                    route_id.clone(),
-                )
-                .await?;
+                // Legacy paths bind BEFORE delegating: spawn_server serves an
+                // already-bound listener and no longer binds.
+                let addr = format!("{host_owned}:{port}");
+                let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+                    CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
+                })?;
+                let handle =
+                    spawn_server(listener, tls_config, runtime.clone(), route_id.clone()).await?;
                 // Register reload handler (exactly-once: inside OnceCell init closure).
                 if let (Some(tls_cfg), Some(source)) =
                     (handle.tls_config.as_ref(), handle.tls_source.as_ref())
@@ -171,36 +175,124 @@ impl ServerRegistry {
             Err(e) => {
                 // Decrement ref_count on spawn failure so the entry is
                 // cleaned up when it reaches zero.
-                let mut guard = self.inner.lock().map_err(|_| {
-                    CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
-                })?;
-                if let Some(entry) = guard.get_mut(&port) {
-                    entry.ref_count -= 1;
-                    if entry.ref_count == 0 {
-                        guard.remove(&port);
-                    }
-                }
+                self.decrement_ref_count(port)?;
                 return Err(e);
             }
         };
 
         if wants_tls != handle.is_tls {
             // Decrement ref count since we're rejecting this caller
-            let mut guard = self.inner.lock().map_err(|_| {
-                CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
-            })?;
-            if let Some(entry) = guard.get_mut(&port) {
-                entry.ref_count -= 1;
-                if entry.ref_count == 0 {
-                    guard.remove(&port);
-                }
-            }
+            self.decrement_ref_count(port)?;
             return Err(CamelError::EndpointCreationFailed(format!(
                 "Server on port {port} already running with different TLS mode"
             )));
         }
 
         Ok((handle.state.clone(), handle.listening_handle.clone()))
+    }
+
+    /// Decrement the ref count for `port`, removing the entry when it
+    /// reaches zero. Shared by the rejection paths of both spawn entry
+    /// points.
+    fn decrement_ref_count(&self, port: u16) -> Result<(), CamelError> {
+        let mut guard = self.inner.lock().map_err(|_| {
+            CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
+        })?;
+        if let Some(entry) = guard.get_mut(&port) {
+            entry.ref_count -= 1;
+            if entry.ref_count == 0 {
+                guard.remove(&port);
+            }
+        }
+        Ok(())
+    }
+
+    /// Spawn (or join) the server keyed by the injected listener's actual
+    /// port.
+    ///
+    /// The listener is authoritative for the registry key: `local_addr()`
+    /// is read BEFORE any registry mutation, so a port-0 bind registers
+    /// under its real ephemeral port. When an existing entry already
+    /// serves that port, the redundant listener is dropped and the
+    /// existing server is reused. Returns the actual bound address.
+    pub async fn get_or_spawn_with_listener(
+        &'static self,
+        listener: tokio::net::TcpListener,
+        tls_config: Option<WsTlsConfig>,
+        runtime: Arc<dyn RuntimeObservability>,
+        route_id: String,
+    ) -> Result<
+        (
+            WsAppState,
+            std::net::SocketAddr,
+            Option<axum_server::Handle<std::net::SocketAddr>>,
+        ),
+        CamelError,
+    > {
+        let wants_tls = tls_config.is_some();
+        let port = listener
+            .local_addr()
+            .map_err(|e| {
+                CamelError::EndpointCreationFailed(format!("Failed to read listener address: {e}"))
+            })?
+            .port();
+
+        let (cell, _is_new) = {
+            let mut guard = self.inner.lock().map_err(|_| {
+                CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
+            })?;
+            let entry = guard.entry(port).or_insert_with(|| ServerRegistryInner {
+                cell: Arc::new(OnceCell::new()),
+                ref_count: 0,
+            });
+            entry.ref_count += 1;
+            (entry.cell.clone(), entry.ref_count == 1)
+        };
+
+        // When an existing entry wins, the init closure never runs and the
+        // injected listener is dropped here — exactly-once spawn holds.
+        let handle = cell
+            .get_or_try_init(|| async {
+                let handle =
+                    spawn_server(listener, tls_config, runtime.clone(), route_id.clone()).await?;
+                // Register reload handler (exactly-once: inside OnceCell init closure).
+                if let (Some(tls_cfg), Some(source)) =
+                    (handle.tls_config.as_ref(), handle.tls_source.as_ref())
+                {
+                    let handler = Arc::new(crate::tls_reload::WsReloadHandler::new(
+                        tls_cfg.clone(),
+                        source.clone(),
+                        port,
+                    ));
+                    camel_component_api::tls_source::TlsReloadRegistry::global().register(handler);
+                }
+                Ok::<ServerHandle, CamelError>(handle)
+            })
+            .await;
+
+        let handle = match handle {
+            Ok(h) => h,
+            Err(e) => {
+                // Decrement ref_count on spawn failure so the entry is
+                // cleaned up when it reaches zero.
+                self.decrement_ref_count(port)?;
+                return Err(e);
+            }
+        };
+
+        if wants_tls != handle.is_tls {
+            // Decrement ref count since we're rejecting this caller
+            self.decrement_ref_count(port)?;
+            return Err(CamelError::EndpointCreationFailed(format!(
+                "Server on port {port} already running with different TLS mode"
+            )));
+        }
+
+        Ok((
+            handle.state.clone(),
+            handle.bound_addr,
+            handle.listening_handle.clone(),
+        ))
     }
 
     /// Release a reference to the server on the given port.
@@ -221,17 +313,24 @@ impl ServerRegistry {
         }
         guard.clear();
     }
+
+    /// Current ref count for the entry on `port` — **test-only**.
+    #[cfg(test)]
+    pub fn ref_count_for_test(&'static self, port: u16) -> usize {
+        let guard = Self::global().inner.lock().expect("ServerRegistry lock");
+        guard.get(&port).map(|entry| entry.ref_count).unwrap_or(0)
+    }
 }
 
 async fn spawn_server(
-    host: &str,
-    port: u16,
+    listener: tokio::net::TcpListener,
     tls_config: Option<WsTlsConfig>,
     runtime: Arc<dyn RuntimeObservability>,
     route_id: String,
 ) -> Result<ServerHandle, CamelError> {
-    let host_owned = host.to_string();
-    let addr = format!("{host}:{port}");
+    let bound_addr = listener.local_addr().map_err(|e| {
+        CamelError::EndpointCreationFailed(format!("Failed to read listener address: {e}"))
+    })?;
     let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
     let path_configs = Arc::new(DashMap::new());
     let path_policies = Arc::new(DashMap::new());
@@ -251,9 +350,6 @@ async fn spawn_server(
     let (task, is_tls, retained_tls_cfg, retained_source, listening_handle) =
         if let Some(ref tls) = tls_config {
             let rustls = load_tls_config(&tls.cert_path, &tls.key_path)?;
-            let parsed_addr = addr.parse().map_err(|e| {
-                CamelError::EndpointCreationFailed(format!("Invalid listen address {addr}: {e}"))
-            })?;
             let tls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(rustls));
             let tls_source = ServerTlsSource {
                 cert_path: std::path::PathBuf::from(&tls.cert_path),
@@ -262,16 +358,22 @@ async fn spawn_server(
             };
             // Clone for handle retention — the original moves into the spawned task
             let retained = tls_cfg.clone();
-            // axum_server defers the TCP bind into the spawned serve() future, so
-            // surface bind success/failure via Handle::listening(). The clone here
+            // The listener arrives already bound; `Handle::listening()` now
+            // signals when the accept loop starts serving. The clone here
             // moves into the task; the original is retained for the caller.
             let listen_handle = axum_server::Handle::new();
             let listen_handle_for_task = listen_handle.clone();
             let error_flag = Arc::clone(&server_error);
             let rt = Arc::clone(&runtime);
             let rid = route_id.clone();
+            let std_listener = listener.into_std().map_err(|e| {
+                CamelError::EndpointCreationFailed(format!("Listener conversion failed: {e}"))
+            })?;
+            let server = axum_server::from_tcp_rustls(std_listener, tls_cfg).map_err(|e| {
+                CamelError::EndpointCreationFailed(format!("TLS listener setup failed: {e}"))
+            })?;
             let task = tokio::spawn(async move {
-                if let Err(e) = axum_server::bind_rustls(parsed_addr, tls_cfg)
+                if let Err(e) = server
                     .handle(listen_handle_for_task)
                     .serve(app.into_make_service())
                     .await
@@ -280,8 +382,8 @@ async fn spawn_server(
                         .force_unhealthy_for_route(&rid, "g:ws:bind-tls", &e.to_string());
                     // log-policy: outside-contract
                     tracing::error!(
-                        host = host_owned,
-                        port = port,
+                        host = %bound_addr.ip(),
+                        port = bound_addr.port(),
                         error = %e,
                         "WebSocket server terminated with error"
                     );
@@ -296,9 +398,6 @@ async fn spawn_server(
                 Some(listen_handle),
             )
         } else {
-            let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-                CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
-            })?;
             let error_flag = Arc::clone(&server_error);
             let rt = Arc::clone(&runtime);
             let rid = route_id.clone();
@@ -308,8 +407,8 @@ async fn spawn_server(
                         .force_unhealthy_for_route(&rid, "g:ws:bind-plain", &e.to_string());
                     // log-policy: outside-contract
                     tracing::error!(
-                        host = host_owned,
-                        port = port,
+                        host = %bound_addr.ip(),
+                        port = bound_addr.port(),
                         error = %e,
                         "WebSocket server terminated with error"
                     );
@@ -319,7 +418,12 @@ async fn spawn_server(
             (task, false, None, None, None)
         };
 
-    tracing::info!(host, port, is_tls, "WebSocket server started");
+    tracing::info!(
+        host = %bound_addr.ip(),
+        port = bound_addr.port(),
+        is_tls,
+        "WebSocket server started"
+    );
 
     Ok(ServerHandle {
         state,
@@ -327,6 +431,7 @@ async fn spawn_server(
         _task: task,
         tls_config: retained_tls_cfg,
         tls_source: retained_source,
+        bound_addr,
         listening_handle,
     })
 }
@@ -1123,11 +1228,20 @@ impl WsConsumer {
             runtime,
         }
     }
-}
 
-#[async_trait]
-impl Consumer for WsConsumer {
-    async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+    /// Start the consumer by injecting an already-bound TCP listener.
+    ///
+    /// The listener is authoritative for binding: the server registry
+    /// keys the server by the listener's actual port (`local_addr()`),
+    /// so the endpoint URI's host:port is informational under this
+    /// entry point. Path, auth and per-segment config still come from
+    /// the endpoint; the TLS mode comes from the consumer config and
+    /// must match any server already running on the same port.
+    pub async fn start_with_listener(
+        &mut self,
+        ctx: ConsumerContext,
+        listener: tokio::net::TcpListener,
+    ) -> Result<(), CamelError> {
         // Reject double-start (WS-006)
         if self.server_state.is_some() {
             return Err(CamelError::EndpointCreationFailed(
@@ -1136,59 +1250,50 @@ impl Consumer for WsConsumer {
         }
 
         tracing::info!(
-            host = self.cfg.inner.host,
-            port = self.cfg.inner.port,
             path = self.cfg.inner.path,
             scheme = self.cfg.inner.scheme,
-            "WebSocket consumer starting"
+            "WebSocket consumer starting with injected listener"
         );
 
-        let tls_config = if self.cfg.inner.scheme == "wss" {
-            let cert_path = self.cfg.inner.tls_cert.clone().ok_or_else(|| {
-                CamelError::EndpointCreationFailed("TLS cert path is required for wss".into())
-            })?;
-            let key_path = self.cfg.inner.tls_key.clone().ok_or_else(|| {
-                CamelError::EndpointCreationFailed("TLS key path is required for wss".into())
-            })?;
-            Some(WsTlsConfig {
-                cert_path,
-                key_path,
-            })
-        } else {
-            None
-        };
+        let tls_config = self.tls_config()?;
 
-        let (state, listening_handle) = ServerRegistry::global()
-            .get_or_spawn(
-                &self.cfg.inner.host,
-                self.cfg.inner.port,
+        let (state, bound_addr, listening_handle) = ServerRegistry::global()
+            .get_or_spawn_with_listener(
+                listener,
                 tls_config,
                 self.runtime.clone(),
                 ctx.route_id().to_string(),
             )
             .await?;
 
-        // Readiness gating:
-        // - Plain ws: `spawn_server` binds the TCP listener synchronously
-        //   before returning, so `get_or_spawn` returning `Ok` means the
-        //   bind already succeeded. Signal readiness immediately.
-        // - wss: `spawn_server` defers the bind into a spawned serve()
-        //   task. The `axum_server::Handle` lets us await the actual bind
-        //   result. `listening()` returns `Some(addr)` once bound, or
-        //   `None` if the bind failed — propagate that failure here so
-        //   the route never marks itself ready on a dead listener.
-        match listening_handle {
-            Some(handle) => match handle.listening().await {
-                Some(_addr) => ctx.mark_ready(),
-                None => {
-                    return Err(CamelError::EndpointCreationFailed(
-                        "TLS listener bind failed".to_string(),
-                    ));
-                }
-            },
-            None => ctx.mark_ready(),
-        }
+        self.gate_ready(&ctx, listening_handle).await?;
 
+        // The listener's actual address — not the URI's informational
+        // host:port — keys the connection registry.
+        // NOTE: keyed by the listener's actual address, not
+        // `canonical_host()` from the URI (as `start` does). The listener
+        // is authoritative here; a URI host whose canonical form maps to a
+        // different interface string (e.g. `localhost` + a `::1` listener)
+        // will make same-host producer lookup miss. Bind the listener on
+        // the address family the URI names.
+        let registry_key = (
+            bound_addr.ip().to_string(),
+            bound_addr.port(),
+            self.cfg.inner.path.clone(),
+        );
+        self.finish_start(&ctx, state, registry_key).await
+    }
+
+    /// Shared tail of `start` and `start_with_listener`: publish the
+    /// path dispatch entry and segment config, register the connection
+    /// registry under `registry_key`, and spawn the envelope forward
+    /// task.
+    async fn finish_start(
+        &mut self,
+        ctx: &ConsumerContext,
+        state: WsAppState,
+        registry_key: (String, u16, String),
+    ) -> Result<(), CamelError> {
         let (env_tx, mut env_rx) = mpsc::channel::<ExchangeEnvelope>(64);
         {
             let mut table = state.dispatch.write().await;
@@ -1211,11 +1316,6 @@ impl Consumer for WsConsumer {
             state.path_policies.insert(path, sec_ctx.clone());
         }
 
-        let registry_key = (
-            self.cfg.inner.canonical_host(),
-            self.cfg.inner.port,
-            self.cfg.inner.path.clone(),
-        );
         global_registries().insert(registry_key.clone(), Arc::clone(&self.registry));
 
         let sender = ctx.sender();
@@ -1240,6 +1340,96 @@ impl Consumer for WsConsumer {
         self.registry_key = Some(registry_key);
         self.forward_task = Some(forward_task);
         Ok(())
+    }
+}
+
+impl WsConsumer {
+    /// TLS config from consumer settings; errors when `wss` lacks cert/key.
+    fn tls_config(&self) -> Result<Option<WsTlsConfig>, CamelError> {
+        if self.cfg.inner.scheme == "wss" {
+            let cert_path = self.cfg.inner.tls_cert.clone().ok_or_else(|| {
+                CamelError::EndpointCreationFailed("TLS cert path is required for wss".into())
+            })?;
+            let key_path = self.cfg.inner.tls_key.clone().ok_or_else(|| {
+                CamelError::EndpointCreationFailed("TLS key path is required for wss".into())
+            })?;
+            Ok(Some(WsTlsConfig {
+                cert_path,
+                key_path,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Readiness gating shared by `start` and `start_with_listener`:
+    /// both paths bind the TCP listener before delegation — plain
+    /// synchronously, TLS via the pre-bound listener handed to the serve
+    /// task. `listening()` therefore signals that the serve/accept loop
+    /// actually started (a `None` return means serving failed — e.g. the
+    /// task died at startup — so the route never marks itself ready on a
+    /// dead listener).
+    async fn gate_ready(
+        &self,
+        ctx: &ConsumerContext,
+        listening_handle: Option<axum_server::Handle<std::net::SocketAddr>>,
+    ) -> Result<(), CamelError> {
+        match listening_handle {
+            Some(handle) => match handle.listening().await {
+                Some(_addr) => {
+                    ctx.mark_ready();
+                    Ok(())
+                }
+                None => Err(CamelError::EndpointCreationFailed(
+                    "TLS listener bind failed".to_string(),
+                )),
+            },
+            None => {
+                ctx.mark_ready();
+                Ok(())
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Consumer for WsConsumer {
+    async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        // Reject double-start (WS-006)
+        if self.server_state.is_some() {
+            return Err(CamelError::EndpointCreationFailed(
+                "WebSocket consumer already started".into(),
+            ));
+        }
+
+        tracing::info!(
+            host = self.cfg.inner.host,
+            port = self.cfg.inner.port,
+            path = self.cfg.inner.path,
+            scheme = self.cfg.inner.scheme,
+            "WebSocket consumer starting"
+        );
+
+        let tls_config = self.tls_config()?;
+
+        let (state, listening_handle) = ServerRegistry::global()
+            .get_or_spawn(
+                &self.cfg.inner.host,
+                self.cfg.inner.port,
+                tls_config,
+                self.runtime.clone(),
+                ctx.route_id().to_string(),
+            )
+            .await?;
+
+        self.gate_ready(&ctx, listening_handle).await?;
+
+        let registry_key = (
+            self.cfg.inner.canonical_host(),
+            self.cfg.inner.port,
+            self.cfg.inner.path.clone(),
+        );
+        self.finish_start(&ctx, state, registry_key).await
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
@@ -1844,14 +2034,6 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    }
-
     /// Retry `connect_async` until the server accepts, bounded by 5s.
     /// Unbounded retries hang the whole test binary when the consumer's
     /// bind silently failed on crowded CI port space (rc-y24l).
@@ -2027,14 +2209,19 @@ mod tests {
     #[tokio::test]
     async fn echo_flow_round_trips_message_through_consumer_and_producer() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/echo");
         let component_ctx = NoOpComponentContext;
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let producer = endpoint
             .create_producer(rt(), &ProducerContext::default())
             .unwrap();
@@ -2045,7 +2232,7 @@ mod tests {
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         let route_task = tokio::spawn(async move {
             if let Some(envelope) = route_rx.recv().await {
@@ -2100,24 +2287,199 @@ mod tests {
         route_task.await.unwrap();
     }
 
+    /// Echo a single envelope back through `producer` (test helper for the
+    /// listener-injection consumer tests).
+    fn spawn_echo_route(
+        mut route_rx: mpsc::Receiver<ExchangeEnvelope>,
+        producer: BoxProcessor,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            if let Some(envelope) = route_rx.recv().await {
+                let payload = envelope
+                    .exchange
+                    .input
+                    .body
+                    .as_text()
+                    .unwrap_or_default()
+                    .to_string();
+                let key = envelope
+                    .exchange
+                    .input
+                    .header("CamelWsConnectionKey")
+                    .and_then(|v| v.as_str())
+                    .unwrap()
+                    .to_string();
+
+                let mut response = Exchange::new(CamelMessage::new(CamelBody::Text(payload)));
+                response
+                    .input
+                    .set_header("CamelWsConnectionKey", serde_json::Value::String(key));
+                producer.oneshot(response).await.unwrap();
+            }
+        })
+    }
+
+    /// Receive the next text message from the client, skipping control
+    /// frames (test helper for the listener-injection consumer tests).
+    async fn recv_client_text(
+        client: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> String {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match client.next().await {
+                    Some(Ok(ClientMessage::Text(txt))) => break txt.to_string(),
+                    Some(Ok(ClientMessage::Ping(_))) | Some(Ok(ClientMessage::Pong(_))) => continue,
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => panic!("ws receive failed: {e}"),
+                    None => panic!("websocket closed before echo"),
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
-    async fn consumer_stop_sends_close_1001() {
+    async fn start_with_listener_round_trips_without_port_guess() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
-        let uri = format!("ws://127.0.0.1:{port}/shutdown");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let uri = format!("ws://127.0.0.1:{}/echo", addr.port());
         let component_ctx = NoOpComponentContext;
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        // The port-0 listener is the source of truth and is handed to
+        // the consumer as-is.
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
+        let producer = endpoint
+            .create_producer(rt(), &ProducerContext::default())
+            .unwrap();
+
+        let (route_tx, route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
+        consumer.start_with_listener(ctx, listener).await.unwrap();
+
+        let route_task = spawn_echo_route(route_rx, producer);
+
+        let url = format!("ws://127.0.0.1:{}/echo", addr.port());
+        let mut client = connect_until_ready(&url).await;
+
+        client
+            .send(ClientMessage::Text("hello-ws".into()))
+            .await
+            .unwrap();
+
+        let incoming = recv_client_text(&mut client).await;
+        assert_eq!(incoming, "hello-ws");
+
+        consumer.stop().await.unwrap();
+        route_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn injected_entry_survives_consumer_stop() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+        let uri = format!("ws://127.0.0.1:{port}/echo");
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
+
+        // Consumer A: injected listener entry.
+        let mut consumer_a = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
+        let (route_tx_a, route_rx_a) = mpsc::channel(16);
+        let ctx_a = ConsumerContext::new(
+            route_tx_a,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
+        consumer_a
+            .start_with_listener(ctx_a, listener)
+            .await
+            .unwrap();
+
+        let producer_a = endpoint
+            .create_producer(rt(), &ProducerContext::default())
+            .unwrap();
+        let route_task_a = spawn_echo_route(route_rx_a, producer_a);
+
+        let url = format!("ws://127.0.0.1:{port}/echo");
+        let mut client_a = connect_until_ready(&url).await;
+        client_a
+            .send(ClientMessage::Text("msg-a".into()))
+            .await
+            .unwrap();
+        assert_eq!(recv_client_text(&mut client_a).await, "msg-a");
+
+        consumer_a.stop().await.unwrap();
+        route_task_a.await.unwrap();
+
+        // Consumer B: plain `start` entry on the same port. The injected
+        // server entry must still be alive, so this joins it instead of
+        // rebinding (a rebind would collide with the live server).
+        let mut consumer_b = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
+        let (route_tx_b, route_rx_b) = mpsc::channel(16);
+        let ctx_b = ConsumerContext::new(
+            route_tx_b,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
+        consumer_b.start(ctx_b).await.unwrap();
+
+        let producer_b = endpoint
+            .create_producer(rt(), &ProducerContext::default())
+            .unwrap();
+        let route_task_b = spawn_echo_route(route_rx_b, producer_b);
+
+        let mut client_b = connect_until_ready(&url).await;
+        client_b
+            .send(ClientMessage::Text("msg-b".into()))
+            .await
+            .unwrap();
+        assert_eq!(recv_client_text(&mut client_b).await, "msg-b");
+
+        consumer_b.stop().await.unwrap();
+        route_task_b.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn consumer_stop_sends_close_1001() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+        let uri = format!("ws://127.0.0.1:{port}/shutdown");
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
             route_tx,
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/shutdown");
         let mut client = connect_until_ready(&url).await;
@@ -2179,15 +2541,17 @@ mod tests {
     #[tokio::test]
     async fn wss_consumer_start_fails_without_tls_cert() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
-        let component_ctx = NoOpComponentContext;
-        let endpoint = WssComponent::new()
-            .create_endpoint(&format!("wss://127.0.0.1:{port}/secure"), &component_ctx)
-            .unwrap();
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+        let uri = format!("wss://127.0.0.1:{port}/secure");
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let (tx, _rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "ws-test-route".to_string());
-        let result = consumer.start(ctx).await;
+        let result = consumer.start_with_listener(ctx, listener).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -2202,17 +2566,19 @@ mod tests {
         // Ensure clean global state (process-lifetime servers may leak across tests).
         ServerRegistry::reset();
 
-        let port = free_port();
-        let component_ctx = NoOpComponentContext;
-        let endpoint = WssComponent::new()
-            .create_endpoint(&format!(
-                "wss://127.0.0.1:{port}/secure?tlsCert=/nonexistent/cert.pem&tlsKey=/nonexistent/key.pem"
-            ), &component_ctx)
-            .unwrap();
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+        let uri = format!(
+            "wss://127.0.0.1:{port}/secure?tlsCert=/nonexistent/cert.pem&tlsKey=/nonexistent/key.pem"
+        );
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let (tx, _rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "ws-test-route".to_string());
-        let result = consumer.start(ctx).await;
+        let result = consumer.start_with_listener(ctx, listener).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -2224,13 +2590,18 @@ mod tests {
     #[tokio::test]
     async fn server_registry_returns_same_state_for_same_port() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
-        let (state1, _) = ServerRegistry::global()
-            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
+        // One socket, two handles: clone at the std level BEFORE the tokio
+        // conversion so both injected listeners report the same local port.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let std_clone = std_listener.try_clone().unwrap();
+        let listener1 = tokio_listener_from_std(std_listener);
+        let listener2 = tokio_listener_from_std(std_clone);
+        let (state1, _addr1, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener1, None, test_rt(), "test-route".into())
             .await
             .unwrap();
-        let (state2, _) = ServerRegistry::global()
-            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
+        let (state2, _addr2, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener2, None, test_rt(), "test-route".into())
             .await
             .unwrap();
         assert!(
@@ -2239,12 +2610,284 @@ mod tests {
         );
     }
 
+    // ── Listener injection: get_or_spawn_with_listener ────────────────────
+    //
+    // The injected listener is authoritative for the registry key: the
+    // actual port comes from `local_addr()`, so port-0 binds register under
+    // their real ephemeral port and the caller learns the bound address.
+
+    /// Assert a raw TCP connect to `addr` succeeds within 2s.
+    async fn assert_tcp_connectable(addr: std::net::SocketAddr) {
+        tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr))
+            .await
+            .expect("connect timed out")
+            .expect("expected a successful TCP connect");
+    }
+
+    /// Build a tokio listener from a std listener, setting non-blocking mode
+    /// (required by `TcpListener::from_std`).
+    fn tokio_listener_from_std(std_listener: std::net::TcpListener) -> tokio::net::TcpListener {
+        std_listener.set_nonblocking(true).unwrap();
+        tokio::net::TcpListener::from_std(std_listener).unwrap()
+    }
+
+    #[tokio::test]
+    async fn with_listener_port_zero_returns_real_bound_addr() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let expected_port = listener.local_addr().unwrap().port();
+        assert_ne!(expected_port, 0, "probe port must be real");
+
+        let (_state, bound_addr, listening) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-p0".into())
+            .await
+            .expect("injected listener spawn must succeed");
+
+        assert!(listening.is_none(), "plain path has no listening handle");
+        assert_eq!(bound_addr.port(), expected_port);
+        assert_ne!(
+            bound_addr.port(),
+            0,
+            "bound address must carry the real port"
+        );
+        assert_tcp_connectable(bound_addr).await;
+    }
+
+    #[tokio::test]
+    async fn with_listener_same_port_reuses_entry() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        // One socket, two handles: clone at the std level BEFORE the tokio
+        // conversion so both injected listeners report the same local port.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let std_clone = std_listener.try_clone().unwrap();
+        let listener1 = tokio_listener_from_std(std_listener);
+        let port = listener1.local_addr().unwrap().port();
+
+        let (_s1, addr1, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener1, None, test_rt(), "ws-injected-r1".into())
+            .await
+            .expect("first injected spawn must succeed");
+
+        let listener2 = tokio_listener_from_std(std_clone);
+        let (_s2, addr2, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener2, None, test_rt(), "ws-injected-r2".into())
+            .await
+            .expect("second injected call must reuse the entry, not rebind");
+
+        assert_eq!(addr1.port(), port);
+        assert_eq!(
+            addr2, addr1,
+            "both callers must observe the same bound address"
+        );
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            2,
+            "two injected callers must hold two references on the same entry"
+        );
+        assert_tcp_connectable(addr1).await;
+        assert_tcp_connectable(addr1).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_get_or_spawn_after_injected_reuses_entry() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (_s1, addr, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-mix".into())
+            .await
+            .expect("injected spawn must succeed");
+
+        let (_s2, _) = ServerRegistry::global()
+            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
+            .await
+            .expect("legacy call on injected entry must reuse it, not rebind");
+
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            2,
+            "injected + legacy callers must hold two references on the same entry"
+        );
+        assert_tcp_connectable(addr).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_get_or_spawn_unchanged_after_refactor() {
+        use camel_component_api::test_support::tls;
+
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // Test-infra port pick: bind-0, read, drop the probe listener.
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        // Plain legacy spawn: pre-refactor return shape `(WsAppState, Option<Handle>)`,
+        // binds so a TCP connect succeeds, ref count 1.
+        let (_state, listening) = ServerRegistry::global()
+            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
+            .await
+            .expect("plain legacy spawn must succeed");
+        assert!(
+            listening.is_none(),
+            "plain legacy path must keep returning no listening handle"
+        );
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            1,
+            "a single legacy caller holds one reference"
+        );
+        assert_tcp_connectable(std::net::SocketAddr::from(([127, 0, 0, 1], port))).await;
+
+        // TLS legacy call on the same port: TLS-mode mismatch, unchanged.
+        let (cert_pem, key_pem) = {
+            let (_ca, c, k) = tls::gen_server_cert();
+            (c, k)
+        };
+        let cert_path = tls::write_pem_tmp("ws-bound-cert.pem", &cert_pem);
+        let key_path = tls::write_pem_tmp("ws-bound-key.pem", &key_pem);
+        let tls_cfg = WsTlsConfig {
+            cert_path: cert_path.to_str().expect("cert path").to_string(),
+            key_path: key_path.to_str().expect("key path").to_string(),
+        };
+        let result = ServerRegistry::global()
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                Some(tls_cfg),
+                test_rt(),
+                "test-route-tls".into(),
+            )
+            .await;
+        let err = match result {
+            Ok(_) => panic!("TLS-mode mismatch on the same port must error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("different TLS mode"),
+            "expected TLS-mode mismatch error, got: {err}"
+        );
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            1,
+            "the rejected caller must not hold a reference"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_listener_tls_mismatch_errors() {
+        use camel_component_api::test_support::tls;
+
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // One socket, two handles (same trick as the reuse test): the second
+        // injected listener reports the same port without a second bind.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let std_clone = std_listener.try_clone().unwrap();
+        let listener = tokio_listener_from_std(std_listener);
+        let port = listener.local_addr().unwrap().port();
+
+        let (_state, addr, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-plain".into())
+            .await
+            .expect("plain injected spawn must succeed");
+
+        let (cert_pem, key_pem) = {
+            let (_ca, c, k) = tls::gen_server_cert();
+            (c, k)
+        };
+        let cert_path = tls::write_pem_tmp("ws-injected-cert.pem", &cert_pem);
+        let key_path = tls::write_pem_tmp("ws-injected-key.pem", &key_pem);
+        let tls_cfg = WsTlsConfig {
+            cert_path: cert_path.to_str().expect("cert path").to_string(),
+            key_path: key_path.to_str().expect("key path").to_string(),
+        };
+
+        let tls_listener = tokio_listener_from_std(std_clone);
+        let result = ServerRegistry::global()
+            .get_or_spawn_with_listener(
+                tls_listener,
+                Some(tls_cfg),
+                test_rt(),
+                "ws-injected-tls".into(),
+            )
+            .await;
+        let err = match result {
+            Ok(_) => panic!("TLS-mode mismatch on an injected port must error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("different TLS mode"),
+            "expected TLS-mode mismatch error, got: {err}"
+        );
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            1,
+            "the rejected caller must not hold a reference"
+        );
+        assert_tcp_connectable(addr).await;
+    }
+
+    #[tokio::test]
+    async fn reset_clears_injected_entry_allowing_rebind() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (_state, _addr, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-reset".into())
+            .await
+            .expect("injected spawn must succeed");
+        assert_eq!(ServerRegistry::global().ref_count_for_test(port), 1);
+
+        // reset() must abort the injected entry's server task and clear the
+        // map entry like any other.
+        ServerRegistry::reset();
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            0,
+            "reset must clear the injected entry"
+        );
+
+        // The aborted task releases the socket asynchronously — retry the
+        // bind briefly. Success proves no listener leak.
+        let mut fresh = None;
+        for _ in 0..100 {
+            match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                Ok(l) => {
+                    fresh = Some(l);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        let fresh = fresh.expect("port must be rebindable after reset (no listener leak)");
+
+        let (_state2, addr2, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(fresh, None, test_rt(), "ws-injected-rebind".into())
+            .await
+            .expect("re-spawn on the fresh listener must succeed");
+        assert_eq!(addr2.port(), port);
+        assert_tcp_connectable(addr2).await;
+    }
+
     #[tokio::test]
     async fn dispatch_handler_returns_404_for_unregistered_path() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
-        let (state, _) = ServerRegistry::global()
-            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (state, _addr, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener, None, test_rt(), "test-route".into())
             .await
             .unwrap();
         let app = Router::new().fallback(dispatch_handler).with_state(state);
@@ -2285,7 +2928,6 @@ mod tests {
                 })
             }),
         );
-        // Bind to port 0 directly to avoid TOCTOU race with free_port() + re-bind
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server_task = tokio::spawn(async move {
@@ -2312,20 +2954,21 @@ mod tests {
     #[tokio::test]
     async fn max_connections_rejects_with_close_1013() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/limited?maxConnections=1");
-        let component_ctx = NoOpComponentContext;
-        let endpoint = WsComponent::new()
-            .create_endpoint(&uri, &component_ctx)
-            .unwrap();
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
             route_tx,
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/limited");
         let _client1 = connect_until_ready(&url).await;
@@ -2361,20 +3004,21 @@ mod tests {
     #[tokio::test]
     async fn max_message_size_rejects_with_close_1009() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/sizelimit?maxMessageSize=10");
-        let component_ctx = NoOpComponentContext;
-        let endpoint = WsComponent::new()
-            .create_endpoint(&uri, &component_ctx)
-            .unwrap();
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
             route_tx,
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/sizelimit");
         let mut client = connect_until_ready(&url).await;
@@ -2411,20 +3055,21 @@ mod tests {
     #[tokio::test]
     async fn origin_rejection_returns_403() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/origintest?allowOrigin=https://allowed.com");
-        let component_ctx = NoOpComponentContext;
-        let endpoint = WsComponent::new()
-            .create_endpoint(&uri, &component_ctx)
-            .unwrap();
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
             route_tx,
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         let (state, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
@@ -2463,13 +3108,18 @@ mod tests {
     #[tokio::test]
     async fn broadcast_sends_to_all_connected_clients() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/bc");
         let component_ctx = NoOpComponentContext;
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let producer = endpoint
             .create_producer(rt(), &ProducerContext::default())
             .unwrap();
@@ -2480,7 +3130,7 @@ mod tests {
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/bc");
 
@@ -2530,16 +3180,25 @@ mod tests {
     #[tokio::test]
     async fn concurrent_get_or_spawn_returns_same_state() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        // One socket, four handles: clone at the std level BEFORE the tokio
+        // conversion so all injected listeners report the same local port.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let std_clone1 = std_listener.try_clone().unwrap();
+        let std_clone2 = std_listener.try_clone().unwrap();
+        let std_clone3 = std_listener.try_clone().unwrap();
+        let listener0 = tokio_listener_from_std(std_listener);
+        let listener1 = tokio_listener_from_std(std_clone1);
+        let listener2 = tokio_listener_from_std(std_clone2);
+        let listener3 = tokio_listener_from_std(std_clone3);
         let results: Arc<std::sync::Mutex<Vec<WsAppState>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let mut handles = Vec::new();
-        for _ in 0..4 {
+        for listener in [listener0, listener1, listener2, listener3] {
             let results = results.clone();
             handles.push(tokio::spawn(async move {
-                let (state, _) = ServerRegistry::global()
-                    .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
+                let (state, _addr, _) = ServerRegistry::global()
+                    .get_or_spawn_with_listener(listener, None, test_rt(), "test-route".into())
                     .await
                     .unwrap();
                 results.lock().unwrap().push(state);
@@ -2710,14 +3369,14 @@ mod tests {
     #[tokio::test]
     async fn consumer_double_start_returns_error() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/doublestart");
-        let component_ctx = NoOpComponentContext;
-        let endpoint = WsComponent::new()
-            .create_endpoint(&uri, &component_ctx)
-            .unwrap();
-
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
             route_tx,
@@ -2726,7 +3385,7 @@ mod tests {
         );
 
         // First start should succeed
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         // Second start should fail
         let (route_tx2, _route_rx2) = mpsc::channel(16);
@@ -2750,21 +3409,21 @@ mod tests {
     #[tokio::test]
     async fn registry_cleanup_on_consumer_stop() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/cleanup");
-        let component_ctx = NoOpComponentContext;
-        let endpoint = WsComponent::new()
-            .create_endpoint(&uri, &component_ctx)
-            .unwrap();
-
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
             route_tx,
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         // Verify registry entry exists
         let registries = global_registries();
@@ -2798,14 +3457,19 @@ mod tests {
     #[tokio::test]
     async fn producer_server_send_returns_error_when_all_dropped() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/backpressure");
         let component_ctx = NoOpComponentContext;
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let producer = endpoint
             .create_producer(rt(), &ProducerContext::default())
             .unwrap();
@@ -2816,7 +3480,7 @@ mod tests {
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         // Connect a client so the registry has an entry
         let url = format!("ws://127.0.0.1:{port}/backpressure");
@@ -2855,21 +3519,21 @@ mod tests {
     #[tokio::test]
     async fn server_responds_to_client_ping_with_pong() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/pingpong");
-        let component_ctx = NoOpComponentContext;
-        let endpoint = WsComponent::new()
-            .create_endpoint(&uri, &component_ctx)
-            .unwrap();
-
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
             route_tx,
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/pingpong");
         let mut client = connect_until_ready(&url).await;
@@ -2903,12 +3567,10 @@ mod tests {
     // WS-008: Client-side retry on transient connect failures
     #[tokio::test]
     async fn producer_retries_on_connection_refused() {
-        // Use a port that nothing is listening on
-        let port = free_port();
-        // Ensure nothing is on this port
-        let cfg = WsEndpointConfig::from_uri(&format!(
-            "ws://127.0.0.1:{port}/retry?reconnect=true&reconnectMaxAttempts=2&reconnectDelayMs=50"
-        ))
+        // Port 0: instant deterministic connection refusal, no bind probe.
+        let cfg = WsEndpointConfig::from_uri(
+            "ws://127.0.0.1:0/retry?reconnect=true&reconnectMaxAttempts=2&reconnectDelayMs=50",
+        )
         .unwrap();
         let producer = WsProducer::new(cfg.client_config());
 
@@ -2999,7 +3661,9 @@ mod tests {
     #[tokio::test]
     async fn consumer_stop_returns_error_when_server_had_errors() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/errorflag")).unwrap();
         let mut consumer = WsConsumer::new(cfg.server_config(), test_rt());
         let (route_tx, _route_rx) = mpsc::channel(16);
@@ -3008,7 +3672,7 @@ mod tests {
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         // Simulate server error by setting the flag directly
         if let Some(ref state) = consumer.server_state {
@@ -3030,7 +3694,9 @@ mod tests {
     #[tokio::test]
     async fn consumer_stop_succeeds_when_server_healthy() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/healthy")).unwrap();
         let mut consumer = WsConsumer::new(cfg.server_config(), test_rt());
         let (route_tx, _route_rx) = mpsc::channel(16);
@@ -3039,7 +3705,7 @@ mod tests {
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         let result = consumer.stop().await;
         assert!(
@@ -3330,17 +3996,17 @@ mod tests {
         let cert_path = tls::write_pem_tmp("ws-release-cert.pem", &cert_pem);
         let key_path = tls::write_pem_tmp("ws-release-key.pem", &key_pem);
 
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
         let tls_cfg = WsTlsConfig {
             cert_path: cert_path.to_str().expect("cert path").to_string(),
             key_path: key_path.to_str().expect("key path").to_string(),
         };
 
         // Spawn a single WSS server.
-        let (_state, _) = ServerRegistry::global()
-            .get_or_spawn(
-                "127.0.0.1",
-                port,
+        let (_state, _addr, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(
+                listener,
                 Some(tls_cfg),
                 test_rt(),
                 "ws-release-test".into(),
@@ -3386,27 +4052,31 @@ mod tests {
         let cert_path = tls::write_pem_tmp("ws-multiref-cert.pem", &cert_pem);
         let key_path = tls::write_pem_tmp("ws-multiref-key.pem", &key_pem);
 
-        let port = free_port();
+        // One socket, two handles: clone at the std level BEFORE the tokio
+        // conversion so both injected listeners report the same local port.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let std_clone = std_listener.try_clone().unwrap();
+        let listener1 = tokio_listener_from_std(std_listener);
+        let listener2 = tokio_listener_from_std(std_clone);
+        let port = listener1.local_addr().unwrap().port();
         let tls_cfg = WsTlsConfig {
             cert_path: cert_path.to_str().expect("cert path").to_string(),
             key_path: key_path.to_str().expect("key path").to_string(),
         };
 
         // Acquire TWO references to the same port.
-        let (_s1, _) = ServerRegistry::global()
-            .get_or_spawn(
-                "127.0.0.1",
-                port,
+        let (_s1, _addr1, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(
+                listener1,
                 Some(tls_cfg.clone()),
                 test_rt(),
                 "ws-multiref-r1".into(),
             )
             .await
             .expect("WSS server should spawn (ref 1)");
-        let (_s2, _) = ServerRegistry::global()
-            .get_or_spawn(
-                "127.0.0.1",
-                port,
+        let (_s2, _addr2, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(
+                listener2,
                 Some(tls_cfg),
                 test_rt(),
                 "ws-multiref-r2".into(),
@@ -3444,11 +4114,11 @@ mod tests {
         // Ensure clean global state (process-lifetime servers may leak across tests).
         ServerRegistry::reset();
 
-        let port = free_port();
-        let (_state, _) = ServerRegistry::global()
-            .get_or_spawn(
-                "127.0.0.1",
-                port,
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (_state, _addr, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(
+                listener,
                 None,
                 test_rt(),
                 "ws-plaintext-no-reload-test".into(),
@@ -3587,17 +4257,17 @@ mod tests {
     async fn ws_message_dispatch_failure_counts_b_prime() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
         let errors: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
-        let port = free_port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/dispatch");
-        let endpoint = WsComponent::new()
-            .create_endpoint(&uri, &NoOpComponentContext)
-            .unwrap();
 
         // Recording runtime through the same seam the other tests fill with
         // the Panic helper (`test_rt()`).
-        let mut consumer = endpoint
-            .create_consumer(Arc::new(RecordingRuntime::new(Arc::clone(&errors))))
-            .unwrap();
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            Arc::new(RecordingRuntime::new(Arc::clone(&errors))),
+        );
 
         // Pipeline receiver dropped up front: every forward-task dispatch
         // send fails with `ChannelClosed`.
@@ -3608,7 +4278,7 @@ mod tests {
             CancellationToken::new(),
             "ws-test-route".to_string(),
         );
-        consumer.start(ctx).await.unwrap();
+        consumer.start_with_listener(ctx, listener).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/dispatch");
         let mut client = connect_until_ready(&url).await;

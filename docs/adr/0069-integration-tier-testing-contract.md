@@ -184,7 +184,9 @@ operator-facing signals.
    rc-w1u9 temptation. The fix stays an operator signal, not a test callback.
    The harness consumes the readiness signal only through the same public
    surface an operator uses: health or readiness state, or the bound address
-   a future boot handle reports. It never subscribes to a core-internal
+   a future boot handle reports (the WebSocket side of that address surface
+   has since landed: `ServerRegistry::get_or_spawn_with_listener`). It never
+   subscribes to a core-internal
    event or a callback added for the test. If partner readiness needs more
    than the operator surface exposes, the gap is an operator-facing engine
    feature, filed on its own merits. It is not a harness hook into core.

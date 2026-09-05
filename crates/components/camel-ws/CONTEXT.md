@@ -65,14 +65,23 @@ deterministic trust.
   shutdown removes its path, policy, and connection registry.
 - `WsReloadHandler::matches` matches `wss` servers by port and intentionally ignores host. This
   mirrors the port-keyed `ServerRegistry`.
-- Plain WS binds its TCP listener before `ConsumerContext::mark_ready`. WSS
-  starts its bind in the server task, so `WsConsumer::start` awaits
-  `axum_server::Handle::listening()` before signalling readiness. On bind
-  failure (`listening()` returns `None`) `start` returns `Err`, so the route
+- Plain WS binds its TCP listener before `ConsumerContext::mark_ready`. WSS also binds its
+  listener before delegation (`spawn_server` serves a pre-bound listener via `from_tcp_rustls`);
+  `listening()` now signals that the serve/accept loop actually started. `WsConsumer::start`
+  awaits `axum_server::Handle::listening()` before signalling readiness. On serve failure
+  (`listening()` returns `None`) `start` returns `Err`, so the route
   never marks itself ready on a dead listener. The health pin
   (`g:ws:bind-tls`) and the `WsConsumer::stop` error remain secondary failure
   signals for bind errors that surface after readiness. ADR-0007 requires
   such task failures to remain visible to Route supervision.
+- Test/operator surface (bd rc-9xsv, port-toctou elimination):
+  `ServerRegistry::get_or_spawn_with_listener` accepts a pre-bound
+  `tokio::net::TcpListener`, keys the registry by the listener's actual port,
+  and returns the entry's stored `bound_addr` (`ServerHandle` payload).
+  `WsConsumer::start_with_listener` mirrors it on the consumer side — the
+  URI's host:port is informational; the listener is authoritative for
+  binding (connection-registry keys use the bound address, see the
+  in-code note on the `canonical_host` asymmetry).
 - When a security plan exists, the kernel handshake fails closed: missing or invalid credentials
   reject the upgrade (401) and install no carrier, and the strict dispatch check denies a
   non-Public route whose exchange lacks the carrier. Query-token values are redacted before
