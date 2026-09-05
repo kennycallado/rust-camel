@@ -28,9 +28,11 @@ pub use adapters::{
     PartnerRouter, ReceiveError, ReceiveTimeout, RecordedSend, TransportError,
 };
 pub use boot_scenario::{ScenarioRun, boot_scenario};
+#[cfg(feature = "http")]
+pub use document::partner_scripts_for;
 pub use document::{
-    DocError, EndpointRef, Expectation, Provisioning, RouteSource, ScenarioAction,
-    ScenarioDocument, ScenarioTarget, parse_scenario_document,
+    DocError, EndpointRef, Expectation, PartnerScript, PartnerScriptResponse, Provisioning,
+    RouteSource, ScenarioAction, ScenarioDocument, ScenarioTarget, parse_scenario_document,
 };
 pub use env_layers::{AmbientLookup, LayeredEnv, ambient_std};
 pub use runner::{
@@ -51,6 +53,11 @@ mod env_layers_test;
 /// Scenario action runner tests (the four named tests from task 2.4).
 #[cfg(test)]
 mod runner_test;
+
+/// Partner router address-math tests (the pure wire_target /
+/// lane_key_for cases).
+#[cfg(test)]
+mod adapters_test;
 
 /// HTTP partner adapter tests (the named tests from task 3.1).
 #[cfg(all(test, feature = "http"))]

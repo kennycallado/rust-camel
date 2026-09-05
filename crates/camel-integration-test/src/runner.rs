@@ -32,9 +32,11 @@ use std::time::Duration;
 use camel_api::Value;
 
 use crate::adapters::{
-    IncomingMessage, OutgoingMessage, PartnerAdapter, PartnerRouter, ReceiveError, TransportError,
+    IncomingMessage, OutgoingMessage, PartnerRouter, ReceiveError, TransportError,
 };
-use crate::document::{EndpointRef, Expectation, ScenarioAction, ScenarioDocument, ScenarioTarget};
+use crate::document::{
+    EndpointRef, Expectation, Provisioning, ScenarioAction, ScenarioDocument, ScenarioTarget,
+};
 
 /// The bounded deadline for every `send` action (ADR-0069 §7: every
 /// adapter operation carries a deadline).
@@ -75,6 +77,96 @@ impl ScenarioVars {
     /// Records the last message received on an endpoint URI.
     fn remember(&mut self, endpoint: String, message: IncomingMessage) {
         self.last_received.insert(endpoint, message);
+    }
+}
+
+/// Resolves `${name}` placeholders in a scenario string against `vars`.
+///
+/// Grammar: `$${` escapes to a literal `${`; `${name}` substitutes the
+/// variable when `name` matches `[A-Za-z0-9_]+` and is immediately
+/// followed by `}`. Anything else — including `${env:FOO}`, where a
+/// colon follows the name — stays literal, so `${env:}` never resolves
+/// in scenarios. A non-string variable substitutes its JSON
+/// representation (`Value::to_string`), so a number 42 yields `42`.
+/// Substituted text is not re-scanned. An unset variable fails with
+/// [`ScenarioFailure::VarUnresolved`].
+pub(crate) fn resolve_placeholders(
+    input: &str,
+    vars: &ScenarioVars,
+) -> Result<String, ScenarioFailure> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            // `$${` escapes to a literal `${`.
+            if i + 2 < bytes.len() && bytes[i + 1] == b'$' && bytes[i + 2] == b'{' {
+                out.extend_from_slice(b"${");
+                i += 3;
+                continue;
+            }
+            // `${name}` with name in [A-Za-z0-9_]+ immediately followed
+            // by `}`; a colon or any other character after the name
+            // keeps the whole span literal.
+            if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                let name_start = i + 2;
+                let mut j = name_start;
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                    j += 1;
+                }
+                if j > name_start && j < bytes.len() && bytes[j] == b'}' {
+                    let name = &input[name_start..j];
+                    match vars.get(name) {
+                        Some(value) => {
+                            let replacement = stringify(value);
+                            out.extend_from_slice(replacement.as_bytes());
+                            i = j + 1;
+                            continue;
+                        }
+                        None => {
+                            return Err(ScenarioFailure::VarUnresolved {
+                                name: name.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            out.push(b'$');
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // The output is a byte-for-byte copy of the input except for
+    // substituted spans, so it stays valid UTF-8.
+    Ok(String::from_utf8(out).expect("placeholder output preserves input UTF-8")) // allow-unwrap
+}
+
+/// Recursively interpolates `${name}` placeholders in a value: maps
+/// and arrays are rebuilt with interpolated values, string leaves go
+/// through [`resolve_placeholders`], and every other leaf is cloned
+/// untouched. An unset variable propagates
+/// [`ScenarioFailure::VarUnresolved`] from any depth.
+pub(crate) fn interpolate_value(
+    value: &Value,
+    vars: &ScenarioVars,
+) -> Result<Value, ScenarioFailure> {
+    match value {
+        Value::String(text) => Ok(Value::String(resolve_placeholders(text, vars)?)),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| interpolate_value(item, vars))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        Value::Object(map) => {
+            let rebuilt = map
+                .iter()
+                .map(|(key, item)| Ok((key.clone(), interpolate_value(item, vars)?)))
+                .collect::<Result<_, _>>()?;
+            Ok(Value::Object(rebuilt))
+        }
+        other => Ok(other.clone()),
     }
 }
 
@@ -144,6 +236,36 @@ pub enum ScenarioFailure {
         /// Teardown failure detail.
         message: String,
     },
+}
+
+/// Fills the harness bind variables into `vars` (ADR-0069 §9): every
+/// wired reference with `provisioning: harness` and a `bindVar` gets
+/// its partner's bound `host:port` authority from the router, so a
+/// scenario string can address the partner as
+/// `http://${NAME}/path`.
+///
+/// Two-layer split: the scenario variable carries `host:port` only;
+/// the env-tier binding that route files interpolate keeps its
+/// `http://host:port` form (owned by the CLI driver, unchanged here).
+/// A reference with no registered adapter or no bound authority is
+/// skipped: the variable stays unset, and a later use fails with the
+/// verdict-class `VarUnresolved`.
+pub fn fill_bind_vars(wired: &[EndpointRef], router: &PartnerRouter, vars: &mut ScenarioVars) {
+    for reference in wired {
+        if reference.provisioning != Some(Provisioning::Harness) {
+            continue;
+        }
+        let Some(bind_var) = reference.bind_var.as_deref() else {
+            continue;
+        };
+        let Some(authority) = router
+            .adapter(&reference.endpoint)
+            .and_then(|adapter| adapter.bound_authority())
+        else {
+            continue;
+        };
+        vars.set(bind_var, Value::String(authority));
+    }
 }
 
 /// Runs a scenario's actions in order against the router.
@@ -240,7 +362,16 @@ async fn run_action(
             headers,
             method,
         } => {
-            send_action(index, to, body.as_ref(), headers.as_ref(), method, router).await?;
+            send_action(
+                index,
+                to,
+                body.as_ref(),
+                headers.as_ref(),
+                method,
+                router,
+                vars,
+            )
+            .await?;
         }
         ScenarioAction::Receive {
             from,
@@ -263,6 +394,16 @@ async fn run_action(
 }
 
 /// Dispatches a `send` action, bounded by [`SEND_DEADLINE`].
+///
+/// The endpoint reference, the body's string leaves, and the header
+/// values are the complete interpolation surface: each resolves its
+/// `${name}` placeholders against `vars` before dispatch, and an
+/// unresolved variable fails with the verdict-class `VarUnresolved`.
+/// The dial target comes from the router's address math: a
+/// harness-declared `:0` reference (or a dynamic reference resolving
+/// to a partner authority) dials the partner's bound address with the
+/// interpolated path preserved; anything else dials the interpolated
+/// URI literally.
 async fn send_action(
     index: usize,
     to: &EndpointRef,
@@ -270,13 +411,27 @@ async fn send_action(
     headers: Option<&BTreeMap<String, Value>>,
     method: &str,
     router: &PartnerRouter,
+    vars: &ScenarioVars,
 ) -> Result<(), ScenarioFailure> {
+    let declared = to.endpoint.as_str();
+    let interpolated = resolve_placeholders(declared, vars)?;
+    let body = body
+        .map(|value| interpolate_value(value, vars))
+        .transpose()?;
+    let headers = headers
+        .map(|map| -> Result<BTreeMap<String, Value>, ScenarioFailure> {
+            map.iter()
+                .map(|(name, value)| Ok((name.clone(), interpolate_value(value, vars)?)))
+                .collect()
+        })
+        .transpose()?;
     let msg = OutgoingMessage {
-        body: body.cloned().unwrap_or(Value::Null),
-        headers: headers.cloned().unwrap_or_default(),
+        body: body.unwrap_or(Value::Null),
+        headers: headers.unwrap_or_default(),
         method: method.to_string(),
     };
-    let bounded = tokio::time::timeout(SEND_DEADLINE, router.send(to, msg)).await;
+    let bounded =
+        tokio::time::timeout(SEND_DEADLINE, router.send(declared, &interpolated, msg)).await;
     let sent = bounded.map_err(|_| ScenarioFailure::ActionTransport {
         action: index,
         source: TransportError::Deadline {
@@ -299,8 +454,14 @@ async fn receive_action(
     router: &PartnerRouter,
     vars: &mut ScenarioVars,
 ) -> Result<(), ScenarioFailure> {
+    // The lane is read under the two-key contract: the declared
+    // string names the registered lane when it can, and the
+    // interpolated URI resolves a dynamic reference's lane by
+    // authority (`lane_key_for`).
+    let declared = from.endpoint.as_str();
+    let interpolated = resolve_placeholders(declared, vars)?;
     let message = router
-        .receive(from, deadline)
+        .receive(declared, &interpolated, deadline)
         .await
         .map_err(|source| match source {
             ReceiveError::Timeout(_) => ScenarioFailure::ReceiveTimeout {

@@ -31,8 +31,6 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
 
-use crate::document::EndpointRef;
-
 /// The HTTP partner adapter (feature `http`): a loopback listener
 /// plus client that play both wire roles against the system under
 /// test.
@@ -138,74 +136,293 @@ pub enum ReceiveError {
 ///
 /// Implementations must be `Send + Sync`; calls return boxed futures
 /// so the trait stays object-safe behind `Box<dyn PartnerAdapter>`.
+///
+/// The two-key contract splits the lane from the wire: `lane_key` is
+/// the registered router key whose lane (queue, parked roundtrip) the
+/// call belongs to, `target_uri`/`source_uri` is the resolved address
+/// the scenario referenced. Adapters that own a listener (the http
+/// partner) read their arrival lane by the registered key's request
+/// path; adapters that dial treat the target URI as the wire address.
 pub trait PartnerAdapter: Send + Sync {
-    /// Send a message to the target endpoint.
+    /// Send a message to the target URI, parking any roundtrip under
+    /// the lane key. Adapters without a client role keep the default
+    /// (a transport failure naming the gap); the http partner is one
+    /// such adapter — the router's own client lane performs every
+    /// http client-role send.
     fn send<'a>(
         &'a self,
-        target: &'a EndpointRef,
+        lane_key: &'a str,
+        target_uri: &'a str,
         msg: OutgoingMessage,
-    ) -> BoxFuture<'a, Result<(), TransportError>>;
+    ) -> BoxFuture<'a, Result<(), TransportError>> {
+        let _ = (lane_key, target_uri, msg);
+        Box::pin(async {
+            Err(TransportError::Other {
+                message: "adapter does not implement client-role sends".to_string(),
+            })
+        })
+    }
 
-    /// Receive a message from the source endpoint before the deadline
+    /// Receive a message from the source URI before the deadline
     /// passes. Implementations must respect the deadline; they never
     /// hang past it.
     fn receive<'a>(
         &'a self,
-        source: &'a EndpointRef,
+        lane_key: &'a str,
+        source_uri: &'a str,
         deadline: Duration,
     ) -> BoxFuture<'a, Result<IncomingMessage, ReceiveError>>;
+
+    /// The host:port authority this adapter's listener bound, when it
+    /// owns one (the http partner); `None` otherwise. The router uses
+    /// it to resolve declared and dynamic endpoint references to real
+    /// wire addresses.
+    fn bound_authority(&self) -> Option<String> {
+        None
+    }
 }
 
-/// Dispatches adapter calls by [`EndpointRef`] endpoint equality to
-/// the endpoint-keyed adapter map it wraps.
+/// Dispatches adapter calls by declared endpoint key to the
+/// endpoint-keyed adapter map it wraps, and owns the shared http
+/// client lane (feature `http`).
 ///
-/// An endpoint URI with no registered adapter fails the send at the
-/// transport ([`TransportError::Unbound`]) and fails the receive at
-/// the transport too ([`ReceiveError::Transport`]): no partner
-/// exists that could ever deliver, the failure is apparatus class,
-/// and the call never hangs.
+/// Sends split into two keys — the declared endpoint string and the
+/// interpolated wire address — and http-scheme sends route through
+/// the router's own [`ClientLane`](http::ClientLane) (feature
+/// `http`): a declared `:0` harness key dials the partner's bound
+/// address, a dynamic reference resolves by interpolated authority,
+/// and a plain string dials its literal URI — no `Unbound` failure
+/// for http schemes. Non-http schemes dispatch to the registered
+/// adapter as before: an endpoint URI with no registered adapter
+/// fails the send at the transport ([`TransportError::Unbound`]) and
+/// the receive at the transport too
+/// ([`ReceiveError::Transport`]) — no partner exists that could ever
+/// deliver, the failure is apparatus class, and the call never hangs.
+///
+/// Receives are client-role-first: a roundtrip parked by the router's
+/// own client lane wins over the partner adapter's server-role
+/// arrivals.
 pub struct PartnerRouter {
-    /// Endpoint URI to adapter.
+    /// Declared endpoint key to adapter.
     adapters: BTreeMap<String, Box<dyn PartnerAdapter>>,
+    /// The shared http client lane (feature `http`): one parked
+    /// roundtrip per lane key, filled by every http-scheme send.
+    /// `Arc`-shared because a launch's spawned exchange keeps the
+    /// handle alive to park its own failure.
+    #[cfg(feature = "http")]
+    client_lane: Arc<http::ClientLane>,
 }
 
 impl PartnerRouter {
     /// Builds a router over the given endpoint-keyed adapters.
     pub fn new(adapters: BTreeMap<String, Box<dyn PartnerAdapter>>) -> Self {
-        Self { adapters }
+        Self {
+            adapters,
+            #[cfg(feature = "http")]
+            client_lane: Arc::new(http::ClientLane::new()),
+        }
+    }
+
+    /// The adapter registered under `key`, if any.
+    pub fn adapter(&self, key: &str) -> Option<&dyn PartnerAdapter> {
+        self.adapters.get(key).map(|boxed| boxed.as_ref())
+    }
+
+    /// Every registered partner that owns a bound authority, as
+    /// `(declared key, bound authority)` pairs.
+    pub fn authorities(&self) -> Vec<(String, String)> {
+        self.adapters
+            .iter()
+            .filter_map(|(key, adapter)| Some((key.clone(), adapter.bound_authority()?)))
+            .collect()
+    }
+
+    /// The lane key a receive under `(declared, interpolated)` reads:
+    /// the declared string itself when it names a registered partner
+    /// key (lane reads by declared key, today's behavior); otherwise
+    /// the registered key of the partner whose bound authority equals
+    /// the interpolated URI's authority. `None` when neither resolves
+    /// (plain strings): the caller falls back to the declared string.
+    pub fn lane_key_for(&self, declared: &str, interpolated: &str) -> Option<String> {
+        if self.adapters.contains_key(declared) {
+            return Some(declared.to_string());
+        }
+        let authority = uri_authority(interpolated)?;
+        self.authorities()
+            .into_iter()
+            .find(|(_, bound)| bound == authority)
+            .map(|(key, _)| key)
+    }
+
+    /// The wire target a send under `(declared_key, interpolated_uri)`
+    /// dials, when it differs from plain literal dialing.
+    ///
+    /// - `declared_key` names a registered partner AND carries the
+    ///   unroutable port-0 authority (the harness-declared form,
+    ///   ADR-0069 §8): rewrite only the authority of
+    ///   `interpolated_uri` to that partner's bound authority,
+    ///   preserving the interpolated path and query.
+    /// - `declared_key` names no partner but the interpolated URI's
+    ///   authority equals a bound partner's authority: return that
+    ///   partner's authority rewrite (path preserved) — the resolved
+    ///   URI for a dynamic reference.
+    /// - Anything else — a routable declared key (a partner registered
+    ///   under its own bound address, or under a foreign endpoint as
+    ///   a client-role vehicle) or an address no partner owns — is
+    ///   `None`: the caller dials the interpolated URI literally.
+    pub fn wire_target(&self, declared_key: &str, interpolated_uri: &str) -> Option<String> {
+        if let Some(adapter) = self.adapters.get(declared_key) {
+            let bound = adapter.bound_authority()?;
+            if !authority_is_port_zero(declared_key) {
+                return None;
+            }
+            return rewrite_authority(interpolated_uri, &bound);
+        }
+        self.partner_by_authority(interpolated_uri)
+            .and_then(|(_, bound)| rewrite_authority(interpolated_uri, &bound))
+    }
+
+    /// Sends `msg` under the two-key contract: dispatch by declared
+    /// endpoint key, dial by resolved address (see the type docs for
+    /// the http cases).
+    pub async fn send(
+        &self,
+        declared: &str,
+        interpolated: &str,
+        msg: OutgoingMessage,
+    ) -> Result<(), TransportError> {
+        #[cfg(feature = "http")]
+        if interpolated.starts_with("http://") {
+            return self.send_http(declared, interpolated, msg).await;
+        }
+        match self.adapters.get(declared) {
+            Some(adapter) => adapter.send(declared, interpolated, msg).await,
+            None => Err(TransportError::Unbound {
+                endpoint: declared.to_string(),
+            }),
+        }
+    }
+
+    /// The http-scheme send dispatch (feature `http`): every case goes
+    /// through the router's own client lane.
+    #[cfg(feature = "http")]
+    async fn send_http(
+        &self,
+        declared: &str,
+        interpolated: &str,
+        msg: OutgoingMessage,
+    ) -> Result<(), TransportError> {
+        // (a) The declared key registers an http partner: the
+        // harness-declared endpoint — dial its bound address when the
+        // `:0` form resolves one, the literal URI otherwise. A
+        // non-http adapter registered under an http-scheme key keeps
+        // today's equality dispatch.
+        if let Some(adapter) = self.adapters.get(declared) {
+            if adapter.bound_authority().is_some() {
+                let target = self
+                    .wire_target(declared, interpolated)
+                    .unwrap_or_else(|| interpolated.to_string());
+                return Arc::clone(&self.client_lane)
+                    .launch(declared, &target, msg)
+                    .await;
+            }
+            return adapter.send(declared, interpolated, msg).await;
+        }
+        // (b) The declared key is not registered, but the interpolated
+        // authority resolves to a partner: dial the resolved URI under
+        // that partner's REGISTERED key, so `lane_key_for` finds the
+        // roundtrip on receive.
+        if let Some((lane_key, target)) = self
+            .partner_by_authority(interpolated)
+            .and_then(|(key, bound)| Some((key, rewrite_authority(interpolated, &bound)?)))
+        {
+            return Arc::clone(&self.client_lane)
+                .launch(&lane_key, &target, msg)
+                .await;
+        }
+        // (c) Neither: a plain-string reference dials its literal URI
+        // with no partner involved.
+        Arc::clone(&self.client_lane)
+            .launch(declared, interpolated, msg)
+            .await
+    }
+
+    /// Receives under the two-key contract, client-role-first: derive
+    /// the lane key ([`Self::lane_key_for`], falling back to the
+    /// declared string for plain strings), return a roundtrip parked
+    /// by the router's own client lane when one exists, and otherwise
+    /// delegate the server-role receive to the adapter registered
+    /// under that key. [`TransportError::Unbound`] only when neither a
+    /// parked roundtrip nor a registered adapter exists.
+    pub async fn receive(
+        &self,
+        declared: &str,
+        interpolated: &str,
+        deadline: Duration,
+    ) -> Result<IncomingMessage, ReceiveError> {
+        let lane_key = self
+            .lane_key_for(declared, interpolated)
+            .unwrap_or_else(|| declared.to_string());
+        #[cfg(feature = "http")]
+        if let Some(parked) = self.client_lane.take(&lane_key) {
+            return self
+                .client_lane
+                .await_parked(interpolated, deadline, parked)
+                .await;
+        }
+        match self.adapters.get(lane_key.as_str()) {
+            Some(adapter) => adapter.receive(&lane_key, interpolated, deadline).await,
+            None => Err(ReceiveError::Transport(TransportError::Unbound {
+                endpoint: declared.to_string(),
+            })),
+        }
+    }
+
+    /// The registered partner whose bound authority equals the URI's
+    /// authority, as `(registered key, bound authority)`; the
+    /// post-interpolation resolution of a dynamic reference.
+    fn partner_by_authority(&self, uri: &str) -> Option<(String, String)> {
+        let authority = uri_authority(uri)?;
+        self.authorities()
+            .into_iter()
+            .find(|(_, bound)| bound == authority)
     }
 }
 
-impl PartnerAdapter for PartnerRouter {
-    fn send<'a>(
-        &'a self,
-        target: &'a EndpointRef,
-        msg: OutgoingMessage,
-    ) -> BoxFuture<'a, Result<(), TransportError>> {
-        Box::pin(async move {
-            match self.adapters.get(&target.endpoint) {
-                Some(adapter) => adapter.send(target, msg).await,
-                None => Err(TransportError::Unbound {
-                    endpoint: target.endpoint.clone(),
-                }),
-            }
-        })
-    }
+/// The authority span of an absolute URI (`scheme://authority/rest`);
+/// `None` when the string carries no `://` separator. Userinfo is not
+/// part of this grammar.
+fn uri_authority(uri: &str) -> Option<&str> {
+    let start = uri.find("://")? + 3;
+    let rest = &uri[start..];
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    Some(&rest[..end])
+}
 
-    fn receive<'a>(
-        &'a self,
-        source: &'a EndpointRef,
-        deadline: Duration,
-    ) -> BoxFuture<'a, Result<IncomingMessage, ReceiveError>> {
-        Box::pin(async move {
-            match self.adapters.get(&source.endpoint) {
-                Some(adapter) => adapter.receive(source, deadline).await,
-                None => Err(ReceiveError::Transport(TransportError::Unbound {
-                    endpoint: source.endpoint.clone(),
-                })),
-            }
-        })
+/// Whether the URI's authority is the unroutable port-0 placeholder —
+/// the harness-declared endpoint form (`http://127.0.0.1:0/...`,
+/// ADR-0069 §8). A declared key with any other authority addresses a
+/// routable endpoint and dials literally.
+fn authority_is_port_zero(uri: &str) -> bool {
+    let Some(authority) = uri_authority(uri) else {
+        return false;
+    };
+    match authority.rsplit_once(':') {
+        Some((_, port)) => port == "0",
+        None => false,
     }
+}
+
+/// Rewrites the URI's authority, preserving scheme, path, and query.
+fn rewrite_authority(uri: &str, authority: &str) -> Option<String> {
+    let rest_start = uri.find("://")? + 3;
+    let rest = &uri[rest_start..];
+    let path_start = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let mut rewritten = String::with_capacity(uri.len());
+    rewritten.push_str(&uri[..rest_start]);
+    rewritten.push_str(authority);
+    rewritten.push_str(&rest[path_start..]);
+    Some(rewritten)
 }
 
 /// One recorded send: the endpoint the scenario addressed and the
@@ -317,7 +534,8 @@ impl FakeAdapter {
 impl PartnerAdapter for FakeAdapter {
     fn send<'a>(
         &'a self,
-        target: &'a EndpointRef,
+        lane_key: &'a str,
+        _target_uri: &'a str,
         msg: OutgoingMessage,
     ) -> BoxFuture<'a, Result<(), TransportError>> {
         Box::pin(async move {
@@ -327,7 +545,7 @@ impl PartnerAdapter for FakeAdapter {
                 });
             }
             lock_through(&self.inner.sent).push(RecordedSend {
-                endpoint: target.endpoint.clone(),
+                endpoint: lane_key.to_string(),
                 message: msg,
             });
             Ok(())
@@ -336,7 +554,8 @@ impl PartnerAdapter for FakeAdapter {
 
     fn receive<'a>(
         &'a self,
-        source: &'a EndpointRef,
+        _lane_key: &'a str,
+        source_uri: &'a str,
         deadline: Duration,
     ) -> BoxFuture<'a, Result<IncomingMessage, ReceiveError>> {
         Box::pin(async move {
@@ -351,7 +570,7 @@ impl PartnerAdapter for FakeAdapter {
             match outcome {
                 Ok(Some(message)) => Ok(message),
                 Ok(None) | Err(_) => Err(ReceiveError::Timeout(ReceiveTimeout {
-                    endpoint: source.endpoint.clone(),
+                    endpoint: source_uri.to_string(),
                     deadline,
                     elapsed: started.elapsed(),
                 })),
@@ -405,7 +624,8 @@ impl DirectStimulus {
 impl PartnerAdapter for DirectStimulus {
     fn send<'a>(
         &'a self,
-        target: &'a EndpointRef,
+        lane_key: &'a str,
+        _target_uri: &'a str,
         msg: OutgoingMessage,
     ) -> BoxFuture<'a, Result<(), TransportError>> {
         Box::pin(async move {
@@ -420,21 +640,13 @@ impl PartnerAdapter for DirectStimulus {
                         .registry()
                         .get("direct")
                         .ok_or_else(|| transport("direct component not registered".to_string()))?;
-                    let endpoint = component
-                        .create_endpoint(target.endpoint.as_str(), &*ctx)
-                        .map_err(|e| {
-                            transport(format!(
-                                "failed to create endpoint {}: {e}",
-                                target.endpoint
-                            ))
-                        })?;
+                    let endpoint = component.create_endpoint(lane_key, &*ctx).map_err(|e| {
+                        transport(format!("failed to create endpoint {lane_key}: {e}"))
+                    })?;
                     endpoint
                         .create_producer(Arc::new(NoOpComponentContext), &producer_ctx)
                         .map_err(|e| {
-                            transport(format!(
-                                "failed to create producer for {}: {e}",
-                                target.endpoint
-                            ))
+                            transport(format!("failed to create producer for {lane_key}: {e}"))
                         })?
                 };
                 match producer.oneshot(exchange.clone()).await {
@@ -452,10 +664,7 @@ impl PartnerAdapter for DirectStimulus {
                             tokio::time::sleep(STIMULUS_RETRY_SLEEP).await;
                             continue;
                         }
-                        return Err(transport(format!(
-                            "send to {} failed: {e}",
-                            target.endpoint
-                        )));
+                        return Err(transport(format!("send to {lane_key} failed: {e}")));
                     }
                 }
             }
@@ -464,14 +673,14 @@ impl PartnerAdapter for DirectStimulus {
 
     fn receive<'a>(
         &'a self,
-        source: &'a EndpointRef,
+        _lane_key: &'a str,
+        source_uri: &'a str,
         _deadline: Duration,
     ) -> BoxFuture<'a, Result<IncomingMessage, ReceiveError>> {
         Box::pin(async move {
             Err(ReceiveError::Transport(TransportError::Other {
                 message: format!(
-                    "{} is a context stimulus endpoint; receive is a partner role",
-                    source.endpoint
+                    "{source_uri} is a context stimulus endpoint; receive is a partner role"
                 ),
             }))
         })

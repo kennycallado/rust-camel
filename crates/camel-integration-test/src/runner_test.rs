@@ -10,18 +10,23 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use camel_api::Value;
+use futures::future::BoxFuture;
 
 use crate::adapters::{
     FakeAdapter, IncomingMessage, OutgoingMessage, PartnerAdapter, PartnerRouter, ReceiveError,
     TransportError,
 };
 use crate::document::{
-    EndpointRef, Expectation, RouteSource, ScenarioAction, ScenarioDocument, ScenarioTarget,
+    EndpointRef, Expectation, Provisioning, RouteSource, ScenarioAction, ScenarioDocument,
+    ScenarioTarget,
 };
 use crate::runner::{
-    DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, run_scenario,
-    run_scenario_document,
+    DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, fill_bind_vars,
+    interpolate_value, resolve_placeholders, run_scenario, run_scenario_document,
 };
+
+#[cfg(feature = "http")]
+use crate::adapters::http::HttpPartner;
 
 /// A bare endpoint reference with no provisioning and no bind variable.
 fn endpoint(uri: &str) -> EndpointRef {
@@ -37,6 +42,7 @@ fn doc_with(actions: Vec<ScenarioAction>) -> ScenarioDocument {
     ScenarioDocument {
         route_source: RouteSource::RouteFiles(vec!["routes.yaml".into()]),
         scenario: actions,
+        partners: None,
         env: None,
         env_passthrough: None,
         profile: None,
@@ -230,7 +236,8 @@ async fn router_dispatches_and_fake_records_sends() {
         headers: BTreeMap::from([("X-Trace".to_string(), Value::String("t1".to_string()))]),
         method: "POST".to_string(),
     };
-    PartnerAdapter::send(&router, &endpoint("partner://fake"), sent)
+    router
+        .send("partner://fake", "partner://fake", sent)
         .await
         .expect("send must succeed");
     let recorded = handle.sent_messages();
@@ -245,25 +252,27 @@ async fn router_dispatches_and_fake_records_sends() {
     // receive fails at the transport too — no partner exists that
     // could ever deliver, so the failure is apparatus class, not a
     // verdict-class timeout, and the call never hangs.
-    let err = PartnerAdapter::send(
-        &router,
-        &endpoint("partner://other"),
-        OutgoingMessage {
-            body: Value::Null,
-            headers: BTreeMap::new(),
-            method: "GET".to_string(),
-        },
-    )
-    .await
-    .expect_err("unbound endpoint must fail");
+    let err = router
+        .send(
+            "partner://other",
+            "partner://other",
+            OutgoingMessage {
+                body: Value::Null,
+                headers: BTreeMap::new(),
+                method: "GET".to_string(),
+            },
+        )
+        .await
+        .expect_err("unbound endpoint must fail");
     assert!(matches!(err, TransportError::Unbound { .. }));
-    let failure = PartnerAdapter::receive(
-        &router,
-        &endpoint("partner://other"),
-        Duration::from_secs(30),
-    )
-    .await
-    .expect_err("unbound endpoint must never deliver");
+    let failure = router
+        .receive(
+            "partner://other",
+            "partner://other",
+            Duration::from_secs(30),
+        )
+        .await
+        .expect_err("unbound endpoint must never deliver");
     assert!(
         matches!(
             failure,
@@ -499,4 +508,296 @@ fn partner_adapter_trait_object_is_send_sync() {
     fn assert_send_sync<T: Send + Sync + ?Sized>() {}
     assert_send_sync::<dyn PartnerAdapter>();
     assert_send_sync::<Box<dyn PartnerAdapter>>();
+}
+
+// -------------------------------------------------------------------------
+// Placeholder resolution (${name} in scenario strings, ADR-0069 §5)
+// -------------------------------------------------------------------------
+
+/// A known variable substitutes its string value into the placeholder.
+#[test]
+fn resolve_substitutes_known_var() {
+    let mut vars = ScenarioVars::new();
+    vars.set("PARTNER", Value::String("127.0.0.1:9".to_string()));
+    assert_eq!(
+        resolve_placeholders("http://${PARTNER}/orders", &vars),
+        Ok("http://127.0.0.1:9/orders".to_string())
+    );
+}
+
+/// `$${` escapes to a literal `${`; the rest is scanned literally and
+/// no lookup happens.
+#[test]
+fn resolve_escape_yields_literal() {
+    let vars = ScenarioVars::new();
+    assert_eq!(
+        resolve_placeholders("$${not_a_var}", &vars),
+        Ok("${not_a_var}".to_string())
+    );
+}
+
+/// An unset variable fails with the variable's name named.
+#[test]
+fn resolve_unset_var_names_it() {
+    let vars = ScenarioVars::new();
+    assert_eq!(
+        resolve_placeholders("${missing}", &vars),
+        Err(ScenarioFailure::VarUnresolved {
+            name: "missing".to_string()
+        })
+    );
+}
+
+/// A non-string variable substitutes its JSON representation.
+#[test]
+fn resolve_non_string_stringifies() {
+    let mut vars = ScenarioVars::new();
+    vars.set("N", Value::Number(42.into()));
+    assert_eq!(resolve_placeholders("${N}", &vars), Ok("42".to_string()));
+}
+
+/// A name that does not match `[A-Za-z0-9_]+` stays literal.
+#[test]
+fn resolve_invalid_name_stays_literal() {
+    let vars = ScenarioVars::new();
+    assert_eq!(
+        resolve_placeholders("${a-b}", &vars),
+        Ok("${a-b}".to_string())
+    );
+}
+
+/// An env-style placeholder (a colon after the name) stays literal:
+/// `${env:}` never resolves in scenarios.
+#[test]
+fn resolve_env_placeholder_stays_literal() {
+    let vars = ScenarioVars::new();
+    assert_eq!(
+        resolve_placeholders("${env:FOO}", &vars),
+        Ok("${env:FOO}".to_string())
+    );
+}
+
+/// Interpolation rebuilds maps and arrays recursively, substituting
+/// string leaves and leaving other leaves untouched.
+#[test]
+fn interpolate_walks_nested_leaves() {
+    let mut vars = ScenarioVars::new();
+    vars.set("x", Value::String("1".to_string()));
+    vars.set("y", Value::String("2".to_string()));
+    let body = Value::Object(
+        [
+            (
+                "a".to_string(),
+                Value::Array(vec![
+                    Value::String("${x}".to_string()),
+                    Value::Number(1.into()),
+                ]),
+            ),
+            (
+                "b".to_string(),
+                Value::Object(
+                    [("c".to_string(), Value::String("${y}".to_string()))]
+                        .into_iter()
+                        .collect(),
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let expected = Value::Object(
+        [
+            (
+                "a".to_string(),
+                Value::Array(vec![
+                    Value::String("1".to_string()),
+                    Value::Number(1.into()),
+                ]),
+            ),
+            (
+                "b".to_string(),
+                Value::Object(
+                    [("c".to_string(), Value::String("2".to_string()))]
+                        .into_iter()
+                        .collect(),
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    assert_eq!(interpolate_value(&body, &vars), Ok(expected));
+}
+
+/// An unset variable inside a nested body propagates the failure.
+#[test]
+fn interpolate_unset_in_body_propagates() {
+    let vars = ScenarioVars::new();
+    let body = Value::Object(
+        [(
+            "a".to_string(),
+            Value::Object(
+                [("b".to_string(), Value::String("${missing}".to_string()))]
+                    .into_iter()
+                    .collect(),
+            ),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    assert_eq!(
+        interpolate_value(&body, &vars),
+        Err(ScenarioFailure::VarUnresolved {
+            name: "missing".to_string()
+        })
+    );
+}
+
+// -------------------------------------------------------------------------
+// Interpolation and bind vars in the action path (ADR-0069 §5, §9)
+// -------------------------------------------------------------------------
+
+/// An adapter standing in for one that owns a listener: it reports a
+/// fixed bound authority and nothing else.
+struct StaticAuthority(&'static str);
+
+impl PartnerAdapter for StaticAuthority {
+    fn receive<'a>(
+        &'a self,
+        _lane_key: &'a str,
+        source_uri: &'a str,
+        _deadline: Duration,
+    ) -> BoxFuture<'a, Result<IncomingMessage, ReceiveError>> {
+        Box::pin(async move {
+            Err(ReceiveError::Transport(TransportError::Other {
+                message: format!("{source_uri} has no receive role in this test"),
+            }))
+        })
+    }
+
+    fn bound_authority(&self) -> Option<String> {
+        Some(self.0.to_string())
+    }
+}
+
+/// A send to a dynamic `http://${PARTNER}/...` reference dials the
+/// partner's bound authority: the interpolated URI resolves to the
+/// registered partner by authority, and the partner listener records
+/// the request path.
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn send_interpolates_endpoint() {
+    let partner = HttpPartner::start_permissive(200)
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let recorder = partner.recorder();
+    let authority = partner.bound_addr().to_string();
+    let router = PartnerRouter::new(BTreeMap::from([(
+        "http://127.0.0.1:0/orders".to_string(),
+        Box::new(partner) as Box<dyn PartnerAdapter>,
+    )]));
+    let doc = doc_with(vec![
+        ScenarioAction::Send {
+            to: endpoint("http://${PARTNER}/orders"),
+            body: None,
+            headers: None,
+            method: "POST".to_string(),
+        },
+        // The client lane dials in a spawned task (task 1.5 makes the
+        // send await the connect); the receive takes the parked
+        // roundtrip and synchronizes the server-side recording, the
+        // same pattern the http partner tests use.
+        ScenarioAction::Receive {
+            from: endpoint("http://${PARTNER}/orders"),
+            deadline: Duration::from_secs(5),
+            extract: None,
+        },
+    ]);
+    let mut vars = ScenarioVars::new();
+    vars.set("PARTNER", Value::String(authority));
+    run_scenario(&doc, &router, &mut vars)
+        .await
+        .expect("the interpolated send must reach the partner");
+    let recorded = recorder.recorded_requests();
+    assert_eq!(recorded.len(), 1, "exactly one request must reach the wire");
+    assert_eq!(recorded[0].path, "/orders");
+}
+
+/// A send interpolates its body's string leaves and its header
+/// values: the recorded wire request carries the substituted bytes.
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn send_interpolates_body_and_headers() {
+    let partner = HttpPartner::start_permissive(200)
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let recorder = partner.recorder();
+    let uri = format!("http://{}/orders", partner.bound_addr());
+    let router = PartnerRouter::new(BTreeMap::from([(
+        uri.clone(),
+        Box::new(partner) as Box<dyn PartnerAdapter>,
+    )]));
+    let doc = doc_with(vec![
+        ScenarioAction::Send {
+            to: endpoint(&uri),
+            body: Some(Value::Object(
+                [("sku".to_string(), Value::String("${SKU}".to_string()))]
+                    .into_iter()
+                    .collect(),
+            )),
+            headers: Some(BTreeMap::from([(
+                "X-Trace".to_string(),
+                Value::String("${SKU}".to_string()),
+            )])),
+            method: "POST".to_string(),
+        },
+        // Synchronizes the spawned client-lane exchange and the
+        // server-side recording.
+        ScenarioAction::Receive {
+            from: endpoint(&uri),
+            deadline: Duration::from_secs(5),
+            extract: None,
+        },
+    ]);
+    let mut vars = ScenarioVars::new();
+    vars.set("SKU", Value::String("x1".to_string()));
+    run_scenario(&doc, &router, &mut vars)
+        .await
+        .expect("the send must reach the partner");
+    let recorded = recorder.recorded_requests();
+    assert_eq!(recorded.len(), 1);
+    assert!(
+        String::from_utf8_lossy(&recorded[0].body).contains("x1"),
+        "recorded body must carry the substituted SKU: {:?}",
+        recorded[0].body,
+    );
+    assert_eq!(
+        recorded[0].headers.get("x-trace").map(String::as_str),
+        Some("x1"),
+        "recorded header must carry the substituted value"
+    );
+}
+
+/// `fill_bind_vars` writes the partner's bound authority —
+/// `host:port`, no scheme — into the scenario variable named by the
+/// wired reference's `bindVar`.
+#[test]
+fn fill_bind_vars_sets_authority_without_scheme() {
+    let uri = "http://127.0.0.1:0/orders";
+    let router = PartnerRouter::new(BTreeMap::from([(
+        uri.to_string(),
+        Box::new(StaticAuthority("127.0.0.1:45678")) as Box<dyn PartnerAdapter>,
+    )]));
+    let wired = vec![EndpointRef {
+        endpoint: uri.to_string(),
+        provisioning: Some(Provisioning::Harness),
+        bind_var: Some("PARTNER".to_string()),
+    }];
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired, &router, &mut vars);
+    assert_eq!(
+        vars.get("PARTNER"),
+        Some(&Value::String("127.0.0.1:45678".to_string())),
+        "the bind variable must carry the bare host:port authority"
+    );
 }

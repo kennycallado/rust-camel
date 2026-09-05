@@ -52,6 +52,63 @@ with the CLI; the `http:` partner adapter rides the non-default
 cargo run -p camel-cli --features integration-http -- test --integration orders.test.yaml
 ```
 
+## `partners:` section
+
+A `partners:` section scripts the responses a harness partner serves.
+It is a map. Each key is the exact declared endpoint string, the `:0`
+URI as written in the scenario. The value is a sequence of script
+entries.
+
+Each entry carries optional `method` and `path` matchers plus a
+`response`. A request matches an entry when its method and path match.
+The `response` holds optional `status`, `headers`, and `body`. An entry
+with no `method` or `path` matches any request. The harness serves the
+first matching entry in order. A request no entry matches serves status
+500 with an empty body. A document with no `partners:` section is
+permissive: every request gets status 200 with an empty body.
+
+Every `partners:` key must equal a declared harness `http` endpoint
+reference. A key that matches no wired reference fails load with a
+`doc-validation` error, exit 2, naming the key. The check runs before
+any partner binds. A typo of a real key, for example `http://127.0.0.1:0/order` for
+`:0/orders`, fails here. It never falls silently to permissive.
+
+## `${name}` interpolation
+
+Scenario strings interpolate `${name}`. The surface covers three
+places:
+
+- endpoint strings in `send` and `receive`,
+- body string leaves,
+- header values.
+
+Substitution is string-only. A string leaf with no placeholder stays
+as is. Raw substitution applies, with no percent-encoding. An unset
+variable at send time fails `scenario-var-unresolved`, exit 1, naming
+the variable. Exit 1 is a verdict failure, not a parse error. In CI, a
+document that fails this way is a failed test run, not a harness
+error.
+
+`$${` escapes a literal `${`. The escape applies to body leaves and
+header values too. For example, a JSON body leaf that must reach the
+wire as `${literal}` is written `$${literal}`.
+
+The `receive` resolves by the interpolated authority. The path and
+query need not match the `send`. A receive declared as
+`http://${PARTNER}/orders` finds the roundtrip a map-form send parked.
+
+## Two layers, one name: `PARTNER`
+
+The same name can carry two forms in one run.
+
+| Layer | Form | Usage |
+|-------|------|-------|
+| scenario variable | `host:port` | `http://${PARTNER}/orders` |
+| route env | `http://host:port` | `${env:PARTNER}` |
+
+One-line rule: scenario = authority, route env = full URI. `${env:}`
+deliberately does not resolve in scenario strings.
+
 The [Testing chapter](../../docs/src/testing/index.md) documents the
 full action grammar, the partner adapters, and the exit contract.
 `examples/integration-testing/` is a runnable example.

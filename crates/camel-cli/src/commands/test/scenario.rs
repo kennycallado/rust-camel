@@ -134,6 +134,85 @@ fn wire_endpoint_refs(
     out
 }
 
+/// Whether a wired reference is the map form (`provisioning: harness`)
+/// pointing at an `http` endpoint — the only references the driver
+/// binds a partner for, and the only keys a `partners:` entry may name.
+#[cfg(feature = "integration-http")]
+fn is_harness_http(reference: &camel_integration_test::EndpointRef) -> bool {
+    use camel_integration_test::Provisioning;
+    reference.provisioning == Some(Provisioning::Harness)
+        && scheme_of(&reference.endpoint) == "http"
+}
+
+/// The scripted responses a document's `partners:` entry maps to, for
+/// one endpoint key: a thin delegate to the canonical mapping
+/// `camel_integration_test::partner_scripts_for`, so the
+/// grammar-to-wire semantics live in one place.
+#[cfg(feature = "integration-http")]
+fn partner_scripts_for(
+    doc: &camel_integration_test::ScenarioDocument,
+    endpoint: &str,
+) -> Option<Vec<camel_integration_test::ScriptedResponse>> {
+    camel_integration_test::partner_scripts_for(doc, endpoint)
+}
+
+/// The partner-bind sub-step of the full-boot path, extracted for test
+/// access: one scripted or permissive listener per harness
+/// `http` reference (ADR-0069 sections 8-9). The binding scope is
+/// deliberate — ONLY the map form with `provisioning: harness` gets a
+/// partner. A plain-string endpoint ref gets none: a plain-string send
+/// dials its literal interpolated URI (the inbound-put pattern), and a
+/// dynamic `http://${PARTNER}/...` send routes by interpolated
+/// authority through the router's wire-target math; binding a
+/// plain-string ref would point an unused listener at an address no
+/// scenario ever resolves. A scripted partner binds where the document
+/// declares a matching `partners:` entry ([`partner_scripts_for`]),
+/// permissive 200 otherwise. Returns the adapter map keyed by declared
+/// endpoint plus the harness-provisioned env tier (the
+/// `http://host:port` form route files interpolate), or the
+/// `partner-bind-failure` doc error.
+#[cfg(feature = "integration-http")]
+async fn bind_partners(
+    doc: &camel_integration_test::ScenarioDocument,
+    wired: &[&camel_integration_test::EndpointRef],
+) -> Result<
+    (
+        std::collections::BTreeMap<String, Box<dyn camel_integration_test::PartnerAdapter>>,
+        std::collections::BTreeMap<String, String>,
+    ),
+    String,
+> {
+    use camel_integration_test::HttpPartner;
+    let mut adapters: std::collections::BTreeMap<
+        String,
+        Box<dyn camel_integration_test::PartnerAdapter>,
+    > = std::collections::BTreeMap::new();
+    let mut harness_provisioned: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for reference in wired {
+        let endpoint = &reference.endpoint;
+        if !is_harness_http(reference) {
+            continue;
+        }
+        let partner = match partner_scripts_for(doc, endpoint) {
+            Some(scripts) => HttpPartner::start(scripts).await,
+            None => HttpPartner::start_permissive(200).await,
+        };
+        let partner = match partner {
+            Ok(partner) => partner,
+            Err(e) => {
+                return Err(format!("partner-bind-failure: endpoint {endpoint}: {e}"));
+            }
+        };
+        if let Some(bind_var) = &reference.bind_var {
+            harness_provisioned
+                .insert(bind_var.clone(), format!("http://{}", partner.bound_addr()));
+        }
+        adapters.insert(endpoint.clone(), Box::new(partner));
+    }
+    Ok((adapters, harness_provisioned))
+}
+
 /// Runs one scenario document.
 ///
 /// Path selection: when this build provides every wire scheme the
@@ -247,9 +326,12 @@ async fn run_scenario_fake_smoke(
 /// integration-tier crate's e2e tests use — the partner schemes
 /// dispatch through the `PartnerRouter`.
 ///
-/// The partner listeners run with a non-consuming permissive 200
-/// default ([`HttpPartner::start_permissive`]): every request the
-/// booted route sends gets it for the document's lifetime — outbound
+/// Partner listeners are harness-scoped: only map-form references with
+/// `provisioning: harness` bind one ([`bind_partners`]); a
+/// scripted partner binds where the document's `partners:` entry
+/// declares the key, a non-consuming permissive 200 default
+/// ([`HttpPartner::start_permissive`]) otherwise — every unmatched
+/// request gets it for the document's lifetime, because outbound
 /// scenarios validate arrivals on the wire, not responses.
 #[cfg(feature = "integration-http")]
 async fn run_scenario_full_boot(
@@ -257,44 +339,55 @@ async fn run_scenario_full_boot(
     root: &Path,
 ) -> ScenarioDocResult {
     use camel_integration_test::{
-        DirectStimulus, EndpointRef, FakeAdapter, HttpPartner, LayeredEnv, PartnerAdapter,
-        PartnerRouter, ScenarioFailure, ScenarioVars, ambient_std, boot_scenario,
-        run_scenario_document,
+        DirectStimulus, EndpointRef, FakeAdapter, LayeredEnv, PartnerRouter, ScenarioFailure,
+        ScenarioVars, ambient_std, boot_scenario, run_scenario_document,
     };
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
     let wired = wire_endpoint_refs(doc);
 
-    // (a) Partners first: bind one listener per http endpoint, fold
-    // each bindVar into the harness-provisioned tier.
-    let mut adapters: std::collections::BTreeMap<String, Box<dyn PartnerAdapter>> =
-        std::collections::BTreeMap::new();
-    let mut harness_provisioned: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    for reference in &wired {
-        let EndpointRef {
-            endpoint, bind_var, ..
-        } = reference;
-        if scheme_of(endpoint) != "http" {
-            continue;
+    // Load-time cross-check (ADR-0069 section 9): every `partners:` key
+    // must equal a wired harness `http` endpoint reference. A typo of a
+    // real key (`:0/order` vs `:0/orders`) fails here, at
+    // doc-validation, BEFORE any partner binds — never as a silent
+    // fall-through to the permissive default.
+    if let Some(partners) = &doc.partners {
+        let harness_http: std::collections::BTreeSet<&str> = wired
+            .iter()
+            .copied()
+            .filter(|r| is_harness_http(r))
+            .map(|r| r.endpoint.as_str())
+            .collect();
+        if let Some(key) = partners
+            .keys()
+            .find(|key| !harness_http.contains(key.as_str()))
+        {
+            return ScenarioDocResult {
+                action_results: Vec::new(),
+                doc_error: Some(format!(
+                    "doc-validation: partners[{key}]: no wired harness `http` endpoint \
+                     reference declares this key"
+                )),
+                apparatus: true,
+            };
         }
-        let partner = match HttpPartner::start_permissive(200).await {
-            Ok(partner) => partner,
-            Err(e) => {
-                return ScenarioDocResult {
-                    action_results: Vec::new(),
-                    doc_error: Some(format!("partner-bind-failure: endpoint {endpoint}: {e}")),
-                    apparatus: true,
-                };
-            }
-        };
-        if let Some(bind_var) = bind_var {
-            harness_provisioned
-                .insert(bind_var.clone(), format!("http://{}", partner.bound_addr()));
-        }
-        adapters.insert(endpoint.clone(), Box::new(partner));
     }
+
+    // (a) Partners first: bind one listener per harness `http`
+    // endpoint (plain-string refs get none — their sends dial the
+    // literal interpolated URI), fold each env-tier bindVar into the
+    // harness-provisioned tier.
+    let (mut adapters, harness_provisioned) = match bind_partners(doc, &wired).await {
+        Ok((adapters, harness_provisioned)) => (adapters, harness_provisioned),
+        Err(doc_error) => {
+            return ScenarioDocResult {
+                action_results: Vec::new(),
+                doc_error: Some(doc_error),
+                apparatus: true,
+            };
+        }
+    };
 
     // (b) The layered environment: harness-provisioned bindings win
     // over the document env; ambient reads stay behind the passthrough
@@ -342,8 +435,14 @@ async fn run_scenario_full_boot(
     let router = PartnerRouter::new(adapters);
 
     // (e) The whole document through the shared runner: one row per
-    // executed action, stop at the first failure.
+    // executed action, stop at the first failure. The scenario-tier
+    // bindVars carry the partner's `host:port` authority (so a
+    // scenario string addresses the partner as
+    // `http://${NAME}/...`); the env tier above keeps the
+    // `http://host:port` form for route files.
     let mut vars = ScenarioVars::new();
+    let wired_refs: Vec<EndpointRef> = wired.iter().map(|r| (*r).clone()).collect();
+    camel_integration_test::runner::fill_bind_vars(&wired_refs, &router, &mut vars);
     let mut outcome = run_scenario_document(doc, &router, &mut vars).await;
     let (mut action_results, mut apparatus) = outcome_rows(doc, &outcome);
 
@@ -374,5 +473,257 @@ async fn run_scenario_full_boot(
         action_results,
         doc_error: None,
         apparatus,
+    }
+}
+
+#[cfg(all(test, feature = "integration-http"))]
+mod tests {
+    use super::*;
+    use camel_integration_test::parse_scenario_document;
+
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// A unique temp project root for one test, removed on drop
+    /// (panic-safe): the directory holding `Camel.toml`, the route
+    /// file, and the scenario document (the v1 harness keeps the
+    /// document in the project root).
+    struct TempProject(PathBuf);
+
+    impl TempProject {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("camel-cli-scenario-{tag}-{}", std::process::id()));
+            fs::create_dir_all(&dir).expect("create temp project root"); // allow-unwrap
+            Self(dir)
+        }
+
+        fn root(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempProject {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Writes the minimal boot project into `root`: a sealed
+    /// `Camel.toml`, one no-op route file (the boot needs a route
+    /// source; the scenario actions under test never touch it), and
+    /// the scenario document in the root. Returns the document path.
+    fn write_project(root: &Path, doc_yaml: &str) -> PathBuf {
+        fs::write(root.join("Camel.toml"), "log_level = \"info\"\n").expect("write Camel.toml"); // allow-unwrap
+        fs::write(
+            root.join("routes.yaml"),
+            "routes:\n  - id: noop\n    from: direct:start\n    steps:\n      - log: \"noop\"\n",
+        )
+        .expect("write routes.yaml"); // allow-unwrap
+        let doc_path = root.join("scenario.test.yaml");
+        fs::write(&doc_path, doc_yaml).expect("write scenario doc"); // allow-unwrap
+        doc_path
+    }
+
+    #[test]
+    fn partner_scripts_map_defaults() {
+        let project = TempProject::new("partner-scripts-map-defaults");
+        let doc_path = write_project(
+            project.root(),
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      body:
+        id: ord-7
+"#,
+        );
+        let doc = parse_scenario_document(&doc_path).expect("parse scenario doc"); // allow-unwrap
+        let scripts = partner_scripts_for(&doc, "http://127.0.0.1:0/orders")
+            .expect("the declared entry must map"); // allow-unwrap
+        assert_eq!(scripts.len(), 1, "the entry carries one script");
+        let scripted = &scripts[0];
+        assert_eq!(scripted.method.as_deref(), Some("POST"));
+        assert_eq!(scripted.path.as_deref(), Some("/orders"));
+        assert_eq!(scripted.status, 200, "absent status defaults to 200");
+        assert!(
+            scripted.headers.is_empty(),
+            "absent headers default to empty"
+        );
+        assert_eq!(
+            scripted.body,
+            br#"{"id":"ord-7"}"#.to_vec(),
+            "the body must be the JSON serialization"
+        );
+    }
+
+    #[test]
+    fn partner_scripts_none_when_absent() {
+        let project = TempProject::new("partner-scripts-none");
+        let doc_path = write_project(
+            project.root(),
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+"#,
+        );
+        let doc = parse_scenario_document(&doc_path).expect("parse scenario doc"); // allow-unwrap
+        assert!(
+            partner_scripts_for(&doc, "http://127.0.0.1:0/orders").is_none(),
+            "a document without a partners entry maps to None (caller binds permissive)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn driver_binds_permissive_when_partners_absent() {
+        let project = TempProject::new("driver-binds-permissive");
+        let root = project.root();
+        let doc_path = write_project(
+            root,
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    deadline: 2s
+    extract:
+      status: status
+      body: body
+- validate:
+    target: { variable: status }
+    expectation: 200
+- validate:
+    target: { variable: body }
+    expectation: ""
+"#,
+        );
+        let doc = parse_scenario_document(&doc_path).expect("parse scenario doc"); // allow-unwrap
+        let result = run_scenario_full_boot(&doc, root).await;
+        assert_eq!(result.doc_error, None, "permissive bind must not error");
+        assert!(!result.apparatus, "no apparatus failure is expected");
+        assert_eq!(result.action_results.len(), 4, "every action must run");
+        for row in &result.action_results {
+            assert!(
+                row.outcome.is_ok(),
+                "send + receive + validates must pass against the permissive 200 empty partner: {:?}",
+                row.outcome
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn driver_binds_no_partner_for_plain_strings() {
+        // The literal dial target: a listener the TEST owns, at a real
+        // port, outside the driver's adapter map.
+        let target = camel_integration_test::HttpPartner::start_permissive(200)
+            .await
+            .expect("bind the test-owned listener"); // allow-unwrap
+        let uri = format!("http://{}/x", target.bound_addr());
+        let project = TempProject::new("driver-plain-string");
+        let root = project.root();
+        let doc_path = write_project(
+            root,
+            &format!(
+                r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: {uri}
+- receive:
+    from: {uri}
+    deadline: 2s
+"#
+            ),
+        );
+        let doc = parse_scenario_document(&doc_path).expect("parse scenario doc"); // allow-unwrap
+
+        // Binding scope: the plain-string reference gets NO partner.
+        let wired = wire_endpoint_refs(&doc);
+        let (adapters, harness_provisioned) = bind_partners(&doc, &wired)
+            .await
+            .expect("bind step must succeed"); // allow-unwrap
+        assert!(
+            !adapters.contains_key(&uri),
+            "a plain-string ref must not get a partner listener"
+        );
+        assert!(
+            harness_provisioned.is_empty(),
+            "no harness bind means no env-tier binding"
+        );
+
+        // The send dials the literal URI: the test-owned listener
+        // records the arrival.
+        let result = run_scenario_full_boot(&doc, root).await;
+        assert_eq!(result.doc_error, None, "the plain-string send must dial");
+        assert_eq!(result.action_results.len(), 2, "send + receive must run");
+        for row in &result.action_results {
+            assert!(
+                row.outcome.is_ok(),
+                "the send must reach the literal URI and the receive must read the roundtrip: {:?}",
+                row.outcome
+            );
+        }
+        let recorded = target.recorder().recorded_requests();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "exactly one wire arrival on the literal URI"
+        );
+        assert_eq!(recorded[0].path, "/x");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn partners_key_typo_fails_load() {
+        let project = TempProject::new("partners-key-typo");
+        let doc_path = write_project(
+            project.root(),
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+partners:
+  http://127.0.0.1:0/order:
+  - method: POST
+    response:
+      status: 201
+"#,
+        );
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let summary = super::super::run_tests(&[doc_path], &mut out, &mut err).await;
+        assert_eq!(
+            summary.exit_code, 2,
+            "doc-validation is apparatus class, exit 2"
+        );
+        let err = String::from_utf8(err).expect("stderr is utf-8"); // allow-unwrap
+        assert!(
+            err.contains("doc-validation"),
+            "doc-validation class: {err}"
+        );
+        assert!(
+            err.contains("http://127.0.0.1:0/order"),
+            "the error must name the unmatched key: {err}"
+        );
+        assert!(
+            !err.contains("partner-bind"),
+            "the cross-check must fail before any partner binds: {err}"
+        );
     }
 }

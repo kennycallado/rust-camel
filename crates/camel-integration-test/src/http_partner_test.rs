@@ -16,15 +16,6 @@ use camel_api::Value;
 use crate::adapters::http::{HttpPartner, ScriptedResponse};
 use crate::adapters::{OutgoingMessage, PartnerAdapter, PartnerRouter};
 
-/// A bare endpoint reference with no provisioning and no bind variable.
-fn endpoint(uri: &str) -> crate::document::EndpointRef {
-    crate::document::EndpointRef {
-        endpoint: uri.to_string(),
-        provisioning: None,
-        bind_var: None,
-    }
-}
-
 /// The permissive default is non-consuming: every request no scripted
 /// response matches is answered with the permissive status for the
 /// partner's whole lifetime. The CLI full-boot path relies on this —
@@ -45,18 +36,20 @@ async fn permissive_default_serves_every_unmatched_request() {
     // Two sequential exchanges against the same listener: the client
     // role parks one response at a time, so send/receive in rounds.
     for round in 0..2 {
-        PartnerAdapter::send(
-            &router,
-            &endpoint(&target),
-            OutgoingMessage {
-                body: Value::String(format!("req-{round}")),
-                headers: BTreeMap::new(),
-                method: "POST".to_string(),
-            },
-        )
-        .await
-        .expect("send must perform the real HTTP roundtrip");
-        let response = PartnerAdapter::receive(&router, &endpoint(&target), Duration::from_secs(5))
+        router
+            .send(
+                &target,
+                &target,
+                OutgoingMessage {
+                    body: Value::String(format!("req-{round}")),
+                    headers: BTreeMap::new(),
+                    method: "POST".to_string(),
+                },
+            )
+            .await
+            .expect("send must perform the real HTTP roundtrip");
+        let response = router
+            .receive(&target, &target, Duration::from_secs(5))
             .await
             .expect("the permissive response must arrive");
         assert_eq!(
@@ -97,27 +90,29 @@ async fn outbound_partner_records_wire_request() {
     let uri = format!("http://{}/orders", partner.bound_addr());
     let router = router_for(&uri, partner);
 
-    PartnerAdapter::send(
-        &router,
-        &endpoint(&uri),
-        OutgoingMessage {
-            body: Value::String("payload-bytes".to_string()),
-            headers: BTreeMap::from([
-                ("X-Trace".to_string(), Value::String("t-42".to_string())),
-                (
-                    "Content-Type".to_string(),
-                    Value::String("text/plain".to_string()),
-                ),
-            ]),
-            method: "POST".to_string(),
-        },
-    )
-    .await
-    .expect("send must perform the real HTTP roundtrip on loopback");
+    router
+        .send(
+            &uri,
+            &uri,
+            OutgoingMessage {
+                body: Value::String("payload-bytes".to_string()),
+                headers: BTreeMap::from([
+                    ("X-Trace".to_string(), Value::String("t-42".to_string())),
+                    (
+                        "Content-Type".to_string(),
+                        Value::String("text/plain".to_string()),
+                    ),
+                ]),
+                method: "POST".to_string(),
+            },
+        )
+        .await
+        .expect("send must perform the real HTTP roundtrip on loopback");
 
     // The receive completes the request/response pair and therefore
     // also synchronizes the server-side recording.
-    let response = PartnerAdapter::receive(&router, &endpoint(&uri), Duration::from_secs(5))
+    let response = router
+        .receive(&uri, &uri, Duration::from_secs(5))
         .await
         .expect("scripted response must arrive");
     assert_eq!(response.status, Some(201));
@@ -167,19 +162,21 @@ async fn inbound_client_receives_status_headers_body() {
         .expect("client partner must bind 127.0.0.1:0");
     let router = router_for(&target, client);
 
-    PartnerAdapter::send(
-        &router,
-        &endpoint(&target),
-        OutgoingMessage {
-            body: Value::Null,
-            headers: BTreeMap::new(),
-            method: "GET".to_string(),
-        },
-    )
-    .await
-    .expect("send must reach the far-side listener");
+    router
+        .send(
+            &target,
+            &target,
+            OutgoingMessage {
+                body: Value::Null,
+                headers: BTreeMap::new(),
+                method: "GET".to_string(),
+            },
+        )
+        .await
+        .expect("send must reach the far-side listener");
 
-    let response = PartnerAdapter::receive(&router, &endpoint(&target), Duration::from_secs(5))
+    let response = router
+        .receive(&target, &target, Duration::from_secs(5))
         .await
         .expect("canned response must arrive");
     assert_eq!(response.status, Some(200), "status must be exposed");
@@ -208,7 +205,8 @@ async fn receive_without_send_times_out() {
     let uri = format!("http://{}/never", partner.bound_addr());
     let router = router_for(&uri, partner);
     let started = std::time::Instant::now();
-    let failure = PartnerAdapter::receive(&router, &endpoint(&uri), Duration::from_millis(200))
+    let failure = router
+        .receive(&uri, &uri, Duration::from_millis(200))
         .await
         .expect_err("no arrival must time out");
     assert!(
@@ -249,28 +247,31 @@ async fn outbound_arrival_reaches_receive() {
         .await
         .expect("sut client partner must bind 127.0.0.1:0");
     let send_router = router_for(&target, sut);
-    PartnerAdapter::send(
-        &send_router,
-        &endpoint(&target),
-        OutgoingMessage {
-            body: Value::String("wire-body".to_string()),
-            headers: BTreeMap::from([(
-                "Content-Type".to_string(),
-                Value::String("text/plain".to_string()),
-            )]),
-            method: "POST".to_string(),
-        },
-    )
-    .await
-    .expect("sut send must reach the server listener");
+    send_router
+        .send(
+            &target,
+            &target,
+            OutgoingMessage {
+                body: Value::String("wire-body".to_string()),
+                headers: BTreeMap::from([(
+                    "Content-Type".to_string(),
+                    Value::String("text/plain".to_string()),
+                )]),
+                method: "POST".to_string(),
+            },
+        )
+        .await
+        .expect("sut send must reach the server listener");
     // Drain the parked client response so the send completes.
-    let _ = PartnerAdapter::receive(&send_router, &endpoint(&target), Duration::from_secs(5)).await;
+    let _ = send_router
+        .receive(&target, &target, Duration::from_secs(5))
+        .await;
 
     let server_router = router_for(&target, server);
-    let arrival =
-        PartnerAdapter::receive(&server_router, &endpoint(&target), Duration::from_secs(5))
-            .await
-            .expect("the wire request must arrive for validation");
+    let arrival = server_router
+        .receive(&target, &target, Duration::from_secs(5))
+        .await
+        .expect("the wire request must arrive for validation");
     assert_eq!(arrival.method.as_deref(), Some("POST"));
     assert_eq!(arrival.path.as_deref(), Some("/orders"));
     assert_eq!(arrival.status, None, "requests carry no status");
@@ -306,32 +307,118 @@ async fn arrivals_queue_per_endpoint() {
     {
         let send_router = router_for(&target, sut);
         for body in ["first-body", "second-body"] {
-            PartnerAdapter::send(
-                &send_router,
-                &endpoint(&target),
-                OutgoingMessage {
-                    body: Value::String(body.to_string()),
-                    headers: BTreeMap::new(),
-                    method: "POST".to_string(),
-                },
-            )
-            .await
-            .expect("sut send must reach the server listener");
+            send_router
+                .send(
+                    &target,
+                    &target,
+                    OutgoingMessage {
+                        body: Value::String(body.to_string()),
+                        headers: BTreeMap::new(),
+                        method: "POST".to_string(),
+                    },
+                )
+                .await
+                .expect("sut send must reach the server listener");
             // Drain the parked response so the send's slot is free.
-            let _ =
-                PartnerAdapter::receive(&send_router, &endpoint(&target), Duration::from_secs(5))
-                    .await;
+            let _ = send_router
+                .receive(&target, &target, Duration::from_secs(5))
+                .await;
         }
     }
 
     let server_router = router_for(&target, server);
-    let first = PartnerAdapter::receive(&server_router, &endpoint(&target), Duration::from_secs(5))
+    let first = server_router
+        .receive(&target, &target, Duration::from_secs(5))
         .await
         .expect("first arrival must dequeue");
-    let second =
-        PartnerAdapter::receive(&server_router, &endpoint(&target), Duration::from_secs(5))
-            .await
-            .expect("second arrival must dequeue");
+    let second = server_router
+        .receive(&target, &target, Duration::from_secs(5))
+        .await
+        .expect("second arrival must dequeue");
     assert_eq!(first.body, Value::String("first-body".to_string()));
     assert_eq!(second.body, Value::String("second-body".to_string()));
+}
+
+// -------------------------------------------------------------------------
+// Plain-string dispatch (case c: no partner involved)
+// -------------------------------------------------------------------------
+
+/// Whether the buffered bytes carry a complete HTTP/1.1 request head
+/// (the blank line after the headers).
+fn head_is_complete(bytes: &[u8]) -> bool {
+    bytes.windows(4).any(|window| window == b"\r\n\r\n")
+}
+
+/// Case (c) of the router's http dispatch: a plain-string endpoint
+/// reference with no registered partner dials its literal URI through
+/// the router's own client lane, and a receive on the same declared
+/// string returns the parked roundtrip. The far side is a raw
+/// `TcpListener` (no partner), so the only way the request line below
+/// can be recorded is a literal dial of the interpolated address.
+#[tokio::test]
+async fn plain_string_send_dials_literal_without_partner() {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the raw far-side listener must bind 127.0.0.1:0");
+    let port = listener
+        .local_addr()
+        .expect("the listener must report its bound address")
+        .port();
+    let served = tokio::spawn(async move {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .expect("the literal dial must connect");
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 256];
+        loop {
+            if head_is_complete(&head) {
+                break;
+            }
+            let read = stream
+                .read(&mut chunk)
+                .await
+                .expect("the connection must be readable");
+            if read == 0 {
+                break;
+            }
+            head.extend_from_slice(&chunk[..read]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .await
+            .expect("the response must be writable");
+        String::from_utf8_lossy(&head).into_owned()
+    });
+
+    let router = PartnerRouter::new(BTreeMap::new());
+    let uri = format!("http://127.0.0.1:{port}/x");
+    router
+        .send(
+            &uri,
+            &uri,
+            OutgoingMessage {
+                body: Value::Null,
+                headers: BTreeMap::new(),
+                method: "POST".to_string(),
+            },
+        )
+        .await
+        .expect("a plain-string http send must dial without a partner");
+
+    let response = router
+        .receive(&uri, &uri, Duration::from_secs(5))
+        .await
+        .expect("the receive must return the parked roundtrip");
+    assert_eq!(response.status, Some(200));
+    assert_eq!(response.body, Value::String("ok".to_string()));
+
+    let recorded = served.await.expect("the far-side task must finish");
+    assert!(
+        recorded.starts_with("POST /x "),
+        "the literal dial must carry the request line, got {recorded:?}"
+    );
 }

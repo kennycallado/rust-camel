@@ -405,6 +405,108 @@ scenario:
 }
 
 #[test]
+fn partners_section_parses() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 201
+      body:
+        id: ord-7
+"#,
+    )
+    .expect("parse must succeed");
+    let partners = doc.partners.expect("partners map must be present");
+    let scripts = partners
+        .get("http://127.0.0.1:0/orders")
+        .expect("the endpoint key must survive as the entry key");
+    assert_eq!(scripts.len(), 1, "the entry must carry one script");
+    let script = &scripts[0];
+    assert_eq!(script.method.as_deref(), Some("POST"));
+    assert_eq!(script.path.as_deref(), Some("/orders"));
+    assert_eq!(script.response.status, Some(201));
+    let body = script
+        .response
+        .body
+        .as_ref()
+        .expect("the script must carry a body");
+    assert_eq!(
+        body.get("id"),
+        Some(&camel_api::Value::String("ord-7".to_string())),
+        "the body must keep the id"
+    );
+}
+
+#[test]
+fn partners_unknown_key_is_doc_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    responsez:
+      status: 201
+"#,
+    )
+    .expect_err("parse must fail");
+    assert!(
+        err.to_string().contains("responsez"),
+        "error must name the offending key: {err}"
+    );
+}
+
+#[test]
+fn partners_absent_keeps_none() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+"#,
+    )
+    .expect("parse must succeed");
+    assert!(doc.partners.is_none(), "absent partners must stay None");
+}
+
+#[test]
+fn partners_status_out_of_range_rejected() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+partners:
+  http://127.0.0.1:0/orders:
+  - response:
+      status: 999
+"#,
+    )
+    .expect_err("parse must fail");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("http://127.0.0.1:0/orders"),
+        "error must name the entry key: {rendered}"
+    );
+    assert!(
+        rendered.contains("999"),
+        "error must name the offending status: {rendered}"
+    );
+}
+
+#[test]
 fn reserved_env_key_rejected() {
     let err = parse_case(
         r#"

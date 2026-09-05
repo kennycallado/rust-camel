@@ -5,8 +5,9 @@
 //! declares one integration-tier test: exactly one route source
 //! (`routeFiles`, `routeFilesFromRoot`, or inline `routes`), an ordered
 //! `scenario:` action list, an optional `env:` map with fixed fixture
-//! values, an optional `envPassthrough:` allowlist, and an optional
-//! pinned `profile`. Unknown fields are rejected.
+//! values, an optional `envPassthrough:` allowlist, an optional
+//! endpoint-keyed `partners:` scripting map, and an optional pinned
+//! `profile`. Unknown fields are rejected.
 //!
 //! The scenario vocabulary and the unit-tier vocabulary (`inputs`,
 //! `expects`, `intercepts`) never mix in one document. A document with
@@ -40,6 +41,9 @@ pub struct ScenarioDocument {
     pub route_source: RouteSource,
     /// Ordered scenario actions.
     pub scenario: Vec<ScenarioAction>,
+    /// Document-level partner scripting, keyed by endpoint address.
+    /// The grammar lives here; the runner consumes the map.
+    pub partners: Option<BTreeMap<String, Vec<PartnerScript>>>,
     /// Fixed fixture values for the scenario; the layered environment
     /// source reads these before any ambient value.
     pub env: Option<BTreeMap<String, String>>,
@@ -190,6 +194,67 @@ pub enum Provisioning {
     Harness,
 }
 
+/// One partner script of a `partners:` entry: the response a partner
+/// serves when the system under test reaches its endpoint. Grammar
+/// only; the runner consumes the map.
+#[derive(Debug, Clone)]
+pub struct PartnerScript {
+    /// Request method the script applies to; optional.
+    pub method: Option<String>,
+    /// Request path the script applies to; optional.
+    pub path: Option<String>,
+    /// The scripted response.
+    pub response: PartnerScriptResponse,
+}
+
+/// The response a partner script serves.
+#[derive(Debug, Clone)]
+pub struct PartnerScriptResponse {
+    /// HTTP status code, validated to the 100-599 range at load.
+    pub status: Option<u16>,
+    /// Response headers.
+    pub headers: Option<BTreeMap<String, String>>,
+    /// Response body.
+    pub body: Option<Value>,
+}
+
+/// The scripted responses a document's `partners:` entry maps to, for
+/// one endpoint key. `None` when the document declares no entry for
+/// the endpoint — the caller binds a permissive partner. `Some` maps
+/// each script grammar entry to its wire form: absent `status`
+/// defaults to 200, absent headers to the empty map, and the body is
+/// the JSON serialization (empty when absent).
+///
+/// The canonical `PartnerScript` → wire-form mapping; the CLI driver
+/// and library-level scenarios bind partners through this function so
+/// the semantics live in exactly one place.
+#[cfg(feature = "http")]
+pub fn partner_scripts_for(
+    doc: &ScenarioDocument,
+    endpoint: &str,
+) -> Option<Vec<crate::adapters::http::ScriptedResponse>> {
+    use crate::adapters::http::ScriptedResponse;
+    let scripts = doc.partners.as_ref()?.get(endpoint)?;
+    Some(
+        scripts
+            .iter()
+            .map(|script| ScriptedResponse {
+                method: script.method.clone(),
+                path: script.path.clone(),
+                status: script.response.status.unwrap_or(200),
+                headers: script.response.headers.clone().unwrap_or_default(),
+                body: script
+                    .response
+                    .body
+                    .as_ref()
+                    .map_or_else(Vec::new, |value| {
+                        serde_json::to_vec(value).unwrap_or_default()
+                    }),
+            })
+            .collect(),
+    )
+}
+
 /// A validation expectation. The grammar keys mirror the mock-testkit
 /// matcher rules: `equals`, `regex`, `contains`, `startsWith`,
 /// `endsWith`, `exists`, `jsonSubset`.
@@ -238,6 +303,10 @@ struct RawDocument {
     env: Option<BTreeMap<String, String>>,
     env_passthrough: Option<Vec<String>>,
     profile: Option<String>,
+    // Document-level partner scripting: the raw map stays
+    // endpoint-keyed with raw sequence values; conversion runs during
+    // validation so errors can name the entry key.
+    partners: Option<BTreeMap<String, serde_yaml::Value>>,
     // Unit-tier vocabulary, present only to detect and name the mixing
     // ban violation.
     inputs: Option<serde_yaml::Value>,
@@ -281,6 +350,22 @@ struct RawValidate {
     /// `variable`) converts during validation.
     target: serde_yaml::Value,
     expectation: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RawPartnerScript {
+    method: Option<String>,
+    path: Option<String>,
+    response: RawPartnerScriptResponse,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RawPartnerScriptResponse {
+    status: Option<u16>,
+    headers: Option<BTreeMap<String, String>>,
+    body: Option<Value>,
 }
 
 /// Raw endpoint reference: bare string or map with `endpoint`,
@@ -458,6 +543,15 @@ pub enum DocError {
         /// The endpoint that reserved it.
         endpoint: String,
     },
+    /// A `partners` entry failed validation; `endpoint` is the entry
+    /// key of the failing script list.
+    #[error("doc-validation: partners[{endpoint}]: {message}")]
+    Partners {
+        /// The endpoint key of the failing entry.
+        endpoint: String,
+        /// What failed.
+        message: String,
+    },
     /// Inline `routes` failed to parse.
     #[error("doc-validation: inline routes: {0}")]
     InlineRoutes(String),
@@ -483,7 +577,9 @@ fn classify_yaml_error(raw: &str) -> DocError {
 /// is declared;
 /// (f) each action converts (single-key dispatch, deadlines, durations,
 /// endpoint provisioning, expectation grammar) with action-index
-/// errors; (g) no `env` key collides with a declared `bindVar`.
+/// errors; (g) each `partners` entry converts (script grammar, response
+/// status range) with entry-key errors; (h) no `env` key collides with
+/// a declared `bindVar`.
 pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError> {
     if !camel_dsl::discovery::is_test_document(path) {
         return Err(DocError::NotTestDocument {
@@ -568,7 +664,45 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
     for (index, item) in raw_scenario.into_iter().enumerate() {
         scenario.push(build_action(item, index)?);
     }
-    // (g) Reserved env keys: the harness binding wins over document
+    // (g) Partner scripting: entries convert from the raw sequence
+    // with the entry key named on every failure; an empty sequence is
+    // a valid, inert entry.
+    let partners = match raw.partners {
+        Some(raw_partners) => {
+            let mut partners = BTreeMap::new();
+            for (endpoint, raw_scripts) in raw_partners {
+                let entry_error = |message: String| DocError::Partners {
+                    endpoint: endpoint.clone(),
+                    message,
+                };
+                let scripts = serde_yaml::from_value::<Vec<RawPartnerScript>>(raw_scripts)
+                    .map_err(|e| entry_error(e.to_string()))?;
+                let mut converted = Vec::with_capacity(scripts.len());
+                for script in scripts {
+                    if let Some(status) = script.response.status
+                        && !(100..=599).contains(&status)
+                    {
+                        return Err(entry_error(format!(
+                            "response `status` {status} is out of range; expected 100-599"
+                        )));
+                    }
+                    converted.push(PartnerScript {
+                        method: script.method,
+                        path: script.path,
+                        response: PartnerScriptResponse {
+                            status: script.response.status,
+                            headers: script.response.headers,
+                            body: script.response.body,
+                        },
+                    });
+                }
+                partners.insert(endpoint, converted);
+            }
+            Some(partners)
+        }
+        None => None,
+    };
+    // (h) Reserved env keys: the harness binding wins over document
     // fixtures.
     if let Some(env) = raw.env.as_ref() {
         for action in &scenario {
@@ -585,6 +719,7 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
     Ok(ScenarioDocument {
         route_source,
         scenario,
+        partners,
         env: raw.env,
         env_passthrough: raw.env_passthrough,
         profile: raw.profile,

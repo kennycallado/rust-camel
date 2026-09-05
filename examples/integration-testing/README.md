@@ -74,3 +74,31 @@ cd examples/integration-testing
 The route pins loopback port 18097 in the route URI: no bound-address
 API exists in v1, so a CI job that shares loopback with other jobs can
 collide on that port.
+
+## Partner CRUD chain
+
+`partner-crud.test.yaml` walks one harness partner through a full CRUD
+chain. The `partners:` section scripts POST /orders to 201
+`{"id":"ord-7"}` and GET /orders/ord-7 to 200 `{"id":"ord-7"}`. Each
+scripted response carries `content-type: application/json`, so the
+client-role receive JSON-parses the body.
+
+The scenario extracts the created id, interpolates it into a GET URI,
+and validates the matcher. The chain proves three pieces of the
+interpolation stack in one run:
+
+- extract: `receive.extract` reads `orderId` from the POST response
+  body.
+- interpolate: the GET URI `http://${PARTNER}/orders/${orderId}` uses
+  the extracted id.
+- matcher: the GET script's exact path `/orders/ord-7` proves the
+  interpolation reached the wire.
+
+The GET script serves only the exact path `/orders/ord-7`. A literal
+`${orderId}` on the wire would miss the script, serve the unmatched 500
+with an empty body, and fail the final `contains: ord-7` validation.
+
+```bash
+cd examples/integration-testing
+../../target/debug/camel test partner-crud.test.yaml
+```

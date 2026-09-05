@@ -197,6 +197,7 @@ async fn inbound_response_validated_on_wire() {
         env: fixture.doc.env.clone(),
         env_passthrough: fixture.doc.env_passthrough.clone(),
         profile: fixture.doc.profile.clone(),
+        partners: None,
     };
     let mut vars = ScenarioVars::new();
     let outcome = run_scenario_document(&corrupted, &fixture.router, &mut vars).await;

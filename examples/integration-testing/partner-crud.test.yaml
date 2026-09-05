@@ -1,0 +1,62 @@
+# Partner CRUD chain: one harness partner, scripted with POST and GET
+# responses. The scenario extracts the created order id, interpolates it
+# into a GET URI, and validates the round-trip through the matcher.
+#
+# The `partners:` section is keyed by the exact declared endpoint string
+# (the `:0` URI as written). The partner binds on 127.0.0.1:0. The
+# scenario variable PARTNER carries the bound `host:port` authority.
+#
+# The GET script matches only the exact path `/orders/ord-7`. That path
+# proves the interpolation: a literal `${orderId}` on the wire would miss
+# the script, serve the unmatched 500 with an empty body, and fail the
+# final `contains: ord-7` validation.
+#
+# Harness partner only: no route files, no inbound route. The grammar
+# requires a route source key, so `routeFiles` is the empty list.
+routeFiles: []
+scenario:
+  - send:
+      to:
+        endpoint: http://127.0.0.1:0/orders
+        provisioning: harness
+        bindVar: PARTNER
+      method: POST
+      body:
+        sku: abc
+  - receive:
+      from:
+        endpoint: http://127.0.0.1:0/orders
+        provisioning: harness
+        bindVar: PARTNER
+      deadline: 5s
+      extract:
+        orderId: body.id
+  - send:
+      to: 'http://${PARTNER}/orders/${orderId}'
+      method: GET
+  - receive:
+      from: 'http://${PARTNER}/orders/${orderId}'
+      deadline: 5s
+  - validate:
+      target:
+        lastReceived: 'http://${PARTNER}/orders/${orderId}'
+      expectation:
+        contains: ord-7
+partners:
+  http://127.0.0.1:0/orders:
+    - method: POST
+      path: /orders
+      response:
+        status: 201
+        headers:
+          content-type: application/json
+        body:
+          id: ord-7
+    - method: GET
+      path: /orders/ord-7
+      response:
+        status: 200
+        headers:
+          content-type: application/json
+        body:
+          id: ord-7

@@ -1,10 +1,20 @@
 //! The HTTP partner adapter (ADR-0069 §5, §8; feature `http`).
 //!
-//! [`HttpPartner`] is the harness-owned far side of an HTTP wire: it
-//! binds a loopback listener (`127.0.0.1:0` only — no free-port
-//! probing, ADR-0069 §8) that records every request that reaches
-//! the wire, and it drives the client role that performs real HTTP
-//! requests to a configured address.
+//! [`HttpPartner`] is the harness-owned SERVER side of an HTTP wire:
+//! it binds a loopback listener (`127.0.0.1:0` only — no free-port
+//! probing, ADR-0069 §8) that records every request that reaches the
+//! wire, serves the first scripted response whose method and path
+//! match, and queues the arrival per request path for the server-role
+//! `receive`.
+//!
+//! The CLIENT role lives one level up: [`PartnerRouter`]'s
+//! [`ClientLane`] performs every http client-role send (the dial and
+//! the parked roundtrip), keyed by lane key, so a send addressed to a
+//! declared endpoint and a receive addressed through a dynamic
+//! reference find the same lane. `HttpPartner` reports its bound
+//! address through [`PartnerAdapter::bound_authority`] so the router
+//! can resolve declared `:0` endpoints and interpolated authorities
+//! to real wire targets.
 //!
 //! Wire roles:
 //!
@@ -16,24 +26,23 @@
 //!   with `status: None` (requests carry no status). The recording and
 //!   the queue are the normative proof of what crossed the wire
 //!   (ADR-0069 §5).
-//! - Inbound (the scenario drives): `send` performs a real HTTP
-//!   request to the target endpoint; `receive` awaits the response
-//!   bounded by the action deadline and returns its status, headers,
-//!   and body.
+//! - Inbound (the scenario drives): the router's [`ClientLane`]
+//!   `launch` performs a real HTTP request to the target URI; the
+//!   router's `receive` returns the parked response bounded by the
+//!   action deadline — its status, headers, and body.
 //!
-//! `receive` resolves the role by dispatch state: a response parked by
-//! this partner's own `send` (client role) wins; otherwise the call
-//! awaits the next listener arrival (server role) for the endpoint's
-//! request path, bounded by the deadline. The v1 bound, reconsidered
-//! for the outbound queue: server-role arrivals queue per path (depth
-//! [`ARRIVAL_LANE_CAPACITY`]); the client role stays one response in
-//! flight per endpoint URI (v1 inbound scenarios drive one exchange at
-//! a time — a second `send` to the same endpoint replaces the parked
+//! Server-role arrivals queue per path (depth
+//! [`ARRIVAL_LANE_CAPACITY`]); the client lane stays one response in
+//! flight per lane key (v1 inbound scenarios drive one exchange at a
+//! time — a second `send` under the same lane key replaces the parked
 //! response).
 //!
 //! The listener uses the same hyper 1 stack that sits under the
 //! workspace's reqwest users, driven directly so one dependency set
 //! serves both roles.
+//!
+//! [`PartnerRouter`]: crate::adapters::PartnerRouter
+//! [`PartnerAdapter::bound_authority`]: crate::adapters::PartnerAdapter::bound_authority
 
 use std::collections::BTreeMap;
 use std::io;
@@ -41,6 +50,8 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -74,7 +85,6 @@ use crate::adapters::ReceiveError;
 use crate::adapters::ReceiveTimeout;
 use crate::adapters::TransportError;
 use crate::adapters::lock_through;
-use crate::document::EndpointRef;
 
 /// The status served when no scripted response matches a request:
 /// a scripting gap is a partner-side defect, never a verdict.
@@ -181,16 +191,14 @@ struct ServerState {
     arrivals: Mutex<BTreeMap<String, Arc<ArrivalLane>>>,
 }
 
-/// Shared partner state: the bound listener's bookkeeping and the
-/// client role's in-flight requests.
+/// Shared partner state: the bound listener's bookkeeping. The client
+/// role (in-flight roundtrips, dialing) lives in the router's
+/// [`ClientLane`], not here.
 struct HttpInner {
     /// The address the listener bound.
     bound: SocketAddr,
     /// Listener-side scripting and recording.
     server: Arc<ServerState>,
-    /// One parked response receiver per endpoint URI, filled by
-    /// `send` and consumed by `receive`.
-    in_flight: Mutex<BTreeMap<String, oneshot::Receiver<Result<IncomingMessage, TransportError>>>>,
     /// Signals the accept loop to stop when the partner drops.
     shutdown: Mutex<Option<watch::Sender<bool>>>,
 }
@@ -270,7 +278,6 @@ impl HttpPartner {
             inner: Arc::new(HttpInner {
                 bound,
                 server,
-                in_flight: Mutex::new(BTreeMap::new()),
                 shutdown: Mutex::new(Some(shutdown_tx)),
             }),
         })
@@ -289,53 +296,19 @@ impl HttpPartner {
         }
     }
 
-    /// Validates the endpoint URI for the client role and launches
-    /// the HTTP roundtrip; the response is parked for `receive`.
-    fn launch_request(&self, endpoint: &str, msg: OutgoingMessage) -> Result<(), TransportError> {
-        let target = ParsedTarget::parse(endpoint)?;
-        let (tx, rx) = oneshot::channel();
-        lock_through(&self.inner.in_flight).insert(endpoint.to_string(), rx);
-        tokio::spawn(async move {
-            let result = perform_request(&target, msg).await;
-            // The receiver drops when the scenario never receives;
-            // that is normal, not an error to report.
-            let _ = tx.send(result);
-        });
-        Ok(())
-    }
-
-    /// Awaits the response parked for this endpoint (client role),
-    /// bounded by the deadline.
-    async fn await_response(
-        &self,
-        endpoint: &str,
-        deadline: Duration,
-        rx: oneshot::Receiver<Result<IncomingMessage, TransportError>>,
-    ) -> Result<IncomingMessage, ReceiveError> {
-        let started = tokio::time::Instant::now();
-        match tokio::time::timeout(deadline, rx).await {
-            Err(_) => Err(ReceiveError::Timeout(ReceiveTimeout {
-                endpoint: endpoint.to_string(),
-                deadline,
-                elapsed: started.elapsed(),
-            })),
-            Ok(Ok(result)) => result.map_err(ReceiveError::Transport),
-            Ok(Err(_cancelled)) => Err(ReceiveError::Transport(TransportError::Other {
-                message: "http request task ended without delivering a response".to_string(),
-            })),
-        }
-    }
-
     /// Awaits the next listener arrival queued for the endpoint's
-    /// request path (server role), bounded by the deadline.
+    /// request path (server role), bounded by the deadline. The path
+    /// comes from the registered lane key — the endpoint identity —
+    /// and `source_uri` names the failure.
     async fn await_arrival(
         &self,
-        endpoint: &str,
+        lane_key: &str,
+        source_uri: &str,
         deadline: Duration,
     ) -> Result<IncomingMessage, ReceiveError> {
         // Same origin-form shape the listener keys lanes by: path and
         // query, `/` when the URI carries none.
-        let path = ParsedTarget::parse(endpoint)
+        let path = ParsedTarget::parse(lane_key)
             .map(|target| target.target)
             .unwrap_or_else(|_| "/".to_string());
         let lane = lane_for(&self.inner.server.arrivals, &path);
@@ -347,7 +320,7 @@ impl HttpPartner {
             // so a closed queue is unreachable; map it to a timeout so
             // the call still never hangs.
             Ok(None) | Err(_) => Err(ReceiveError::Timeout(ReceiveTimeout {
-                endpoint: endpoint.to_string(),
+                endpoint: source_uri.to_string(),
                 deadline,
                 elapsed: started.elapsed(),
             })),
@@ -366,29 +339,174 @@ impl Drop for HttpPartner {
 }
 
 impl PartnerAdapter for HttpPartner {
-    fn send<'a>(
-        &'a self,
-        target: &'a EndpointRef,
-        msg: OutgoingMessage,
-    ) -> BoxFuture<'a, Result<(), TransportError>> {
-        Box::pin(async move { self.launch_request(target.endpoint.as_str(), msg) })
-    }
+    // No `send` override: the http client role belongs to the
+    // router's ClientLane; the trait default declines client-role
+    // sends. This partner keeps listener, scripting, recording, and
+    // server-role duties only.
 
     fn receive<'a>(
         &'a self,
-        source: &'a EndpointRef,
+        lane_key: &'a str,
+        source_uri: &'a str,
         deadline: Duration,
     ) -> BoxFuture<'a, Result<IncomingMessage, ReceiveError>> {
-        Box::pin(async move {
-            // Client role first: a response parked by this partner's
-            // own `send` wins. Otherwise the server role: await the
-            // next listener arrival queued for the request path.
-            let parked = lock_through(&self.inner.in_flight).remove(source.endpoint.as_str());
-            match parked {
-                Some(rx) => self.await_response(&source.endpoint, deadline, rx).await,
-                None => self.await_arrival(&source.endpoint, deadline).await,
+        // Server role only: await the next listener arrival queued for
+        // the registered key's request path. The client-role-first
+        // dispatch lives in the router, over the shared ClientLane.
+        Box::pin(async move { self.await_arrival(lane_key, source_uri, deadline).await })
+    }
+
+    fn bound_authority(&self) -> Option<String> {
+        Some(self.bound_addr().to_string())
+    }
+}
+
+/// One parked response entry per lane key: the generation it was
+/// booked under and the parked roundtrip receiver.
+struct LaneEntry {
+    /// The launch-unique generation; [`fail_lane_entry`] refuses to
+    /// touch an entry carrying any other value.
+    generation: u64,
+    /// The parked roundtrip the client-role receive consumes.
+    rx: oneshot::Receiver<Result<IncomingMessage, TransportError>>,
+}
+
+/// The router-owned http client role: every http-scheme `send` the
+/// router dispatches dials through this lane, and every http
+/// `receive` checks it first for the parked roundtrip
+/// (client-role-first).
+///
+/// One parked response per lane key (v1 inbound scenarios drive one
+/// exchange at a time — a second `send` under the same lane key
+/// replaces the parked response). The map lock is a
+/// `std::sync::Mutex`, held only for map access and never across an
+/// await.
+pub struct ClientLane {
+    /// One parked response entry per lane key, filled by
+    /// [`launch`](Self::launch) and consumed by
+    /// [`take`](Self::take). `Arc`-shared with the spawned exchanges
+    /// so a post-connect failure can park its error under its own
+    /// generation ([`fail_lane_entry`](Self::fail_lane_entry)).
+    in_flight: Arc<Mutex<BTreeMap<String, LaneEntry>>>,
+    /// Monotonic source of entry generations: every launch stamps its
+    /// entry with a fresh value, so the spawned exchange's failure
+    /// transition can tell its own entry from a later send's.
+    next_generation: AtomicU64,
+}
+
+impl ClientLane {
+    /// An empty lane.
+    pub(crate) fn new() -> Self {
+        Self {
+            in_flight: Arc::new(Mutex::new(BTreeMap::new())),
+            next_generation: AtomicU64::new(0),
+        }
+    }
+
+    /// Validates the target URI and launches the HTTP roundtrip. The
+    /// dial happens inline: a parse or connect failure returns
+    /// [`TransportError`] from this call with NO lane entry inserted,
+    /// so the caller observes the failure on the send itself (the
+    /// whole send stays under the runner's send deadline). Only a
+    /// live connection books the generation-stamped entry whose
+    /// response the router's `receive` consumes. The lane handle
+    /// stays alive in the spawned exchange so a post-connect failure
+    /// parks through [`fail_lane_entry`](Self::fail_lane_entry).
+    pub(crate) async fn launch(
+        self: Arc<Self>,
+        lane_key: &str,
+        target_uri: &str,
+        msg: OutgoingMessage,
+    ) -> Result<(), TransportError> {
+        // (a) Validate the target URI.
+        let target = ParsedTarget::parse(target_uri)?;
+        // (b) Dial inline: connection refused fails the send here.
+        let stream = TcpStream::connect((target.host.as_str(), target.port))
+            .await
+            .map_err(|e| TransportError::Other {
+                message: format!("connect to {}:{} failed: {e}", target.host, target.port),
+            })?;
+        // (c) A live connection: book the entry, stamped with a fresh
+        // generation.
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        lock_through(&self.in_flight).insert(lane_key.to_string(), LaneEntry { generation, rx });
+        // (d) The exchange runs on the connected stream. A
+        // post-connect failure parks the error under its own
+        // generation only: a later send that replaced the entry stays
+        // intact.
+        let lane = Arc::clone(&self);
+        let key = lane_key.to_string();
+        tokio::spawn(async move {
+            let result = perform_exchange(stream, &target, msg).await;
+            match result {
+                Ok(response) => {
+                    // The receiver drops when the scenario never
+                    // receives; that is normal, not an error to
+                    // report.
+                    let _ = tx.send(Ok(response));
+                }
+                Err(error) => {
+                    if !lane.fail_lane_entry(&key, generation, error.clone()) {
+                        // The entry was already taken (a receive is
+                        // waiting on the old channel) or superseded
+                        // (dropped receiver): either is normal.
+                        let _ = tx.send(Err(error));
+                    }
+                }
             }
-        })
+        });
+        Ok(())
+    }
+
+    /// Takes the response parked under the lane key, if any; the
+    /// router's client-role-first receive calls this before any
+    /// server-role delegation.
+    pub(crate) fn take(
+        &self,
+        lane_key: &str,
+    ) -> Option<oneshot::Receiver<Result<IncomingMessage, TransportError>>> {
+        lock_through(&self.in_flight)
+            .remove(lane_key)
+            .map(|entry| entry.rx)
+    }
+
+    /// The atomic failure transition: when the entry under `key`
+    /// still carries `generation`, its receiver is replaced in place
+    /// with one already resolved to `error` and the call returns
+    /// true; any other state returns false and touches nothing. A
+    /// later send's entry (fresh generation) can never be removed or
+    /// overwritten by an older exchange's failure — there is no
+    /// remove-then-rebook window.
+    pub(crate) fn fail_lane_entry(
+        &self,
+        key: &str,
+        generation: u64,
+        error: TransportError,
+    ) -> bool {
+        fail_lane_map_entry(&self.in_flight, key, generation, error)
+    }
+
+    /// Awaits the response parked under the lane key, bounded by the
+    /// deadline; `endpoint` names the failure.
+    pub(crate) async fn await_parked(
+        &self,
+        endpoint: &str,
+        deadline: Duration,
+        rx: oneshot::Receiver<Result<IncomingMessage, TransportError>>,
+    ) -> Result<IncomingMessage, ReceiveError> {
+        let started = tokio::time::Instant::now();
+        match tokio::time::timeout(deadline, rx).await {
+            Err(_) => Err(ReceiveError::Timeout(ReceiveTimeout {
+                endpoint: endpoint.to_string(),
+                deadline,
+                elapsed: started.elapsed(),
+            })),
+            Ok(Ok(result)) => result.map_err(ReceiveError::Transport),
+            Ok(Err(_cancelled)) => Err(ReceiveError::Transport(TransportError::Other {
+                message: "http request task ended without delivering a response".to_string(),
+            })),
+        }
     }
 }
 
@@ -435,21 +553,16 @@ impl ParsedTarget {
     }
 }
 
-/// Performs one real HTTP/1.1 roundtrip and maps the response into
-/// an [`IncomingMessage`].
-async fn perform_request(
+/// Runs the HTTP/1.1 exchange on the already-connected `stream` and
+/// maps the response into an [`IncomingMessage`]. Only post-connect
+/// failures surface here — the dial itself happened inline in
+/// [`ClientLane::launch`].
+async fn perform_exchange(
+    stream: TcpStream,
     target: &ParsedTarget,
     msg: OutgoingMessage,
 ) -> Result<IncomingMessage, TransportError> {
     let transport = |detail: String| TransportError::Other { message: detail };
-    let stream = TcpStream::connect((target.host.as_str(), target.port))
-        .await
-        .map_err(|e| {
-            transport(format!(
-                "connect to {}:{} failed: {e}",
-                target.host, target.port
-            ))
-        })?;
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
         .map_err(|e| transport(format!("http handshake failed: {e}")))?;
@@ -503,6 +616,30 @@ async fn perform_request(
         method: None,
         path: None,
     })
+}
+
+/// The lane-map mutation behind [`ClientLane::fail_lane_entry`]:
+/// one sync lock guard, one in-place map mutation, no await point —
+/// so the generation check and the error-parking write are one
+/// uninterrupted critical section.
+fn fail_lane_map_entry(
+    in_flight: &Mutex<BTreeMap<String, LaneEntry>>,
+    key: &str,
+    generation: u64,
+    error: TransportError,
+) -> bool {
+    let mut lanes = lock_through(in_flight);
+    match lanes.get_mut(key) {
+        Some(entry) if entry.generation == generation => {
+            let (tx, rx) = oneshot::channel();
+            // The replaced receiver is still held by the entry, so
+            // the resolution cannot fail.
+            let _ = tx.send(Err(error));
+            entry.rx = rx;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Returns the arrival lane for `path`, creating an empty lane on
@@ -691,4 +828,40 @@ fn wire_body_to_value(content_type: Option<&str>, bytes: &[u8]) -> Value {
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(bytes).into_owned()));
     }
     Value::String(String::from_utf8_lossy(bytes).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The replace-then-fail race contract, deterministic: the
+    /// failure transition lands only on the entry still carrying its
+    /// own generation; a stale generation touches nothing, and the
+    /// parked error surfaces on the lane key's receive.
+    #[test]
+    fn fail_lane_entry_is_conditional() {
+        let lane = ClientLane::new();
+        let (_, rx) = oneshot::channel();
+        lock_through(&lane.in_flight).insert("K".to_string(), LaneEntry { generation: 2, rx });
+        let error = || TransportError::Other {
+            message: "boom".to_string(),
+        };
+
+        // A stale generation is rejected; the entry stays untouched.
+        assert!(!lane.fail_lane_entry("K", 1, error()));
+        assert_eq!(
+            lock_through(&lane.in_flight)
+                .get("K")
+                .map(|entry| entry.generation),
+            Some(2)
+        );
+
+        // The entry's own generation parks the error in place.
+        assert!(lane.fail_lane_entry("K", 2, error()));
+        let mut rx = lane.take("K").expect("the entry stays present");
+        match rx.try_recv() {
+            Ok(Err(TransportError::Other { message })) => assert_eq!(message, "boom"),
+            other => panic!("the parked error must surface on receive, got {other:?}"),
+        }
+    }
 }

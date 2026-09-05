@@ -200,6 +200,7 @@ fn method_scenario_document(
     ScenarioDocument {
         route_source: RouteSource::RouteFiles(vec![PathBuf::from("routes/bridge.yaml")]),
         scenario,
+        partners: None,
         env: None,
         env_passthrough: None,
         profile: Some("default".to_string()),
@@ -308,6 +309,7 @@ async fn outbound_bridge_header_corruption_fails() {
         env: fixture.doc.env.clone(),
         env_passthrough: fixture.doc.env_passthrough.clone(),
         profile: fixture.doc.profile.clone(),
+        partners: None,
     };
     let mut vars = ScenarioVars::new();
     let outcome = run_scenario_document(&corrupted, &fixture.router, &mut vars).await;
