@@ -290,6 +290,7 @@ where
                     // below is NOT an exhaustion: it is a clean shutdown and
                     // must not fire error alerts.
                     if let Some(metrics) = metrics {
+                        // allow-open-label rc-otxh (scheme/operation: &'static str params, callers pass literals — same closure as rc-gm6s above)
                         metrics.increment_errors(operation, &format!("e:{scheme}:{operation}"));
                     }
                     return Err(err);

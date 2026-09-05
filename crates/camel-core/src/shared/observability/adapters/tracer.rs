@@ -163,6 +163,7 @@ fn record_step_metrics(
     if let Err(e) = result {
         let error_class = e.classify();
         if error_class != CIRCUIT_OPEN {
+            // allow-open-label rc-otxh (classify() returns a closed &'static str set: exhaustive match in CamelError::classify)
             metrics.increment_errors(route_id, error_class);
         }
     }

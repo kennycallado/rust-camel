@@ -46,6 +46,7 @@ fn record_post_process_failure(
     error: &CamelError,
     message: &str,
 ) {
+    // allow-open-label rc-otxh (label: caller-bounded b-prime literals at all four call sites; helper co-locates metric + error! for lint-log-levels)
     runtime.metrics().increment_errors(route_id, label);
     // log-policy: outside-contract
     error!(error = %error, "{message}");

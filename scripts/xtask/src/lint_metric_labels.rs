@@ -2,11 +2,11 @@
 //! principle; dashboard-observability D6, ruling N8).
 //!
 //! Walks `crates/**/src/**/*.rs` for calls to `record_counter`,
-//! `record_histogram`, `record_component_operation`, and
-//! `increment_retry_attempt`. Every string-valued argument — the metric
-//! name (first parameter, it becomes a series name), the label keys and
-//! values inside the literal labels array, or the scheme/operation /
-//! component/operation/outcome parameters — must be:
+//! `record_histogram`, `record_component_operation`,
+//! `increment_retry_attempt`, and `increment_errors`. Every string-valued
+//! argument — the metric name (first parameter, it becomes a series name),
+//! the label keys and values inside the literal labels array, or the
+//! scheme/operation / component/operation/outcome parameters — must be:
 //!
 //! (a) a string literal, or
 //! (b) BEST-EFFORT recognized enum-variant-derived expressions
@@ -14,6 +14,19 @@
 //!     them — the variant list bounds the value set), or
 //! (c) the call annotated `// allow-open-label <bd-ref>` on the
 //!     preceding line or the same line.
+//!
+//! INDEPENDENT of (a)-(c): EVERY string literal in walked code carrying
+//! the `b-prime:` prefix — in any call, including helper-forwarding
+//! arguments — must match the ADR-0012 b-prime grammar
+//! `b-prime:<component>:<site>` (the b-prime branch of the canonical
+//! `LABEL_REGEX` in `main.rs`; component min one char, site min two). A
+//! malformed b-prime literal is a violation with no annotation escape:
+//! `allow-open-label` suppresses only the closed-set denial above, never
+//! the shape check.
+//!
+//! For `increment_errors` only the second argument (error_type) is the
+//! ADR-0012 label position; the first argument (route_id) is a runtime
+//! dimension and is never checked.
 //!
 //! Default-deny: undecidable expressions are violations. Calls inside
 //! `impl MetricsCollector` / `impl ComponentMetrics` blocks are SKIPPED —
@@ -34,6 +47,7 @@ const TARGET_FNS: &[&str] = &[
     "record_histogram",
     "record_component_operation",
     "increment_retry_attempt",
+    "increment_errors",
 ];
 
 /// Trait names whose impl blocks are collector transport, not emission.
@@ -116,6 +130,35 @@ fn is_enum_variant_path(path: &syn::Path) -> bool {
             .all(|s| s.arguments.is_empty() && is_camel_case(&s.ident.to_string()))
 }
 
+/// True when `seg` matches `[a-z][a-z0-9-]*` — the ADR-0012 component
+/// segment: lowercase start, then lowercase letters, digits, or hyphens;
+/// a single character is legal (the `*` of LABEL_REGEX).
+fn is_component_segment(seg: &str) -> bool {
+    let mut chars = seg.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// True when `seg` matches `[a-z][a-z0-9-]+` — the ADR-0012 site segment:
+/// the component character classes but at least two characters (the `+`
+/// of LABEL_REGEX demands one continuation char).
+fn is_site_segment(seg: &str) -> bool {
+    is_component_segment(seg) && seg.len() >= 2
+}
+
+/// True when `label` matches the ADR-0012 b-prime grammar
+/// `^b-prime:[a-z][a-z0-9-]*:[a-z][a-z0-9-]+$` — the b-prime branch of the
+/// canonical `LABEL_REGEX` (`main.rs`), narrowed to the only family this
+/// lint shape-checks; the character classes are reused verbatim and pinned
+/// against the regex by `b_prime_predicate_matches_label_regex`.
+fn is_well_formed_b_prime(label: &str) -> bool {
+    let mut segs = label.split(':');
+    segs.next() == Some("b-prime")
+        && segs.next().is_some_and(is_component_segment)
+        && segs.next().is_some_and(is_site_segment)
+        && segs.next().is_none()
+}
+
 /// BEST-EFFORT recognition of enum-derived label values: a bare
 /// `Enum::Variant` path, or `.as_str()` / `.to_string()` / `.to_str()`
 /// on one. Everything else — identifiers, `format!` results, field
@@ -132,11 +175,15 @@ fn is_enum_derived(e: &syn::Expr) -> bool {
     }
 }
 
-/// Visitor collecting closed-set violations for target method calls.
+/// Visitor collecting closed-set violations for target method calls and
+/// b-prime shape violations for every string literal.
 struct MetricLabelVisitor<'a> {
     file_path: &'a str,
     lines: Vec<&'a str>,
     violations: Vec<Violation>,
+    /// Line a missing-bd-ref violation was already pushed for, so one call
+    /// with several open string positions reports the annotation defect once.
+    missing_ref_reported: Option<usize>,
 }
 
 impl MetricLabelVisitor<'_> {
@@ -165,10 +212,13 @@ impl MetricLabelVisitor<'_> {
                 if has_bd_ref(cand) {
                     return true;
                 }
-                self.push(
-                    line,
-                    format!("{ALLOW_MARKER} annotation is missing a bd reference"),
-                );
+                if self.missing_ref_reported != Some(line) {
+                    self.missing_ref_reported = Some(line);
+                    self.push(
+                        line,
+                        format!("{ALLOW_MARKER} annotation is missing a bd reference"),
+                    );
+                }
                 return false;
             }
         }
@@ -176,12 +226,13 @@ impl MetricLabelVisitor<'_> {
     }
 
     /// Check one string-position argument; push a violation when the
-    /// value is not provably closed.
+    /// value is not provably closed. A valid `// allow-open-label
+    /// <bd-ref>` annotation suppresses exactly this closed-set denial.
     fn check_str_position(&mut self, line: usize, e: &syn::Expr) {
         let inner = strip_outer(e);
         let ok = matches!(inner, syn::Expr::Lit(l) if matches!(l.lit, syn::Lit::Str(_)))
             || is_enum_derived(inner);
-        if !ok {
+        if !ok && !self.annotation_allows(line) {
             let text = inner.to_token_stream().to_string();
             self.push(line, format!("label value not provably closed ({text})"));
         }
@@ -193,6 +244,9 @@ impl MetricLabelVisitor<'_> {
     fn check_labels_arg(&mut self, line: usize, e: &syn::Expr) {
         let inner = strip_outer(e);
         let syn::Expr::Array(array) = inner else {
+            if self.annotation_allows(line) {
+                return;
+            }
             let text = inner.to_token_stream().to_string();
             self.push(
                 line,
@@ -233,6 +287,16 @@ impl MetricLabelVisitor<'_> {
                     self.check_str_position(line, a);
                 }
             }
+            "increment_errors" => {
+                if args.len() != 2 {
+                    return; // does not compile against the trait; ignore
+                }
+                // arg0 (route_id) is a runtime dimension, not a closed
+                // label; arg1 (error_type) is the ADR-0012 label position.
+                // The b-prime SHAPE of a literal error_type is checked
+                // globally in visit_expr_lit — never suppressible here.
+                self.check_str_position(line, args[1]);
+            }
             "record_component_operation" => {
                 if args.len() != 3 {
                     return;
@@ -247,12 +311,34 @@ impl MetricLabelVisitor<'_> {
 }
 
 impl syn::visit::Visit<'_> for MetricLabelVisitor<'_> {
+    /// GLOBAL b-prime shape check: EVERY string literal in walked
+    /// (non-test, non-collector-transport) code that carries the
+    /// `b-prime:` prefix must match the ADR-0012 grammar, regardless of
+    /// which call it sits in. This closes the helper-forwarding gap and is
+    /// deliberately NOT annotation-suppressible — the annotation escapes
+    /// closed-set denials only.
+    fn visit_expr_lit(&mut self, l: &syn::ExprLit) {
+        if let syn::Lit::Str(s) = &l.lit {
+            let value = s.value();
+            if value.starts_with("b-prime:") && !is_well_formed_b_prime(&value) {
+                let line = l.span().start().line;
+                self.push(
+                    line,
+                    format!(
+                        "b-prime label malformed: expected b-prime:<component>:<site> ({value})"
+                    ),
+                );
+            }
+        }
+        syn::visit::visit_expr_lit(self, l);
+    }
+
     fn visit_expr_method_call(&mut self, m: &syn::ExprMethodCall) {
         if TARGET_FNS.contains(&m.method.to_string().as_str()) {
-            let line = m.span().start().line;
-            if self.annotation_allows(line) {
-                return;
-            }
+            // Annotation consultation lives inside the closed-set checkers:
+            // it suppresses only "not provably closed" denials, never the
+            // global b-prime shape check above.
+            self.missing_ref_reported = None;
             self.check_call(m);
         }
         // Descend so target calls NESTED in other calls' arguments
@@ -303,6 +389,7 @@ pub fn lint_metric_labels_src(src: &str, file_path: &str) -> Result<Vec<Violatio
         file_path,
         lines: src.lines().collect(),
         violations: Vec::new(),
+        missing_ref_reported: None,
     };
     visit_clean_items(&mut vis, &file.items);
     Ok(vis.violations)
@@ -367,6 +454,37 @@ fn is_excluded_dir(entry: &walkdir::DirEntry, workspace_root: &Path) -> bool {
 mod tests {
     use super::*;
 
+    /// Drift guard (rc-otxh): the hand-rolled b-prime predicate must agree
+    /// with the canonical `LABEL_REGEX` (b-prime branch) so the two
+    /// encodings of ADR-0012 cannot diverge silently.
+    #[test]
+    fn b_prime_predicate_matches_label_regex() {
+        let re = regex::Regex::new(crate::LABEL_REGEX).expect("valid label regex"); // allow-unwrap
+        let corpus = [
+            "b-prime:cxf:response-marshalling",
+            "b-prime:direct:send-and-wait",
+            "b-prime:cxf:site-", // trailing dash: allowed by both
+            "b-prime:a:bc",      // single-char component: legal (`*`), two-char site (`+`)
+            "b-prime:cxf:",      // empty site
+            "b-prime::x",        // empty component
+            "b-prime:x",         // 2 segments
+            "b-prime:a:b",       // single-char site: regex rejects (`+`)
+            "b-prime:ab:b",      // single-char site, legal component
+            "b-prime:a:b:c",     // 4 segments
+            "b-prime:Cxf:site",  // uppercase component
+            "b-prime:cxf:Site",  // uppercase site
+            "b-prime:cxf:site!", // illegal char
+        ];
+        for label in corpus {
+            let regex_ok = re.is_match(label) && label.starts_with("b-prime:");
+            assert_eq!(
+                is_well_formed_b_prime(label),
+                regex_ok,
+                "predicate/regex disagree on {label:?}"
+            );
+        }
+    }
+
     /// Spec scenario pair (`component-metrics-emission` — "Label values
     /// are closed sets"): a `format!`-built label value is reported; a
     /// literal passes; an annotated site passes. Synthetic snippet
@@ -411,6 +529,56 @@ fn emit(m: &dyn MetricsCollector, id: &str) {
     }
 
     /// F2 fix: marker without a bd reference is itself a violation.
+    ///
+    /// rc-otxh: the global b-prime shape check inherits the clean-item
+    /// scope — literals inside `#[cfg(test)]` modules and collector
+    /// transport impls must NOT fire.
+    #[test]
+    fn global_shape_check_respects_scope_exclusions() {
+        let raw = r#"
+#[cfg(test)]
+mod tests {
+    fn emit(m: &dyn MetricsCollector) {
+        m.increment_errors("route-1", "b-prime:a:b");
+    }
+}
+
+impl MetricsCollector for MyCollector {
+    fn increment_errors(&self, route_id: &str, error_type: &str) {
+        let _ = (route_id, error_type);
+        let typo = "b-prime:a:b";
+        let _ = typo;
+    }
+}
+"#;
+        let v = lint_metric_labels_src(raw, "synthetic.rs").expect("snippet parses");
+        assert!(
+            v.is_empty(),
+            "test-module and collector-impl literals are out of scope: {v:?}"
+        );
+    }
+
+    /// rc-otxh: a bare marker on a call with several dynamic positions
+    /// reports each denial plus exactly ONE missing-bd-ref violation.
+    #[test]
+    fn bare_marker_multi_denial_reports_one_missing_ref() {
+        let raw = r#"
+fn emit(m: &dyn MetricsCollector, a: &str, b: &str, c: &str) {
+    // allow-open-label pass-through helper
+    m.record_component_operation(a, b, c);
+}
+"#;
+        let v = lint_metric_labels_src(raw, "synthetic.rs").expect("snippet parses");
+        assert_eq!(v.len(), 4, "3 dynamic denials + 1 missing-ref, got {v:?}");
+        assert_eq!(
+            v.iter()
+                .filter(|x| x.snippet.contains("missing a bd reference"))
+                .count(),
+            1,
+            "missing-ref must be deduped per call: {v:?}"
+        );
+    }
+
     #[test]
     fn marker_without_bd_ref_is_violation() {
         let raw = r#"
@@ -459,6 +627,249 @@ fn emit(m: &Metrics, id: &str) {
                 .len(),
             1,
             "nested call must not be invisible"
+        );
+    }
+
+    /// rc-otxh: `increment_errors` arg0 (route_id) is a runtime dimension,
+    /// never checked; arg1 (error_type) is the ADR-0012 label position.
+    /// A literal carrying the `b-prime:` prefix must additionally match the
+    /// ADR-0012 grammar `b-prime:<component>:<site>`.
+    #[test]
+    fn increment_errors_b_prime_literal_passes() {
+        let lit = r#"
+fn emit(m: &dyn MetricsCollector) {
+    m.increment_errors("route-1", "b-prime:cxf:response-marshalling");
+}
+"#;
+        let v = lint_metric_labels_src(lit, "synthetic.rs").expect("snippet parses");
+        assert!(v.is_empty(), "well-formed b-prime literal must pass: {v:?}");
+    }
+
+    /// rc-otxh: a b-prime literal whose site (or component) segment breaks
+    /// the ADR-0012 grammar is flagged with a message naming the shape.
+    #[test]
+    fn increment_errors_malformed_b_prime_flagged() {
+        let empty_site = r#"
+fn emit(m: &dyn MetricsCollector) {
+    m.increment_errors("route-1", "b-prime:cxf:");
+}
+"#;
+        let v = lint_metric_labels_src(empty_site, "synthetic.rs").expect("snippet parses");
+        assert_eq!(v.len(), 1, "malformed b-prime site must be flagged: {v:?}");
+        assert!(
+            v[0].snippet.contains("b-prime label malformed"),
+            "violation must name the problem: {:?}",
+            v[0].snippet
+        );
+        assert!(
+            v[0].snippet.contains("b-prime:<component>:<site>"),
+            "violation must show the expected shape: {:?}",
+            v[0].snippet
+        );
+
+        // Grammar segmentation at the call path: empty component,
+        // 2-segment, and 4-segment shapes are all malformed; a trailing
+        // dash in the site is legal (pins non-over-rejection).
+        for (bad, why) in [
+            ("b-prime::x", "empty component"),
+            ("b-prime:x", "2 segments"),
+            ("b-prime:a:b:c", "4 segments"),
+        ] {
+            let src = format!(
+                "fn emit(m: &dyn MetricsCollector) {{\n    m.increment_errors(\"route-1\", \"{bad}\");\n}}\n"
+            );
+            let v = lint_metric_labels_src(&src, "synthetic.rs").expect("snippet parses");
+            assert_eq!(v.len(), 1, "{why} must be flagged: {v:?}");
+        }
+        let trailing_dash = r#"
+fn emit(m: &dyn MetricsCollector) {
+    m.increment_errors("route-1", "b-prime:cxf:site-");
+}
+"#;
+        let v = lint_metric_labels_src(trailing_dash, "synthetic.rs").expect("snippet parses");
+        assert!(v.is_empty(), "trailing dash is ADR-legal: {v:?}");
+
+        // Grammar character classes: an uppercase component start is
+        // malformed too (ADR-0012 segments are `[a-z][a-z0-9-]*`).
+        let upper = r#"
+fn emit(m: &dyn MetricsCollector) {
+    m.increment_errors("route-1", "b-prime:Cxf:site");
+}
+"#;
+        assert_eq!(
+            lint_metric_labels_src(upper, "synthetic.rs")
+                .expect("snippet parses")
+                .len(),
+            1,
+            "uppercase component must be flagged"
+        );
+    }
+
+    /// rc-otxh: a dynamic (format!-built) error_type is undecidable and
+    /// default-denied, same as the other target fns.
+    #[test]
+    fn increment_errors_dynamic_error_type_flagged() {
+        let raw = r#"
+fn emit(m: &dyn MetricsCollector, site: &str) {
+    m.increment_errors("route-1", &format!("b-prime:cxf:{site}"));
+}
+"#;
+        let v = lint_metric_labels_src(raw, "synthetic.rs").expect("snippet parses");
+        assert_eq!(
+            v.len(),
+            1,
+            "format!-built error_type must be flagged: {v:?}"
+        );
+        assert!(
+            v[0].snippet.contains("not provably closed"),
+            "violation must say 'not provably closed': {:?}",
+            v[0].snippet
+        );
+    }
+
+    /// rc-otxh: the annotation escape hatch applies to increment_errors.
+    #[test]
+    fn increment_errors_annotated_dynamic_passes() {
+        let annotated = r#"
+fn emit(m: &dyn MetricsCollector, label: &str) {
+    m.increment_errors("route-1", label); // allow-open-label rc-otxh
+}
+"#;
+        let v = lint_metric_labels_src(annotated, "synthetic.rs").expect("snippet parses");
+        assert!(v.is_empty(), "annotated dynamic site must pass: {v:?}");
+    }
+
+    /// rc-otxh: non-b-prime literal error_type passes the closed-set rule
+    /// (the collector-transport otel impl is skipped at walk level), and
+    /// arg0 stays unchecked even when it is a dynamic expression.
+    #[test]
+    fn increment_errors_non_b_prime_literal_passes() {
+        let lit = r#"
+fn emit(m: &dyn MetricsCollector, route_id: &str) {
+    m.increment_errors(route_id, "timeout");
+}
+"#;
+        let v = lint_metric_labels_src(lit, "synthetic.rs").expect("snippet parses");
+        assert!(
+            v.is_empty(),
+            "plain literal error_type with dynamic route_id must pass: {v:?}"
+        );
+    }
+
+    /// rc-otxh review: the ADR-0012 segment grammar is position-dependent —
+    /// component `[a-z][a-z0-9-]*` (single char legal), site
+    /// `[a-z][a-z0-9-]+` (min two chars). Corpus pinned at arbitrary
+    /// (non-target) call sites so the global literal walk is exercised.
+    #[test]
+    fn b_prime_grammar_segment_positions() {
+        // Single-char component + two-char site: legal per LABEL_REGEX.
+        let ok = r#"
+fn helper(label: &str) {}
+fn emit() {
+    helper("b-prime:a:bc");
+}
+"#;
+        assert_eq!(
+            lint_metric_labels_src(ok, "synthetic.rs")
+                .expect("snippet parses")
+                .len(),
+            0,
+            "single-char component with two-char site is legal"
+        );
+
+        // Single-char site: rejected by LABEL_REGEX (`+`), must be flagged.
+        for label in ["b-prime:a:b", "b-prime:ab:b"] {
+            let raw = format!(
+                r#"
+fn helper(label: &str) {{}}
+fn emit() {{
+    helper("{label}");
+}}
+"#
+            );
+            let v = lint_metric_labels_src(&raw, "synthetic.rs").expect("snippet parses");
+            assert_eq!(v.len(), 1, "{label} must be flagged: {v:?}");
+            assert!(v[0].snippet.contains("b-prime label malformed"));
+        }
+    }
+
+    /// rc-otxh review: call-path pin — the same single-char-site drift is
+    /// flagged on the increment_errors path with the grammar message.
+    #[test]
+    fn b_prime_single_char_site_flagged_at_call() {
+        let raw = r#"
+fn emit(m: &dyn MetricsCollector) {
+    m.increment_errors("route-1", "b-prime:a:b");
+}
+"#;
+        let v = lint_metric_labels_src(raw, "synthetic.rs").expect("snippet parses");
+        assert_eq!(v.len(), 1, "single-char site at the call path: {v:?}");
+        assert!(
+            v[0].snippet.contains("b-prime label malformed"),
+            "violation must name the grammar: {:?}",
+            v[0].snippet
+        );
+    }
+
+    /// rc-otxh review finding 2a: the b-prime shape check is GLOBAL — a
+    /// malformed b-prime literal is flagged no matter which call (or plain
+    /// expression position) it sits in, closing the helper-forwarding gap.
+    #[test]
+    fn global_shape_check_flags_non_target_sites() {
+        let raw = r#"
+fn helper(label: &str) {}
+fn emit() {
+    helper("b-prime:cxf:");
+}
+"#;
+        let v = lint_metric_labels_src(raw, "synthetic.rs").expect("snippet parses");
+        assert_eq!(v.len(), 1, "malformed literal at a helper call: {v:?}");
+        assert!(
+            v[0].snippet.contains("b-prime label malformed"),
+            "violation must name the grammar: {:?}",
+            v[0].snippet
+        );
+    }
+
+    /// rc-otxh review finding 2b: the annotation suppresses ONLY the
+    /// closed-set denial — the b-prime shape check is not suppressible.
+    #[test]
+    fn shape_check_not_suppressible_by_annotation() {
+        let raw = r#"
+fn helper(label: &str) {}
+fn emit() {
+    // allow-open-label rc-otxh
+    helper("b-prime:cxf:");
+}
+"#;
+        let v = lint_metric_labels_src(raw, "synthetic.rs").expect("snippet parses");
+        assert_eq!(
+            v.len(),
+            1,
+            "annotated malformed literal must STILL be flagged: {v:?}"
+        );
+        assert!(v[0].snippet.contains("b-prime label malformed"));
+    }
+
+    /// rc-otxh review: camel-sql-style forwarding — a helper takes a dynamic
+    /// label (annotation suppresses the closed-set denial on the identifier)
+    /// while its call sites pass well-formed b-prime literals that the
+    /// global shape check validates silently.
+    #[test]
+    fn forwarding_b_prime_literals_pass() {
+        let raw = r#"
+fn forward(m: &dyn MetricsCollector, label: &str) {
+    // allow-open-label rc-otxh
+    m.increment_errors("route", label);
+}
+fn emit(m: &dyn MetricsCollector) {
+    forward(m, "b-prime:sql:on-consume");
+}
+"#;
+        let v = lint_metric_labels_src(raw, "synthetic.rs").expect("snippet parses");
+        assert!(
+            v.is_empty(),
+            "well-formed forwarding literals must pass: {v:?}"
         );
     }
 }

@@ -47,6 +47,7 @@ impl ComponentMetrics {
     /// label — error-family emission is never lever-gated.
     pub fn observe(&self, component: &str, operation: &str, failed: bool) {
         if failed {
+            // allow-open-label rc-otxh (facade builds the e:{component}:{operation} label per ADR-0012; names bounded at observe() call sites)
             self.collector
                 .increment_errors(component, &format!("e:{component}:{operation}"));
         }
