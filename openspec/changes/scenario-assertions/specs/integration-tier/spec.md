@@ -32,6 +32,102 @@ declaration order; when no entry matches it SHALL serve the unmatched
 status (500 with an empty body, or the permissive default). Every request
 that reaches the wire SHALL be recorded before any scripting decision.
 
+#### Scenario: scripted response serves the matching request
+
+- **GIVEN** a `partners:` entry scripting method `POST` on `/orders`
+  with status 201 and a body
+- **WHEN** the scenario sends `method: POST` to that path
+- **THEN** the response carries status 201 and the scripted body, and
+  the scenario validates both
+
+#### Scenario: unmatched request serves the unmatched status
+
+- **GIVEN** a `partners:` entry scripting only method `POST` on
+  `/orders`
+- **WHEN** the scenario sends `method: DELETE` to the same path
+- **THEN** the response carries status 500 with an empty body, and
+  validation of any scripted body fails
+
+#### Scenario: absent partners section keeps permissive behavior
+
+- **GIVEN** a scenario with a harness endpoint reference and no
+  `partners:` section
+- **WHEN** any request reaches the partner
+- **THEN** the response is status 200 with an empty body, exactly as
+  before this section existed
+
+#### Scenario: unknown partner entry field is a load error
+
+- **GIVEN** a `partners:` entry with a field `responsez`
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the field and exits 2
+
+#### Scenario: partners key with no matching declared ref is a load error
+
+- **GIVEN** a declared harness reference `http://127.0.0.1:0/orders`
+  and a `partners:` key `http://127.0.0.1:0/order` (a typo of the
+  declared URI)
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the unmatched key
+  and exits 2
+
+#### Scenario: delay holds the response before serving
+
+- **GIVEN** a partner entry with `delay: 500ms` and a 200 response
+- **WHEN** the scenario sends to the partner
+- **THEN** the send completes no sooner than the delay and observes 200
+
+#### Scenario: fault close breaks the connection without a response
+
+- **GIVEN** a partner entry with `fault: close`
+- **WHEN** the scenario sends to the partner
+- **THEN** the send fails with a transport-class error rather than an HTTP
+  status, and the recorder still holds the request
+
+#### Scenario: times serves N matching requests then spends the entry
+
+- **GIVEN** a partner entry with `times: 2` and a fallback entry matching
+  the same request
+- **WHEN** the scenario sends the matching request three times
+- **THEN** the first two sends observe the timed entry's response and the
+  third observes the fallback's
+
+#### Scenario: times below one is a load error
+
+- **GIVEN** a partner entry with `times: 0`
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the partner key and
+  `times`, and exits 2
+
+#### Scenario: response and fault together is a load error
+
+- **GIVEN** a partner entry declaring both `response` and `fault`
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the partner key and
+  both fields, and exits 2
+
+#### Scenario: neither response nor fault is a load error
+
+- **GIVEN** a partner entry declaring matchers but neither `response`
+  nor `fault`
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the partner key and
+  the missing fields, and exits 2
+
+#### Scenario: unknown fault name is a load error
+
+- **GIVEN** a partner entry with `fault: reset`
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the partner key and
+  `fault`, and exits 2
+
+#### Scenario: delay applies before a fault
+
+- **GIVEN** a partner entry with `delay: 300ms` and `fault: close`
+- **WHEN** the scenario sends to the partner
+- **THEN** the send fails with a transport-class error no sooner than the
+  delay
+
 #### Scenario: plain-string body is served verbatim
 
 - **GIVEN** a partner script whose `response.body` is the JSON string
@@ -288,6 +384,14 @@ exit 2.
 - **WHEN** the document loads
 - **THEN** the run reports `doc-validation` naming the action and
   `deadline`, and exits 2
+
+#### Scenario: missing count is a load error
+
+- **GIVEN** a partner-target validate whose expectation lacks `count`
+  and carries no `atLeast` or `atMost` either
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the expectation and
+  exits 2
 
 #### Scenario: missing bound is a load error
 
