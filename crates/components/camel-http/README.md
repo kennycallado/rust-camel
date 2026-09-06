@@ -150,8 +150,10 @@ let route = RouteBuilder::from("timer:secure")
 |--------|-------------|
 | `CamelHttpUri` | Override target URL |
 | `CamelHttpPath` | Append to base URL path |
-| `CamelHttpQuery` | Append query string |
+| `CamelHttpQuery` | Composes with the endpoint query: header pairs append for keys absent from the higher-precedence source (override URI query first, else endpoint query); collisions keep the higher-precedence pair |
 | `CamelHttpMethod` | Override HTTP method |
+
+Outbound URL composition and the `allowedUriHosts` override-host fence follow [ADR-0071](../../../docs/adr/0071-http-outbound-url-policy.md).
 
 ## Example: REST API Server
 

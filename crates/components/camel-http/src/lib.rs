@@ -137,6 +137,11 @@ pub struct HttpEndpointConfig {
     pub skip_response_headers: Vec<String>,
     pub follow_redirects: bool,
     pub max_redirects: usize,
+    /// CamelHttpUri host fence (`allowedUriHosts`): `None` when the option
+    /// is absent (override behavior unchanged); `Some` arms the fail-closed
+    /// fence. Parsed entries only — never re-serialized into the outbound
+    /// query.
+    pub allowed_uri_hosts: Option<Vec<AllowedUriHost>>,
 }
 
 /// ADR-0051 redact-by-construction: query bytes (authored `raw_query` and
@@ -178,6 +183,7 @@ impl std::fmt::Debug for HttpEndpointConfig {
             .field("skip_response_headers", &self.skip_response_headers)
             .field("follow_redirects", &self.follow_redirects)
             .field("max_redirects", &self.max_redirects)
+            .field("allowed_uri_hosts", &self.allowed_uri_hosts)
             .finish()
     }
 }
@@ -361,6 +367,13 @@ impl UriConfig for HttpEndpointConfig {
             None => 10,
         };
 
+        // CamelHttpUri host fence: parsed eagerly so a malformed or empty
+        // allowlist fails endpoint creation (fail-closed), not resolution.
+        let allowed_uri_hosts = match parts.params.get("allowedUriHosts") {
+            Some(v) => Some(parse_allowed_uri_hosts(v)?),
+            None => None,
+        };
+
         // Authored pairs ride raw_query verbatim (the sole carrier);
         // query_params is programmatic-only — never auto-populated from
         // URI leftovers. Consumed option keys are filtered at
@@ -389,6 +402,7 @@ impl UriConfig for HttpEndpointConfig {
             skip_response_headers,
             follow_redirects,
             max_redirects,
+            allowed_uri_hosts,
         })
     }
 }
@@ -523,6 +537,12 @@ struct HttpEndpointUriConfig {
 
     #[uri_param(name = "maxRedirects", default = "10", desc = "Max redirect hops")]
     max_redirects: u64,
+
+    #[uri_param(
+        name = "allowedUriHosts",
+        desc = "Comma-separated allowlist of CamelHttpUri override hosts (host or host:port)"
+    )]
+    allowed_uri_hosts: Option<String>,
 }
 
 impl HttpEndpointConfig {
@@ -2506,7 +2526,29 @@ impl HttpProducer {
             .header("CamelHttpUri")
             .and_then(|v| v.as_str())
         {
-            let mut url = uri.to_string();
+            // Host fence (allowedUriHosts): opt-in, fail-closed. Evaluated
+            // on the raw override before any path/query assembly; a
+            // rejection renders the URL only through the diagnostics
+            // redaction path (ADR-0051).
+            if let Some(fence) = &config.allowed_uri_hosts
+                && !uri_host_allowed(uri, fence)?
+            {
+                return Err(CamelError::ProcessorError(format!(
+                    "CamelHttpUri host not allowed by allowedUriHosts fence: {}",
+                    redact_url_for_diagnostics(uri)
+                )));
+            }
+            // The override replaces the base URL; its own query is the
+            // higher-precedence source for composition (ADR-0071) — the
+            // endpoint base query does not ride an override. Split at the
+            // first `?` so CamelHttpPath applies to the path component
+            // and the queries merge at pair level, never a second `?`
+            // marker.
+            let (base, override_query) = match uri.split_once('?') {
+                Some((base, query)) => (base, Some(query)),
+                None => (uri, None),
+            };
+            let mut url = base.to_string();
             if let Some(path) = exchange
                 .input
                 .header("CamelHttpPath")
@@ -2522,6 +2564,13 @@ impl HttpProducer {
                 .header("CamelHttpQuery")
                 .and_then(|v| v.as_str())
             {
+                if let Some(merged) = merge_header_query(override_query, query)? {
+                    url.push('?');
+                    url.push_str(&merged);
+                }
+                return Ok(url);
+            }
+            if let Some(query) = override_query {
                 url.push('?');
                 url.push_str(query);
             }
@@ -2546,10 +2595,16 @@ impl HttpProducer {
             .header("CamelHttpQuery")
             .and_then(|v| v.as_str())
         {
-            // Applied verbatim; wins over the endpoint's raw/programmatic
-            // query base.
-            url.push('?');
-            url.push_str(query);
+            // Compose: the endpoint query (raw-preserving,
+            // consumed-option-filtered) comes first and wins collisions;
+            // header pairs append verbatim for absent keys (ADR-0071).
+            // An empty header leaves the endpoint query unchanged.
+            if let Some(merged) =
+                merge_header_query(resolve_endpoint_query(config)?.as_deref(), query)?
+            {
+                url.push('?');
+                url.push_str(&merged);
+            }
             return Ok(url);
         }
 
@@ -2564,6 +2619,87 @@ impl HttpProducer {
     fn is_ok_status(status: u16, range: (u16, u16)) -> bool {
         status >= range.0 && status <= range.1
     }
+}
+
+/// One allowlist entry of the `CamelHttpUri` host fence (`allowedUriHosts`
+/// endpoint option). DNS hosts are stored ASCII-lowercased; IPv6 literals
+/// in bracketed canonical form (the `url` crate's host serialization). A
+/// `port` of `None` is a host-only entry and permits any port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllowedUriHost {
+    /// Canonical host: lowercased DNS name or bracketed IPv6 literal.
+    pub host: String,
+    /// `Some` pins the entry to one effective port; `None` permits any.
+    pub port: Option<u16>,
+}
+
+/// Parse the `allowedUriHosts` option value: comma-separated `host` or
+/// `host:port` entries. Bracketed IPv6 is supported (`[::1]:8443`, bare
+/// `[::1]` host-only). Empty segments are dropped. Segments are parsed
+/// through the `url` crate (with an `http://` scheme injected) so DNS
+/// names are lowercased and ports range-checked; anything it rejects is a
+/// malformed entry. A value yielding zero valid entries is also an error.
+/// Both failure modes fail endpoint creation (fail-closed).
+fn parse_allowed_uri_hosts(raw: &str) -> Result<Vec<AllowedUriHost>, CamelError> {
+    let mut entries = Vec::new();
+    for segment in raw.split(',') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let parsed = url::Url::parse(&format!("http://{segment}"))
+            .map_err(|_| invalid_allowed_uri_host_entry(segment))?;
+        // A segment carrying a path or userinfo is a typo'd entry — the
+        // spec's "any other malformed entry" clause. Silently narrowing it
+        // to its hostname would widen or skew the fence.
+        if parsed.path() != "/" || !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(invalid_allowed_uri_host_entry(segment));
+        }
+        let Some(host) = parsed.host_str() else {
+            return Err(invalid_allowed_uri_host_entry(segment));
+        };
+        entries.push(AllowedUriHost {
+            host: host.to_string(),
+            port: parsed.port(),
+        });
+    }
+    if entries.is_empty() {
+        return Err(CamelError::InvalidUri(
+            "allowedUriHosts declares no valid host entries".to_string(),
+        ));
+    }
+    Ok(entries)
+}
+
+fn invalid_allowed_uri_host_entry(segment: &str) -> CamelError {
+    CamelError::InvalidUri(format!("invalid allowedUriHosts entry '{segment}'"))
+}
+
+/// Whether `url_str` matches the fence. Parse failure or a host-less URL
+/// is fail-closed (`Ok(false)`). DNS hosts compare case-insensitively
+/// (both sides are lowercased by the `url` crate); IPv6 compares in
+/// bracketed canonical form. A host-only entry permits any port; a
+/// `host:port` entry matches only the effective port — the explicit port
+/// or the scheme default (443 for https, 80 for http).
+fn uri_host_allowed(url_str: &str, fence: &[AllowedUriHost]) -> Result<bool, CamelError> {
+    let Ok(parsed) = url::Url::parse(url_str) else {
+        return Ok(false);
+    };
+    let Some(host) = parsed.host_str() else {
+        return Ok(false);
+    };
+    let effective_port = parsed.port().or(match parsed.scheme() {
+        "https" => Some(443_u16),
+        "http" => Some(80),
+        _ => None,
+    });
+    Ok(fence.iter().any(|entry| {
+        entry.host == host
+            && match entry.port {
+                None => true,
+                Some(port) => effective_port == Some(port),
+            }
+    }))
 }
 
 /// Serialize the outbound query for the endpoint base.
@@ -2604,6 +2740,39 @@ fn resolve_endpoint_query(config: &HttpEndpointConfig) -> Result<Option<String>,
     }
 
     if parts.is_empty() && config.raw_query.as_deref() != Some("") {
+        return Ok(None);
+    }
+    Ok(Some(parts.join("&")))
+}
+
+/// Compose the outbound query when a `CamelHttpQuery` exchange header is
+/// present (ADR-0071). `higher_precedence` — the endpoint query in the
+/// base arm, the override URI's own query in the override arm — comes
+/// first and wins any key collision; header pairs append verbatim for
+/// absent keys only. An empty header leaves the higher-precedence query
+/// unchanged (no additional `?` marker). Header spans are validated, not
+/// re-encoded: a byte forbidden in a query component is a resolve error
+/// naming the byte (Wave-A law).
+fn merge_header_query(
+    higher_precedence: Option<&str>,
+    header_query: &str,
+) -> Result<Option<String>, CamelError> {
+    if header_query.is_empty() {
+        return Ok(higher_precedence.map(str::to_string));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut higher_keys = std::collections::HashSet::new();
+    for (key, span) in raw_query_pairs(higher_precedence.unwrap_or(""))? {
+        higher_keys.insert(key);
+        parts.push(span.to_string());
+    }
+    for (key, span) in raw_query_pairs(header_query)? {
+        validate_raw_query_span(span)?;
+        if !higher_keys.contains(key.as_str()) {
+            parts.push(span.to_string());
+        }
+    }
+    if parts.is_empty() {
         return Ok(None);
     }
     Ok(Some(parts.join("&")))
@@ -7607,7 +7776,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_url_camel_http_query_stays_verbatim() {
+    fn resolve_url_camel_http_query_composes_verbatim_span() {
         let config = HttpEndpointConfig::from_uri("http://h/p?x=1").unwrap();
         let mut exchange = Exchange::new(Message::default());
         exchange.input.set_header(
@@ -7617,8 +7786,167 @@ mod tests {
 
         let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
 
-        // Header value applied verbatim, wins over the endpoint raw base.
-        assert_eq!(url, "http://h/p?userFilter=a%2Cb");
+        // Policy change (ADR-0071): the header no longer replaces the
+        // endpoint query — it composes, the endpoint winning collisions.
+        // The header span bytes still ride verbatim: `a%2Cb` is carried
+        // as-authored, never re-encoded (no %252C).
+        assert_eq!(url, "http://h/p?x=1&userFilter=a%2Cb");
+        assert!(!url.contains("%252C"), "header bytes re-encoded: {url}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Outbound query composition (http-contract-surface, ADR-0071)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn header_composes_with_endpoint_query() {
+        let config =
+            HttpEndpointConfig::from_uri("http://upstream/api?apiKey=secret&lang=en").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String("lang=es&page=2".to_string()),
+        );
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // Higher precedence (endpoint) wins collisions: `lang` stays `en`;
+        // the header appends only its absent keys.
+        assert_eq!(url, "http://upstream/api?apiKey=secret&lang=en&page=2");
+    }
+
+    #[test]
+    fn header_alone_still_rides() {
+        let config = HttpEndpointConfig::from_uri("http://upstream/api").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String("page=2".to_string()),
+        );
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // No endpoint query: the header pairs are the whole query.
+        assert_eq!(url, "http://upstream/api?page=2");
+    }
+
+    #[test]
+    fn empty_reflected_query_leaves_endpoint_query_intact() {
+        let config = HttpEndpointConfig::from_uri("http://upstream/api?apiKey=secret").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        // The consumer installs an empty CamelHttpQuery on requests that
+        // arrived without a query string.
+        exchange
+            .input
+            .set_header("CamelHttpQuery", serde_json::Value::String(String::new()));
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // No second `?` marker, no dropped endpoint pair.
+        assert_eq!(url, "http://upstream/api?apiKey=secret");
+        assert!(!url.ends_with('?'), "dangling '?' marker: {url}");
+    }
+
+    #[test]
+    fn forbidden_byte_in_header_query_errors() {
+        let config = HttpEndpointConfig::from_uri("http://upstream/api").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String("q=ab<cd".to_string()),
+        );
+
+        let err = HttpProducer::resolve_url(&exchange, &config)
+            .unwrap_err()
+            .to_string();
+
+        // Fail loud naming the forbidden byte (`<` = 0x3C); a resolve
+        // error means no URL is emitted, never a re-encoded one.
+        assert!(err.contains("0x3C"), "error must name the byte: {err}");
+    }
+
+    #[test]
+    fn override_uri_with_query_plus_header_query() {
+        let config = HttpEndpointConfig::from_uri("http://upstream/api").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://host/api?a=1".to_string()),
+        );
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String("a=2&b=3".to_string()),
+        );
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // Pair-level merge with a single `?`: the override's `a=1` wins
+        // the collision, the header appends `b=3` — no `?a=1?a=2` concat.
+        assert_eq!(url, "http://host/api?a=1&b=3");
+    }
+
+    #[test]
+    fn path_applies_before_query_composition() {
+        let config = HttpEndpointConfig::from_uri("http://upstream/api").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://host/api?a=1".to_string()),
+        );
+        exchange.input.set_header(
+            "CamelHttpPath",
+            serde_json::Value::String("/extra".to_string()),
+        );
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String("b=2".to_string()),
+        );
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // CamelHttpPath applies to the override base without its query,
+        // then the query composes.
+        assert_eq!(url, "http://host/api/extra?a=1&b=2");
+    }
+
+    #[test]
+    fn plain_proxy_reflection_composes() {
+        let config = HttpEndpointConfig::from_uri("http://upstream/api?apiKey=secret").unwrap();
+        // Headers as the consumer installs them from the wire.
+        let exchange = exchange_with_path_and_query("/in/extra", "page=2");
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // Reflection rides by default and composes: the operator pair is
+        // not replaced (rc-k3pir parity).
+        assert_eq!(url, "http://upstream/api/in/extra?apiKey=secret&page=2");
+    }
+
+    #[test]
+    fn bridge_endpoint_ignores_url_headers() {
+        let cfg = HttpEndpointConfig::from_uri("http://h/p?a=1&bridgeEndpoint=true").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://evil.test/x".to_string()),
+        );
+        exchange.input.set_header(
+            "CamelHttpPath",
+            serde_json::Value::String("/foo".to_string()),
+        );
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String("z=9".to_string()),
+        );
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+        // All three URL headers ignored; the endpoint base plus its own
+        // (consumed-option-filtered) query is sent, exactly as before.
+        assert_eq!(url, "http://h/p?a=1");
+        assert!(!url.contains("evil"), "override leaked: {url}");
+        assert!(!url.contains("z=9"), "header query leaked: {url}");
+        assert!(!url.contains("/foo"), "header path leaked: {url}");
     }
 
     #[test]
@@ -7681,6 +8009,177 @@ mod tests {
             err.to_string().contains("0x20"),
             "error must name the forbidden byte: {err}"
         );
+    }
+
+    #[test]
+    fn armed_fence_rejects_unknown_host_redacted() {
+        let cfg = HttpEndpointConfig::from_uri(
+            "http://x?allowedUriHosts=api.internal:8443,cdn.example.com",
+        )
+        .unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String(
+                "http://user:pass@evil.example.com/x?token=s3cret".to_string(),
+            ),
+        );
+
+        let err = HttpProducer::resolve_url(&exchange, &cfg)
+            .expect_err("override host outside the fence must fail resolution");
+
+        let message = err.to_string();
+        assert!(!message.contains("pass"), "userinfo leaked: {message}");
+        assert!(!message.contains("s3cret"), "query leaked: {message}");
+    }
+
+    #[test]
+    fn armed_fence_allows_listed_host() {
+        let cfg = HttpEndpointConfig::from_uri(
+            "http://x?allowedUriHosts=api.internal:8443,cdn.example.com",
+        )
+        .unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://cdn.example.com/x".to_string()),
+        );
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+        assert_eq!(url, "http://cdn.example.com/x");
+    }
+
+    #[test]
+    fn host_only_entry_permits_any_port() {
+        let cfg = HttpEndpointConfig::from_uri("http://x?allowedUriHosts=cdn.example.com").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://cdn.example.com:9443/x".to_string()),
+        );
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+        assert_eq!(url, "http://cdn.example.com:9443/x");
+    }
+
+    #[test]
+    fn unarmed_endpoint_unchanged() {
+        let cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://any.example.com/path".to_string()),
+        );
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+        assert_eq!(url, "http://any.example.com/path");
+    }
+
+    #[test]
+    fn empty_allowlist_fails_endpoint_creation() {
+        assert!(HttpEndpointConfig::from_uri("http://x?allowedUriHosts=,,").is_err());
+    }
+
+    #[test]
+    fn malformed_entry_fails_endpoint_creation() {
+        assert!(HttpEndpointConfig::from_uri("http://x?allowedUriHosts=not a host!").is_err());
+    }
+
+    #[test]
+    fn fence_entry_with_path_fails_creation() {
+        // A trailing path is a typo'd entry: silently narrowing it to the
+        // hostname would widen or skew the fence. Reject loudly.
+        assert!(
+            HttpEndpointConfig::from_uri("http://x?allowedUriHosts=api.internal:8443/v2").is_err()
+        );
+    }
+
+    #[test]
+    fn fence_entry_with_userinfo_fails_creation() {
+        assert!(
+            HttpEndpointConfig::from_uri("http://x?allowedUriHosts=user@cdn.example.com").is_err()
+        );
+    }
+
+    #[test]
+    fn ipv6_fence_entry_allows_bracketed_host() {
+        let cfg = HttpEndpointConfig::from_uri("http://x?allowedUriHosts=[::1]:8443").unwrap();
+        // The textual host forms differ; both parse to the same bracketed
+        // canonical host (`[::1]`) that the entry stores, so both ride.
+        for uri in ["http://[::1]:8443/x", "http://[0:0:0:0:0:0:0:1]:8443/x"] {
+            let mut exchange = Exchange::new(Message::default());
+            exchange
+                .input
+                .set_header("CamelHttpUri", serde_json::Value::String(uri.to_string()));
+            let url = HttpProducer::resolve_url(&exchange, &cfg)
+                .unwrap_or_else(|e| panic!("override {uri} must be honored: {e}"));
+            assert_eq!(url, uri, "bracketed IPv6 override not honored");
+        }
+    }
+
+    #[test]
+    fn dns_case_insensitive_fence_match() {
+        // The entry is stored ASCII-lowercased, so the mixed-case option
+        // matches the lowercase override host.
+        let cfg = HttpEndpointConfig::from_uri("http://x?allowedUriHosts=CDN.Example.COM").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://cdn.example.com/x".to_string()),
+        );
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+        assert_eq!(url, "http://cdn.example.com/x");
+    }
+
+    #[test]
+    fn fence_allowed_override_query_merges_with_header() {
+        // Fence pass plus full composition: the override URI query is the
+        // higher-precedence source, the header pair appends.
+        let cfg =
+            HttpEndpointConfig::from_uri("http://x?allowedUriHosts=host.example&k=v").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://host.example/api?a=1".to_string()),
+        );
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String("b=2".to_string()),
+        );
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+        assert_eq!(url, "http://host.example/api?a=1&b=2");
+    }
+
+    #[test]
+    fn empty_header_with_armed_fence_leaves_no_query() {
+        let cfg = HttpEndpointConfig::from_uri("http://x?allowedUriHosts=host.example").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://host.example/api".to_string()),
+        );
+        exchange
+            .input
+            .set_header("CamelHttpQuery", serde_json::Value::String(String::new()));
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+        assert_eq!(url, "http://host.example/api");
+        assert!(!url.contains('?'), "query marker leaked: {url}");
+    }
+
+    #[test]
+    fn fence_option_is_consumed() {
+        // A raw query on the base URI plus the fence option; no override
+        // header. The option is consumed at parse time and must never
+        // appear in the outbound query.
+        let cfg =
+            HttpEndpointConfig::from_uri("http://h/p?x=1&allowedUriHosts=cdn.example.com").unwrap();
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+        assert!(!url.contains("allowedUriHosts"), "option leaked: {url}");
+        assert!(url.contains("x=1"), "authored query lost: {url}");
     }
 
     #[tokio::test]
@@ -9396,7 +9895,7 @@ mod tests {
         // Mirror struct must stay in sync with bespoke from_components parser.
         assert_eq!(
             HttpEndpointConfig::uri_options().len(),
-            21,
+            22,
             "HttpEndpointUriConfig #[uri_param] count drifted from parser"
         );
     }

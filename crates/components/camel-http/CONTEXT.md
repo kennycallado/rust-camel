@@ -125,7 +125,8 @@ Reviewer: r_glm5.1 verifies these classifications against source at Phase C revi
 
 The Producer resolves the outbound URL through `resolve_url`, which returns
 `Result<String, CamelError>` — malformed operator input never panics the
-producer task. Query source precedence:
+producer task. The outbound URL policy — query composition and the
+`allowedUriHosts` fence — is recorded in ADR-0071. Query source precedence:
 
 1. `bridgeEndpoint=true` — the endpoint base URL carries the endpoint's own
    `raw_query` (consumed option keys filtered; `bridgeEndpoint` itself is one)
@@ -133,11 +134,37 @@ producer task. Query source precedence:
    URL headers (`CamelHttpUri`, `CamelHttpPath`, `CamelHttpQuery`) are ignored.
    This check precedes the `CamelHttpUri` override so bridging wins.
 2. `CamelHttpUri` override — replaces the base URL; `CamelHttpPath` and
-   `CamelHttpQuery` append.
-3. `CamelHttpQuery` header — applied verbatim, wins over the endpoint base
-   query.
+   `CamelHttpQuery` compose with it (ADR-0071). When the override URI carries
+   its own query and the exchange also carries `CamelHttpQuery`, the two merge
+   at pair level — override-URI pairs first (winning collisions), header pairs
+   appending for absent keys — instead of concatenating a second `?` marker
+   (the double-`?` merge fix). `CamelHttpPath` applies to the path component
+   before query composition.
+3. `CamelHttpQuery` header — COMPOSES with the arm-specific higher-precedence
+   source (ADR-0071), it does not replace it:
+   - Base arm (no `CamelHttpUri`): the higher-precedence source is the
+     endpoint query (`raw_query` + programmatic `query_params`,
+     consumed-option-filtered). Header pairs append verbatim for absent keys
+     only; the endpoint wins any collision.
+   - Override arm (`CamelHttpUri` present): the higher-precedence source is
+     the override URI's own query — the endpoint base query does NOT ride an
+     override (the override remains untrusted exchange data under ADR-0032).
+   - A present-but-empty `CamelHttpQuery` is a no-op: the higher-precedence
+     source is emitted unchanged with no additional `?` marker.
+   - Header pair bytes ride verbatim; a raw byte forbidden in a query
+      component inside a header value is a resolve error naming the byte
+      (Wave-A law). This deliberately diverges from Apache Camel
+      header-wins-verbatim semantics: collisions resolve to the higher-
+      precedence source — the endpoint config in the base arm, the override
+      URI's own pairs in the override arm.
 4. Endpoint `raw_query` base — authored bytes byte-for-byte minus consumed
    option keys, then programmatic `query_params`.
+
+Default inbound reflection (rc-k3pir, ADR-0071): the consumer installs
+`CamelHttpPath`/`CamelHttpQuery` from the inbound wire request, and a
+non-bridged producer consumes them by default, composing per rule 3. The
+plain-proxy shape keeps working; the operator query pair is not replaced by
+reflected inbound data.
 
 `query_params` is programmatic-only — never auto-populated from the URI. It is a
 `Vec<(String, String)>` emitted in declaration order with minimal RFC-3986
@@ -149,6 +176,23 @@ are neither unwrapped nor re-encoded.
 
 A raw byte forbidden in a query component produces a resolve error naming the
 offending byte — the serializer never silently re-encodes authored bytes.
+
+### CamelHttpUri host fence (`allowedUriHosts`)
+
+Next to `bridgeEndpoint`, the outbound URL policy includes an opt-in
+`allowedUriHosts` fence for the `CamelHttpUri` override (rc-rbfxq, ADR-0071).
+Comma-separated exact host entries, each optionally `host:port`; bracketed
+IPv6 literals compare in canonical form, DNS names case-insensitively, a
+host-only entry permits any port, and a `host:port` entry matches only the
+override's effective port. A malformed entry (path or userinfo, or anything
+the `url` crate rejects) or a declared option yielding zero valid entries
+fails endpoint creation. An armed fence fails closed: an override resolving
+to an unlisted host, or yielding no host, is a resolve error and the rejected
+URL is rendered only through the diagnostics redaction path (ADR-0051). An
+unarmed endpoint (option absent) keeps the pre-fence override behavior. The
+option is consumed and never appears in the outbound query. Unlike ADR-0034's
+mandatory `authorizedRoutes`, this fence is opt-in — a deliberate
+compatibility trade-off (defense-in-depth hardening, not incident response).
 
 Option-key consumption has a single metadata-driven owner: `uri_options()`
 (ADR-0041), consulted at runtime by the raw filter (`is_consumed_option`) — no
