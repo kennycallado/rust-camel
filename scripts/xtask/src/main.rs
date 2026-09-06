@@ -5,8 +5,10 @@ mod lint_context_citations;
 mod lint_gate_forwarding;
 mod lint_metric_labels;
 mod lint_single_source;
+mod lint_test_sleep;
 mod mutants;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -99,6 +101,11 @@ enum Commands {
     /// existence, anchor resolution, and (later) symbol validation against
     /// the workspace's own crate definitions. Exits non-zero on violations.
     LintContextCitations,
+    /// Scan test function bodies for blocking/async sleep calls
+    /// (`tokio::time::sleep`, `std::thread::sleep`). Advisory: exits 0
+    /// even with findings. Escape hatch: append `// allow-test-sleep:`
+    /// followed by a non-empty reason to the finding line.
+    LintTestSleep,
     /// Enforce closed label sets on metric emission calls
     /// (`record_counter`, `record_histogram`,
     /// `record_component_operation`, `increment_retry_attempt`):
@@ -307,6 +314,35 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-context-citations error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintTestSleep => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_test_sleep::run(&workspace_root) {
+                Ok(report) => {
+                    for (file, finding) in &report.findings {
+                        println!(
+                            "{}:{}: sleep in test body — use wait_until or a deadline (suppress with an allow-test-sleep marker comment)",
+                            file.display(),
+                            finding.line
+                        );
+                    }
+                    let distinct_files: HashSet<_> = report
+                        .findings
+                        .iter()
+                        .map(|(file, _)| file.as_path())
+                        .collect();
+                    println!(
+                        "lint-test-sleep: {} findings across {} files (advisory; {} files scanned)",
+                        report.findings.len(),
+                        distinct_files.len(),
+                        report.files_scanned
+                    );
+                }
+                Err(e) => {
+                    eprintln!("lint-test-sleep error: {e}");
                     std::process::exit(1);
                 }
             }
