@@ -39,6 +39,12 @@ redirects remove `Authorization` and `Cookie` headers. When
 verification only when an operator sets `tls.insecure=true` or
 `tls.verify_peer=false`, and it emits a warning. The Consumer rejects a partial
 server TLS configuration that supplies only a certificate or only a key.
+Producer TLS material (CA bundle, client identity) is read from disk when a
+client is built; pinned clients are cached for `PINNED_CLIENT_TTL` (60 s), so
+edited PEM files take effect at most once per TTL window per client. Producer
+certificate rotation is not a supported feature (consumer-side TLS has a
+hot-reload path via `TlsReloadRegistry` in `src/tls_reload.rs`; the producer
+has no equivalent).
 
 The Producer attaches the exchange body only for entity-enclosing methods
 (POST, PUT, PATCH). GET, HEAD, DELETE, OPTIONS, and TRACE send no body and log

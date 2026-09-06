@@ -257,8 +257,13 @@ async fn run_outer_watcher(inputs: OuterWatcherInputs) {
     // (a) Await termination — the ONLY wait; no timeout (the guard
     // fires when the task ends, however long it runs).
     if inputs.terminated.await.is_err() {
-        // Sender dropped without firing (cannot happen with the guard;
-        // defensive) — treat as accounted, stay silent.
+        // Sender dropped without firing. Mechanically possible when the
+        // watched task is aborted before its first poll — the async block
+        // is lazy, so the TerminationGuard is never constructed. Today's
+        // spawn sites start this watcher only after the startup handshake
+        // resolves Ok, which itself requires a first poll, so this branch
+        // is defensive in production: staying silent is correct for
+        // rollback-owned/unwatched or stop-owned/pre-cancelled terminations.
         return;
     }
     // (b) Cancelled stop owns termination — silent.
@@ -582,7 +587,11 @@ pub(crate) fn spawn_consumer_task(
 
             let handle = tokio::spawn(async move {
                 // First statement: the guard fires term_rx on Drop, covering
-                // every termination mode of this task (return, panic, abort).
+                // every termination mode of this task (return, panic, abort)
+                // after the first poll. No watcher is alive before that
+                // point at today's spawn sites; the watcher's recv-Err
+                // branch is the designed handler if an early-spawning
+                // caller ever appears.
                 let _guard = TerminationGuard { tx: Some(term_tx) };
                 let result = consumer.start(consumer_ctx.clone()).await;
                 if let Err(e) = &result {

@@ -43,7 +43,11 @@ deadline surfaces as transient `Io` that triggers re-resolve on
 the next call (`src/executor.rs`, `src/connection.rs`, e_opus review I1).
 Credentials
 are captured at construction: `refresh` re-resolves the topology but not
-credentials, so password rotation requires a context rebuild.
+credentials, so password rotation requires a context rebuild. Concurrent
+refreshes collapse to one rebuild per invalidation episode: `refresh` clears
+the cached connection and re-resolves through the executor's single-flight
+connect gate, so racing callers share one connector; a straggler whose clear
+lands after the leader's store forces at most one extra sequential rebuild.
 
 Idempotent `add` is the exception. It issues exactly one `SET NX` per trait
 call and never re-issues it after a transport error. A lost response leaves

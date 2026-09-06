@@ -20,8 +20,8 @@ untouched) gains a per-task outcome state shared with the watcher:
 - Bg-monitor path (bg JoinError/Err published inside the body): set
   `Accounted` after `publish_runtime_failure`, before the finally-`stop()`.
 - Normal path: set `Accounted` only AFTER the final `consumer.stop().await`
-  succeeds OR returns Err (a stop Err is not a crash — debug-log it, account
-  it; the route's normal lifecycle owns it).
+  succeeds OR returns Err (a stop Err is not a crash — it is silently
+  discarded, account it; the route's normal lifecycle owns it).
 - Normal Ok-start with no bg handle: same finally rule.
 
 `Pending` at termination time = ABNORMAL (a termination the body never
