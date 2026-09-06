@@ -376,18 +376,16 @@ An entry MAY also declare:
 - `delay: <humantime>` (default none): hold before serving the response
   or committing the fault.
 
+The `response.body` encoding SHALL mirror the client send path
+(`value_to_wire` semantics): a JSON string serves its exact bytes
+verbatim — no quoting, no escaping; `null` serves an empty body; any
+other JSON value serves as compact JSON. An absent `body` serves an
+empty body.
+
 The listener SHALL serve the first unspent entry whose matchers match, in
 declaration order; when no entry matches it SHALL serve the unmatched
 status (500 with an empty body, or the permissive default). Every request
 that reaches the wire SHALL be recorded before any scripting decision.
-Partners SHALL bind before route boot. Every `partners:` key MUST equal a
-declared harness `http` endpoint ref. Unknown entry or response fields,
-`times` below 1, both or neither of `response`/`fault`, unknown fault
-names, and unparseable `delay` values SHALL fail `doc-validation` at
-load, naming the partner key and the offending field, and exit 2. A
-document with no `partners:` section SHALL keep the `permissive(200)`
-default: status 200 with an empty body, exactly as before this section
-existed.
 
 #### Scenario: scripted response serves the matching request
 
@@ -485,30 +483,87 @@ existed.
 - **THEN** the send fails with a transport-class error no sooner than the
   delay
 
+#### Scenario: plain-string body is served verbatim
+
+- **GIVEN** a partner script whose `response.body` is the JSON string
+  `exact text` (not a JSON document)
+- **WHEN** a client-role send hits the scripted entry and the response
+  body is validated on the wire
+- **THEN** the served bytes equal `exact text` exactly — no quotes, no
+  escapes
+
+#### Scenario: null body serves an empty body
+
+- **GIVEN** a partner script whose `response.body` is `null`
+- **WHEN** a client-role send hits the scripted entry
+- **THEN** the served body is empty (zero bytes), not the literal `null`
+
+#### Scenario: partner and client body encodings agree
+
+- **GIVEN** the same JSON `Value` used as a partner script `body` and as
+  a client send `body`
+- **WHEN** both cross the wire
+- **THEN** the wire bytes are identical for strings, `null`, and
+  structured values alike
+
 ### Requirement: Partner request verification
 
 A `validate` action MAY target a partner with
 `target: {partner: <declared endpoint URI>}`. The URI MUST equal a
 declared harness `http` endpoint ref; otherwise the run SHALL report
-`doc-validation` naming the URI and exit 2. The action SHALL assert on the partner's recorded requests
-through an `expectation` map with required `count` (exact integer) and
-optional `method` (case-insensitive) and `path` (exact, query included)
-filters, where `count` is a non-negative integer. A `validate` action MAY
-carry a `deadline` (humantime) when, and only when, its target is a
-partner: without it the assertion SHALL read one immediate snapshot of
-the recorder; with it the action SHALL poll until equality or
-expiration. When expiration is first observed, the action SHALL take one
-final recorder snapshot. That final snapshot remains eligible to pass
-only when its filtered count equals `count`; otherwise it fails. The
-assertion SHALL pass if and only if a snapshot's filtered count equals
-`count`; a count above `count` never passes and polling continues to the
-deadline. The reported actual count SHALL be the filtered count from
-the final snapshot. A count mismatch, immediate or at deadline, SHALL be
-a verdict failure of the existing `validation-mismatch` class naming the
-partner, the filters, and the expected and actual counts. A `deadline`
-on a non-partner target, a missing, negative, or non-integer `count`, an
-unknown expectation field, or an unparseable `deadline` SHALL report
-`doc-validation` at load, naming the offending field, and exit 2.
+`doc-validation` naming the URI and exit 2. The action SHALL assert on
+the partner's recorded requests through an `expectation` map carrying
+exactly one bound form — `count: n` (exact), `atLeast: n`, `atMost: n`,
+or `atLeast` combined with `atMost` (a range, requiring
+`atLeast <= atMost`) — plus optional filters:
+
+- `method` (case-insensitive),
+- one path filter at most: `path` (exact wire bytes, query included),
+  `pathContains` (substring of the recorded path-and-query), or
+  `pathMatches` (regular expression, compile-verified at load),
+- `query`: a map of string keys to string values matched as a subset —
+  every declared pair SHALL be present among the recorded query's
+  percent-decoded pairs, order-independent and encoding-independent.
+
+All filters compose by logical AND. Absence SHALL be expressed as
+`atMost: 0`.
+
+A `validate` action MAY carry a `deadline` (humantime) when, and only
+when, its target is a partner. Without a deadline the assertion SHALL
+read one immediate snapshot of the recorder and decide on it, for every
+bound. With a deadline, because arrivals only add (the filtered count is
+monotone non-decreasing), the bounds decide as follows:
+
+- `count` — poll until a snapshot's filtered count equals it or the
+  deadline expires; a count above it never passes. On first-observed
+  expiry, one final snapshot decides; the reported actual is that
+  snapshot's filtered count.
+- `atLeast(n)` — poll until the filtered count reaches `n` (early
+  success: once reached, always reached); at expiry the final snapshot
+  decides and fails below `n`.
+- `atMost(n)` — an upper bound is an absence claim over the window:
+  the action SHALL wait the full deadline (failing immediately on any
+  snapshot above `n`) and decide on the final snapshot — `n` or below
+  passes. Early success is invalid: a passing early snapshot cannot
+  prove the count stays within bounds.
+- range (`atLeast` + `atMost`) — fail immediately on any snapshot above
+  the maximum; otherwise wait the full deadline and decide on the final
+  snapshot — within `[minimum, maximum]` passes.
+
+A bound or filter mismatch, immediate or at deadline, SHALL be a verdict
+failure of the existing `validation-mismatch` class naming the partner,
+the bound (in its own grammar, e.g. `at least 3`), the filters (by kind),
+and the expected and actual counts. Recorded-path diagnostics SHALL
+route through the redaction law (ADR-0051). Filter payloads SHALL NOT
+render raw in diagnostics: declared `query` pairs render `key=value`
+except keys in the harness secret set, which render redacted;
+`pathContains` and `pathMatches` payloads render by kind only. A
+`deadline` on a non-partner target, a missing bound, `count` mixed with
+`atLeast` or `atMost`, an inverted range (`atLeast > atMost`), more than
+one path filter, a negative or non-integer bound, an unknown expectation
+field, an invalid `pathMatches` pattern, or an unparseable `deadline`
+SHALL report `doc-validation` at load, naming the offending field, and
+exit 2.
 
 #### Scenario: immediate count assert passes
 
@@ -549,6 +604,128 @@ unknown expectation field, or an unparseable `deadline` SHALL report
   partner, the expected count 3, and the actual count from the final
   snapshot
 
+#### Scenario: atLeast settles early and passes
+
+- **GIVEN** a partner holding two requests with a third in flight
+- **WHEN** the scenario validates with `expectation: {atLeast: 3}` and
+  `deadline: 5s`
+- **THEN** the action polls and passes once the third lands, without
+  waiting the full deadline
+
+#### Scenario: atLeast fails at the deadline naming the actual
+
+- **GIVEN** a partner whose recorder holds one request
+- **WHEN** the scenario validates with `expectation: {atLeast: 3}` and
+  `deadline: 1s`
+- **THEN** the scenario fails with `validation-mismatch` naming the
+  partner, `at least 3`, and the actual count 1
+
+#### Scenario: atMost without a deadline decides on the snapshot
+
+- **GIVEN** a partner whose recorder holds two requests
+- **WHEN** the scenario validates with `expectation: {atMost: 2}`
+- **THEN** the action passes on the immediate snapshot
+
+#### Scenario: atMost with a deadline waits the full window
+
+- **GIVEN** a partner holding one matching `POST` and a route that sends
+  no further matching request (a nonmatching `GET` may still land)
+- **WHEN** the scenario validates with
+  `expectation: {atMost: 1, method: POST}` and `deadline: 2s`
+- **THEN** the action waits the full deadline (no early pass) and
+  decides on the final snapshot
+
+#### Scenario: atMost fails fast when exceeded mid-window
+
+- **GIVEN** a partner whose count rises above the bound while the
+  validate window is open
+- **WHEN** a poll observes the filtered count above `atMost: 2`
+- **THEN** the scenario fails immediately with `validation-mismatch`
+  naming the partner, `at most 2`, and the observed count
+
+#### Scenario: atMost zero asserts absence over the window
+
+- **GIVEN** a partner bound and dialed elsewhere, holding zero recorded
+  requests
+- **WHEN** the scenario validates with
+  `expectation: {atMost: 0}` and `deadline: 1s`
+- **THEN** the action waits the window and passes on the final snapshot
+
+#### Scenario: range fails fast above the maximum
+
+- **GIVEN** a partner whose filtered count reaches 5 with a range bound
+  of `atLeast: 2, atMost: 4` and an open deadline
+- **WHEN** a poll observes the count 5
+- **THEN** the scenario fails immediately, before the deadline expires
+
+#### Scenario: range passes on the final snapshot
+
+- **GIVEN** a partner whose filtered count settles at 3 with a range
+  bound of `atLeast: 2, atMost: 4` and `deadline: 1s`
+- **WHEN** the deadline expires
+- **THEN** the action passes on the final snapshot
+
+#### Scenario: inverted range is a load error
+
+- **GIVEN** a partner-target expectation carrying `atLeast: 4` and
+  `atMost: 3`
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the expectation and
+  exits 2
+
+#### Scenario: pathContains tolerates encoding drift
+
+- **GIVEN** a partner whose recorder holds `/q?bbox=1.5%2C2.5` on the
+  wire
+- **WHEN** the scenario validates with
+  `expectation: {atLeast: 1, pathContains: "bbox="}`
+- **THEN** the action passes without pinning the encoded byte sequence
+
+#### Scenario: pathMatches narrows by regular expression
+
+- **GIVEN** a partner holding `/orders/42` and `/health`
+- **WHEN** the scenario validates with
+  `expectation: {count: 1, pathMatches: "^/orders/\\d+$"}`
+- **THEN** the action passes
+
+#### Scenario: query subset matches order- and encoding-independent
+
+- **GIVEN** a partner whose recorder holds `/q?b=2&a=1%2B1` on the wire
+- **WHEN** the scenario validates with
+  `expectation: {atLeast: 1, query: {a: "1+1", b: "2"}}`
+- **THEN** the action passes
+
+#### Scenario: query subset fails when a declared pair is absent
+
+- **GIVEN** a partner whose recorder holds `/q?a=1`
+- **WHEN** the scenario validates with
+  `expectation: {atLeast: 1, query: {a: "1", c: "3"}}`
+- **THEN** the scenario fails with `validation-mismatch`
+
+#### Scenario: count mixed with atLeast is a load error
+
+- **GIVEN** a partner-target expectation carrying both `count` and
+  `atLeast`
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the expectation and
+  exits 2
+
+#### Scenario: two path filters are a load error
+
+- **GIVEN** a partner-target expectation carrying both `path` and
+  `pathContains`
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the expectation and
+  exits 2
+
+#### Scenario: invalid pathMatches pattern is a load error
+
+- **GIVEN** a partner-target expectation whose `pathMatches` does not
+  compile
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the pattern and
+  exits 2
+
 #### Scenario: partner target with undeclared URI is a load error
 
 - **GIVEN** a validate action whose `partner` URI equals no declared
@@ -566,6 +743,15 @@ unknown expectation field, or an unparseable `deadline` SHALL report
 #### Scenario: missing count is a load error
 
 - **GIVEN** a partner-target validate whose expectation lacks `count`
+  and carries no `atLeast` or `atMost` either
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the expectation and
+  exits 2
+
+#### Scenario: missing bound is a load error
+
+- **GIVEN** a partner-target validate whose expectation carries no
+  `count`, `atLeast`, or `atMost`
 - **WHEN** the document loads
 - **THEN** the run reports `doc-validation` naming the expectation and
   exits 2
@@ -703,4 +889,65 @@ fail-closed with a configuration error naming the v1 tier limitation.
   unchanged — mechanical call-site updates that swap local wiring
   helpers for the shared ones (same arrange, same assertions) do not
   count as modification
+
+### Requirement: Minimum-elapsed arrival assertion
+
+A `validate` action MAY carry `elapsedAtLeast: <humantime>` when, and
+only when, its target is `lastReceived`. The runner SHALL anchor a
+scenario-start instant. Each adapter SHALL capture the wire-arrival
+instant — the monotonic time at which the transport finished receiving
+the message — and the assertion SHALL compare THAT instant (not the
+time the `receive` action consumed it from the queue) against the
+scenario start. The assertion SHALL pass if and only if the wire
+arrival of the last received message on the target endpoint is at least
+`elapsedAtLeast` after the scenario start. A failed assertion SHALL be
+a verdict failure of the existing `validation-mismatch` class naming
+the endpoint, the bound, and the actual elapsed duration. An
+`elapsedAtLeast` on a non-`lastReceived` target or an unparseable value
+SHALL report `doc-validation` at load, naming the offending field, and
+exit 2. This requirement delivers the not-before-X proof dimension
+ADR-0069 §5 names; no §5 amendment is required (§13.3 admits new
+assertion kinds through their own changes).
+
+#### Scenario: waited arrival passes the bound
+
+- **GIVEN** a partner script with `delay: 300ms` and a receive on that
+  endpoint that completes
+- **WHEN** the scenario validates the endpoint with
+  `elapsedAtLeast: 200ms`
+- **THEN** the action passes
+
+#### Scenario: early arrival fails even when consumed late
+
+- **GIVEN** a message whose wire arrival happens 20ms after scenario
+  start but whose `receive` action runs after a later `sleep` and
+  consumes it at 2s
+- **WHEN** the scenario validates the endpoint with
+  `elapsedAtLeast: 1s`
+- **THEN** the scenario fails with `validation-mismatch` naming the
+  endpoint, `1s`, and the actual wire-arrival elapsed of about 20ms
+
+#### Scenario: too-early arrival fails naming the actual elapsed
+
+- **GIVEN** a receive that completes within 50ms of scenario start
+- **WHEN** the scenario validates the endpoint with
+  `elapsedAtLeast: 10s`
+- **THEN** the scenario fails with `validation-mismatch` naming the
+  endpoint, `10s`, and the actual elapsed
+
+#### Scenario: elapsedAtLeast on a partner target is a load error
+
+- **GIVEN** a validate action targeting a `partner` with
+  `elapsedAtLeast`
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the action and
+  `elapsedAtLeast`, and exits 2
+
+#### Scenario: unparseable elapsedAtLeast is a load error
+
+- **GIVEN** a validate action whose `elapsedAtLeast` is not a humantime
+  duration
+- **WHEN** the document loads
+- **THEN** the run reports `doc-validation` naming the field and
+  exits 2
 
