@@ -30,7 +30,7 @@ When the producer endpoint URI carries an authored raw query, `resolve_url` MUST
 - **When** the producer resolves the outbound URL
 - **Then** the pair is consumed — the raw filter matches the decoded key, not the encoded bytes
 
-#### Scenario: CamelHttpQuery composes with the endpoint query
+#### Scenario: CamelHttpQuery stays verbatim
 
 - **Given** a producer exchange carrying a `CamelHttpQuery` header and an endpoint with raw query `x=1`
 - **When** the producer resolves the outbound URL
