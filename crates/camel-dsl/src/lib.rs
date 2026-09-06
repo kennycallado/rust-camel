@@ -29,7 +29,7 @@ pub use compile::{
 pub use contract::{DeclarativeStepKind, is_rust_only_kind, mandatory_declarative_step_kinds};
 pub use discovery::{
     DiscoveryError, MaterializationFailure, discover_routes, discover_routes_with_threshold,
-    discover_routes_with_threshold_and_security,
+    discover_routes_with_threshold_and_security, discover_routes_with_threshold_security_and_env,
 };
 pub use json::{
     parse_json, parse_json_to_canonical, parse_json_to_declarative, parse_json_with_threshold,

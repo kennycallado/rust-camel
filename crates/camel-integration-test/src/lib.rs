@@ -59,6 +59,11 @@ mod env_layers_test;
 #[cfg(test)]
 mod runner_test;
 
+/// boot_scenario delegation tests (the six named tests from task 3.1,
+/// scenario-shared-boot).
+#[cfg(test)]
+mod boot_scenario_test;
+
 /// Partner router address-math tests (the pure wire_target /
 /// lane_key_for cases).
 #[cfg(test)]

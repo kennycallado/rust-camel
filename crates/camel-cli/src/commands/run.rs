@@ -252,37 +252,30 @@ pub async fn run(
     // diagnosis).
     tracing::info!("camel-cli: loading routes from patterns: {:?}", patterns);
 
-    let security_compile_context = crate::security::build_security_compile_context_from_config(
-        &camel_config,
-        ctx.registry_arc(),
-    )
-    .await?;
+    // Security compile context (scenario-shared-boot task 2.3): the
+    // builder moved to camel-bundles' security_boot module behind the
+    // `security` feature (default-on). Without the feature, any
+    // configured `[security.*]` section fails closed here, naming the
+    // required feature, before any route compiles.
+    #[cfg(feature = "security")]
+    let security_compile_context =
+        camel_bundles::security_boot::build_security_compile_context_from_config(
+            &camel_config,
+            ctx.registry_arc(),
+        )
+        .await?;
+    #[cfg(not(feature = "security"))]
+    camel_bundles::security_boot::ensure_security_supported(&camel_config)?;
+    #[cfg(not(feature = "security"))]
+    let security_compile_context = camel_dsl::SecurityCompileContext::default();
 
     // ADR-0061: install per-bind public-exposure acknowledgements from
-    // `[binds."<addr>"]` before any route starts staging.
-    let bind_acks: std::collections::HashMap<String, bool> = camel_config
-        .binds
-        .iter()
-        .map(|(k, v)| (k.clone(), v.allow_public_exposure))
-        .collect();
-    // MCP binds are invisible to the route-level gate (`mcp:` from-URIs
-    // carry no authority; the listener binds via `McpServerConfig.bind`),
-    // so the same ack map threads into the MCP registry's per-bind gate
-    // (Task 2.6) — refuse-without-ack on non-loopback Public, warn when
-    // acked. Only when the mcp component is compiled in.
-    #[cfg(feature = "mcp")]
-    camel_component_mcp::McpServerRegistry::global().set_bind_exposure_acks(bind_acks.clone());
-    // Wasm source binds are likewise invisible to the route-level gate
-    // (the `wasm:` gate runs inside the source consumer; there is no
-    // shared listener registry), so the same ack map threads into the
-    // wasm component's per-bind gate — fail-closed without ack. Only
-    // when the wasm component is compiled in.
-    #[cfg(feature = "wasm")]
-    install_wasm_bind_acks(&bind_acks);
-    ctx.set_bind_exposure_acks(camel_core::route_controller::BindExposureAcks::new(
-        bind_acks,
-    ))
-    .await;
+    // `[binds."<addr>"]` before any route starts staging (task 2.3: the
+    // wiring lives in camel-bundles' security_boot; the helper threads
+    // the ack map into the route controller and, under their own cfg
+    // gates, the MCP registry and the wasm source-bind gate — mirroring
+    // the previous inline block 1:1).
+    camel_bundles::security_boot::install_bind_exposure_acks(&mut ctx, &camel_config).await;
 
     // 4. Boot the component bundle cascade via camel-bundles (ADR-0069
     //    section 10). Boot registers the built-ins, every bundle of the
@@ -335,12 +328,9 @@ pub async fn run(
             // ADR-0033: register fail-closed ConfigChecks derived from the
             // discovered routes (e.g. SqlDynamicQueryCheck for every `sql:`
             // endpoint). The checks run synchronously at the head of
-            // `CamelContext::start()` before any route consumer is started.
-            for check in
-                camel_core::startup_validation::scan_route_definitions_for_sql_checks(&defs)
-            {
-                ctx.add_startup_check(check);
-            }
+            // `CamelContext::start()` before any route consumer is started
+            // (task 2.3: shared installer in camel-bundles).
+            camel_bundles::security_boot::install_sql_startup_checks(&mut ctx, &defs);
             // Benchmark instrumentation: when BENCH_LATENCY_FILE is set,
             // wrap every top-level `To` step with timing processors
             // (default), or bracket each whole route when
@@ -548,20 +538,15 @@ fn resolve_route_patterns(
     resolve_route_patterns_with(&default_patterns(), routes_override, config_routes)
 }
 
-/// Install per-bind public-exposure acks into the wasm component's
-/// source-bind gate (wasm-source-auth-kernel, Task 1.5). Wasm source
-/// consumers bind outside the route-level gate, so the same ack map the
-/// route controller gets must also reach `WasmSourceBindAcks` before
-/// any route starts staging. Only exists when the wasm component is
-/// compiled in.
-#[cfg(feature = "wasm")]
-fn install_wasm_bind_acks(bind_acks: &std::collections::HashMap<String, bool>) {
-    camel_component_wasm::WasmSourceBindAcks::global().set(bind_acks.clone());
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Serializes tests that write or read the process-global
+/// `WasmSourceBindAcks` singleton: `set()` replaces the whole map, so
+/// parallel test writers would clobber each other's installs.
+#[cfg(test)]
+pub(crate) static WASM_ACKS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 #[path = "run_tests.rs"]

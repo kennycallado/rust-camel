@@ -2,9 +2,11 @@
 
 The component registration cascade for rust-camel. This crate runs
 `ComponentBundle::register_all` for every component of a `camel run` boot. It
-also owns the teardown handle for that cascade. Established by
-[ADR-0069](../../docs/adr/0069-integration-tier-testing-contract.md) section
-10.
+also owns the teardown handle for that cascade and the shared security boot
+wiring (`security_boot`): the pre-route installers both `camel run` and the
+integration harness call between context configuration and route loading.
+Established by [ADR-0069](../../docs/adr/0069-integration-tier-testing-contract.md)
+section 10.
 
 ## Language
 
@@ -48,10 +50,25 @@ _Avoid_: bridge hook, cleanup service
 **Feature gates**:
 Cargo features that mirror the `camel run` cfg lines one to one: `grpc`,
 `wasm`, `http-static`, `llm`, `surrealdb`, `mqtt`, and `mcp` are default-on;
-`kafka` is opt-in. `camel-cli` forwards each of its gates into this crate.
-The `exec` gate stays with the CLI because its registration rule is
-conditional on route content.
+`kafka` and `security` are opt-in. The `security` feature pulls the auth
+stack (`camel-auth`, `camel-component-keycloak`, `camel-dsl`, `serde_json`)
+for the shared security builder. `camel-cli` forwards each of its gates into
+this crate. The `exec` gate stays with the CLI because its registration rule
+is conditional on route content.
 _Avoid_: bundle flags, component toggles
+
+**security boot wiring**:
+The `security_boot` module: the pre-route wiring shared by `camel run` and
+the integration harness (ADR-0069 section 10). The ungated installers —
+`install_bind_exposure_acks` (per-bind public-exposure acknowledgements from
+`[binds]`, ADR-0061) and `install_sql_startup_checks` (ADR-0033 fail-closed
+checks derived from the discovered route definitions) — compile with only
+the crate's hard dependencies. `ensure_security_supported` is the
+fail-closed guard: without the `security` feature, any configured
+`[security.*]` section is rejected naming the required feature, before any
+route compiles. With the feature, `build_security_compile_context_from_config`
+owns every `[security.*]` section (moved from `camel-cli`'s `security.rs`).
+_Avoid_: security setup, auth wiring (the module is the shared seam)
 
 ## Architecture notes
 
@@ -78,10 +95,23 @@ failures return `CamelError::Config` with the message the inline cascade
 produced. SQL and SurrealDb init failures log as `system-broken` per
 ADR-0012, matching the prior CLI behavior.
 
+**Security feature gate.** The `security` feature is opt-in and pulls
+`camel-auth`, `camel-component-keycloak`, `camel-dsl`, and `serde_json` —
+the auth stack the moved builder needs. Without it,
+`ensure_security_supported` fails closed on any configured `[security.*]`
+section before any route compiles, naming the required feature. The wasm
+sub-paths of the builder key on this crate's own `wasm` feature; the
+not-wasm rejections name camel-bundles as the crate owner.
+
 ## Related decisions
 
 - [ADR-0069](../../docs/adr/0069-integration-tier-testing-contract.md) —
   the integration-tier testing contract. Section 10 defines this crate, the
-  `BootHandle`, and the enumerated boot boundary.
+  `BootHandle`, the enumerated boot boundary, and the shared security
+  wiring (`security_boot`).
+- [ADR-0061](../../docs/adr/0061-unified-transport-auth.md) — per-bind
+  public-exposure acknowledgements installed by `install_bind_exposure_acks`.
+- [ADR-0033](../../docs/adr/0033-security-defaults-fail-closed-startup-validation.md) —
+  fail-closed SQL startup checks installed by `install_sql_startup_checks`.
 - [ADR-0012](../../docs/adr/0012-log-level-convention-handler-contract-boundaries.md) —
   log-policy annotations on the `error!` sites moved from `camel run`.

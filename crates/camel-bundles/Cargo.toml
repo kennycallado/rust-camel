@@ -42,7 +42,8 @@ camel-template.workspace = true
 camel-xj.workspace = true
 camel-xslt.workspace = true
 # Feature-gated bundles; gates mirror the `camel run` cfg lines 1:1
-# (ADR-0069 section 10). `kafka` stays opt-in; the rest are default-on.
+# (ADR-0069 section 10). `kafka` and `security` stay opt-in; the rest are
+# default-on.
 camel-component-grpc = { workspace = true, optional = true }
 camel-component-kafka = { workspace = true, optional = true }
 camel-component-llm = { workspace = true, optional = true }
@@ -50,9 +51,20 @@ camel-component-mcp = { workspace = true, optional = true }
 camel-component-mqtt = { workspace = true, optional = true }
 camel-component-surrealdb = { workspace = true, optional = true }
 camel-component-wasm = { workspace = true, optional = true }
+# Security builder (task 2.2): auth stack behind the `security` feature.
+# serde_json is needed by the moved builder (`native_principal` constructs
+# the empty claims object), so it rides the same optional gate.
+camel-auth = { workspace = true, optional = true }
+camel-component-keycloak = { workspace = true, optional = true }
+camel-dsl = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+# Test-only fixtures for the moved security-builder tests (signed-JWT and
+# timestamp claims); never linked into the library.
+chrono.workspace = true
+jsonwebtoken.workspace = true
 
 [features]
 default = ["grpc", "wasm", "http-static", "llm", "surrealdb", "mqtt", "mcp"]
@@ -64,6 +76,7 @@ grpc = ["dep:camel-component-grpc"]
 llm = ["dep:camel-component-llm"]
 mcp = ["dep:camel-component-mcp"]
 wasm = ["dep:camel-component-wasm"]
+security = ["dep:camel-auth", "dep:camel-component-keycloak", "dep:camel-dsl", "dep:serde_json"]
 
 [lints]
 workspace = true

@@ -266,14 +266,19 @@ fn try_exists_error_aborts_instead_of_defaults() {
     }
 }
 
-/// Task 1.5 (wasm-source-auth-kernel): `camel run` threads the
-/// per-bind exposure acks from `[binds."<addr>"]` into the wasm
-/// component's source-bind gate. The wiring helper invoked at run
-/// startup must install the config-built ack map so
-/// `WasmSourceBindAcks::acknowledged` reflects what the config set.
+/// Task 1.5 (wasm-source-auth-kernel) / scenario-shared-boot task 2.3:
+/// `camel run` threads the per-bind exposure acks from
+/// `[binds."<addr>"]` into the wasm component's source-bind gate. The
+/// shared installer `camel run` now delegates to must install the
+/// config-built ack map so `WasmSourceBindAcks::acknowledged` reflects
+/// what the config set.
 #[cfg(feature = "wasm")]
-#[test]
-fn wasm_bind_acks_wired_from_config() {
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn wasm_bind_acks_wired_from_config() {
+    let _wasm_acks_guard = crate::commands::run::WASM_ACKS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     const TEST_BIND: &str = "0.0.0.0:41234"; // distinctive; no other test acks it
 
     let camel_config: camel_config::CamelConfig = toml::from_str(&format!(
@@ -283,18 +288,15 @@ allow_public_exposure = true
     ))
     .expect("parse test CamelConfig"); // allow-unwrap
 
-    // Same construction as the run command's wiring site.
-    let bind_acks: std::collections::HashMap<String, bool> = camel_config
-        .binds
-        .iter()
-        .map(|(k, v)| (k.clone(), v.allow_public_exposure))
-        .collect();
+    let mut ctx = camel_config::CamelConfig::configure_context_with_beans(&camel_config, None)
+        .await
+        .expect("configure_context_with_beans must succeed"); // allow-unwrap
 
-    install_wasm_bind_acks(&bind_acks);
+    camel_bundles::security_boot::install_bind_exposure_acks(&mut ctx, &camel_config).await;
 
     assert!(
         camel_component_wasm::WasmSourceBindAcks::global().acknowledged(TEST_BIND),
-        "run wiring must install wasm bind acks from CamelConfig.binds"
+        "shared installer must install wasm bind acks from CamelConfig.binds"
     );
 }
 
@@ -341,4 +343,276 @@ fn dangling_config_parent_fails_fast() {
         stderr.contains("cannot resolve project root"),
         "stderr must name the project-root failure: {stderr}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Shared-wiring scenario tests (scenario-shared-boot task 2.3): the
+// camel-run half of the runtime-boot "both callers" scenarios. They
+// replicate the run.rs wiring sequence in-process through the SAME
+// camel-bundles helpers `camel run` delegates to, so a regression in a
+// shared helper fails the run-side scenario, not only the harness-side
+// one.
+// ---------------------------------------------------------------------------
+
+/// Boot a project through the shared helper sequence in the run.rs order
+/// (security build → bind-ack install → `camel_bundles::boot` →
+/// discovery → SQL startup checks → add routes), stopping before
+/// `ctx.start()` so tests can assert on either a successful start or a
+/// startup refusal. Registers a test-owned mock component (same-scheme
+/// registration replaces the cascade's instance) after boot and before
+/// route compilation, so `to: mock:` producers resolve against a message
+/// store the test can observe.
+#[cfg(feature = "security")]
+async fn boot_via_shared_wiring(
+    project_dir: &std::path::Path,
+    config: &camel_config::CamelConfig,
+) -> (
+    camel_core::CamelContext,
+    camel_bundles::BootHandle,
+    camel_auth::ProviderRegistry,
+    camel_component_mock::MockComponent,
+) {
+    let mut ctx = camel_config::CamelConfig::configure_context_with_beans(config, None)
+        .await
+        .expect("configure_context_with_beans must succeed"); // allow-unwrap
+
+    let sec = camel_bundles::security_boot::build_security_compile_context_from_config(
+        config,
+        ctx.registry_arc(),
+    )
+    .await
+    .expect("shared security builder must succeed"); // allow-unwrap
+    let providers = sec.provider_registry();
+
+    camel_bundles::security_boot::install_bind_exposure_acks(&mut ctx, config).await;
+
+    let boot_handle = camel_bundles::boot(&mut ctx, config, project_dir)
+        .await
+        .expect("camel_bundles::boot must succeed"); // allow-unwrap
+
+    let mock = camel_component_mock::MockComponent::new();
+    ctx.register_component(mock.clone());
+
+    let routes_yaml = project_dir.join("routes.yaml");
+    let defs = camel_dsl::discover_routes_with_threshold_and_security(
+        &[routes_yaml.display().to_string()],
+        config.stream_caching.threshold,
+        sec,
+    )
+    .expect("route discovery must succeed"); // allow-unwrap
+
+    camel_bundles::security_boot::install_sql_startup_checks(&mut ctx, &defs);
+
+    for def in defs {
+        ctx.add_route_definition(def)
+            .await
+            .expect("add_route_definition must succeed"); // allow-unwrap
+    }
+
+    (ctx, boot_handle, providers, mock)
+}
+
+/// Deliver an exchange to a `direct:` endpoint exactly as the scenario
+/// harness `DirectStimulus` does (crates/camel-integration-test
+/// adapters.rs): a fresh endpoint + producer per send through the
+/// component registry, one `oneshot` per exchange, retrying the
+/// consumer-startup race (`EndpointCreationFailed`) on a bounded
+/// deadline.
+#[cfg(feature = "security")]
+async fn direct_oneshot(
+    ctx: &camel_core::CamelContext,
+    uri: &str,
+    exchange: camel_api::Exchange,
+) -> Result<camel_api::Exchange, camel_api::CamelError> {
+    use tower::ServiceExt;
+
+    const RETRY_SLEEP: std::time::Duration = std::time::Duration::from_millis(20);
+    const RETRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
+
+    let deadline = tokio::time::Instant::now() + RETRY_DEADLINE;
+    loop {
+        let producer_ctx = ctx.producer_context();
+        let component = ctx
+            .registry()
+            .get("direct")
+            .expect("direct component registered by the bundle cascade"); // allow-unwrap
+        let endpoint = component
+            .create_endpoint(uri, ctx)
+            .expect("direct endpoint creation must succeed"); // allow-unwrap
+        let producer = endpoint
+            .create_producer(
+                std::sync::Arc::new(camel_component_api::NoOpComponentContext),
+                &producer_ctx,
+            )
+            .expect("direct producer creation must succeed"); // allow-unwrap
+        match producer.oneshot(exchange.clone()).await {
+            Ok(reply) => return Ok(reply),
+            Err(e) => {
+                let is_startup_race = matches!(e, camel_api::CamelError::EndpointCreationFailed(_));
+                if is_startup_race && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(RETRY_SLEEP).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// runtime-boot "both callers boot a security_policy route" (camel-run
+/// half): a project with a native bearer credential and a
+/// `security_policy` route, booted through the shared helpers, admits a
+/// stimulus carrying the valid native credential and refuses a
+/// credential-less one with `CamelError::Unauthenticated`.
+///
+/// Pass-case mechanism (deviation from the task text, reported): the
+/// task says to carry the bearer token in the exchange headers, but
+/// `direct:` has no transport boundary — only http/ws/grpc/mcp/wasm
+/// consumers mint the kernel carrier from headers (the
+/// `set_security_context` default is a no-op), and the pipeline gate is
+/// strictly carrier-only. The pass case therefore drives the same seam
+/// the transports drive: `kernel_authenticate` against the provider
+/// registry built by the SHARED security builder, then
+/// `install_carrier` (mirroring camel-processor's
+/// security_policy_layer tests). The `Authorization` header is still set
+/// for fidelity; the refuse case is a plain exchange exactly as
+/// specified.
+#[cfg(feature = "security")]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn run_shared_wiring_native_credentials_gate() {
+    let _wasm_acks_guard = crate::commands::run::WASM_ACKS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    use camel_api::security_policy::{
+        AccessMode, CredentialSource, RouteSecurityPlan, TransportId,
+    };
+    use camel_api::{Body, CamelError, Exchange, Message};
+    use camel_auth::credential_source::ExtractedToken;
+    use camel_auth::kernel::{install_carrier, kernel_authenticate};
+
+    let camel_toml = r#"
+[security.native]
+subject = "dev-user"
+issuer = "native"
+bearer_token = "dev-token"
+roles = ["admin"]
+"#;
+    let routes_yaml = r#"
+routes:
+  - id: sec-gate
+    from: direct:sec
+    security_policy:
+      roles: ["admin"]
+      provider: "native"
+    steps:
+      - to: mock:out
+"#;
+
+    let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+    std::fs::write(dir.path().join("Camel.toml"), camel_toml).expect("write Camel.toml"); // allow-unwrap
+    std::fs::write(dir.path().join("routes.yaml"), routes_yaml).expect("write routes.yaml"); // allow-unwrap
+
+    let config: camel_config::CamelConfig =
+        toml::from_str(camel_toml).expect("parse test CamelConfig"); // allow-unwrap
+
+    let (mut ctx, boot_handle, providers, mock) = boot_via_shared_wiring(dir.path(), &config).await;
+
+    ctx.start().await.expect("booted context must start"); // allow-unwrap
+
+    // Pass case: the native credential from Camel.toml authenticates
+    // through the shared builder's provider registry; the policy route
+    // forwards the exchange to mock:out.
+    let mut message = Message::new(Body::Text("ping".to_string()));
+    message.set_header(
+        "Authorization",
+        serde_json::Value::String("Bearer dev-token".to_string()),
+    );
+    let mut exchange = Exchange::new(message);
+    let plan = RouteSecurityPlan {
+        access_mode: AccessMode::Authenticated,
+        provider_ref: Some("native".to_string()),
+        transport: TransportId::Http,
+        credential_sources: vec![CredentialSource::AuthorizationHeader],
+        audience_binding: None,
+    };
+    let credentials = ExtractedToken {
+        token: "dev-token".to_string(),
+        source: CredentialSource::AuthorizationHeader,
+    };
+    let principal = kernel_authenticate(&plan, &providers, &credentials)
+        .await
+        .expect("native credential must authenticate via the shared builder's registry"); // allow-unwrap
+    install_carrier(&mut exchange, &principal);
+
+    direct_oneshot(&ctx, "direct:sec", exchange)
+        .await
+        .expect("credentialed send must complete the security_policy route"); // allow-unwrap
+
+    mock.get_endpoint("out")
+        .expect("mock:out endpoint must exist after the send") // allow-unwrap
+        .await_exchanges(1, std::time::Duration::from_secs(2))
+        .await;
+
+    // Refuse case: no credential anywhere — no carrier, no header.
+    let plain = Exchange::new(Message::new(Body::Text("ping".to_string())));
+    let err = direct_oneshot(&ctx, "direct:sec", plain)
+        .await
+        .expect_err("credential-less send must be refused"); // allow-unwrap
+    assert!(
+        matches!(err, CamelError::Unauthenticated(_)),
+        "refusal must be Unauthenticated, got: {err:?}"
+    );
+
+    // Teardown: BootHandle::shutdown stops the context and drains pools.
+    let _ = boot_handle.shutdown(&mut ctx).await;
+}
+
+/// runtime-boot "both callers refuse an unacknowledged public bind"
+/// (camel-run half): a non-loopback bind serving a Public route without
+/// `allow_public_exposure`, booted through the shared installer, fails
+/// context start with the ADR-0061 acknowledgement error.
+#[cfg(feature = "security")]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn run_shared_wiring_public_bind_without_ack_fails() {
+    let _wasm_acks_guard = crate::commands::run::WASM_ACKS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    use camel_api::CamelError;
+
+    let camel_toml = r#"
+[binds."0.0.0.0:41997"]
+"#;
+    let routes_yaml = r#"
+routes:
+  - id: pub-bind
+    from: http://0.0.0.0:41997/pub
+    steps:
+      - to: mock:out
+"#;
+
+    let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+    std::fs::write(dir.path().join("Camel.toml"), camel_toml).expect("write Camel.toml"); // allow-unwrap
+    std::fs::write(dir.path().join("routes.yaml"), routes_yaml).expect("write routes.yaml"); // allow-unwrap
+
+    let config: camel_config::CamelConfig =
+        toml::from_str(camel_toml).expect("parse test CamelConfig"); // allow-unwrap
+
+    let (mut ctx, boot_handle, _providers, _mock) =
+        boot_via_shared_wiring(dir.path(), &config).await;
+
+    let err = ctx
+        .start()
+        .await
+        .expect_err("unacknowledged non-loopback Public bind must refuse to start"); // allow-unwrap
+    match err {
+        CamelError::RouteError(msg) => assert!(
+            msg.contains("non-loopback address; acknowledge via [binds"),
+            "refusal must name the acknowledgement path: {msg}"
+        ),
+        other => panic!("expected RouteError, got {other:?}"),
+    }
+
+    let _ = boot_handle.shutdown(&mut ctx).await;
 }

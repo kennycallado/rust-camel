@@ -47,6 +47,11 @@ tempfile.workspace = true
 toml.workspace = true
 
 [features]
+# Shared security composition root (scenario-shared-boot task 3.1):
+# when on, boot_scenario builds the security compile context through
+# the camel-bundles builder; when off, any configured [security.*]
+# section fails closed through ensure_security_supported.
+security = ["camel-bundles/security"]
 # Demand-gated HTTP activation (ADR-0069 §8): the HttpPartner adapter
 # and its hyper dependency compile only when scenarios need scheme
 # http endpoints.

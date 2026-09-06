@@ -1,24 +1,129 @@
-//! Security compile-context construction.
+//! Composition-root boot wiring shared by `camel run` and the integration
+//! harness (ADR-0069 section 10).
 //!
-//! Authenticator builders for the `[security.*]` config blocks
-//! (`native`, `keycloak`, `oidc`), provider resolution/registration, and
-//! the cfg-gated [`build_security_compile_context_from_config`] entry point
-//! shared between the wasm and non-wasm build paths.
+//! These helpers install the pre-route wiring that `camel run` performs
+//! between context configuration and route loading: the `[binds]`
+//! public-exposure acknowledgements (ADR-0061 Rule 4, fail-closed) and the
+//! ADR-0033 fail-closed SQL startup checks derived from the discovered
+//! route definitions. Both helpers use only camel-bundles' hard
+//! dependencies, so any caller compiles them without a feature gate; the
+//! feature-gated fan-out (MCP registry, wasm source-bind gate) follows the
+//! same cargo features as the components themselves, mirroring the `camel
+//! run` cfg lines 1:1.
+//!
+//! [`ensure_security_supported`] is the fail-closed guard: without the
+//! `security` feature, any configured `[security.*]` section is rejected
+//! with an error naming the required feature, before any route compiles.
+//! With the feature, [`build_security_compile_context_from_config`] owns
+//! every `[security.*]` section (moved from `camel-cli`'s `security.rs`,
+//! task 2.2).
 
-use camel_api::CamelError;
-use camel_auth::{JwksProvider, escape_json_pointer};
-use camel_dsl::SecurityCompileContext;
+use std::collections::HashMap;
+#[cfg(feature = "security")]
 use std::sync::Arc;
 
+use camel_api::CamelError;
+#[cfg(feature = "security")]
+use camel_auth::{JwksProvider, escape_json_pointer};
+use camel_config::config::CamelConfig;
+use camel_core::CamelContext;
+use camel_core::RouteDefinition;
+#[cfg(feature = "security")]
+use camel_dsl::SecurityCompileContext;
+
+/// Install per-bind public-exposure acknowledgements from
+/// `[binds."<addr>"]` (ADR-0061) before any route starts staging.
+///
+/// The same ack map fans out to every bind gate that is invisible to the
+/// route-level gate: the context-level route controller (always), the MCP
+/// registry's per-bind gate (`mcp` feature), and the wasm component's
+/// source-bind gate (`wasm` feature).
+pub async fn install_bind_exposure_acks(ctx: &mut CamelContext, config: &CamelConfig) {
+    // Same construction as the `camel run` wiring site.
+    let bind_acks: HashMap<String, bool> = config
+        .binds
+        .iter()
+        .map(|(k, v)| (k.clone(), v.allow_public_exposure))
+        .collect();
+    // MCP binds are invisible to the route-level gate (`mcp:` from-URIs
+    // carry no authority; the listener binds via `McpServerConfig.bind`),
+    // so the same ack map threads into the MCP registry's per-bind gate —
+    // refuse-without-ack on non-loopback Public, warn when acked. Only
+    // when the mcp component is compiled in.
+    #[cfg(feature = "mcp")]
+    camel_component_mcp::McpServerRegistry::global().set_bind_exposure_acks(bind_acks.clone());
+    // Wasm source binds are likewise invisible to the route-level gate
+    // (the `wasm:` gate runs inside the source consumer; there is no
+    // shared listener registry), so the same ack map threads into the
+    // wasm component's per-bind gate — fail-closed without ack. Only
+    // when the wasm component is compiled in.
+    #[cfg(feature = "wasm")]
+    camel_component_wasm::WasmSourceBindAcks::global().set(bind_acks.clone());
+    ctx.set_bind_exposure_acks(camel_core::route_controller::BindExposureAcks::new(
+        bind_acks,
+    ))
+    .await;
+}
+
+/// Register the ADR-0033 fail-closed `ConfigCheck`s derived from the
+/// discovered route definitions (e.g. `SqlDynamicQueryCheck` for every
+/// `sql:` endpoint declaring dynamic-query intent). The checks run
+/// synchronously at the head of `CamelContext::start()` before any route
+/// consumer is started.
+pub fn install_sql_startup_checks(ctx: &mut CamelContext, defs: &[RouteDefinition]) {
+    for check in camel_core::startup_validation::scan_route_definitions_for_sql_checks(defs) {
+        ctx.add_startup_check(check);
+    }
+}
+
+/// Fail closed when the config declares `[security.*]` sections but this
+/// build was made without the `security` feature. With the feature enabled,
+/// the shared builder below handles every `[security.*]` section; when the
+/// feature is disabled, security configuration cannot be honored and this
+/// check fails closed naming the feature.
+#[cfg(not(feature = "security"))]
+pub fn ensure_security_supported(config: &CamelConfig) -> Result<(), CamelError> {
+    // Explicit field check: `SecurityConfig` has no `is_empty`.
+    let security_configured = config.security.oidc.is_some()
+        || config.security.native.is_some()
+        || config.security.keycloak.is_some()
+        || config.security.permissions.is_some()
+        || config.security.policies.is_some();
+    if security_configured {
+        return Err(CamelError::Config(
+            "security configuration ([security.*]) is present but this build was made without \
+             the `camel-bundles/security` feature; rebuild with the camel-bundles/security \
+             feature enabled to boot security configuration"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// With the `security` feature the shared security builder (task 2.2)
+/// handles every `[security.*]` section, so nothing is unsupported.
+#[cfg(feature = "security")]
+pub fn ensure_security_supported(_config: &CamelConfig) -> Result<(), CamelError> {
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
+// Security compile-context builder (task 2.2) — moved verbatim from
+// `camel-cli`'s `security.rs`; the wasm-gated variant keys on camel-bundles'
+// own `wasm` feature, and the not-wasm rejections name camel-bundles as the
+// crate owner.
+// ---------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------
 // Auth helpers — shared between wasm and non-wasm build paths
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 
 /// Synthesize a native principal from a subject/roles/scopes triple.
 ///
 /// Emits the loud-synthesis warning (task 1.4) once per principal: native
 /// principals carry no claims/audience, so downstream policy decisions only
 /// see the configured roles/scopes.
+#[cfg(feature = "security")]
 fn native_principal(
     subject: &str,
     issuer: &str,
@@ -39,6 +144,7 @@ fn native_principal(
     }
 }
 
+#[cfg(feature = "security")]
 fn native_authenticator(
     native: &camel_config::config::NativeAuthConfig,
 ) -> Result<Arc<dyn camel_auth::TokenAuthenticator>, CamelError> {
@@ -120,6 +226,7 @@ fn native_authenticator(
     Ok(Arc::new(camel_auth::StaticTokenAuthenticator::new(store)))
 }
 
+#[cfg(feature = "security")]
 async fn keycloak_authenticator(
     keycloak: &camel_config::config::KeycloakSecurityConfig,
 ) -> Result<Arc<dyn camel_auth::TokenAuthenticator>, CamelError> {
@@ -170,6 +277,7 @@ async fn keycloak_authenticator(
     }
 }
 
+#[cfg(feature = "security")]
 /// OIDC claim-path preset, mirroring
 /// `camel_component_keycloak::keycloak_claim_paths`.
 fn oidc_claim_paths(oidc: &camel_config::config::OidcSecurityConfig) -> camel_auth::ClaimPaths {
@@ -187,6 +295,7 @@ fn oidc_claim_paths(oidc: &camel_config::config::OidcSecurityConfig) -> camel_au
     }
 }
 
+#[cfg(feature = "security")]
 /// Assemble the OIDC JWT validator from config plus a JWKS provider.
 ///
 /// Split from [`oidc_authenticator`] so tests can inject an in-memory
@@ -201,6 +310,7 @@ fn oidc_validator(
     camel_auth::LocalJwtValidator::new(oidc.audience.clone(), oidc.issuer.clone(), jwks, mapper)
 }
 
+#[cfg(feature = "security")]
 async fn oidc_authenticator(
     oidc: &camel_config::config::OidcSecurityConfig,
     ssrf: &camel_api::SsrfPolicy,
@@ -231,6 +341,7 @@ async fn oidc_authenticator(
     Ok(Arc::new(oidc_validator(oidc, jwks)))
 }
 
+#[cfg(feature = "security")]
 /// OIDC provider audience binding: single issuer, every configured audience.
 fn oidc_binding(
     oidc: &camel_config::config::OidcSecurityConfig,
@@ -241,6 +352,7 @@ fn oidc_binding(
     }
 }
 
+#[cfg(feature = "security")]
 /// Keycloak provider audience binding: issuer derived from `server_url`/`realm`
 /// (mirrors `KeycloakRealmConfig::realm_url` trailing-slash normalization).
 fn keycloak_binding(
@@ -256,6 +368,7 @@ fn keycloak_binding(
     }
 }
 
+#[cfg(feature = "security")]
 /// Fail-closed guard for JWT-backed provider bindings (ADR-0061 audience
 /// enforcement): a binding with exactly one empty set would enter the
 /// kernel's REPLACEMENT path (the non-empty set), which skips the empty
@@ -284,6 +397,7 @@ fn ensure_jwt_binding_complete(
     Ok(())
 }
 
+#[cfg(feature = "security")]
 /// Native provider audience binding: reservation only — static tokens have no
 /// issuer/audience semantics.
 fn native_binding() -> camel_api::security_policy::AudienceBinding {
@@ -293,6 +407,7 @@ fn native_binding() -> camel_api::security_policy::AudienceBinding {
     }
 }
 
+#[cfg(feature = "security")]
 /// Resolve every configured authenticator provider from `[security.*]`.
 ///
 /// Builds a `("keycloak", _)`, `("oidc", _)`, and `("native", _)` entry for
@@ -342,6 +457,7 @@ async fn resolve_authenticators(
     Ok((providers, bindings))
 }
 
+#[cfg(feature = "security")]
 /// Register resolved providers onto a [`SecurityCompileContext`].
 ///
 /// Every provider (first included) is registered by name onto a default
@@ -374,6 +490,7 @@ fn register_providers(
     registered
 }
 
+#[cfg(feature = "security")]
 /// Register Keycloak UMA permission evaluator from `[security.keycloak.uma]`
 /// config.  No-ops when no UMA config is present.
 async fn register_keycloak_uma_evaluator(
@@ -399,12 +516,12 @@ async fn register_keycloak_uma_evaluator(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // Public entry-point (cfg-gated) — matches the existing signature
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 
-#[cfg(feature = "wasm")]
-pub(crate) async fn build_security_compile_context_from_config(
+#[cfg(all(feature = "security", feature = "wasm"))]
+pub async fn build_security_compile_context_from_config(
     camel_config: &camel_config::config::CamelConfig,
     registry: Arc<std::sync::Mutex<camel_core::Registry>>,
 ) -> Result<SecurityCompileContext, CamelError> {
@@ -445,20 +562,20 @@ pub(crate) async fn build_security_compile_context_from_config(
     Ok(security_ctx)
 }
 
-#[cfg(not(feature = "wasm"))]
-pub(crate) async fn build_security_compile_context_from_config(
+#[cfg(all(feature = "security", not(feature = "wasm")))]
+pub async fn build_security_compile_context_from_config(
     camel_config: &camel_config::config::CamelConfig,
     _registry: Arc<std::sync::Mutex<camel_core::Registry>>,
 ) -> Result<SecurityCompileContext, CamelError> {
     if camel_config.security.permissions.is_some() {
         return Err(CamelError::Config(
-            "security.permissions requires camel-cli wasm feature".into(),
+            "security.permissions requires the camel-bundles wasm feature".into(),
         ));
     }
 
     if camel_config.security.policies.is_some() {
         return Err(CamelError::Config(
-            "security.policies requires camel-cli wasm feature".into(),
+            "security.policies requires the camel-bundles wasm feature".into(),
         ));
     }
 
@@ -476,13 +593,191 @@ pub(crate) async fn build_security_compile_context_from_config(
     Ok(security_ctx)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bind-ack installer must thread `[binds."<addr>"]` into the wasm
+    /// component's source-bind gate, mirroring the `camel run` wiring
+    /// (run_tests `wasm_bind_acks_wired_from_config`).
+    #[cfg(feature = "wasm")]
+    #[tokio::test]
+    async fn install_bind_exposure_acks_installs_from_config() {
+        const TEST_BIND: &str = "127.0.0.1:41999"; // distinctive; no other test acks it
+
+        let config: CamelConfig = toml::from_str(&format!(
+            r#"[binds."{TEST_BIND}"]
+allow_public_exposure = true
+"#
+        ))
+        .expect("parse test CamelConfig"); // allow-unwrap
+
+        let mut ctx = CamelConfig::configure_context_with_beans(&config, None)
+            .await
+            .expect("configure_context_with_beans must succeed"); // allow-unwrap
+
+        install_bind_exposure_acks(&mut ctx, &config).await;
+
+        assert!(
+            camel_component_wasm::WasmSourceBindAcks::global().acknowledged(TEST_BIND),
+            "bind-ack installer must install wasm bind acks from CamelConfig.binds"
+        );
+    }
+
+    /// The SQL startup-check installer must register the ADR-0033 checks so
+    /// a `sql:` endpoint declaring dynamic-query intent without the
+    /// capability fails context start, naming the `sql-dynamic-query`
+    /// check id.
+    #[tokio::test]
+    async fn install_sql_startup_checks_registers_checks() {
+        let config: CamelConfig = toml::from_str("").expect("parse empty test CamelConfig"); // allow-unwrap
+        let mut ctx = CamelConfig::configure_context_with_beans(&config, None)
+            .await
+            .expect("configure_context_with_beans must succeed"); // allow-unwrap
+
+        let def = RouteDefinition::new(
+            "direct:sql-probe",
+            vec![camel_core::BuilderStep::To(
+                "sql:select 1?db_url=postgres://x/y&useMessageBodyForSql=true".to_string(),
+            )],
+        )
+        .with_route_id("sql-probe".to_string());
+        install_sql_startup_checks(&mut ctx, &[def]);
+
+        let err = ctx
+            .start()
+            .await
+            .expect_err("failing startup check must fail context start"); // allow-unwrap
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sql-dynamic-query"),
+            "start failure must name the sql-dynamic-query check: {msg}"
+        );
+    }
+
+    /// Without the `security` feature, any configured `[security.*]` section
+    /// must be rejected with an error naming `camel-bundles/security`; an
+    /// empty security config is accepted.
+    #[cfg(not(feature = "security"))]
+    #[test]
+    fn ensure_security_supported_without_feature_rejects_security() {
+        let config: CamelConfig = toml::from_str("[security.native]\nsubject = \"probe\"")
+            .expect("parse test CamelConfig"); // allow-unwrap
+        let err = ensure_security_supported(&config)
+            .expect_err("security config must be rejected without camel-bundles/security"); // allow-unwrap
+        let msg = err.to_string();
+        assert!(
+            msg.contains("camel-bundles/security"),
+            "refusal must name the required feature: {msg}"
+        );
+
+        let empty: CamelConfig = toml::from_str("").expect("parse empty test CamelConfig"); // allow-unwrap
+        assert!(
+            ensure_security_supported(&empty).is_ok(),
+            "empty security config must be accepted without the feature"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Tests
+// Tests (security builder) — moved verbatim from `camel-cli`'s `security.rs`
+// (task 2.2); the wasm-gated entries now key on camel-bundles' own `wasm`
+// feature.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+#[cfg(feature = "security")]
+mod security_tests {
     use std::sync::Arc;
+
+    // -----------------------------------------------------------------------
+    // Task 2.2 move-acceptance tests (scenario-shared-boot): the native
+    // path builds offline and compiles a security_policy route, wasm-backed
+    // policies are rejected without the wasm feature, and the feature-on
+    // half of the `ensure_security_supported` cfg pair holds.
+    // -----------------------------------------------------------------------
+
+    /// Native credential with an inline secret: the builder returns Ok and
+    /// the returned context compiles a `security_policy` route — no network
+    /// (StaticTokenAuthenticator path).
+    #[tokio::test]
+    async fn native_security_builder_offline() {
+        let cfg: camel_config::config::CamelConfig = toml::from_str(
+            r#"
+        [security.native]
+        subject = "dev-user"
+        issuer = "native"
+        bearer_token = "dev-token"
+        roles = ["admin"]
+        "#,
+        )
+        .expect("config parses");
+
+        let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
+        let ctx = super::build_security_compile_context_from_config(&cfg, registry)
+            .await
+            .expect("security context builds");
+
+        let yaml = r#"
+routes:
+  - id: route-native
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+      provider: "native"
+    steps:
+      - to: log:info
+"#;
+        let defs = camel_dsl::parse_yaml_with_threshold_and_security(yaml, 1024, ctx)
+            .expect("security_policy route compiles");
+        assert_eq!(defs.len(), 1);
+        assert!(
+            defs[0].security_policy_config().is_some(),
+            "route must carry a compiled security_policy"
+        );
+    }
+
+    /// Wasm-backed `[security.policies]` must be rejected with a Config
+    /// error naming camel-bundles' own wasm feature when that feature is
+    /// off (runs under `--no-default-features --features security`).
+    #[cfg(not(feature = "wasm"))]
+    #[tokio::test]
+    async fn builder_rejects_wasm_security_without_wasm_feature() {
+        let cfg: camel_config::config::CamelConfig = toml::from_str(
+            r#"
+        [security.policies.wasm.probe]
+        path = "plugins/authz.wasm"
+        "#,
+        )
+        .expect("config parses");
+
+        let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
+        let err = match super::build_security_compile_context_from_config(&cfg, registry).await {
+            Ok(_) => panic!("policies without the wasm feature must be rejected"),
+            Err(err) => err,
+        };
+        match err {
+            camel_api::CamelError::Config(msg) => assert!(
+                msg.contains("requires the camel-bundles wasm feature"),
+                "unexpected error: {msg}"
+            ),
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+    }
+
+    /// Feature-on half of the cfg-invariant pair (companion to 2.1's
+    /// `ensure_security_supported_without_feature_rejects_security`): with
+    /// the `security` feature the guard accepts an empty security config.
+    #[cfg(feature = "security")]
+    #[test]
+    fn ensure_security_supported_ok_with_feature() {
+        let empty: camel_config::config::CamelConfig =
+            toml::from_str("").expect("parse empty test CamelConfig"); // allow-unwrap
+        assert!(
+            super::ensure_security_supported(&empty).is_ok(),
+            "with the security feature an empty security config is supported"
+        );
+    }
 
     #[tokio::test]
     async fn native_static_token_builds_authenticator() {
@@ -991,9 +1286,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Named-provider registration tests (task 3.3) — the CLI registers every
-    // configured provider (XOR removed). Filter `multi_provider` matches the
-    // submodule name.
+    // Named-provider registration tests (task 3.3) — every configured
+    // provider is registered (XOR removed). Filter `multi_provider` matches
+    // the submodule name.
     // -----------------------------------------------------------------------
 
     mod multi_provider {

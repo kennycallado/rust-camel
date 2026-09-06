@@ -82,11 +82,16 @@ _Avoid_: env conflict, shadowed variable
 
 **scenario boot**:
 `boot_scenario(doc, root, env)`: the embedded FULL-tier composition
-root — sealed config load (`from_file_sealed`, pinned profile, no
-ambient `CAMEL_*` overrides), `configure_context_with_beans`,
-`camel_bundles::boot`, route source load with `${env:}` resolution
-through the `LayeredEnv`, `ctx.start()`. Returns `ScenarioRun { ctx,
-boot }`; partners stay caller-owned.
+root, delegating to the shared `camel run` wiring in the same order
+(ADR-0069 section 10): sealed config load (`from_file_sealed`, pinned
+profile, no ambient `CAMEL_*` overrides), `configure_context_with_beans`,
+the offline security gate, the security compile-context build (the shared
+builder behind the `security` feature; the fail-closed guard without it),
+`install_bind_exposure_acks`, `camel_bundles::boot`, route discovery
+through `discover_routes_with_threshold_security_and_env` with `${env:}`
+resolution through the `LayeredEnv`, `install_sql_startup_checks`, route
+registration, `ctx.start()`. Returns `ScenarioRun { ctx, boot }`;
+partners stay caller-owned.
 _Avoid_: full boot (the tier name is FULL, the function is the scenario
 boot), embedded runner
 
@@ -154,8 +159,9 @@ Classification is by `DocError` variant, never by message text; the CLI
 adapter owns the mapping and every variant maps to exit 2. Variants
 carrying the `doc-validation:` token in Display: `NotTestDocument`,
 `MissingScenario`, `MixedVocabulary`, `Validation`, `ReservedEnvKey`,
-`InlineRoutes`. `UnsupportedProvisioning` names the
-`infra-unavailable` class (ADR-0069 section 7). `RouteSourceMissing`
+`InlineRoutes`. `UnsupportedProvisioning` and the boot's `AuthProviderUnavailable`
+rejection (keycloak/oidc config) name the `infra-unavailable` class
+(ADR-0069 section 7). `RouteSourceMissing`
 and `RouteSourceConflict` render the unit-tier messages verbatim,
 without the token, and map to exit 2 as doc parse errors, exactly as
 the unit tier maps them today. This crate never exits.
@@ -175,9 +181,9 @@ are load-time rules too.
 reverse. ADR-0055 forbids depending on `camel-test`, the publish-order
 leaf sink. The scenario boot additionally depends on `camel-config`
 (the sealed loader) and `camel-bundles` (the `camel run` registration
-cascade) — the composition-root direction ADR-0069 section 10 fixes:
-testing crates consume the boot, the engine never consumes the testing
-crates.
+cascade and the `security_boot` wiring) — the composition-root direction
+ADR-0069 section 10 fixes: testing crates consume the boot, the engine
+never consumes the testing crates.
 
 ### The scenario boot seals hermeticity twice
 
@@ -188,8 +194,26 @@ the `CAMEL_*` allowlist override merge is off. `${env:}` placeholders
 in the config and in route files resolve through the `LayeredEnv`
 (`interpolate_env_with`), never the process environment — the harness
 must not read global state (ADR-0069 section 4). Route files load
-through `camel_dsl::parse_yaml`, the same per-file parser under `camel
-run` discovery, with the 16 MiB cap preserved.
+through `discover_routes_with_threshold_security_and_env`, the
+env-injected discovery entry: the injected lookup is the `LayeredEnv`,
+so the process environment is never consulted, and the full discovery
+contract is preserved (glob patterns, the reserved test-suffix gate,
+JSON explicit-pattern gating, file size caps, two-pass template
+materialization) with the config's `stream_caching.threshold` and the
+built security compile context.
+
+### The scenario tier gates security offline
+
+The tier runs offline: no network. Keycloak/oidc security configuration
+(network-prefetching auth providers) is rejected before any builder call
+with `CamelError::AuthProviderUnavailable`; the CLI adapter classifies
+that variant as the `infra-unavailable` document-error class (exit 2),
+never `full-boot-failure`. Wasm `security.policies`/`security.permissions`
+are rejected fail-closed with a configuration error naming the v1 tier
+limitation. The remaining `[security.*]` sections (native) build through
+the shared `camel_bundles::security_boot` builder behind the `security`
+feature; without the feature, `ensure_security_supported` rejects any
+configured section before a route compiles.
 
 ### Partner receives resolve the wire role by dispatch state
 
@@ -245,7 +269,13 @@ is diagnosable from the failure text.
 ## Related decisions
 
 - ADR-0069: integration-tier testing contract (format, vocabulary ban,
-  provisioning sources, failure taxonomy, crate layout).
+  provisioning sources, failure taxonomy, crate layout, shared
+  composition root).
+- [integration-tier spec](../../openspec/specs/integration-tier/spec.md):
+  the scenario boot shares the `camel run` composition root (sealed
+  config, security compile-context build, bind acknowledgements, bundle
+  cascade, env-injected discovery, SQL startup checks) and gates
+  keycloak/oidc and wasm security offline.
 - ADR-0064: runtime-profile boundary that content-derived tiering
   measures.
 - ADR-0049: `#[non_exhaustive]` posture for public enums.

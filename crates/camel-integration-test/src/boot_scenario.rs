@@ -1,13 +1,23 @@
 //! The embedded FULL-tier scenario boot (ADR-0069 sections 4, 5, 10).
 //!
-//! [`boot_scenario`] boots the real composition root for one scenario
-//! document: the sealed config load (pinned profile, no ambient
-//! `CAMEL_*` overrides, `${env:}` through the layered environment),
-//! context preparation through `camel_config`, the `camel run`
+//! [`boot_scenario`] boots the same composition root `camel run`
+//! boots, through the same seams and in the same order: the sealed
+//! config load (pinned profile, no ambient `CAMEL_*` overrides,
+//! `${env:}` through the layered environment), context preparation
+//! through `camel_config`, the offline tier security gate (keycloak/
+//! oidc and wasm policies/permissions fail closed — the tier has no
+//! network and v1 supports the native provider only), the security
+//! compile context through the shared `camel_bundles` builder, the
+//! `[binds]` public-exposure acknowledgements (ADR-0061), the
 //! component-bundle cascade through `camel_bundles::boot`, the
-//! document's route source (file placeholders resolve through the
-//! layered environment, never the process environment), and
-//! `ctx.start()`.
+//! document's route source through `camel_dsl` route discovery
+//! (two-pass template materialization included; every `${env:NAME}`
+//! resolves through the layered environment, never the process
+//! environment), the ADR-0033 fail-closed SQL startup checks from the
+//! discovered definitions, and `ctx.start()`. Oversize route files now
+//! surface as `CamelError::Io` (discovery's capped-read error),
+//! matching `camel run`; the pre-delegation loader used `RouteError`
+//! for this case.
 //!
 //! Partners are NOT owned here: the caller constructs them before the
 //! boot (bind `127.0.0.1:0`), builds the harness-provisioned map into
@@ -22,7 +32,6 @@ use camel_api::CamelError;
 use camel_bundles::BootHandle;
 use camel_config::config::CamelConfig;
 use camel_core::CamelContext;
-use camel_core::RouteDefinition;
 
 use crate::document::{RouteSource, ScenarioDocument};
 use crate::env_layers::LayeredEnv;
@@ -43,13 +52,18 @@ pub struct ScenarioRun {
 
 /// Boots the full composition root for one scenario document.
 ///
-/// Sequence: load `<root>/Camel.toml` through the sealed loader with
-/// the document's pinned profile (defaulting to `"default"`; ambient
+/// Sequence (the `camel run` wiring order, ADR-0069 sections 4, 10):
+/// load `<root>/Camel.toml` through the sealed loader with the
+/// document's pinned profile (defaulting to `"default"`; ambient
 /// `CAMEL_PROFILE` and allowlisted `CAMEL_*` overrides never apply),
-/// prepare the context from that config, register the component
-/// cascade through `camel_bundles::boot`, load the document's route
-/// source, and start the context. Binding waits at `ctx.start()`
-/// through the operator readiness signal.
+/// prepare the context from that config, gate `[security.*]` for the
+/// offline tier, build the security compile context through the
+/// shared builder, install the `[binds]` exposure acknowledgements,
+/// register the component cascade through `camel_bundles::boot`,
+/// discover the document's route source with the config's
+/// `stream_caching.threshold`, register the ADR-0033 SQL startup
+/// checks from the discovered routes, and start the context. Binding
+/// waits at `ctx.start()` through the operator readiness signal.
 ///
 /// `root` is the project root: the directory holding `Camel.toml`
 /// and the base for route file resolution. Both route source file
@@ -79,72 +93,137 @@ pub async fn boot_scenario(
     })?;
 
     let mut ctx = CamelConfig::configure_context_with_beans(&config, None).await?;
+
+    // Tier security gate — a config-shape check, so it runs ungated
+    // by cargo features and before any builder call: the scenario
+    // tier has no network, so keycloak/oidc (network-prefetching auth
+    // providers) and wasm policies/permissions (a later wave) fail
+    // closed here, never at a fetch.
+    if config.security.keycloak.is_some() || config.security.oidc.is_some() {
+        return Err(CamelError::AuthProviderUnavailable(
+            "scenario tier runs offline (no network): keycloak/oidc security requires \
+             a network-prefetching auth provider; v1 supports the native provider only"
+                .to_string(),
+        ));
+    }
+    if config.security.policies.is_some() || config.security.permissions.is_some() {
+        return Err(CamelError::Config(
+            "wasm security policies/permissions are not supported in the scenario \
+             tier in v1 (offline tier; later wave)"
+                .to_string(),
+        ));
+    }
+
+    // Security compile context through the shared builder (the `camel
+    // run` seam): with the `security` feature the builder owns every
+    // remaining `[security.*]` section (native); without it the
+    // fail-closed guard rejects any configured section and the
+    // default context compiles the routes.
+    #[cfg(feature = "security")]
+    let security_ctx = camel_bundles::security_boot::build_security_compile_context_from_config(
+        &config,
+        ctx.registry_arc(),
+    )
+    .await?;
+    #[cfg(not(feature = "security"))]
+    let security_ctx = {
+        camel_bundles::security_boot::ensure_security_supported(&config)?;
+        camel_dsl::SecurityCompileContext::default()
+    };
+
+    // ADR-0061: per-bind public-exposure acknowledgements from
+    // `[binds]`, installed before any route starts staging — the
+    // shared installer, same as `camel run`.
+    camel_bundles::security_boot::install_bind_exposure_acks(&mut ctx, &config).await;
+
     let boot = camel_bundles::boot(&mut ctx, &config, root).await?;
 
-    for def in load_route_definitions(doc, root, env)? {
+    let defs = camel_dsl::discover_routes_with_threshold_security_and_env(
+        &route_patterns(doc, root)?,
+        config.stream_caching.threshold,
+        security_ctx,
+        &|name| env.lookup(name),
+    )
+    .map_err(map_discovery_error)?;
+
+    // ADR-0033: fail-closed SQL startup checks from the discovered
+    // routes; they run at the head of `ctx.start()`, before any route
+    // consumer starts.
+    camel_bundles::security_boot::install_sql_startup_checks(&mut ctx, &defs);
+
+    for def in defs {
         ctx.add_route_definition(def).await?;
     }
     ctx.start().await?;
     Ok(ScenarioRun { ctx, boot })
 }
 
-/// Loads the document's route source for the boot.
+/// Builds the route-discovery patterns for the document's route
+/// source.
 ///
-/// File forms read each file (capped like `camel run` route
-/// discovery), resolve `${env:NAME}` placeholders through the layered
-/// environment — never the process environment, the harness must not
-/// read global state (ADR-0069 section 4) — and parse through
-/// `camel_dsl::parse_yaml`, the same per-file YAML parser that sits
-/// under `camel run` route discovery.
+/// Both file forms resolve against `root`, as today. Each declared
+/// file gets an existence pre-check: a glob pattern that matches
+/// nothing is silent, and the missing-file error must name the file
+/// the document declared. A declared file with discovery's reserved
+/// `.test.yaml`/`.test.yml` suffix is rejected here too: the document
+/// explicitly names the file, so discovery's silent reserved-suffix
+/// skip would boot zero routes — test documents belong to `camel
+/// test`, not scenario routeFiles.
 ///
 /// Inline routes cannot boot in v1: the document parser owns the
 /// definitions, and this entry receives the document by reference, so
 /// the definitions cannot move into the context. A FULL-tier
 /// scenario that wants the embedded boot declares `routeFiles`.
-fn load_route_definitions(
-    doc: &ScenarioDocument,
-    root: &Path,
-    env: &LayeredEnv,
-) -> Result<Vec<RouteDefinition>, CamelError> {
+fn route_patterns(doc: &ScenarioDocument, root: &Path) -> Result<Vec<String>, CamelError> {
     match &doc.route_source {
-        RouteSource::RouteFiles(files) | RouteSource::RouteFilesFromRoot(files) => {
-            let mut defs = Vec::new();
-            for file in files {
+        RouteSource::RouteFiles(files) | RouteSource::RouteFilesFromRoot(files) => files
+            .iter()
+            .map(|file| {
                 let full = root.join(file);
-                let metadata = std::fs::metadata(&full)
+                std::fs::metadata(&full)
                     .map_err(|e| CamelError::Io(format!("{}: {e}", full.display())))?;
-                if metadata.len() > camel_dsl::MAX_ROUTE_FILE_SIZE {
-                    return Err(CamelError::RouteError(format!(
-                        "{}: route file exceeds the {} byte cap",
-                        full.display(),
-                        camel_dsl::MAX_ROUTE_FILE_SIZE
+                // Same predicate as discovery's reserved-suffix gate,
+                // but fail loud: the route file was declared, not
+                // glob-expanded, so a silent skip has no excuse.
+                if camel_dsl::discovery::is_test_document(&full) {
+                    return Err(CamelError::Config(format!(
+                        "{}: test documents (*.test.yaml, *.test.yml) belong to \
+                         `camel test`, not scenario routeFiles",
+                        full.display()
                     )));
                 }
-                let content = std::fs::read_to_string(&full)
-                    .map_err(|e| CamelError::Io(format!("{}: {e}", full.display())))?;
-                let interpolated =
-                    camel_dsl::env_interpolation::interpolate_env_with(&content, &|name| {
-                        env.lookup(name)
-                    })
-                    .map_err(|name| {
-                        CamelError::Config(format!(
-                            "{}: unresolved ${{env:{name}}} placeholder \
-                             (no layer of the scenario environment defines it)",
-                            full.display()
-                        ))
-                    })?;
-                defs.extend(
-                    camel_dsl::parse_yaml(&interpolated)
-                        .map_err(|e| CamelError::RouteError(format!("{}: {e}", full.display())))?,
-                );
-            }
-            Ok(defs)
-        }
+                Ok(full.display().to_string())
+            })
+            .collect(),
         RouteSource::Inline(_) => Err(CamelError::Config(
             "inline route sources cannot boot in v1: declare routeFiles \
              (the document parser owns inline definitions; the boot \
              receives the document by reference)"
                 .to_string(),
         )),
+    }
+}
+
+/// Maps a discovery error into the `CamelError` shapes the scenario
+/// boot reports. The env mapping keeps the message shape the per-file
+/// loader produced (file path, variable name, and the no-layer
+/// hermeticity note); the io and parse mappings keep the previous
+/// per-file read/parse error classes.
+fn map_discovery_error(err: camel_dsl::DiscoveryError) -> CamelError {
+    match err {
+        camel_dsl::DiscoveryError::Env { path, var_name } => CamelError::Config(format!(
+            "{path}: unresolved ${{env:{var_name}}} placeholder \
+             (no layer of the scenario environment defines it)"
+        )),
+        camel_dsl::DiscoveryError::Io { path, source } => {
+            CamelError::Io(format!("{path}: {source}"))
+        }
+        camel_dsl::DiscoveryError::Yaml { path, error } => {
+            CamelError::RouteError(format!("{path}: {error}"))
+        }
+        camel_dsl::DiscoveryError::Json { path, error } => {
+            CamelError::RouteError(format!("{path}: {error}"))
+        }
+        other => CamelError::RouteError(other.to_string()),
     }
 }

@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::Path;
 
-use crate::env_interpolation::interpolate_env;
+use crate::env_interpolation::{interpolate_env, interpolate_env_with};
 use crate::json::parse_json_with_threshold_and_security;
 use crate::model::SecurityCompileContext;
 use crate::template::materializer::materialize_and_compile;
@@ -197,7 +197,7 @@ fn file_extension(path: &Path) -> Option<String> {
 /// let routes = discover_routes(&["routes/*.yaml".to_string(), "routes/*.json".to_string()])?;
 /// ```
 pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, DiscoveryError> {
-    discover_routes_inner(patterns, None, None)
+    discover_routes_inner(patterns, None, None, None)
 }
 
 /// Discovers routes with a custom stream-cache threshold.
@@ -208,7 +208,7 @@ pub fn discover_routes_with_threshold(
     patterns: &[String],
     stream_cache_threshold: usize,
 ) -> Result<Vec<RouteDefinition>, DiscoveryError> {
-    discover_routes_inner(patterns, Some(stream_cache_threshold), None)
+    discover_routes_inner(patterns, Some(stream_cache_threshold), None, None)
 }
 
 /// Discovers routes with a custom stream-cache threshold and security compile context.
@@ -222,7 +222,34 @@ pub fn discover_routes_with_threshold_and_security(
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
 ) -> Result<Vec<RouteDefinition>, DiscoveryError> {
-    discover_routes_inner(patterns, Some(stream_cache_threshold), Some(security_ctx))
+    discover_routes_inner(
+        patterns,
+        Some(stream_cache_threshold),
+        Some(security_ctx),
+        None,
+    )
+}
+
+/// Discovers routes with a custom stream-cache threshold, a security
+/// compile context, and an injected environment lookup.
+///
+/// Same as [`discover_routes_with_threshold_and_security`] but every
+/// `${env:NAME}` placeholder resolves through `env_lookup` instead of the
+/// process environment. Hermetic callers (the integration tier) inject
+/// their layered environment here; the process environment is never
+/// consulted through this entry.
+pub fn discover_routes_with_threshold_security_and_env(
+    patterns: &[String],
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<RouteDefinition>, DiscoveryError> {
+    discover_routes_inner(
+        patterns,
+        Some(stream_cache_threshold),
+        Some(security_ctx),
+        Some(env_lookup),
+    )
 }
 
 /// Parse a `TemplateError::InvalidParameter` Display string
@@ -238,10 +265,15 @@ fn parse_invalid_parameter_message(msg: &str) -> Option<(String, String, String)
     Some((name.to_string(), ty.to_string(), value.to_string()))
 }
 
+/// Injected `${env:NAME}` resolver: returns the value for the variable
+/// name, or `None` when unresolved.
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
 fn discover_routes_inner(
     patterns: &[String],
     stream_cache_threshold: Option<usize>,
     security_ctx: Option<SecurityCompileContext>,
+    env_lookup: Option<EnvLookup<'_>>,
 ) -> Result<Vec<RouteDefinition>, DiscoveryError> {
     let mut routes = Vec::new();
     let mut templates: HashMap<String, RouteTemplateSpec> = HashMap::new();
@@ -306,11 +338,15 @@ fn discover_routes_inner(
             let source_hash = hasher.finish();
 
             // Env interpolation happens before parsing for both YAML and JSON.
-            let content =
-                interpolate_env(&raw_content).map_err(|var_name| DiscoveryError::Env {
-                    path: path_str.clone(),
-                    var_name,
-                })?;
+            // With an injected lookup the process environment is never read.
+            let content = match env_lookup {
+                Some(lookup) => interpolate_env_with(&raw_content, lookup),
+                None => interpolate_env(&raw_content),
+            }
+            .map_err(|var_name| DiscoveryError::Env {
+                path: path_str.clone(),
+                var_name,
+            })?;
 
             // Parse based on extension — collect templates, templated specs, and regular routes
             match ext.as_deref() {
@@ -1395,12 +1431,12 @@ routes:
 
         // (None-threshold, Some-ctx) — only reachable through the private fn.
         let routes =
-            discover_routes_inner(std::slice::from_ref(&pattern), None, Some(ctx)).unwrap();
+            discover_routes_inner(std::slice::from_ref(&pattern), None, Some(ctx), None).unwrap();
         assert_eq!(routes.len(), 1);
         assert!(routes[0].security_authenticator().is_some());
 
         // Fail-closed pin: public path (None ctx) must reject the secured route.
-        let err = match discover_routes_inner(&[pattern], None, None) {
+        let err = match discover_routes_inner(&[pattern], None, None, None) {
             Ok(_) => panic!("expected error for secured route without authenticator"),
             Err(e) => e,
         };
@@ -1440,7 +1476,7 @@ templated_routes:
 
         // Fail-closed: default security ctx (no authenticator) must classify
         // the failure as SecurityRequired, not InvalidBody.
-        let err = match discover_routes_inner(&[pattern], None, None) {
+        let err = match discover_routes_inner(&[pattern], None, None, None) {
             Ok(_) => panic!("expected secured templated route to fail closed"),
             Err(e) => e,
         };
@@ -1595,5 +1631,190 @@ routes:
         assert!(!is_test_document(Path::new("atest.yaml")));
         assert!(!is_test_document(Path::new("a.yaml")));
         assert!(!is_test_document(Path::new("x.test.json")));
+    }
+
+    // ── Env-lookup-injected discovery entry ──────────────────────────
+
+    #[test]
+    fn env_injected_entry_resolves_through_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("tier.yaml");
+        fs::write(
+            &file_path,
+            r#"
+routes:
+  - id: tier-route
+    from: "direct:${env:RC_TIER_ONLY}"
+    steps:
+      - to: "log:info"
+"#,
+        )
+        .unwrap();
+        let pattern = file_path.to_string_lossy().to_string();
+
+        let routes = discover_routes_with_threshold_security_and_env(
+            &[pattern],
+            4096,
+            SecurityCompileContext::default(),
+            &|n| (n == "RC_TIER_ONLY").then(|| "start".into()),
+        )
+        .unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].from_uri(), "direct:start");
+    }
+
+    #[test]
+    fn env_injected_entry_never_reads_process_env() {
+        unsafe { env::set_var("RC_6BSF_PROC_ONLY", "leak") };
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("proc.yaml");
+        fs::write(
+            &file_path,
+            r#"
+routes:
+  - id: proc-route
+    from: "direct:${env:RC_6BSF_PROC_ONLY}"
+    steps:
+      - to: "log:info"
+"#,
+        )
+        .unwrap();
+        let pattern = file_path.to_string_lossy().to_string();
+
+        let err = match discover_routes_with_threshold_security_and_env(
+            &[pattern],
+            4096,
+            SecurityCompileContext::default(),
+            &|_| None,
+        ) {
+            Ok(_) => panic!("expected Env error, process env leaked through"),
+            Err(e) => e,
+        };
+        match &err {
+            DiscoveryError::Env { var_name, .. } => {
+                assert_eq!(var_name, "RC_6BSF_PROC_ONLY");
+            }
+            other => panic!("expected Env error, got: {other:?}"),
+        }
+
+        unsafe { env::remove_var("RC_6BSF_PROC_ONLY") };
+    }
+
+    #[test]
+    fn env_injected_entry_materializes_templates() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Env-injected file: template parameter values carry ${env:} placeholders.
+        let env_file = dir.path().join("tpl-env.yaml");
+        fs::write(
+            &env_file,
+            r#"
+routes: []
+templates:
+  - id: direct-tpl
+    parameters:
+      - name: target
+    routes:
+      - id: "tpl-body-route"
+        from: "{{target}}"
+        steps: []
+templated_routes:
+  - route_template_ref: direct-tpl
+    route_id: "inst-a"
+    parameters:
+      target: "direct:${env:RC_TPL}"
+  - route_template_ref: direct-tpl
+    route_id: "inst-b"
+    parameters:
+      target: "direct:${env:RC_TPL}"
+"#,
+        )
+        .unwrap();
+        let env_pattern = env_file.to_string_lossy().to_string();
+        let injected = discover_routes_with_threshold_security_and_env(
+            &[env_pattern],
+            4096,
+            SecurityCompileContext::default(),
+            &|n| (n == "RC_TPL").then(|| "shared".into()),
+        )
+        .unwrap();
+
+        // Baseline: identical file with placeholders pre-substituted, run
+        // through the process-environment entry (existing comparison
+        // convention — RouteDefinition has no PartialEq).
+        let plain_file = dir.path().join("tpl-plain.yaml");
+        fs::write(
+            &plain_file,
+            r#"
+routes: []
+templates:
+  - id: direct-tpl
+    parameters:
+      - name: target
+    routes:
+      - id: "tpl-body-route"
+        from: "{{target}}"
+        steps: []
+templated_routes:
+  - route_template_ref: direct-tpl
+    route_id: "inst-a"
+    parameters:
+      target: "direct:shared"
+  - route_template_ref: direct-tpl
+    route_id: "inst-b"
+    parameters:
+      target: "direct:shared"
+"#,
+        )
+        .unwrap();
+        let plain_pattern = plain_file.to_string_lossy().to_string();
+        let baseline = discover_routes_with_threshold_and_security(
+            &[plain_pattern],
+            4096,
+            SecurityCompileContext::default(),
+        )
+        .unwrap();
+
+        assert_eq!(injected.len(), 2);
+        assert_eq!(injected.len(), baseline.len());
+        let injected_ids: Vec<&str> = injected.iter().map(|r| r.route_id()).collect();
+        let baseline_ids: Vec<&str> = baseline.iter().map(|r| r.route_id()).collect();
+        assert_eq!(injected_ids, baseline_ids);
+        let injected_uris: Vec<&str> = injected.iter().map(|r| r.from_uri()).collect();
+        let baseline_uris: Vec<&str> = baseline.iter().map(|r| r.from_uri()).collect();
+        assert_eq!(injected_uris, baseline_uris);
+    }
+
+    #[test]
+    fn env_injected_entry_equivalent_output_at_same_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("threshold.yaml");
+        let raw = r#"
+routes:
+  - id: threshold-route
+    from: "direct:${env:RC_TH}"
+    steps:
+      - stream_cache: {}
+      - to: "log:info"
+"#;
+        fs::write(&file_path, raw).unwrap();
+        let pattern = file_path.to_string_lossy().to_string();
+
+        let injected = discover_routes_with_threshold_security_and_env(
+            &[pattern],
+            777,
+            SecurityCompileContext::default(),
+            &|n| (n == "RC_TH").then(|| "th".into()),
+        )
+        .unwrap();
+
+        let pre_interpolated = raw.replace("${env:RC_TH}", "th");
+        let parsed = crate::yaml::parse_yaml_with_threshold(&pre_interpolated, 777).unwrap();
+
+        assert_eq!(injected.len(), 1);
+        assert_eq!(injected.len(), parsed.len());
+        assert_eq!(injected[0].route_id(), parsed[0].route_id());
+        assert_eq!(injected[0].from_uri(), parsed[0].from_uri());
     }
 }

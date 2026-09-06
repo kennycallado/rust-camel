@@ -26,6 +26,13 @@ use camel_config::config::CamelConfig;
 use camel_core::CamelContext;
 use camel_core::datasource::RuntimeDatasourceCatalog;
 
+pub mod security_boot;
+
+// Shared security compile-context builder (task 2.2), doc-visible at the
+// crate root for boot consumers.
+#[cfg(feature = "security")]
+pub use security_boot::build_security_compile_context_from_config;
+
 struct BridgeCleanup {
     xslt: Arc<camel_xslt::XsltBridgeRuntime>,
     xj: Arc<camel_xj::XjBridgeRuntime>,

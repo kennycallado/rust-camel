@@ -308,6 +308,27 @@ async fn run_scenario_fake_smoke(
     }
 }
 
+/// ADR-0051 positive secret rule: the booted context's `http` component
+/// metadata classifies secret query options; the router masks their
+/// values from every wire-path diagnostic.
+#[cfg(feature = "integration-http")]
+async fn http_secret_query_keys(
+    ctx: &std::sync::Arc<tokio::sync::Mutex<camel_core::CamelContext>>,
+) -> Vec<String> {
+    ctx.lock()
+        .await
+        .component_metadata("http")
+        .map(|metadata| {
+            metadata
+                .uri_options
+                .iter()
+                .filter(|option| option.secret)
+                .map(|option| option.name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The full-boot path (ADR-0069 sections 4-5, 10): bind one
 /// [`HttpPartner`] per harness `http` endpoint (each binds
 /// `127.0.0.1:0`; every harness-provisioned `bindVar` lands in the
@@ -404,9 +425,19 @@ async fn run_scenario_full_boot(
     let run = match boot_scenario(doc, root, &env).await {
         Ok(run) => run,
         Err(e) => {
+            // Document-error class by variant (the camel-integration-test
+            // convention: classification by variant, never message text —
+            // see the variant→class map in document.rs "Errors"): an
+            // AuthProviderUnavailable rejection (keycloak/oidc config in
+            // the offline tier, scenario-shared-boot task 3.1) is the
+            // infra-unavailable class; every other boot failure keeps
+            // full-boot-failure.
+            let class = matches!(e, camel_api::CamelError::AuthProviderUnavailable(_))
+                .then_some("infra-unavailable")
+                .unwrap_or("full-boot-failure");
             return ScenarioDocResult {
                 action_results: Vec::new(),
-                doc_error: Some(format!("full-boot-failure: scenario boot failed: {e}")),
+                doc_error: Some(format!("{class}: scenario boot failed: {e}")),
                 apparatus: true,
             };
         }
@@ -434,23 +465,8 @@ async fn run_scenario_full_boot(
     }
     let router = PartnerRouter::new(adapters);
 
-    // ADR-0051 positive secret rule: the booted context's `http`
-    // component metadata classifies secret query options; the router
-    // masks their values from every wire-path diagnostic.
-    let secret_keys: Vec<String> = ctx
-        .lock()
-        .await
-        .component_metadata("http")
-        .map(|metadata| {
-            metadata
-                .uri_options
-                .iter()
-                .filter(|option| option.secret)
-                .map(|option| option.name.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    router.set_secret_query_keys(secret_keys);
+    // ADR-0051 positive secret rule — see `http_secret_query_keys`.
+    router.set_secret_query_keys(http_secret_query_keys(&ctx).await);
 
     // (e) The whole document through the shared runner: one row per
     // executed action, stop at the first failure. The scenario-tier
@@ -495,286 +511,5 @@ async fn run_scenario_full_boot(
 }
 
 #[cfg(all(test, feature = "integration-http"))]
-mod tests {
-    use super::*;
-    use camel_integration_test::parse_scenario_document;
-
-    use std::fs;
-    use std::path::PathBuf;
-
-    /// A unique temp project root for one test, removed on drop
-    /// (panic-safe): the directory holding `Camel.toml`, the route
-    /// file, and the scenario document (the v1 harness keeps the
-    /// document in the project root).
-    struct TempProject(PathBuf);
-
-    impl TempProject {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("camel-cli-scenario-{tag}-{}", std::process::id()));
-            fs::create_dir_all(&dir).expect("create temp project root"); // allow-unwrap
-            Self(dir)
-        }
-
-        fn root(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempProject {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// Writes the minimal boot project into `root`: a sealed
-    /// `Camel.toml`, one no-op route file (the boot needs a route
-    /// source; the scenario actions under test never touch it), and
-    /// the scenario document in the root. Returns the document path.
-    fn write_project(root: &Path, doc_yaml: &str) -> PathBuf {
-        fs::write(root.join("Camel.toml"), "log_level = \"info\"\n").expect("write Camel.toml"); // allow-unwrap
-        fs::write(
-            root.join("routes.yaml"),
-            "routes:\n  - id: noop\n    from: direct:start\n    steps:\n      - log: \"noop\"\n",
-        )
-        .expect("write routes.yaml"); // allow-unwrap
-        let doc_path = root.join("scenario.test.yaml");
-        fs::write(&doc_path, doc_yaml).expect("write scenario doc"); // allow-unwrap
-        doc_path
-    }
-
-    #[test]
-    fn partner_scripts_map_defaults() {
-        let project = TempProject::new("partner-scripts-map-defaults");
-        let doc_path = write_project(
-            project.root(),
-            r#"
-routeFiles: [routes.yaml]
-scenario:
-- send:
-    to: direct:start
-partners:
-  http://127.0.0.1:0/orders:
-  - method: POST
-    path: /orders
-    response:
-      body:
-        id: ord-7
-"#,
-        );
-        let doc = parse_scenario_document(&doc_path).expect("parse scenario doc"); // allow-unwrap
-        let scripts = partner_scripts_for(&doc, "http://127.0.0.1:0/orders")
-            .expect("the declared entry must map"); // allow-unwrap
-        assert_eq!(scripts.len(), 1, "the entry carries one script");
-        let scripted = &scripts[0];
-        assert_eq!(scripted.method.as_deref(), Some("POST"));
-        assert_eq!(scripted.path.as_deref(), Some("/orders"));
-        assert_eq!(scripted.status, 200, "absent status defaults to 200");
-        assert!(
-            scripted.headers.is_empty(),
-            "absent headers default to empty"
-        );
-        assert_eq!(
-            scripted.body,
-            br#"{"id":"ord-7"}"#.to_vec(),
-            "the body must be the JSON serialization"
-        );
-    }
-
-    #[test]
-    fn partner_scripts_none_when_absent() {
-        let project = TempProject::new("partner-scripts-none");
-        let doc_path = write_project(
-            project.root(),
-            r#"
-routeFiles: [routes.yaml]
-scenario:
-- send:
-    to: direct:start
-"#,
-        );
-        let doc = parse_scenario_document(&doc_path).expect("parse scenario doc"); // allow-unwrap
-        assert!(
-            partner_scripts_for(&doc, "http://127.0.0.1:0/orders").is_none(),
-            "a document without a partners entry maps to None (caller binds permissive)"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn driver_binds_permissive_when_partners_absent() {
-        let project = TempProject::new("driver-binds-permissive");
-        let root = project.root();
-        let doc_path = write_project(
-            root,
-            r#"
-routeFiles: [routes.yaml]
-scenario:
-- send:
-    to:
-      endpoint: http://127.0.0.1:0/orders
-      provisioning: harness
-- receive:
-    from:
-      endpoint: http://127.0.0.1:0/orders
-      provisioning: harness
-    deadline: 2s
-    extract:
-      status: status
-      body: body
-- validate:
-    target: { variable: status }
-    expectation: 200
-- validate:
-    target: { variable: body }
-    expectation: ""
-"#,
-        );
-        let doc = parse_scenario_document(&doc_path).expect("parse scenario doc"); // allow-unwrap
-        let result = run_scenario_full_boot(&doc, root).await;
-        assert_eq!(result.doc_error, None, "permissive bind must not error");
-        assert!(!result.apparatus, "no apparatus failure is expected");
-        assert_eq!(result.action_results.len(), 4, "every action must run");
-        for row in &result.action_results {
-            assert!(
-                row.outcome.is_ok(),
-                "send + receive + validates must pass against the permissive 200 empty partner: {:?}",
-                row.outcome
-            );
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn driver_binds_no_partner_for_plain_strings() {
-        // The literal dial target: a listener the TEST owns, at a real
-        // port, outside the driver's adapter map.
-        let target = camel_integration_test::HttpPartner::start_permissive(200)
-            .await
-            .expect("bind the test-owned listener"); // allow-unwrap
-        let uri = format!("http://{}/x", target.bound_addr());
-        let project = TempProject::new("driver-plain-string");
-        let root = project.root();
-        let doc_path = write_project(
-            root,
-            &format!(
-                r#"
-routeFiles: [routes.yaml]
-scenario:
-- send:
-    to: {uri}
-- receive:
-    from: {uri}
-    deadline: 2s
-"#
-            ),
-        );
-        let doc = parse_scenario_document(&doc_path).expect("parse scenario doc"); // allow-unwrap
-
-        // Binding scope: the plain-string reference gets NO partner.
-        let wired = wire_endpoint_refs(&doc);
-        let (adapters, harness_provisioned) = bind_partners(&doc, &wired)
-            .await
-            .expect("bind step must succeed"); // allow-unwrap
-        assert!(
-            !adapters.contains_key(&uri),
-            "a plain-string ref must not get a partner listener"
-        );
-        assert!(
-            harness_provisioned.is_empty(),
-            "no harness bind means no env-tier binding"
-        );
-
-        // The send dials the literal URI: the test-owned listener
-        // records the arrival.
-        let result = run_scenario_full_boot(&doc, root).await;
-        assert_eq!(result.doc_error, None, "the plain-string send must dial");
-        assert_eq!(result.action_results.len(), 2, "send + receive must run");
-        for row in &result.action_results {
-            assert!(
-                row.outcome.is_ok(),
-                "the send must reach the literal URI and the receive must read the roundtrip: {:?}",
-                row.outcome
-            );
-        }
-        let recorded = target.recorder().recorded_requests();
-        assert_eq!(
-            recorded.len(),
-            1,
-            "exactly one wire arrival on the literal URI"
-        );
-        assert_eq!(recorded[0].path, "/x");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn partners_key_typo_fails_load() {
-        let project = TempProject::new("partners-key-typo");
-        let doc_path = write_project(
-            project.root(),
-            r#"
-routeFiles: [routes.yaml]
-scenario:
-- send:
-    to:
-      endpoint: http://127.0.0.1:0/orders
-      provisioning: harness
-partners:
-  http://127.0.0.1:0/order:
-  - method: POST
-    response:
-      status: 201
-"#,
-        );
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let summary = super::super::run_tests(&[doc_path], &mut out, &mut err).await;
-        assert_eq!(
-            summary.exit_code, 2,
-            "doc-validation is apparatus class, exit 2"
-        );
-        let err = String::from_utf8(err).expect("stderr is utf-8"); // allow-unwrap
-        assert!(
-            err.contains("doc-validation"),
-            "doc-validation class: {err}"
-        );
-        assert!(
-            err.contains("http://127.0.0.1:0/order"),
-            "the error must name the unmatched key: {err}"
-        );
-        assert!(
-            !err.contains("partner-bind"),
-            "the cross-check must fail before any partner binds: {err}"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn undeclared_partner_target_exits_two() {
-        let project = TempProject::new("undeclared-partner-target");
-        let doc_path = write_project(
-            project.root(),
-            r#"
-routeFiles: [routes.yaml]
-scenario:
-- send:
-    to: direct:start
-- validate:
-    target: {partner: http://127.0.0.1:0/nowhere}
-    expectation: {count: 1}
-"#,
-        );
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let summary = super::super::run_tests(&[doc_path], &mut out, &mut err).await;
-        assert_eq!(
-            summary.exit_code, 2,
-            "doc-validation is apparatus class, exit 2"
-        );
-        let err = String::from_utf8(err).expect("stderr is utf-8"); // allow-unwrap
-        assert!(
-            err.contains("doc-validation"),
-            "doc-validation class: {err}"
-        );
-        assert!(
-            err.contains("http://127.0.0.1:0/nowhere"),
-            "the error must name the undeclared partner URI: {err}"
-        );
-    }
-}
+#[path = "scenario_tests.rs"]
+mod tests;

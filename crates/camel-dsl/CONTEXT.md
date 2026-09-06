@@ -56,6 +56,19 @@ passes the URI through byte-identical; a key overlapping the query string or (fo
 form) the inner config map fails closed with `EndpointUriError::DuplicateKey`.
 _Avoid_: endpoint options (that is the lint/runtime concept), query params
 
+**route discovery (env-injected)**:
+`discover_routes_with_threshold_security_and_env(patterns,
+stream_cache_threshold, security_ctx, env_lookup)`: the hermetic discovery
+entry — every `${env:NAME}` placeholder resolves through the injected
+`env_lookup` closure, never the process environment. It preserves the full
+discovery contract of the process-environment entries: glob pattern
+handling, the reserved test-suffix gate, JSON explicit-pattern gating, file
+size caps, two-pass template materialization, stream-cache threshold
+threading, and security compile-context threading. The integration tier
+injects its layered environment here (ADR-0069 section 4).
+_Avoid_: env-aware discovery (the process-environment entries are the
+default; this entry is the hermetic variant)
+
 **RouteDefinition**:
 The structured representation of a Route — produced by RouteBuilder or by parsing a YAML/JSON file. CamelContext consumes RouteDefinitions to build and start Routes.
 _Avoid_: route spec, route config, route descriptor
