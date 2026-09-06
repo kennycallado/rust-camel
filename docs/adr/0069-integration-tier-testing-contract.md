@@ -1,6 +1,6 @@
 # ADR-0069: Integration-Tier Testing Contract
 
-- Status: Accepted (human-ratified 2026-09-03; e_opus + e_gpt BLESS-WITH-FIXES, fixes applied)
+- Status: Accepted (human-ratified 2026-09-03; e_opus + e_gpt BLESS-WITH-FIXES, fixes applied). Amended 2026-09-06: section 13 added (flake taxonomy and test-design rules R1-R7, bd rc-jwp3; ADR-0070 carries the staged-listener application of R2).
 - Date: 2026-09-03
 - Supersedes: none. Binds the sketch in ADR-0064 section 4.
 - Epic: rc-kk69. Authoring path: human grill + ste-writing (same path as ADR-0064, per rc-379d precedent). Not a conductor-light change.
@@ -340,6 +340,128 @@ rc-i2qf closes with a reason, not a supersede. Its acceptance criterion is
 already satisfied by the recorded rejection: a producer is a write/send sink.
 Partner reply behavior belongs to the typed partner adapters in
 `camel-integration-test`. `camel-component-mock` does not change.
+
+### 13. Flake taxonomy and test-design rules
+
+Added 2026-09-06 (bd rc-jwp3, epic rc-99d5). Two escalation reviews
+(e_opus advisory, e_gpt adversarial counter-review) produced the
+adjudicated text below. The counter-review's corrected rules are the
+normative wording. The full reviews are local-only working documents.
+The durable adjudication record is bd rc-99d5. The wording below is
+self-contained.
+
+#### 13.1 Taxonomy
+
+Seven flake classes. Cite these tags in bd issues:
+
+- `unbounded-wait`: a test awaits externally driven progress without a
+  deadline (loop, retry, receive, lock, JoinHandle).
+- `port-toctou`: a bind-inspect-close-rebind race around ephemeral
+  ports. Governed by ADR-0070.
+- `pooled-race`: a raw test server closes a connection while a pooled
+  client reuses it.
+- `global-state`: statics or environment mutation contaminates a later
+  test in the same process.
+- `platform-timing`: an OS-dependent race window. A detector class,
+  not a cause.
+- `sleep-as-sync`: sleep stands in for synchronization. The test
+  assumes state after N milliseconds. A `wait_until` barrier on an
+  observable state replaces it. Post-start sleeps are vestigial since
+  the rc-w1u9 explicit handshake.
+- `runner-pollution`: orphan processes or firewall residue from
+  earlier CI steps.
+
+Honest expectations, from the counter-review's audit. The rules below
+prohibit named anti-patterns, bound hangs in gating jobs, and removed
+the two known races (rc-y24l, rc-u3aw). No rule makes any class
+structurally impossible. A renamed helper or an assembled raw response
+can still evade a scanner. Retries that fail on flaky, weekly macOS
+coverage, and job-level ceilings remain necessary layers.
+
+#### 13.2 Rules
+
+R1 `no-unbounded-wait`. A test operation that waits for externally
+driven progress MUST have a deadline at its call site, or use an
+audited bounded helper. This covers network I/O, channel receive,
+lock acquisition, process exit, readiness polling, and JoinHandle
+waits. A long-lived service loop MAY run without an internal deadline
+only when the test spawns it, owns its handle, bounds every readiness
+assertion, and bounds teardown. A source exception MUST carry
+`// allow-test-wait: <reason>`. Enforcement is a narrow AST lint over
+known wait calls (`syn`, already an xtask dependency). It does not
+claim complete proof. R6 remains the mandatory backstop.
+
+R2 `no-free-port`. Test infrastructure MUST NOT select an address
+through bind, inspect, close, and rebind. The component that owns the
+bind MUST accept port zero, retain the live listener, and report its
+bound address through a production or operator-facing API. A child
+process MAY bind port zero and report the address to its parent. A
+reservation socket is not an ownership handoff. The counter-review
+held this rule BLOCKED until a bound-address API existed. ADR-0070 is
+that API. Four applications landed. Every test binary and itest suite
+now stages listeners. The named exceptions carry their own bd issues:
+rc-1dgvg (in-lib residue), rc-s7dyw (external-process handoff), plus
+ADR-0070's reserved-address and oneshot-placeholder exceptions.
+
+R3 `no-raw-http-test-server`. Tests of outbound HTTP client behavior
+MUST use a real loopback server that implements the connection
+semantics the scenario requires. Prefer axum, Hyper, or wiremock. Use
+`oneshot`
+only for server-handler behavior below the network boundary. Raw TCP
+is allowed for malformed-message, framing, disconnect, and other
+protocol-fault tests. Such
+a server MUST implement either one-response-and-close semantics or a
+complete request loop for persistent connections. A literal scanner
+flags suspicious fixtures. It cannot enforce protocol correctness.
+
+R4 `no-env-mutation-unguarded`. Tests MUST inject configuration
+directly when the API permits it. A test of process-environment
+behavior MUST run in a dedicated child process with an explicit
+environment. In-process mutation is a documented legacy exception. It
+MUST use one crate-wide RAII guard, one lock, and MUST restore the
+prior value. Async or multi-threaded mutation is forbidden unless all
+readers and writers are proven to use that same lock. The lint recognizes the
+canonical guard type, not variable names.
+
+R5 `no-unignored-loopback`. No new rule. ADR-0054 and
+`cargo xtask lint-ignore` already enforce the stricter closed
+vocabulary with the bidirectional allowlist. That contract stands
+unchanged.
+
+R6 `per-test-timeout`. Per-test ceilings are required. Nextest
+provides them and isolates each test in its own process. Adopt nextest
+first for `--workspace --lib`. Container and bridge suites stay on
+their current cargo invocations until migration measurements pass.
+Job-level `timeout-minutes` remain mandatory for every job. Note the
+semantics: `slow-timeout { period = "30s", terminate-after = 3 }`
+terminates after about 90 seconds.
+
+R7 quarantine. Normal CI MAY retry for diagnosis only when
+`flaky-result = "fail"` keeps a pass-on-retry red. A confirmed flaky
+test may enter a checked-in quarantine registry that names its exact
+test ID, bd issue, owner, and ISO expiry date. A gating xtask lint
+MUST reject missing, malformed, or expired entries. A separate
+non-gating job MAY run quarantined tests with retries. Maximum
+lifetime is 14 days. `#[ignore]` and name suffixes are not quarantine
+mechanisms.
+
+#### 13.3 Enforcement status and pilot evidence
+
+The rules are normative from this amendment. Their scanners land
+incrementally under tracked bd issues (structural lint work:
+rc-3lx2). Partial enforcement is the honest state, per 13.1.
+
+The scenario-tier pilot of 2026-09-05 (bd rc-enbw, timeout.sh
+migration eval on 0.40.0) supplies the first empirical support: both
+central timeout asserts of timeout.sh replicate cleanly through
+client-side send and receive with a deadline. Two cautions travel
+with that evidence. First, partner receive does not yet record
+responseTimeout-aborted requests (bd rc-kcli), so deadline proofs do
+not rest on partner-side abort accounting until it closes. Second,
+the pilot also requested a minimum-elapsed `not-before-X` assertion
+(bd rc-1alu). Section 2's vocabulary ban governs format mixing, not
+assertion growth. New assertion kinds enter through their own
+changes.
 
 ## Consequences
 
