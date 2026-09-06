@@ -383,7 +383,7 @@ unchanged.
 
 ### Requirement: Raw-preserving outbound query serialization
 
-When the producer endpoint URI carries an authored raw query, `resolve_url` MUST emit those bytes byte-for-byte minus explicitly consumed option keys. Option-key consumption MUST have a single metadata-driven owner (ADR-0041 `uri_options()`): it is the sole authority for OUTBOUND option filtering — the raw filter consults it at runtime — while `from_uri`'s manual typed parsing (`skip_impl`) stays direct and unchanged; no duplicated handwritten key lists. Authored non-option pairs are carried ONLY by `raw_query` (no structured re-collection). "Byte-for-byte" is bounded to wire-legal authored bytes: a raw byte forbidden in a query component MUST produce a resolve error, never silent re-encoding. Query-source precedence MUST hold: `bridgeEndpoint` bridging > `CamelHttpUri` override > `CamelHttpQuery` header (verbatim, appended/replacing as today) > endpoint `raw_query` base > programmatic `query_params` (the only structured path — minimal RFC-3986 encoding, declaration order, `%20` never `+` for spaces). `RAW(...)` wrappers MUST NOT be unwrapped or re-encoded by the serializer. URL resolution failures MUST propagate as errors — malformed operator input never panics the producer task.
+When the producer endpoint URI carries an authored raw query, `resolve_url` MUST emit those bytes byte-for-byte minus explicitly consumed option keys. Option-key consumption MUST have a single metadata-driven owner (ADR-0041 `uri_options()`): it is the sole authority for OUTBOUND option filtering — the raw filter consults it at runtime — while `from_uri`'s manual typed parsing (`skip_impl`) stays direct and unchanged; no duplicated handwritten key lists. Authored non-option pairs are carried ONLY by `raw_query` (no structured re-collection). "Byte-for-byte" is bounded to wire-legal authored bytes: a raw byte forbidden in a query component MUST produce a resolve error, never silent re-encoding. Query-source precedence MUST hold: `bridgeEndpoint` bridging > `CamelHttpUri` override > `CamelHttpQuery` header (composed per ADR-0071: pairs ride verbatim, append for keys absent from the higher-precedence source, and lose key collisions) > endpoint `raw_query` base > programmatic `query_params` (the only structured path — minimal RFC-3986 encoding, declaration order, `%20` never `+` for spaces). `RAW(...)` wrappers MUST NOT be unwrapped or re-encoded by the serializer. URL resolution failures MUST propagate as errors — malformed operator input never panics the producer task.
 
 #### Scenario: Authored order and encoding survive to the wire
 
@@ -411,9 +411,9 @@ When the producer endpoint URI carries an authored raw query, `resolve_url` MUST
 
 #### Scenario: CamelHttpQuery stays verbatim
 
-- **Given** a producer exchange carrying a `CamelHttpQuery` header
+- **Given** a producer exchange carrying a `CamelHttpQuery` header and an endpoint with raw query `x=1`
 - **When** the producer resolves the outbound URL
-- **Then** the header value is applied verbatim as today (not structured-serialized) and wins over the endpoint `raw_query` base
+- **Then** the header pairs ride verbatim (not structured-serialized), append after the endpoint pairs for absent keys, and lose key collisions to the higher-precedence query source (ADR-0071)
 
 #### Scenario: Programmatic fallback stays deterministic
 
