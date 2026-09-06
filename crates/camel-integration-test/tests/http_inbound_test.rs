@@ -189,6 +189,7 @@ async fn inbound_response_validated_on_wire() {
                             Value::String("never-the-served-body".to_string()),
                         )),
                         deadline: None,
+                        elapsed_at_least: None,
                     }
                 } else {
                     action.clone()

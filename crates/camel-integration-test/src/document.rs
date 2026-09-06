@@ -14,9 +14,9 @@
 //! `scenario:` that also declares a unit-tier section is rejected at
 //! load time.
 //!
-//! Durations (`deadline`, `duration`) are humantime strings, for
-//! example `"5s"` or `"250ms"`, parsed during validation so errors can
-//! name the action index.
+//! Durations (`deadline`, `duration`, `elapsedAtLeast`) are humantime
+//! strings, for example `"5s"` or `"250ms"`, parsed during validation
+//! so errors can name the action index.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -136,6 +136,13 @@ pub enum ScenarioAction {
         /// whose counts settle asynchronously; without it the partner
         /// assertion reads one immediate snapshot.
         deadline: Option<Duration>,
+        /// Optional minimum wire-arrival age. Only valid on
+        /// `lastReceived` targets: the last received message must have
+        /// arrived at least this long after the scenario started (the
+        /// not-before-X control `run.sh` expresses with `awk`). The
+        /// assertion anchors to the message's wire arrival, never the
+        /// consumption time.
+        elapsed_at_least: Option<Duration>,
     },
 }
 
@@ -215,8 +222,9 @@ pub enum Provisioning {
 /// the endpoint — the caller binds a permissive partner. `Some` maps
 /// each script grammar entry to its wire form: absent `status`
 /// defaults to 200, absent `times` to 1 (serve once), absent headers
-/// to the empty map, and the body is the JSON serialization (empty
-/// when absent); `delay` and `fault` map through.
+/// to the empty map, and the body follows the client send path's
+/// `value_to_wire` encoding (empty when absent); `delay` and `fault`
+/// map through.
 ///
 /// The canonical `PartnerScript` → wire-form mapping; the CLI driver
 /// and library-level scenarios bind partners through this function so
@@ -237,7 +245,7 @@ pub fn partner_scripts_for(
                         response.status.unwrap_or(200),
                         response.headers.clone().unwrap_or_default(),
                         response.body.as_ref().map_or_else(Vec::new, |value| {
-                            serde_json::to_vec(value).unwrap_or_default()
+                            crate::adapters::http::value_to_wire(value)
                         }),
                     ),
                     // Fault entries carry no response; the placeholder
@@ -290,18 +298,65 @@ pub enum Expectation {
     JsonSubset(Value),
 }
 
-/// The partner-count expectation of a `validate` action with a
-/// `partner` target: an exact recorded-request count plus optional
-/// `method` and `path` filters.
+/// The recorded-request count bound of a [`PartnerExpectation`]:
+/// exactly one bound form per expectation. Poll semantics per bound
+/// (arrivals only add, so the filtered count is monotone
+/// non-decreasing):
+///
+/// - Without a deadline, one immediate snapshot decides for every
+///   bound.
+/// - [`CountBound::Exact`] polls until a snapshot's count equals `n`;
+///   a snapshot above never passes.
+/// - [`CountBound::AtLeast`] succeeds early, once the count reaches
+///   `n` (sound: the count only grows).
+/// - [`CountBound::AtMost`] is an absence claim over the window: it
+///   waits the full deadline, fails immediately on any snapshot above
+///   `n`, and decides on the final snapshot — an early passing
+///   snapshot cannot prove the count stays within bounds.
+/// - [`CountBound::Range`] fails immediately above the maximum and
+///   otherwise waits the full deadline, deciding on the final
+///   snapshot within `[min, max]`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum CountBound {
+    /// Exactly `n` matching requests.
+    Exact(u64),
+    /// At least `n` matching requests (early success at `n` or more).
+    AtLeast(u64),
+    /// At most `n` matching requests (absence claim over the window).
+    AtMost(u64),
+    /// Between `min` and `max` matching requests, inclusive.
+    Range(u64, u64),
+}
+
+/// The path filter of a [`PartnerExpectation`] over the recorded
+/// path-and-query; at most one filter per expectation.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum PathFilter {
+    /// Exact path-and-query match (strict bytes).
+    Exact(String),
+    /// Substring containment against the recorded path-and-query.
+    Contains(String),
+    /// Regular expression match, compile-verified at load time.
+    Matches(String),
+}
+
+/// The partner expectation of a `validate` action with a `partner`
+/// target: a recorded-request count bound plus optional `method`,
+/// `path`, and `query` subset filters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartnerExpectation {
-    /// Exact number of matching requests the partner must have
-    /// recorded.
-    pub count: u64,
+    /// The count bound the recorded requests must satisfy.
+    pub bound: CountBound,
     /// Optional request-method filter.
     pub method: Option<String>,
-    /// Optional request-path filter (path-and-query, exact).
-    pub path: Option<String>,
+    /// Optional request-path filter (path-and-query).
+    pub path: Option<PathFilter>,
+    /// Optional query subset filter: every declared pair must be
+    /// present (order- and encoding-independent) in the recorded
+    /// request's percent-decoded query.
+    pub query: Option<BTreeMap<String, String>>,
 }
 
 /// The expectation of a `validate` action, keyed by its target: the
@@ -384,6 +439,9 @@ struct RawValidate {
     /// Raw humantime string; partner targets only, parsed during
     /// validation so the error can name the action index.
     deadline: Option<String>,
+    /// Raw humantime string; `lastReceived` targets only, parsed
+    /// during validation so the error can name the action index.
+    elapsed_at_least: Option<String>,
 }
 
 /// Raw endpoint reference: bare string or map with `endpoint`,
@@ -854,6 +912,20 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                     )));
                 }
             };
+            let elapsed_at_least = match raw.elapsed_at_least.as_deref() {
+                None => None,
+                // The elapsed bound measures the wire arrival of the
+                // last received message against the scenario start;
+                // only that target carries an arrival to measure.
+                Some(raw_bound) if matches!(target, ScenarioTarget::LastReceived(_)) => {
+                    Some(parse_duration(raw_bound, index, "elapsedAtLeast")?)
+                }
+                Some(raw_bound) => {
+                    return Err(action_error(format!(
+                        "`elapsedAtLeast` is only valid on a `lastReceived` validate target, got `{raw_bound}`"
+                    )));
+                }
+            };
             let expectation = match &target {
                 ScenarioTarget::Partner(_) => ValidateExpectation::Partner(
                     partner_expectation_from_value(&raw.expectation, index)?,
@@ -864,6 +936,7 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                 target,
                 expectation,
                 deadline,
+                elapsed_at_least,
             })
         }
         other => Err(action_error(format!(
@@ -1024,59 +1097,143 @@ fn expectation_from_value(value: &Value, index: usize) -> Result<Expectation, Do
     Ok(Expectation::Equals(value.clone()))
 }
 
-/// Applies the partner expectation grammar: a map with a required
-/// `count` (non-negative integer) and optional `method` / `path`
-/// string filters; unknown keys fail. Field-by-field extraction, like
-/// the endpoint-reference reader, so errors name the offending key.
+/// Applies the partner expectation grammar: a map with exactly one
+/// count bound (`count`; or `atLeast`, `atMost`, or their range), an
+/// optional `method` string, at most one path filter (`path`,
+/// `pathContains`, `pathMatches` — the regex compiled at load), and
+/// an optional `query` subset map of string keys to string values;
+/// unknown keys fail. Field-by-field extraction, like the
+/// endpoint-reference reader, so errors name the offending key.
 fn partner_expectation_from_value(
     value: &Value,
     index: usize,
 ) -> Result<PartnerExpectation, DocError> {
     const FIELD: &str = "partner expectation";
+    const KEYS: &[&str] = &[
+        "count",
+        "atLeast",
+        "atMost",
+        "method",
+        "path",
+        "pathContains",
+        "pathMatches",
+        "query",
+    ];
     let invalid = |message: String| DocError::Validation { index, message };
     let Value::Object(map) = value else {
         return Err(invalid(format!(
-            "{FIELD} must be a map with a `count` key, got {value:?}"
+            "{FIELD} must be a map with a count bound, got {value:?}"
         )));
     };
     let mut count: Option<u64> = None;
+    let mut at_least: Option<u64> = None;
+    let mut at_most: Option<u64> = None;
     let mut method: Option<String> = None;
-    let mut path: Option<String> = None;
+    let mut path: Option<PathFilter> = None;
+    let mut path_key: Option<&str> = None;
+    let mut query: Option<BTreeMap<String, String>> = None;
     for (key, payload) in map {
         match key.as_str() {
-            "count" => {
-                count = Some(payload.as_u64().ok_or_else(|| {
+            "count" | "atLeast" | "atMost" => {
+                let bound = payload.as_u64().ok_or_else(|| {
                     invalid(format!(
-                        "{FIELD}: `count` must be a non-negative integer, got {payload}"
+                        "{FIELD}: `{key}` must be a non-negative integer, got {payload}"
                     ))
-                })?);
+                })?;
+                match key.as_str() {
+                    "count" => count = Some(bound),
+                    "atLeast" => at_least = Some(bound),
+                    _ => at_most = Some(bound),
+                }
             }
-            "method" | "path" => {
+            "method" => {
                 let text = payload.as_str().ok_or_else(|| {
                     invalid(format!("{FIELD}: `{key}` must be a string, got {payload}"))
                 })?;
-                if key == "method" {
-                    method = Some(text.to_string());
-                } else {
-                    path = Some(text.to_string());
+                method = Some(text.to_string());
+            }
+            "path" | "pathContains" | "pathMatches" => {
+                if let Some(first) = path_key {
+                    return Err(invalid(format!(
+                        "{FIELD}: `{first}` and `{key}` are exclusive: at most one path filter"
+                    )));
                 }
+                let text = payload.as_str().ok_or_else(|| {
+                    invalid(format!("{FIELD}: `{key}` must be a string, got {payload}"))
+                })?;
+                path = Some(match key.as_str() {
+                    "path" => PathFilter::Exact(text.to_string()),
+                    "pathContains" => PathFilter::Contains(text.to_string()),
+                    _ => {
+                        if let Err(e) = regex::Regex::new(text) {
+                            return Err(invalid(format!("{FIELD}: invalid regex `{text}`: {e}")));
+                        }
+                        PathFilter::Matches(text.to_string())
+                    }
+                });
+                path_key = Some(key.as_str());
+            }
+            "query" => {
+                let Value::Object(pairs) = payload else {
+                    return Err(invalid(format!(
+                        "{FIELD}: `query` must be a map of string keys to string values, got {payload}"
+                    )));
+                };
+                let mut subset = BTreeMap::new();
+                for (name, pair) in pairs {
+                    let Some(text) = pair.as_str() else {
+                        return Err(invalid(format!(
+                            "{FIELD}: `query` value for `{name}` must be a string, got {pair}"
+                        )));
+                    };
+                    subset.insert(name.clone(), text.to_string());
+                }
+                query = Some(subset);
             }
             other => {
                 return Err(invalid(format!(
-                    "{FIELD}: unknown field `{other}`; expected `count`, `method`, or `path`"
+                    "{FIELD}: unknown field `{other}`; expected {}",
+                    backticked(KEYS)
                 )));
             }
         }
     }
-    let count = count.ok_or_else(|| {
-        invalid(format!(
-            "{FIELD}: requires a `count` (non-negative integer)"
-        ))
-    })?;
+    if count.is_some() && (at_least.is_some() || at_most.is_some()) {
+        let mut others: Vec<&str> = Vec::new();
+        if at_least.is_some() {
+            others.push("atLeast");
+        }
+        if at_most.is_some() {
+            others.push("atMost");
+        }
+        return Err(invalid(format!(
+            "{FIELD}: `count` and {} are exclusive: declare exactly one bound form",
+            backticked(&others)
+        )));
+    }
+    let bound = if let Some(exact) = count {
+        CountBound::Exact(exact)
+    } else if let (Some(min), Some(max)) = (at_least, at_most) {
+        if min > max {
+            return Err(invalid(format!(
+                "{FIELD}: `atLeast` ({min}) must not exceed `atMost` ({max})"
+            )));
+        }
+        CountBound::Range(min, max)
+    } else if let Some(n) = at_least {
+        CountBound::AtLeast(n)
+    } else if let Some(n) = at_most {
+        CountBound::AtMost(n)
+    } else {
+        return Err(invalid(format!(
+            "{FIELD}: requires a count bound: `count`, `atLeast`, or `atMost`"
+        )));
+    };
     Ok(PartnerExpectation {
-        count,
+        bound,
         method,
         path,
+        query,
     })
 }
 

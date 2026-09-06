@@ -68,6 +68,14 @@ with one recognized matcher key is that matcher; any other object is a
 literal `equals`.
 _Avoid_: assertion (assertions are the runner's verdict), matcher map
 
+**elapsedAtLeast**:
+The `validate` timing assertion on a `lastReceived` target: the last
+received message's wire arrival must be at least this long (humantime)
+after the scenario start. Anchored to wire arrival, never the
+consumption time — a message consumed late can still have arrived
+early. The not-before-X control `run.sh` expressed with `awk`.
+_Avoid_: minimum age, delay assertion, consume-time check
+
 **vocabulary ban**:
 The load-time rule that a document with `scenario:` must not declare
 `inputs`, `expects`, or `intercepts` (`DocError::MixedVocabulary`,
@@ -116,6 +124,14 @@ The dotted grammar of `receive.extract` reads: heads `body`, `headers`,
 (hyper lowercases wire names; the fake preserves author casing). The
 transport-scalar heads carry no sub-path.
 _Avoid_: path expression, jsonpath
+
+**partner body encoding**:
+The wire encoding of a partner script's `response.body`, mirroring the
+client send path (`value_to_wire`, one encoding for both wire roles):
+a string serves as its exact bytes (no surrounding quotes, no
+escaping), null serves empty, any other value serves as compact JSON,
+and an absent body serves empty.
+_Avoid_: JSON serialization (strings are not quoted), double encoding
 
 ## `#[non_exhaustive]` posture
 
@@ -235,6 +251,28 @@ When matching fails the harness reports the wire evidence: receive-timeout
 errors list the wire paths that arrived in the lane group
 (`ReceiveTimeout.lanes_recorded`), and partner-count mismatches list the
 recorded paths.
+
+### Partner validate matches by bound-aware windows
+
+A partner `validate` expectation carries exactly one count bound: `count`
+(exact), `atLeast`, `atMost`, or `atLeast` combined with `atMost` (a range).
+Optional filters narrow the counted requests. `method` compares
+ASCII-case-insensitively. One path filter reads the recorded path-and-query:
+`path` compares strict bytes, `pathContains` matches a substring,
+`pathMatches` matches a regular expression. The `query` subset requires every
+declared pair among the request's percent-decoded query pairs, in any
+position order. All filters compose by logical AND. Arrival-lane keys keep
+their strict raw wire bytes.
+
+Without a deadline one snapshot decides, for every bound. With a deadline the
+poll re-reads at 100 ms intervals. `count` settles at equality and `atLeast`
+at its floor. Arrivals only add, so early success is sound. `atMost` and a
+range are absence claims over the window: they wait the full deadline, fail
+on the first snapshot above the ceiling, and decide on the final snapshot.
+Mismatch details name the bound in its own grammar (`expected at least 3`),
+the filters by kind, and both counts. Filter payloads follow the redaction
+law: recorded paths pass through the redactor, `pathContains` and
+`pathMatches` render kind only, and secret query pairs render `<redacted>`.
 
 ### Diagnostic redaction uses the positive secret rule
 

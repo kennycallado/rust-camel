@@ -10,8 +10,9 @@
 //! so a recording is the proof the send reached the bound address.
 //!
 //! The helper mirrors the CLI driver's partner mapping (status
-//! default 200, headers default empty, body JSON-serialized) at the
-//! library level. The scenarios exercise the client-role wire path
+//! default 200, headers default empty, body through the client send
+//! path's `value_to_wire` encoding) at the library level. The
+//! scenarios exercise the client-role wire path
 //! only — except the two-layer test, which boots one route the same
 //! way the CLI driver does, to prove the env-tier binding form.
 
@@ -262,6 +263,71 @@ partners:
       body: parked-ok
 "#;
 
+/// Plain-string-body document: the scripted body is a JSON string and
+/// the response declares no content type, so the receive decodes the
+/// wire bytes as plain text. The validation proves the string serves
+/// verbatim: quoted wire bytes (a body serialized as JSON) would
+/// mismatch under the text decode.
+const PLAIN_STRING_BODY_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    method: PUT
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    deadline: 5s
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:0/orders
+    expectation: exact text
+partners:
+  http://127.0.0.1:0/orders:
+  - method: PUT
+    path: /orders
+    response:
+      status: 200
+      body: "exact text"
+"#;
+
+/// Null-body document: the scripted body is an explicit null and the
+/// response declares no content type, so the received body is the
+/// empty string — a null body never decodes to null, and a stale
+/// literal `null` on the wire would fail the validation.
+const NULL_BODY_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    method: PUT
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    deadline: 5s
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:0/orders
+    expectation: ''
+partners:
+  http://127.0.0.1:0/orders:
+  - method: PUT
+    path: /orders
+    response:
+      status: 200
+      body: null
+"#;
+
 /// Delay document: one entry with `delay: 100ms` serving a 200 with
 /// body `slow-ok`. The scenario sends, receives (which parks the
 /// delayed roundtrip), and validates status 200 plus the body. The
@@ -301,6 +367,119 @@ partners:
       headers:
         content-type: application/json
       body: slow-ok
+"#;
+
+/// Elapsed-bound document, passing side: the scripted `delay: 300ms`
+/// puts the response's wire arrival ~300ms after the scenario start,
+/// past the 200ms `elapsedAtLeast` bound on the `lastReceived` validate.
+const ELAPSED_WAITED_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    method: PUT
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    deadline: 5s
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:0/orders
+    expectation:
+      equals:
+        ok: true
+    elapsedAtLeast: 200ms
+partners:
+  http://127.0.0.1:0/orders:
+  - method: PUT
+    path: /orders
+    delay: 300ms
+    response:
+      status: 200
+      headers:
+        content-type: application/json
+      body: {"ok": true}
+"#;
+
+/// Elapsed-bound document, early-arrival side: the response arrives
+/// ~immediately (no script delay) but the scenario consumes it only
+/// after a 1s `sleep`. The 500ms `elapsedAtLeast` bound must judge the
+/// WIRE arrival, not the consumption time — consumed late is still
+/// arrived early, so the validate must fail.
+const ELAPSED_EARLY_ARRIVAL_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    method: PUT
+- sleep:
+    duration: 1s
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    deadline: 5s
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:0/orders
+    expectation:
+      equals:
+        ok: true
+    elapsedAtLeast: 500ms
+partners:
+  http://127.0.0.1:0/orders:
+  - method: PUT
+    path: /orders
+    response:
+      status: 200
+      headers:
+        content-type: application/json
+      body: {"ok": true}
+"#;
+
+/// Elapsed-bound document, unreachable bound: an immediate arrival
+/// against a 10s `elapsedAtLeast` bound must fail naming the endpoint,
+/// the bound, and the actual elapsed time.
+const ELAPSED_TOO_EARLY_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    method: PUT
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: PARTNER
+    deadline: 5s
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:0/orders
+    expectation:
+      equals:
+        ok: true
+    elapsedAtLeast: 10s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: PUT
+    path: /orders
+    response:
+      status: 200
+      headers:
+        content-type: application/json
+      body: {"ok": true}
 "#;
 
 /// Fault document: the partner scripted `fault: close` records the
@@ -702,6 +881,117 @@ async fn delay_response_serves_e2e() {
     assert_eq!(recorded.len(), 1, "exactly one request must reach the wire");
     assert_eq!(recorded[0].method, "PUT");
     assert_eq!(recorded[0].path, "/orders");
+}
+
+/// The wire-arrival bound, passing side: the delayed response's wire
+/// arrival lands ~300ms after the scenario start, past the 200ms
+/// `elapsedAtLeast` bound — the not-before-X control `run.sh`
+/// expressed with `awk t>=X`.
+#[tokio::test]
+async fn waited_arrival_passes_elapsed_bound() {
+    let (outcome, _recorders) = run_doc(ELAPSED_WAITED_DOC).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the delayed arrival must satisfy the elapsed bound: {outcome:?}"
+    );
+}
+
+/// THE regression pin: the response arrives ~immediately but the
+/// scenario consumes it only after a 1s `sleep`. The assertion must
+/// measure the WIRE arrival (~tens of ms, well under the 500ms bound),
+/// never the consumption time (~1s): consumed late is still arrived
+/// early, so the validate fails naming the endpoint and the bound.
+#[tokio::test]
+async fn early_arrival_fails_even_when_consumed_late() {
+    let (outcome, _recorders) = run_doc(ELAPSED_EARLY_ARRIVAL_DOC).await;
+    assert_eq!(
+        outcome.verdict, None,
+        "the early arrival must fail the 500ms bound: {outcome:?}"
+    );
+    let failure = outcome
+        .per_action
+        .get(3)
+        .and_then(|result| result.as_ref().err())
+        .expect("the final validate must fail");
+    let ScenarioFailure::ValidationMismatch { action, detail } = failure else {
+        panic!("expected ValidationMismatch, got {failure:?}");
+    };
+    assert_eq!(*action, 3, "the final validate is the failing action");
+    assert!(
+        detail.contains(ORDERS),
+        "detail must name the redacted endpoint subject: {detail}"
+    );
+    assert!(
+        detail.contains("500ms"),
+        "detail must name the elapsed bound: {detail}"
+    );
+    assert!(
+        detail.contains("after the scenario started"),
+        "detail must name the actual elapsed (humantime, any unit) \
+         between `arrived` and `after the scenario started`: {detail}"
+    );
+}
+
+/// An unreachable bound fails an immediate arrival, naming the
+/// endpoint, the `10s` bound, and the actual elapsed time.
+#[tokio::test]
+async fn too_early_arrival_fails_naming_actual() {
+    let (outcome, _recorders) = run_doc(ELAPSED_TOO_EARLY_DOC).await;
+    assert_eq!(
+        outcome.verdict, None,
+        "the 10s bound must fail an immediate arrival: {outcome:?}"
+    );
+    let failure = outcome
+        .per_action
+        .get(2)
+        .and_then(|result| result.as_ref().err())
+        .expect("the final validate must fail");
+    let ScenarioFailure::ValidationMismatch { action, detail } = failure else {
+        panic!("expected ValidationMismatch, got {failure:?}");
+    };
+    assert_eq!(*action, 2, "the final validate is the failing action");
+    assert!(
+        detail.contains(ORDERS),
+        "detail must name the redacted endpoint subject: {detail}"
+    );
+    assert!(
+        detail.contains("10s"),
+        "detail must name the bound: {detail}"
+    );
+    assert!(
+        detail.contains("after the scenario started"),
+        "detail must name the actual elapsed (humantime, any unit) \
+         between `arrived` and `after the scenario started`: {detail}"
+    );
+}
+
+/// A scripted JSON-string body with no content type serves verbatim:
+/// the received body is `exact text` exactly — no surrounding quotes,
+/// no escaping — because the partner body encoding mirrors the client
+/// send path (`value_to_wire`).
+#[tokio::test]
+async fn plain_string_body_served_verbatim() {
+    let (outcome, _recorders) = run_doc(PLAIN_STRING_BODY_DOC).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the string body must serve verbatim: {outcome:?}"
+    );
+}
+
+/// A scripted null body serves empty: the received body decodes to
+/// the empty string (never to null, never to the literal `null`
+/// text), because the partner body encoding mirrors the client send
+/// path (`value_to_wire`).
+#[tokio::test]
+async fn null_body_serves_empty() {
+    let (outcome, _recorders) = run_doc(NULL_BODY_DOC).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the null body must serve empty: {outcome:?}"
+    );
 }
 
 /// Asserts a faulted roundtrip surfaced on the receive as the

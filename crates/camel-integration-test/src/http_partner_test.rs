@@ -290,6 +290,62 @@ async fn outbound_arrival_reaches_receive() {
     );
 }
 
+/// The arrival instant is stamped when the listener finishes receiving
+/// the request (the enqueue point), not when a receive action consumes
+/// it: the request sits queued while the scenario sleeps, and the late
+/// receive still measures the arrival age from the wire moment.
+#[tokio::test]
+async fn server_arrival_stamp_predates_consumption() {
+    let server = HttpPartner::start(vec![ScriptedResponse {
+        method: Some("POST".to_string()),
+        path: Some("/orders".to_string()),
+        status: 200,
+        headers: BTreeMap::new(),
+        body: b"ok".to_vec(),
+        ..Default::default()
+    }])
+    .await
+    .expect("server partner must bind 127.0.0.1:0");
+    let target = format!("http://{}/orders", server.bound_addr());
+    // A second partner plays the system under test's HTTP client: its
+    // client role performs the real request into the server's listener.
+    let sut = HttpPartner::start(Vec::new())
+        .await
+        .expect("sut client partner must bind 127.0.0.1:0");
+    let send_router = router_for(&target, sut);
+    send_router
+        .send(
+            &target,
+            &target,
+            OutgoingMessage {
+                body: Value::String("wire-body".to_string()),
+                headers: BTreeMap::new(),
+                method: "POST".to_string(),
+            },
+        )
+        .await
+        .expect("sut send must reach the server listener");
+    // Drain the parked client response so the send completes.
+    let _ = send_router
+        .receive(&target, &target, Duration::from_secs(5))
+        .await;
+
+    // The request is already queued on the partner; the late receive
+    // must measure from the wire moment, not from consumption.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let server_router = router_for(&target, server);
+    let arrival = server_router
+        .receive(&target, &target, Duration::from_secs(5))
+        .await
+        .expect("the wire request must arrive for validation");
+    assert!(
+        arrival.arrival.elapsed() >= Duration::from_millis(100),
+        "the arrival stamp must be taken at enqueue (the transport \
+         receive), before the sleep: elapsed {:?}",
+        arrival.arrival.elapsed()
+    );
+}
+
 /// Arrivals queue per endpoint while the scenario has not received:
 /// two requests received in arrival order, one `receive` per arrival.
 #[tokio::test]

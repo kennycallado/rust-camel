@@ -60,7 +60,11 @@ pub struct PartnerScriptResponse {
     pub status: Option<u16>,
     /// Response headers.
     pub headers: Option<BTreeMap<String, String>>,
-    /// Response body.
+    /// Response body, encoded onto the wire with the client send
+    /// path's `value_to_wire` semantics: a string serves as its exact
+    /// bytes (no surrounding quotes, no escaping), null serves empty,
+    /// any other value serves as compact JSON, and an absent body
+    /// serves empty.
     pub body: Option<Value>,
 }
 
@@ -479,6 +483,33 @@ partners:
             rendered.contains(&humantime_error),
             "error must carry the humantime error text: {rendered}"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "http")]
+    fn partner_client_body_parity() {
+        use crate::adapters::http::value_to_wire;
+
+        // The partner body vocabulary mirrors the client send path;
+        // every expectation is a literal byte constant, never derived
+        // from the function under test.
+        let cases: Vec<(camel_api::Value, &[u8])> = vec![
+            // A string serves as exact raw bytes: the inner quote is
+            // not escaped, no quotes surround the body.
+            (serde_json::json!("a\"b"), b"a\"b"),
+            // Null serves empty.
+            (serde_json::Value::Null, b""),
+            // Structured values serve as compact JSON.
+            (serde_json::json!({"k": 1}), b"{\"k\":1}"),
+            (serde_json::json!([1, 2]), b"[1,2]"),
+        ];
+        for (value, wire) in &cases {
+            assert_eq!(
+                &value_to_wire(value),
+                wire,
+                "body {value} must serve as the exact client-path bytes"
+            );
+        }
     }
 
     #[test]

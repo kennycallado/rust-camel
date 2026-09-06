@@ -5,15 +5,18 @@
 //! helpers — [`PartnerRouter::wire_target`](crate::adapters::PartnerRouter::wire_target)
 //! and [`PartnerRouter::lane_key_for`](crate::adapters::PartnerRouter::lane_key_for)
 //! — through a stub adapter that declares a bound authority without
-//! owning a listener, so no feature `http` and no wire are involved.
+//! owning a listener, so no feature `http` and no wire are involved,
+//! plus the scripted-queue arrival-stamp semantics (also no wire).
 //! The runtime plain-string dial lives with the http partner tests.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
+use camel_api::Value;
 use futures::future::BoxFuture;
 
 use crate::adapters::{
-    IncomingMessage, PartnerAdapter, PartnerRouter, ReceiveError, TransportError,
+    FakeAdapter, IncomingMessage, PartnerAdapter, PartnerRouter, ReceiveError, TransportError,
 };
 
 /// A partner-shaped stub: declares a bound authority without owning a
@@ -114,5 +117,44 @@ fn lane_key_for_resolves_dynamic_ref() {
     assert_eq!(
         router.lane_key_for("http://${PARTNER}/orders", "http://127.0.0.1:45678/orders"),
         Some("http://127.0.0.1:0/orders".to_string())
+    );
+}
+
+// -------------------------------------------------------------------------
+// Wire-arrival instants (ADR-0069 §5: the wire is the proof)
+// -------------------------------------------------------------------------
+
+/// A scripted message's `arrival` instant is stamped when the message
+/// is constructed (the wire moment), not when a receive action
+/// consumes it: after a deliberate sleep between construction and
+/// receive, the arrival age covers the whole sleep.
+#[tokio::test]
+async fn incoming_message_carries_arrival_instant() {
+    let fake = FakeAdapter::scripted(vec![IncomingMessage {
+        body: Value::String("queued".to_string()),
+        headers: BTreeMap::new(),
+        status: None,
+        method: None,
+        path: None,
+        arrival: std::time::Instant::now(),
+    }]);
+    let router = PartnerRouter::new(BTreeMap::from([(
+        "partner://fake".to_string(),
+        Box::new(fake) as Box<dyn PartnerAdapter>,
+    )]));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let message = router
+        .receive("partner://fake", "partner://fake", Duration::from_secs(1))
+        .await
+        .expect("the scripted message must arrive");
+    assert!(
+        message.arrival.elapsed() >= Duration::from_millis(50),
+        "arrival must be stamped at construction (the wire), not at \
+         receive consumption: elapsed {:?}",
+        message.arrival.elapsed()
+    );
+    assert!(
+        message.arrival.elapsed() < Duration::from_secs(5),
+        "arrival sanity bound: the message was stamped milliseconds ago"
     );
 }

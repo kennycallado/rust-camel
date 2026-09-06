@@ -2264,6 +2264,7 @@ dependencies = [
  "camel-config",
  "camel-core",
  "camel-dsl",
+ "form_urlencoded",
  "futures",
  "http",
  "http-body-util",

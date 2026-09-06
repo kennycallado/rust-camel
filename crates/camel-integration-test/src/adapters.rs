@@ -70,6 +70,10 @@ pub struct IncomingMessage {
     /// Request path (with query, when present) when the partner
     /// protocol carries a request line; `None` otherwise.
     pub path: Option<String>,
+    /// Monotonic wire-arrival instant — when the transport finished
+    /// receiving this message — NOT when a receive action consumed it
+    /// (ADR-0069 §5: the wire is the proof).
+    pub arrival: std::time::Instant,
 }
 
 /// A send or receive failed at the transport layer, before any

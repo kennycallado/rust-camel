@@ -6,10 +6,13 @@
 //! temporary `.test.yaml` document and parses it through
 //! [`crate::parse_scenario_document`].
 
+use std::collections::BTreeMap;
+use std::time::Duration;
+
 use crate::document::is_http_token;
 use crate::{
-    DocError, Expectation, PartnerExpectation, ScenarioAction, ScenarioDocument, ScenarioTarget,
-    ValidateExpectation, parse_scenario_document,
+    CountBound, DocError, Expectation, PartnerExpectation, ScenarioAction, ScenarioDocument,
+    ScenarioTarget, ValidateExpectation, parse_scenario_document,
 };
 
 /// Writes `text` to a fresh temporary `case.test.yaml` and parses it.
@@ -466,6 +469,7 @@ scenario:
             target,
             expectation,
             deadline,
+            ..
         } => {
             match target {
                 ScenarioTarget::Partner(endpoint) => assert_eq!(
@@ -477,9 +481,10 @@ scenario:
             assert_eq!(
                 expectation,
                 &ValidateExpectation::Partner(PartnerExpectation {
-                    count: 3,
+                    bound: CountBound::Exact(3),
                     method: Some("POST".to_string()),
                     path: None,
+                    query: None,
                 }),
                 "expectation must parse as a partner count with a method filter"
             );
@@ -550,7 +555,7 @@ scenario:
 }
 
 #[test]
-fn missing_count_is_load_error() {
+fn partner_missing_bound_fails() {
     let err = parse_case(
         r#"
 routeFiles: [routes.yaml]
@@ -571,8 +576,8 @@ scenario:
         DocError::Validation { index, message } => {
             assert_eq!(index, 1, "error must name the action index");
             assert!(
-                message.contains("count"),
-                "message must name `count`: {message}"
+                message.contains("count") && message.contains("atLeast"),
+                "message must name the bound forms: {message}"
             );
         }
         other => panic!("expected Validation, got {other}"),
@@ -666,5 +671,410 @@ scenario:
             );
         }
         other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn elapsed_at_least_parses_on_last_received() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:9999/hook
+    expectation:
+      equals: ok
+    elapsedAtLeast: 250ms
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.first().expect("one action");
+    match action {
+        ScenarioAction::Validate {
+            elapsed_at_least, ..
+        } => {
+            assert_eq!(
+                *elapsed_at_least,
+                Some(Duration::from_millis(250)),
+                "elapsedAtLeast must parse as a humantime duration"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+#[test]
+fn elapsed_at_least_on_partner_target_fails() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      count: 1
+    elapsedAtLeast: 1s
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("elapsedAtLeast"),
+                "message must name `elapsedAtLeast`: {message}"
+            );
+            assert!(
+                message.contains("lastReceived"),
+                "message must name the only valid target kind: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn elapsed_at_least_unparseable_fails() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:9999/hook
+    expectation:
+      equals: ok
+    elapsedAtLeast: not-a-duration
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("elapsedAtLeast") && message.contains("not-a-duration"),
+                "message must name the field and the value: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn partner_count_mixed_with_at_least_fails() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      count: 2
+      atLeast: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("count") && message.contains("atLeast"),
+                "message must name both exclusive keys: {message}"
+            );
+            assert!(
+                message.contains("exclusive"),
+                "message must name the keys as exclusive: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn partner_two_path_filters_fail() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      count: 1
+      path: /a
+      pathContains: b
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("path") && message.contains("pathContains"),
+                "message must name both path keys: {message}"
+            );
+            assert!(
+                message.contains("exclusive"),
+                "message must name the path keys as exclusive: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn partner_invalid_path_matches_fails() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      count: 1
+      pathMatches: "([unclosed"
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("([unclosed"),
+                "message must name the invalid pattern: {message}"
+            );
+            assert!(
+                message.contains("regex"),
+                "message must name the regex problem: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn partner_query_non_string_value_fails() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      atLeast: 1
+      query: {a: 1}
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("query") && message.contains("`a`"),
+                "message must name `query` and the offending key `a`: {message}"
+            );
+            assert!(
+                message.contains("string"),
+                "message must name the string-value requirement: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn partner_at_least_non_integer_fails() {
+    for value in ["-1", "1.5"] {
+        let text = format!(
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      atLeast: {value}
+"#
+        );
+        let err = parse_case(&text).expect_err("parse must fail");
+        match err {
+            DocError::Validation { index, message } => {
+                assert_eq!(index, 1, "error must name the action index");
+                assert!(
+                    message.contains("atLeast"),
+                    "message must name `atLeast`: {message}"
+                );
+                assert!(
+                    message.contains("non-negative integer"),
+                    "message must name the non-negative-integer requirement: {message}"
+                );
+            }
+            other => panic!("expected Validation, got {other}"),
+        }
+    }
+}
+
+#[test]
+fn partner_at_least_parses() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      atLeast: 3
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.get(1).expect("two actions");
+    match action {
+        ScenarioAction::Validate { expectation, .. } => {
+            assert_eq!(
+                expectation,
+                &ValidateExpectation::Partner(PartnerExpectation {
+                    bound: CountBound::AtLeast(3),
+                    method: None,
+                    path: None,
+                    query: None,
+                }),
+                "expectation must parse as an at-least bound"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+#[test]
+fn partner_range_parses_and_inverted_fails() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      atLeast: 2
+      atMost: 4
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.get(1).expect("two actions");
+    match &action {
+        ScenarioAction::Validate { expectation, .. } => {
+            assert_eq!(
+                expectation,
+                &ValidateExpectation::Partner(PartnerExpectation {
+                    bound: CountBound::Range(2, 4),
+                    method: None,
+                    path: None,
+                    query: None,
+                }),
+                "atLeast+atMost must combine into a range bound"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
+    let inverted = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      atLeast: 4
+      atMost: 3
+"#,
+    )
+    .expect_err("inverted range must fail");
+    match inverted {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("4") && message.contains("3"),
+                "message must name both bound values: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn partner_query_subset_parses() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      atLeast: 1
+      query: {a: "1+1", b: "2"}
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.get(1).expect("two actions");
+    match action {
+        ScenarioAction::Validate { expectation, .. } => {
+            assert_eq!(
+                expectation,
+                &ValidateExpectation::Partner(PartnerExpectation {
+                    bound: CountBound::AtLeast(1),
+                    method: None,
+                    path: None,
+                    query: Some(BTreeMap::from([
+                        ("a".to_string(), "1+1".to_string()),
+                        ("b".to_string(), "2".to_string()),
+                    ])),
+                }),
+                "expectation must parse the query subset map"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
     }
 }

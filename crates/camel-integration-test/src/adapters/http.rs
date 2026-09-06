@@ -772,6 +772,9 @@ async fn perform_exchange(
         // The client role receives a response: no request line.
         method: None,
         path: None,
+        // Stamped at response receipt: when the transport finished
+        // receiving, not when a receive action consumes it.
+        arrival: std::time::Instant::now(),
     })
 }
 
@@ -837,6 +840,10 @@ fn enqueue_arrival(
         status: None,
         method: Some(wire.method.clone()),
         path: Some(wire.path.clone()),
+        // Stamped here at the enqueue point: the transport finished
+        // receiving the request, before any receive action can
+        // consume it from the lane.
+        arrival: std::time::Instant::now(),
     };
     let lane = lane_for(arrivals, &wire.path);
     // try_send, not send: a full lane means the scenario is not
@@ -962,8 +969,10 @@ fn empty_response(status: u16) -> Response<Full<Bytes>> {
 
 /// Encodes a scenario body value onto the wire: strings pass through
 /// as exact bytes, `Null` is empty, and structured values serialize
-/// as compact JSON.
-fn value_to_wire(body: &Value) -> Vec<u8> {
+/// as compact JSON. The client send path and the partner script
+/// mapping share this encoding so both wire roles serve the same
+/// bytes for the same value.
+pub(crate) fn value_to_wire(body: &Value) -> Vec<u8> {
     match body {
         Value::Null => Vec::new(),
         Value::String(text) => text.clone().into_bytes(),

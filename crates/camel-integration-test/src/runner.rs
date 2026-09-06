@@ -28,31 +28,36 @@
 //! `send` is bounded by [`SEND_DEADLINE`].
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use camel_api::Value;
 
-#[cfg(feature = "http")]
-use crate::adapters::http::HttpWireRequest;
 use crate::adapters::redact_wire_path;
 use crate::adapters::{
     IncomingMessage, OutgoingMessage, PartnerRouter, ReceiveError, TransportError, lanes_suffix,
 };
 use crate::document::{
-    EndpointRef, Expectation, PartnerExpectation, Provisioning, ScenarioAction, ScenarioDocument,
-    ScenarioTarget, ValidateExpectation,
+    EndpointRef, Expectation, Provisioning, ScenarioAction, ScenarioDocument, ScenarioTarget,
+    ValidateExpectation,
+};
+
+/// Partner verification for the `validate` action's `partner` target
+/// (ADR-0069 §5): the filtered recorded-request count, the deadline
+/// poll, and the mismatch-detail renderers.
+mod partner_validate;
+
+// Test-only re-exports: these primitives are exercised directly by
+// `runner_test`, while the runner itself only calls
+// `partner_validate_action`.
+use partner_validate::partner_validate_action;
+#[cfg(all(test, feature = "http"))]
+pub(crate) use partner_validate::{
+    matching_requests, partner_mismatch_detail, render_bound, render_filters,
 };
 
 /// The bounded deadline for every `send` action (ADR-0069 §7: every
 /// adapter operation carries a deadline).
 const SEND_DEADLINE: Duration = Duration::from_secs(30);
-
-/// The poll interval of a partner validate with a deadline
-/// (feature `http`): a fresh recorded-request snapshot every 100 ms
-/// until the filtered count settles or the deadline passes. The sleep
-/// between snapshots means the poll never busy-waits.
-#[cfg(feature = "http")]
-const PARTNER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Mutable run state carried across actions: scenario variables set by
 /// `extract`, and the last message received per endpoint for
@@ -294,8 +299,11 @@ pub async fn run_scenario(
     router: &PartnerRouter,
     vars: &mut ScenarioVars,
 ) -> Result<ScenarioVerdict, ScenarioFailure> {
+    // The scenario-start anchor every `elapsedAtLeast` bound measures
+    // against; taken once per run, before the first action.
+    let started_at = Instant::now();
     for (index, action) in doc.scenario.iter().enumerate() {
-        run_action(action, index, router, vars).await?;
+        run_action(action, index, router, vars, started_at).await?;
     }
     Ok(ScenarioVerdict::Pass)
 }
@@ -336,13 +344,16 @@ pub async fn run_scenario_document(
     router: &PartnerRouter,
     vars: &mut ScenarioVars,
 ) -> DocumentOutcome {
+    // The scenario-start anchor every `elapsedAtLeast` bound measures
+    // against; taken once per run, before the first action.
+    let started_at = Instant::now();
     let mut per_action = Vec::with_capacity(doc.scenario.len());
     let mut failed = false;
     for (index, action) in doc.scenario.iter().enumerate() {
         if failed {
             break;
         }
-        match run_action(action, index, router, vars).await {
+        match run_action(action, index, router, vars, started_at).await {
             Ok(()) => per_action.push(Ok(ScenarioVerdict::Pass)),
             Err(failure) => {
                 per_action.push(Err(failure));
@@ -370,6 +381,7 @@ async fn run_action(
     index: usize,
     router: &PartnerRouter,
     vars: &mut ScenarioVars,
+    started_at: Instant,
 ) -> Result<(), ScenarioFailure> {
     match action {
         ScenarioAction::Send {
@@ -399,12 +411,8 @@ async fn run_action(
         ScenarioAction::Sleep { duration } => {
             tokio::time::sleep(*duration).await;
         }
-        ScenarioAction::Validate {
-            target,
-            expectation,
-            deadline,
-        } => {
-            validate_action(index, target, expectation, *deadline, router, vars).await?;
+        ScenarioAction::Validate { .. } => {
+            validate_action(action, index, started_at, router, vars).await?;
         }
     }
     Ok(())
@@ -529,24 +537,37 @@ async fn receive_action(
 /// with it ([`partner_validate_action`]). Every other target applies
 /// the message grammar against `vars`; the deadline is partner-only
 /// (the grammar rejected it on these targets at parse time, so the
-/// message arm ignores it). Mismatch details name the validation
-/// subject — the variable's name, the receiving endpoint, or the
-/// partner URI — so a corrupted-header regression is diagnosable from
-/// the failure text.
+/// message arm ignores it). An `elapsedAtLeast` bound on a
+/// `lastReceived` target checks the message's wire arrival against
+/// the scenario-start anchor before the grammar runs; the grammar
+/// rejected it on every other target at parse time. Mismatch details
+/// name the validation subject — the variable's name, the receiving
+/// endpoint, or the partner URI — so a corrupted-header regression is
+/// diagnosable from the failure text.
 async fn validate_action(
+    action: &ScenarioAction,
     index: usize,
-    target: &ScenarioTarget,
-    expectation: &ValidateExpectation,
-    deadline: Option<Duration>,
+    started_at: Instant,
     router: &PartnerRouter,
     vars: &ScenarioVars,
 ) -> Result<(), ScenarioFailure> {
+    // run_action dispatches only the Validate variant here; the
+    // fallback mirrors the impossible pairing arms below.
+    let ScenarioAction::Validate {
+        target,
+        expectation,
+        deadline,
+        elapsed_at_least,
+    } = action
+    else {
+        return Err(unpaired_validate(index));
+    };
     match (target, expectation) {
         // The parser pairs a `partner` target with the partner count
         // grammar; this arm reads the router's snapshot and owns the
         // deadline.
         (ScenarioTarget::Partner(endpoint), ValidateExpectation::Partner(expected)) => {
-            partner_validate_action(index, &endpoint.endpoint, expected, deadline, router).await
+            partner_validate_action(index, &endpoint.endpoint, expected, *deadline, router).await
         }
         (_, ValidateExpectation::Message(expectation)) => {
             let (value, subject) = match target {
@@ -556,15 +577,36 @@ async fn validate_action(
                     // that quotes a wire path (ADR-0051).
                     let redacted =
                         redact_wire_path(&endpoint.endpoint, &router.secret_query_keys());
-                    (
-                        vars.last_received(&endpoint.endpoint)
-                            .map(|message| message.body.clone())
-                            .ok_or_else(|| ScenarioFailure::ValidationMismatch {
+                    let message = vars.last_received(&endpoint.endpoint).ok_or_else(|| {
+                        ScenarioFailure::ValidationMismatch {
+                            action: index,
+                            detail: format!(
+                                "no message has been received on {redacted} to validate"
+                            ),
+                        }
+                    })?;
+                    // The elapsed bound anchors to the message's wire
+                    // arrival, never the consumption time: a message
+                    // consumed late can still have arrived early (the
+                    // wire is the proof, ADR-0069 §5).
+                    if let Some(bound) = elapsed_at_least {
+                        let actual = message
+                            .arrival
+                            .checked_duration_since(started_at)
+                            .unwrap_or_default();
+                        if actual < *bound {
+                            return Err(ScenarioFailure::ValidationMismatch {
                                 action: index,
                                 detail: format!(
-                                    "no message has been received on {redacted} to validate"
+                                    "{redacted}: arrived {} after the scenario started; `elapsedAtLeast` requires {}",
+                                    humantime::format_duration(actual),
+                                    humantime::format_duration(*bound)
                                 ),
-                            })?,
+                            });
+                        }
+                    }
+                    (
+                        message.body.clone(),
                         format!("body last received on {redacted}"),
                     )
                 }
@@ -652,179 +694,6 @@ fn unpaired_validate(index: usize) -> ScenarioFailure {
         action: index,
         detail: "validate target kind does not pair with the expectation kind".to_string(),
     }
-}
-
-/// Counts the recorded requests that pass both filters (feature
-/// `http`): `method` compares ASCII-case-insensitively (wire records
-/// are uppercased; the expectation may declare any casing), `path`
-/// compares the path-and-query exactly, and `None` passes everything.
-#[cfg(feature = "http")]
-pub(crate) fn matching_requests(
-    requests: &[HttpWireRequest],
-    method: Option<&str>,
-    path: Option<&str>,
-) -> usize {
-    requests
-        .iter()
-        .filter(|request| {
-            method.is_none_or(|m| m.eq_ignore_ascii_case(&request.method))
-                && path.is_none_or(|p| p == request.path)
-        })
-        .count()
-}
-
-/// Asserts the partner count expectation against the router's
-/// recorded-request snapshot for the declared endpoint key
-/// (ADR-0069 §5: what crossed the wire is the normative proof).
-///
-/// The snapshot filters by the expectation's `method` and `path`
-/// ([`matching_requests`]) and asserts exact equality on the filtered
-/// count — arrivals only add, so a count above the expected one fails
-/// at every snapshot and never settles back. Without a deadline the
-/// assertion reads one immediate snapshot. With one it polls at
-/// [`PARTNER_POLL_INTERVAL`] and, on expiry, one final snapshot
-/// decides with its own count the reported actual. Every snapshot
-/// clones out of the recorder's lock before any await, so no lock
-/// spans an await point and the poll sleeps between snapshots.
-#[cfg(feature = "http")]
-async fn partner_validate_action(
-    index: usize,
-    uri: &str,
-    expected: &PartnerExpectation,
-    deadline: Option<Duration>,
-    router: &PartnerRouter,
-) -> Result<(), ScenarioFailure> {
-    let expected_count = usize::try_from(expected.count).unwrap_or(usize::MAX);
-    let count = || {
-        matching_requests(
-            &router.recorded_requests(uri),
-            expected.method.as_deref(),
-            expected.path.as_deref(),
-        )
-    };
-    let mismatch = |actual: usize| {
-        // The fresh recorded paths of this partner, in arrival order:
-        // the wire evidence the mismatch detail lists (redacted).
-        let recorded: Vec<String> = router
-            .recorded_requests(uri)
-            .iter()
-            .map(|request| request.path.clone())
-            .collect();
-        ScenarioFailure::ValidationMismatch {
-            action: index,
-            detail: partner_mismatch_detail(
-                uri,
-                expected,
-                actual,
-                &recorded,
-                &router.secret_query_keys(),
-            ),
-        }
-    };
-    match deadline {
-        // No deadline: one immediate snapshot decides.
-        None => {
-            let actual = count();
-            if actual == expected_count {
-                Ok(())
-            } else {
-                Err(mismatch(actual))
-            }
-        }
-        // Poll until some snapshot's count equals the expectation or
-        // the deadline passes; the final snapshot then decides.
-        Some(deadline) => {
-            let until = tokio::time::Instant::now() + deadline;
-            loop {
-                if count() == expected_count {
-                    return Ok(());
-                }
-                let now = tokio::time::Instant::now();
-                if now >= until {
-                    let actual = count();
-                    return if actual == expected_count {
-                        Ok(())
-                    } else {
-                        Err(mismatch(actual))
-                    };
-                }
-                tokio::time::sleep((until - now).min(PARTNER_POLL_INTERVAL)).await;
-            }
-        }
-    }
-}
-
-/// Partner verification needs the http adapter's recording (feature
-/// `http`); without the feature the arm fails with the verdict-class
-/// mismatch instead of passing silently.
-#[cfg(not(feature = "http"))]
-async fn partner_validate_action(
-    index: usize,
-    uri: &str,
-    expected: &PartnerExpectation,
-    deadline: Option<Duration>,
-    router: &PartnerRouter,
-) -> Result<(), ScenarioFailure> {
-    let _ = (uri, expected, deadline, router);
-    Err(ScenarioFailure::ValidationMismatch {
-        action: index,
-        detail: "partner validation requires the `http` feature".to_string(),
-    })
-}
-
-/// The mismatch detail of a failed partner count assertion: the
-/// partner URI, the applied filters (`method`, `path`) when set, the
-/// expected-versus-actual counts, and the recorded request paths —
-/// `recorded` carries the RAW wire paths; every secret-marked query
-/// value is masked through the shared redactor before it reaches the
-/// detail (ADR-0051).
-#[cfg(feature = "http")]
-pub(crate) fn partner_mismatch_detail(
-    uri: &str,
-    expected: &PartnerExpectation,
-    actual: usize,
-    recorded: &[String],
-    secret_keys: &[String],
-) -> String {
-    // The partner URI header may itself carry query bytes (a
-    // query-bearing declaration): render it redacted like every
-    // recorded path below (ADR-0051).
-    let mut detail = format!("partner {}", redact_wire_path(uri, secret_keys));
-    if expected.method.is_some() || expected.path.is_some() {
-        let filters = [
-            expected
-                .method
-                .as_deref()
-                .map(|method| format!("method {method}")),
-            expected
-                .path
-                .as_deref()
-                // The declared filter may carry query bytes: the echo
-                // renders redacted like the header and the recorded
-                // list (redaction is idempotent).
-                .map(|path| format!("path {}", redact_wire_path(path, secret_keys))),
-        ];
-        let joined = filters.into_iter().flatten().collect::<Vec<_>>().join(", ");
-        detail.push_str(&format!(" ({joined})"));
-    }
-    detail.push_str(&format!(", expected {}, actual {actual}", expected.count));
-    // The recorded request paths, deduplicated in arrival order: what
-    // actually crossed the wire, every secret-marked query value
-    // masked before it reaches the detail (ADR-0051).
-    let mut unique: Vec<&str> = Vec::new();
-    for path in recorded {
-        if !unique.contains(&path.as_str()) {
-            unique.push(path);
-        }
-    }
-    if !unique.is_empty() {
-        let redacted: Vec<String> = unique
-            .iter()
-            .map(|path| redact_wire_path(path, secret_keys))
-            .collect();
-        detail.push_str(&format!(", recorded: [{}]", redacted.join(", ")));
-    }
-    detail
 }
 
 /// Turns a validation predicate into a [`ScenarioFailure`] on `false`.

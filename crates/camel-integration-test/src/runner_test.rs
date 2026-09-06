@@ -30,9 +30,9 @@ use crate::runner::{
 #[cfg(feature = "http")]
 use crate::adapters::http::{HttpPartner, HttpWireRequest};
 #[cfg(feature = "http")]
-use crate::document::PartnerExpectation;
+use crate::document::{CountBound, PartnerExpectation, PathFilter};
 #[cfg(feature = "http")]
-use crate::runner::{matching_requests, partner_mismatch_detail};
+use crate::runner::{matching_requests, partner_mismatch_detail, render_bound, render_filters};
 
 /// A bare endpoint reference with no provisioning and no bind variable.
 fn endpoint(uri: &str) -> EndpointRef {
@@ -71,6 +71,7 @@ fn text_message(body: &str) -> IncomingMessage {
         status: None,
         method: None,
         path: None,
+        arrival: std::time::Instant::now(),
     }
 }
 
@@ -96,6 +97,7 @@ async fn send_then_receive_within_deadline() {
                 "hello".to_string(),
             ))),
             deadline: None,
+            elapsed_at_least: None,
         },
     ]);
     let mut vars = ScenarioVars::new();
@@ -135,6 +137,7 @@ async fn variable_extraction_flows_forward() {
             status: None,
             method: None,
             path: None,
+            arrival: std::time::Instant::now(),
         }])
     }
     fn extraction_doc() -> ScenarioDocument {
@@ -153,6 +156,7 @@ async fn variable_extraction_flows_forward() {
                     "abc-123".to_string(),
                 ))),
                 deadline: None,
+                elapsed_at_least: None,
             },
         ])
     }
@@ -309,6 +313,7 @@ async fn selector_extracts_status_method_and_path() {
         status: Some(201),
         method: Some("POST".to_string()),
         path: Some("/orders".to_string()),
+        arrival: std::time::Instant::now(),
     }]);
     let router = router_for("partner://fake", fake);
     let doc = doc_with(vec![
@@ -327,6 +332,7 @@ async fn selector_extracts_status_method_and_path() {
                 201.into(),
             ))),
             deadline: None,
+            elapsed_at_least: None,
         },
         ScenarioAction::Validate {
             target: ScenarioTarget::Variable("method".to_string()),
@@ -334,6 +340,7 @@ async fn selector_extracts_status_method_and_path() {
                 "POST".to_string(),
             ))),
             deadline: None,
+            elapsed_at_least: None,
         },
         ScenarioAction::Validate {
             target: ScenarioTarget::Variable("path".to_string()),
@@ -341,6 +348,7 @@ async fn selector_extracts_status_method_and_path() {
                 "/orders".to_string(),
             ))),
             deadline: None,
+            elapsed_at_least: None,
         },
     ]);
     let mut vars = ScenarioVars::new();
@@ -360,6 +368,7 @@ async fn selector_header_lookup_is_case_insensitive() {
             status: None,
             method: None,
             path: None,
+            arrival: std::time::Instant::now(),
         }])
     }
     fn doc(selector: &str) -> ScenarioDocument {
@@ -378,6 +387,7 @@ async fn selector_header_lookup_is_case_insensitive() {
                     "t-42".to_string(),
                 ))),
                 deadline: None,
+                elapsed_at_least: None,
             },
         ])
     }
@@ -422,6 +432,7 @@ async fn document_run_all_pass_records_verdict() {
             target: ScenarioTarget::Variable("unset".to_string()),
             expectation: ValidateExpectation::Message(Expectation::Exists),
             deadline: None,
+            elapsed_at_least: None,
         },
     ]);
     // Seed the variable so the `Exists` validation passes.
@@ -492,6 +503,7 @@ async fn variable_mismatch_names_the_variable() {
         status: None,
         method: None,
         path: None,
+        arrival: std::time::Instant::now(),
     }]);
     let router = router_for("partner://fake", fake);
     let doc = doc_with(vec![
@@ -509,6 +521,7 @@ async fn variable_mismatch_names_the_variable() {
                 "express".to_string(),
             ))),
             deadline: None,
+            elapsed_at_least: None,
         },
     ]);
     let mut vars = ScenarioVars::new();
@@ -872,11 +885,13 @@ fn partner_validate(
     ScenarioAction::Validate {
         target: ScenarioTarget::Partner(endpoint(ORDERS)),
         expectation: ValidateExpectation::Partner(PartnerExpectation {
-            count,
+            bound: CountBound::Exact(count),
             method: method.map(str::to_string),
-            path: path.map(str::to_string),
+            path: path.map(|path| PathFilter::Exact(path.to_string())),
+            query: None,
         }),
         deadline,
+        elapsed_at_least: None,
     }
 }
 
@@ -916,18 +931,29 @@ fn first_failure(outcome: &DocumentOutcome) -> &ScenarioFailure {
         .expect("the document must have failed")
 }
 
+/// A wire HTTP request with no headers and no body.
+#[cfg(feature = "http")]
+fn wire(method: &str, path: &str) -> HttpWireRequest {
+    HttpWireRequest {
+        method: method.to_string(),
+        path: path.to_string(),
+        headers: BTreeMap::new(),
+        body: Vec::new(),
+    }
+}
+
+/// A GET wire request with no headers and no body.
+#[cfg(feature = "http")]
+fn wire_get(path: &str) -> HttpWireRequest {
+    wire("GET", path)
+}
+
 /// Filter semantics of `matching_requests`: the method filter folds
 /// ASCII case, the path filter is the exact path-and-query, and `None`
 /// filters pass everything.
 #[test]
 #[cfg(feature = "http")]
 fn matching_requests_filters_method_case_insensitive_and_exact_path() {
-    let wire = |method: &str, path: &str| HttpWireRequest {
-        method: method.to_string(),
-        path: path.to_string(),
-        headers: BTreeMap::new(),
-        body: Vec::new(),
-    };
     let requests = vec![
         wire("POST", "/orders"),
         wire("GET", "/orders"),
@@ -936,20 +962,134 @@ fn matching_requests_filters_method_case_insensitive_and_exact_path() {
         wire("delete", "/orders"),
     ];
     // `None` filters pass every request.
-    assert_eq!(matching_requests(&requests, None, None), 5);
+    assert_eq!(matching_requests(&requests, None, None, None), 5);
     // The method filter folds ASCII case in both directions.
-    assert_eq!(matching_requests(&requests, Some("get"), None), 3);
-    assert_eq!(matching_requests(&requests, Some("DELETE"), None), 1);
-    // The path filter is the exact path-and-query: no prefix and no
-    // query-blind matching.
-    assert_eq!(matching_requests(&requests, None, Some("/orders")), 3);
+    assert_eq!(matching_requests(&requests, Some("get"), None, None), 3);
+    assert_eq!(matching_requests(&requests, Some("DELETE"), None, None), 1);
+    // The Exact path filter is the exact path-and-query: no prefix and
+    // no query-blind matching.
     assert_eq!(
-        matching_requests(&requests, None, Some("/orders?page=2")),
+        matching_requests(
+            &requests,
+            None,
+            Some(&PathFilter::Exact("/orders".to_string())),
+            None
+        ),
+        3
+    );
+    assert_eq!(
+        matching_requests(
+            &requests,
+            None,
+            Some(&PathFilter::Exact("/orders?page=2".to_string())),
+            None
+        ),
         1
     );
-    // Both filters combine conjunctively.
+    // All filters combine conjunctively.
     assert_eq!(
-        matching_requests(&requests, Some("get"), Some("/orders")),
+        matching_requests(
+            &requests,
+            Some("get"),
+            Some(&PathFilter::Exact("/orders".to_string())),
+            None
+        ),
+        1
+    );
+}
+
+/// The Exact path filter is byte-strict on the path-and-query: the
+/// percent-encoded comma never equals the decoded comma, so only the
+/// request carrying the identical bytes counts. Encoding leniency
+/// belongs to Contains/Matches and the decoded query subset, never to
+/// the Exact comparison.
+#[test]
+#[cfg(feature = "http")]
+fn matching_exact_path_is_byte_strict() {
+    let requests = vec![wire_get("/q?bbox=1.5%2C2.5"), wire_get("/q?bbox=1.5,2.5")];
+    assert_eq!(
+        matching_requests(
+            &requests,
+            None,
+            Some(&PathFilter::Exact("/q?bbox=1.5%2C2.5".to_string())),
+            None
+        ),
+        1
+    );
+}
+
+/// The Contains path filter tolerates encoding differences: the
+/// substring `bbox=` appears in both the percent-encoded and the raw
+/// comma form of the request path.
+#[test]
+#[cfg(feature = "http")]
+fn matching_contains_tolerates_encoding() {
+    let requests = vec![wire_get("/q?bbox=1.5%2C2.5"), wire_get("/q?bbox=1.5,2.5")];
+    assert_eq!(
+        matching_requests(
+            &requests,
+            None,
+            Some(&PathFilter::Contains("bbox=".to_string())),
+            None
+        ),
+        2
+    );
+}
+
+/// The Matches path filter narrows by regex over the recorded
+/// path-and-query: only the request the pattern accepts counts.
+#[test]
+#[cfg(feature = "http")]
+fn matching_regex_narrows() {
+    let requests = vec![wire_get("/orders/42"), wire_get("/health")];
+    assert_eq!(
+        matching_requests(
+            &requests,
+            None,
+            Some(&PathFilter::Matches("^/orders/\\d+$".to_string())),
+            None
+        ),
+        1
+    );
+}
+
+/// The query subset filter decodes the request's query (percent and
+/// `+` forms) and compares pair-wise: every declared pair must appear
+/// among the decoded pairs, in any position order.
+#[test]
+#[cfg(feature = "http")]
+fn matching_query_subset_decodes_and_ignores_order() {
+    let requests = vec![wire_get("/q?b=2&a=1%2B1")];
+    let query = BTreeMap::from([
+        ("a".to_string(), "1+1".to_string()),
+        ("b".to_string(), "2".to_string()),
+    ]);
+    assert_eq!(matching_requests(&requests, None, None, Some(&query)), 1);
+}
+
+/// The query subset filter is a subset, not an equality: a declared
+/// pair absent from the request's query excludes the request.
+#[test]
+#[cfg(feature = "http")]
+fn matching_query_subset_absent_pair_excludes() {
+    let requests = vec![wire_get("/q?a=1")];
+    let query = BTreeMap::from([
+        ("a".to_string(), "1".to_string()),
+        ("c".to_string(), "3".to_string()),
+    ]);
+    assert_eq!(matching_requests(&requests, None, None, Some(&query)), 0);
+}
+
+/// The method and query subset filters combine conjunctively: the
+/// declared lowercase method folds ASCII case onto the uppercased
+/// wire records, and only the one request that passes both counts.
+#[test]
+#[cfg(feature = "http")]
+fn matching_method_composes_with_query() {
+    let requests = vec![wire("POST", "/q?a=1"), wire("GET", "/q?a=1")];
+    let query = BTreeMap::from([("a".to_string(), "1".to_string())]);
+    assert_eq!(
+        matching_requests(&requests, Some("post"), None, Some(&query)),
         1
     );
 }
@@ -1164,9 +1304,10 @@ async fn deadline_expiry_reports_final_actual() {
 #[cfg(feature = "http")]
 fn partner_mismatch_detail_lists_recorded_paths() {
     let expected = PartnerExpectation {
-        count: 2,
+        bound: CountBound::Exact(2),
         method: None,
         path: None,
+        query: None,
     };
     let detail = partner_mismatch_detail(
         "http://127.0.0.1:0/a",
@@ -1195,9 +1336,12 @@ fn partner_mismatch_detail_lists_recorded_paths() {
 #[cfg(feature = "http")]
 fn count_mismatch_redacts_secrets() {
     let expected = PartnerExpectation {
-        count: 2,
+        bound: CountBound::Exact(2),
         method: None,
-        path: Some("/login?authPassword=hunter2&x=1".to_string()),
+        path: Some(PathFilter::Exact(
+            "/login?authPassword=hunter2&x=1".to_string(),
+        )),
+        query: None,
     };
     let detail = partner_mismatch_detail(
         "http://127.0.0.1:0/login?authPassword=hunter2&x=1",
@@ -1225,6 +1369,65 @@ fn count_mismatch_redacts_secrets() {
     assert!(
         detail.contains("path /login?authPassword=***"),
         "the path filter echo must mask the secret too: {detail}"
+    );
+}
+
+/// The bound grammar of the mismatch detail: each bound kind renders
+/// in its own words, and `Exact` keeps the historical `expected N`
+/// phrasing the exact-count mismatch tests pin byte-for-byte.
+#[test]
+#[cfg(feature = "http")]
+fn render_bound_grammar() {
+    assert_eq!(render_bound(&CountBound::Exact(3)), "expected 3");
+    assert_eq!(render_bound(&CountBound::AtLeast(3)), "expected at least 3");
+    assert_eq!(render_bound(&CountBound::AtMost(2)), "expected at most 2");
+    assert_eq!(
+        render_bound(&CountBound::Range(2, 4)),
+        "expected between 2 and 4"
+    );
+}
+
+/// Filter rendering redacts secret query pairs and elides pattern
+/// payloads (ADR-0051 extended to filter payloads): the declared
+/// secret pair masks its value, the non-secret pair stays visible,
+/// and a `pathContains` pattern renders by kind only — neither the
+/// secret value nor the pattern bytes print.
+#[test]
+#[cfg(feature = "http")]
+fn render_filters_redacts_secret_query_and_elides_patterns() {
+    let expected = PartnerExpectation {
+        bound: CountBound::AtLeast(1),
+        method: Some("GET".to_string()),
+        path: Some(PathFilter::Contains("secret".to_string())),
+        query: Some(BTreeMap::from([
+            ("bbox".to_string(), "1,2".to_string()),
+            ("token".to_string(), "abc".to_string()),
+        ])),
+    };
+    let rendered = render_filters(&expected, &["token".to_string()]);
+    assert!(
+        rendered.contains("token=<redacted>"),
+        "the secret pair must mask its value: {rendered}"
+    );
+    assert!(
+        rendered.contains("bbox=1,2"),
+        "the non-secret pair must stay visible: {rendered}"
+    );
+    assert!(
+        rendered.contains("method GET"),
+        "the method clause must render: {rendered}"
+    );
+    assert!(
+        rendered.contains("pathContains <pattern elided>"),
+        "the pattern must render by kind only: {rendered}"
+    );
+    assert!(
+        !rendered.contains("abc"),
+        "the secret value must never print: {rendered}"
+    );
+    assert!(
+        !rendered.contains("secret"),
+        "the pattern payload must never print: {rendered}"
     );
 }
 
@@ -1359,6 +1562,7 @@ async fn body_validation_failure_carries_redacted_subject() {
                 "expected".to_string(),
             ))),
             deadline: None,
+            elapsed_at_least: None,
         },
     ]);
     let mut vars = ScenarioVars::new();
@@ -1391,6 +1595,7 @@ async fn unreceived_validate_carries_redacted_subject() {
         target: ScenarioTarget::LastReceived(endpoint(declared)),
         expectation: ValidateExpectation::Message(Expectation::Exists),
         deadline: None,
+        elapsed_at_least: None,
     }]);
     let mut vars = ScenarioVars::new();
     let failure = run_scenario(&doc, &router, &mut vars)

@@ -2,8 +2,10 @@
 //!
 //! Whole-document proofs of the `validate` `partner` grammar: exact
 //! recorded-request counts, `method`/`path` filters, immediate and
-//! polled (deadline) reads, and the mismatch failure naming the
-//! partner, the expectation, and the actual. The flagship boots a
+//! polled (deadline) reads, bound-aware windows (`atLeast` settles
+//! early, `atMost` and a range are absence claims over the window),
+//! and the mismatch failure naming the partner, the expectation, and
+//! the actual. The flagship boots a
 //! REAL retrying route over the shipped two-layer bindVar stack — the
 //! route's producer faults against the scripted partner once, the
 //! route-level `error_handler.retry` redials, and the recorded count
@@ -189,6 +191,353 @@ partners:
       body: ok
 "#;
 
+/// Two sends then a validation of `atLeast: 3` under a five second
+/// deadline, while a burst of two more arrivals lands near-
+/// simultaneously at +300 ms: the polled snapshots jump 2 → 4
+/// without ever observing 3, and the floor bound settles early on
+/// `4 >= 3` instead of waiting the window out.
+const AT_LEAST_SETTLES_EARLY_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {atLeast: 3, method: POST}
+    deadline: 5s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: ok
+"#;
+
+/// One send, then a validation of `atLeast: 3` under a one second
+/// deadline: nothing else ever arrives, the poll expires, and the
+/// failure names the floor in its own grammar (`at least 3`) with the
+/// final snapshot's actual count.
+const AT_LEAST_FAILS_AT_DEADLINE_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- sleep:
+    duration: 100ms
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {atLeast: 3}
+    deadline: 1s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: ok
+"#;
+
+/// One send, a settle sleep, then a deadline-less validation of
+/// `atMost: 2`: one immediate snapshot decides, and one arrival
+/// within a ceiling of two passes.
+const AT_MOST_IMMEDIATE_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- sleep:
+    duration: 100ms
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {atMost: 2}
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: ok
+"#;
+
+/// One matching POST held, then an absence claim of `atMost: 1`
+/// filtered to POST under a two second deadline, while a nonmatching
+/// GET lands mid-window: the claim must NOT pass on the early
+/// snapshot — it waits the full window (the method filter keeps the
+/// GET out) and decides on the final snapshot.
+const AT_MOST_FULL_WINDOW_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- sleep:
+    duration: 100ms
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {atMost: 1, method: POST}
+    deadline: 2s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: ok
+"#;
+
+/// Three quick matching sends against an absence claim of `atMost: 2`
+/// under a five second deadline: the first snapshot above the ceiling
+/// fails immediately — the window never burns.
+const AT_MOST_FAILS_FAST_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- sleep:
+    duration: 100ms
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {atMost: 2}
+    deadline: 5s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: ok
+"#;
+
+/// Two matching POSTs held, then an absence claim of `atMost: 2,
+/// method: POST` under a five second deadline while a third matching
+/// POST lands mid-window: the ceiling crossing happens AFTER the
+/// validate's first snapshot, so only the poll's in-window ceiling
+/// re-check can fail fast — a ceiling check hoisted out of the poll
+/// loop would miss the crossing and burn the whole window.
+const AT_MOST_MID_WINDOW_BREACH_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- sleep:
+    duration: 100ms
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {atMost: 2, method: POST}
+    deadline: 5s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: ok
+"#;
+
+/// One send to `/orders`, then an absence claim of `atMost: 0` over
+/// the path `/never` (zero matching arrivals held) under a one second
+/// deadline: the claim waits the full window and passes on the final
+/// snapshot — an early pass could not prove the absence holds.
+const AT_MOST_ZERO_ABSENCE_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {atMost: 0, path: /never}
+    deadline: 1s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: ok
+"#;
+
+/// Five quick sends against a range of `atLeast: 2, atMost: 4` under
+/// a five second deadline: the count of five sits above the maximum,
+/// the first snapshot fails immediately, and the mismatch names the
+/// range in its own grammar.
+const RANGE_FAILS_FAST_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- sleep:
+    duration: 100ms
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {atLeast: 2, atMost: 4}
+    deadline: 5s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: ok
+"#;
+
+/// Three sends settled against a range of `atLeast: 2, atMost: 4`
+/// under a one second deadline: within bounds, so the claim never
+/// settles early — it waits the window and passes on the final
+/// snapshot.
+const RANGE_FINAL_SNAPSHOT_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- sleep:
+    duration: 100ms
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {atLeast: 2, atMost: 4}
+    deadline: 1s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: ok
+"#;
+
+/// One POST bind-send to `/orders` (which the `pathContains: bbox=`
+/// filter excludes), then a validation of `atLeast: 1` while two
+/// foreign GETs land with drifted bbox spellings (percent-encoded and
+/// raw): the substring filter counts both drifted arrivals, so two
+/// matching requests satisfy the floor.
+const PATH_CONTAINS_DRIFT_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- sleep:
+    duration: 300ms
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {atLeast: 1, pathContains: "bbox="}
+    deadline: 5s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: ok
+"#;
+
+/// One POST bind-send to `/orders`, then a validation of `atLeast: 1`
+/// with a `pathMatches` regex and a `query` subset while three foreign
+/// GETs land (`/q?bbox=1.5%2C2.5`, `/q?x=1&bbox=1.5%2C2.5`,
+/// `/health`): the regex keeps `/health` out, the subset matches the
+/// percent-decoded `bbox` pair in both query orders, so two matching
+/// requests satisfy the floor.
+const PATH_MATCHES_QUERY_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- sleep:
+    duration: 300ms
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {atLeast: 1, pathMatches: '^/q\?', query: {bbox: "1.5,2.5"}}
+    deadline: 5s
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: ok
+"#;
+
 /// The flagship: the scenario dials the pinned route listener as a
 /// plain string, the route's producer faults against the scripted
 /// partner (first entry `fault: close`), the route-level
@@ -327,6 +676,47 @@ async fn raw_post(authority: &str, path: &str) {
         .read_to_end(&mut sink)
         .await
         .expect("the partner must close after its response");
+}
+
+/// One raw HTTP/1.1 GET straight to the partner's bound address —
+/// the same foreign-client arrival path [`raw_post`] takes, with a
+/// GET request line so method filters can discriminate it.
+async fn raw_get(authority: &str, path: &str) {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    let mut stream = tokio::net::TcpStream::connect(authority)
+        .await
+        .expect("the partner's bound address must accept");
+    let request = format!("GET {path} HTTP/1.1\r\nhost: {authority}\r\nconnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("the raw request must leave");
+    let mut sink = Vec::new();
+    stream
+        .read_to_end(&mut sink)
+        .await
+        .expect("the partner must close after its response");
+}
+
+/// Loads `yaml` through the crate's document path and binds the
+/// declared partners WITHOUT running: the staging point for tests
+/// that race background arrivals against the run or measure the
+/// run's elapsed time.
+async fn stage_doc(
+    yaml: &str,
+) -> (
+    ScenarioDocument,
+    PartnerRouter,
+    BTreeMap<String, HttpRecorder>,
+    BTreeMap<String, String>,
+) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("case.test.yaml");
+    std::fs::write(&path, yaml).expect("write case file");
+    let doc = parse_scenario_document(&path).expect("document must load");
+    let (router, recorders, authorities) = bind_doc_partners(&doc).await;
+    (doc, router, recorders, authorities)
 }
 
 /// Three sends then the immediate count validation: the scenario
@@ -529,4 +919,353 @@ async fn route_retries_faulted_partner_then_count_e2e() {
         .shutdown(&mut guard)
         .await
         .expect("clean shutdown must complete");
+}
+
+/// Two held sends and a near-simultaneous burst of two more at
+/// +300 ms: the snapshots jump 2 → 4 without ever observing 3, and
+/// the `atLeast: 3` floor settles early on the burst — the run
+/// finishes well inside its 5 s deadline.
+#[tokio::test]
+async fn at_least_settles_early() {
+    let (doc, router, recorders, authorities) = stage_doc(AT_LEAST_SETTLES_EARLY_DOC).await;
+    let authority = authorities
+        .get(ORDERS)
+        .expect("the orders partner must be bound")
+        .clone();
+    // The burst: two foreign arrivals fired concurrently, so both
+    // land inside one 100 ms poll window and no snapshot reads 3.
+    let burst = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::join!(
+            raw_post(&authority, "/orders"),
+            raw_post(&authority, "/orders")
+        );
+    });
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    let started = std::time::Instant::now();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let elapsed = started.elapsed();
+    burst.await.expect("the burst task must join");
+
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the floor must settle on the burst (4 >= 3): {outcome:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the settle must come early, not at the 5 s deadline: {elapsed:?}"
+    );
+    assert_eq!(
+        recorders[ORDERS].recorded_requests().len(),
+        4,
+        "both held sends and both burst arrivals must be on the wire"
+    );
+}
+
+/// One held arrival against `atLeast: 3`: the poll expires, the final
+/// snapshot decides, and the mismatch names the floor in its own
+/// grammar (`at least 3`) with the actual count of one.
+#[tokio::test]
+async fn at_least_fails_at_deadline_naming_actual() {
+    let (outcome, _recorders, _authorities) = run_doc(AT_LEAST_FAILS_AT_DEADLINE_DOC).await;
+    assert_eq!(outcome.verdict, None, "the expired floor must fail");
+
+    let failure = outcome
+        .per_action
+        .last()
+        .and_then(|result| result.as_ref().err())
+        .expect("the validate must fail");
+    let ScenarioFailure::ValidationMismatch { detail, .. } = failure else {
+        panic!("expected ValidationMismatch, got {failure:?}");
+    };
+    assert!(
+        detail.contains("expected at least 3, actual 1"),
+        "the mismatch must name the floor and the final actual: {detail}"
+    );
+}
+
+/// One held arrival against `atMost: 2` without a deadline: one
+/// immediate snapshot decides, and one arrival inside a ceiling of
+/// two passes.
+#[tokio::test]
+async fn at_most_decides_immediately_without_deadline() {
+    let (outcome, _recorders, _authorities) = run_doc(AT_MOST_IMMEDIATE_DOC).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "one arrival must sit inside the ceiling of two: {outcome:?}"
+    );
+}
+
+/// One matching POST and a nonmatching GET mid-window against
+/// `atMost: 1, method: POST` with a 2 s deadline: the absence claim
+/// does NOT pass on the early snapshot — it waits the full window
+/// (the filter keeps the GET out) and passes on the final snapshot.
+#[tokio::test]
+async fn at_most_waits_full_window() {
+    let (doc, router, _recorders, authorities) = stage_doc(AT_MOST_FULL_WINDOW_DOC).await;
+    let authority = authorities
+        .get(ORDERS)
+        .expect("the orders partner must be bound")
+        .clone();
+    // The nonmatching straggler: landed mid-window, filtered out by
+    // the method clause.
+    let straggler = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        raw_get(&authority, "/orders").await;
+    });
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    let started = std::time::Instant::now();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let elapsed = started.elapsed();
+    straggler.await.expect("the straggler task must join");
+
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the final snapshot must hold one POST, inside the ceiling: {outcome:?}"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(1900),
+        "an early pass cannot prove the absence; the claim must wait the full window: {elapsed:?}"
+    );
+}
+
+/// Three matching arrivals against `atMost: 2` with a 5 s deadline:
+/// the first snapshot above the ceiling fails immediately — the
+/// mismatch names the ceiling and the actual, and the window never
+/// burns.
+#[tokio::test]
+async fn at_most_fails_fast_above_bound() {
+    let (doc, router, _recorders, _authorities) = stage_doc(AT_MOST_FAILS_FAST_DOC).await;
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    let started = std::time::Instant::now();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        outcome.verdict, None,
+        "three arrivals must break a ceiling of two"
+    );
+    let failure = outcome
+        .per_action
+        .last()
+        .and_then(|result| result.as_ref().err())
+        .expect("the validate must fail");
+    let ScenarioFailure::ValidationMismatch { detail, .. } = failure else {
+        panic!("expected ValidationMismatch, got {failure:?}");
+    };
+    assert!(
+        detail.contains("expected at most 2, actual 3"),
+        "the mismatch must name the ceiling and the observed count: {detail}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the ceiling breach must fail fast, not burn the 5 s window: {elapsed:?}"
+    );
+}
+
+/// Two matching POSTs held inside a ceiling of two, then a third
+/// matching POST lands from a foreign background client at +300 ms —
+/// after the validate's poll began: the in-window ceiling re-check
+/// fails fast on the mid-window snapshot, and the mismatch names the
+/// ceiling and the observed count without burning the 5 s deadline.
+#[tokio::test]
+async fn at_most_fails_fast_when_ceiling_crossed_mid_window() {
+    let (doc, router, _recorders, authorities) = stage_doc(AT_MOST_MID_WINDOW_BREACH_DOC).await;
+    let authority = authorities
+        .get(ORDERS)
+        .expect("the orders partner must be bound")
+        .clone();
+    // The breaching arrival: lands after the validate's poll began,
+    // far inside its 5 s deadline — the crossing must be caught by a
+    // mid-window ceiling re-check, not by the deadline's final
+    // snapshot.
+    let breach = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        raw_post(&authority, "/orders").await;
+    });
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    let started = std::time::Instant::now();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let elapsed = started.elapsed();
+    breach.await.expect("the breaching dial task must join");
+
+    assert_eq!(
+        outcome.verdict, None,
+        "the mid-window crossing must break a ceiling of two"
+    );
+    let failure = outcome
+        .per_action
+        .last()
+        .and_then(|result| result.as_ref().err())
+        .expect("the validate must fail");
+    let ScenarioFailure::ValidationMismatch { detail, .. } = failure else {
+        panic!("expected ValidationMismatch, got {failure:?}");
+    };
+    assert!(
+        detail.contains("expected at most 2, actual 3"),
+        "the mismatch must name the ceiling and the observed count: {detail}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the mid-window crossing must fail fast on the poll, not burn the 5 s window: {elapsed:?}"
+    );
+}
+
+/// Zero matching arrivals against `atMost: 0` over a 1 s window: the
+/// absence claim waits the full window and passes on the final
+/// snapshot — an instant pass could not prove the absence holds.
+#[tokio::test]
+async fn at_most_zero_proves_absence_over_window() {
+    let (doc, router, _recorders, _authorities) = stage_doc(AT_MOST_ZERO_ABSENCE_DOC).await;
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    let started = std::time::Instant::now();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "no matching arrival must prove the absence: {outcome:?}"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(900),
+        "an early pass cannot prove the absence; the claim must wait the window: {elapsed:?}"
+    );
+}
+
+/// Five settled arrivals against the range `atLeast: 2, atMost: 4`
+/// with a 5 s deadline: the count sits above the maximum, the first
+/// snapshot fails immediately, and the mismatch names the range.
+#[tokio::test]
+async fn range_fails_fast_above_max() {
+    let (doc, router, _recorders, _authorities) = stage_doc(RANGE_FAILS_FAST_DOC).await;
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    let started = std::time::Instant::now();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        outcome.verdict, None,
+        "five arrivals must break the max of four"
+    );
+    let failure = outcome
+        .per_action
+        .last()
+        .and_then(|result| result.as_ref().err())
+        .expect("the validate must fail");
+    let ScenarioFailure::ValidationMismatch { detail, .. } = failure else {
+        panic!("expected ValidationMismatch, got {failure:?}");
+    };
+    assert!(
+        detail.contains("expected between 2 and 4, actual 5"),
+        "the mismatch must name the range and the observed count: {detail}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the ceiling breach must fail fast, not burn the 5 s window: {elapsed:?}"
+    );
+}
+
+/// Three settled arrivals against the range `atLeast: 2, atMost: 4`
+/// with a 1 s deadline: inside bounds, so the claim never settles
+/// early — it waits the window and passes on the final snapshot.
+#[tokio::test]
+async fn range_passes_on_final_snapshot() {
+    let (doc, router, _recorders, _authorities) = stage_doc(RANGE_FINAL_SNAPSHOT_DOC).await;
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    let started = std::time::Instant::now();
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "three arrivals must sit inside the range: {outcome:?}"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(900),
+        "an in-bounds range must wait the window and decide on the final snapshot: {elapsed:?}"
+    );
+}
+
+/// Two foreign GETs land with drifted bbox spellings (percent-encoded
+/// comma and bare value) while the scenario holds one excluded POST:
+/// `pathContains: bbox=` counts both drifted arrivals, so two
+/// matching requests satisfy `atLeast: 1` end to end.
+#[tokio::test]
+async fn path_contains_tolerates_encoding_drift_end_to_end() {
+    let (doc, router, recorders, authorities) = stage_doc(PATH_CONTAINS_DRIFT_DOC).await;
+    let authority = authorities
+        .get(ORDERS)
+        .expect("the orders partner must be bound")
+        .clone();
+    // The drifted spellings: both must land before the validate's
+    // first snapshot (the scenario sleeps 300 ms first).
+    let drift = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        raw_get(&authority, "/q?bbox=1.5%2C2.5").await;
+        raw_get(&authority, "/q?bbox=3.0").await;
+    });
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    drift.await.expect("the drift task must join");
+
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "both drifted spellings must satisfy the floor: {outcome:?}"
+    );
+    assert_eq!(
+        recorders[ORDERS].recorded_requests().len(),
+        3,
+        "the bind-send and both drifted GETs must be on the wire"
+    );
+}
+
+/// Three foreign GETs land (`/q?bbox=1.5%2C2.5`, `/q?x=1&bbox=...`,
+/// `/health`) while the scenario holds one excluded POST: the
+/// `pathMatches` regex keeps `/health` out, the `query` subset
+/// matches the percent-decoded `bbox` pair in both query orders, so
+/// two matching requests satisfy `atLeast: 1` end to end.
+#[tokio::test]
+async fn path_matches_and_query_subset_end_to_end() {
+    let (doc, router, recorders, authorities) = stage_doc(PATH_MATCHES_QUERY_DOC).await;
+    let authority = authorities
+        .get(ORDERS)
+        .expect("the orders partner must be bound")
+        .clone();
+    // The three arrivals: all must land before the validate's first
+    // snapshot (the scenario sleeps 300 ms first).
+    let arrivals = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        raw_get(&authority, "/q?bbox=1.5%2C2.5").await;
+        raw_get(&authority, "/q?x=1&bbox=1.5%2C2.5").await;
+        raw_get(&authority, "/health").await;
+    });
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    arrivals.await.expect("the arrivals task must join");
+
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the regex and the query subset must count two matches: {outcome:?}"
+    );
+    assert_eq!(
+        recorders[ORDERS].recorded_requests().len(),
+        4,
+        "the bind-send and all three foreign GETs must be on the wire"
+    );
 }

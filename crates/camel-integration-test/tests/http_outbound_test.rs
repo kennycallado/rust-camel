@@ -199,6 +199,7 @@ fn method_scenario_document(
                 expected_body.to_string(),
             ))),
             deadline: None,
+            elapsed_at_least: None,
         },
     ];
     ScenarioDocument {
@@ -307,6 +308,7 @@ async fn outbound_bridge_header_corruption_fails() {
                             Value::String("express".to_string()),
                         )),
                         deadline: None,
+                        elapsed_at_least: None,
                     }
                 } else {
                     action.clone()
