@@ -185,7 +185,8 @@ operator-facing signals.
    The harness consumes the readiness signal only through the same public
    surface an operator uses: health or readiness state, or the bound address
    a future boot handle reports (the WebSocket side of that address surface
-   has since landed: `ServerRegistry::get_or_spawn_with_listener`). It never
+   has since landed: `ServerRegistry::get_or_spawn_with_listener`. ADR-0070
+   generalizes the full staged-listener surface and its rulings). It never
    subscribes to a core-internal
    event or a callback added for the test. If partner readiness needs more
    than the operator surface exposes, the gap is an operator-facing engine

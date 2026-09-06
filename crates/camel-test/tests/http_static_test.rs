@@ -9,10 +9,9 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
-use support::install_crypto_provider;
+use support::{install_crypto_provider, stage_http_listener};
 
 use std::collections::HashMap;
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,15 +37,6 @@ static TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Bind to port 0 to obtain a free port, then drop the listener.
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("failed to bind")
-        .local_addr()
-        .expect("local_addr")
-        .port()
-}
 
 /// Create a test ConsumerContext with a controllable cancellation token.
 fn test_ctx() -> (ConsumerContext, CancellationToken, Arc<Notify>) {
@@ -118,7 +108,7 @@ async fn http_static_shared_port_api_and_static() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "hello.txt", "hello from static");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
 
     let config = HttpStaticConfig {
         dir: dir.path().to_path_buf(),
@@ -195,7 +185,7 @@ async fn http_static_basic_file_serving() {
     write_file(dir.path(), "index.html", "<h1>Hello</h1>");
     write_file(dir.path(), "style.css", "body { color: red; }");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let config = HttpStaticConfig {
         dir: dir.path().to_path_buf(),
         port,
@@ -238,7 +228,7 @@ async fn http_static_precompressed_gzip_content_encoding() {
     write_file(dir.path(), "app.js", js_content);
     write_gz_file(dir.path(), "app.js", js_content);
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let config = HttpStaticConfig {
         dir: dir.path().to_path_buf(),
         port,
@@ -291,8 +281,8 @@ async fn http_static_cache_control_from_config() {
     let dir2 = tempfile::TempDir::new().expect("tempdir");
     write_file(dir2.path(), "file.txt", "from dir2");
 
-    let port1 = free_port();
-    let port2 = free_port();
+    let port1 = stage_http_listener("127.0.0.1").await;
+    let port2 = stage_http_listener("127.0.0.1").await;
 
     let config1 = HttpStaticConfig {
         dir: dir1.path().to_path_buf(),
@@ -358,7 +348,7 @@ async fn http_static_spa_fallback_serves_index() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "index.html", "<div id=\"app\">SPA</div>");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let config = HttpStaticConfig {
         dir: dir.path().to_path_buf(),
         port,
@@ -402,7 +392,7 @@ async fn http_static_spa_wins_over_custom_error_page() {
     );
     write_file(dir.path(), "custom404.html", "<h1>Custom 404 Page</h1>");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
 
     let mut error_pages = HashMap::new();
     error_pages.insert(404u16, dir.path().join("custom404.html"));
@@ -452,7 +442,7 @@ async fn http_static_subdirectory_serving() {
     write_file(dir.path(), "index.html", "<h1>Root</h1>");
     write_file(&dir.path().join("assets/css"), "main.css", "body {}");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let config = HttpStaticConfig {
         dir: dir.path().to_path_buf(),
         port,
@@ -485,7 +475,7 @@ async fn http_static_404_for_missing_file() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "exists.txt", "I exist");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let config = HttpStaticConfig {
         dir: dir.path().to_path_buf(),
         port,
@@ -517,7 +507,7 @@ async fn http_static_mount_path_prefix_serves_files() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "style.css", "body { color: blue; }");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let config = HttpStaticConfig {
         dir: dir.path().to_path_buf(),
         port,
@@ -560,7 +550,7 @@ async fn http_static_multiple_mounts_same_port() {
     write_file(dir_assets.path(), "app.js", "console.log('app')");
     write_file(dir_public.path(), "robots.txt", "User-agent: *");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
 
     let config_assets = HttpStaticConfig {
         dir: dir_assets.path().to_path_buf(),
@@ -622,7 +612,7 @@ async fn http_static_duplicate_mount_path_rejected() {
     write_file(dir1.path(), "a.txt", "a");
     write_file(dir2.path(), "b.txt", "b");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
 
     let config1 = HttpStaticConfig {
         dir: dir1.path().to_path_buf(),
@@ -689,7 +679,7 @@ async fn http_static_longest_prefix_wins() {
     write_file(dir_assets.path(), "file.txt", "from assets");
     write_file(dir_assets_sub.path(), "file.txt", "from assets/sub");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
 
     let config_assets = HttpStaticConfig {
         dir: dir_assets.path().to_path_buf(),
@@ -742,7 +732,7 @@ async fn http_static_spa_fallback_scoped_to_mount_prefix() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "index.html", "<div id=\"app\">Scoped SPA</div>");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let config = HttpStaticConfig {
         dir: dir.path().to_path_buf(),
         port,
@@ -787,7 +777,7 @@ async fn http_static_segment_boundary_prefix_match() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "file.txt", "from asset dir");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let config = HttpStaticConfig {
         dir: dir.path().to_path_buf(),
         port,
@@ -830,7 +820,7 @@ async fn http_static_spa_and_non_spa_same_mount_path_rejected() {
     write_file(dir1.path(), "a.txt", "a");
     write_file(dir2.path(), "index.html", "<div>SPA</div>");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
 
     let config1 = HttpStaticConfig {
         dir: dir1.path().to_path_buf(),
@@ -895,7 +885,7 @@ async fn http_static_consumer_lifecycle_start_stop() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "test.txt", "lifecycle test");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let config = HttpStaticConfig {
         dir: dir.path().to_path_buf(),
         port,
@@ -1035,7 +1025,7 @@ async fn http_static_error_page_returns_original_status() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "custom404.html", "<h1>Not Found</h1>");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
 
     let mut error_pages = HashMap::new();
     error_pages.insert(404u16, dir.path().join("custom404.html"));
@@ -1075,7 +1065,7 @@ async fn http_static_path_traversal_rejected() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "safe.txt", "safe content");
 
-    let port = free_port();
+    let port = stage_http_listener("127.0.0.1").await;
     let config = HttpStaticConfig {
         dir: dir.path().to_path_buf(),
         port,

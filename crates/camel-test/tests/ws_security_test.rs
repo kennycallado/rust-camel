@@ -140,11 +140,6 @@ fn make_app_state(path: &str, sec_ctx: Option<SecurityContext>) -> WsAppState {
     }
 }
 
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
 fn ws_upgrade_request(port: u16, path: &str, auth_header: Option<&str>) -> Request<Body> {
     let mut builder = Request::builder()
         .method("GET")
@@ -168,7 +163,8 @@ fn ws_upgrade_request(port: u16, path: &str, auth_header: Option<&str>) -> Reque
 /// header returns 401 when the path has an Authenticated kernel plan.
 #[tokio::test]
 async fn test_ws_401_without_auth() {
-    let port = free_port();
+    // oneshot tests never bind or dial; the port is a URI placeholder (bd rc-yorz9)
+    let port: u16 = 65535;
     let path = "/ws/auth";
     let state = make_app_state(path, Some(kernel_security_context(MockOutcome::Principal)));
 
@@ -183,7 +179,7 @@ async fn test_ws_401_without_auth() {
 /// returns 401 when the kernel provider rejects it.
 #[tokio::test]
 async fn test_ws_401_invalid_token() {
-    let port = free_port();
+    let port: u16 = 65535;
     let path = "/ws/auth";
     let state = make_app_state(
         path,
@@ -203,7 +199,7 @@ async fn test_ws_401_invalid_token() {
 /// the provider-unavailable branch is the kernel path's non-401 denial.
 #[tokio::test]
 async fn test_ws_503_provider_unavailable() {
-    let port = free_port();
+    let port: u16 = 65535;
     let path = "/ws/auth";
     let state = make_app_state(
         path,
@@ -220,7 +216,7 @@ async fn test_ws_503_provider_unavailable() {
 /// Marker substring alone must NOT yield 503 — status selection is variant-based (spec: wording independence).
 #[tokio::test]
 async fn test_ws_500_generic_processor_error_with_marker() {
-    let port = free_port();
+    let port: u16 = 65535;
     let path = "/ws/auth";
     let state = make_app_state(
         path,
@@ -242,7 +238,7 @@ async fn test_ws_500_generic_processor_error_with_marker() {
 /// only available with a real server, not via tower::ServiceExt::oneshot.
 #[tokio::test]
 async fn test_ws_auth_passes_with_valid_token() {
-    let port = free_port();
+    let port: u16 = 65535;
     let path = "/ws/auth";
     let state = make_app_state(path, Some(kernel_security_context(MockOutcome::Principal)));
 
@@ -261,7 +257,7 @@ async fn test_ws_auth_passes_with_valid_token() {
 /// (no security policy) passes auth without any Authorization header.
 #[tokio::test]
 async fn test_ws_unprotected_path_skips_auth() {
-    let port = free_port();
+    let port: u16 = 65535;
     let path = "/ws/open";
     // No security context — path_policies stays empty
     let state = make_app_state(path, None);
@@ -279,7 +275,7 @@ async fn test_ws_unprotected_path_skips_auth() {
 /// unexpected error (not unauthenticated, not unavailable) returns 500.
 #[tokio::test]
 async fn test_ws_500_provider_error() {
-    let port = free_port();
+    let port: u16 = 65535;
     let path = "/ws/auth";
     let state = make_app_state(
         path,
@@ -298,7 +294,7 @@ async fn test_ws_500_provider_error() {
 /// credential from the AuthorizationHeader source and returns 401.
 #[tokio::test]
 async fn test_ws_401_malformed_auth_scheme() {
-    let port = free_port();
+    let port: u16 = 65535;
     let path = "/ws/auth";
     let state = make_app_state(path, Some(kernel_security_context(MockOutcome::Principal)));
 
