@@ -121,6 +121,41 @@ Per ADR-0012, this component's `error!` sites are categorized as:
 
 Reviewer: r_glm5.1 verifies these classifications against source at Phase C review time.
 
+## Outbound query fidelity
+
+The Producer resolves the outbound URL through `resolve_url`, which returns
+`Result<String, CamelError>` — malformed operator input never panics the
+producer task. Query source precedence:
+
+1. `bridgeEndpoint=true` — the endpoint base URL carries the endpoint's own
+   `raw_query` (consumed option keys filtered; `bridgeEndpoint` itself is one)
+   with programmatic `query_params` appending absent keys after it; all exchange
+   URL headers (`CamelHttpUri`, `CamelHttpPath`, `CamelHttpQuery`) are ignored.
+   This check precedes the `CamelHttpUri` override so bridging wins.
+2. `CamelHttpUri` override — replaces the base URL; `CamelHttpPath` and
+   `CamelHttpQuery` append.
+3. `CamelHttpQuery` header — applied verbatim, wins over the endpoint base
+   query.
+4. Endpoint `raw_query` base — authored bytes byte-for-byte minus consumed
+   option keys, then programmatic `query_params`.
+
+`query_params` is programmatic-only — never auto-populated from the URI. It is a
+`Vec<(String, String)>` emitted in declaration order with minimal RFC-3986
+encoding; `%20`, never `+`, for spaces. Authored keys always win: a
+`query_params` entry whose key is already present in the authored pairs is
+skipped (no duplication, no override). Authored non-option pairs are carried
+ONLY by `raw_query`; there is no structured re-collection. `RAW(...)` wrappers
+are neither unwrapped nor re-encoded.
+
+A raw byte forbidden in a query component produces a resolve error naming the
+offending byte — the serializer never silently re-encodes authored bytes.
+
+Option-key consumption has a single metadata-driven owner: `uri_options()`
+(ADR-0041), consulted at runtime by the raw filter (`is_consumed_option`) — no
+duplicated handwritten key lists. `connectTimeout` is promoted to metadata-only:
+it is a consumed option whose effective value comes from the global http config.
+The legacy `HTTP_CAMEL_OPTIONS` list is deleted.
+
 ## Contract Surface
 
 Per ADR-0057 (headers) and ADR-0024 (status/body/Stop). Documents the accepted and rejected names/values for the HTTP consumer reply finaliser. Future bug reports check here first: if behaviour is in this surface, it is a feature request. If not, it is a bug.

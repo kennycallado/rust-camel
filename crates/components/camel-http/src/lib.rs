@@ -42,7 +42,7 @@ use camel_auth::oauth2::TokenProvider;
 use camel_component_api::tls_source::ServerTlsSource;
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, StreamBody, StreamMetadata};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
-use camel_component_api::{UriComponents, UriConfig, parse_uri};
+use camel_component_api::{UriComponents, UriConfig, parse_uri, raw_query_pairs};
 use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
@@ -107,14 +107,22 @@ use futures::stream::BoxStream;
 ///
 /// Only increase limits when you control both ends of the connection or when
 /// business requirements demand larger payloads.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpEndpointConfig {
     pub base_url: String,
     pub http_method: Option<String>,
     pub throw_exception_on_failure: bool,
     pub ok_status_code_range: (u16, u16),
     pub response_timeout: Option<Duration>,
-    pub query_params: HashMap<String, String>,
+    /// Programmatic query parameters, serialized in declaration order with
+    /// minimal RFC-3986 encoding (`%20`, never `+`). Never populated from
+    /// the endpoint URI — set by callers via config construction.
+    pub query_params: Vec<(String, String)>,
+    /// Authored query bytes from the endpoint URI, verbatim (no decode, no
+    /// re-encode, no `RAW(...)` unwrapping). `Some("")` preserves a bare
+    /// `?` marker. Sole carrier of URI-authored pairs; consumed option
+    /// keys are filtered out at serialization time.
+    pub raw_query: Option<String>,
     pub allow_internal: bool,
     pub blocked_hosts: Vec<String>,
     pub max_body_size: usize,
@@ -129,6 +137,49 @@ pub struct HttpEndpointConfig {
     pub skip_response_headers: Vec<String>,
     pub follow_redirects: bool,
     pub max_redirects: usize,
+}
+
+/// ADR-0051 redact-by-construction: query bytes (authored `raw_query` and
+/// programmatic `query_params`) may carry credentials. The display-surface
+/// Debug renders the raw view blanket-masked (mirroring
+/// `redact_url_for_diagnostics`) and programmatic values masked, mirroring
+/// `UriComponents`' sensitive-value masking. Wire fidelity is unaffected.
+impl std::fmt::Debug for HttpEndpointConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpEndpointConfig")
+            .field("base_url", &self.base_url)
+            .field("http_method", &self.http_method)
+            .field(
+                "throw_exception_on_failure",
+                &self.throw_exception_on_failure,
+            )
+            .field("ok_status_code_range", &self.ok_status_code_range)
+            .field("response_timeout", &self.response_timeout)
+            .field(
+                "query_params",
+                &self
+                    .query_params
+                    .iter()
+                    .map(|(key, _)| (key, "***"))
+                    .collect::<Vec<_>>(),
+            )
+            .field("raw_query", &self.raw_query.as_ref().map(|_| "?[redacted]"))
+            .field("allow_internal", &self.allow_internal)
+            .field("blocked_hosts", &self.blocked_hosts)
+            .field("max_body_size", &self.max_body_size)
+            .field("read_timeout_ms", &self.read_timeout_ms)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .field("auth", &self.auth)
+            .field("token_provider", &self.token_provider)
+            .field("user_agent", &self.user_agent)
+            .field("bridge_endpoint", &self.bridge_endpoint)
+            .field("connection_close", &self.connection_close)
+            .field("skip_request_headers", &self.skip_request_headers)
+            .field("skip_response_headers", &self.skip_response_headers)
+            .field("follow_redirects", &self.follow_redirects)
+            .field("max_redirects", &self.max_redirects)
+            .finish()
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -152,31 +203,19 @@ impl std::fmt::Debug for HttpAuth {
     }
 }
 
-/// Camel options that should NOT be forwarded as HTTP query params
-const HTTP_CAMEL_OPTIONS: &[&str] = &[
-    "httpMethod",
-    "throwExceptionOnFailure",
-    "okStatusCodeRange",
-    "followRedirects",
-    "maxRedirects",
-    "connectTimeout",
-    "responseTimeout",
-    "allowInternal",
-    "blockedHosts",
-    "maxBodySize",
-    "readTimeout",
-    "maxResponseBytes",
-    "authMethod",
-    "authUsername",
-    "authPassword",
-    "authBearerToken",
-    "userAgent",
-    "cookieHandling",
-    "bridgeEndpoint",
-    "connectionClose",
-    "skipRequestHeaders",
-    "skipResponseHeaders",
-];
+/// Whether `key` names a camel-http endpoint option consumed at parse time.
+///
+/// Single metadata-driven owner of OUTBOUND option filtering (ADR-0041):
+/// derived from the `#[uri_param]` metadata behind
+/// [`HttpEndpointConfig::uri_options`], so the raw query filter consumes
+/// exactly the keys the component documents — no duplicated handwritten
+/// key lists. `from_components`'s manual typed parsing stays direct and
+/// unchanged; this predicate never re-wires it.
+fn is_consumed_option(key: &str) -> bool {
+    HttpEndpointConfig::uri_options()
+        .iter()
+        .any(|option| option.name == key || option.aliases.iter().any(|alias| alias == key))
+}
 
 impl UriConfig for HttpEndpointConfig {
     /// Returns "http" as the primary scheme (also accepts "https")
@@ -322,12 +361,11 @@ impl UriConfig for HttpEndpointConfig {
             None => 10,
         };
 
-        // Collect remaining params (not Camel options) as query params
-        let query_params: HashMap<String, String> = parts
-            .params
-            .into_iter()
-            .filter(|(k, _)| !HTTP_CAMEL_OPTIONS.contains(&k.as_str()))
-            .collect();
+        // Authored pairs ride raw_query verbatim (the sole carrier);
+        // query_params is programmatic-only — never auto-populated from
+        // URI leftovers. Consumed option keys are filtered at
+        // serialization time by `is_consumed_option`.
+        let raw_query = parts.raw_query.clone();
 
         Ok(Self {
             base_url,
@@ -335,7 +373,8 @@ impl UriConfig for HttpEndpointConfig {
             throw_exception_on_failure,
             ok_status_code_range,
             response_timeout,
-            query_params,
+            query_params: Vec::new(),
+            raw_query,
             allow_internal,
             blocked_hosts,
             max_body_size,
@@ -400,6 +439,12 @@ struct HttpEndpointUriConfig {
 
     #[uri_param(name = "responseTimeout", desc = "Response timeout in milliseconds")]
     response_timeout: Option<u64>,
+
+    #[uri_param(
+        name = "connectTimeout",
+        desc = "Connection timeout in milliseconds (consumed option; effective timeout comes from the global http config)"
+    )]
+    connect_timeout: Option<u64>,
 
     #[uri_param(
         name = "allowInternal",
@@ -2431,22 +2476,29 @@ impl HttpProducer {
         "GET".to_string()
     }
 
-    fn resolve_url(exchange: &Exchange, config: &HttpEndpointConfig) -> String {
-        // bridgeEndpoint=true: emit the endpoint base URL verbatim and ignore
-        // ALL exchange URL headers (CamelHttpUri, CamelHttpPath,
-        // CamelHttpQuery) per Apache Camel bridging semantics. Only
-        // configured query_params are applied. This check MUST come before the
-        // CamelHttpUri override so bridging wins over that header.
+    fn resolve_url(exchange: &Exchange, config: &HttpEndpointConfig) -> Result<String, CamelError> {
+        // bridgeEndpoint=true: exchange URL headers (CamelHttpUri,
+        // CamelHttpPath, CamelHttpQuery) are ignored per Apache Camel
+        // bridging semantics. The endpoint's own query still rides: the
+        // same raw-preserving, consumed-option-filtered query as the
+        // non-bridge path (bridgeEndpoint itself is a consumed option),
+        // with programmatic query_params appending absent keys after the
+        // raw base. This check MUST come before the CamelHttpUri override
+        // so bridging wins over that header.
         if config.bridge_endpoint {
-            let url = config.base_url.clone();
-            if config.query_params.is_empty() {
-                return url;
-            }
-            let mut parsed = url::Url::parse(&url).expect("base URL must be valid"); // allow-unwrap
-            for (k, v) in &config.query_params {
-                parsed.query_pairs_mut().append_pair(k, v);
-            }
-            return parsed.to_string();
+            let Some(query) = resolve_endpoint_query(config)? else {
+                return Ok(config.base_url.clone());
+            };
+            let mut parsed = url::Url::parse(&config.base_url).map_err(|e| {
+                CamelError::ProcessorError(format!(
+                    "invalid base URL '{}': {e}",
+                    redact_url_for_diagnostics(&config.base_url)
+                ))
+            })?;
+            // set_query keeps already-legal bytes byte-for-byte and keeps
+            // the Url base normalization the bridge pins expect.
+            parsed.set_query(Some(&query));
+            return Ok(parsed.to_string());
         }
 
         if let Some(uri) = exchange
@@ -2473,7 +2525,7 @@ impl HttpProducer {
                 url.push('?');
                 url.push_str(query);
             }
-            return url;
+            return Ok(url);
         }
 
         let mut url = config.base_url.clone();
@@ -2494,22 +2546,116 @@ impl HttpProducer {
             .header("CamelHttpQuery")
             .and_then(|v| v.as_str())
         {
+            // Applied verbatim; wins over the endpoint's raw/programmatic
+            // query base.
             url.push('?');
             url.push_str(query);
-        } else if !config.query_params.is_empty() {
-            let mut parsed = url::Url::parse(&url).expect("base URL must be valid"); // allow-unwrap
-            for (k, v) in &config.query_params {
-                parsed.query_pairs_mut().append_pair(k, v);
-            }
-            url = parsed.to_string();
+            return Ok(url);
         }
 
-        url
+        if let Some(query) = resolve_endpoint_query(config)? {
+            url.push('?');
+            url.push_str(&query);
+        }
+
+        Ok(url)
     }
 
     fn is_ok_status(status: u16, range: (u16, u16)) -> bool {
         status >= range.0 && status <= range.1
     }
+}
+
+/// Serialize the outbound query for the endpoint base.
+///
+/// Authored raw pairs come first, byte-for-byte minus consumed option keys
+/// (order, separators and authored escapes — including `RAW(...)` text —
+/// preserved); then programmatic `query_params` entries whose key is absent
+/// from the authored pairs, in declaration order with minimal RFC-3986
+/// encoding (`%20`, never `+`). Authored keys always win — no duplication,
+/// no override.
+///
+/// Returns `Ok(None)` when no query component is emitted: no pairs at all,
+/// or a non-empty raw query whose every pair was consumed. A bare `?`
+/// marker (`raw_query == Some("")`) always emits the query component.
+fn resolve_endpoint_query(config: &HttpEndpointConfig) -> Result<Option<String>, CamelError> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut authored_keys = std::collections::HashSet::new();
+
+    if let Some(raw) = config.raw_query.as_deref() {
+        for (key, span) in raw_query_pairs(raw)? {
+            authored_keys.insert(key.clone());
+            if is_consumed_option(&key) {
+                continue;
+            }
+            validate_raw_query_span(span)?;
+            parts.push(span.to_string());
+        }
+    }
+
+    for (key, value) in &config.query_params {
+        if !authored_keys.contains(key.as_str()) {
+            parts.push(format!(
+                "{}={}",
+                encode_query_component(key),
+                encode_query_component(value)
+            ));
+        }
+    }
+
+    if parts.is_empty() && config.raw_query.as_deref() != Some("") {
+        return Ok(None);
+    }
+    Ok(Some(parts.join("&")))
+}
+
+/// Bytes that may appear unescaped in a URI query component (RFC 3986
+/// `query = *( pchar / "/" / "?" )`): unreserved, sub-delims, `:`, `@`,
+/// `/`, `?`, plus the `%` escape introducer.
+fn is_legal_query_byte(byte: u8) -> bool {
+    matches!(byte,
+        b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
+        | b'-' | b'.' | b'_' | b'~'
+        | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'='
+        | b':' | b'@' | b'/' | b'?'
+        | b'%')
+}
+
+/// Reject an authored raw pair carrying a byte that is not legal in a query
+/// component (e.g. literal space, `#`, non-ASCII). The serializer never
+/// silently re-encodes operator-authored bytes: "byte-for-byte" is bounded
+/// to wire-legal bytes, and the check fires before the resolved string
+/// reaches any consumer (SSRF pre-check, diagnostics redaction).
+fn validate_raw_query_span(span: &str) -> Result<(), CamelError> {
+    for &byte in span.as_bytes() {
+        if !is_legal_query_byte(byte) {
+            return Err(CamelError::ProcessorError(format!(
+                "raw query pair '{span}' contains byte 0x{byte:02X}, which is not legal in a URL query component"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Minimal RFC-3986 percent-encoding for one programmatic query component:
+/// unreserved bytes pass through, every other byte encodes as uppercase
+/// hex. A space encodes as `%20`, never `+`.
+fn encode_query_component(component: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(component.len());
+    for &byte in component.as_bytes() {
+        match byte {
+            b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+        }
+    }
+    out
 }
 
 /// Redact credentials from a URL before it reaches logs or error values
@@ -2603,7 +2749,7 @@ impl Service<Exchange> for HttpProducer {
                 // drops the exchange body before the request is built (Apache
                 // Camel `HttpMethods` parity).
                 let suppress_body = !HttpProducer::is_entity_enclosing(&method_str);
-                let url = HttpProducer::resolve_url(&exchange, &config);
+                let url = HttpProducer::resolve_url(&exchange, &config)?;
 
                 // SECURITY: Validate URL for SSRF
                 ssrf::validate_url_for_ssrf(&url, &config)?;
@@ -3161,6 +3307,7 @@ mod tests {
                 "httpMethod".to_string(),
                 "POST".to_string(),
             )]),
+            raw_query: None,
         };
         let config = HttpEndpointConfig::from_components(components).unwrap();
         assert_eq!(config.base_url, "https://api.example.com/v1");
@@ -4727,44 +4874,36 @@ mod tests {
         assert_eq!(status, 200);
     }
 
-    #[tokio::test]
-    async fn test_non_camel_query_params_are_forwarded() {
-        // This test verifies Bug #3 fix: non-Camel options should be forwarded
-        // We'll test the config parsing, not the actual HTTP call
+    #[test]
+    fn test_non_camel_query_params_are_forwarded() {
+        // Authored pairs ride raw_query (the sole carrier); query_params is
+        // programmatic-only (http-query-wire-fidelity).
         let config = HttpEndpointConfig::from_uri(
             "http://example.com/api?apiKey=secret123&httpMethod=GET&token=abc456",
         )
         .unwrap();
 
-        // apiKey and token are NOT Camel options, should be forwarded
-        assert!(
-            config.query_params.contains_key("apiKey"),
-            "apiKey should be preserved"
+        // apiKey and token are NOT camel-http options: the authored bytes
+        // (including the interleaved httpMethod) ride raw_query verbatim.
+        assert_eq!(
+            config.raw_query.as_deref(),
+            Some("apiKey=secret123&httpMethod=GET&token=abc456")
         );
-        assert!(
-            config.query_params.contains_key("token"),
-            "token should be preserved"
-        );
-        assert_eq!(config.query_params.get("apiKey").unwrap(), "secret123");
-        assert_eq!(config.query_params.get("token").unwrap(), "abc456");
-
-        // httpMethod IS a Camel option, should NOT be in query_params
-        assert!(
-            !config.query_params.contains_key("httpMethod"),
-            "httpMethod should not be forwarded"
-        );
+        assert!(config.query_params.is_empty());
     }
 
     #[test]
-    fn test_query_params_are_url_encoded_when_resolving_url() {
+    fn test_authored_query_bytes_survive_resolve_url() {
         let config =
-            HttpEndpointConfig::from_uri("http://example.com/api?q=hello world&tag=a+b").unwrap();
+            HttpEndpointConfig::from_uri("http://example.com/api?q=hello%20world&tag=a+b").unwrap();
         let exchange = Exchange::new(Message::default());
 
-        let url = HttpProducer::resolve_url(&exchange, &config);
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
 
-        assert!(url.contains("q=hello+world"), "url was: {url}");
-        assert!(url.contains("tag=a%2Bb"), "url was: {url}");
+        // Authored bytes ride verbatim: `%20` stays `%20` (never re-encoded
+        // to `+` or double-encoded) and `+` stays `+`.
+        assert!(url.contains("q=hello%20world"), "url was: {url}");
+        assert!(url.contains("tag=a+b"), "url was: {url}");
     }
 
     // -----------------------------------------------------------------------
@@ -5025,6 +5164,7 @@ mod tests {
                 ("maxRequestBody".to_string(), "5242880".to_string()),
                 ("maxInflightRequests".to_string(), "7".to_string()),
             ]),
+            raw_query: None,
         };
         let cfg = HttpServerConfig::from_components(components).unwrap();
         assert_eq!(cfg.host, "0.0.0.0");
@@ -7275,7 +7415,7 @@ mod tests {
             "CamelHttpPath",
             serde_json::Value::String("next".to_string()),
         );
-        let url = HttpProducer::resolve_url(&exchange, &cfg);
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
         assert!(url.starts_with("http://example.com/base/next?"));
         assert!(url.contains("foo=bar"));
 
@@ -7288,7 +7428,7 @@ mod tests {
             serde_json::Value::String("a=1&b=2".to_string()),
         );
 
-        let override_url = HttpProducer::resolve_url(&exchange, &cfg);
+        let override_url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
         assert_eq!(override_url, "http://other.test/root/next?a=1&b=2");
     }
 
@@ -7309,9 +7449,9 @@ mod tests {
         let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
         cfg.bridge_endpoint = true;
         cfg.query_params
-            .insert("token".to_string(), "secret".to_string());
+            .push(("token".to_string(), "secret".to_string()));
         let exchange = exchange_with_path_and_query("/foo", "dropme=1");
-        let url = HttpProducer::resolve_url(&exchange, &cfg);
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
         assert_eq!(url, "http://x/?token=secret");
         assert!(!url.contains("/foo"));
         assert!(!url.contains("dropme"));
@@ -7322,7 +7462,7 @@ mod tests {
         let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
         cfg.bridge_endpoint = false;
         let exchange = exchange_with_path_and_query("/foo", "dropme=1");
-        let url = HttpProducer::resolve_url(&exchange, &cfg);
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
         assert!(url.contains("/foo"), "url should contain /foo: {url}");
         assert!(
             url.contains("dropme=1"),
@@ -7339,7 +7479,7 @@ mod tests {
             "CamelHttpPath",
             serde_json::Value::String("/foo".to_string()),
         );
-        let url = HttpProducer::resolve_url(&exchange, &cfg);
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
         assert_eq!(url, "http://x");
         assert!(!url.contains("/foo"));
     }
@@ -7362,11 +7502,234 @@ mod tests {
             "CamelHttpQuery",
             serde_json::Value::String("x=1".to_string()),
         );
-        let url = HttpProducer::resolve_url(&exchange, &cfg);
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
         // Under bridgeEndpoint=true ALL exchange URL headers (CamelHttpUri,
         // CamelHttpPath, CamelHttpQuery) are ignored; the endpoint base URL
         // wins verbatim.
         assert_eq!(url, "http://x");
+    }
+
+    #[test]
+    fn bridge_programmatic_params_use_percent20() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+        cfg.bridge_endpoint = true;
+        cfg.query_params = vec![("b".to_string(), "x y".to_string())];
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+        // `%20 never +` is global for programmatic values — the bridge arm
+        // uses the same encoder as the non-bridge path. Bridging
+        // semantics (what gets bridged, precedence) are unchanged.
+        assert_eq!(url, "http://x/?b=x%20y");
+        assert!(!url.contains('+'));
+    }
+
+    #[test]
+    fn bridge_arm_carries_authored_raw_query() {
+        let cfg = HttpEndpointConfig::from_uri("http://h/p?a=1&bridgeEndpoint=true").unwrap();
+        // bridgeEndpoint is consumed as an endpoint option; a=1 is the
+        // authored leftover riding raw_query.
+        let exchange = exchange_with_path_and_query("/ignored", "dropme=1");
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+        // Authored leftovers ride under bridging (Apache Camel semantics):
+        // query is a=1 in authored bytes; exchange path/query stay ignored.
+        assert_eq!(url, "http://h/p?a=1");
+        assert!(!url.contains("dropme"), "exchange query leaked: {url}");
+        assert!(!url.contains("/ignored"), "exchange path leaked: {url}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Raw-preserving outbound query serialization (http-query-wire-fidelity)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_url_preserves_authored_query_order_and_bytes() {
+        let config =
+            HttpEndpointConfig::from_uri("http://h/p?a=1&b=x,y&c=t:1&connectTimeout=5000").unwrap();
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // Authored order, authored separators, no %2C/%3A re-encoding,
+        // consumed option (connectTimeout) removed.
+        assert_eq!(url, "http://h/p?a=1&b=x,y&c=t:1");
+    }
+
+    #[test]
+    fn resolve_url_consumes_encoded_option_key() {
+        let config = HttpEndpointConfig::from_uri("http://h/p?connect%54imeout=5000&a=1").unwrap();
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // The raw filter matches the decoded key, not the encoded bytes.
+        assert_eq!(url, "http://h/p?a=1");
+    }
+
+    #[test]
+    fn resolve_url_all_options_consumed_drops_query() {
+        let config = HttpEndpointConfig::from_uri("http://h/p?connectTimeout=5000").unwrap();
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // A non-empty query whose every pair was consumed drops the query
+        // component entirely — no dangling `?`.
+        assert_eq!(url, "http://h/p");
+        assert!(!url.contains('?'));
+    }
+
+    #[test]
+    fn resolve_url_preserves_empty_query_marker() {
+        let config = HttpEndpointConfig::from_uri("http://h/p?").unwrap();
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // A bare `?` marker is preserved distinctly, never conflated with
+        // an all-consumed query.
+        assert_eq!(url, "http://h/p?");
+    }
+
+    #[test]
+    fn resolve_url_raw_wrapper_not_re_encoded() {
+        let config = HttpEndpointConfig::from_uri("http://h/p?token=RAW(abc)").unwrap();
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // RAW(...) wrapper bytes survive exactly as authored (rc-g4isv).
+        assert_eq!(url, "http://h/p?token=RAW(abc)");
+        assert!(!url.contains("%28"), "RAW( wrapper re-encoded: {url}");
+    }
+
+    #[test]
+    fn resolve_url_camel_http_query_stays_verbatim() {
+        let config = HttpEndpointConfig::from_uri("http://h/p?x=1").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String("userFilter=a%2Cb".to_string()),
+        );
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // Header value applied verbatim, wins over the endpoint raw base.
+        assert_eq!(url, "http://h/p?userFilter=a%2Cb");
+    }
+
+    #[test]
+    fn resolve_url_programmatic_params_use_percent20_deterministic() {
+        let mut config = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+        config.query_params = vec![
+            ("b".to_string(), "x y".to_string()),
+            ("a".to_string(), "1".to_string()),
+        ];
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // Declaration order (not lexical), minimal RFC-3986 encoding,
+        // `%20` — never `+` — for spaces.
+        assert_eq!(url, "http://h/p?b=x%20y&a=1");
+        assert!(!url.contains('+'));
+    }
+
+    #[test]
+    fn resolve_url_authored_and_programmatic_merge() {
+        let mut config = HttpEndpointConfig::from_uri("http://h/p?a=1&c=t:1").unwrap();
+        config.query_params = vec![
+            ("b".to_string(), "2".to_string()),
+            ("a".to_string(), "9".to_string()),
+        ];
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+        // Programmatic `b` appended (absent from raw); programmatic `a=9`
+        // ignored (authored key wins); no duplication.
+        assert_eq!(url, "http://h/p?a=1&c=t:1&b=2");
+    }
+
+    #[test]
+    fn from_uri_no_longer_fills_query_params_from_uri() {
+        let config = HttpEndpointConfig::from_uri("http://h/p?a=1&connectTimeout=5000").unwrap();
+
+        // Authored pairs live in raw_query ONLY (provenance pin).
+        assert!(
+            config.query_params.is_empty(),
+            "query_params is programmatic-only: {:?}",
+            config.query_params
+        );
+        assert_eq!(config.raw_query.as_deref(), Some("a=1&connectTimeout=5000"));
+    }
+
+    #[test]
+    fn resolve_url_forbidden_raw_byte_errors() {
+        let mut config = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+        config.raw_query = Some("a=x y".to_string());
+        let exchange = Exchange::new(Message::default());
+
+        let err = HttpProducer::resolve_url(&exchange, &config)
+            .expect_err("literal space in raw query must error");
+
+        // The error names the forbidden byte; no output string is produced.
+        assert!(
+            err.to_string().contains("0x20"),
+            "error must name the forbidden byte: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_url_malformed_base_url_errors_no_panic() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_test_server().await;
+        let mut config = HttpEndpointConfig::from_uri("http://[::1:bad").unwrap();
+        config.allow_internal = true; // test server binds 127.0.0.1
+        let producer = HttpProducer {
+            config: Arc::new(config),
+            client: build_client(&HttpConfig::default(), None),
+            pinned_cache: Arc::new(PinnedClientCache::new(
+                PINNED_CLIENT_TTL,
+                PINNED_CLIENT_MAX_ENTRIES,
+            )),
+            http_config: Arc::new(HttpConfig::default()),
+            runtime: rt(),
+        };
+
+        // First call: malformed base URL propagates as an error through the
+        // real producer path — no panic, no poisoned state (rc-ph7z2).
+        let first = producer
+            .clone()
+            .oneshot(Exchange::new(Message::default()))
+            .await;
+        let err = first.expect_err("malformed base URL must error, not panic");
+        assert!(
+            err.to_string().to_lowercase().contains("url"),
+            "error must name the malformed URL: {err}"
+        );
+
+        // Second call through the SAME producer succeeds — the failure
+        // left no poisoned state.
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String(format!("{url}/api")),
+        );
+        let response = producer
+            .oneshot(exchange)
+            .await
+            .expect("valid request through same producer must succeed");
+        let status = response
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
     }
 
     #[test]
@@ -7763,6 +8126,40 @@ mod tests {
             !debug.contains("secret123"),
             "password must be redacted in HttpEndpointConfig debug: {debug}"
         );
+    }
+
+    #[test]
+    fn debug_lists_all_public_fields() {
+        let config = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+        let debug = format!("{:?}", config);
+        for field in [
+            "base_url",
+            "http_method",
+            "throw_exception_on_failure",
+            "ok_status_code_range",
+            "response_timeout",
+            "query_params",
+            "raw_query",
+            "allow_internal",
+            "blocked_hosts",
+            "max_body_size",
+            "read_timeout_ms",
+            "max_response_bytes",
+            "auth",
+            "token_provider",
+            "user_agent",
+            "bridge_endpoint",
+            "connection_close",
+            "skip_request_headers",
+            "skip_response_headers",
+            "follow_redirects",
+            "max_redirects",
+        ] {
+            assert!(
+                debug.contains(field),
+                "Debug output missing field '{field}': {debug}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -8999,7 +9396,7 @@ mod tests {
         // Mirror struct must stay in sync with bespoke from_components parser.
         assert_eq!(
             HttpEndpointConfig::uri_options().len(),
-            20,
+            21,
             "HttpEndpointUriConfig #[uri_param] count drifted from parser"
         );
     }

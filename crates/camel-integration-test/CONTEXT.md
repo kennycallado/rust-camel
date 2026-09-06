@@ -202,6 +202,34 @@ per endpoint URI. Arrivals map into `IncomingMessage` with the request
 line (`method`, `path`) and `status: None` — requests carry no status;
 status validation is inbound work.
 
+### Partner lanes key on strict wire bytes
+
+Partner arrival lanes key on the strict wire `path_and_query` bytes of each
+recorded request; receive paths derive from the declared partner endpoint URI.
+The key is never canonicalized, so producer-side byte drift stays detectable.
+When matching fails the harness reports the wire evidence: receive-timeout
+errors list the wire paths that arrived in the lane group
+(`ReceiveTimeout.lanes_recorded`), and partner-count mismatches list the
+recorded paths.
+
+### Diagnostic redaction uses the positive secret rule
+
+Wire-path diagnostics redact only query values whose DECODED key is in the
+secret set, per the ADR-0051 positive secret rule. The secret set is installed
+through `PartnerRouter::set_secret_query_keys` (and the `HttpPartner`
+adapter-level entry point). A percent-encoded secret key matches its decoded
+form; the raw key span stays as authored, only the value is masked. Unknown
+keys keep their authored bytes. When `raw_query_pairs` rejects the query (a
+malformed key escape), the ENTIRE query portion is masked fail-safe — the
+redactor never panics and never prints an undecodable secret.
+
+### Empty harness path is an apparatus error
+
+A harness HTTP target whose authored path is empty or absent fails parse as an
+apparatus-class transport error naming the declaration — never a silent `/`
+fallback lane. The check scans the authored target tail: it must start with
+`/`.
+
 ### Document execution stops at the first failure
 
 `run_scenario_document` executes actions in order through the shared

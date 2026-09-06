@@ -6,7 +6,7 @@ pub mod config;
 pub mod uri;
 
 pub use config::UriConfig;
-pub use uri::{UriComponents, parse_uri};
+pub use uri::{UriComponents, parse_uri, raw_query_pairs};
 
 // Re-export CamelError for macro-generated code
 pub use camel_api::CamelError;

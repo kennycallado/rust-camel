@@ -57,7 +57,7 @@ pub use camel_api::{
 };
 
 // Re-export camel-endpoint types for component convenience
-pub use camel_endpoint::{UriComponents, UriConfig, parse_uri};
+pub use camel_endpoint::{UriComponents, UriConfig, parse_uri, raw_query_pairs};
 
 // Re-export component-metadata types so macro-generated `uri_options()` and
 // `metadata()` resolve through the configured crate path (`#endpoint_crate`).

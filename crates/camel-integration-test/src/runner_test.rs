@@ -12,6 +12,8 @@ use std::time::Duration;
 use camel_api::Value;
 use futures::future::BoxFuture;
 
+#[cfg(feature = "http")]
+use crate::adapters::ReceiveTimeout;
 use crate::adapters::{
     FakeAdapter, IncomingMessage, OutgoingMessage, PartnerAdapter, PartnerRouter, ReceiveError,
     TransportError,
@@ -30,7 +32,7 @@ use crate::adapters::http::{HttpPartner, HttpWireRequest};
 #[cfg(feature = "http")]
 use crate::document::PartnerExpectation;
 #[cfg(feature = "http")]
-use crate::runner::matching_requests;
+use crate::runner::{matching_requests, partner_mismatch_detail};
 
 /// A bare endpoint reference with no provisioning and no bind variable.
 fn endpoint(uri: &str) -> EndpointRef {
@@ -1151,5 +1153,316 @@ async fn deadline_expiry_reports_final_actual() {
     assert!(
         detail.contains("actual 1"),
         "the mismatch must report the final snapshot's count: {detail}"
+    );
+}
+
+/// The partner count mismatch detail lists the recorded request
+/// paths, not only the counts, so a failed assertion is diagnosable
+/// from the failure text alone (spec: integration-tier, count
+/// mismatch lists recorded paths).
+#[test]
+#[cfg(feature = "http")]
+fn partner_mismatch_detail_lists_recorded_paths() {
+    let expected = PartnerExpectation {
+        count: 2,
+        method: None,
+        path: None,
+    };
+    let detail = partner_mismatch_detail(
+        "http://127.0.0.1:0/a",
+        &expected,
+        1,
+        &["/a?b=1".to_string(), "/c".to_string()],
+        &[],
+    );
+    assert!(
+        detail.contains("expected 2, actual 1"),
+        "the mismatch must name both counts: {detail}"
+    );
+    assert!(
+        detail.contains("/a?b=1"),
+        "must list the first path: {detail}"
+    );
+    assert!(detail.contains("/c"), "must list the second path: {detail}");
+}
+
+/// Secret-marked query keys redact in the partner count mismatch
+/// detail (ADR-0051 positive secret rule): the partner URI header,
+/// the `path` filter echo, and every recorded path mask the secret
+/// value, a non-secret pair stays visible, and the secret value never
+/// prints.
+#[test]
+#[cfg(feature = "http")]
+fn count_mismatch_redacts_secrets() {
+    let expected = PartnerExpectation {
+        count: 2,
+        method: None,
+        path: Some("/login?authPassword=hunter2&x=1".to_string()),
+    };
+    let detail = partner_mismatch_detail(
+        "http://127.0.0.1:0/login?authPassword=hunter2&x=1",
+        &expected,
+        1,
+        &["/login?authPassword=hunter2&x=1".to_string()],
+        &["authPassword".to_string()],
+    );
+    assert!(
+        detail.contains("authPassword=***"),
+        "the secret value must be masked: {detail}"
+    );
+    assert!(
+        !detail.contains("hunter2"),
+        "the secret must never print: {detail}"
+    );
+    assert!(
+        detail.contains("x=1"),
+        "non-secret pairs must stay visible: {detail}"
+    );
+    assert!(
+        detail.contains("partner http://127.0.0.1:0/login?authPassword=***&x=1"),
+        "the partner URI header must mask the secret too: {detail}"
+    );
+    assert!(
+        detail.contains("path /login?authPassword=***"),
+        "the path filter echo must mask the secret too: {detail}"
+    );
+}
+
+/// An adapter whose receive times out with a canned endpoint and
+/// lane evidence, handed over exactly as the adapter rendered them —
+/// pre-redacted at the harness construction sites, or RAW from a
+/// third-party adapter (ADR-0051).
+#[cfg(feature = "http")]
+struct CannedTimeout {
+    endpoint: String,
+    lanes_recorded: Vec<String>,
+}
+
+#[cfg(feature = "http")]
+impl PartnerAdapter for CannedTimeout {
+    fn receive<'a>(
+        &'a self,
+        _lane_key: &'a str,
+        _source_uri: &'a str,
+        deadline: Duration,
+    ) -> BoxFuture<'a, Result<IncomingMessage, ReceiveError>> {
+        Box::pin(async move {
+            Err(ReceiveError::Timeout(ReceiveTimeout {
+                endpoint: self.endpoint.clone(),
+                deadline,
+                elapsed: Duration::ZERO,
+                lanes_recorded: self.lanes_recorded.clone(),
+            }))
+        })
+    }
+}
+
+/// The printed receive-timeout failure carries the REDACTED endpoint
+/// the construction site built — never the raw declared endpoint —
+/// so a query-bearing declaration leaks no secret value into the CLI
+/// FAIL line or the JUnit artifacts (ADR-0051).
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn receive_timeout_failure_carries_redacted_endpoint() {
+    let declared = "http://host/login?authPassword=hunter2&x=1";
+    let router = PartnerRouter::new(BTreeMap::from([(
+        declared.to_string(),
+        Box::new(CannedTimeout {
+            endpoint: "http://host/login?authPassword=***&x=1".to_string(),
+            lanes_recorded: vec!["/login?authPassword=***&x=1".to_string()],
+        }) as Box<dyn PartnerAdapter>,
+    )]));
+    let doc = doc_with(vec![ScenarioAction::Receive {
+        from: endpoint(declared),
+        deadline: Duration::from_millis(50),
+        extract: None,
+    }]);
+    let mut vars = ScenarioVars::new();
+    let failure = run_scenario(&doc, &router, &mut vars)
+        .await
+        .expect_err("the receive must time out");
+    let text = failure.to_string();
+    assert!(
+        !text.contains("hunter2"),
+        "the raw secret must never print: {text}"
+    );
+    assert!(
+        text.contains("authPassword=***"),
+        "the redacted form must print: {text}"
+    );
+    assert!(
+        text.contains("x=1"),
+        "non-secret query keys must stay visible: {text}"
+    );
+}
+
+/// Render-site defense for third-party adapters: a receive-timeout
+/// handed over with a RAW endpoint and RAW lane evidence (no
+/// adapter-side redaction) still prints masked, because the runner
+/// holds the secret set and redaction is idempotent on already-masked
+/// output (ADR-0051).
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn raw_adapter_timeout_redacts_at_the_mapping() {
+    let declared = "http://host/login?authPassword=hunter2&x=1";
+    let router = PartnerRouter::new(BTreeMap::from([(
+        declared.to_string(),
+        Box::new(CannedTimeout {
+            endpoint: "http://host/login?authPassword=hunter2&x=1".to_string(),
+            lanes_recorded: vec!["/login?authPassword=hunter2&x=1".to_string()],
+        }) as Box<dyn PartnerAdapter>,
+    )]));
+    router.set_secret_query_keys(vec!["authPassword".to_string()]);
+    let doc = doc_with(vec![ScenarioAction::Receive {
+        from: endpoint(declared),
+        deadline: Duration::from_millis(50),
+        extract: None,
+    }]);
+    let mut vars = ScenarioVars::new();
+    let failure = run_scenario(&doc, &router, &mut vars)
+        .await
+        .expect_err("the receive must time out");
+    let text = failure.to_string();
+    assert!(
+        !text.contains("hunter2"),
+        "the raw secret must never print: {text}"
+    );
+    assert!(
+        text.contains("authPassword=***"),
+        "the redacted form must print: {text}"
+    );
+    assert!(
+        text.contains("x=1"),
+        "non-secret query keys must stay visible: {text}"
+    );
+}
+
+/// A body validation on a query-bearing declaration prints the
+/// REDACTED subject — never the raw declared endpoint — so a
+/// successful receive followed by a failing `received:` body check
+/// leaks no secret value into the FAIL line (ADR-0051).
+#[tokio::test]
+async fn body_validation_failure_carries_redacted_subject() {
+    let declared = "http://host/login?authPassword=hunter2&x=1";
+    let fake = FakeAdapter::scripted(vec![text_message("mismatch-me")]);
+    let router = router_for(declared, fake);
+    router.set_secret_query_keys(vec!["authPassword".to_string()]);
+    let doc = doc_with(vec![
+        ScenarioAction::Receive {
+            from: endpoint(declared),
+            deadline: Duration::from_secs(1),
+            extract: None,
+        },
+        ScenarioAction::Validate {
+            target: ScenarioTarget::LastReceived(endpoint(declared)),
+            expectation: ValidateExpectation::Message(Expectation::Equals(Value::String(
+                "expected".to_string(),
+            ))),
+            deadline: None,
+        },
+    ]);
+    let mut vars = ScenarioVars::new();
+    let failure = run_scenario(&doc, &router, &mut vars)
+        .await
+        .expect_err("the body validation must fail");
+    let text = failure.to_string();
+    assert!(
+        !text.contains("hunter2"),
+        "the raw secret must never print: {text}"
+    );
+    assert!(
+        text.contains("authPassword=***"),
+        "the redacted form must print: {text}"
+    );
+    assert!(
+        text.contains("x=1"),
+        "non-secret query keys must stay visible: {text}"
+    );
+}
+
+/// A lastReceived validation before any receive prints the REDACTED
+/// endpoint in its "no message has been received" detail (ADR-0051).
+#[tokio::test]
+async fn unreceived_validate_carries_redacted_subject() {
+    let declared = "http://host/login?authPassword=hunter2&x=1";
+    let router = router_for(declared, FakeAdapter::scripted(vec![]));
+    router.set_secret_query_keys(vec!["authPassword".to_string()]);
+    let doc = doc_with(vec![ScenarioAction::Validate {
+        target: ScenarioTarget::LastReceived(endpoint(declared)),
+        expectation: ValidateExpectation::Message(Expectation::Exists),
+        deadline: None,
+    }]);
+    let mut vars = ScenarioVars::new();
+    let failure = run_scenario(&doc, &router, &mut vars)
+        .await
+        .expect_err("the validation must find no message");
+    let text = failure.to_string();
+    assert!(
+        !text.contains("hunter2"),
+        "the raw secret must never print: {text}"
+    );
+    assert!(
+        text.contains("authPassword=***"),
+        "the redacted form must print: {text}"
+    );
+    assert!(
+        text.contains("x=1"),
+        "non-secret keys must stay visible: {text}"
+    );
+}
+
+/// The transport `Unbound` backstop on receive renders the declared
+/// endpoint redacted when the router holds a secret set (ADR-0051).
+#[tokio::test]
+async fn unbound_receive_failure_carries_redacted_endpoint() {
+    let declared = "http://host/login?authPassword=hunter2&x=1";
+    let router = PartnerRouter::new(BTreeMap::new());
+    router.set_secret_query_keys(vec!["authPassword".to_string()]);
+    let error = router
+        .receive(declared, declared, Duration::from_millis(1))
+        .await
+        .expect_err("no adapter is registered");
+    let ReceiveError::Transport(TransportError::Unbound { endpoint }) = error else {
+        panic!("expected an Unbound transport failure, got {error:?}");
+    };
+    assert!(
+        !endpoint.contains("hunter2"),
+        "the raw secret must never print: {endpoint}"
+    );
+    assert!(
+        endpoint.contains("authPassword=***"),
+        "the redacted form must print: {endpoint}"
+    );
+}
+
+/// The transport `Unbound` backstop on send renders the declared
+/// endpoint redacted when the router holds a secret set (ADR-0051).
+#[tokio::test]
+async fn unbound_send_failure_carries_redacted_endpoint() {
+    let declared = "http://host/login?authPassword=hunter2&x=1";
+    let router = PartnerRouter::new(BTreeMap::new());
+    router.set_secret_query_keys(vec!["authPassword".to_string()]);
+    let error = router
+        .send(
+            declared,
+            "partner://nowhere",
+            OutgoingMessage {
+                body: Value::Null,
+                headers: BTreeMap::new(),
+                method: "GET".to_string(),
+            },
+        )
+        .await
+        .expect_err("no adapter is registered");
+    let TransportError::Unbound { endpoint } = error else {
+        panic!("expected an Unbound transport failure, got {error:?}");
+    };
+    assert!(
+        !endpoint.contains("hunter2"),
+        "the raw secret must never print: {endpoint}"
+    );
+    assert!(
+        endpoint.contains("authPassword=***"),
+        "the redacted form must print: {endpoint}"
     );
 }

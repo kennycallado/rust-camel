@@ -14,9 +14,11 @@
 //! receives on demand.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use camel_api::Body;
@@ -102,8 +104,7 @@ pub enum TransportError {
 ///
 /// Verdict class: the scenario ran and the system under test failed
 /// it. A struct, not an enum: the taxonomy has one receive failure.
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
-#[error("nothing reached {endpoint} within {deadline:?} (waited {elapsed:?})")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReceiveTimeout {
     /// The endpoint URI that delivered nothing.
     pub endpoint: String,
@@ -111,6 +112,40 @@ pub struct ReceiveTimeout {
     pub deadline: Duration,
     /// How long the receive actually waited before giving up.
     pub elapsed: Duration,
+    /// The wire `path_and_query` strings that arrived in the matching
+    /// lane group, ALREADY REDACTED for diagnostics (ADR-0051
+    /// positive secret rule) by the construction site; empty when no
+    /// lane recorded an arrival. Appended to [`Display`](fmt::Display)
+    /// so byte divergence is diagnosed without external packet
+    /// capture.
+    pub lanes_recorded: Vec<String>,
+}
+
+impl fmt::Display for ReceiveTimeout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "nothing reached {} within {:?} (waited {:?})",
+            self.endpoint, self.deadline, self.elapsed
+        )?;
+        f.write_str(&lanes_suffix(&self.lanes_recorded))
+    }
+}
+
+impl std::error::Error for ReceiveTimeout {}
+
+/// The lane-evidence suffix shared by receive-timeout diagnostics:
+/// `; no arrival matched; lanes recorded: [/a, /b]`, or empty when
+/// the construction site saw no lanes.
+pub(crate) fn lanes_suffix(lanes_recorded: &[String]) -> String {
+    if lanes_recorded.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; no arrival matched; lanes recorded: [{}]",
+            lanes_recorded.join(", ")
+        )
+    }
 }
 
 /// Why a `receive` call did not deliver a message (ADR-0069 §7).
@@ -189,6 +224,15 @@ pub trait PartnerAdapter: Send + Sync {
     fn recorded_requests(&self) -> Vec<http::HttpWireRequest> {
         Vec::new()
     }
+
+    /// Stores the query keys classified secret (ADR-0051 positive
+    /// secret rule) for the adapter's diagnostic redaction; the
+    /// router fans the set out from the booted context's component
+    /// metadata. Default noop: adapters without wire-path
+    /// diagnostics render nothing to redact.
+    fn set_secret_query_keys(&self, keys: &[String]) {
+        let _ = keys;
+    }
 }
 
 /// Dispatches adapter calls by declared endpoint key to the
@@ -220,6 +264,11 @@ pub struct PartnerRouter {
     /// handle alive to park its own failure.
     #[cfg(feature = "http")]
     client_lane: Arc<http::ClientLane>,
+    /// The secret-marked query-key set (ADR-0051 positive secret
+    /// rule), fanned out from the booted context's component
+    /// metadata by [`set_secret_query_keys`](Self::set_secret_query_keys):
+    /// the redaction source of every wire-path diagnostic.
+    secret_query_keys: Arc<RwLock<Vec<String>>>,
 }
 
 impl PartnerRouter {
@@ -229,7 +278,37 @@ impl PartnerRouter {
             adapters,
             #[cfg(feature = "http")]
             client_lane: Arc::new(http::ClientLane::new()),
+            secret_query_keys: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+
+    /// Stores the secret-marked query-key set (ADR-0051) and fans it
+    /// out to every redaction site: kept here for partner-validate
+    /// mismatch rendering, set on the router-owned http client lane
+    /// and on every registered adapter for their receive-timeout
+    /// diagnostics. The set crosses the CLI→harness boundary as plain
+    /// strings, derived from the booted context's component metadata.
+    pub fn set_secret_query_keys(&self, keys: Vec<String>) {
+        *self
+            .secret_query_keys
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = keys.clone();
+        #[cfg(feature = "http")]
+        self.client_lane.set_secret_query_keys(&keys);
+        for adapter in self.adapters.values() {
+            adapter.set_secret_query_keys(&keys);
+        }
+    }
+
+    /// The stored secret-marked query-key set: the redaction source
+    /// of every diagnostic that quotes a declared endpoint or wire
+    /// path (partner-validate mismatch rendering, `Unbound`
+    /// backstops, lastReceived validation subjects).
+    pub(crate) fn secret_query_keys(&self) -> Vec<String> {
+        self.secret_query_keys
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// The adapter registered under `key`, if any.
@@ -319,8 +398,10 @@ impl PartnerRouter {
         }
         match self.adapters.get(declared) {
             Some(adapter) => adapter.send(declared, interpolated, msg).await,
+            // Backstop (the CLI pre-validates wiring), still redacted:
+            // the router holds the secret set.
             None => Err(TransportError::Unbound {
-                endpoint: declared.to_string(),
+                endpoint: redact_wire_path(declared, &self.secret_query_keys()),
             }),
         }
     }
@@ -394,8 +475,10 @@ impl PartnerRouter {
         }
         match self.adapters.get(lane_key.as_str()) {
             Some(adapter) => adapter.receive(&lane_key, interpolated, deadline).await,
+            // Backstop (the CLI pre-validates wiring), still redacted:
+            // the router holds the secret set.
             None => Err(ReceiveError::Transport(TransportError::Unbound {
-                endpoint: declared.to_string(),
+                endpoint: redact_wire_path(declared, &self.secret_query_keys()),
             })),
         }
     }
@@ -595,6 +678,7 @@ impl PartnerAdapter for FakeAdapter {
                     endpoint: source_uri.to_string(),
                     deadline,
                     elapsed: started.elapsed(),
+                    lanes_recorded: Vec::new(),
                 })),
             }
         })
@@ -605,6 +689,49 @@ impl PartnerAdapter for FakeAdapter {
 /// data, a poisoned lock carries no invariant to protect.
 fn lock_through<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Masks secret-marked query values in a recorded wire path for
+/// diagnostics (ADR-0051 positive secret rule): a pair whose DECODED
+/// key is in `secret_keys` keeps its raw key span but has its value
+/// masked as `***`; every other pair keeps its authored bytes,
+/// unknown keys included — apparatus-internal diagnostics stay
+/// maximally informative. A percent-encoded secret key
+/// (`%61uthPassword`) matches its decoded form. When
+/// [`raw_query_pairs`](camel_component_api::raw_query_pairs) rejects
+/// the query (a malformed key escape), the ENTIRE query portion is
+/// masked fail-safe: the redactor never panics and never prints an
+/// undecodable secret.
+pub(crate) fn redact_wire_path(path_and_query: &str, secret_keys: &[String]) -> String {
+    let Some(question_mark) = path_and_query.find('?') else {
+        return path_and_query.to_string();
+    };
+    let (path, query) = path_and_query.split_at(question_mark + 1);
+    if query.is_empty() {
+        return path_and_query.to_string();
+    }
+    let rendered = match camel_component_api::raw_query_pairs(query) {
+        Ok(pairs) => pairs
+            .into_iter()
+            .map(|(decoded_key, raw_pair)| {
+                if secret_keys.contains(&decoded_key) {
+                    match raw_pair.split_once('=') {
+                        // Mask the value; the raw key span stays as
+                        // authored (an encoded secret key stays
+                        // visibly encoded).
+                        Some((raw_key, _)) => format!("{raw_key}=***"),
+                        // A bare key carries no value to mask.
+                        None => raw_pair.to_string(),
+                    }
+                } else {
+                    raw_pair.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("&"),
+        Err(_) => "***".to_string(),
+    };
+    format!("{path}{rendered}")
 }
 
 // ---------------------------------------------------------------------------

@@ -794,8 +794,13 @@ fn http_endpoint_config_query_params() {
     let config =
         HttpEndpointConfig::from_uri("http://example.com/api?apiKey=secret&httpMethod=GET")
             .unwrap();
-    assert!(config.query_params.contains_key("apiKey"));
-    assert!(!config.query_params.contains_key("httpMethod")); // Camel option, not forwarded
+    // Authored pairs ride raw_query verbatim (the sole carrier);
+    // query_params is programmatic-only (http-query-wire-fidelity).
+    assert!(config.query_params.is_empty());
+    assert_eq!(
+        config.raw_query.as_deref(),
+        Some("apiKey=secret&httpMethod=GET")
+    );
 }
 
 #[test]

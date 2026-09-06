@@ -434,6 +434,24 @@ async fn run_scenario_full_boot(
     }
     let router = PartnerRouter::new(adapters);
 
+    // ADR-0051 positive secret rule: the booted context's `http`
+    // component metadata classifies secret query options; the router
+    // masks their values from every wire-path diagnostic.
+    let secret_keys: Vec<String> = ctx
+        .lock()
+        .await
+        .component_metadata("http")
+        .map(|metadata| {
+            metadata
+                .uri_options
+                .iter()
+                .filter(|option| option.secret)
+                .map(|option| option.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    router.set_secret_query_keys(secret_keys);
+
     // (e) The whole document through the shared runner: one row per
     // executed action, stop at the first failure. The scenario-tier
     // bindVars carry the partner's `host:port` authority (so a

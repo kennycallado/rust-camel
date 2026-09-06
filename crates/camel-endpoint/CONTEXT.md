@@ -49,6 +49,32 @@ The parser stores a sensitive non-`RAW` value literally without percent-decoding
 `RAW(...)` value, it removes the wrapper and stores the inner value. Non-sensitive `RAW(...)`
 values retain the wrapper for downstream handling.
 
+## Raw query contract
+
+`UriComponents` captures the authored query string byte-for-byte in an additive
+`raw_query: Option<String>` field at parse time. The structured `params` view is
+unchanged: duplicate keys still fail parse loudly and decoded access is
+untouched. The raw view is verbatim — no normalization, no re-encoding, no
+`RAW(...)` unwrapping at capture; redaction classification applies only at
+display surfaces.
+
+- `raw_query` is `None` when the URI has no query component and `Some("")` for a
+  bare trailing `?` marker — the marker survives verbatim and is never conflated
+  with absence.
+- `raw_query` is omitted from the redacting `Debug` implementation by design.
+  The manual `Debug` renders `scheme`, `path`, and the redacted `params` view
+  only, so authored query bytes never leak through a `Debug` trace.
+- `RAW(...)` wrapper text stays as authored in `raw_query`.
+
+`raw_query_pairs(query: &str) -> Result<Vec<(String, &str)>, CamelError>` is the
+wire-fidelity view: it splits the raw query into `(decoded_key, raw_span)`
+pairs. Keys are percent-decoded fallibly — a malformed key escape is an
+`InvalidUri` error naming the key — while values stay raw within their span
+(malformed value escapes are not decoded). Pairs are assumed duplicate-free
+(`parse_uri`'s structured view enforces it). It is re-exported from this crate
+and again through `camel-component-api`, where camel-http's raw filter and the
+integration-tier redactor consume it.
+
 ## `UriConfig` derive contract
 
 `#[derive(UriConfig)]` accepts these attributes:

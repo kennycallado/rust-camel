@@ -1550,28 +1550,23 @@ async fn http_query_params_forwarding_config() {
     use camel_component_http::HttpEndpointConfig;
     use camel_endpoint::UriConfig;
 
-    // Verify config parsing forwards non-Camel query params
+    // Verify config parsing preserves non-Camel query params
     let config = HttpEndpointConfig::from_uri(
         "http://api.example.com/v1/users?apiKey=secret123&httpMethod=GET&token=abc456",
     )
     .unwrap();
 
-    // apiKey and token should be preserved for forwarding
-    assert!(
-        config.query_params.contains_key("apiKey"),
-        "apiKey should be preserved"
+    // Authored pairs (apiKey, token) ride raw_query verbatim — the sole
+    // carrier of URI-authored pairs; query_params is programmatic-only
+    // (http-query-wire-fidelity).
+    assert_eq!(
+        config.raw_query.as_deref(),
+        Some("apiKey=secret123&httpMethod=GET&token=abc456"),
+        "apiKey and token should be preserved"
     );
     assert!(
-        config.query_params.contains_key("token"),
-        "token should be preserved"
-    );
-    assert_eq!(config.query_params.get("apiKey").unwrap(), "secret123");
-    assert_eq!(config.query_params.get("token").unwrap(), "abc456");
-
-    // httpMethod should NOT be in query_params (it's a Camel option)
-    assert!(
-        !config.query_params.contains_key("httpMethod"),
-        "httpMethod should not be forwarded"
+        config.query_params.is_empty(),
+        "query_params is programmatic-only, never auto-populated from the URI"
     );
 }
 

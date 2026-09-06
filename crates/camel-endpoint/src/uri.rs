@@ -13,6 +13,12 @@ pub struct UriComponents {
     pub path: String,
     /// Query parameters as key-value pairs.
     pub params: HashMap<String, String>,
+    /// Verbatim authored query bytes (without the leading `?`), preserved
+    /// byte-for-byte at parse time. `Some("")` for a bare trailing `?`,
+    /// `None` when the URI has no query component. Capture never unwraps
+    /// `RAW(...)` wrappers or re-encodes; redaction applies only at display
+    /// surfaces, so `Debug` deliberately omits this field.
+    pub raw_query: Option<String>,
 }
 
 const SENSITIVE_KEYS: &[&str] = &[
@@ -121,15 +127,16 @@ pub fn parse_uri(uri: &str) -> Result<UriComponents, CamelError> {
     // own grammar (`scheme:path?params`), not RFC 3986, so we do not reject a
     // second '?'. Operators who need a literal '?' in a value can percent-encode
     // as `%3F` (handled by percent_decode).
-    let (path, params) = match rest.split_once('?') {
-        Some((path, query)) => (path, parse_query(query)?),
-        None => (rest, HashMap::new()),
+    let (path, raw_query, params) = match rest.split_once('?') {
+        Some((path, query)) => (path, Some(query.to_string()), parse_query(query)?),
+        None => (rest, None, HashMap::new()),
     };
 
     Ok(UriComponents {
         scheme: scheme.to_string(),
         path: percent_decode(path)?,
         params,
+        raw_query,
     })
 }
 
@@ -214,6 +221,36 @@ fn split_query_pairs(query: &str) -> Vec<&str> {
 
     pairs.push(&query[start..]);
     pairs
+}
+
+/// Iterate the raw pairs of a query string, decoding only the keys.
+///
+/// Returns one `(decoded_key, raw_pair)` element per pair: the key is
+/// percent-decoded (so `connect%54imeout` decodes to `connectTimeout`),
+/// while `raw_pair` is the original authored `key=value` slice — values are
+/// never decoded here. This is the wire-fidelity view consumed by the
+/// camel-http raw filter, which forwards authored query bytes while still
+/// matching structured keys.
+///
+/// A malformed percent-escape in a key is an `InvalidUri` error naming the
+/// key; malformed escapes inside values stay raw within their span. Pairs
+/// must already be duplicate-free (enforced by `parse_uri`'s structured
+/// view); this function does not re-check duplicates.
+pub fn raw_query_pairs(query: &str) -> Result<Vec<(String, &str)>, CamelError> {
+    let mut pairs = Vec::new();
+    for pair in split_query_pairs(query)
+        .into_iter()
+        .filter(|s| !s.is_empty())
+    {
+        let key = match pair.split_once('=') {
+            Some((key, _)) => key,
+            // No '=': the whole span is the key. Bare keys are rejected by
+            // parse_query upstream; here they simply decode as-is.
+            None => pair,
+        };
+        pairs.push((percent_decode(key)?, pair));
+    }
+    Ok(pairs)
 }
 
 /// Parse a boolean parameter from a string, case-insensitively.
@@ -678,5 +715,69 @@ mod tests {
     fn parse_uri_percent_encoded_question_in_value_decodes() {
         let uri = parse_uri("x:p?key=a%3Fb").unwrap();
         assert_eq!(uri.params.get("key"), Some(&"a?b".to_string()));
+    }
+
+    // http-query-wire-fidelity: raw query capture must not disturb the
+    // structured params view — duplicate keys keep failing loudly.
+
+    #[test]
+    fn raw_query_preserves_authored_bytes() {
+        let uri = parse_uri("scheme://host/p?a=1&b=x%2Cy&c=t:1").unwrap();
+        assert_eq!(uri.raw_query, Some("a=1&b=x%2Cy&c=t:1".to_string()));
+        assert_eq!(uri.params.get("b"), Some(&"x,y".to_string()));
+    }
+
+    #[test]
+    fn raw_query_absent_is_none() {
+        let uri = parse_uri("scheme://host/p").unwrap();
+        assert!(uri.raw_query.is_none());
+    }
+
+    #[test]
+    fn raw_query_empty_marker_is_empty_string() {
+        let uri = parse_uri("scheme://host/p?").unwrap();
+        assert_eq!(uri.raw_query, Some(String::new()));
+    }
+
+    #[test]
+    fn raw_query_preserves_raw_wrapper_text() {
+        let uri = parse_uri("scheme://host/p?token=RAW(abc123)").unwrap();
+        assert_eq!(uri.raw_query, Some("token=RAW(abc123)".to_string()));
+    }
+
+    #[test]
+    fn raw_query_pairs_decodes_keys_keeps_raw_spans() {
+        let pairs = raw_query_pairs("a=1&connect%54imeout=5s&b=x%2Cy").unwrap();
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        let spans: Vec<&str> = pairs.iter().map(|(_, span)| *span).collect();
+        assert_eq!(keys, ["a", "connectTimeout", "b"]);
+        assert_eq!(spans, ["a=1", "connect%54imeout=5s", "b=x%2Cy"]);
+    }
+
+    #[test]
+    fn raw_query_pairs_malformed_key_escape_errors() {
+        match raw_query_pairs("%zz=1") {
+            Err(CamelError::InvalidUri(msg)) => {
+                assert!(msg.contains("%zz"), "error must name the key, got: {msg}");
+            }
+            _ => panic!("Expected InvalidUri naming the malformed key"),
+        }
+    }
+
+    #[test]
+    fn raw_query_pairs_malformed_value_escape_stays_raw() {
+        let pairs = raw_query_pairs("a=%zz").unwrap();
+        assert_eq!(pairs, vec![("a".to_string(), "a=%zz")]);
+    }
+
+    #[test]
+    fn duplicate_keys_still_rejected() {
+        let result = parse_uri("scheme://host/p?a=1&a=2");
+        match result {
+            Err(CamelError::InvalidUri(msg)) => {
+                assert_eq!(msg, "duplicate query parameter: a");
+            }
+            _ => panic!("Expected InvalidUri for duplicate key"),
+        }
     }
 }

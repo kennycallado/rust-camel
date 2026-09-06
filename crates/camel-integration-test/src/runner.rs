@@ -34,8 +34,9 @@ use camel_api::Value;
 
 #[cfg(feature = "http")]
 use crate::adapters::http::HttpWireRequest;
+use crate::adapters::redact_wire_path;
 use crate::adapters::{
-    IncomingMessage, OutgoingMessage, PartnerRouter, ReceiveError, TransportError,
+    IncomingMessage, OutgoingMessage, PartnerRouter, ReceiveError, TransportError, lanes_suffix,
 };
 use crate::document::{
     EndpointRef, Expectation, PartnerExpectation, Provisioning, ScenarioAction, ScenarioDocument,
@@ -200,12 +201,16 @@ pub enum ScenarioVerdict {
 pub enum ScenarioFailure {
     /// Nothing reached the partner before the deadline (verdict
     /// class, `receive-timeout`).
-    #[error("receive-timeout: {endpoint} delivered nothing within {deadline:?}")]
+    #[error("receive-timeout: {endpoint} delivered nothing within {deadline:?}{lanes}")]
     ReceiveTimeout {
         /// The endpoint URI that delivered nothing.
         endpoint: String,
         /// The deadline that elapsed.
         deadline: Duration,
+        /// Rendered lane evidence (already redacted, ADR-0051): the
+        /// `; no arrival matched; lanes recorded: [...]` suffix, or
+        /// empty when the construction site saw no lanes.
+        lanes: String,
     },
     /// A validation failed (verdict class, `validation-mismatch`).
     #[error("validation-mismatch: action {action}: {detail}")]
@@ -476,10 +481,24 @@ async fn receive_action(
         .receive(declared, &interpolated, deadline)
         .await
         .map_err(|source| match source {
-            ReceiveError::Timeout(_) => ScenarioFailure::ReceiveTimeout {
-                endpoint: from.endpoint.clone(),
-                deadline,
-            },
+            // Render-site defense: a third-party adapter may hand
+            // over RAW endpoint and lane evidence; the runner holds
+            // the secret set, and redaction is idempotent on
+            // already-masked output (ADR-0051).
+            ReceiveError::Timeout(timeout) => {
+                let keys = router.secret_query_keys();
+                ScenarioFailure::ReceiveTimeout {
+                    endpoint: redact_wire_path(&timeout.endpoint, &keys),
+                    deadline,
+                    lanes: lanes_suffix(
+                        &timeout
+                            .lanes_recorded
+                            .iter()
+                            .map(|lane| redact_wire_path(lane, &keys))
+                            .collect::<Vec<_>>(),
+                    ),
+                }
+            }
             ReceiveError::Transport(source) => ScenarioFailure::ActionTransport {
                 action: index,
                 source,
@@ -531,18 +550,24 @@ async fn validate_action(
         }
         (_, ValidateExpectation::Message(expectation)) => {
             let (value, subject) = match target {
-                ScenarioTarget::LastReceived(endpoint) => (
-                    vars.last_received(&endpoint.endpoint)
-                        .map(|message| message.body.clone())
-                        .ok_or_else(|| ScenarioFailure::ValidationMismatch {
-                            action: index,
-                            detail: format!(
-                                "no message has been received on {} to validate",
-                                endpoint.endpoint
-                            ),
-                        })?,
-                    format!("body last received on {}", endpoint.endpoint),
-                ),
+                ScenarioTarget::LastReceived(endpoint) => {
+                    // The declared endpoint may carry query bytes: the
+                    // subject renders redacted like every diagnostic
+                    // that quotes a wire path (ADR-0051).
+                    let redacted =
+                        redact_wire_path(&endpoint.endpoint, &router.secret_query_keys());
+                    (
+                        vars.last_received(&endpoint.endpoint)
+                            .map(|message| message.body.clone())
+                            .ok_or_else(|| ScenarioFailure::ValidationMismatch {
+                                action: index,
+                                detail: format!(
+                                    "no message has been received on {redacted} to validate"
+                                ),
+                            })?,
+                        format!("body last received on {redacted}"),
+                    )
+                }
                 ScenarioTarget::Variable(name) => (
                     vars.get(name)
                         .cloned()
@@ -677,9 +702,24 @@ async fn partner_validate_action(
             expected.path.as_deref(),
         )
     };
-    let mismatch = |actual: usize| ScenarioFailure::ValidationMismatch {
-        action: index,
-        detail: partner_mismatch_detail(uri, expected, actual),
+    let mismatch = |actual: usize| {
+        // The fresh recorded paths of this partner, in arrival order:
+        // the wire evidence the mismatch detail lists (redacted).
+        let recorded: Vec<String> = router
+            .recorded_requests(uri)
+            .iter()
+            .map(|request| request.path.clone())
+            .collect();
+        ScenarioFailure::ValidationMismatch {
+            action: index,
+            detail: partner_mismatch_detail(
+                uri,
+                expected,
+                actual,
+                &recorded,
+                &router.secret_query_keys(),
+            ),
+        }
     };
     match deadline {
         // No deadline: one immediate snapshot decides.
@@ -733,23 +773,57 @@ async fn partner_validate_action(
 }
 
 /// The mismatch detail of a failed partner count assertion: the
-/// partner URI, the applied filters (`method`, `path`) when set, and
-/// the expected-versus-actual counts.
+/// partner URI, the applied filters (`method`, `path`) when set, the
+/// expected-versus-actual counts, and the recorded request paths —
+/// `recorded` carries the RAW wire paths; every secret-marked query
+/// value is masked through the shared redactor before it reaches the
+/// detail (ADR-0051).
 #[cfg(feature = "http")]
-fn partner_mismatch_detail(uri: &str, expected: &PartnerExpectation, actual: usize) -> String {
-    let mut detail = format!("partner {uri}");
+pub(crate) fn partner_mismatch_detail(
+    uri: &str,
+    expected: &PartnerExpectation,
+    actual: usize,
+    recorded: &[String],
+    secret_keys: &[String],
+) -> String {
+    // The partner URI header may itself carry query bytes (a
+    // query-bearing declaration): render it redacted like every
+    // recorded path below (ADR-0051).
+    let mut detail = format!("partner {}", redact_wire_path(uri, secret_keys));
     if expected.method.is_some() || expected.path.is_some() {
         let filters = [
             expected
                 .method
                 .as_deref()
                 .map(|method| format!("method {method}")),
-            expected.path.as_deref().map(|path| format!("path {path}")),
+            expected
+                .path
+                .as_deref()
+                // The declared filter may carry query bytes: the echo
+                // renders redacted like the header and the recorded
+                // list (redaction is idempotent).
+                .map(|path| format!("path {}", redact_wire_path(path, secret_keys))),
         ];
         let joined = filters.into_iter().flatten().collect::<Vec<_>>().join(", ");
         detail.push_str(&format!(" ({joined})"));
     }
     detail.push_str(&format!(", expected {}, actual {actual}", expected.count));
+    // The recorded request paths, deduplicated in arrival order: what
+    // actually crossed the wire, every secret-marked query value
+    // masked before it reaches the detail (ADR-0051).
+    let mut unique: Vec<&str> = Vec::new();
+    for path in recorded {
+        if !unique.contains(&path.as_str()) {
+            unique.push(path);
+        }
+    }
+    if !unique.is_empty() {
+        let redacted: Vec<String> = unique
+            .iter()
+            .map(|path| redact_wire_path(path, secret_keys))
+            .collect();
+        detail.push_str(&format!(", recorded: [{}]", redacted.join(", ")));
+    }
     detail
 }
 

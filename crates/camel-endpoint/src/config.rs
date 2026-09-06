@@ -212,6 +212,7 @@ mod derive_tests {
                 ("timeout".to_string(), "500".to_string()),
                 ("enabled".to_string(), "false".to_string()),
             ]),
+            raw_query: None,
         };
 
         let config = ConfigWithParams::from_components(components).unwrap();

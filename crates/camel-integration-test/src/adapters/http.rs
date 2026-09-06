@@ -52,6 +52,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -87,6 +88,7 @@ use crate::adapters::ReceiveError;
 use crate::adapters::ReceiveTimeout;
 use crate::adapters::TransportError;
 use crate::adapters::lock_through;
+use crate::adapters::redact_wire_path;
 use crate::document::PartnerFault;
 
 /// The status served when no scripted response matches a request:
@@ -233,6 +235,11 @@ struct HttpInner {
     server: Arc<ServerState>,
     /// Signals the accept loop to stop when the partner drops.
     shutdown: Mutex<Option<watch::Sender<bool>>>,
+    /// The secret-marked query-key set for diagnostic redaction
+    /// (ADR-0051): set through the router's fan-out after the
+    /// partner moved into its box, read when a receive-timeout
+    /// renders lane evidence.
+    secret_query_keys: RwLock<Vec<String>>,
 }
 
 /// The harness-owned far side of an HTTP wire (ADR-0069 §5).
@@ -311,6 +318,7 @@ impl HttpPartner {
                 bound,
                 server,
                 shutdown: Mutex::new(Some(shutdown_tx)),
+                secret_query_keys: RwLock::new(Vec::new()),
             }),
         })
     }
@@ -328,6 +336,33 @@ impl HttpPartner {
         }
     }
 
+    /// The stored secret-marked query-key set (ADR-0051), set through
+    /// the router's fan-out.
+    fn stored_secret_query_keys(&self) -> Vec<String> {
+        self.inner
+            .secret_query_keys
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// The wire paths that arrived on this partner, unique, in
+    /// arrival order, each redacted through the stored secret-key set
+    /// (ADR-0051) — the lane evidence a receive-timeout reports.
+    fn recorded_lane_paths_redacted(&self) -> Vec<String> {
+        let secret_keys = self.stored_secret_query_keys();
+        let mut unique: Vec<String> = Vec::new();
+        for request in lock_through(&self.inner.server.requests).iter() {
+            if !unique.contains(&request.path) {
+                unique.push(request.path.clone());
+            }
+        }
+        unique
+            .iter()
+            .map(|path| redact_wire_path(path, &secret_keys))
+            .collect()
+    }
+
     /// Awaits the next listener arrival queued for the endpoint's
     /// request path (server role), bounded by the deadline. The path
     /// comes from the registered lane key — the endpoint identity —
@@ -339,10 +374,11 @@ impl HttpPartner {
         deadline: Duration,
     ) -> Result<IncomingMessage, ReceiveError> {
         // Same origin-form shape the listener keys lanes by: path and
-        // query, `/` when the URI carries none.
+        // query. An empty or absent path is an apparatus error — the
+        // declaration names no lane.
         let path = ParsedTarget::parse(lane_key)
-            .map(|target| target.target)
-            .unwrap_or_else(|_| "/".to_string());
+            .map_err(ReceiveError::Transport)?
+            .target;
         let lane = lane_for(&self.inner.server.arrivals, &path);
         let mut rx = lane.rx.lock().await;
         let started = tokio::time::Instant::now();
@@ -351,11 +387,18 @@ impl HttpPartner {
             // The lane's sender never drops (it lives in the lane map),
             // so a closed queue is unreachable; map it to a timeout so
             // the call still never hangs.
-            Ok(None) | Err(_) => Err(ReceiveError::Timeout(ReceiveTimeout {
-                endpoint: source_uri.to_string(),
-                deadline,
-                elapsed: started.elapsed(),
-            })),
+            // The endpoint name itself may carry query bytes (a
+            // query-bearing declaration): render it and the lane
+            // evidence both redacted (ADR-0051).
+            Ok(None) | Err(_) => {
+                let secret_keys = self.stored_secret_query_keys();
+                Err(ReceiveError::Timeout(ReceiveTimeout {
+                    endpoint: redact_wire_path(source_uri, &secret_keys),
+                    deadline,
+                    elapsed: started.elapsed(),
+                    lanes_recorded: self.recorded_lane_paths_redacted(),
+                }))
+            }
         }
     }
 }
@@ -395,6 +438,14 @@ impl PartnerAdapter for HttpPartner {
     fn recorded_requests(&self) -> Vec<HttpWireRequest> {
         self.recorder().recorded_requests()
     }
+
+    fn set_secret_query_keys(&self, keys: &[String]) {
+        *self
+            .inner
+            .secret_query_keys
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = keys.to_vec();
+    }
 }
 
 /// One parked response entry per lane key: the generation it was
@@ -428,6 +479,15 @@ pub struct ClientLane {
     /// entry with a fresh value, so the spawned exchange's failure
     /// transition can tell its own entry from a later send's.
     next_generation: AtomicU64,
+    /// The wire request targets launched through this lane, unique,
+    /// in launch order — the lane evidence an
+    /// [`await_parked`](Self::await_parked) receive-timeout reports
+    /// (redacted at render time, ADR-0051).
+    launched_wire_paths: Mutex<Vec<String>>,
+    /// The secret-marked query-key set for diagnostic redaction
+    /// (ADR-0051): set through the router's fan-out, read when a
+    /// timeout renders the launched wire paths.
+    secret_query_keys: RwLock<Vec<String>>,
 }
 
 impl ClientLane {
@@ -436,7 +496,19 @@ impl ClientLane {
         Self {
             in_flight: Arc::new(Mutex::new(BTreeMap::new())),
             next_generation: AtomicU64::new(0),
+            launched_wire_paths: Mutex::new(Vec::new()),
+            secret_query_keys: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Stores the secret-marked query-key set (ADR-0051): the router
+    /// fans it out; the [`await_parked`](Self::await_parked) timeout
+    /// renders lane evidence through it.
+    pub(crate) fn set_secret_query_keys(&self, keys: &[String]) {
+        *self
+            .secret_query_keys
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = keys.to_vec();
     }
 
     /// Validates the target URI and launches the HTTP roundtrip. The
@@ -463,9 +535,16 @@ impl ClientLane {
                 message: format!("connect to {}:{} failed: {e}", target.host, target.port),
             })?;
         // (c) A live connection: book the entry, stamped with a fresh
-        // generation.
+        // generation, and record the wire target this launch puts on
+        // the wire (the lane evidence a later timeout reports).
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
+        {
+            let mut launched = lock_through(&self.launched_wire_paths);
+            if !launched.contains(&target.target) {
+                launched.push(target.target.clone());
+            }
+        }
         lock_through(&self.in_flight).insert(lane_key.to_string(), LaneEntry { generation, rx });
         // (d) The exchange runs on the connected stream. A
         // post-connect failure parks the error under its own
@@ -524,7 +603,9 @@ impl ClientLane {
     }
 
     /// Awaits the response parked under the lane key, bounded by the
-    /// deadline; `endpoint` names the failure.
+    /// deadline; `endpoint` names the failure. A timeout reports the
+    /// wire paths this lane launched, every secret-marked query value
+    /// masked (ADR-0051).
     pub(crate) async fn await_parked(
         &self,
         endpoint: &str,
@@ -533,11 +614,25 @@ impl ClientLane {
     ) -> Result<IncomingMessage, ReceiveError> {
         let started = tokio::time::Instant::now();
         match tokio::time::timeout(deadline, rx).await {
-            Err(_) => Err(ReceiveError::Timeout(ReceiveTimeout {
-                endpoint: endpoint.to_string(),
-                deadline,
-                elapsed: started.elapsed(),
-            })),
+            Err(_) => {
+                let secret_keys = self
+                    .secret_query_keys
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                let lanes_recorded = lock_through(&self.launched_wire_paths)
+                    .iter()
+                    .map(|path| redact_wire_path(path, &secret_keys))
+                    .collect();
+                // The endpoint name may carry query bytes (a
+                // query-bearing target): render it redacted too.
+                Err(ReceiveError::Timeout(ReceiveTimeout {
+                    endpoint: redact_wire_path(endpoint, &secret_keys),
+                    deadline,
+                    elapsed: started.elapsed(),
+                    lanes_recorded,
+                }))
+            }
             Ok(Ok(result)) => result.map_err(ReceiveError::Transport),
             Ok(Err(_cancelled)) => Err(ReceiveError::Transport(TransportError::Other {
                 message: "http request task ended without delivering a response".to_string(),
@@ -548,13 +643,15 @@ impl ClientLane {
 
 /// The client role's parsed endpoint: a plain `http` authority and
 /// request target.
+#[derive(Debug)]
 struct ParsedTarget {
     /// Host from the endpoint URI.
     host: String,
     /// Port from the endpoint URI; 80 when absent.
     port: u16,
-    /// Origin-form request target (path and query); `/` when the
-    /// URI carries none.
+    /// Origin-form request target (path and query). The declaration
+    /// must carry a non-empty one: an empty or absent path is an
+    /// apparatus-class parse error, never a silent `/`.
     target: String,
 }
 
@@ -580,11 +677,35 @@ impl ParsedTarget {
             .ok_or_else(|| invalid("no host".to_string()))?
             .to_string();
         let port = uri.port_u16().unwrap_or(80);
+        // The `http` crate normalizes an absent path to `/`; the
+        // harness reads the AUTHORED bytes, so a declaration like
+        // `http://host` (no path after the authority) fails as an
+        // apparatus error naming the declaration — never a silent
+        // `/` lane. Once the authored tail starts with `/`,
+        // `path_and_query()` is that non-empty tail.
+        let authored_target = endpoint
+            .split_once("://")
+            .map(|(_, rest)| {
+                let start = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+                &rest[start..]
+            })
+            .unwrap_or("");
+        if !authored_target.starts_with('/') {
+            // redaction: the raw declaration names itself in this
+            // apparatus error, but the secret-key set lives on the
+            // router and adapters, not on this free fn — threading it
+            // in would be new plumbing beyond the sweep's reach. The
+            // leak needs a doubly-pathological declaration (no path
+            // AND a secret-bearing query).
+            return Err(invalid(
+                "empty or absent path: a harness target must declare a request path, never a silent `/` lane"
+                    .to_string(),
+            ));
+        }
         let target = uri
             .path_and_query()
             .map(|pq| pq.as_str().to_string())
-            .filter(|pq| !pq.is_empty())
-            .unwrap_or_else(|| "/".to_string());
+            .unwrap_or_default();
         Ok(Self { host, port, target })
     }
 }
@@ -902,6 +1023,7 @@ fn wire_body_to_value(content_type: Option<&str>, bytes: &[u8]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::PartnerRouter;
 
     /// The default scripted response is well-formed serve-once OK:
     /// the derived `Default` would zero both `status` and `times`,
@@ -917,6 +1039,28 @@ mod tests {
         assert_eq!(scripted.fault, None);
         assert!(scripted.headers.is_empty());
         assert!(scripted.body.is_empty());
+    }
+
+    /// A harness target declaration whose path is empty or absent is
+    /// an apparatus-class parse error naming the declaration — never
+    /// a silent `/` lane (the recorded-authority-form default at
+    /// `serve` is a wire-recording concern, not a declaration parse).
+    #[test]
+    fn parsed_target_empty_path_is_apparatus_error() {
+        let error = ParsedTarget::parse("http://host").expect_err("an empty path must fail");
+        match error {
+            TransportError::Other { message } => {
+                assert!(
+                    message.contains("http://host"),
+                    "must name the declaration: {message}"
+                );
+                assert!(
+                    message.contains("path"),
+                    "must name the missing path: {message}"
+                );
+            }
+            other => panic!("expected an apparatus-class transport error, got {other:?}"),
+        }
     }
 
     /// The replace-then-fail race contract, deterministic: the
@@ -948,5 +1092,233 @@ mod tests {
             Ok(Err(TransportError::Other { message })) => assert_eq!(message, "boom"),
             other => panic!("the parked error must surface on receive, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Wire-path diagnostics and redaction (spec: integration-tier)
+    // -----------------------------------------------------------------
+
+    /// One raw HTTP/1.1 exchange straight to the partner's bound
+    /// address: the exact authored target bytes reach the wire with
+    /// no client-side normalization, and the partner records before
+    /// it answers, so a returned call means a recorded arrival.
+    async fn raw_request(authority: &str, method: &str, target: &str) {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+        let mut stream = tokio::net::TcpStream::connect(authority)
+            .await
+            .expect("the partner's bound address must accept");
+        let request = format!(
+            "{method} {target} HTTP/1.1\r\nhost: {authority}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("the raw request must leave");
+        let mut sink = Vec::new();
+        stream
+            .read_to_end(&mut sink)
+            .await
+            .expect("the partner must close after its response");
+    }
+
+    /// A router over one started permissive partner registered under
+    /// `declared`, plus the partner's bound authority.
+    async fn partner_router(declared: &str) -> (PartnerRouter, String) {
+        let partner = HttpPartner::start_permissive(200)
+            .await
+            .expect("partner must bind 127.0.0.1:0");
+        let authority = partner.bound_addr().to_string();
+        let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
+        adapters.insert(declared.to_string(), Box::new(partner));
+        (PartnerRouter::new(adapters), authority)
+    }
+
+    /// The rendered timeout message of a receive on `declared` under
+    /// an already-expired budget.
+    async fn expired_receive_message(router: &PartnerRouter, declared: &str) -> String {
+        match router.receive(declared, declared, Duration::ZERO).await {
+            Err(ReceiveError::Timeout(timeout)) => timeout.to_string(),
+            other => panic!("expected a receive timeout, got {other:?}"),
+        }
+    }
+
+    /// A receive-timeout lists the wire paths that arrived in the
+    /// partner's lanes, so byte divergence is diagnosed from the
+    /// failure text alone. `x` is not secret-marked: the path stays
+    /// in clear.
+    #[tokio::test]
+    async fn receive_timeout_message_lists_arrived_wire_paths() {
+        let (router, authority) = partner_router("http://127.0.0.1:0/other").await;
+        raw_request(&authority, "GET", "/api?x=1").await;
+        let message = expired_receive_message(&router, "http://127.0.0.1:0/other").await;
+        assert!(
+            message.contains("lanes recorded: [/api?x=1]"),
+            "must list the arrived wire path: {message}"
+        );
+    }
+
+    /// The arrivals-lane receive-timeout redacts secret-marked query
+    /// values (ADR-0051): the key set is derived from a directly
+    /// constructed `ComponentMetadata` the way the CLI derives it
+    /// from the booted context — no context boot needed. The secret
+    /// value is masked, non-secret pairs stay visible, the secret
+    /// value never prints.
+    #[tokio::test]
+    async fn arrivals_lane_timeout_redacts_secrets() {
+        use camel_api::component_metadata::{ComponentMetadata, OptionKind, UriOption};
+        let (router, authority) = partner_router("http://127.0.0.1:0/elsewhere").await;
+        let mut metadata = ComponentMetadata::minimal("http");
+        metadata.uri_options.push(
+            UriOption::new(
+                "authPassword",
+                "partner authentication password",
+                OptionKind::String,
+            )
+            .secret(),
+        );
+        let secret_keys: Vec<String> = metadata
+            .uri_options
+            .iter()
+            .filter(|option| option.secret)
+            .map(|option| option.name.clone())
+            .collect();
+        router.set_secret_query_keys(secret_keys);
+        raw_request(&authority, "GET", "/login?authPassword=hunter2&x=1").await;
+        let message = expired_receive_message(&router, "http://127.0.0.1:0/elsewhere").await;
+        assert!(
+            message.contains("authPassword=***"),
+            "the secret value must be masked: {message}"
+        );
+        assert!(
+            !message.contains("hunter2"),
+            "the secret must never print: {message}"
+        );
+        assert!(
+            message.contains("x=1"),
+            "non-secret pairs must stay visible: {message}"
+        );
+    }
+
+    /// A percent-encoded secret key matches its DECODED form: the raw
+    /// key span stays as authored, only the value is masked.
+    #[tokio::test]
+    async fn encoded_secret_query_key_redacts() {
+        let (router, authority) = partner_router("http://127.0.0.1:0/elsewhere").await;
+        router.set_secret_query_keys(vec!["authPassword".to_string()]);
+        raw_request(&authority, "GET", "/login?%61uthPassword=hunter2&x=1").await;
+        let message = expired_receive_message(&router, "http://127.0.0.1:0/elsewhere").await;
+        assert!(
+            message.contains("%61uthPassword=***&x=1"),
+            "the raw key span stays, the value masks: {message}"
+        );
+        assert!(
+            !message.contains("hunter2"),
+            "the secret must never print: {message}"
+        );
+        assert!(
+            message.contains("x=1"),
+            "non-secret pairs stay visible: {message}"
+        );
+    }
+
+    /// The client-lane (`await_parked`) receive-timeout redacts the
+    /// same way: a send parks a roundtrip the partner holds (a
+    /// scripted delay longer than the test), the receive under an
+    /// expired budget times out on the parked response, and the
+    /// launched wire path renders masked.
+    #[tokio::test]
+    async fn await_parked_timeout_redacts_secrets() {
+        let scripted = ScriptedResponse {
+            path: Some("/login?authPassword=hunter2&x=1".to_string()),
+            delay: Some(Duration::from_secs(30)),
+            ..ScriptedResponse::default()
+        };
+        let partner = HttpPartner::start(vec![scripted])
+            .await
+            .expect("partner must bind 127.0.0.1:0");
+        let authority = partner.bound_addr().to_string();
+        let declared = format!("http://{authority}/login?authPassword=hunter2&x=1");
+        let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
+        adapters.insert(declared.clone(), Box::new(partner));
+        let router = PartnerRouter::new(adapters);
+        router.set_secret_query_keys(vec!["authPassword".to_string()]);
+        router
+            .send(
+                &declared,
+                &declared,
+                OutgoingMessage {
+                    body: Value::Null,
+                    headers: BTreeMap::new(),
+                    method: "GET".to_string(),
+                },
+            )
+            .await
+            .expect("the send must dial the partner");
+        // The partner records before it holds the response: wait for
+        // the recording so the timeout renders settled evidence.
+        for _ in 0..2000 {
+            if !router.recorded_requests(&declared).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let message = expired_receive_message(&router, &declared).await;
+        assert!(
+            message.contains("authPassword=***"),
+            "the secret value must be masked: {message}"
+        );
+        assert!(
+            !message.contains("hunter2"),
+            "the secret must never print: {message}"
+        );
+        assert!(
+            message.contains("x=1"),
+            "non-secret pairs must stay visible: {message}"
+        );
+    }
+
+    /// End to end: a send targeting a declared endpoint's authored
+    /// query bytes lands in the matching lane — the arrival key
+    /// equals the declared endpoint's wire `path_and_query` — and the
+    /// client-role receive returns the parked roundtrip.
+    #[tokio::test]
+    async fn query_bearing_receive_matches_end_to_end() {
+        let partner = HttpPartner::start_permissive(200)
+            .await
+            .expect("partner must bind 127.0.0.1:0");
+        let authority = partner.bound_addr().to_string();
+        let declared = format!("http://{authority}/api?flag=a&x=1");
+        let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
+        adapters.insert(declared.clone(), Box::new(partner));
+        let router = PartnerRouter::new(adapters);
+        router
+            .send(
+                &declared,
+                &declared,
+                OutgoingMessage {
+                    body: Value::Null,
+                    headers: BTreeMap::new(),
+                    method: "GET".to_string(),
+                },
+            )
+            .await
+            .expect("the send must dial the declared endpoint");
+        let message = router
+            .receive(&declared, &declared, Duration::from_secs(5))
+            .await
+            .expect("the roundtrip must complete");
+        assert_eq!(
+            message.status,
+            Some(200),
+            "the permissive partner serves 200"
+        );
+        let recorded = router.recorded_requests(&declared);
+        assert_eq!(recorded.len(), 1, "exactly one request crossed the wire");
+        assert_eq!(
+            recorded[0].path, "/api?flag=a&x=1",
+            "the arrival key equals the declared wire path_and_query"
+        );
+        assert_eq!(recorded[0].method, "GET");
     }
 }

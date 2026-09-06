@@ -366,6 +366,7 @@ fn pattern_field_collects_namespace_pairs_at_parse_time() {
         scheme: "x".to_string(),
         path: "p".to_string(),
         params: query,
+        raw_query: None,
     };
 
     let cfg = C::parse_uri_components(parts).expect("parse should succeed");
