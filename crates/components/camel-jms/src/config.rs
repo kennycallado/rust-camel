@@ -635,6 +635,48 @@ mod tests {
         assert_eq!(redact_broker_url("tcp://host:61616"), "tcp://host:61616");
     }
 
+    /// Exact-output pin: userinfo is fully masked by `***`, never partially
+    /// truncated, in scheme://...@ authority position.
+    #[test]
+    fn redact_exact_userinfo_mask() {
+        assert_eq!(
+            redact_broker_url("tcp://admin:secretpass@broker.example.com:61616"),
+            "tcp://***@broker.example.com:61616"
+        );
+    }
+
+    /// Exact-output pin: sensitive query params redact to `<redacted>`,
+    /// benign params survive byte-for-byte, `&` separators preserved.
+    #[test]
+    fn redact_exact_query_join() {
+        assert_eq!(
+            redact_broker_url("tcp://host:61616?password=p&user=u&keepAlive=true"),
+            "tcp://host:61616?password=<redacted>&user=<redacted>&keepAlive=true"
+        );
+    }
+
+    /// Exact-output pin: a bare `user@host` (no scheme) is NOT an authority
+    /// position — passthrough untouched.
+    #[test]
+    fn redact_exact_bare_at_passthrough() {
+        assert_eq!(redact_broker_url("admin@host"), "admin@host");
+    }
+
+    /// Exact-output pin: delimiter-exact query redaction on the ActiveMQ
+    /// failover form — the whole query part after '?' must match verbatim,
+    /// no dropped params, no mangled separators.
+    #[test]
+    fn redact_exact_failover_param_boundaries() {
+        let redacted = redact_broker_url(
+            "failover:(tcp://host:61616)?jms.userName=admin&jms.password=secret&keepAlive=true",
+        );
+        let (_, query) = redacted.split_once('?').expect("query segment after '?'");
+        assert_eq!(
+            query,
+            "jms.userName=<redacted>&jms.password=<redacted>&keepAlive=true"
+        );
+    }
+
     #[test]
     fn broker_config_debug_redacts_url_credentials() {
         let cfg = BrokerConfig {

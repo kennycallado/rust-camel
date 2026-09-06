@@ -351,6 +351,51 @@ mod tests {
         ))); // Teredo
     }
 
+    // ---- IPv4-mapped mirrors (::ffff:0:0/96) ----
+
+    #[test]
+    fn v4_mapped_private_loopback_linklocal_blocked() {
+        assert!(is_ssrf_blocked_ip(&v6("::ffff:10.0.0.1")));
+        assert!(is_ssrf_blocked_ip(&v6("::ffff:127.0.0.1")));
+        assert!(is_ssrf_blocked_ip(&v6("::ffff:169.254.1.1")));
+    }
+
+    #[test]
+    fn v4_mapped_multicast_zero_octet_blocked() {
+        assert!(is_ssrf_blocked_ip(&v6("::ffff:224.0.0.1")));
+        assert!(is_ssrf_blocked_ip(&v6("::ffff:0.1.2.3")));
+    }
+
+    #[test]
+    fn v4_mapped_cgnat_corners() {
+        // CGN 100.64.0.0/10 boundary: 100.63 and 100.128 are NOT CGN
+        assert!(!is_ssrf_blocked_ip(&v6("::ffff:100.63.0.1")));
+        assert!(is_ssrf_blocked_ip(&v6("::ffff:100.64.0.1")));
+        assert!(is_ssrf_blocked_ip(&v6("::ffff:100.127.0.1")));
+        assert!(!is_ssrf_blocked_ip(&v6("::ffff:100.128.0.1")));
+    }
+
+    #[test]
+    fn v4_mapped_benchmark_pair_blocked() {
+        assert!(is_ssrf_blocked_ip(&v6("::ffff:198.18.0.1")));
+        assert!(is_ssrf_blocked_ip(&v6("::ffff:198.19.255.254")));
+    }
+
+    #[test]
+    fn v4_mapped_reserved_blocked() {
+        assert!(is_ssrf_blocked_ip(&v6("::ffff:240.0.0.1")));
+    }
+
+    #[test]
+    fn v4_mapped_public_stay_unblocked() {
+        assert!(!is_ssrf_blocked_ip(&v6("::ffff:8.8.8.8")));
+        assert!(!is_ssrf_blocked_ip(&v6("::ffff:8.64.0.1")));
+        // 199.18 is NOT benchmark (only 198.18/15 is)
+        assert!(!is_ssrf_blocked_ip(&v6("::ffff:199.18.0.1")));
+        // 223.x is the last public block before reserved 240.0.0.0/4
+        assert!(!is_ssrf_blocked_ip(&v6("::ffff:223.255.255.255")));
+    }
+
     // ---- SsrfPolicy ----
 
     #[test]
