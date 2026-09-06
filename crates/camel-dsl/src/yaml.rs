@@ -241,6 +241,28 @@ fn parse_yaml_to_canonical_inner(
         .collect()
 }
 
+/// Whether `s` contains any character outside the YAML 1.2 c-printable set.
+///
+/// Prohibited classes: C0 controls minus TAB/LF/CR (U+0000..=U+0008, U+000B,
+/// U+000C, U+000E..=U+001F), DEL (U+007F), C1 controls minus NEL (U+0080..=
+/// U+0084, U+0086..=U+009F), and the noncharacters U+FFFE/U+FFFF. Everything
+/// else — including TAB, LF, CR, and NEL (U+0085) — is printable and returns
+/// `false`. Escaped forms (e.g. `\u007f` as six ASCII bytes) do not trip the
+/// classifier.
+pub fn yaml_stream_has_non_printable(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(c,
+            '\u{0}'..='\u{8}'
+            | '\u{b}' | '\u{c}'
+            | '\u{e}'..='\u{1f}'
+            | '\u{7f}'
+            | '\u{80}'..='\u{84}'
+            | '\u{86}'..='\u{9f}'
+            | '\u{fffe}' | '\u{ffff}'
+        )
+    })
+}
+
 fn yaml_source_to_value_source(
     yaml: crate::route_ast::RouteDslPermissionValueSource,
 ) -> Result<camel_auth::PermissionValueSource, CamelError> {
@@ -5483,5 +5505,33 @@ routes:
         let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
         assert!(err.contains("audiences"), "got: {err}");
         assert!(err.contains("security_policy"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod yaml_stream_classifier {
+    use super::*;
+
+    #[test]
+    fn yaml_stream_has_non_printable_rejects_each_prohibited_class() {
+        for s in [
+            "\u{0}", "\u{8}", "\u{b}", "\u{c}", "\u{e}", "\u{1f}", "\u{7f}", "\u{80}", "\u{84}",
+            "\u{86}", "\u{9f}", "\u{fffe}", "\u{ffff}",
+        ] {
+            assert!(
+                yaml_stream_has_non_printable(s),
+                "expected non-printable for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_stream_has_non_printable_allows_printable_and_line_breaks() {
+        for s in ["", "a\tb", "a\nb", "a\rb", "a\u{85}b", "di*rect:e\\u007fnd"] {
+            assert!(
+                !yaml_stream_has_non_printable(s),
+                "expected printable for {s:?}"
+            );
+        }
     }
 }

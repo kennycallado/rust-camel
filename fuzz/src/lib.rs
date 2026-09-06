@@ -123,10 +123,28 @@ pub fn dsl_parity_harness(data: &[u8]) {
 
 /// Deserialize `s` with the YAML serde front-end and enforce parity with the
 /// JSON deserialization.
+///
+/// A stream carrying raw non-printable characters (YAML 1.2 c-printable
+/// prohibited classes) is spec-correctly rejected by the YAML front-end, so
+/// only the expected `Err` is asserted — no step-layer comparison is
+/// possible without a YAML value. All other documents take the strict path.
 fn expect_yaml_overlap(s: &str, json_routes: &RouteDslRoutes) {
+    if camel_dsl::yaml::yaml_stream_has_non_printable(s) {
+        expect_expected_rejection(s);
+        return;
+    }
     let result = noyalib::compat::serde_yaml::from_str::<RouteDslRoutes>(s);
     let yaml_routes = panic_if_yaml_rejects(result);
     assert_step_layer_parity(json_routes, &yaml_routes);
+}
+
+/// Assert the YAML front-end rejects a stream carrying raw non-printable
+/// characters; that rejection is spec-correct, not a parity divergence.
+fn expect_expected_rejection(s: &str) {
+    assert!(
+        noyalib::compat::serde_yaml::from_str::<RouteDslRoutes>(s).is_err(),
+        "parity divergence: yaml accepts document with raw non-printable characters"
+    );
 }
 
 /// Panic when the YAML front-end rejects a JSON-valid document; otherwise
@@ -166,6 +184,16 @@ mod tests {
             {"route_template_ref": "tpl", "parameters": {"uri": "tick"}}
         ]
     }"#;
+
+    /// Minimized DEL document from fuzz run 33984285881 (93 bytes,
+    /// JSON-valid): the raw U+007F byte makes YAML spec-correctly reject the
+    /// stream.
+    const MINIMIZED_DEL_DOC: &str = "{\"routes\":[{\"id\":\"r1\",\"from\":\"dtart\",\"steps\":[{\"to\":\"di*rect:ewwwwwwwwwwwwww\x7fwwwwwwwwnd\"}]}]}";
+
+    /// Same document with the raw DEL byte replaced by the six ASCII bytes
+    /// `\u007f` (98 wire bytes): printable wire, so strict parity must still
+    /// hold.
+    const ESCAPED_DEL_DOC: &str = "{\"routes\":[{\"id\":\"r1\",\"from\":\"dtart\",\"steps\":[{\"to\":\"di*rect:ewwwwwwwwwwwwww\\u007fwwwwwwwwnd\"}]}]}";
 
     const MISSING_REF_JSON: &str = r#"{
         "routes": [],
@@ -267,6 +295,16 @@ mod tests {
     #[test]
     fn dsl_parity_harness_invalid_utf8_returns() {
         dsl_parity_harness(b"\xff");
+    }
+
+    #[test]
+    fn harness_del_document_does_not_panic() {
+        dsl_parity_harness(MINIMIZED_DEL_DOC.as_bytes());
+    }
+
+    #[test]
+    fn escaped_del_document_keeps_strict_parity() {
+        dsl_parity_harness(ESCAPED_DEL_DOC.as_bytes());
     }
 
     #[test]
