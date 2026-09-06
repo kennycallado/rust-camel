@@ -561,7 +561,6 @@ async fn redis_consumer_pubsub_mode() {
     let conn_str = shared_redis().await.to_string();
 
     let h = CamelTestContext::builder()
-        .with_timer()
         .with_mock()
         .with_component(RedisComponent::new())
         .build()
@@ -582,17 +581,56 @@ async fn redis_consumer_pubsub_mode() {
     .unwrap();
 
     h.add_route(consumer_route).await.unwrap();
-
-    let producer_route = RouteBuilder::from("timer:pub?period=2000&repeatCount=1")
-        .set_header("CamelRedis.Channel", Value::String("testchannel".into()))
-        .set_header("CamelRedis.Value", Value::String("pubsub-message".into()))
-        .to(format!("redis://{}?command=PUBLISH", conn_str))
-        .route_id("redis-pubsub-publisher")
-        .build()
-        .unwrap();
-
-    h.add_route(producer_route).await.unwrap();
     h.start().await;
+
+    // The pubsub consumer marks itself ready before its SUBSCRIBE registers
+    // on the server, so start() returning does not guarantee delivery
+    // eligibility — and pubsub has no replay: a publish that lands before the
+    // subscription is registered is lost forever (bd rc-8kha). Gate the
+    // publish on the server actually listing the channel subscription.
+    let barrier_client =
+        redis::Client::open(format!("redis://{conn_str}")).expect("valid barrier redis url");
+    // R1 (ADR-0069 s13): every wait carries a deadline — connect included.
+    let barrier_conn = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        barrier_client.get_multiplexed_async_connection(),
+    )
+    .await
+    .expect("barrier redis connect within 5s")
+    .expect("barrier redis connection");
+
+    wait_until(
+        "redis pubsub subscription registered on server",
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_millis(100),
+        || {
+            let mut conn = barrier_conn.clone();
+            async move {
+                let channels: Vec<String> = redis::cmd("PUBSUB")
+                    .arg("CHANNELS")
+                    .arg("testchannel")
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(|e| format!("PUBSUB CHANNELS probe failed: {e}"))?;
+                Ok(channels.iter().any(|c| c == "testchannel"))
+            }
+        },
+    )
+    .await
+    .expect("subscription should register on the server before publish");
+
+    // Deterministic publish: only after the subscription is server-visible.
+    // The producer PUBLISH path keeps dedicated coverage in the
+    // redis_pubsub_producer test above.
+    {
+        let mut conn = barrier_conn.clone();
+        redis::cmd("PUBLISH")
+            .arg("testchannel")
+            .arg("pubsub-message")
+            .query_async::<i64>(&mut conn)
+            .await
+            .expect("test publish failed");
+    }
 
     let endpoint = h.mock().get_endpoint("received").unwrap();
     wait_until(

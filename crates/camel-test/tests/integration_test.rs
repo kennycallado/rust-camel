@@ -2073,12 +2073,23 @@ async fn aggregator_agg_timeout_emits_after_inactivity() {
     h.add_route(route).await.unwrap();
     h.start().await;
 
-    // Wait for timeout to fire (200ms + margin)
-    tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+    // Wait for the inactivity-timeout emission to reach the mock (observed,
+    // not assumed: a fixed sleep breaks under parallel CI load — bd rc-95ic).
+    let endpoint = h.mock().get_endpoint("agg-timeout-result").unwrap();
+    wait_until(
+        "aggregator inactivity timeout emits exchange",
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_millis(50),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .expect("aggregate should complete on inactivity timeout");
 
     h.stop().await;
 
-    let endpoint = h.mock().get_endpoint("agg-timeout-result").unwrap();
     endpoint.assert_exchange_count(1).await;
 }
 
