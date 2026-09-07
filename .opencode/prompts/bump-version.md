@@ -18,10 +18,10 @@ being released.
    `sed -i 's/version = "=OLD"/version = "=NEW"/g' Cargo.toml`
 3. Refresh lockfile workspace entries: `cargo update --workspace`. No build
    needed — pin consistency is what matters. Do NOT use
-   `cargo generate-lockfile`: it re-resolves the entire lockfile (v0.39.0
-   churned 662 lines of transitive deps inside the release commit).
+   `cargo generate-lockfile`: it re-resolves the entire lockfile (a past
+   release churned 662 lines of transitive deps inside the release commit).
 4. Commit: `chore(release): bump version to X.Y.Z` — SUBJECT ONLY, no body,
-   no bullets, no Bd reference (matches v0.37.0/v0.38.0).
+   no bullets, no Bd reference (matches all previous release commits).
 5. Local tag: `git tag vX.Y.Z`
 
 Note: README carries no version reference — nothing to update there.
