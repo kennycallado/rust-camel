@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::run::tests::EnvVarGuard;
 use std::fs;
 use std::path::Path;
 
@@ -1228,5 +1229,269 @@ async fn max_count_zero_asserts_absence() {
     assert!(
         out.contains("MockEndpoint 'out': expected at most 0 exchanges, got 1"),
         "an arrival must break the maxCount 0 claim: {out}"
+    );
+}
+
+/// Write a route file whose circuit breaker `open_duration_ms` carries an
+/// env placeholder with a 750 ms default.
+fn write_cb_route_file(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        r#"
+routes:
+  - id: cb-route
+    from: "direct:start"
+    circuit_breaker:
+      failure_threshold: 4
+      open_duration_ms: ${env:CB_MS:-750}
+    steps:
+      - to: "mock:out"
+"#,
+    )
+    .expect("write cb route file"); // allow-unwrap
+    path
+}
+
+/// Write a route file whose `set_header` step carries the given token in
+/// its STRING-typed `value` field (the tree-walk typing canon: a
+/// substituted leaf keeps string typing, so string positions interpolate).
+fn write_string_header_route_file(dir: &Path, name: &str, value_token: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"
+routes:
+  - id: lean-string-route
+    from: "direct:start"
+    steps:
+      - set_header:
+          key: lean-key
+          value: {value_token}
+"#
+        ),
+    )
+    .expect("write string-header route file"); // allow-unwrap
+    path
+}
+
+/// The `value` source of the route's single `set_header` step — the
+/// STRING-typed field the string-position tests observe.
+fn header_value(defs: &[camel_core::RouteDefinition]) -> &camel_api::declarative::ValueSourceDef {
+    let def = defs.first().expect("route definition present"); // allow-unwrap
+    def.steps()
+        .iter()
+        .find_map(|step| match step {
+            camel_core::BuilderStep::DeclarativeSetHeader { value, .. } => Some(value),
+            _ => None,
+        })
+        .expect("set_header step present") // allow-unwrap
+}
+
+/// Write a document referencing a route file via `routeFiles`, with a
+/// trivial expectation (`direct:start` → `mock:out`, count 1).
+fn write_route_files_doc(dir: &Path, name: &str, route_file: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"
+routeFiles:
+  - {route_file}
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    count: 1
+"#
+        ),
+    )
+    .expect("write routeFiles doc"); // allow-unwrap
+    path
+}
+
+/// Parse a `.test.yaml` document from disk for runner-level assertions.
+fn parse_doc_at(path: &Path) -> document::TestDocument {
+    let text = fs::read_to_string(path).expect("read test document"); // allow-unwrap
+    document::parse_test_document(&text).expect("parse test document") // allow-unwrap
+}
+
+/// File routes under the LEAN runner load through the same tree-walk-first
+/// loader `camel run` uses, so a placeholder on a STRING-typed field
+/// (`set_header.value`) interpolates to its `:-default` and the route loads.
+#[tokio::test(flavor = "multi_thread")]
+async fn lean_file_route_string_placeholder_loads() {
+    let dir = temp_dir("lean-file-string");
+    let route = write_string_header_route_file(&dir, "string.routes.yaml", "${env:LEAN_T:-hello}");
+    let doc_path = write_route_files_doc(&dir, "a.test.yaml", "string.routes.yaml");
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    let doc = parse_doc_at(&doc_path);
+    let defs = match runner::load_routes(&doc, &dir).await {
+        Ok(defs) => defs,
+        Err(e) => panic!("route load must succeed: {e}"),
+    };
+    assert_eq!(
+        header_value(&defs),
+        &camel_api::declarative::ValueSourceDef::Literal(serde_json::Value::String(
+            "hello".to_string()
+        )),
+        "string-position placeholder must carry the interpolated default"
+    );
+}
+
+/// A placeholder on the integer-typed `circuit_breaker.open_duration_ms`
+/// fails the route load — the substituted leaf keeps STRING typing exactly
+/// as `camel run` rejects the same file (boot parity; LEAN never accepts a
+/// route the boot path rejects), so the doc error is the route-load
+/// failure naming the file, never the named-var wording.
+#[tokio::test(flavor = "multi_thread")]
+async fn lean_file_route_int_placeholder_doc_error() {
+    let dir = temp_dir("lean-file-int");
+    let route = write_cb_route_file(&dir, "cb.routes.yaml");
+    let doc_path = write_route_files_doc(&dir, "a.test.yaml", "cb.routes.yaml");
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    let doc = parse_doc_at(&doc_path);
+    let err = match runner::load_routes(&doc, &dir).await {
+        Ok(_) => panic!("int-field placeholder must fail the load (boot parity)"),
+        Err(e) => e,
+    };
+    assert!(err.contains("cb.routes.yaml"), "err: {err}");
+    assert!(
+        !err.contains("not set"),
+        "must not carry the named-var wording: {err}"
+    );
+}
+
+/// Inline `routes:` go through the same tree-walk-first interpolation as
+/// the file forms (boot parity), so a placeholder on the STRING-typed
+/// `set_header.value` field interpolates and the routes parse.
+#[tokio::test(flavor = "multi_thread")]
+async fn lean_inline_routes_string_placeholder_loads() {
+    let dir = temp_dir("lean-inline-string");
+    let doc_path = dir.join("a.test.yaml");
+    fs::write(
+        &doc_path,
+        r#"
+routes:
+  - id: p-route
+    from: "direct:start"
+    steps:
+      - set_header:
+          key: k
+          value: ${env:P:-one}
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    count: 1
+"#,
+    )
+    .expect("write inline doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![doc_path.clone(), dir.clone()]);
+    let doc = parse_doc_at(&doc_path);
+    let defs = match runner::load_routes(&doc, &dir).await {
+        Ok(defs) => defs,
+        Err(e) => panic!("route load must succeed: {e}"),
+    };
+    assert_eq!(
+        header_value(&defs),
+        &camel_api::declarative::ValueSourceDef::Literal(serde_json::Value::String(
+            "one".to_string()
+        )),
+        "inline string-position placeholder must interpolate"
+    );
+}
+
+/// An inline `routes:` block carrying a placeholder on the integer-typed
+/// `circuit_breaker.open_duration_ms` fails the document the same way the
+/// file form does — the substituted leaf keeps STRING typing, so the load
+/// fails as a route-load error, never with the named-var wording (boot
+/// parity; the only test that pins the inline branch to
+/// `interpolate_yaml_source` instead of the legacy text splice).
+#[tokio::test(flavor = "multi_thread")]
+async fn lean_inline_routes_int_placeholder_doc_error() {
+    let dir = temp_dir("lean-inline-int");
+    let doc_path = dir.join("a.test.yaml");
+    fs::write(
+        &doc_path,
+        r#"
+routes:
+  - id: cb-route
+    from: "direct:start"
+    circuit_breaker:
+      failure_threshold: 4
+      open_duration_ms: ${env:CB_MS:-750}
+    steps:
+      - to: "mock:out"
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    count: 1
+"#,
+    )
+    .expect("write inline cb doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![doc_path.clone(), dir.clone()]);
+    let doc = parse_doc_at(&doc_path);
+    let err = match runner::load_routes(&doc, &dir).await {
+        Ok(_) => panic!("int-field placeholder must fail the load (boot parity)"),
+        Err(e) => e,
+    };
+    assert!(err.contains("inline routes"), "err: {err}");
+    assert!(
+        !err.contains("not set"),
+        "must not carry the named-var wording: {err}"
+    );
+}
+
+/// An unresolved no-default placeholder on a STRING-typed field fails the
+/// document with the boot-parity wording (variable name + lowercase
+/// `not set`), never a serde type error.
+#[tokio::test(flavor = "multi_thread")]
+async fn lean_unset_no_default_doc_error_names_var() {
+    let dir = temp_dir("lean-unset");
+    let route = write_string_header_route_file(&dir, "unset.routes.yaml", "${env:LEAN_UNDEF_xyz}");
+    let doc_path = write_route_files_doc(&dir, "a.test.yaml", "unset.routes.yaml");
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    let doc = parse_doc_at(&doc_path);
+    let err = match runner::load_routes(&doc, &dir).await {
+        Ok(_) => panic!("unset no-default placeholder must fail the document"),
+        Err(e) => e,
+    };
+    assert!(err.contains("LEAN_UNDEF_xyz"), "err: {err}");
+    assert!(err.contains("not set"), "err: {err}");
+    assert!(
+        !err.contains("invalid type"),
+        "failure must not be a serde type error: {err}"
+    );
+}
+
+/// The default-only lookup is hermetic: an ambient `LEAN_T` value present
+/// in the process environment must not influence the resolved string
+/// default.
+#[tokio::test(flavor = "multi_thread")]
+async fn lean_ignores_ambient_env() {
+    let dir = temp_dir("lean-ambient");
+    let route = write_string_header_route_file(&dir, "ambient.routes.yaml", "${env:LEAN_T:-hello}");
+    let doc_path = write_route_files_doc(&dir, "a.test.yaml", "ambient.routes.yaml");
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    // The guard restores the prior value on drop, so a panicking
+    // assertion cannot leak the ambient value into other tests.
+    let _env = EnvVarGuard::set("LEAN_T", "ambient");
+    let doc = parse_doc_at(&doc_path);
+    let defs = match runner::load_routes(&doc, &dir).await {
+        Ok(defs) => defs,
+        Err(e) => panic!("route load must succeed: {e}"),
+    };
+    assert_eq!(
+        header_value(&defs),
+        &camel_api::declarative::ValueSourceDef::Literal(serde_json::Value::String(
+            "hello".to_string()
+        )),
+        "default must win over the ambient value"
     );
 }

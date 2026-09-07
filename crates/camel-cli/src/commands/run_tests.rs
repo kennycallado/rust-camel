@@ -156,20 +156,22 @@ fn broken_include_aborts_instead_of_defaults() {
 
 /// Restores an env var to its prior value on drop, so a panicking
 /// assertion cannot leak the test's env mutation into other tests.
-struct EnvVarGuard {
+/// Shared with `commands::test::driver_tests` (lean env-hermeticity
+/// tests) via `crate::commands::run::tests`.
+pub(crate) struct EnvVarGuard {
     key: &'static str,
     prior: Option<String>,
 }
 
 impl EnvVarGuard {
-    fn unset(key: &'static str) -> Self {
+    pub(crate) fn unset(key: &'static str) -> Self {
         let prior = std::env::var(key).ok();
         // SAFETY: test-scoped; the guard restores the prior value on drop.
         unsafe { std::env::remove_var(key) };
         Self { key, prior }
     }
 
-    fn set(key: &'static str, value: &str) -> Self {
+    pub(crate) fn set(key: &'static str, value: &str) -> Self {
         let prior = std::env::var(key).ok();
         // SAFETY: test-scoped; the guard restores the prior value on drop.
         unsafe { std::env::set_var(key, value) };

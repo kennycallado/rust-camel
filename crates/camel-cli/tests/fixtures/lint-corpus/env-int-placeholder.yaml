@@ -1,0 +1,10 @@
+# Corpus fixture (rc-93wct, rev 2): a string-typed route field carried by a
+# whole-scalar env placeholder WITH a default. R-SCHEMA validates the
+# interpolated copy with tree-walk typing — the substituted leaf keeps
+# STRING typing — so this file yields one Info note and no Error; the
+# baseline carries ("R-SCHEMA", "info") for it.
+routes:
+  - id: ${env:RC93WCT_ID:-demo-route}
+    from: "direct:start"
+    steps:
+      - log: "ready"

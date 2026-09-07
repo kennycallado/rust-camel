@@ -69,6 +69,25 @@ injects its layered environment here (ADR-0069 section 4).
 _Avoid_: env-aware discovery (the process-environment entries are the
 default; this entry is the hermetic variant)
 
+**file route loading (env-interpolated)**:
+`load_from_file` resolves `${env:NAME}` placeholders with the same
+tree-walk-first strategy as discovery's YAML arm (`interpolate_yaml_source`,
+rc-93wct): the parsed tree is interpolated scalar-by-scalar — comments are
+never interpolated, and a substituted leaf keeps STRING typing (wave-E
+canon), so a placeholder on an int-typed field (e.g. `throttle.max_requests`)
+fails the load at deserialization — boot parity with discovery/`camel run`.
+Documents that do not survive the YAML round-trip fall back to the legacy
+whole-text splice. A `:-default` token resolves to the default, and an unset
+variable without a default fails the load naming the variable
+(`Environment variable 'NAME' not set (required by <path>)` — the same
+wording the LEAN runner surfaces as its doc error). The process environment
+is never read; the lookup-injectable variant
+`load_from_file_with_env(path, lookup)` is the sole injection point for
+ambient values. Escapes (`$$`, `$${env:...}`) apply; both entries keep the
+16 MiB cap and path-annotated parse errors.
+_Avoid_: env-aware loading, pre-parse substitution (the tree walk
+interpolates parsed scalars; only the fallback splices raw text)
+
 **RouteDefinition**:
 The structured representation of a Route — produced by RouteBuilder or by parsing a YAML/JSON file. CamelContext consumes RouteDefinitions to build and start Routes.
 _Avoid_: route spec, route config, route descriptor

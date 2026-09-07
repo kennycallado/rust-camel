@@ -11,6 +11,13 @@
 //! paths back onto the document's CST, so span anchoring stays exact for every
 //! form.
 //!
+//! Validation targets an INTERPOLATED copy of the source (rc-93wct):
+//! `${env:X:-d}` tokens resolve to their defaults (default-only lookup,
+//! never the process environment), and a whole-scalar token validates as
+//! the STRING default — the typing mirror of the boot path's tree-walk
+//! (see [`enforce_typing_mirror`]). Whole-scalar no-default tokens are
+//! explicit Errors; comment tokens produce nothing.
+//!
 //! - Most keywords (type/enum/pattern/const/format/minimum/`exclusiveMinimum`/
 //!   anyOf/oneOf/minItems/maxItems/required) anchor on the JSON-pointer
 //!   instance node: jsonschema already points `required` at the parent
@@ -20,6 +27,7 @@
 //!
 //! The compiled validator is cached in a process-wide [`OnceLock`].
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use camel_api::component_metadata::ComponentMetadataCatalog;
@@ -29,6 +37,10 @@ use noyalib::cst;
 use crate::ROUTE_SCHEMA;
 use crate::diagnostic::{Diagnostic, DiagnosticCode, Severity, Span};
 use crate::document::Document;
+use crate::env_interpolation::{
+    WholeScalarEnvToken, env_regex, interpolated_validation_copy, sanitize_env_value,
+    whole_scalar_env_token,
+};
 use crate::rule::Rule;
 
 /// Compiled route-schema validator (built once per process).
@@ -45,9 +57,16 @@ impl Rule for RSchemaRule {
             return Vec::new();
         }
 
-        // Convert the raw source to a JSON value. An unconvertible document
-        // yields no diagnostics (no panic, no abort).
-        let Some(value) = raw_to_json_value(doc) else {
+        // Build the interpolated validation copy FIRST (rc-93wct):
+        // default-only `${env:X:-d}` resolution, never the process
+        // environment, per-token — no-default tokens stay literal so their
+        // authored placeholder keeps flagging the genuinely undefined
+        // variables.
+        let (validation_raw, substituted) = interpolated_validation_copy(&doc.raw);
+
+        // Convert the interpolated source to a JSON value. An unconvertible
+        // document yields no diagnostics (no panic, no abort).
+        let Some(mut value) = raw_to_json_value(&validation_raw) else {
             return Vec::new();
         };
 
@@ -81,15 +100,52 @@ impl Rule for RSchemaRule {
             serde_json::Value::Object(_) => 2,
             _ => return Vec::new(),
         };
+        // Parse the ORIGINAL CST (from `doc.raw`, not the interpolated copy)
+        // once so span resolution reuses it across all errors — diagnostics
+        // land on authored text.
+        let Ok(parsed) = cst::parse_document(&doc.raw) else {
+            return Vec::new();
+        };
+
+        // Typing mirror (rc-93wct rev 2): force whole-scalar substituted
+        // tokens to JSON STRINGS (the whole-text splice let YAML re-infer
+        // numeric/boolean types the boot tree-walk never produces) and
+        // collect whole-scalar no-default tokens for explicit Errors.
+        let mut unresolved: Vec<UnresolvedPlaceholder> = Vec::new();
+        enforce_typing_mirror(&parsed, &mut value, "", &doc.raw, &mut unresolved);
+
+        // Info spans resolve against the interpolated (pre-envelope) `value`
+        // tree BEFORE it is moved into the wrapped `instance`: leaf paths in
+        // `value`-coordinates map 1:1 onto the original CST for every
+        // document form (the envelope wrapper is added around `value`,
+        // never inside it).
+        //
+        // The SAME `${env:V:-d}` token can appear in several fields. Each
+        // note must anchor on its OWN authored occurrence, so the matching
+        // leaves are collected per token in walk order and each occurrence
+        // consumes the next one — a first-match search would collapse every
+        // duplicate note onto the first matching leaf.
+        let mut matches_by_token: HashMap<String, Vec<Span>> = HashMap::new();
+        let info_spans: Vec<Option<Span>> = substituted
+            .iter()
+            .map(|sub| {
+                let token = format!("${{env:{}:-{}}}", sub.var, sub.default);
+                let matches = matches_by_token.entry(token.clone()).or_insert_with(|| {
+                    let mut spans = Vec::new();
+                    collect_placeholder_spans(&parsed, &value, "", &token, &doc.raw, &mut spans);
+                    spans
+                });
+                // A token with no resolvable value-leaf span (comment,
+                // mapping key) yields NO note — comments are not part of
+                // the parsed instance.
+                (!matches.is_empty()).then(|| matches.remove(0))
+            })
+            .collect();
+
         let instance = match envelope_depth {
             0 => value,
             1 => serde_json::json!({ "routes": value }),
             _ => serde_json::json!({ "routes": [value] }),
-        };
-
-        // Parse the CST once so span resolution reuses it across all errors.
-        let Ok(parsed) = cst::parse_document(&doc.raw) else {
-            return Vec::new();
         };
 
         let validator = VALIDATOR.get_or_init(compile_validator);
@@ -121,6 +177,53 @@ impl Rule for RSchemaRule {
                 }
             }
         }
+
+        // Whole-scalar no-default tokens: boot hard-fails on the
+        // unresolved variable, so lint must not stay silent even where the
+        // literal placeholder text is a valid string. `$${env:...}`
+        // escapes never reach this list (their authored `$$` breaks the
+        // whole-scalar exact match).
+        //
+        // NOTE: at an int/bool schema position the SAME authored
+        // placeholder also fails the schema `type` keyword (the literal
+        // token text is a string, the position wants a number), so one
+        // no-default token there yields TWO Errors — the schema type Error
+        // and this explicit unresolved Error. Both are intentional: one
+        // reports the type defect, the other names the unresolved variable
+        // (boot-parity hard failure). Do not "deduplicate" them.
+        for u in unresolved {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::RSchema,
+                severity: Severity::Error,
+                span: u.span,
+                message: format!(
+                    "unresolved ${{env:{}}} placeholder (no default): route loading \
+                     would fail on this placeholder",
+                    u.var
+                ),
+                fix: None,
+            });
+        }
+
+        // One Info note per substituted default with a resolvable value-leaf
+        // span, explaining why the field validated cleanly. The note lands
+        // on the authored placeholder; tokens without a value-leaf span
+        // (comments, mapping keys) are skipped above.
+        for (sub, span) in substituted.iter().zip(info_spans) {
+            let Some(span) = span else {
+                continue;
+            };
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::RSchema,
+                severity: Severity::Info,
+                span,
+                message: format!(
+                    "validated against substituted default for ${{env:{}}} (:-{})",
+                    sub.var, sub.default
+                ),
+                fix: None,
+            });
+        }
         diagnostics
     }
 
@@ -150,13 +253,220 @@ fn compile_validator() -> Validator {
     jsonschema::validator_for(&schema).expect("embedded route schema must compile") // allow-unwrap
 }
 
-/// Convert `doc.raw` (YAML or JSON) to a [`serde_json::Value`].
+/// Convert raw source text (YAML or JSON) to a [`serde_json::Value`].
 ///
 /// Deserializes via noyalib's serde compat shim; on ANY conversion error
 /// returns `None` (R-SCHEMA then returns no diagnostics — no panic).
-fn raw_to_json_value(doc: &Document) -> Option<serde_json::Value> {
-    let value: serde_json::Value = noyalib::compat::serde_yaml::from_str(&doc.raw).ok()?;
+fn raw_to_json_value(raw: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = noyalib::compat::serde_yaml::from_str(raw).ok()?;
     Some(value)
+}
+
+/// Collect every leaf span whose authored slice contains `token`, in CST walk
+/// order, resolving each through the existing
+/// [`crate::document::value_span_for`] path.
+///
+/// Walks the interpolated instance's leaf paths (in `value`-coordinates,
+/// which map 1:1 onto the original CST for every document form — the
+/// envelope wrapper is added around `value`, never inside it) and resolves
+/// each against the ORIGINAL CST; every leaf whose authored slice contains
+/// the token is a placeholder value node. The Nth substituted occurrence of
+/// a token anchors on the Nth collected span, so duplicate `${env:V:-d}`
+/// tokens in different fields each keep their own note.
+///
+/// A leaf whose slice holds the token `k` times contributes `k` copies of
+/// its span: a scalar repeating the same placeholder still anchors every
+/// note on its (single) value node. Only UNESCAPED occurrences count —
+/// ENV_RE consumes `$${env:...}` / `$$` escapes atomically, so the token
+/// text inside a `$${env:...}` escape never contributes (a naive
+/// `matches(token)` count would let the Info note anchor on the escape).
+/// A leaf with no match (including an unresolvable zero span) contributes
+/// nothing — the caller keeps the miss path (`Span::new(0, 0)`).
+fn collect_placeholder_spans(
+    parsed: &cst::Document,
+    value: &serde_json::Value,
+    path: &str,
+    token: &str,
+    raw: &str,
+    out: &mut Vec<Span>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                let child = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                collect_placeholder_spans(parsed, v, &child, token, raw, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                let child = format!("{path}[{i}]");
+                collect_placeholder_spans(parsed, v, &child, token, raw, out);
+            }
+        }
+        _ => {
+            let span = crate::document::value_span_for(parsed, path);
+            // Count only unescaped occurrences: ENV_RE consumes
+            // `$${env:...}` / `$$` escapes atomically, so a bare-match arm
+            // whose text equals the token is a real authored placeholder.
+            let count = env_regex()
+                .captures_iter(&raw[span.start..span.end])
+                .filter(|caps| {
+                    caps.get(1).is_none()
+                        && caps.get(2).is_none()
+                        && caps.get(3).is_some_and(|m| m.as_str() == token)
+                })
+                .count();
+            out.extend(std::iter::repeat_n(span, count));
+        }
+    }
+}
+
+/// A whole-scalar `${env:VAR}` token (no default) found at a value
+/// position — reported as an Error (boot hard-fails on it).
+struct UnresolvedPlaceholder {
+    var: String,
+    span: Span,
+}
+
+/// Typing-mirror walk over the interpolated instance (rc-93wct rev 2).
+///
+/// The validation copy is a whole-text splice, so YAML re-infers
+/// numeric/boolean types from substituted defaults (`max_requests: 2` →
+/// JSON number). The boot path's tree-walk keeps STRING typing for every
+/// scalar that carried a token; this walk replicates that canon:
+///
+/// - a leaf whose AUTHORED scalar (original CST slice from `doc.raw`,
+///   quotes/whitespace trimmed) is EXACTLY one substituted `${env:X:-d}`
+///   token is forced to the JSON STRING `"d"` — int/bool positions then
+///   type-error against the string, string positions pass cleanly;
+/// - a whole-scalar `${env:X}` (no default, unescaped) keeps its literal
+///   instance value and is collected for an explicit Error — even at a
+///   string position, where the literal placeholder validates as an
+///   ordinary string;
+/// - `$${env:...}` escapes never match (their authored `$$` breaks the
+///   exact match), and tokens inside comments are never visited (comments
+///   have no value leaf in the instance).
+///
+/// Paths are in `value`-coordinates (pre-envelope), which map 1:1 onto the
+/// original CST for every document form. An unresolvable path keeps the
+/// `value_span_for` miss span (`Span::new(0, 0)`), whose empty slice never
+/// matches a token.
+/// Boot-parity restore for STRUCTURE-CHANGING defaults (rc-93wct ceiling).
+///
+/// An unquoted flow-style default (`${env:X:-[a,b]}`) splices `[a,b]`
+/// into the whole-text validation copy, where YAML re-parses it as a
+/// sequence/mapping — the node becomes NON-scalar and the scalar
+/// String-forcing arm in [`enforce_typing_mirror`] never sees it, leaving
+/// the re-inferred shape to false-positive against scalar-typed schema
+/// positions. The boot tree-walk keeps the substituted leaf a STRING no
+/// matter the default's shape, so the mirror restores that typing by
+/// replacing the spliced node with the string default.
+///
+/// Known ceiling (degrade-safe, like the miss-span path): a default
+/// containing `}` makes the token regex stop at the first brace, so the
+/// token no longer matches whole-scalar and the partial splice can break
+/// the validation copy — R-SCHEMA then stays silent (no diagnostics).
+/// Both shapes are silence-or-Info, never a false positive.
+fn structure_changing_default(parsed: &cst::Document, path: &str, raw: &str) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    let span = crate::document::value_span_for(parsed, path);
+    if span.end <= span.start {
+        return None;
+    }
+    let authored = &raw[span.start..span.end];
+    if !authored.contains("${") {
+        return None;
+    }
+    match whole_scalar_env_token(authored) {
+        Some(WholeScalarEnvToken::WithDefault { default }) => Some(sanitize_env_value(&default)),
+        // No-default tokens never substitute, so they cannot change the
+        // validation copy's structure; the scalar arm owns them.
+        _ => None,
+    }
+}
+
+fn enforce_typing_mirror(
+    parsed: &cst::Document,
+    value: &mut serde_json::Value,
+    path: &str,
+    raw: &str,
+    unresolved: &mut Vec<UnresolvedPlaceholder>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(default) = structure_changing_default(parsed, path, raw) {
+                *value = serde_json::Value::String(default);
+                return;
+            }
+            for (k, v) in map.iter_mut() {
+                let child = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                enforce_typing_mirror(parsed, v, &child, raw, unresolved);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            if let Some(default) = structure_changing_default(parsed, path, raw) {
+                *value = serde_json::Value::String(default);
+                return;
+            }
+            for (i, v) in items.iter_mut().enumerate() {
+                enforce_typing_mirror(parsed, v, &format!("{path}[{i}]"), raw, unresolved);
+            }
+        }
+        _ => {
+            // Cheap pre-filter: only scalars whose authored slice contains
+            // a `${` can be whole-scalar tokens.
+            let span = crate::document::value_span_for(parsed, path);
+            let authored = &raw[span.start..span.end];
+            if !authored.contains("${") {
+                return;
+            }
+            match whole_scalar_env_token(authored) {
+                Some(WholeScalarEnvToken::WithDefault { default }) => {
+                    *value = serde_json::Value::String(sanitize_env_value(&default));
+                }
+                Some(WholeScalarEnvToken::NoDefault { var }) => {
+                    unresolved.push(UnresolvedPlaceholder { var, span });
+                }
+                None => {
+                    // Embedded-token parity (rc-93wct): the boot tree-walk
+                    // Unresolved-fails on EVERY unescaped no-default token,
+                    // including ones inside a larger scalar
+                    // (`id: svc-${env:HOST}`). The whole-scalar arms above
+                    // cannot see them, so scan the authored slice with
+                    // ENV_RE — it consumes `$${env:...}` / `$$` escapes
+                    // atomically — and flag each bare no-default match,
+                    // span-anchored at its offset inside the leaf. Value
+                    // leaves only: comments and mapping keys are never
+                    // visited by this walk.
+                    for caps in env_regex().captures_iter(authored) {
+                        let (Some(whole), Some(var)) = (caps.get(3), caps.get(4)) else {
+                            // `$${env:...}` / `$$` escape arm — never unresolved.
+                            continue;
+                        };
+                        if caps.get(5).is_some() {
+                            // Has a default: substituted validation + Info
+                            // note, not unresolved.
+                            continue;
+                        }
+                        unresolved.push(UnresolvedPlaceholder {
+                            var: var.as_str().to_string(),
+                            span: Span::new(span.start + whole.start(), span.start + whole.end()),
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Convert a JSON-pointer instance path to a noyalib CST query path.
@@ -194,327 +504,5 @@ fn instance_path_to_noyalib(instance_path: &str, envelope_depth: usize) -> Strin
     out
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::StubCatalog;
-
-    fn slice<'a>(raw: &'a str, span: &Span) -> &'a str {
-        &raw[span.start..span.end]
-    }
-
-    fn analyze(source: &str) -> Vec<Diagnostic> {
-        let doc = Document::parse(source);
-        assert!(
-            doc.parse_failure.is_none(),
-            "test fixtures must parse cleanly (got: {:?})",
-            doc.parse_failure
-        );
-        RSchemaRule.analyze(&doc, &StubCatalog::empty())
-    }
-
-    fn rschema_only(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
-        diags
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::RSchema)
-            .collect()
-    }
-
-    #[test]
-    fn rschema_wrong_type_reports_value() {
-        // `steps` must be an array; a string violates the `type` keyword.
-        let source = "id: r1\nfrom: direct:start\nsteps: notanarray\n";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            rschema
-                .iter()
-                .any(|d| slice(source, &d.span) == "notanarray"),
-            "expected a RSchema diagnostic on the `steps` string value; got spans: {:?}",
-            rschema
-                .iter()
-                .map(|d| slice(source, &d.span))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn rschema_missing_required_reports_parent() {
-        // `RouteDslRoute` requires both `id` and `from`; omitting `from`
-        // yields a `required` error whose instance_path is the route object
-        // itself (the missing key has no node). The span anchors on that
-        // parent mapping — the whole route, which contains `id`.
-        let source = "id: r1\n";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            !rschema.is_empty(),
-            "expected at least one RSchema diagnostic for the missing `from`"
-        );
-        // The parent-object span must be non-empty and cover the route body.
-        let covers_parent = rschema
-            .iter()
-            .any(|d| d.span.start == 0 && source[d.span.start..d.span.end].contains("id"));
-        assert!(
-            covers_parent,
-            "expected the diagnostic to anchor on the parent route object"
-        );
-    }
-
-    #[test]
-    fn rschema_minimum_reports_numeric_value() {
-        // `concurrent` is a direct `RouteDslRoute` property with `minimum: 0`
-        // (not wrapped in anyOf, so the keyword fires at the leaf). `-1`
-        // violates it; the diagnostic must anchor on the offending value.
-        let source = "id: r1\nfrom: direct:start\nconcurrent: -1\n";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            rschema.iter().any(|d| slice(source, &d.span) == "-1"),
-            "expected a RSchema diagnostic on `-1`; got spans: {:?}",
-            rschema
-                .iter()
-                .map(|d| slice(source, &d.span))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn rschema_anyof_failure_reports_value() {
-        // `circuit_breaker` is `anyOf: [RouteDslCircuitBreaker, null]`; an
-        // integer matches neither branch. The diagnostic anchors on the value.
-        let source = "id: r1\nfrom: direct:start\ncircuit_breaker: 123\n";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            rschema.iter().any(|d| slice(source, &d.span) == "123"),
-            "expected a RSchema diagnostic on `123`; got spans: {:?}",
-            rschema
-                .iter()
-                .map(|d| slice(source, &d.span))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn rschema_additional_properties_reports_key() {
-        // `RouteDslRoute` has `additionalProperties: false`; `bogus` is not
-        // allowed. The diagnostic must anchor on the offending KEY.
-        let source = "id: r1\nfrom: direct:start\nbogus: 1\n";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            rschema.iter().any(|d| slice(source, &d.span) == "bogus"),
-            "expected a RSchema diagnostic on the `bogus` key; got spans: {:?}",
-            rschema
-                .iter()
-                .map(|d| slice(source, &d.span))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn rschema_items_violation_reports_array() {
-        // `RouteDslRoute.steps` has `items: { $ref: "#/$defs/RouteDslStep" }`
-        // and `type: "array"`. A numeric element violates the `items`
-        // subschema (it does not match any `anyOf` branch of RouteDslStep).
-        // jsonschema points the instance_path at the offending element, so the
-        // diagnostic must anchor on the `123` element, not the whole array.
-        let source = "id: r1\nfrom: direct:start\nsteps:\n  - 123\n";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            rschema.iter().any(|d| slice(source, &d.span) == "123"),
-            "expected an RSchema diagnostic anchoring on the offending array element `123`; got spans: {:?}",
-            rschema
-                .iter()
-                .map(|d| slice(source, &d.span))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn rschema_skips_when_parse_failure() {
-        let source = "steps:\n  - to: timer:foo\n  bad: [";
-        let doc = Document::parse(source);
-        assert!(doc.parse_failure.is_some(), "fixture must fail to parse");
-        let diags = RSchemaRule.analyze(&doc, &StubCatalog::empty());
-        assert!(
-            diags.is_empty(),
-            "R-SCHEMA must skip a parse-failed document"
-        );
-    }
-
-    #[test]
-    fn rschema_envelope_form_valid_is_silent() {
-        // Regression for the false-positive cluster: a valid multi-route
-        // envelope `{routes: [...]}` must be validated AS-IS (not re-wrapped).
-        // Re-wrapping produced `{routes: [{routes: [...]}]}` and dozens of
-        // bogus "id/from required" + "'routes' was unexpected" errors.
-        let source = "\
-routes:
-  - id: r1
-    from: direct:start
-    steps:
-      - to: log:info
-  - id: r2
-    from: timer:tick?period=1000
-    steps:
-      - to: log:info
-";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            rschema.is_empty(),
-            "a valid multi-route envelope must produce no R-SCHEMA errors; got: {:?}",
-            rschema
-        );
-    }
-
-    #[test]
-    fn rschema_envelope_form_reports_real_defect() {
-        // Envelope form must still catch a genuine defect in route N>0; the
-        // span-strip must handle any route index (instance_path /routes/1/...).
-        let source = "\
-routes:
-  - id: r1
-    from: direct:start
-  - id: r2
-    from: direct:other
-    steps: notanarray
-";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            !rschema.is_empty(),
-            "expected an R-SCHEMA error for the malformed `steps` in route 2"
-        );
-    }
-
-    #[test]
-    fn rschema_legacy_array_form_is_silent_when_valid() {
-        // Legacy array form `[ {...}, {...} ]` is normalised to
-        // `{routes: <array>}`; valid bare routes must pass.
-        let source = "\
-- id: r1
-  from: direct:start
-  steps:
-    - to: log:info
-";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            rschema.is_empty(),
-            "a valid legacy-array route must produce no R-SCHEMA errors; got: {:?}",
-            rschema
-        );
-    }
-
-    #[test]
-    fn rschema_bare_route_valid_is_silent() {
-        // Bare single-route form (depth 2) with a clean document must produce
-        // no R-SCHEMA diagnostics — proves the depth-2 normalisation path
-        // validates cleanly, not just defects.
-        let source = "\
-id: r1
-from: direct:start
-steps:
-  - to: log:out
-";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            rschema.is_empty(),
-            "a valid bare single route must produce no R-SCHEMA errors; got: {:?}",
-            rschema
-        );
-    }
-
-    #[test]
-    fn rschema_rest_form_document_is_silent() {
-        // A `rest:`-block document is a valid DSL form (camel-dsl
-        // `RouteDslRest`, lowered by `expand_rest_into`), but ROUTE_SCHEMA
-        // does not model it yet. The bare-route normalisation used to wrap it
-        // as `{routes: [{rest: ...}]}`, and `RouteDslRoute`'s
-        // `additionalProperties: false` rejected the `rest` key — a false
-        // positive on `examples/rest-crud/routes/secured.yaml` (rc-xmbi).
-        // Until RestDsl defs land in ROUTE_SCHEMA, R-SCHEMA skips the rest
-        // form entirely (same policy as scalar/null documents).
-        let source = "\
-rest:
-  - host: 0.0.0.0
-    port: 9090
-    path: /api/users
-    security_policy:
-      roles: [\"user\"]
-      provider: native-demo
-    operations:
-      - method: GET
-        operation_id: listUsers
-        to: direct:listUsers
-";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            rschema.is_empty(),
-            "a rest-block document must not emit R-SCHEMA until the schema \
-             models the form; got: {:?}",
-            rschema
-        );
-    }
-
-    #[test]
-    fn rschema_legacy_array_defect_anchors_element() {
-        // Legacy array form (depth 1) with a defect: `steps` is a string
-        // instead of an array. The diagnostic must anchor on the offending
-        // value (`notanarray`), proving span resolution works through the
-        // envelope_depth=1 wrapper.
-        let source = "\
-- id: r1
-  from: direct:start
-  steps: notanarray
-";
-        let diags = analyze(source);
-        let rschema = rschema_only(&diags);
-        assert!(
-            !rschema.is_empty(),
-            "expected at least one RSchema diagnostic for the malformed `steps`"
-        );
-        assert!(
-            rschema
-                .iter()
-                .any(|d| slice(source, &d.span) == "notanarray"),
-            "expected the diagnostic to anchor on `notanarray`; got spans: {:?}",
-            rschema
-                .iter()
-                .map(|d| slice(source, &d.span))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn lint_accepts_remove_header_route() {
-        // `remove_header` is a first-class RouteDslStep variant: a route using
-        // it must validate with zero errors against ROUTE_SCHEMA. Direct
-        // jsonschema validation (not the full Rule) isolates the schema shape
-        // from rule-level span anchoring.
-        let schema: serde_json::Value =
-            serde_json::from_str(ROUTE_SCHEMA).expect("embedded route schema is valid JSON");
-        let validator =
-            jsonschema::validator_for(&schema).expect("embedded route schema must compile");
-        let doc: serde_json::Value = serde_json::from_str(
-            r#"{"routes": [{"id": "r1", "from": "direct://test", "steps": [{"remove_header": {"key": "CamelHttpPath"}}]}]}"#,
-        )
-        .expect("remove_header fixture must parse as JSON");
-        let errors: Vec<_> = validator.iter_errors(&doc).collect();
-        assert!(
-            errors.is_empty(),
-            "a remove_header step must validate cleanly; got: {:?}",
-            errors
-        );
-    }
-}
+mod tests;

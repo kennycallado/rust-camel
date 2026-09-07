@@ -4,6 +4,7 @@ pub mod completion;
 pub mod diagnostic;
 pub mod document;
 pub mod engine;
+pub mod env_interpolation;
 pub mod error;
 pub mod hover;
 pub mod route_view;

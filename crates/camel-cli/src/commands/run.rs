@@ -550,4 +550,4 @@ pub(crate) static WASM_ACKS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::
 
 #[cfg(test)]
 #[path = "run_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -31,6 +31,7 @@ pub use discovery::{
     DiscoveryError, MaterializationFailure, discover_routes, discover_routes_with_threshold,
     discover_routes_with_threshold_and_security, discover_routes_with_threshold_security_and_env,
 };
+pub use env_interpolation::interpolate_yaml_source;
 pub use json::{
     parse_json, parse_json_to_canonical, parse_json_to_declarative, parse_json_with_threshold,
     parse_json_with_threshold_and_security,
@@ -47,8 +48,8 @@ pub use model::{
 pub use openapi::generate_openapi;
 pub use util::MAX_ROUTE_FILE_SIZE;
 pub use yaml::{
-    RouteDslRoute, RouteDslRoutes, RouteDslStep, load_from_file, parse_yaml,
-    parse_yaml_to_canonical, parse_yaml_to_declarative, parse_yaml_with_threshold,
+    RouteDslRoute, RouteDslRoutes, RouteDslStep, load_from_file, load_from_file_with_env,
+    parse_yaml, parse_yaml_to_canonical, parse_yaml_to_declarative, parse_yaml_with_threshold,
     parse_yaml_with_threshold_and_security,
 };
 

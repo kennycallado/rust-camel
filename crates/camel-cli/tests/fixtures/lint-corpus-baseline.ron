@@ -76,32 +76,67 @@
     // cannot verify its options. Expected, not a defect.
     (
         "examples/env-interpolation/routes/routes.yaml",
-        [("R-URI-known:unverified-scheme", "info")],
+        [
+            ("R-URI-known:unverified-scheme", "info"),
+            // R-SCHEMA Info: route 2's defaulted env tokens collapse to one
+            // entry (rc-93wct).
+            ("R-SCHEMA", "info"),
+            // R-SCHEMA Error (rc-93wct rev 2): route 1 carries no-default
+            // tokens (`POLL_PERIOD_MS`/`LOG_PREFIX` embedded, `APP_NAME`/
+            // `GREET_TARGET` whole-scalar). Boot hard-fails on them without
+            // the variables, so the deterministic default-only lint Error
+            // is honest semantics, not a false positive.
+            ("R-SCHEMA", "error"),
+        ],
     ),
     (
         "examples/wasm-source-webhook/routes/webhook.yaml",
         [("R-URI-known:unverified-scheme", "info")],
     ),
 
+    // R-SCHEMA Info — by-design substituted-default note (rc-93wct). The
+    // env placeholder with `:-default` is validated against its
+    // interpolated copy: one Info per file regardless of token count
+    // (baseline collapses duplicates).
+    (
+        "crates/camel-cli/tests/fixtures/lint-corpus/env-int-placeholder.yaml",
+        [
+            // `id: ${env:RC93WCT_ID:-demo-route}` — whole-scalar token on a
+            // string-typed field; the substituted leaf keeps STRING typing.
+            ("R-SCHEMA", "info"),
+        ],
+    ),
+
+    // Adjudication (rc-93wct rev 2, conductor ruling): `from:
+    // ${env:INBOUND}/in` is an embedded no-default token. The scenario
+    // harness sets INBOUND, so boot succeeds — but without the variable the
+    // boot would hard-fail, and the deterministic default-only lint must
+    // flag it. Honest deterministic-lint semantics, not a defect. The
+    // fixture itself is wave-E territory and stays untouched by this
+    // change.
+    (
+        "crates/camel-integration-test/tests/fixtures/inbound/routes/consumer.yaml",
+        [
+            ("R-SCHEMA", "error"),
+            // The URI scheme head is a placeholder the catalog cannot
+            // resolve, so unverified-scheme Info is by-design
+            // (harness-resolved at discovery).
+            ("R-URI-known:unverified-scheme", "info"),
+        ],
+    ),
+
     // integration-testing example (ADR-0069 scenario tier). The partner
     // URI is an env placeholder (`${env:PARTNER}/orders`), so the scheme
     // cannot be verified at lint time. By-design, harness-resolved at
-    // boot.
+    // boot. The R-SCHEMA Error (rc-93wct rev 2) flags the embedded
+    // no-default token: boot hard-fails on it without PARTNER, so the
+    // deterministic lint Error is honest semantics.
     (
         "examples/integration-testing/routes/bridge.yaml",
-        [("R-URI-known:unverified-scheme", "info")],
-    ),
-
-    // Scenario-tier itest fixture (ADR-0069 sections 4-5, rc-5yon): the
-    // inbound consumer route's URI is an intentional env-layer placeholder
-    // (`${env:INBOUND}/in`), resolved by the harness at discovery. The lint
-    // catalog cannot resolve placeholders, so the info is expected, not a
-    // defect. Same precedent as the outbound-bridge/retry fixtures. May
-    // become obsolete when env-agent lint placeholder resolution lands
-    // (rc-93wct) — drop on rebase.
-    (
-        "crates/camel-integration-test/tests/fixtures/inbound/routes/consumer.yaml",
-        [("R-URI-known:unverified-scheme", "info")],
+        [
+            ("R-URI-known:unverified-scheme", "info"),
+            ("R-SCHEMA", "error"),
+        ],
     ),
 
     // intercepts-demo (declarative-intercepts, bd rc-7f0n). The `kafka:`
@@ -159,28 +194,55 @@
     // interpolation placeholder, so the catalog cannot verify it and
     // unverified-scheme Info is by-design. Same precedent as
     // env-interpolation/routes.yaml. Carry-forward from the 3.2 fixture
-    // commit (caught by this gate when the CLI suite runs whole).
+    // commit (caught by this gate when the CLI suite runs whole). The
+    // R-SCHEMA Error (rc-93wct rev 2) flags the embedded no-default token:
+    // boot hard-fails on it without PARTNER, so the deterministic lint
+    // Error is honest semantics.
     (
         "crates/camel-integration-test/tests/fixtures/outbound/routes/bridge.yaml",
-        [("R-URI-known:unverified-scheme", "info")],
+        [
+            ("R-URI-known:unverified-scheme", "info"),
+            ("R-SCHEMA", "error"),
+        ],
     ),
 
     // Flagship retry fixture (itest-partner-faults-and-asserts, Task 2.3).
     // The producer URI is `${env:PARTNER_URL}/order`: the scheme head is
     // an interpolation placeholder, so the catalog cannot verify it and
     // unverified-scheme Info is by-design. Same precedent as the
-    // outbound-bridge fixture above.
+    // outbound-bridge fixture above. The R-SCHEMA Error (rc-93wct rev 2)
+    // flags the embedded no-default token: boot hard-fails on it without
+    // PARTNER_URL.
     (
         "crates/camel-integration-test/tests/fixtures/retry-route.yaml",
-        [("R-URI-known:unverified-scheme", "info")],
+        [
+            ("R-URI-known:unverified-scheme", "info"),
+            ("R-SCHEMA", "error"),
+        ],
     ),
 
     // Runnable retry example (itest-partner-faults-and-asserts, Task 2.4).
     // Mirrors the flagship fixture: the producer URI is
     // `${env:PARTNER_URL}/order`, an interpolation placeholder the
-    // catalog cannot verify. Same by-design unverified-scheme Info.
+    // catalog cannot verify. Same by-design unverified-scheme Info, plus
+    // the rc-93wct rev-2 R-SCHEMA Error for the embedded no-default
+    // token.
     (
         "examples/integration-testing/partner-retry.routes.yaml",
-        [("R-URI-known:unverified-scheme", "info")],
+        [
+            ("R-URI-known:unverified-scheme", "info"),
+            ("R-SCHEMA", "error"),
+        ],
+    ),
+
+    // R-MOCK-IN-PRODUCTION — inline `mock:` sends in the sequence-demo
+    // teaching route. Pre-existing main drift from wave-E's landed
+    // arrival-sequence example (8fcb14e8): the file reached main without a
+    // baseline row. Same class as mock-demo.yaml — the paired
+    // `sequence-demo.test.yaml` asserts against these endpoints, which is
+    // the example's teaching point (ADR-0064 Stage C warn phase).
+    (
+        "examples/yaml-dsl/config/sequence-demo.yaml",
+        [("R-MOCK-IN-PRODUCTION", "warning")],
     ),
 ]

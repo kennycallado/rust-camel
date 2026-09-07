@@ -143,8 +143,18 @@ pub(crate) fn find_camel_toml_root(start: &Path) -> Option<PathBuf> {
 /// is a document error ([`TestDocError::NoProjectRoot`]). `routeFiles`
 /// paths resolve relative to `doc_dir`, and both file forms load through
 /// `camel_dsl::load_from_file` (the same per-file parser `camel run` uses,
-/// including the 16 MiB size cap and path-annotated errors). Inline `routes`
-/// are re-serialized to YAML and parsed through `camel_dsl::parse_yaml`.
+/// including the 16 MiB cap, path-annotated errors, and default-only env
+/// interpolation). Inline `routes` are re-serialized to YAML, interpolated
+/// with the same default-only lookup, then parsed through
+/// `camel_dsl::parse_yaml`.
+///
+/// All three route sources share the tree-walk-first loader semantics of
+/// `camel_dsl::interpolate_yaml_source` (rc-93wct boot parity): comments
+/// never interpolate, a substituted leaf keeps STRING typing — so a
+/// string-typed field interpolates while an int-typed field carrying a
+/// placeholder fails the load exactly as `camel run` rejects the file —
+/// and documents that do not survive the YAML round-trip fall back to the
+/// legacy whole-text splice.
 ///
 /// Visible to the driver (`commands::test`), which loads routes once to
 /// derive the document's tier before running it.
@@ -183,7 +193,11 @@ pub(super) async fn load_routes(
         mapping.insert("routes", value.clone());
         let text = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))
             .map_err(|e| format!("failed to serialize inline routes: {e}"))?;
-        camel_dsl::parse_yaml(&text).map_err(|e| format!("inline routes: {e}"))
+        // Boot parity: same seam as the file forms (see doc comment above).
+        let interpolated = camel_dsl::interpolate_yaml_source(&text, &|_| None).map_err(|var| {
+            format!("Environment variable '{var}' not set (required by inline routes)")
+        })?;
+        camel_dsl::parse_yaml(&interpolated).map_err(|e| format!("inline routes: {e}"))
     } else {
         Err("document declares none of routeFiles, routeFilesFromRoot, or routes".to_string())
     }

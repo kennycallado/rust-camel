@@ -805,3 +805,106 @@ async fn did_close_cancels_pending_lint() {
 
     shutdown_server(cw, cr, handle).await;
 }
+
+// ---------------------------------------------------------------------------
+// rc-93wct: LSP inherits the interpolated R-SCHEMA validation
+// ---------------------------------------------------------------------------
+
+/// Opening a route whose string-typed field carries a whole-scalar env
+/// placeholder with a default (`id: ${env:RC93WCT_ID:-demo-route}`) must
+/// publish the substituted-default Info note and NO Error anywhere (rev 2
+/// typing canon: the substituted leaf keeps STRING typing). The LSP shares
+/// the camel-lint engine, so R-SCHEMA validates the interpolated copy; the
+/// raw document (and therefore completions/hover) still sees the literal
+/// placeholder.
+#[tokio::test]
+async fn placeholder_string_field_publishes_info_not_error() {
+    let engine = make_engine();
+    let (mut cw, mut cr, handle) = spawn_server(engine).await;
+
+    // Initialize
+    send_jsonrpc(
+        &mut cw,
+        "initialize",
+        serde_json::json!({"processId": null, "rootUri": null, "capabilities": {}}),
+        1,
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+    let _init = read_jsonrpc(&mut cr).await.expect("init response");
+    send_notification(&mut cw, "initialized", serde_json::json!({}))
+        .await
+        .unwrap(); // allow-unwrap — test helper
+
+    // didOpen: envelope-form route with a whole-scalar
+    // placeholder-with-default on the string-typed route `id` field.
+    send_notification(
+        &mut cw,
+        "textDocument/didOpen",
+        serde_json::json!({
+            "textDocument": {
+                "uri": "file:///rc93wct.route.yaml",
+                "languageId": "camel-route",
+                "version": 1,
+                "text": "routes:\n  - id: ${env:RC93WCT_ID:-demo-route}\n    from: \"direct:start\"\n    steps:\n      - log: \"ready\"\n"
+            }
+        }),
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+
+    // didOpen publishes immediately (only didChange is debounced): drain
+    // every publishDiagnostics arriving in a short window.
+    let mut notifications: Vec<Value> = Vec::new();
+    while let Ok(Some(v)) =
+        tokio::time::timeout(Duration::from_millis(200), read_jsonrpc(&mut cr)).await
+    {
+        if v["method"] == "textDocument/publishDiagnostics" {
+            notifications.push(v);
+        }
+    }
+    assert!(
+        !notifications.is_empty(),
+        "expected publishDiagnostics after didOpen"
+    );
+
+    // LSP over-the-wire severity integers: ERROR = 1, INFORMATION = 3.
+    const ERROR: i64 = 1;
+    const INFORMATION: i64 = 3;
+
+    let all_diags: Vec<&Value> = notifications
+        .iter()
+        .filter_map(|n| n["params"]["diagnostics"].as_array())
+        .flatten()
+        .collect();
+
+    // The document is fully valid under the rev-2 typing canon (the
+    // substituted `id` leaf stays a string), so any ERROR-severity
+    // diagnostic anywhere in the published set is a false positive.
+    let error_anywhere = all_diags.iter().any(|d| d["severity"] == ERROR);
+    assert!(
+        !error_anywhere,
+        "valid document must not publish any Error; got: {all_diags:?}"
+    );
+
+    // Exactly one INFORMATION note names the placeholder variable (the
+    // bare catalog in this test engine adds an unrelated
+    // unverified-scheme Info for `direct:`, which names no variable).
+    let naming_notes: Vec<&str> = all_diags
+        .iter()
+        .filter(|d| d["severity"] == INFORMATION)
+        .filter_map(|d| d["message"].as_str())
+        .filter(|m| m.contains("RC93WCT_ID"))
+        .collect();
+    assert_eq!(
+        naming_notes.len(),
+        1,
+        "expected exactly one Information note naming RC93WCT_ID; got: {all_diags:?}"
+    );
+    assert!(
+        naming_notes[0].contains(":-demo-route"),
+        "the Information note must report the substituted default; got: {naming_notes:?}"
+    );
+
+    shutdown_server(cw, cr, handle).await;
+}

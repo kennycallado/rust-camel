@@ -5,7 +5,7 @@ against a `ComponentMetadataCatalog`. Produces a flat list of `Diagnostic` value
 Strictly outside the runtime and DSL — depends on `camel-api` (contract types + catalog
 trait), never on `camel-core`, `camel-dsl`, or `camel-cli`.
 
-Dependencies: `camel-api`, `noyalib`, `jsonschema`, `ariadne`, `serde`, `thiserror`.
+Dependencies: `camel-api`, `noyalib`, `jsonschema`, `ariadne`, `serde`, `thiserror`, `regex`.
 
 ## Architecture
 
@@ -26,11 +26,40 @@ The engine ships with 6 rules:
 | Code | Rule | Severity | Description |
 |------|------|----------|-------------|
 | R-SYN | Syntax | Error | YAML/JSON parse failure; `RSynRule` reads the `parse_failure` field of `Document` (set by `Document::parse`) and emits one diagnostic |
-| R-SCHEMA | JSON Schema | Error | Validates the parsed document against the embedded route-schema.json, with per-keyword error anchoring |
+| R-SCHEMA | JSON Schema | Error / Info | Validates the parsed document against the embedded route-schema.json, with per-keyword error anchoring |
 | R-URI-known | URI known | Error / Info | Validates endpoint schemes and options against the catalog; unknown scheme → Info, unknown option / kind mismatch / missing required / duplicate key across query/parameters → Error |
 | R-SECRET | Secret | Warning | Detects literal credentials (passwords, tokens, API keys) in route source |
 | R-DEPRECATED | Deprecated | Warning | Flags deprecated component options |
 | R-MOCK-IN-PRODUCTION | Mock in production | Warning | Flags an intercept-replaceable inline `mock:` send in a route file; origin scope `to`/`endpoints`; exempt under `tests/fixtures/` paths and `*.test.yaml`; escalates to Error per ADR-0064 §5 |
+
+**R-SCHEMA interpolation (rc-93wct)**: R-SCHEMA validates an interpolated
+copy of the source, not the raw text — `${env:NAME:-default}` tokens resolve
+to their default before schema validation (`$${env:...}`/`$$` escapes
+apply), and the rule replicates the boot tree-walk TYPING: a value leaf
+whose authored scalar is exactly one substituted `${env:X:-d}` token
+(whole-scalar; quotes/whitespace trimmed) validates as the STRING `"d"`, so
+numeric/boolean re-inference is suppressed. Consequently integer- and
+boolean-typed positions produce a schema type Error anchored on the
+authored placeholder (boot parity: the route fails to load there for the
+same reason), while string-typed positions validate cleanly and emit one
+Info note per substituted default, span-anchored on the authored
+placeholder. Known ceiling — structure-changing defaults: an unquoted
+flow-style default (for example `:-[a,b]`) splices into a non-scalar node
+in the validation copy, and a default containing `}` breaks the token
+match entirely; the typing mirror restores boot string typing for the
+spliced node, so both shapes stay silent (Info at most), never a
+false-positive type Error. A whole-scalar no-default token (`${env:X}`) is an Error at
+any value position — boot hard-fails on the unresolved variable, so lint
+must not stay silent even where the literal placeholder is a valid string.
+Comment tokens produce no diagnostics (comments have no value leaf in the
+instance; tokens without a resolvable value-leaf span are skipped).
+Per-token semantics: a whole-document error fallback is forbidden. The
+interpolator lives in `src/env_interpolation.rs` — a SYNC mirror of the
+whole-text splice arm of `camel-dsl::env_interpolation`, because crate
+purity forbids depending on camel-dsl; update both together (rc-ayke
+CROSS-DEP). The ambient-env hermeticity witness lives in
+`tests/env_hermeticity.rs` (poisoning the process environment requires
+`std::env`, banned under `src/`).
 
 **Document** wraps `noyalib` parse output with `parse_failure`, the route view (`LintRoute` /
 `Endpoint` / `LintOption`), and an `apply_fix` hook.
@@ -94,7 +123,7 @@ _Avoid_: error code, lint code (use DiagnosticCode for the enum)
 
 **Severity**:
 Error (R-SYN, R-SCHEMA, R-URI-known errors), Warning (R-SECRET, R-DEPRECATED, R-MOCK-IN-PRODUCTION),
-Info (`UnverifiedScheme`).
+Info (`UnverifiedScheme`, R-SCHEMA substituted-default notes).
 
 **Fix**:
 Optional suggested edit with a replacement string and the span to replace. `Document::apply_fix(&fix)`

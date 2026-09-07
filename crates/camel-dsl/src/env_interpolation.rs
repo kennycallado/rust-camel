@@ -24,6 +24,9 @@
 //! last-wins, matching the loader's own duplicate-key behavior (parity
 //! with the raw-splice outcome class).
 
+//! SYNC: the whole-text splice arm ([`interpolate_env_with`]) is mirrored by
+//! camel-lint::env_interpolation (rc-93wct); crate purity forbids the dependency.
+//! Update both together.
 use noyalib::compat::serde_yaml as serde_yml;
 use regex::Regex;
 use std::env;
@@ -83,6 +86,26 @@ pub fn interpolate_env_with(
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<String, String> {
     interpolate_string(src, lookup)
+}
+
+/// Canonical interpolation strategy for a YAML route source (rc-93wct):
+/// parse-tree interpolation first ([`interpolate_env_tree`] — comments are
+/// never interpolated and a substituted leaf keeps STRING typing), falling
+/// back to the legacy whole-text splice ([`interpolate_env_with`]) when the
+/// document does not survive the YAML round-trip. An unresolved variable
+/// from either path surfaces as `Err(var_name)`.
+///
+/// Both the discovery YAML arm and `load_from_file_with_env` route through
+/// this seam so the loader cannot drift from discovery semantics.
+pub fn interpolate_yaml_source(
+    raw: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    match interpolate_env_tree(raw, lookup) {
+        Ok(content) => Ok(content),
+        Err(TreeInterpolateError::Unresolved(var_name)) => Err(var_name),
+        Err(TreeInterpolateError::Fallback) => interpolate_env_with(raw, lookup),
+    }
 }
 
 /// Shared string scanner for both interpolation paths (legacy whole-text

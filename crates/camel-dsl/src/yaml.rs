@@ -2071,13 +2071,36 @@ fn parse_language_expression(
 use crate::util::read_route_file_capped;
 
 pub fn load_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
+    load_from_file_with_env(path, &|_| None)
+}
+
+/// Lookup-injectable variant of [`load_from_file`]: `${env:NAME}` placeholders
+/// in the raw file text resolve through `lookup` (never the process
+/// environment) before YAML parsing, using the same tree-walk-first strategy
+/// as discovery's YAML arm (`interpolate_yaml_source`): parse-tree
+/// interpolation first — comments never interpolate, substituted leaves keep
+/// string typing (boot parity for int-typed positions) — falling back to the
+/// legacy whole-text splice when the document does not survive the YAML
+/// round-trip. Same 16 MiB cap and path-annotated errors; an unresolved
+/// variable without default fails naming the variable.
+pub fn load_from_file_with_env(
+    path: &Path,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<RouteDefinition>, CamelError> {
     info!(path = %path.display(), "loading routes from file");
     let content = read_route_file_capped(path).map_err(|e| {
         // log-policy: system-broken
         error!(path = %path.display(), error = %e, "failed to load routes from file");
         e
     })?;
-    let annotated = annotate_format(InputFormat::Yaml, parse_yaml_inner(&content));
+    let interpolated = crate::env_interpolation::interpolate_yaml_source(&content, lookup)
+        .map_err(|var| {
+            CamelError::RouteError(format!(
+                "Environment variable '{var}' not set (required by {})",
+                path.display()
+            ))
+        })?;
+    let annotated = annotate_format(InputFormat::Yaml, parse_yaml_inner(&interpolated));
     annotated.map_err(|e| match e {
         CamelError::RouteError(msg) => {
             CamelError::RouteError(format!("{msg} (in {})", path.display()))
@@ -5062,6 +5085,223 @@ routes:
         assert!(
             err.to_string().contains("exceeds max"),
             "expected size cap error, got: {err}"
+        );
+    }
+
+    /// Asserts the first step is a `set_header` whose literal value resolved
+    /// to `expected` with STRING typing (the wave-E canon: a substituted
+    /// leaf keeps string typing). `set_header.value` is the real string-typed
+    /// RouteDsl field used for the rev-2 loader tests — `RouteDslRoute` has
+    /// no `title` metadata field, so the spec's `title` placeholder lives on
+    /// the header value here.
+    fn assert_set_header_value(routes: &[RouteDefinition], expected: &str) {
+        match &routes[0].steps()[0] {
+            camel_core::route::BuilderStep::DeclarativeSetHeader { key, value } => {
+                assert_eq!(key, "k");
+                assert_eq!(
+                    value,
+                    &ValueSourceDef::Literal(serde_json::Value::String(expected.into()))
+                );
+            }
+            other => panic!("expected set_header step, got: {other:?}"),
+        }
+    }
+
+    fn write_route_file(dir: &tempfile::TempDir, name: &str, body: &str) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn load_from_file_interpolates_string_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "string-env.yaml",
+            "routes:\n  - id: string-env\n    from: \"direct:start\"\n    steps:\n      - set_header:\n          key: k\n          value: ${env:RC_T:-hello}\n",
+        );
+
+        let routes = load_from_file(&path).unwrap();
+        assert_set_header_value(&routes, "hello");
+    }
+
+    #[test]
+    fn load_from_file_int_placeholder_fails_boot_parity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "throttle-env.yaml",
+            "routes:\n  - id: throttle-env\n    from: \"direct:start\"\n    steps:\n      - throttle:\n          max_requests: ${env:MY_LIMIT:-2}\n          period_secs: 1\n",
+        );
+
+        let err = match load_from_file(&path) {
+            Ok(_) => panic!("expected int placeholder to fail boot parity"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        // The substituted leaf keeps STRING typing, so the throttle step
+        // fails untagged-variant deserialization — the same error class
+        // discovery's YAML arm produces for the same file (boot parity),
+        // NOT the named-variable doc error.
+        assert!(
+            msg.contains("did not match any variant"),
+            "expected untagged-variant type mismatch (discovery parity class), got: {msg}"
+        );
+        assert!(
+            !msg.contains("not set"),
+            "int placeholder with default must not surface the named-var error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_from_file_unset_no_default_errors_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "unset-no-def.yaml",
+            "routes:\n  - id: unset-no-def\n    from: \"direct:start\"\n    steps:\n      - set_header:\n          key: k\n          value: ${env:UNSET_NO_DEF_xyz}\n",
+        );
+
+        let err = match load_from_file(&path) {
+            Ok(_) => panic!("expected unset env error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UNSET_NO_DEF_xyz"),
+            "expected var name in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("not set"),
+            "expected lowercase 'not set', got: {msg}"
+        );
+        assert!(
+            !msg.contains("did not match"),
+            "must not leak serde error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("invalid type"),
+            "must not leak serde error, got: {msg}"
+        );
+    }
+
+    /// Restore-on-drop guard for tests that mutate the process
+    /// environment: removes `var` when dropped — including on panic — so
+    /// a failing assertion cannot leak the mutation into sibling tests.
+    struct EnvGuard {
+        var: &'static str,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: `set_var`/`remove_var` at the call sites run while no
+            // other thread reads the process environment — the test harness
+            // runs each test on its own thread and nothing in this crate
+            // spawns an env-reading background thread during the guarded
+            // span.
+            unsafe { std::env::remove_var(self.var) };
+        }
+    }
+
+    #[test]
+    fn load_from_file_ambient_env_ignored_by_default_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "ambient.yaml",
+            "routes:\n  - id: ambient\n    from: \"direct:start\"\n    steps:\n      - set_header:\n          key: k\n          value: ${env:RC93WCT_VAR:-hello}\n",
+        );
+
+        unsafe { std::env::set_var("RC93WCT_VAR", "goodbye") };
+        let _guard = EnvGuard { var: "RC93WCT_VAR" };
+        let routes = load_from_file(&path).unwrap();
+        assert_set_header_value(&routes, "hello");
+    }
+
+    #[test]
+    fn load_from_file_with_env_injection_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "injected.yaml",
+            "routes:\n  - id: injected\n    from: \"direct:start\"\n    steps:\n      - set_header:\n          key: k\n          value: ${env:RC93WCT_VAR:-hello}\n",
+        );
+
+        let routes = load_from_file_with_env(&path, &|_| Some("goodbye".into())).unwrap();
+        assert_set_header_value(&routes, "goodbye");
+    }
+
+    #[test]
+    fn load_from_file_commented_no_default_placeholder_harmless() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "commented.yaml",
+            "# ${env:RC_C}\nroutes:\n  - id: commented\n    from: \"direct:start\"\n    steps:\n      - set_header:\n          key: k\n          value: \"literal\"\n",
+        );
+
+        let routes = load_from_file(&path).unwrap();
+        assert_set_header_value(&routes, "literal");
+    }
+
+    #[test]
+    fn load_from_file_roundtrip_fragile_fails_with_parse_error_not_env_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "roundtrip-fragile.yaml",
+            "routes:\n  - id: roundtrip-fragile\n    from: \"direct:start\"\n    steps:\n      - set_header:\n          key: k\n          value: !mytag ${env:RC_T:-hello}\n",
+        );
+
+        let err = match load_from_file(&path) {
+            Ok(_) => panic!("expected tagged-node route to fail typed deserialization"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        // The placeholder is resolvable (default `hello`), so the failure is
+        // the document's own parse/deserialization error — the tagged node
+        // fails typed deserialization under both strategies — never the
+        // interpolation-layer env wording.
+        assert!(
+            !msg.contains("not set"),
+            "resolvable placeholder must not surface the env error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("RC_T"),
+            "resolvable placeholder must not name the env var, got: {msg}"
+        );
+        assert!(
+            msg.contains("YAML parse error"),
+            "expected the document's own parse error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn discovery_and_load_from_file_agree_on_int_placeholder() {
+        unsafe { std::env::remove_var("MY_LIMIT") };
+        let _guard = EnvGuard { var: "MY_LIMIT" };
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "parity.yaml",
+            "routes:\n  - id: parity\n    from: \"direct:start\"\n    steps:\n      - throttle:\n          max_requests: ${env:MY_LIMIT:-2}\n          period_secs: 1\n",
+        );
+        let pattern = path.to_string_lossy().to_string();
+
+        let discovery_err = match crate::discovery::discover_routes(&[pattern]) {
+            Ok(_) => panic!("discovery must reject the int placeholder (boot parity)"),
+            Err(e) => e,
+        };
+        assert!(
+            discovery_err
+                .to_string()
+                .contains("did not match any variant"),
+            "discovery must surface the same untagged-variant type mismatch as the loader, got: {discovery_err}"
+        );
+        assert!(
+            load_from_file(&path).is_err(),
+            "load_from_file must reject the int placeholder identically"
         );
     }
 

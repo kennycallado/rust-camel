@@ -493,9 +493,9 @@ routes:
       - to: "${env:OUTPUT_ENDPOINT}"
 ```
 
-The substitution happens before parsing, so it works in any position — URIs, log messages, header values, etc. If an environment variable is not set and no default is provided via the `:-` syntax, discovery returns a `DiscoveryError::Env` error — the literal `${env:VAR_NAME}` string is **not** left in place.
+Interpolation is tree-walk-first: the parsed document is interpolated scalar-by-scalar before deserialization (comments are never touched), so placeholders work in any position — URIs, log messages, header values, etc. A substituted scalar keeps **string** typing: a whole-scalar placeholder on an integer- or boolean-typed field (e.g. `throttle.max_requests: ${env:LIMIT:-3}`) fails the load even when it has a default, matching the runtime's boot behavior; placeholders embedded inside a larger string (e.g. `timer:tick?period=${env:POLL_MS:-1000}`) interpolate normally. If an environment variable is not set and no default is provided via the `:-` syntax, discovery returns a `DiscoveryError::Env` error — the literal `${env:VAR_NAME}` string is **not** left in place.
 
-> **Caution:** Because interpolation is textual (performed before parsing), env values injected into JSON string positions must already be valid for their JSON context. For example, an env var containing an unescaped double quote will produce invalid JSON, causing a `DiscoveryError::Json` parse error. YAML is more forgiving of unquoted values but the same principle applies to structured contexts.
+> **Caution:** JSON route files still use the legacy whole-text splice (`interpolate_env_with` — the YAML-shim tree re-serializes to YAML, not JSON), so env values injected into JSON string positions must already be valid for their JSON context. For example, an env var containing an unescaped double quote will produce invalid JSON, causing a `DiscoveryError::Json` parse error.
 
 You can specify a default value when the variable is not set:
 
@@ -523,7 +523,7 @@ routes:
 
 `Camel.toml` uses the same `${env:...}` engine and escape rules. See [Environment variable interpolation](../../docs/src/configuration/env-interpolation.md) for the unified syntax, the escape table, and the credential-leaf exception.
 
-> **Note:** Direct file loaders (`load_from_file` for YAML, `json::load_json_from_file` for JSON) read and parse files without interpolating environment variables. Use [`discover_routes`] if you need env interpolation.
+> **Note:** `load_from_file` (YAML) interpolates `${env:...}` placeholders with the same tree-walk-first strategy as discovery, default-only: a whole-scalar `:-default` token resolves to its default (as a string), a whole-scalar placeholder on an integer- or boolean-typed field fails the load (boot parity), and an unset variable without a default fails the load naming the variable. The JSON loader (`json::load_json_from_file`) does not interpolate. Use [`discover_routes`] for full env-injected discovery of route directories.
 
 ## Language Expressions
 Many steps support language expressions for dynamic values:

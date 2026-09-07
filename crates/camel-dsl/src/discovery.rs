@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::Path;
 
-use crate::env_interpolation::{TreeInterpolateError, interpolate_env_tree, interpolate_env_with};
+use crate::env_interpolation::{interpolate_env_with, interpolate_yaml_source};
 use crate::json::parse_json_with_threshold_and_security;
 use crate::model::SecurityCompileContext;
 use crate::template::materializer::materialize_and_compile;
@@ -276,10 +276,10 @@ fn process_env_lookup(name: &str) -> Option<String> {
 
 /// Env interpolation strategy per parse format (rc-ayke).
 ///
-/// YAML and YML use the parse-tree walk (`interpolate_env_tree`) so YAML
-/// comments are never interpolated; text the YAML shim cannot parse — and
+/// YAML and YML use the shared tree-walk-first seam
+/// ([`interpolate_yaml_source`]) so YAML comments are never interpolated;
 /// every other format (JSON: the YAML-shim tree re-serializes to YAML,
-/// not JSON) — falls back to the legacy whole-text splice. An unresolved
+/// not JSON) falls back to the legacy whole-text splice. An unresolved
 /// variable from either path surfaces as `Err(var_name)`.
 fn interpolate_for_parse(
     raw: &str,
@@ -287,11 +287,7 @@ fn interpolate_for_parse(
     lookup: EnvLookup<'_>,
 ) -> Result<String, String> {
     match ext {
-        Some("yaml") | Some("yml") => match interpolate_env_tree(raw, lookup) {
-            Ok(content) => Ok(content),
-            Err(TreeInterpolateError::Unresolved(var_name)) => Err(var_name),
-            Err(TreeInterpolateError::Fallback) => interpolate_env_with(raw, lookup),
-        },
+        Some("yaml") | Some("yml") => interpolate_yaml_source(raw, lookup),
         _ => interpolate_env_with(raw, lookup),
     }
 }
