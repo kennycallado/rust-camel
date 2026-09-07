@@ -175,12 +175,19 @@ Classification is by `DocError` variant, never by message text; the CLI
 adapter owns the mapping and every variant maps to exit 2. Variants
 carrying the `doc-validation:` token in Display: `NotTestDocument`,
 `MissingScenario`, `MixedVocabulary`, `Validation`, `ReservedEnvKey`,
-`InlineRoutes`. `UnsupportedProvisioning` and the boot's `AuthProviderUnavailable`
+`InlineRoutes`, `InlineRoutesRejected`, `ProvisioningWithoutAuthority`,
+`ExpectReplyOnUnsupportedSend`. `UnsupportedProvisioning` and the
+boot's `AuthProviderUnavailable`
 rejection (keycloak/oidc config) name the `infra-unavailable` class
 (ADR-0069 section 7). `RouteSourceMissing`
 and `RouteSourceConflict` render the unit-tier messages verbatim,
 without the token, and map to exit 2 as doc parse errors, exactly as
 the unit tier maps them today. This crate never exits.
+
+v1 inbound bound: `inbound:` documents are boot-owning library callers
+only — the CLI `test` command cannot run them (a document-side
+`${INBOUND}` action endpoint fails the BOOT_SCHEMES gating into the
+named infra-unavailable smoke path, exit 2).
 
 ### Regex expectations compile-verify at load
 

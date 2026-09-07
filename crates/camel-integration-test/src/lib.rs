@@ -18,6 +18,12 @@ pub mod adapters;
 pub mod boot_scenario;
 pub mod document;
 pub mod env_layers;
+/// Inbound listener provisioning (feature `http`, rc-5yon): binds
+/// `127.0.0.1:0` and stages the listener on the HTTP component's
+/// global registry (ADR-0070) before the scenario boot, so the route
+/// consumer consumes the staged socket.
+#[cfg(feature = "http")]
+pub mod inbound;
 pub mod runner;
 pub mod tier;
 
@@ -37,11 +43,13 @@ pub use camel_matchers::{CountBound, Expectation, PathFilter};
 #[cfg(feature = "http")]
 pub use document::partner_scripts_for;
 pub use document::{
-    DocError, EndpointRef, PartnerFault, PartnerScript, PartnerScriptResponse, Provisioning,
-    RouteSource, ScenarioAction, ScenarioDocument, ScenarioTarget, ValidateExpectation,
-    parse_scenario_document,
+    DocError, EndpointRef, InboundListener, PartnerFault, PartnerScript, PartnerScriptResponse,
+    Provisioning, RouteSource, ScenarioAction, ScenarioDocument, ScenarioTarget,
+    ValidateExpectation, parse_scenario_document,
 };
 pub use env_layers::{AmbientLookup, LayeredEnv, ambient_std};
+#[cfg(feature = "http")]
+pub use inbound::provision_inbound;
 pub use runner::{
     DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, run_scenario,
     run_scenario_document,

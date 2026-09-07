@@ -765,7 +765,7 @@ pub(crate) enum ParsedDocument {
     /// A unit-tier document (`inputs` / `expects` / `intercepts`).
     Unit(Box<TestDocument>),
     /// A full-tier scenario document (`scenario:` section).
-    Scenario(ScenarioDocument),
+    Scenario(Box<ScenarioDocument>),
 }
 
 /// Whether the text declares a top-level `scenario:` section. Text that
@@ -787,7 +787,7 @@ fn declares_scenario(text: &str) -> bool {
 pub(crate) fn parse_document(path: &Path, text: &str) -> Result<ParsedDocument, String> {
     if declares_scenario(text) {
         camel_integration_test::parse_scenario_document(path)
-            .map(ParsedDocument::Scenario)
+            .map(|scenario| ParsedDocument::Scenario(Box::new(scenario)))
             .map_err(|e| e.to_string())
     } else {
         parse_test_document(text)

@@ -264,8 +264,10 @@ enum LoadedDoc {
         Box<document::TestDocument>,
         Vec<camel_core::RouteDefinition>,
     ),
-    /// Full-tier scenario document.
-    Scenario(camel_integration_test::ScenarioDocument),
+    /// Full-tier scenario document plus its resolved boot root: the
+    /// nearest ancestor `Camel.toml` directory (the document's own
+    /// directory is not enough for a nested document).
+    Scenario(Box<camel_integration_test::ScenarioDocument>, PathBuf),
 }
 
 /// Derive the tier of one already-parsed unit-tier document from its
@@ -429,7 +431,32 @@ pub async fn run_tests_full(
         // the runner performs, done once here and reused for the run).
         let loaded_tier = match doc {
             document::ParsedDocument::Scenario(scenario) => {
-                Ok((Tier::Full, LoadedDoc::Scenario(scenario)))
+                // The scenario boot anchors its sealed config and
+                // `routeFilesFromRoot` at the nearest ancestor
+                // `Camel.toml` directory — the same strict walk the
+                // LEAN tier uses for `routeFilesFromRoot`. No ancestor
+                // means the document cannot boot: the same named,
+                // per-document exit-2 failure an unreadable document
+                // gets (rc-jjzy5).
+                match runner::find_camel_toml_root(&parent_dir) {
+                    Some(root) => Ok((Tier::Full, LoadedDoc::Scenario(scenario, root))),
+                    None => {
+                        had_parse_error = true;
+                        any_survivor = true;
+                        let message = format!(
+                            "no Camel.toml ancestor for scenario document {}",
+                            path.display()
+                        );
+                        let _ = writeln!(err, "{message}");
+                        doc_reports.push(junit::DocReport {
+                            path: path.clone(),
+                            rows: Vec::new(),
+                            doc_error: Some(message),
+                            tier: None,
+                        });
+                        continue;
+                    }
+                }
             }
             document::ParsedDocument::Unit(unit_doc) => runner::load_routes(&unit_doc, &parent_dir)
                 .await
@@ -481,7 +508,7 @@ pub async fn run_tests_full(
                     .filter_endpoints
                     .iter()
                     .any(|name| unit_doc.expects.contains_key(name)),
-                LoadedDoc::Scenario(_) => false,
+                LoadedDoc::Scenario(..) => false,
             };
             if !matches {
                 continue;
@@ -507,8 +534,8 @@ pub async fn run_tests_full(
         // Tier annotation: one line per executed document.
         let _ = writeln!(out, "{} [{label}]", path.display());
         match loaded {
-            LoadedDoc::Scenario(scenario) => {
-                let result = scenario::run_scenario_doc(&scenario, &parent_dir).await;
+            LoadedDoc::Scenario(scenario, root) => {
+                let result = scenario::run_scenario_doc(&scenario, &root).await;
                 if let Some(doc_error) = result.doc_error {
                     had_apparatus = true;
                     let _ = writeln!(err, "{}: {doc_error}", path.display());

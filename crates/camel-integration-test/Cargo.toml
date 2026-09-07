@@ -37,12 +37,21 @@ tower.workspace = true
 # HTTP partner adapter (feature `http`): the same hyper 1 stack that
 # sits under the workspace's reqwest users, driven directly so the
 # partner plays both wire roles without a client framework.
+# Inbound listener staging (rc-5yon, ADR-0070): the harness binds
+# `127.0.0.1:0` and stages the listener on the HTTP component's global
+# `ServerRegistry` pre-boot, so the scenario route's consumer consumes
+# the staged socket and route URIs interpolate the bound address as a
+# bindVar. Harness-side only — no camel-component-http edits.
+camel-component-http = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["http1", "client", "server"] }
 hyper-util = { workspace = true, optional = true, features = ["tokio"] }
-serde_json = { workspace = true, optional = true }
+# Reply-value extraction for `expectReply` on `direct:` sends
+# (rc-qvz6): the reply body converts to a `serde_json::Value` for the
+# shared matcher verbs without the `http` feature.
+serde_json.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
@@ -60,11 +69,11 @@ security = ["camel-bundles/security"]
 # http endpoints.
 http = [
     "dep:bytes",
+    "dep:camel-component-http",
     "dep:http",
     "dep:http-body-util",
     "dep:hyper",
     "dep:hyper-util",
-    "dep:serde_json",
 ]
 
 [lints]

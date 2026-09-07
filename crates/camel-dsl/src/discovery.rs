@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::Path;
 
-use crate::env_interpolation::{interpolate_env, interpolate_env_with};
+use crate::env_interpolation::{TreeInterpolateError, interpolate_env_tree, interpolate_env_with};
 use crate::json::parse_json_with_threshold_and_security;
 use crate::model::SecurityCompileContext;
 use crate::template::materializer::materialize_and_compile;
@@ -269,6 +269,33 @@ fn parse_invalid_parameter_message(msg: &str) -> Option<(String, String, String)
 /// name, or `None` when unresolved.
 type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
 
+/// Process-environment resolver — the default when no lookup is injected.
+fn process_env_lookup(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// Env interpolation strategy per parse format (rc-ayke).
+///
+/// YAML and YML use the parse-tree walk (`interpolate_env_tree`) so YAML
+/// comments are never interpolated; text the YAML shim cannot parse — and
+/// every other format (JSON: the YAML-shim tree re-serializes to YAML,
+/// not JSON) — falls back to the legacy whole-text splice. An unresolved
+/// variable from either path surfaces as `Err(var_name)`.
+fn interpolate_for_parse(
+    raw: &str,
+    ext: Option<&str>,
+    lookup: EnvLookup<'_>,
+) -> Result<String, String> {
+    match ext {
+        Some("yaml") | Some("yml") => match interpolate_env_tree(raw, lookup) {
+            Ok(content) => Ok(content),
+            Err(TreeInterpolateError::Unresolved(var_name)) => Err(var_name),
+            Err(TreeInterpolateError::Fallback) => interpolate_env_with(raw, lookup),
+        },
+        _ => interpolate_env_with(raw, lookup),
+    }
+}
+
 fn discover_routes_inner(
     patterns: &[String],
     stream_cache_threshold: Option<usize>,
@@ -339,14 +366,14 @@ fn discover_routes_inner(
 
             // Env interpolation happens before parsing for both YAML and JSON.
             // With an injected lookup the process environment is never read.
-            let content = match env_lookup {
-                Some(lookup) => interpolate_env_with(&raw_content, lookup),
-                None => interpolate_env(&raw_content),
-            }
-            .map_err(|var_name| DiscoveryError::Env {
-                path: path_str.clone(),
-                var_name,
-            })?;
+            let fallback_lookup: EnvLookup<'_> = &process_env_lookup;
+            let lookup = env_lookup.unwrap_or(fallback_lookup);
+            let content = interpolate_for_parse(&raw_content, ext.as_deref(), lookup).map_err(
+                |var_name| DiscoveryError::Env {
+                    path: path_str.clone(),
+                    var_name,
+                },
+            )?;
 
             // Parse based on extension — collect templates, templated specs, and regular routes
             match ext.as_deref() {

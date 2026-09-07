@@ -19,6 +19,15 @@
 //! matching `camel run`; the pre-delegation loader used `RouteError`
 //! for this case.
 //!
+//! Inbound provisioning (feature `http`, rc-5yon) runs inside the
+//! boot: when the document declares `inbound:`, the listener binds
+//! `127.0.0.1:0` and stages on the HTTP component's global registry
+//! (ADR-0070 staged consumption) before the bundle cascade, and the
+//! discovery environment gains the bound URL under the declared
+//! bindVar (`LayeredEnv::with_harness_var`) so route-file consumer
+//! templates interpolate the staged socket. The boot result carries
+//! the bound address in `ScenarioRun::inbound_bound`.
+//!
 //! Partners are NOT owned here: the caller constructs them before the
 //! boot (bind `127.0.0.1:0`), builds the harness-provisioned map into
 //! the [`LayeredEnv`] passed in, and tears the partners down after
@@ -48,6 +57,13 @@ pub struct ScenarioRun {
     /// `shutdown(&mut ctx)` after the verdict to drain lifecycles and
     /// pools.
     pub boot: BootHandle,
+    /// The bound address of the document's `inbound:` listener
+    /// (rc-5yon, ADR-0070): the same address the discovery environment
+    /// resolved under the declared bindVar. `None` when the document
+    /// declares no `inbound:` section. Boot-owning library callers and
+    /// tests carry it into `DocumentOutcome::inbound_bound` to target
+    /// the ephemeral listener without re-deriving it.
+    pub inbound_bound: Option<std::net::SocketAddr>,
 }
 
 /// Boots the full composition root for one scenario document.
@@ -65,15 +81,23 @@ pub struct ScenarioRun {
 /// checks from the discovered routes, and start the context. Binding
 /// waits at `ctx.start()` through the operator readiness signal.
 ///
-/// `root` is the project root: the directory holding `Camel.toml`
-/// and the base for route file resolution. Both route source file
-/// forms (`routeFiles`, `routeFilesFromRoot`) resolve against it —
-/// the v1 harness keeps the document in the project root.
+/// `root` is the project root: the directory holding `Camel.toml`.
+/// The sealed config load and `routeFilesFromRoot` resolution anchor
+/// there; relative `routeFiles` stay anchored to the document's own
+/// directory (`source_path`'s parent), so a nested document boots
+/// from the nearest ancestor `Camel.toml` without relocating its
+/// colocated route files (rc-jjzy5). For flat layouts the two
+/// anchors coincide.
 pub async fn boot_scenario(
     doc: &ScenarioDocument,
     root: &Path,
     env: &LayeredEnv,
 ) -> Result<ScenarioRun, CamelError> {
+    let doc_dir = doc
+        .source_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| Path::new(".").to_path_buf());
     let config_path = root.join("Camel.toml");
     let config = CamelConfig::from_file_sealed(
         config_path.to_str().ok_or_else(|| {
@@ -136,13 +160,51 @@ pub async fn boot_scenario(
     // shared installer, same as `camel run`.
     camel_bundles::security_boot::install_bind_exposure_acks(&mut ctx, &config).await;
 
+    // Inbound provisioning (feature `http`, rc-5yon): stage the
+    // document's listener BEFORE any component bundle can spawn a
+    // consumer, and extend the discovery environment with the bound
+    // URL under the declared bindVar, so route-file consumer templates
+    // (`http://${NAME}/...`) resolve to the staged socket (ADR-0070
+    // staged consumption). The no-feature build rejects `inbound:` at
+    // load and, defense-in-depth, in the `#[cfg(not(feature =
+    // "http"))]` arm below, so a declaration reaching this arm implies
+    // the feature.
+    #[cfg(feature = "http")]
+    let provisioned = match doc.inbound.as_ref() {
+        Some(entry) => {
+            let bound = crate::inbound::provision_inbound(entry).await?;
+            Some((
+                env.with_harness_var(&entry.bind_var, format!("http://{bound}")),
+                bound,
+            ))
+        }
+        None => None,
+    };
+    #[cfg(feature = "http")]
+    let (discovery_env, inbound_bound) = match &provisioned {
+        Some((extended, bound)) => (extended, Some(*bound)),
+        None => (env, None),
+    };
+    #[cfg(not(feature = "http"))]
+    let (discovery_env, inbound_bound) = if doc.inbound.is_some() {
+        return Err(CamelError::Config(
+            "inbound listeners need the `http` feature to boot: enable it to \
+             provision the staged listener (the load-time doc gate now fires \
+             first; this rejection is defense-in-depth for directly-constructed \
+             documents)"
+                .to_string(),
+        ));
+    } else {
+        (env, None)
+    };
+
     let boot = camel_bundles::boot(&mut ctx, &config, root).await?;
 
     let defs = camel_dsl::discover_routes_with_threshold_security_and_env(
-        &route_patterns(doc, root)?,
+        &route_patterns(doc, root, &doc_dir)?,
         config.stream_caching.threshold,
         security_ctx,
-        &|name| env.lookup(name),
+        &|name| discovery_env.lookup(name),
     )
     .map_err(map_discovery_error)?;
 
@@ -155,50 +217,70 @@ pub async fn boot_scenario(
         ctx.add_route_definition(def).await?;
     }
     ctx.start().await?;
-    Ok(ScenarioRun { ctx, boot })
+    Ok(ScenarioRun {
+        ctx,
+        boot,
+        inbound_bound,
+    })
 }
 
 /// Builds the route-discovery patterns for the document's route
 /// source.
 ///
-/// Both file forms resolve against `root`, as today. Each declared
-/// file gets an existence pre-check: a glob pattern that matches
-/// nothing is silent, and the missing-file error must name the file
-/// the document declared. A declared file with discovery's reserved
-/// `.test.yaml`/`.test.yml` suffix is rejected here too: the document
-/// explicitly names the file, so discovery's silent reserved-suffix
-/// skip would boot zero routes — test documents belong to `camel
-/// test`, not scenario routeFiles.
+/// `routeFilesFromRoot` resolves against `root` (the nearest
+/// ancestor `Camel.toml` directory); relative `routeFiles` resolve
+/// against the document's own directory (`doc_dir`), so a nested
+/// document keeps its colocated route files while booting from the
+/// ancestor root (rc-jjzy5). Each declared file gets an existence
+/// pre-check: a glob pattern that matches nothing is silent, and the
+/// missing-file error must name the file the document declared. A
+/// declared file with discovery's reserved `.test.yaml`/`.test.yml`
+/// suffix is rejected here too: the document explicitly names the
+/// file, so discovery's silent reserved-suffix skip would boot zero
+/// routes — test documents belong to `camel test`, not scenario
+/// routeFiles.
 ///
 /// Inline routes cannot boot in v1: the document parser owns the
 /// definitions, and this entry receives the document by reference, so
 /// the definitions cannot move into the context. A FULL-tier
-/// scenario that wants the embedded boot declares `routeFiles`.
-fn route_patterns(doc: &ScenarioDocument, root: &Path) -> Result<Vec<String>, CamelError> {
+/// scenario that wants the embedded boot declares `routeFiles`. The
+/// document parser already rejects inline route sources at load
+/// (rc-9dpx), before partners bind; this rejection stays only as
+/// defense-in-depth for documents constructed directly, bypassing
+/// `parse_scenario_document`.
+fn route_patterns(
+    doc: &ScenarioDocument,
+    root: &Path,
+    doc_dir: &Path,
+) -> Result<Vec<String>, CamelError> {
+    /// Resolves one declared file against its anchor directory and
+    /// runs the shared pre-checks (existence, reserved test suffix).
+    fn anchored(base: &Path, file: &Path) -> Result<String, CamelError> {
+        let full = base.join(file);
+        std::fs::metadata(&full).map_err(|e| CamelError::Io(format!("{}: {e}", full.display())))?;
+        // Same predicate as discovery's reserved-suffix gate,
+        // but fail loud: the route file was declared, not
+        // glob-expanded, so a silent skip has no excuse.
+        if camel_dsl::discovery::is_test_document(&full) {
+            return Err(CamelError::Config(format!(
+                "{}: test documents (*.test.yaml, *.test.yml) belong to \
+                 `camel test`, not scenario routeFiles",
+                full.display()
+            )));
+        }
+        Ok(full.display().to_string())
+    }
     match &doc.route_source {
-        RouteSource::RouteFiles(files) | RouteSource::RouteFilesFromRoot(files) => files
-            .iter()
-            .map(|file| {
-                let full = root.join(file);
-                std::fs::metadata(&full)
-                    .map_err(|e| CamelError::Io(format!("{}: {e}", full.display())))?;
-                // Same predicate as discovery's reserved-suffix gate,
-                // but fail loud: the route file was declared, not
-                // glob-expanded, so a silent skip has no excuse.
-                if camel_dsl::discovery::is_test_document(&full) {
-                    return Err(CamelError::Config(format!(
-                        "{}: test documents (*.test.yaml, *.test.yml) belong to \
-                         `camel test`, not scenario routeFiles",
-                        full.display()
-                    )));
-                }
-                Ok(full.display().to_string())
-            })
-            .collect(),
+        RouteSource::RouteFiles(files) => {
+            files.iter().map(|file| anchored(doc_dir, file)).collect()
+        }
+        RouteSource::RouteFilesFromRoot(files) => {
+            files.iter().map(|file| anchored(root, file)).collect()
+        }
         RouteSource::Inline(_) => Err(CamelError::Config(
             "inline route sources cannot boot in v1: declare routeFiles \
-             (the document parser owns inline definitions; the boot \
-             receives the document by reference)"
+             (the load-time doc gate now fires first; this rejection is \
+             defense-in-depth for directly-constructed documents)"
                 .to_string(),
         )),
     }

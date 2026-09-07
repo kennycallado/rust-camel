@@ -65,24 +65,39 @@ expects:
 
 /// Write a full-tier scenario document whose actions run against the
 /// in-memory fake adapter (send records, sleep settles; no receive, so
-/// nothing times out).
+/// nothing times out). The route table lives in a sibling
+/// `*.routes.yaml` declared via `routeFiles` (scenario-tier documents
+/// reject inline `routes:` at load; doc-dir anchoring resolves the
+/// colocated sibling), and a minimal `Camel.toml` anchors the
+/// scenario boot (rc-jjzy5).
 fn write_fake_scenario(dir: &Path, name: &str) -> PathBuf {
-    let path = dir.join(name);
+    fs::write(dir.join("Camel.toml"), "# minimal\n").expect("write Camel.toml"); // allow-unwrap
+    let routes_name = name.replace(".test.yaml", ".routes.yaml");
     fs::write(
-        &path,
+        dir.join(&routes_name),
         r#"
 routes:
   - id: r1
     from: "direct:start"
     steps:
       - to: "mock:out"
+"#,
+    )
+    .expect("write fake scenario routes"); // allow-unwrap
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"
+routeFiles: [{routes_name}]
 scenario:
   - send:
       to: "fake:partner"
       body: "hello"
   - sleep:
       duration: "10ms"
-"#,
+"#
+        ),
     )
     .expect("write fake scenario doc"); // allow-unwrap
     path
@@ -90,17 +105,30 @@ scenario:
 
 /// Write a full-tier scenario document whose `receive` action times out
 /// (the fake adapter is bound but never delivers) — a verdict-class,
-/// exit-1 failure.
+/// exit-1 failure. The route table lives in a sibling `*.routes.yaml`
+/// declared via `routeFiles` (scenario-tier documents reject inline
+/// `routes:` at load; doc-dir anchoring resolves the colocated
+/// sibling), and a minimal `Camel.toml` anchors the scenario boot.
 fn write_timeout_scenario(dir: &Path, name: &str) -> PathBuf {
-    let path = dir.join(name);
+    fs::write(dir.join("Camel.toml"), "# minimal\n").expect("write Camel.toml"); // allow-unwrap
+    let routes_name = name.replace(".test.yaml", ".routes.yaml");
     fs::write(
-        &path,
+        dir.join(&routes_name),
         r#"
 routes:
   - id: r1
     from: "direct:start"
     steps:
       - to: "mock:out"
+"#,
+    )
+    .expect("write timeout scenario routes"); // allow-unwrap
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"
+routeFiles: [{routes_name}]
 scenario:
   - send:
       to: "fake:partner"
@@ -108,7 +136,8 @@ scenario:
   - receive:
       from: "fake:never"
       deadline: "50ms"
-"#,
+"#
+        ),
     )
     .expect("write timeout scenario doc"); // allow-unwrap
     path
@@ -117,22 +146,37 @@ scenario:
 /// Write a full-tier scenario document declaring a real-transport
 /// endpoint on a scheme no build provisions (`grpc`): the run reports
 /// `infra-unavailable` naming the adapter — an apparatus-class, exit-2
-/// failure — in featureless and `integration-http` builds alike.
+/// failure — in featureless and `integration-http` builds alike. The
+/// route table lives in a sibling `*.routes.yaml` declared via
+/// `routeFiles` (scenario-tier documents reject inline `routes:` at
+/// load; doc-dir anchoring resolves the colocated sibling), and a
+/// minimal `Camel.toml` anchors the scenario boot.
 fn write_grpc_scenario(dir: &Path, name: &str) -> PathBuf {
-    let path = dir.join(name);
+    fs::write(dir.join("Camel.toml"), "# minimal\n").expect("write Camel.toml"); // allow-unwrap
+    let routes_name = name.replace(".test.yaml", ".routes.yaml");
     fs::write(
-        &path,
+        dir.join(&routes_name),
         r#"
 routes:
   - id: r1
     from: "direct:start"
     steps:
       - to: "mock:out"
+"#,
+    )
+    .expect("write grpc scenario routes"); // allow-unwrap
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"
+routeFiles: [{routes_name}]
 scenario:
   - send:
       to: "grpc://127.0.0.1:1/hook"
       body: "hello"
-"#,
+"#
+        ),
     )
     .expect("write grpc scenario doc"); // allow-unwrap
     path

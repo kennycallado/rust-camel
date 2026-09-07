@@ -92,6 +92,18 @@
         [("R-URI-known:unverified-scheme", "info")],
     ),
 
+    // Scenario-tier itest fixture (ADR-0069 sections 4-5, rc-5yon): the
+    // inbound consumer route's URI is an intentional env-layer placeholder
+    // (`${env:INBOUND}/in`), resolved by the harness at discovery. The lint
+    // catalog cannot resolve placeholders, so the info is expected, not a
+    // defect. Same precedent as the outbound-bridge/retry fixtures. May
+    // become obsolete when env-agent lint placeholder resolution lands
+    // (rc-93wct) — drop on rebase.
+    (
+        "crates/camel-integration-test/tests/fixtures/inbound/routes/consumer.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
+    ),
+
     // intercepts-demo (declarative-intercepts, bd rc-7f0n). The `kafka:`
     // scheme is not registered by `register_builtin_components_for_lint`,
     // so unverified-scheme Info is by-design. The route file deliberately

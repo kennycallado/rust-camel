@@ -55,6 +55,25 @@ impl LayeredEnv {
         }
         None
     }
+
+    /// Returns a copy of this environment with one extra
+    /// harness-provisioned binding layered on top: `lookup(key)`
+    /// resolves `value` with the same precedence as partner bindVars
+    /// (harness layer wins over the document `env` map). The receiver
+    /// is untouched — `boot_scenario` derives the extended discovery
+    /// environment from the caller's env for the inbound listener's
+    /// bindVar (rc-5yon), so route-file `${env:NAME}` templates resolve
+    /// to the staged socket.
+    pub fn with_harness_var(&self, key: &str, value: String) -> LayeredEnv {
+        let mut harness_provisioned = self.harness_provisioned.clone();
+        harness_provisioned.insert(key.to_string(), value);
+        LayeredEnv {
+            doc: self.doc.clone(),
+            harness_provisioned,
+            passthrough: self.passthrough.clone(),
+            ambient: Arc::clone(&self.ambient),
+        }
+    }
 }
 
 /// Wires `std::env::var` as the ambient lookup for production callers.

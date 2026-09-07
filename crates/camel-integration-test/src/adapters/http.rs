@@ -34,10 +34,11 @@
 //!   action deadline — its status, headers, and body.
 //!
 //! Server-role arrivals queue per path (depth
-//! [`ARRIVAL_LANE_CAPACITY`]); the client lane stays one response in
-//! flight per lane key (v1 inbound scenarios drive one exchange at a
-//! time — a second `send` under the same lane key replaces the parked
-//! response).
+//! [`ARRIVAL_LANE_CAPACITY`]); the client lane parks same-key
+//! responses in a bounded FIFO (depth [`LANE_FIFO_CAPACITY`]):
+//! receives consume the oldest parked response first, in wire
+//! arrival order, and a launch beyond the bound fails apparatus-class
+//! ([`TransportError::LaneFifoOverflow`]) — never a silent overwrite.
 //!
 //! The listener uses the same hyper 1 stack that sits under the
 //! workspace's reqwest users, driven directly so one dependency set
@@ -47,6 +48,7 @@
 //! [`PartnerAdapter::bound_authority`]: crate::adapters::PartnerAdapter::bound_authority
 
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -54,6 +56,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -81,6 +84,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 
+use crate::adapters::ArrivalLaneOverflow;
 use crate::adapters::IncomingMessage;
 use crate::adapters::OutgoingMessage;
 use crate::adapters::PartnerAdapter;
@@ -101,7 +105,15 @@ const UNMATCHED_STATUS: u16 = 500;
 /// the recorder). The v1 bound: a scenario addresses one request per
 /// `receive` action, so 64 queued arrivals on one path is a scripting
 /// defect, not a workload.
-const ARRIVAL_LANE_CAPACITY: usize = 64;
+pub(crate) const ARRIVAL_LANE_CAPACITY: usize = 64;
+
+/// Per-lane-key client FIFO depth. Same-key sends park in arrival
+/// order; beyond this depth a launch fails apparatus-class
+/// ([`TransportError::LaneFifoOverflow`]) instead of silently
+/// overwriting a parked roundtrip. The v1 bound: a scenario driving
+/// more than 64 unanswered same-key exchanges at once is a scripting
+/// defect, not a workload.
+const LANE_FIFO_CAPACITY: usize = 64;
 
 /// One scripted partner response, served to the matching wire
 /// requests: the first matching entry with remaining `times` serves
@@ -208,6 +220,10 @@ struct ArrivalLane {
     /// Dequeue side; the async mutex serializes concurrent receives on
     /// the same path.
     rx: AsyncMutex<mpsc::Receiver<IncomingMessage>>,
+    /// How many arrivals this lane dropped because it was full while
+    /// no receive drained it. Overflow evidence for the
+    /// apparatus-class receive error (rc-7mli).
+    dropped: AtomicUsize,
 }
 
 /// Listener-side state, shared with the connection tasks.
@@ -391,7 +407,19 @@ impl HttpPartner {
             // query-bearing declaration): render it and the lane
             // evidence both redacted (ADR-0051).
             Ok(None) | Err(_) => {
+                let dropped = lane.dropped.load(Ordering::Relaxed);
                 let secret_keys = self.stored_secret_query_keys();
+                if dropped > 0 {
+                    // A lane that dropped arrivals while the scenario
+                    // was not receiving is a harness defect, not a
+                    // system-under-test verdict: the timed-out wait
+                    // reports the overflow evidence instead of a
+                    // receive-timeout (rc-7mli).
+                    return Err(ReceiveError::Overflow(ArrivalLaneOverflow {
+                        endpoint: redact_wire_path(source_uri, &secret_keys),
+                        dropped,
+                    }));
+                }
                 Err(ReceiveError::Timeout(ReceiveTimeout {
                     endpoint: redact_wire_path(source_uri, &secret_keys),
                     deadline,
@@ -448,7 +476,7 @@ impl PartnerAdapter for HttpPartner {
     }
 }
 
-/// One parked response entry per lane key: the generation it was
+/// One parked response in a lane key's FIFO: the generation it was
 /// booked under and the parked roundtrip receiver.
 struct LaneEntry {
     /// The launch-unique generation; [`fail_lane_entry`] refuses to
@@ -463,18 +491,19 @@ struct LaneEntry {
 /// `receive` checks it first for the parked roundtrip
 /// (client-role-first).
 ///
-/// One parked response per lane key (v1 inbound scenarios drive one
-/// exchange at a time — a second `send` under the same lane key
-/// replaces the parked response). The map lock is a
+/// Same-key sends park their responses in a bounded FIFO (depth
+/// [`LANE_FIFO_CAPACITY`]) in wire arrival order; a launch beyond the
+/// bound fails apparatus-class
+/// ([`TransportError::LaneFifoOverflow`]). The map lock is a
 /// `std::sync::Mutex`, held only for map access and never across an
 /// await.
 pub struct ClientLane {
-    /// One parked response entry per lane key, filled by
-    /// [`launch`](Self::launch) and consumed by
+    /// Per lane key, the bounded FIFO of parked responses, filled by
+    /// [`launch`](Self::launch) and drained oldest-first by
     /// [`take`](Self::take). `Arc`-shared with the spawned exchanges
     /// so a post-connect failure can park its error under its own
     /// generation ([`fail_lane_entry`](Self::fail_lane_entry)).
-    in_flight: Arc<Mutex<BTreeMap<String, LaneEntry>>>,
+    in_flight: Arc<Mutex<BTreeMap<String, VecDeque<LaneEntry>>>>,
     /// Monotonic source of entry generations: every launch stamps its
     /// entry with a fresh value, so the spawned exchange's failure
     /// transition can tell its own entry from a later send's.
@@ -517,26 +546,50 @@ impl ClientLane {
     /// so the caller observes the failure on the send itself (the
     /// whole send stays under the runner's send deadline). Only a
     /// live connection books the generation-stamped entry whose
-    /// response the router's `receive` consumes. The lane handle
-    /// stays alive in the spawned exchange so a post-connect failure
-    /// parks through [`fail_lane_entry`](Self::fail_lane_entry).
+    /// response the router's `receive` consumes; when the key's FIFO
+    /// already holds [`LANE_FIFO_CAPACITY`] parked responses, the
+    /// launch fails apparatus-class
+    /// ([`TransportError::LaneFifoOverflow`]) instead of overwriting
+    /// a parked roundtrip — refused BEFORE the dial, so an overflow
+    /// leaves no wire effect: no connection, no launched-path
+    /// evidence, no stamped generation. The lane handle stays alive
+    /// in the spawned exchange so a post-connect failure parks
+    /// through [`fail_lane_entry`](Self::fail_lane_entry).
     pub(crate) async fn launch(
         self: Arc<Self>,
         lane_key: &str,
         target_uri: &str,
         msg: OutgoingMessage,
     ) -> Result<(), TransportError> {
-        // (a) Validate the target URI.
+        // (a) Refuse a full FIFO before any wire effect: the
+        // overflow fails before the dial, before the wire-path
+        // evidence records, and before a generation is stamped. The
+        // booking site re-checks under the insert lock, so the bound
+        // holds under concurrent launches too.
+        if lock_through(&self.in_flight)
+            .get(lane_key)
+            .is_some_and(|fifo| fifo.len() >= LANE_FIFO_CAPACITY)
+        {
+            return Err(TransportError::LaneFifoOverflow {
+                lane_key: lane_key.to_string(),
+                bound: LANE_FIFO_CAPACITY,
+            });
+        }
+        // (b) Validate the target URI.
         let target = ParsedTarget::parse(target_uri)?;
-        // (b) Dial inline: connection refused fails the send here.
+        // (c) Dial inline: connection refused fails the send here.
         let stream = TcpStream::connect((target.host.as_str(), target.port))
             .await
             .map_err(|e| TransportError::Other {
                 message: format!("connect to {}:{} failed: {e}", target.host, target.port),
             })?;
-        // (c) A live connection: book the entry, stamped with a fresh
+        // (d) A live connection: book the entry, stamped with a fresh
         // generation, and record the wire target this launch puts on
-        // the wire (the lane evidence a later timeout reports).
+        // the wire (the lane evidence a later timeout reports). The
+        // booking re-enforces the FIFO bound in the same critical
+        // section as the insert: a FIFO that filled between the
+        // pre-check and here fails the launch before any exchange
+        // runs.
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         {
@@ -545,11 +598,21 @@ impl ClientLane {
                 launched.push(target.target.clone());
             }
         }
-        lock_through(&self.in_flight).insert(lane_key.to_string(), LaneEntry { generation, rx });
-        // (d) The exchange runs on the connected stream. A
+        {
+            let mut lanes = lock_through(&self.in_flight);
+            let fifo = lanes.entry(lane_key.to_string()).or_default();
+            if fifo.len() >= LANE_FIFO_CAPACITY {
+                return Err(TransportError::LaneFifoOverflow {
+                    lane_key: lane_key.to_string(),
+                    bound: LANE_FIFO_CAPACITY,
+                });
+            }
+            fifo.push_back(LaneEntry { generation, rx });
+        }
+        // (e) The exchange runs on the connected stream. A
         // post-connect failure parks the error under its own
-        // generation only: a later send that replaced the entry stays
-        // intact.
+        // generation only: any other entry on the key's FIFO (an
+        // earlier or later send's) stays intact.
         let lane = Arc::clone(&self);
         let key = lane_key.to_string();
         tokio::spawn(async move {
@@ -564,8 +627,7 @@ impl ClientLane {
                 Err(error) => {
                     if !lane.fail_lane_entry(&key, generation, error.clone()) {
                         // The entry was already taken (a receive is
-                        // waiting on the old channel) or superseded
-                        // (dropped receiver): either is normal.
+                        // consuming the old channel): normal.
                         let _ = tx.send(Err(error));
                     }
                 }
@@ -576,23 +638,28 @@ impl ClientLane {
 
     /// Takes the response parked under the lane key, if any; the
     /// router's client-role-first receive calls this before any
-    /// server-role delegation.
+    /// server-role delegation. The key's FIFO drains oldest-first
+    /// (wire arrival order); the empty FIFO leaves the map.
     pub(crate) fn take(
         &self,
         lane_key: &str,
     ) -> Option<oneshot::Receiver<Result<IncomingMessage, TransportError>>> {
-        lock_through(&self.in_flight)
-            .remove(lane_key)
-            .map(|entry| entry.rx)
+        let mut lanes = lock_through(&self.in_flight);
+        let fifo = lanes.get_mut(lane_key)?;
+        let entry = fifo.pop_front()?;
+        if fifo.is_empty() {
+            lanes.remove(lane_key);
+        }
+        Some(entry.rx)
     }
 
-    /// The atomic failure transition: when the entry under `key`
-    /// still carries `generation`, its receiver is replaced in place
-    /// with one already resolved to `error` and the call returns
-    /// true; any other state returns false and touches nothing. A
-    /// later send's entry (fresh generation) can never be removed or
-    /// overwritten by an older exchange's failure — there is no
-    /// remove-then-rebook window.
+    /// The atomic failure transition: when the key's FIFO still
+    /// carries an entry with `generation`, that entry's receiver is
+    /// replaced in place with one already resolved to `error` and the
+    /// call returns true; any other state returns false and touches
+    /// nothing. Only the exchange's own entry is ever touched — no
+    /// other generation on the FIFO can be removed or overwritten by
+    /// an older exchange's failure.
     pub(crate) fn fail_lane_entry(
         &self,
         key: &str,
@@ -781,25 +848,27 @@ async fn perform_exchange(
 /// The lane-map mutation behind [`ClientLane::fail_lane_entry`]:
 /// one sync lock guard, one in-place map mutation, no await point —
 /// so the generation check and the error-parking write are one
-/// uninterrupted critical section.
+/// uninterrupted critical section. The key's FIFO is scanned for the
+/// one entry whose generation matches; other entries stay untouched.
 fn fail_lane_map_entry(
-    in_flight: &Mutex<BTreeMap<String, LaneEntry>>,
+    in_flight: &Mutex<BTreeMap<String, VecDeque<LaneEntry>>>,
     key: &str,
     generation: u64,
     error: TransportError,
 ) -> bool {
     let mut lanes = lock_through(in_flight);
-    match lanes.get_mut(key) {
-        Some(entry) if entry.generation == generation => {
-            let (tx, rx) = oneshot::channel();
-            // The replaced receiver is still held by the entry, so
-            // the resolution cannot fail.
-            let _ = tx.send(Err(error));
-            entry.rx = rx;
-            true
-        }
-        _ => false,
-    }
+    let Some(entry) = lanes
+        .get_mut(key)
+        .and_then(|fifo| fifo.iter_mut().find(|entry| entry.generation == generation))
+    else {
+        return false;
+    };
+    let (tx, rx) = oneshot::channel();
+    // The replaced receiver is still held by the entry, so the
+    // resolution cannot fail.
+    let _ = tx.send(Err(error));
+    entry.rx = rx;
+    true
 }
 
 /// Returns the arrival lane for `path`, creating an empty lane on
@@ -814,6 +883,7 @@ fn lane_for(arrivals: &Mutex<BTreeMap<String, Arc<ArrivalLane>>>, path: &str) ->
             Arc::new(ArrivalLane {
                 tx,
                 rx: AsyncMutex::new(rx),
+                dropped: AtomicUsize::new(0),
             })
         })
         .clone()
@@ -850,6 +920,10 @@ fn enqueue_arrival(
     // receiving; backpressure would stall the connection's response
     // and, through it, the system under test's producer.
     if lane.tx.try_send(arrival).is_err() {
+        // Overflow evidence for the receive path: a timed-out receive
+        // on a lane that dropped arrivals reports the overflow, not a
+        // plain timeout (rc-7mli).
+        lane.dropped.fetch_add(1, Ordering::Relaxed);
         // log-policy: harness-defect — a full lane is a scripting
         // defect, not a workload; the arrival stays on the recorder.
         tracing::warn!(
@@ -1080,16 +1154,21 @@ mod tests {
     fn fail_lane_entry_is_conditional() {
         let lane = ClientLane::new();
         let (_, rx) = oneshot::channel();
-        lock_through(&lane.in_flight).insert("K".to_string(), LaneEntry { generation: 2, rx });
+        lock_through(&lane.in_flight).insert(
+            "K".to_string(),
+            VecDeque::from([LaneEntry { generation: 2, rx }]),
+        );
         let error = || TransportError::Other {
             message: "boom".to_string(),
         };
 
-        // A stale generation is rejected; the entry stays untouched.
+        // A stale generation is rejected; the FIFO's only entry stays
+        // untouched.
         assert!(!lane.fail_lane_entry("K", 1, error()));
         assert_eq!(
             lock_through(&lane.in_flight)
                 .get("K")
+                .and_then(|fifo| fifo.front())
                 .map(|entry| entry.generation),
             Some(2)
         );

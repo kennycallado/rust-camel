@@ -25,12 +25,13 @@
 //! runner ever runs.
 //!
 //! Every await is bounded: `receive` carries the action deadline, and
-//! `send` is bounded by [`SEND_DEADLINE`].
+//! `send` is bounded by the document's `sendDeadline`, defaulting to
+//! [`SEND_DEADLINE`].
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use camel_api::Value;
+use camel_api::{Body, Exchange, Value};
 use camel_matchers::{expectation_matches, stringify};
 
 use crate::adapters::redact_wire_path;
@@ -56,9 +57,17 @@ pub(crate) use partner_validate::{
     matching_requests, partner_mismatch_detail, render_bound, render_filters,
 };
 
-/// The bounded deadline for every `send` action (ADR-0069 §7: every
-/// adapter operation carries a deadline).
+/// The default bounded deadline for every `send` action (ADR-0069
+/// §7: every adapter operation carries a deadline). A document-level
+/// `sendDeadline` overrides it (rc-tr4w).
 const SEND_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The effective send bound of a document: its declared
+/// `sendDeadline`, or the thirty-second [`SEND_DEADLINE`] default.
+/// Real time only (ADR-0069 §6: no virtual time).
+pub(crate) fn effective_send_deadline(doc: &ScenarioDocument) -> Duration {
+    doc.send_deadline.unwrap_or(SEND_DEADLINE)
+}
 
 /// Mutable run state carried across actions: scenario variables set by
 /// `extract`, and the last message received per endpoint for
@@ -251,6 +260,17 @@ pub enum ScenarioFailure {
         /// Startup failure detail.
         message: String,
     },
+    /// The partner's arrival lane dropped arrivals while the scenario
+    /// was not receiving (apparatus class, `arrival-lane-overflow`):
+    /// the harness lost them before the system under test could fail
+    /// the scenario on substance.
+    #[error("arrival-lane-overflow: {endpoint} dropped {dropped} arrivals")]
+    ArrivalLaneOverflow {
+        /// The endpoint URI whose lane dropped arrivals.
+        endpoint: String,
+        /// How many arrivals the lane dropped while full.
+        dropped: usize,
+    },
     /// Teardown of the boot or a partner timed out or erred after the
     /// verdict was recorded (apparatus class, `shutdown-failure`).
     #[error("shutdown-failure: {message}")]
@@ -303,8 +323,9 @@ pub async fn run_scenario(
     // The scenario-start anchor every `elapsedAtLeast` bound measures
     // against; taken once per run, before the first action.
     let started_at = Instant::now();
+    let send_deadline = effective_send_deadline(doc);
     for (index, action) in doc.scenario.iter().enumerate() {
-        run_action(action, index, router, vars, started_at).await?;
+        run_action(action, index, router, vars, started_at, send_deadline).await?;
     }
     Ok(ScenarioVerdict::Pass)
 }
@@ -329,6 +350,14 @@ pub struct DocumentOutcome {
     /// Post-verdict shutdown failure, recorded by the boot-owning
     /// caller; empty when teardown is clean or never ran.
     pub final_failure: Option<ScenarioFailure>,
+    /// The bound address of the document's `inbound:` listener
+    /// (rc-5yon, ADR-0070), filled by the boot-owning caller from
+    /// [`crate::boot_scenario::ScenarioRun::inbound_bound`] after the
+    /// boot, so tests target the ephemeral listener without re-deriving
+    /// it. `None` when the document declares no `inbound:` listener or
+    /// the caller never filled it; the post-boot slot, as
+    /// `final_failure` is the post-verdict slot.
+    pub inbound_bound: Option<std::net::SocketAddr>,
 }
 
 /// Executes a scenario document's actions in order against the
@@ -348,13 +377,14 @@ pub async fn run_scenario_document(
     // The scenario-start anchor every `elapsedAtLeast` bound measures
     // against; taken once per run, before the first action.
     let started_at = Instant::now();
+    let send_deadline = effective_send_deadline(doc);
     let mut per_action = Vec::with_capacity(doc.scenario.len());
     let mut failed = false;
     for (index, action) in doc.scenario.iter().enumerate() {
         if failed {
             break;
         }
-        match run_action(action, index, router, vars, started_at).await {
+        match run_action(action, index, router, vars, started_at, send_deadline).await {
             Ok(()) => per_action.push(Ok(ScenarioVerdict::Pass)),
             Err(failure) => {
                 per_action.push(Err(failure));
@@ -371,6 +401,7 @@ pub async fn run_scenario_document(
         per_action,
         verdict,
         final_failure: None,
+        inbound_bound: None,
     }
 }
 
@@ -383,6 +414,7 @@ async fn run_action(
     router: &PartnerRouter,
     vars: &mut ScenarioVars,
     started_at: Instant,
+    send_deadline: Duration,
 ) -> Result<(), ScenarioFailure> {
     match action {
         ScenarioAction::Send {
@@ -390,6 +422,7 @@ async fn run_action(
             body,
             headers,
             method,
+            expect_reply,
         } => {
             send_action(
                 index,
@@ -397,8 +430,10 @@ async fn run_action(
                 body.as_ref(),
                 headers.as_ref(),
                 method,
+                expect_reply.as_ref(),
                 router,
                 vars,
+                send_deadline,
             )
             .await?;
         }
@@ -419,7 +454,9 @@ async fn run_action(
     Ok(())
 }
 
-/// Dispatches a `send` action, bounded by [`SEND_DEADLINE`].
+/// Dispatches a `send` action, bounded by the document's effective
+/// send deadline ([`effective_send_deadline`]: the declared
+/// `sendDeadline`, or the thirty-second default).
 ///
 /// The endpoint reference, the body's string leaves, and the header
 /// values are the complete interpolation surface: each resolves its
@@ -430,14 +467,28 @@ async fn run_action(
 /// to a partner authority) dials the partner's bound address with the
 /// interpolated path preserved; anything else dials the interpolated
 /// URI literally.
+///
+/// A declared `expectReply` (rc-qvz6, `direct:` sends only — the
+/// grammar rejected every other scheme at load) asserts the
+/// synchronous reply the adapter returned: a non-matching reply is a
+/// verdict-class [`ScenarioFailure::ValidationMismatch`] naming the
+/// rendered expectation and the actual body, and a missing reply is
+/// an apparatus-class [`ScenarioFailure::ActionTransport`] — the
+/// scenario never got an answer to assert against.
+// The action's flat decomposition (index, endpoint, body, headers,
+// method, reply expectation, router, vars) plus the document send
+// bound threaded from run_action (rc-tr4w).
+#[allow(clippy::too_many_arguments)]
 async fn send_action(
     index: usize,
     to: &EndpointRef,
     body: Option<&Value>,
     headers: Option<&BTreeMap<String, Value>>,
     method: &str,
+    expect_reply: Option<&Expectation>,
     router: &PartnerRouter,
     vars: &ScenarioVars,
+    send_deadline: Duration,
 ) -> Result<(), ScenarioFailure> {
     let declared = to.endpoint.as_str();
     let interpolated = resolve_placeholders(declared, vars)?;
@@ -457,17 +508,105 @@ async fn send_action(
         method: method.to_string(),
     };
     let bounded =
-        tokio::time::timeout(SEND_DEADLINE, router.send(declared, &interpolated, msg)).await;
+        tokio::time::timeout(send_deadline, router.send(declared, &interpolated, msg)).await;
     let sent = bounded.map_err(|_| ScenarioFailure::ActionTransport {
         action: index,
         source: TransportError::Deadline {
-            after: SEND_DEADLINE,
+            after: send_deadline,
         },
     })?;
-    sent.map_err(|source| ScenarioFailure::ActionTransport {
-        action: index,
-        source,
-    })
+    let reply = sent.map_err(|source| {
+        // Render-site defense: the lane key is the declared endpoint
+        // URI, and a third-party adapter may hand the overflow over
+        // RAW; the runner holds the secret set, and redaction is
+        // idempotent on already-masked output (ADR-0051).
+        let source = match source {
+            TransportError::LaneFifoOverflow { lane_key, bound } => {
+                TransportError::LaneFifoOverflow {
+                    lane_key: redact_wire_path(&lane_key, &router.secret_query_keys()),
+                    bound,
+                }
+            }
+            other => other,
+        };
+        ScenarioFailure::ActionTransport {
+            action: index,
+            source,
+        }
+    })?;
+    if let Some(expectation) = expect_reply {
+        let Some(reply) = reply else {
+            // Fail closed: the grammar promised a direct reply, but
+            // the adapter produced none — an apparatus defect, never
+            // a silently-skipped assertion.
+            return Err(ScenarioFailure::ActionTransport {
+                action: index,
+                source: TransportError::Other {
+                    message: "direct send produced no reply".to_string(),
+                },
+            });
+        };
+        let value = reply_body_value(&reply);
+        if !expectation_matches(expectation, &value) {
+            return Err(ScenarioFailure::ValidationMismatch {
+                action: index,
+                detail: format!(
+                    "direct reply on {}: expected {}, got {}",
+                    to.endpoint,
+                    render_expectation(expectation),
+                    stringify(&value)
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Converts a synchronous `direct:` reply exchange's body into the
+/// matcher value an `expectReply` assertion reads (rc-qvz6): the
+/// reply message is the exchange's output when the route produced
+/// one, the (route-mutated — `set_body` writes it) input otherwise.
+/// Feature-free by design: the partner-body extractors stay
+/// `http`-gated; this path never touches the wire. Crate-visible for
+/// the runner's unit tests, like the interpolation primitives.
+pub(crate) fn reply_body_value(exchange: &Exchange) -> Value {
+    let message = exchange.output.as_ref().unwrap_or(&exchange.input);
+    match &message.body {
+        Body::Json(value) => value.clone(),
+        Body::Text(text) => reply_bytes_value(text.as_bytes()),
+        Body::Xml(text) => reply_bytes_value(text.as_bytes()),
+        Body::Bytes(bytes) => reply_bytes_value(bytes),
+        // Empty and consumed-stream bodies carry no reply bytes, and
+        // foreign `#[non_exhaustive]` body kinds (none today) expose
+        // none either; the value reads as the empty string.
+        _ => Value::String(String::new()),
+    }
+}
+
+/// Parses reply bytes as JSON, falling back to a lossy-UTF-8 string
+/// when they are not JSON text: a text body holding JSON is observed
+/// as the structured value the matcher verbs expect, and any other
+/// text stays textual.
+fn reply_bytes_value(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(bytes).into_owned()))
+}
+
+/// Renders an expectation for an `expectReply` mismatch detail: the
+/// verb and its payload in the document grammar's own terms.
+fn render_expectation(expectation: &Expectation) -> String {
+    match expectation {
+        Expectation::Equals(expected) => format!("equals {expected}"),
+        Expectation::Regex(pattern) => format!("matches regex `{pattern}`"),
+        Expectation::Contains(needle) => format!("contains `{needle}`"),
+        Expectation::StartsWith(prefix) => format!("startsWith `{prefix}`"),
+        Expectation::EndsWith(suffix) => format!("endsWith `{suffix}`"),
+        Expectation::Exists => "exists".to_string(),
+        Expectation::JsonSubset(pattern) => format!("is a superset of {pattern}"),
+        // Foreign `#[non_exhaustive]` variants (none today): no verb
+        // renders, but the matcher already failed closed.
+        _ => "the expected value".to_string(),
+    }
 }
 
 /// Awaits a `receive` action until the deadline, records the message,
@@ -489,14 +628,14 @@ async fn receive_action(
     let message = router
         .receive(declared, &interpolated, deadline)
         .await
-        .map_err(|source| match source {
+        .map_err(|source| {
             // Render-site defense: a third-party adapter may hand
             // over RAW endpoint and lane evidence; the runner holds
             // the secret set, and redaction is idempotent on
             // already-masked output (ADR-0051).
-            ReceiveError::Timeout(timeout) => {
-                let keys = router.secret_query_keys();
-                ScenarioFailure::ReceiveTimeout {
+            let keys = router.secret_query_keys();
+            match source {
+                ReceiveError::Timeout(timeout) => ScenarioFailure::ReceiveTimeout {
                     endpoint: redact_wire_path(&timeout.endpoint, &keys),
                     deadline,
                     lanes: lanes_suffix(
@@ -506,12 +645,16 @@ async fn receive_action(
                             .map(|lane| redact_wire_path(lane, &keys))
                             .collect::<Vec<_>>(),
                     ),
-                }
+                },
+                ReceiveError::Overflow(overflow) => ScenarioFailure::ArrivalLaneOverflow {
+                    endpoint: redact_wire_path(&overflow.endpoint, &keys),
+                    dropped: overflow.dropped,
+                },
+                ReceiveError::Transport(source) => ScenarioFailure::ActionTransport {
+                    action: index,
+                    source,
+                },
             }
-            ReceiveError::Transport(source) => ScenarioFailure::ActionTransport {
-                action: index,
-                source,
-            },
         })?;
     if let Some(extract) = extract {
         for (name, selector) in extract {

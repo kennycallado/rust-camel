@@ -13,10 +13,10 @@ use std::collections::BTreeMap;
 
 use camel_api::CamelError;
 
-use crate::ScenarioDocument;
 use crate::boot_scenario::boot_scenario;
 use crate::env_layers::{LayeredEnv, ambient_std};
 use crate::parse_scenario_document;
+use crate::{RouteSource, ScenarioAction, ScenarioDocument};
 
 /// A minimal route file: one `direct:` → `log:` route.
 const ROUTE: &str = r#"
@@ -208,19 +208,103 @@ scenario:
     );
 }
 
-#[tokio::test]
-async fn boot_inline_routes_still_rejected() {
-    let doc = r#"
-routes:
-  - id: inline-route
-    from: direct:start
-    steps:
-      - to: log:info
+/// A nested scenario document declaring its route file relative to
+/// itself: the file lives next to the document, not at the root.
+const NESTED_DOC: &str = r#"
+routeFiles: [local.yaml]
 scenario:
   - sleep:
       duration: 1s
 "#;
-    let (dir, doc) = project("# minimal\n", None, doc);
+
+/// A nested scenario document declaring its route file against the
+/// project root's route space (`rr/` under the `Camel.toml` dir).
+const NESTED_FROM_ROOT_DOC: &str = r#"
+routeFilesFromRoot: [rr/root-route.yaml]
+scenario:
+  - sleep:
+      duration: 1s
+"#;
+
+#[tokio::test]
+async fn boot_root_walks_to_ancestor() {
+    // rc-jjzy5, nested tree: the sealed `Camel.toml` and the
+    // `routeFilesFromRoot` file live at the ANCESTOR root; the
+    // relative-routeFiles file lives only next to the document. One
+    // document declares exactly one route source
+    // (`RouteSourceConflict`), so the pair boots twice: each `Ok`
+    // proves its declared file was found and parsed at its own anchor
+    // — the document directory for `routeFiles`, the passed root for
+    // `routeFilesFromRoot`. Anchoring `routeFiles` at the root (the
+    // pre-fix behavior) misses `local.yaml` and fails the first boot.
+    let root = tempfile::tempdir().expect("temp dir");
+    let sub = root.path().join("sub");
+    std::fs::create_dir(&sub).expect("mkdir sub");
+    std::fs::create_dir_all(root.path().join("rr")).expect("mkdir rr");
+    std::fs::write(root.path().join("Camel.toml"), "# minimal\n").expect("write Camel.toml");
+    std::fs::write(root.path().join("rr/root-route.yaml"), ROUTE).expect("write root route");
+    std::fs::write(sub.join("local.yaml"), ROUTE).expect("write local route");
+
+    let files_path = sub.join("doc.test.yaml");
+    std::fs::write(&files_path, NESTED_DOC).expect("write document");
+    let files_doc = parse_scenario_document(&files_path).expect("document parses");
+
+    let from_root_path = sub.join("from-root.test.yaml");
+    std::fs::write(&from_root_path, NESTED_FROM_ROOT_DOC).expect("write document");
+    let from_root_doc = parse_scenario_document(&from_root_path).expect("document parses");
+
+    boot_scenario(&files_doc, root.path(), &empty_env())
+        .await
+        .expect("relative routeFiles must anchor at the document directory");
+    boot_scenario(&from_root_doc, root.path(), &empty_env())
+        .await
+        .expect("routeFilesFromRoot must follow the resolved root");
+}
+
+#[tokio::test]
+async fn route_files_anchor_to_doc_dir() {
+    // rc-jjzy5: the route file exists ONLY next to the nested
+    // document; resolving relative `routeFiles` against the boot root
+    // would miss it and fail the boot.
+    let root = tempfile::tempdir().expect("temp dir");
+    let sub = root.path().join("sub");
+    std::fs::create_dir(&sub).expect("mkdir sub");
+    std::fs::write(root.path().join("Camel.toml"), "# minimal\n").expect("write Camel.toml");
+    std::fs::write(sub.join("local.yaml"), ROUTE).expect("write local route");
+    let doc_path = sub.join("case.test.yaml");
+    std::fs::write(&doc_path, NESTED_DOC).expect("write document");
+    let doc = parse_scenario_document(&doc_path).expect("document parses");
+
+    boot_scenario(&doc, root.path(), &empty_env())
+        .await
+        .expect("the colocated route file must load from the document directory");
+}
+
+#[tokio::test]
+async fn boot_inline_routes_still_rejected() {
+    // The load-time doc gate (rc-9dpx) rejects inline route sources
+    // inside `parse_scenario_document`, so the boot-level rejection is
+    // reachable only through a directly-constructed document — exactly
+    // the defense-in-depth path this test keeps covered.
+    let routes = camel_dsl::parse_yaml(
+        "routes:\n  - id: inline-route\n    from: direct:start\n    steps:\n      - to: log:info\n",
+    )
+    .expect("inline routes parse");
+    let doc = ScenarioDocument {
+        source_path: std::path::PathBuf::new(),
+        route_source: RouteSource::Inline(routes),
+        scenario: vec![ScenarioAction::Sleep {
+            duration: std::time::Duration::from_secs(1),
+        }],
+        partners: None,
+        env: None,
+        env_passthrough: None,
+        profile: None,
+        send_deadline: None,
+        inbound: None,
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("Camel.toml"), "# minimal\n").expect("write Camel.toml");
     let err = expect_boot_error(
         boot_scenario(&doc, dir.path(), &empty_env()).await,
         "inline route sources must not boot in v1",
@@ -233,6 +317,48 @@ scenario:
         err.to_string()
             .contains("inline route sources cannot boot in v1"),
         "error must keep the inline-routes message: {err}"
+    );
+}
+
+/// The `inbound:` rejection without the `http` feature, mirroring the
+/// inline-routes defense-in-depth path.
+#[cfg(not(feature = "http"))]
+#[tokio::test]
+async fn boot_rejects_inbound_without_http_feature() {
+    // The load-time doc gate rejects `inbound:` without the `http`
+    // feature inside `parse_scenario_document`, so the boot-level
+    // rejection is reachable only through a directly-constructed
+    // document — the same defense-in-depth path
+    // `boot_inline_routes_still_rejected` keeps covered.
+    let doc = ScenarioDocument {
+        source_path: std::path::PathBuf::new(),
+        route_source: RouteSource::RouteFiles(vec!["routes.yaml".into()]),
+        scenario: vec![ScenarioAction::Sleep {
+            duration: std::time::Duration::from_secs(1),
+        }],
+        partners: None,
+        env: None,
+        env_passthrough: None,
+        profile: None,
+        send_deadline: None,
+        inbound: Some(crate::InboundListener {
+            bind_var: "INBOUND".to_string(),
+        }),
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("Camel.toml"), "# minimal\n").expect("write Camel.toml");
+    std::fs::write(dir.path().join("routes.yaml"), ROUTE).expect("write route file");
+    let err = expect_boot_error(
+        boot_scenario(&doc, dir.path(), &empty_env()).await,
+        "an inbound document must not boot without the http feature",
+    );
+    assert!(
+        matches!(err, CamelError::Config(_)),
+        "expected Config, got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("http` feature"),
+        "error must name the missing feature: {err}"
     );
 }
 

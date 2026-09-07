@@ -1,16 +1,16 @@
-# Inbound consumer fixture route (ADR-0069 sections 4-5): the system
-# under test CONSUMES http — the consumer binds the pinned loopback
-# port at `ctx.start()` (rc-w1u9: Explicit startup mode, `mark_ready`
-# after bind, so the harness may connect the moment the boot returns).
+# Inbound consumer fixture route (ADR-0069 sections 4-5, rc-5yon): the
+# system under test CONSUMES http — the consumer binds the listener
+# staged by the document's `inbound:` section at `ctx.start()` (rc-w1u9:
+# Explicit startup mode, `mark_ready` after bind, so the harness may
+# connect the moment the boot returns).
 #
-# v1 pins the port in the route URI: no bound-address API exists, so
-# the explicit port (through the `PORT` placeholder default) is the
-# contract the scenario document addresses. The placeholder resolves
-# through the scenario's layered environment at boot, never the
-# process environment.
+# The route pins no port: `${env:INBOUND}` resolves through the
+# scenario's layered environment at discovery to the full URL the boot
+# staged (`http://127.0.0.1:<port>`, rc-5yon), never the process
+# environment.
 routes:
   - id: inbound-consumer
-    from: http://127.0.0.1:${env:PORT:-18180}/in
+    from: ${env:INBOUND}/in
     steps:
       - set_header:
           key: CamelHttpResponseCode

@@ -58,7 +58,10 @@ pub(super) fn is_apparatus(failure: &camel_integration_test::ScenarioFailure) ->
     use camel_integration_test::ScenarioFailure as F;
     matches!(
         failure,
-        F::ActionTransport { .. } | F::PartnerStartup { .. } | F::ShutdownFailure { .. }
+        F::ActionTransport { .. }
+            | F::PartnerStartup { .. }
+            | F::ShutdownFailure { .. }
+            | F::ArrivalLaneOverflow { .. }
     )
 }
 

@@ -1,3 +1,30 @@
+//! `${env:}` interpolation for route sources (rc-ayke).
+//!
+//! Two paths share one string scanner (the `interpolate_string` core behind
+//! [`interpolate_env_with`] and [`interpolate_env_tree`]):
+//!
+//! - **Parse-tree walk** ([`interpolate_env_tree`]): the canonical YAML
+//!   path. Interpolation runs on the scalars of the parsed tree, so YAML
+//!   comments are never interpolated — a placeholder inside a comment
+//!   (e.g. a commented-out line referencing a removed var) cannot fail
+//!   resolution.
+//! - **Legacy whole-text splice** ([`interpolate_env_with`]): a raw pass
+//!   over the unparsed text, kept as the fallback for documents the YAML
+//!   shim cannot parse.
+//!
+//! # Typing semantics (design decision, camel-config precedent)
+//!
+//! An interpolated leaf that resolves to numeric- or boolean-looking text
+//! KEEPS string typing after the tree walk. The legacy raw-splice used to
+//! re-parse such text as a number; the YAML `Value` tree cannot preserve
+//! plain-scalar style through a round-trip, so the leaf stays a string.
+//! Consumers that need numbers compose them inside URI strings instead.
+//!
+//! Interpolated mapping keys that collide after interpolation collapse
+//! last-wins, matching the loader's own duplicate-key behavior (parity
+//! with the raw-splice outcome class).
+
+use noyalib::compat::serde_yaml as serde_yml;
 use regex::Regex;
 use std::env;
 use std::sync::OnceLock;
@@ -55,10 +82,17 @@ pub fn interpolate_env_with(
     src: &str,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<String, String> {
+    interpolate_string(src, lookup)
+}
+
+/// Shared string scanner for both interpolation paths (legacy whole-text
+/// and parse-tree walk). Grammar: `${env:X}`, `${env:X:-default}`,
+/// `$${env:X}` and `$$` escapes; `Err(var_name)` on an unresolved var.
+fn interpolate_string(s: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
     let re = env_regex();
     let mut error: Option<String> = None;
 
-    let result = re.replace_all(src, |caps: &regex::Captures| {
+    let result = re.replace_all(s, |caps: &regex::Captures| {
         if error.is_some() {
             return String::new();
         }
@@ -92,9 +126,94 @@ pub fn interpolate_env_with(
     Ok(result.into_owned())
 }
 
+/// Error surface of the parse-tree interpolation walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TreeInterpolateError {
+    /// A `${env:NAME}` placeholder did not resolve (no value, no default).
+    Unresolved(String),
+    /// The document did not survive the YAML parse/serialize round-trip;
+    /// callers fall back to legacy whole-text interpolation.
+    Fallback,
+}
+
+/// Parse-tree `${env:}` interpolation for YAML documents.
+///
+/// Parses `raw` with the crate's canonical YAML shim (`noyalib::compat::
+/// serde_yaml`, the same alias `parse_yaml` uses), applies the shared
+/// scanner to scalars only (string mapping keys included), and
+/// re-serializes with the same shim. Comments are not part of the tree,
+/// so a placeholder inside a comment never fails resolution.
+///
+/// Scalars whose text contains no `${` or `$$` token pass through
+/// untouched, minimizing round-trip drift. An unresolved var propagates
+/// as [`TreeInterpolateError::Unresolved`]. Numeric/boolean-looking
+/// results keep string typing (see the module docs).
+pub(crate) fn interpolate_env_tree(
+    raw: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, TreeInterpolateError> {
+    let mut root: serde_yml::Value =
+        serde_yml::from_str(raw).map_err(|_| TreeInterpolateError::Fallback)?;
+    interpolate_value(&mut root, lookup)?;
+    serde_yml::to_string(&root).map_err(|_| TreeInterpolateError::Fallback)
+}
+
+/// Whether a scalar's text carries any placeholder or escape token.
+fn has_env_token(s: &str) -> bool {
+    s.contains("${") || s.contains("$$")
+}
+
+/// Recursive tree walk applying `interpolate_string` to scalars that carry
+/// a placeholder or escape token; all other nodes pass through untouched.
+fn interpolate_value(
+    value: &mut serde_yml::Value,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), TreeInterpolateError> {
+    match value {
+        serde_yml::Value::String(s) => {
+            if has_env_token(s) {
+                *s = interpolate_string(s, lookup).map_err(TreeInterpolateError::Unresolved)?;
+            }
+            Ok(())
+        }
+        serde_yml::Value::Sequence(seq) => {
+            for item in seq.iter_mut() {
+                interpolate_value(item, lookup)?;
+            }
+            Ok(())
+        }
+        serde_yml::Value::Mapping(map) => {
+            // The shim's Mapping keys are strings — interpolate them too.
+            // Keys are not mutable in place (`iter_mut` yields `&String`),
+            // so rebuilt entries replace the originals in order.
+            let mut rebuilt = serde_yml::Mapping::new();
+            for (key, val) in map.iter() {
+                let mut key = key.clone();
+                if has_env_token(&key) {
+                    key = interpolate_string(&key, lookup)
+                        .map_err(TreeInterpolateError::Unresolved)?;
+                }
+                let mut val = val.clone();
+                interpolate_value(&mut val, lookup)?;
+                rebuilt.insert(key, val);
+            }
+            *map = rebuilt;
+            Ok(())
+        }
+        // Tagged nodes are opaque through the shim (the inner value is not
+        // reachable) — a document carrying one falls back to the legacy
+        // whole-text splice so placeholders inside tagged nodes keep
+        // interpolating exactly as before the tree walk existed.
+        serde_yml::Value::Tagged(_) => Err(TreeInterpolateError::Fallback),
+        // Null/Bool/Number carry no token-bearing text.
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noyalib::compat::serde_yaml as serde_yml;
 
     #[test]
     fn passthrough_no_placeholders() {
@@ -239,5 +358,80 @@ mod tests {
         let result = interpolate_env("$${env:LIT} and ${env:RUST_CAMEL_TEST_ESC_B}").unwrap();
         assert_eq!(result, "${env:LIT} and val-b");
         unsafe { env::remove_var("RUST_CAMEL_TEST_ESC_B") };
+    }
+
+    #[test]
+    fn comment_placeholder_does_not_fail() {
+        let input =
+            "# TODO re-enable ${env:MISSING}\nroutes:\n  - id: r1\n    from: direct:start\n";
+        let out = interpolate_env_tree(input, &|_| None)
+            .expect("placeholder inside a comment must not fail resolution");
+        assert!(!out.contains("TODO"), "comment must be dropped, got: {out}");
+        assert!(
+            !out.contains("${env:MISSING}"),
+            "comment placeholder must not leak, got: {out}"
+        );
+        assert!(out.contains("r1"), "body must be kept, got: {out}");
+        assert!(
+            out.contains("direct:start"),
+            "body must be kept, got: {out}"
+        );
+    }
+
+    #[test]
+    fn quoted_hash_survives_interpolation() {
+        let input = "text: \"a # b ${env:X}\"\n";
+        let out = interpolate_env_tree(input, &|name| (name == "X").then(|| "ok".to_string()))
+            .expect("resolvable placeholder must interpolate");
+        let parsed: serde_yml::Value = serde_yml::from_str(&out).expect("output must re-parse");
+        assert_eq!(
+            parsed.get("text").and_then(serde_yml::Value::as_str),
+            Some("a # b ok"),
+            "hash must survive and X interpolate, got: {out}"
+        );
+    }
+
+    #[test]
+    fn block_scalar_interpolates_as_value() {
+        let input = "text: |\n  hello ${env:X}\n  second line\n";
+        let out = interpolate_env_tree(input, &|name| (name == "X").then(|| "ok".to_string()))
+            .expect("resolvable placeholder must interpolate");
+        let parsed: serde_yml::Value = serde_yml::from_str(&out).expect("output must re-parse");
+        assert_eq!(
+            parsed.get("text").and_then(serde_yml::Value::as_str),
+            Some("hello ok\nsecond line\n"),
+            "block scalar content must interpolate as a value, got: {out}"
+        );
+    }
+
+    #[test]
+    fn numeric_leaf_stays_string_after_interpolation() {
+        let input = "port: ${env:PORT}\n";
+        let out = interpolate_env_tree(input, &|name| (name == "PORT").then(|| "8080".to_string()))
+            .expect("resolvable placeholder must interpolate");
+        let parsed: serde_yml::Value = serde_yml::from_str(&out).expect("output must re-parse");
+        let leaf = parsed.get("port").expect("port leaf must exist");
+        assert!(
+            leaf.is_string(),
+            "numeric-looking result must stay a string (documented typing semantics), got: {out}"
+        );
+        assert_eq!(leaf.as_str(), Some("8080"));
+    }
+
+    #[test]
+    fn tagged_node_falls_back_to_legacy() {
+        let lookup = |name: &str| (name == "X").then(|| "ok".to_string());
+        // Custom tag: core-schema tags (!!str etc.) resolve to plain values,
+        // only custom tags reach Value::Tagged in the shim.
+        let input = "value: !mytag ${env:X}\n";
+        // Fallback contract: the tree walk refuses tagged documents...
+        let err = interpolate_env_tree(input, &lookup)
+            .expect_err("tagged node must fall back, not pass through");
+        assert_eq!(err, TreeInterpolateError::Fallback);
+        // ...and discovery's legacy splice interpolates them exactly as
+        // before the tree walk existed.
+        let legacy = interpolate_env_with(input, &lookup)
+            .expect("legacy splice must resolve the placeholder inside the tagged node");
+        assert_eq!(legacy, "value: !mytag ok\n");
     }
 }

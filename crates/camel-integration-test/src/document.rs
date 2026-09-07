@@ -6,17 +6,20 @@
 //! (`routeFiles`, `routeFilesFromRoot`, or inline `routes`), an ordered
 //! `scenario:` action list, an optional `env:` map with fixed fixture
 //! values, an optional `envPassthrough:` allowlist, an optional
-//! endpoint-keyed `partners:` scripting map, and an optional pinned
-//! `profile`. Unknown fields are rejected.
+//! endpoint-keyed `partners:` scripting map, an optional pinned
+//! `profile`, an optional document-level `sendDeadline` bounding
+//! every send, and an optional document-level `inbound:` listener
+//! declaration (feature `http`). Unknown fields are rejected.
 //!
 //! The scenario vocabulary and the unit-tier vocabulary (`inputs`,
 //! `expects`, `intercepts`) never mix in one document. A document with
 //! `scenario:` that also declares a unit-tier section is rejected at
 //! load time.
 //!
-//! Durations (`deadline`, `duration`, `elapsedAtLeast`) are humantime
-//! strings, for example `"5s"` or `"250ms"`, parsed during validation
-//! so errors can name the action index.
+//! Durations (`sendDeadline`, `deadline`, `duration`,
+//! `elapsedAtLeast`) are humantime strings, for example `"5s"` or
+//! `"250ms"`, parsed during validation so errors can name the action
+//! index.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -46,6 +49,11 @@ pub use camel_matchers::{CountBound, Expectation, PathFilter};
 /// the runner's job, the same split the unit-tier parser keeps.
 #[derive(Debug)]
 pub struct ScenarioDocument {
+    /// The document's own path as parsed. The boot root may be a
+    /// nearest-ancestor `Camel.toml` directory rather than the
+    /// document's directory, so the document directory travels with
+    /// the model: relative `routeFiles` anchor here (rc-jjzy5).
+    pub source_path: std::path::PathBuf,
     /// The single declared route source.
     pub route_source: RouteSource,
     /// Ordered scenario actions.
@@ -61,6 +69,18 @@ pub struct ScenarioDocument {
     /// Profile pinned per document; an ambient profile would break
     /// hermeticity.
     pub profile: Option<String>,
+    /// Document-level bound for every `send` action (rc-tr4w): an
+    /// optional tighter deadline than the runner's thirty-second
+    /// default, real time only (ADR-0069 §6).
+    pub send_deadline: Option<Duration>,
+    /// The document-level `inbound:` declaration (rc-5yon): the
+    /// harness binds `127.0.0.1:0`, stages the listener on the HTTP
+    /// component's global registry (ADR-0070), and exposes the bound
+    /// address under the named bind variable so route URIs interpolate
+    /// it. Provisioning runs behind the `http` feature; a declaration
+    /// in a build without the feature is a named load error (ADR-0069
+    /// §8 demand-gated activation).
+    pub inbound: Option<InboundListener>,
 }
 
 /// The route source of a scenario document. Exactly one form is
@@ -113,6 +133,11 @@ pub enum ScenarioAction {
         /// Resolved method: explicit or inferred (`POST` with a body,
         /// `GET` without), uppercase.
         method: String,
+        /// Reply assertion for `direct:` sends (rc-qvz6): the same
+        /// matcher grammar `validate` parses, evaluated against the
+        /// synchronous route reply the context-stimulus adapter
+        /// returns. Load-time rejected on every other scheme.
+        expect_reply: Option<Expectation>,
     },
     /// Receive a message from an endpoint before the deadline passes.
     Receive {
@@ -222,6 +247,19 @@ pub enum Provisioning {
     Harness,
 }
 
+/// The document's `inbound:` declaration (rc-5yon): v1 grammar is a
+/// single map `inbound: {bindVar: NAME}`. The harness provisions one
+/// listener per document, binds `127.0.0.1:0`, stages it on the HTTP
+/// component's global registry (ADR-0070 staged consumption), and
+/// fills the bind variable with `http://<bound-address>` so route
+/// consumer URIs interpolate the staged socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundListener {
+    /// Scenario variable name the harness fills with the staged
+    /// listener's `http://<bound-address>` URL.
+    pub bind_var: String,
+}
+
 /// The scripted responses a document's `partners:` entry maps to, for
 /// one endpoint key. `None` when the document declares no entry for
 /// the endpoint — the caller binds a permissive partner. `Some` maps
@@ -307,6 +345,14 @@ struct RawDocument {
     // endpoint-keyed with raw sequence values; conversion runs during
     // validation so errors can name the entry key.
     partners: Option<BTreeMap<String, serde_yaml::Value>>,
+    // Document-level send bound: raw humantime string; parsed during
+    // validation so the error names the field.
+    send_deadline: Option<String>,
+    // Document-level inbound listener declaration: raw node; the
+    // grammar walk runs during validation so unknown fields name
+    // themselves in every build, and the `http` feature gate fires
+    // after structure (ADR-0069 §8 demand-gated activation).
+    inbound: Option<serde_yaml::Value>,
     // Unit-tier vocabulary, present only to detect and name the mixing
     // ban violation.
     inputs: Option<serde_yaml::Value>,
@@ -324,6 +370,10 @@ struct RawSend {
     /// or inferred from body presence) so errors can name the action
     /// index.
     method: Option<String>,
+    /// Raw `expectReply` node; optional, `direct:` sends only.
+    /// Validation converts it through the same matcher grammar
+    /// `validate` uses, and rejects it on every other scheme.
+    expect_reply: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -440,7 +490,9 @@ impl<'de> Deserialize<'de> for RawEndpointRef {
 ///
 /// - `doc-validation` class — Display carries the `doc-validation:`
 ///   token: `NotTestDocument`, `MissingScenario`, `MixedVocabulary`,
-///   `Validation`, `ReservedEnvKey`, `InlineRoutes`.
+///   `Validation`, `ReservedEnvKey`, `InlineRoutes`,
+///   `InlineRoutesRejected`, `ProvisioningWithoutAuthority`,
+///   `ExpectReplyOnUnsupportedSend`.
 /// - `infra-unavailable` class — `UnsupportedProvisioning` (reserved
 ///   provisioning grammar; Display names the class).
 /// - Unit-tier message parity — `RouteSourceMissing` and
@@ -521,6 +573,20 @@ pub enum DocError {
         /// The endpoint that declared it.
         endpoint: String,
     },
+    /// A `provisioning: harness` endpoint reference declares a
+    /// `bindVar` while its scheme (`direct:` or `fake:`) binds no
+    /// partner, so the variable would never receive a bound authority
+    /// and the entry fails later as a verdict-class var-resolution
+    /// error (rc-j87j). Rejected at load instead.
+    #[error(
+        "doc-validation: endpoint `{endpoint}` declares `bindVar` but its `{ref_scheme}:` reference binds no harness partner, so the variable would never receive a bound authority (exit-2 doc-validation class)"
+    )]
+    ProvisioningWithoutAuthority {
+        /// The endpoint whose reference cannot fill the variable.
+        endpoint: String,
+        /// The scheme of the endpoint reference (`direct` or `fake`).
+        ref_scheme: String,
+    },
     /// A document `env` key equals an endpoint's `bindVar`. The
     /// reserved set is exactly the `bindVar` values declared by the
     /// document's own endpoints; the harness binding wins.
@@ -545,6 +611,30 @@ pub enum DocError {
     /// Inline `routes` failed to parse.
     #[error("doc-validation: inline routes: {0}")]
     InlineRoutes(String),
+    /// The document's route source is inline `routes`. Inline
+    /// definitions cannot boot in v1; the author must declare
+    /// `routeFiles`. Rejected at load, before partners bind, instead
+    /// of failing the boot afterward (rc-9dpx).
+    #[error(
+        "doc-validation: inline `routes` are rejected at load: declare `routeFiles` instead (inline definitions cannot boot in the scenario tier; exit 2)"
+    )]
+    InlineRoutesRejected,
+    /// A send declares `expectReply` on a scheme that produces no
+    /// synchronous reply: only the context-stimulus `direct:` send
+    /// returns one. Partner sends (`http`/`https`) park their
+    /// roundtrips for a later `receive`, and `fake:` adapters record
+    /// sends without answering, so the assertion could never run
+    /// (rc-qvz6). Rejected at load, naming the action index, the
+    /// scheme, and the literal `expectReply` field.
+    #[error(
+        "doc-validation: scenario[{index}]: `expectReply` is only valid on a `direct:` send, not `{scheme}` (exit 2)"
+    )]
+    ExpectReplyOnUnsupportedSend {
+        /// Zero-based position of the action in the `scenario:` list.
+        index: usize,
+        /// The scheme of the send's endpoint reference.
+        scheme: String,
+    },
 }
 
 /// Classifies a compat-layer (serde_yaml) error text, mirroring the
@@ -564,14 +654,18 @@ fn classify_yaml_error(raw: &str) -> DocError {
 /// (a) the path carries a reserved test-document suffix; (b) the text
 /// deserializes; (c) a non-empty `scenario:` section exists; (d) no
 /// unit-tier section coexists with it; (e) exactly one route source
-/// is declared;
+/// is declared, and it is not inline (`routes` cannot boot in v1, so
+/// the defect fails at load instead of at boot);
 /// (f) each action converts (single-key dispatch, deadlines, durations,
-/// endpoint provisioning, expectation grammar) with action-index
-/// errors; (g) each `partners` entry converts (script grammar, response
-/// status range) with entry-key errors; (h) no `env` key collides with
-/// a declared `bindVar`; (i) each `partner` validate target URI equals
+/// endpoint provisioning, expectation grammar, the `direct:`-only
+/// `expectReply` gate) with action-index errors; (g) each `partners`
+/// entry converts (script grammar, response status range) with
+/// entry-key errors; (h) no `env` key collides with a declared
+/// `bindVar`; (i) each `partner` validate target URI equals
 /// a harness endpoint reference declared by the scenario's own
-/// `send`/`receive` actions.
+/// `send`/`receive` actions. The optional `inbound:` section converts
+/// between (g) and (h): grammar in every build, activation
+/// demand-gated behind `http` (ADR-0069 §8).
 pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError> {
     if !camel_dsl::discovery::is_test_document(path) {
         return Err(DocError::NotTestDocument {
@@ -651,6 +745,13 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
             });
         }
     };
+    // (e, rc-9dpx) Inline route sources cannot boot in v1; reject at
+    // load, before partners bind, instead of failing the boot after
+    // the composition root is up. The boot keeps its own rejection as
+    // defense-in-depth.
+    if matches!(route_source, RouteSource::Inline(_)) {
+        return Err(DocError::InlineRoutesRejected);
+    }
     // (f) Action conversion.
     let mut scenario = Vec::with_capacity(raw_scenario.len());
     for (index, item) in raw_scenario.into_iter().enumerate() {
@@ -661,9 +762,23 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
     // a valid, inert entry. The grammar conversion lives in the
     // partner-script module.
     let partners = crate::partner_script::partners_from_raw(raw.partners)?;
+    // (g2) Inbound listener declaration: the grammar walk runs in
+    // every build so grammar errors read identically with and without
+    // the `http` feature; the feature gate fires inside, after
+    // structure (ADR-0069 §8).
+    let inbound = raw.inbound.map(inbound_from_raw).transpose()?;
     // (h) Reserved env keys: the harness binding wins over document
-    // fixtures.
+    // fixtures — both the endpoints' bindVars and, since rc-5yon, the
+    // inbound listener's bindVar.
     if let Some(env) = raw.env.as_ref() {
+        if let Some(inbound) = inbound.as_ref()
+            && env.contains_key(&inbound.bind_var)
+        {
+            return Err(DocError::ReservedEnvKey {
+                key: inbound.bind_var.clone(),
+                endpoint: "inbound".to_string(),
+            });
+        }
         for action in &scenario {
             for (bind_var, endpoint) in action.bindings() {
                 if env.contains_key(bind_var) {
@@ -712,14 +827,78 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
             });
         }
     }
+    // Document-level send bound: optional; a present value goes
+    // through the same humantime grammar as the action deadlines,
+    // naming the field on failure (index 0 — the section, not an
+    // action, failed).
+    let send_deadline = raw
+        .send_deadline
+        .as_deref()
+        .map(|raw_deadline| parse_duration(raw_deadline, 0, "sendDeadline"))
+        .transpose()?;
     Ok(ScenarioDocument {
+        source_path: path.to_path_buf(),
         route_source,
         scenario,
         partners,
         env: raw.env,
         env_passthrough: raw.env_passthrough,
         profile: raw.profile,
+        send_deadline,
+        inbound,
     })
+}
+
+/// Converts the raw `inbound:` node. The v1 grammar is a single map
+/// `inbound: {bindVar: NAME}`; unknown fields are rejected naming the
+/// key, mirroring the partners-section strictness. Structure is
+/// validated in every build so grammar errors read identically with
+/// and without the `http` feature; only a structurally valid
+/// declaration reaches the demand gate (ADR-0069 §8), which rejects it
+/// naming the section and the feature when the harness is built
+/// without `http`. Section-level errors use index 0 — the section, not
+/// an action, failed (the `sendDeadline` precedent).
+fn inbound_from_raw(value: serde_yaml::Value) -> Result<InboundListener, DocError> {
+    let section_error = |message: String| DocError::Validation { index: 0, message };
+    let serde_yaml::Value::Mapping(ref map) = value else {
+        return Err(section_error(format!(
+            "`inbound` must be a map with a `bindVar` key, got {value:?}"
+        )));
+    };
+    let mut bind_var: Option<String> = None;
+    for (key, value) in map {
+        match key.as_str() {
+            "bindVar" => {
+                let text = value.as_str().ok_or_else(|| {
+                    section_error(format!(
+                        "`inbound`: `bindVar` must be a string, got {value:?}"
+                    ))
+                })?;
+                bind_var = Some(text.to_string());
+            }
+            other => {
+                return Err(section_error(format!(
+                    "`inbound`: unknown field `{other}`; expected `bindVar`"
+                )));
+            }
+        }
+    }
+    let bind_var =
+        bind_var.ok_or_else(|| section_error("`inbound` requires a `bindVar` key".to_string()))?;
+    // Demand-gated activation (ADR-0069 §8): the grammar parsed; the
+    // activation needs the `http` feature, which provisions the
+    // listener.
+    #[cfg(not(feature = "http"))]
+    {
+        let _ = bind_var;
+        Err(section_error(
+            "`inbound` requires the `http` feature, which this harness build does \
+             not enable: rebuild with `--features http` (demand-gated activation)"
+                .to_string(),
+        ))
+    }
+    #[cfg(feature = "http")]
+    Ok(InboundListener { bind_var })
 }
 
 /// Parses inline `routes` through the shared DSL parser. `parse_yaml`
@@ -779,11 +958,31 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                     }
                 }
             };
+            // (rc-qvz6) `expectReply` reads the synchronous reply only
+            // the context-stimulus `direct:` send produces; partner
+            // sends park their roundtrips for a later `receive` and
+            // fake adapters record sends without answering, so the
+            // assertion is rejected at load on every other scheme.
+            let scheme = ref_scheme(&raw.to.endpoint);
+            if raw.expect_reply.is_some() && scheme != Some("direct") {
+                return Err(DocError::ExpectReplyOnUnsupportedSend {
+                    index,
+                    // A scheme-less reference names no scheme to
+                    // render; the explicit phrase keeps the
+                    // diagnostic from degrading to an empty name.
+                    scheme: scheme.unwrap_or("no scheme").to_string(),
+                });
+            }
+            let expect_reply = raw
+                .expect_reply
+                .map(|value| expectation_from_value(&value, index, "expectReply"))
+                .transpose()?;
             Ok(ScenarioAction::Send {
                 to: endpoint_from_raw(raw.to)?,
                 body: raw.body,
                 headers: raw.headers,
                 method,
+                expect_reply,
             })
         }
         "receive" => {
@@ -844,7 +1043,11 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                 ScenarioTarget::Partner(_) => ValidateExpectation::Partner(
                     partner_expectation_from_value(&raw.expectation, index)?,
                 ),
-                _ => ValidateExpectation::Message(expectation_from_value(&raw.expectation, index)?),
+                _ => ValidateExpectation::Message(expectation_from_value(
+                    &raw.expectation,
+                    index,
+                    "expectation",
+                )?),
             };
             Ok(ScenarioAction::Validate {
                 target,
@@ -897,7 +1100,11 @@ fn build_target(value: &serde_yaml::Value, index: usize) -> Result<ScenarioTarge
     }
 }
 
-/// Applies the provisioning gate: only `harness` (or absent) passes.
+/// Applies the provisioning gate: only `harness` (or absent) passes,
+/// and a harness entry whose reference scheme binds no partner
+/// (`direct:`, `fake:`) must not declare a `bindVar` — the variable
+/// would never receive a bound authority (rc-j87j). A
+/// `direct:`/`fake:` entry without a `bindVar` stays legal.
 fn endpoint_from_raw(raw: RawEndpointRef) -> Result<EndpointRef, DocError> {
     let provisioning = match raw.provisioning.as_deref() {
         None => None,
@@ -909,11 +1116,30 @@ fn endpoint_from_raw(raw: RawEndpointRef) -> Result<EndpointRef, DocError> {
             });
         }
     };
+    if provisioning == Some(Provisioning::Harness)
+        && raw.bind_var.is_some()
+        && let Some(scheme) = ref_scheme(&raw.endpoint)
+        && (scheme == "direct" || scheme == "fake")
+    {
+        return Err(DocError::ProvisioningWithoutAuthority {
+            endpoint: raw.endpoint.clone(),
+            ref_scheme: scheme.to_string(),
+        });
+    }
     Ok(EndpointRef {
         endpoint: raw.endpoint,
         provisioning,
         bind_var: raw.bind_var,
     })
+}
+
+/// The scheme prefix of an endpoint URI: the non-empty text before
+/// the first `:`, or `None` when the URI carries no scheme — which
+/// requires the separator; a colon-less string (`orders`) is a bare
+/// name, not a scheme.
+fn ref_scheme(endpoint: &str) -> Option<&str> {
+    let (scheme, _) = endpoint.split_once(':')?;
+    (!scheme.is_empty()).then_some(scheme)
 }
 
 /// Parses a humantime duration string, naming the action index on
@@ -963,9 +1189,15 @@ fn is_matcher_key(key: &str) -> bool {
 /// Applies the expectation dual grammar: a bare value is a literal
 /// `equals`; an object whose single key is a recognized matcher key is
 /// that matcher; any other object is a literal `equals`. Payload shapes
-/// mirror the mock-testkit matcher rules.
-fn expectation_from_value(value: &Value, index: usize) -> Result<Expectation, DocError> {
-    const FIELD: &str = "expectation";
+/// mirror the mock-testkit matcher rules. The field name parameter
+/// (`expectation`, `expectReply`) keeps one verb parser behind both
+/// readers (rc-qvz6): the verbs never fork between `validate` and
+/// send-level reply assertions.
+fn expectation_from_value(
+    value: &Value,
+    index: usize,
+    field: &'static str,
+) -> Result<Expectation, DocError> {
     let invalid = |message: String| DocError::Validation { index, message };
     if let Value::Object(map) = value
         && map.len() == 1
@@ -977,13 +1209,13 @@ fn expectation_from_value(value: &Value, index: usize) -> Result<Expectation, Do
             "regex" | "contains" | "startsWith" | "endsWith" => {
                 let Some(pattern) = payload.as_str() else {
                     return Err(invalid(format!(
-                        "{FIELD}: `{key}` requires a string payload"
+                        "{field}: `{key}` requires a string payload"
                     )));
                 };
                 if key.as_str() == "regex"
                     && let Err(e) = regex::Regex::new(pattern)
                 {
-                    return Err(invalid(format!("{FIELD}: invalid regex `{pattern}`: {e}")));
+                    return Err(invalid(format!("{field}: invalid regex `{pattern}`: {e}")));
                 }
                 Ok(match key.as_str() {
                     "regex" => Expectation::Regex(pattern.to_string()),
@@ -996,14 +1228,14 @@ fn expectation_from_value(value: &Value, index: usize) -> Result<Expectation, Do
                 if payload.is_null() {
                     Ok(Expectation::Exists)
                 } else {
-                    Err(invalid(format!("{FIELD}: `exists` takes no argument")))
+                    Err(invalid(format!("{field}: `exists` takes no argument")))
                 }
             }
             _ => {
                 if payload.is_object() {
                     Ok(Expectation::JsonSubset(payload.clone()))
                 } else {
-                    Err(invalid(format!("{FIELD}: `jsonSubset` must be an object")))
+                    Err(invalid(format!("{field}: `jsonSubset` must be an object")))
                 }
             }
         };

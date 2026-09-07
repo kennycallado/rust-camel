@@ -15,7 +15,8 @@ use std::time::Duration;
 use camel_api::Value;
 use tokio::net::TcpStream;
 
-use crate::adapters::http::{HttpPartner, ScriptedResponse};
+use crate::adapters::ReceiveError;
+use crate::adapters::http::{ARRIVAL_LANE_CAPACITY, HttpPartner, ScriptedResponse};
 use crate::adapters::{OutgoingMessage, PartnerAdapter, PartnerRouter};
 use crate::document::PartnerFault;
 
@@ -221,6 +222,76 @@ async fn receive_without_send_times_out() {
     assert!(
         started.elapsed() >= Duration::from_millis(150),
         "the server-role wait must honor the deadline, not fail early"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Arrival-lane overflow (rc-7mli): drops surface apparatus-class
+// -------------------------------------------------------------------------
+
+/// An arrival lane that overflowed while the scenario never received
+/// reports the apparatus-class `ReceiveError::Overflow`, not a
+/// verdict-class receive timeout: the parked arrivals drain first, and
+/// the next receive names the endpoint and the dropped count.
+#[tokio::test]
+async fn arrival_overflow_is_apparatus_not_receive_timeout() {
+    let server = HttpPartner::start(vec![ScriptedResponse {
+        method: Some("POST".to_string()),
+        path: Some("/overflow".to_string()),
+        times: (ARRIVAL_LANE_CAPACITY + 6) as u32,
+        status: 200,
+        ..Default::default()
+    }])
+    .await
+    .expect("server partner must bind 127.0.0.1:0");
+    let target = format!("http://{}/overflow", server.bound_addr());
+
+    // No scenario receive runs yet: the listener parks arrivals up to
+    // the lane capacity and drops the rest (still recorded). Every
+    // posted request is served regardless — the response never waited
+    // on a receive.
+    for _ in 0..(ARRIVAL_LANE_CAPACITY + 6) {
+        let response = raw_request(
+            &target,
+            format!(
+                "POST /overflow HTTP/1.1\r\nhost: {}\r\n\
+                 connection: close\r\ncontent-length: 0\r\n\r\n",
+                server.bound_addr()
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("raw post must be served");
+        assert!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "every posted request must be served: {}",
+            String::from_utf8_lossy(&response)
+        );
+    }
+
+    // The parked arrivals drain: each receive must succeed.
+    for _ in 0..ARRIVAL_LANE_CAPACITY {
+        let message = server
+            .receive(&target, &target, Duration::from_secs(5))
+            .await
+            .expect("parked arrival must drain");
+        assert_eq!(message.path.as_deref(), Some("/overflow"));
+    }
+
+    // The queue is empty, but arrivals were dropped: the next receive
+    // reports the overflow evidence, never a plain timeout.
+    let failure = server
+        .receive(&target, &target, Duration::from_millis(200))
+        .await
+        .expect_err("dropped evidence must fail the receive as overflow");
+    let ReceiveError::Overflow(overflow) = failure else {
+        panic!("expected Overflow, got {failure:?}")
+    };
+    assert_eq!(overflow.endpoint, target, "the endpoint must be named");
+    assert!(
+        overflow.dropped >= 1,
+        "the dropped count must be reported, got {}",
+        overflow.dropped
     );
 }
 

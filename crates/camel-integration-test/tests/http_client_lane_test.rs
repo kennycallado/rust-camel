@@ -138,3 +138,135 @@ async fn post_connect_failure_still_parks() {
         "the post-connect failure must park on the lane key, got {parked:?}"
     );
 }
+
+/// Same-key sends park in arrival order (bounded FIFO): three sends
+/// under one lane key with no intervening receives, then three
+/// receives resolve the oldest parked response first — wire order
+/// A, B, C, never a later send's overwrite of the parked roundtrip.
+#[tokio::test]
+async fn same_key_sends_park_fifo() {
+    // The delayed script holds every response past the send burst, so
+    // all three roundtrips park before any of them resolves.
+    let partner = HttpPartner::start(vec![
+        ScriptedResponse {
+            method: Some("POST".to_string()),
+            path: Some("/orders".to_string()),
+            body: b"a-response".to_vec(),
+            delay: Some(Duration::from_millis(50)),
+            ..Default::default()
+        },
+        ScriptedResponse {
+            method: Some("POST".to_string()),
+            path: Some("/orders".to_string()),
+            body: b"b-response".to_vec(),
+            delay: Some(Duration::from_millis(50)),
+            ..Default::default()
+        },
+        ScriptedResponse {
+            method: Some("POST".to_string()),
+            path: Some("/orders".to_string()),
+            body: b"c-response".to_vec(),
+            delay: Some(Duration::from_millis(50)),
+            ..Default::default()
+        },
+    ])
+    .await
+    .expect("partner binds 127.0.0.1:0");
+    let lane_key = orders_uri(&partner);
+    let router = PartnerRouter::new(BTreeMap::from([(
+        lane_key.clone(),
+        Box::new(partner) as Box<dyn PartnerAdapter>,
+    )]));
+
+    for body in ["a", "b", "c"] {
+        router
+            .send(&lane_key, &lane_key, send_msg(body))
+            .await
+            .expect("send parks its roundtrip on the lane key");
+    }
+
+    for expected in ["a-response", "b-response", "c-response"] {
+        let response: IncomingMessage = router
+            .receive(&lane_key, &lane_key, Duration::from_secs(5))
+            .await
+            .expect("the oldest parked roundtrip resolves first");
+        assert_eq!(
+            response.body,
+            Value::String(expected.to_string()),
+            "receives must drain the same-key park in wire order"
+        );
+    }
+}
+
+/// The client lane FIFO bound is an apparatus failure: when more
+/// same-key sends are in flight than the bound, the overflowing send
+/// fails with `TransportError::LaneFifoOverflow` naming the lane key
+/// and the bound — never a silent overwrite of a parked roundtrip.
+/// The refusal precedes the dial, so the refused send reaches no
+/// wire and leaves no launched-path evidence behind.
+#[tokio::test]
+async fn lane_fifo_overflow_is_apparatus() {
+    // Every response waits past the test window, so all earlier sends
+    // stay in flight when the overflowing send launches.
+    let partner = HttpPartner::start(vec![ScriptedResponse {
+        method: Some("POST".to_string()),
+        path: Some("/orders".to_string()),
+        body: b"late".to_vec(),
+        delay: Some(Duration::from_secs(30)),
+        times: 65,
+        ..Default::default()
+    }])
+    .await
+    .expect("partner binds 127.0.0.1:0");
+    let lane_key = orders_uri(&partner);
+    let recorder = partner.recorder();
+    let router = PartnerRouter::new(BTreeMap::from([(
+        lane_key.clone(),
+        Box::new(partner) as Box<dyn PartnerAdapter>,
+    )]));
+
+    for _ in 0..64 {
+        router
+            .send(&lane_key, &lane_key, send_msg("bulk"))
+            .await
+            .expect("the first 64 sends book inside the FIFO");
+    }
+
+    let overflow = router
+        .send(&lane_key, &lane_key, send_msg("one-too-many"))
+        .await;
+    let Err(error) = &overflow else {
+        panic!("the 65th send must fail at the transport, got {overflow:?}");
+    };
+    let TransportError::LaneFifoOverflow { lane_key, bound } = error else {
+        panic!("the overflow must be the apparatus variant, got {error:?}");
+    };
+    assert_eq!(*bound, 64, "the overflow carries the FIFO bound");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(lane_key.as_str()),
+        "the overflow names the lane key: {rendered}"
+    );
+    assert!(
+        rendered.contains("64"),
+        "the overflow names the bound: {rendered}"
+    );
+    // The 64 booked exchanges write their requests asynchronously;
+    // wait until every one of them has reached the wire.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while recorder.recorded_requests().len() < 64 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the 64 booked sends must reach the wire"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The refusal happens before the dial: the overflowing send
+    // writes no request to the wire, so it leaves no launched-path
+    // evidence for a later timeout to over-report.
+    assert_eq!(
+        recorder.recorded_requests().len(),
+        64,
+        "the refused send must reach no wire"
+    );
+}

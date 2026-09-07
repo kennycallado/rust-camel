@@ -9,22 +9,23 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use camel_api::Value;
+use camel_api::{Body, Exchange, Message, Value};
 use futures::future::BoxFuture;
 
 #[cfg(feature = "http")]
 use crate::adapters::ReceiveTimeout;
 use crate::adapters::{
-    FakeAdapter, IncomingMessage, OutgoingMessage, PartnerAdapter, PartnerRouter, ReceiveError,
-    TransportError,
+    ArrivalLaneOverflow, FakeAdapter, IncomingMessage, OutgoingMessage, PartnerAdapter,
+    PartnerRouter, ReceiveError, TransportError,
 };
 use crate::document::{
     EndpointRef, Expectation, Provisioning, RouteSource, ScenarioAction, ScenarioDocument,
     ScenarioTarget, ValidateExpectation,
 };
 use crate::runner::{
-    DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, fill_bind_vars,
-    interpolate_value, resolve_placeholders, run_scenario, run_scenario_document,
+    DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, effective_send_deadline,
+    fill_bind_vars, interpolate_value, reply_body_value, resolve_placeholders, run_scenario,
+    run_scenario_document,
 };
 
 #[cfg(feature = "http")]
@@ -46,12 +47,15 @@ fn endpoint(uri: &str) -> EndpointRef {
 /// A minimal document with the given actions and file-based routes.
 fn doc_with(actions: Vec<ScenarioAction>) -> ScenarioDocument {
     ScenarioDocument {
+        source_path: std::path::PathBuf::new(),
         route_source: RouteSource::RouteFiles(vec!["routes.yaml".into()]),
         scenario: actions,
         partners: None,
         env: None,
         env_passthrough: None,
         profile: None,
+        send_deadline: None,
+        inbound: None,
     }
 }
 
@@ -85,6 +89,7 @@ async fn send_then_receive_within_deadline() {
             body: Some(Value::String("hello".to_string())),
             headers: None,
             method: "POST".to_string(),
+            expect_reply: None,
         },
         ScenarioAction::Receive {
             from: endpoint("partner://fake"),
@@ -125,6 +130,80 @@ async fn receive_timeout_is_verdict_failure() {
     assert!(
         failure.to_string().starts_with("receive-timeout"),
         "error must name the receive-timeout class: {failure}"
+    );
+}
+
+/// The arrival-lane-overflow failure names its class, the endpoint,
+/// and the dropped count (rc-7mli).
+#[test]
+fn arrival_lane_overflow_error_display() {
+    let failure = ScenarioFailure::ArrivalLaneOverflow {
+        endpoint: "http://127.0.0.1:9/orders".to_string(),
+        dropped: 6,
+    };
+    let text = failure.to_string();
+    assert!(
+        text.contains("arrival-lane-overflow"),
+        "error must name the arrival-lane-overflow class: {text}"
+    );
+    assert!(
+        text.contains("http://127.0.0.1:9/orders"),
+        "error must name the endpoint: {text}"
+    );
+    assert!(
+        text.contains('6'),
+        "error must name the dropped count: {text}"
+    );
+}
+
+/// The adapter-level arrival-lane-overflow error renders the endpoint
+/// and the dropped count, and makes no drain-window claim: the
+/// dropped counter is cumulative across the lane's lifetime, so a
+/// "while no receive drained the lane" clause would mislead once an
+/// intervening receive ran (rc-qogy).
+#[test]
+fn adapter_lane_overflow_display_names_endpoint_and_count() {
+    let error = ArrivalLaneOverflow {
+        endpoint: "http://127.0.0.1:9/orders".to_string(),
+        dropped: 6,
+    };
+    let text = error.to_string();
+    assert!(
+        text.contains("arrival lane overflow"),
+        "error must name the overflow: {text}"
+    );
+    assert!(
+        text.contains("http://127.0.0.1:9/orders"),
+        "error must name the endpoint: {text}"
+    );
+    assert!(
+        text.contains('6'),
+        "error must name the dropped count: {text}"
+    );
+    assert!(
+        !text.contains("while no receive drained"),
+        "the cumulative dropped counter never resets, so the Display must not claim a drain window: {text}"
+    );
+}
+
+/// The effective send bound: a document without `sendDeadline`
+/// resolves to the thirty-second default; a document with
+/// `sendDeadline` overrides it (rc-tr4w).
+#[test]
+fn effective_send_deadline_defaults_to_thirty_seconds() {
+    let bare = doc_with(vec![]);
+    assert_eq!(
+        effective_send_deadline(&bare),
+        Duration::from_secs(30),
+        "a document without `sendDeadline` must keep the thirty-second default"
+    );
+
+    let mut bounded = doc_with(vec![]);
+    bounded.send_deadline = Some(Duration::from_millis(500));
+    assert_eq!(
+        effective_send_deadline(&bounded),
+        Duration::from_millis(500),
+        "the document's `sendDeadline` must override the default"
     );
 }
 
@@ -196,6 +275,7 @@ async fn transport_error_is_apparatus_failure() {
         body: None,
         headers: None,
         method: "GET".to_string(),
+        expect_reply: None,
     }]);
     let mut vars = ScenarioVars::new();
     let failure = run_scenario(&doc, &router, &mut vars)
@@ -446,6 +526,7 @@ async fn document_run_all_pass_records_verdict() {
             per_action: vec![Ok(ScenarioVerdict::Pass), Ok(ScenarioVerdict::Pass)],
             verdict: Some(ScenarioVerdict::Pass),
             final_failure: None,
+            inbound_bound: None,
         }
     );
 }
@@ -549,6 +630,27 @@ fn partner_adapter_trait_object_is_send_sync() {
     fn assert_send_sync<T: Send + Sync + ?Sized>() {}
     assert_send_sync::<dyn PartnerAdapter>();
     assert_send_sync::<Box<dyn PartnerAdapter>>();
+}
+
+/// The `expectReply` value reads the exchange's OUTPUT message first:
+/// a route that populates a real InOut reply body wins over the
+/// (route-mutated — `set_body` writes it) input message, which stays
+/// the fallback when no output exists. The e2e direct-reply tests
+/// only exercise the input-fallback arm, so this pins the output arm.
+#[test]
+fn reply_body_value_reads_output_before_input() {
+    let mut exchange = Exchange::new(Message::new(Body::Text("mutated-input".to_string())));
+    assert_eq!(
+        reply_body_value(&exchange),
+        Value::String("mutated-input".to_string()),
+        "without an output message the route-mutated input body is the reply"
+    );
+    exchange.output = Some(Message::new(Body::Text("out-reply".to_string())));
+    assert_eq!(
+        reply_body_value(&exchange),
+        Value::String("out-reply".to_string()),
+        "an output message's body wins over the input body"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -743,6 +845,7 @@ async fn send_interpolates_endpoint() {
             body: None,
             headers: None,
             method: "POST".to_string(),
+            expect_reply: None,
         },
         // The client lane dials in a spawned task (task 1.5 makes the
         // send await the connect); the receive takes the parked
@@ -791,6 +894,7 @@ async fn send_interpolates_body_and_headers() {
                 Value::String("${SKU}".to_string()),
             )])),
             method: "POST".to_string(),
+            expect_reply: None,
         },
         // Synchronizes the spawned client-lane exchange and the
         // server-side recording.
@@ -869,6 +973,7 @@ fn orders_send() -> ScenarioAction {
         body: None,
         headers: None,
         method: "POST".to_string(),
+        expect_reply: None,
     }
 }
 
@@ -1460,6 +1565,46 @@ impl PartnerAdapter for CannedTimeout {
     }
 }
 
+/// An adapter whose send fails with a canned lane FIFO overflow,
+/// handing the lane key over exactly as the adapter rendered it —
+/// RAW from a third-party adapter (ADR-0051).
+#[cfg(feature = "http")]
+struct CannedOverflow {
+    lane_key: String,
+    bound: usize,
+}
+
+#[cfg(feature = "http")]
+impl PartnerAdapter for CannedOverflow {
+    fn send<'a>(
+        &'a self,
+        _lane_key: &'a str,
+        _target_uri: &'a str,
+        msg: OutgoingMessage,
+    ) -> BoxFuture<'a, Result<Option<Exchange>, TransportError>> {
+        let _ = msg;
+        Box::pin(async move {
+            Err(TransportError::LaneFifoOverflow {
+                lane_key: self.lane_key.clone(),
+                bound: self.bound,
+            })
+        })
+    }
+
+    fn receive<'a>(
+        &'a self,
+        _lane_key: &'a str,
+        _source_uri: &'a str,
+        _deadline: Duration,
+    ) -> BoxFuture<'a, Result<IncomingMessage, ReceiveError>> {
+        Box::pin(async move {
+            Err(ReceiveError::Transport(TransportError::Other {
+                message: "adapter does not implement server-role receives".to_string(),
+            }))
+        })
+    }
+}
+
 /// The printed receive-timeout failure carries the REDACTED endpoint
 /// the construction site built — never the raw declared endpoint —
 /// so a query-bearing declaration leaks no secret value into the CLI
@@ -1525,6 +1670,48 @@ async fn raw_adapter_timeout_redacts_at_the_mapping() {
     let failure = run_scenario(&doc, &router, &mut vars)
         .await
         .expect_err("the receive must time out");
+    let text = failure.to_string();
+    assert!(
+        !text.contains("hunter2"),
+        "the raw secret must never print: {text}"
+    );
+    assert!(
+        text.contains("authPassword=***"),
+        "the redacted form must print: {text}"
+    );
+    assert!(
+        text.contains("x=1"),
+        "non-secret query keys must stay visible: {text}"
+    );
+}
+
+/// The lane FIFO overflow on send prints the REDACTED lane key: the
+/// runner's render-site mapping holds the secret set, and a
+/// third-party adapter may hand the raw endpoint URI over in the
+/// overflow (ADR-0051).
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn raw_lane_fifo_overflow_redacts_at_the_mapping() {
+    let declared = "http://host/login?authPassword=hunter2&x=1";
+    let router = PartnerRouter::new(BTreeMap::from([(
+        declared.to_string(),
+        Box::new(CannedOverflow {
+            lane_key: "http://host/login?authPassword=hunter2&x=1".to_string(),
+            bound: 64,
+        }) as Box<dyn PartnerAdapter>,
+    )]));
+    router.set_secret_query_keys(vec!["authPassword".to_string()]);
+    let doc = doc_with(vec![ScenarioAction::Send {
+        to: endpoint(declared),
+        body: None,
+        headers: None,
+        method: "POST".to_string(),
+        expect_reply: None,
+    }]);
+    let mut vars = ScenarioVars::new();
+    let failure = run_scenario(&doc, &router, &mut vars)
+        .await
+        .expect_err("the send must fail at the transport");
     let text = failure.to_string();
     assert!(
         !text.contains("hunter2"),

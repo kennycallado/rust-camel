@@ -1,0 +1,14 @@
+# Fixed-port back-compat fixture route (rc-5yon): the pre-`inbound:`
+# shape — the route URI pins the literal loopback port, exactly as v1
+# fixtures did before staged port-0 listeners existed.
+routes:
+  - id: inbound-consumer
+    from: http://127.0.0.1:28180/in
+    steps:
+      - set_header:
+          key: CamelHttpResponseCode
+          value: 201
+      - set_header:
+          key: X-Scenario-Role
+          value: sut
+      - set_body: inbound-acknowledged

@@ -104,6 +104,10 @@ struct BootedFixture {
     router: PartnerRouter,
     ctx: Arc<tokio::sync::Mutex<CamelContext>>,
     boot: BootHandle,
+    /// The inbound listener's bound address as the boot provisioned it
+    /// (rc-5yon); always `None` here — these fixtures declare no
+    /// `inbound:` section.
+    inbound_bound: Option<std::net::SocketAddr>,
 }
 
 /// Boots the given scenario document with the given partner registered
@@ -136,6 +140,7 @@ async fn boot_with(
         router: PartnerRouter::new(adapters),
         ctx,
         boot: run.boot,
+        inbound_bound: run.inbound_bound,
     }
 }
 
@@ -187,6 +192,7 @@ fn method_scenario_document(
             body: None,
             headers: None,
             method: method.to_string(),
+            expect_reply: None,
         },
         ScenarioAction::Receive {
             from: partner.clone(),
@@ -203,12 +209,15 @@ fn method_scenario_document(
         },
     ];
     ScenarioDocument {
+        source_path: fixture_root().join("bridge.test.yaml"),
         route_source: RouteSource::RouteFiles(vec![PathBuf::from("routes/bridge.yaml")]),
         scenario,
         partners: None,
         env: None,
         env_passthrough: None,
         profile: Some("default".to_string()),
+        send_deadline: None,
+        inbound: None,
     }
 }
 
@@ -293,6 +302,7 @@ async fn outbound_bridge_header_corruption_fails() {
     // Corrupt one header expectation: the route stamps `priority`, the
     // scenario demands `express`.
     let corrupted = ScenarioDocument {
+        source_path: fixture.doc.source_path.clone(),
         route_source: fixture.doc.route_source,
         scenario: fixture
             .doc
@@ -319,6 +329,8 @@ async fn outbound_bridge_header_corruption_fails() {
         env_passthrough: fixture.doc.env_passthrough.clone(),
         profile: fixture.doc.profile.clone(),
         partners: None,
+        send_deadline: fixture.doc.send_deadline,
+        inbound: fixture.doc.inbound,
     };
     let mut vars = ScenarioVars::new();
     let outcome = run_scenario_document(&corrupted, &fixture.router, &mut vars).await;
@@ -359,6 +371,9 @@ async fn shutdown_failure_does_not_mask_verdict() {
     let mut vars = ScenarioVars::new();
     let mut outcome: DocumentOutcome =
         run_scenario_document(&fixture.doc, &fixture.router, &mut vars).await;
+    // The boot-owning flow forwards the provisioned inbound address to
+    // the outcome slot (rc-5yon); `None` for these fixtures.
+    outcome.inbound_bound = fixture.inbound_bound;
     assert_eq!(outcome.verdict, Some(ScenarioVerdict::Pass));
 
     // The shutdown-failure slot is the boot-owning caller's to fill

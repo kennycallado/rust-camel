@@ -101,6 +101,19 @@ pub enum TransportError {
         /// The bounded send deadline the call exceeded.
         after: Duration,
     },
+    /// The client lane's per-key FIFO is full: the launch refused to
+    /// book another in-flight response instead of silently
+    /// overwriting a parked roundtrip (apparatus class, ADR-0069 §7).
+    #[error(
+        "client lane FIFO overflow for {lane_key}: \
+         {bound} in-flight responses already parked"
+    )]
+    LaneFifoOverflow {
+        /// The lane key whose FIFO refused the launch.
+        lane_key: String,
+        /// The FIFO bound the send exceeded.
+        bound: usize,
+    },
 }
 
 /// Nothing reached the partner endpoint before the deadline
@@ -152,12 +165,42 @@ pub(crate) fn lanes_suffix(lanes_recorded: &[String]) -> String {
     }
 }
 
+/// The partner's arrival lane dropped arrivals while the scenario was
+/// not receiving (`arrival-lane-overflow`, ADR-0069 §7).
+///
+/// Apparatus class: the dropped arrivals never competed for a receive
+/// — the harness lost them before the system under test could fail the
+/// scenario on substance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrivalLaneOverflow {
+    /// The endpoint URI whose lane dropped arrivals.
+    pub endpoint: String,
+    /// How many arrivals the lane dropped while full.
+    pub dropped: usize,
+}
+
+impl fmt::Display for ArrivalLaneOverflow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // No drain-window claim: the dropped counter is cumulative
+        // across the lane's lifetime, so "while no receive drained
+        // the lane" would mislead once an intervening receive ran.
+        write!(
+            f,
+            "arrival lane overflow: {} dropped {} arrivals",
+            self.endpoint, self.dropped
+        )
+    }
+}
+
+impl std::error::Error for ArrivalLaneOverflow {}
+
 /// Why a `receive` call did not deliver a message (ADR-0069 §7).
 ///
 /// The variants carry the failure class: [`ReceiveError::Timeout`] is
 /// verdict class (the system under test delivered nothing in time);
-/// [`ReceiveError::Transport`] is apparatus class (the receive failed
-/// at the transport before the scenario got a meaningful answer).
+/// [`ReceiveError::Transport`] and [`ReceiveError::Overflow`] are
+/// apparatus class (the receive failed at the transport, or the lane
+/// dropped arrivals, before the scenario got a meaningful answer).
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ReceiveError {
@@ -165,6 +208,10 @@ pub enum ReceiveError {
     /// (`receive-timeout`, verdict class).
     #[error("{0}")]
     Timeout(ReceiveTimeout),
+    /// The partner's arrival lane dropped arrivals while the scenario
+    /// was not receiving (`arrival-lane-overflow`, apparatus class).
+    #[error("{0}")]
+    Overflow(ArrivalLaneOverflow),
     /// The receive failed at the transport layer
     /// (`action-transport-failure`, apparatus class).
     #[error("{0}")]
@@ -184,16 +231,20 @@ pub enum ReceiveError {
 /// path; adapters that dial treat the target URI as the wire address.
 pub trait PartnerAdapter: Send + Sync {
     /// Send a message to the target URI, parking any roundtrip under
-    /// the lane key. Adapters without a client role keep the default
-    /// (a transport failure naming the gap); the http partner is one
-    /// such adapter — the router's own client lane performs every
-    /// http client-role send.
+    /// the lane key, and return the synchronous reply when the
+    /// adapter produces one: the context-stimulus `direct:` send
+    /// returns the routed exchange (`Ok(Some(..))`) so an
+    /// `expectReply` assertion can read it (rc-qvz6); partner and
+    /// fake adapters answer `Ok(None)`. Adapters without a client
+    /// role keep the default (a transport failure naming the gap);
+    /// the http partner is one such adapter — the router's own client
+    /// lane performs every http client-role send.
     fn send<'a>(
         &'a self,
         lane_key: &'a str,
         target_uri: &'a str,
         msg: OutgoingMessage,
-    ) -> BoxFuture<'a, Result<(), TransportError>> {
+    ) -> BoxFuture<'a, Result<Option<Exchange>, TransportError>> {
         let _ = (lane_key, target_uri, msg);
         Box::pin(async {
             Err(TransportError::Other {
@@ -389,13 +440,15 @@ impl PartnerRouter {
 
     /// Sends `msg` under the two-key contract: dispatch by declared
     /// endpoint key, dial by resolved address (see the type docs for
-    /// the http cases).
+    /// the http cases). The synchronous reply of a context-stimulus
+    /// `direct:` send travels back in the `Ok` slot; every partner
+    /// path answers `None`.
     pub async fn send(
         &self,
         declared: &str,
         interpolated: &str,
         msg: OutgoingMessage,
-    ) -> Result<(), TransportError> {
+    ) -> Result<Option<Exchange>, TransportError> {
         #[cfg(feature = "http")]
         if interpolated.starts_with("http://") {
             return self.send_http(declared, interpolated, msg).await;
@@ -411,14 +464,16 @@ impl PartnerRouter {
     }
 
     /// The http-scheme send dispatch (feature `http`): every case goes
-    /// through the router's own client lane.
+    /// through the router's own client lane. The lane parks the
+    /// roundtrip for a later `receive`, so the send itself answers
+    /// `Ok(None)` — no synchronous reply exists to hand back.
     #[cfg(feature = "http")]
     async fn send_http(
         &self,
         declared: &str,
         interpolated: &str,
         msg: OutgoingMessage,
-    ) -> Result<(), TransportError> {
+    ) -> Result<Option<Exchange>, TransportError> {
         // (a) The declared key registers an http partner: the
         // harness-declared endpoint — dial its bound address when the
         // `:0` form resolves one, the literal URI otherwise. A
@@ -431,7 +486,8 @@ impl PartnerRouter {
                     .unwrap_or_else(|| interpolated.to_string());
                 return Arc::clone(&self.client_lane)
                     .launch(declared, &target, msg)
-                    .await;
+                    .await
+                    .map(|()| None);
             }
             return adapter.send(declared, interpolated, msg).await;
         }
@@ -445,13 +501,15 @@ impl PartnerRouter {
         {
             return Arc::clone(&self.client_lane)
                 .launch(&lane_key, &target, msg)
-                .await;
+                .await
+                .map(|()| None);
         }
         // (c) Neither: a plain-string reference dials its literal URI
         // with no partner involved.
         Arc::clone(&self.client_lane)
             .launch(declared, interpolated, msg)
             .await
+            .map(|()| None)
     }
 
     /// Receives under the two-key contract, client-role-first: derive
@@ -646,7 +704,7 @@ impl PartnerAdapter for FakeAdapter {
         lane_key: &'a str,
         _target_uri: &'a str,
         msg: OutgoingMessage,
-    ) -> BoxFuture<'a, Result<(), TransportError>> {
+    ) -> BoxFuture<'a, Result<Option<Exchange>, TransportError>> {
         Box::pin(async move {
             if let Some(reason) = &self.inner.fail_send {
                 return Err(TransportError::Other {
@@ -657,7 +715,9 @@ impl PartnerAdapter for FakeAdapter {
                 endpoint: lane_key.to_string(),
                 message: msg,
             });
-            Ok(())
+            // The fake records sends; it produces no synchronous
+            // reply for an `expectReply` assertion to read.
+            Ok(None)
         })
     }
 
@@ -780,7 +840,7 @@ impl PartnerAdapter for DirectStimulus {
         lane_key: &'a str,
         _target_uri: &'a str,
         msg: OutgoingMessage,
-    ) -> BoxFuture<'a, Result<(), TransportError>> {
+    ) -> BoxFuture<'a, Result<Option<Exchange>, TransportError>> {
         Box::pin(async move {
             let exchange = stimulus_exchange(msg);
             let transport = |detail: String| TransportError::Other { message: detail };
@@ -804,8 +864,9 @@ impl PartnerAdapter for DirectStimulus {
                 };
                 match producer.oneshot(exchange.clone()).await {
                     // The stimulus exchange completed the route; the
-                    // reply carries no scenario meaning in v1.
-                    Ok(_reply) => return Ok(()),
+                    // routed exchange is the synchronous reply an
+                    // `expectReply` assertion reads (rc-qvz6).
+                    Ok(reply) => return Ok(Some(reply)),
                     Err(e) => {
                         // The direct producer types the startup race as
                         // EndpointCreationFailed at both error sites:

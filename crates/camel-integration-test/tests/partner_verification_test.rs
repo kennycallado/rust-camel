@@ -20,8 +20,8 @@ use camel_integration_test::runner::fill_bind_vars;
 use camel_integration_test::{
     DocumentOutcome, EndpointRef, HttpPartner, HttpRecorder, LayeredEnv, PartnerAdapter,
     PartnerRouter, Provisioning, ScenarioAction, ScenarioDocument, ScenarioFailure, ScenarioVars,
-    ScenarioVerdict, ambient_std, boot_scenario, parse_scenario_document, partner_scripts_for,
-    run_scenario_document,
+    ScenarioVerdict, TransportError, ambient_std, boot_scenario, parse_scenario_document,
+    partner_scripts_for, run_scenario_document,
 };
 
 /// The endpoint URI the partner-only documents declare for their
@@ -1233,6 +1233,20 @@ async fn path_contains_tolerates_encoding_drift_end_to_end() {
     );
 }
 
+/// One send to a non-routable address (RFC 5737 TEST-NET-1): the
+/// connect phase hangs, so the document-level `sendDeadline: 500ms`
+/// fires — the action fails with the deadline transport error long
+/// before the thirty-second default. A CI network that routes
+/// TEST-NET away (fast refuse) fails the deadline-error assertion:
+/// the built-in tripwire.
+const HUNG_SEND_DOC: &str = r#"
+sendDeadline: 500ms
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: http://192.0.2.1:9/hook
+"#;
+
 /// Three foreign GETs land (`/q?bbox=1.5%2C2.5`, `/q?x=1&bbox=...`,
 /// `/health`) while the scenario holds one excluded POST: the
 /// `pathMatches` regex keeps `/health` out, the `query` subset
@@ -1267,5 +1281,39 @@ async fn path_matches_and_query_subset_end_to_end() {
         recorders[ORDERS].recorded_requests().len(),
         4,
         "the bind-send and all three foreign GETs must be on the wire"
+    );
+}
+
+/// A hung send (connect to the non-routable RFC 5737 address never
+/// completes) under `sendDeadline: 500ms`: the send action fails with
+/// the deadline transport error carrying the document bound, and the
+/// whole run stays far under the thirty-second default — the
+/// fail-fast proof (rc-tr4w).
+#[tokio::test]
+async fn send_deadline_bounds_hung_send() {
+    let started = std::time::Instant::now();
+    let (outcome, _recorders, _authorities) = run_doc(HUNG_SEND_DOC).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(outcome.verdict, None, "the hung send must fail");
+    let failure = outcome
+        .per_action
+        .last()
+        .and_then(|result| result.as_ref().err())
+        .expect("the send must fail");
+    let ScenarioFailure::ActionTransport { source, .. } = failure else {
+        panic!("expected ActionTransport, got {failure:?}");
+    };
+    let TransportError::Deadline { after } = &source else {
+        panic!("expected the Deadline transport error, got {source}");
+    };
+    assert_eq!(
+        *after,
+        std::time::Duration::from_millis(500),
+        "the deadline must be the document's 500ms bound"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the document deadline must fail fast, not burn the 30 s default: {elapsed:?}"
     );
 }

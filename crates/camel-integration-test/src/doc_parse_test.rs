@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use crate::document::is_http_token;
 use crate::{
-    CountBound, DocError, Expectation, PartnerExpectation, ScenarioAction, ScenarioDocument,
-    ScenarioTarget, ValidateExpectation, parse_scenario_document,
+    CountBound, DocError, Expectation, PartnerExpectation, Provisioning, ScenarioAction,
+    ScenarioDocument, ScenarioTarget, ValidateExpectation, parse_scenario_document,
 };
 
 /// Writes `text` to a fresh temporary `case.test.yaml` and parses it.
@@ -110,6 +110,30 @@ scenario:
             assert!(
                 message.contains("deadline"),
                 "message must name the missing deadline: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn invalid_send_deadline_is_load_error() {
+    let err = parse_case(
+        r#"
+sendDeadline: soon
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "the section, not an action, failed");
+            assert!(
+                message.contains("sendDeadline"),
+                "message must name the `sendDeadline` field: {message}"
             );
         }
         other => panic!("expected Validation, got {other}"),
@@ -270,6 +294,98 @@ env:
 }
 
 #[test]
+fn expect_reply_on_partner_send_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: http://127.0.0.1:9999/hook
+    expectReply:
+      contains: x
+"#,
+    )
+    .expect_err("parse must fail");
+    let rendered = err.to_string();
+    match err {
+        DocError::ExpectReplyOnUnsupportedSend { index, scheme } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert_eq!(scheme.as_str(), "http", "error must name the send's scheme");
+        }
+        other => panic!("expected ExpectReplyOnUnsupportedSend, got {other}"),
+    }
+    assert!(
+        rendered.contains("scenario[0]"),
+        "rendered error must name the action index: {rendered}"
+    );
+    assert!(
+        rendered.contains("http"),
+        "rendered error must name the scheme: {rendered}"
+    );
+    assert!(
+        rendered.contains("expectReply"),
+        "rendered error must name the literal `expectReply` field: {rendered}"
+    );
+    assert!(
+        rendered.contains("doc-validation"),
+        "rendered error must name the doc-validation class: {rendered}"
+    );
+}
+
+#[test]
+fn expect_reply_on_fake_send_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: fake:orders
+    expectReply:
+      contains: x
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::ExpectReplyOnUnsupportedSend { index, ref scheme } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert_eq!(scheme.as_str(), "fake", "error must name the send's scheme");
+        }
+        other => panic!("expected ExpectReplyOnUnsupportedSend, got {other}"),
+    }
+    assert!(
+        err.to_string().contains("expectReply"),
+        "rendered error must name the literal `expectReply` field: {err}"
+    );
+}
+
+#[test]
+fn expect_reply_on_schemeless_send_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: orders
+    expectReply:
+      contains: x
+"#,
+    )
+    .expect_err("parse must fail");
+    let rendered = err.to_string();
+    match err {
+        DocError::ExpectReplyOnUnsupportedSend { index, .. } => {
+            assert_eq!(index, 0, "error must name the action index");
+        }
+        other => panic!("expected ExpectReplyOnUnsupportedSend, got {other}"),
+    }
+    assert!(
+        rendered.contains("no scheme"),
+        "a scheme-less reference must render an explicit phrase, not an\
+         empty or pseudo scheme name: {rendered}"
+    );
+}
+
+#[test]
 fn reserved_provisioning_rejected() {
     for value in ["testcontainer", "user-provided"] {
         let text = format!(
@@ -301,6 +417,106 @@ scenario:
             rendered.contains(value),
             "rendered error must name the value: {rendered}"
         );
+    }
+}
+
+#[test]
+fn inline_routes_rejected_at_load() {
+    let err = parse_case(
+        r#"
+routes:
+  - id: inline-route
+    from: direct:start
+    steps:
+      - to: log:info
+scenario:
+  - sleep:
+      duration: 1s
+"#,
+    )
+    .expect_err("parse must fail");
+    assert!(
+        matches!(err, DocError::InlineRoutesRejected),
+        "expected InlineRoutesRejected, got {err}"
+    );
+    let display = err.to_string();
+    assert!(
+        display.contains("routeFiles"),
+        "error must direct the author to `routeFiles`: {display}"
+    );
+    assert!(
+        display.contains("doc-validation"),
+        "error must name the doc-validation class: {display}"
+    );
+}
+
+#[test]
+fn harness_provisioning_direct_bindvar_rejected_at_load() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: direct:start
+      provisioning: harness
+      bindVar: P
+"#,
+    )
+    .expect_err("parse must fail");
+    let rendered = err.to_string();
+    match err {
+        DocError::ProvisioningWithoutAuthority {
+            endpoint,
+            ref_scheme,
+        } => {
+            assert_eq!(
+                endpoint, "direct:start",
+                "error must name the endpoint: {endpoint}"
+            );
+            assert_eq!(ref_scheme, "direct", "error must name the ref scheme");
+        }
+        other => panic!("expected ProvisioningWithoutAuthority, got {other}"),
+    }
+    assert!(
+        rendered.contains("direct:start"),
+        "rendered error must name the endpoint: {rendered}"
+    );
+    assert!(
+        rendered.contains("direct"),
+        "rendered error must name the scheme: {rendered}"
+    );
+    assert!(
+        rendered.contains("bindVar"),
+        "rendered error must name the missing bound authority: {rendered}"
+    );
+}
+
+#[test]
+fn harness_provisioning_fake_without_bindvar_loads() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: fake:x
+      provisioning: harness
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.first().expect("one action");
+    match action {
+        ScenarioAction::Send { to, .. } => {
+            assert_eq!(to.endpoint, "fake:x", "endpoint must parse verbatim");
+            assert_eq!(
+                to.provisioning,
+                Some(Provisioning::Harness),
+                "harness provisioning must parse"
+            );
+            assert!(to.bind_var.is_none(), "no bindVar was declared");
+        }
+        other => panic!("expected Send, got {other:?}"),
     }
 }
 
@@ -1037,6 +1253,124 @@ scenario:
         }
         other => panic!("expected Validation, got {other}"),
     }
+}
+
+// -------------------------------------------------------------------------
+// Inbound listener section (task 4.1, rc-5yon)
+// -------------------------------------------------------------------------
+
+#[test]
+fn inbound_unknown_field_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+inbound:
+  bindVar: INBOUND
+  bogus: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    let rendered = err.to_string();
+    assert!(
+        matches!(err, DocError::Validation { .. }),
+        "expected Validation, got {err}"
+    );
+    assert!(
+        rendered.contains("bogus"),
+        "error must name the unknown field `bogus`: {rendered}"
+    );
+    assert!(
+        rendered.contains("inbound"),
+        "error must name the `inbound` section: {rendered}"
+    );
+}
+
+#[cfg(not(feature = "http"))]
+#[test]
+fn inbound_without_feature_rejected_named() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+inbound:
+  bindVar: INBOUND
+"#,
+    )
+    .expect_err("parse must fail");
+    let rendered = err.to_string();
+    assert!(
+        matches!(err, DocError::Validation { .. }),
+        "expected Validation, got {err}"
+    );
+    assert!(
+        rendered.contains("inbound"),
+        "error must name the `inbound` section: {rendered}"
+    );
+    assert!(
+        rendered.contains("http"),
+        "error must name the `http` feature gate: {rendered}"
+    );
+}
+
+/// Reserved-key symmetry (rc-5yon): the inbound listener's bindVar is
+/// a harness binding, so a document `env` key of the same name is
+/// rejected at load, exactly like an endpoint bindVar collision.
+/// Feature-gated: without `http` the declaration itself is rejected
+/// first (demand-gated activation), so the collision never surfaces.
+#[cfg(feature = "http")]
+#[test]
+fn inbound_bindvar_env_collision_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+inbound:
+  bindVar: INBOUND
+env:
+  INBOUND: "http://127.0.0.1:18080"
+"#,
+    )
+    .expect_err("parse must fail");
+    let rendered = err.to_string();
+    match err {
+        DocError::ReservedEnvKey { key, endpoint } => {
+            assert_eq!(key, "INBOUND", "error must name the reserved key");
+            assert_eq!(
+                endpoint, "inbound",
+                "error must name the reserving `inbound:` section"
+            );
+        }
+        other => panic!("expected ReservedEnvKey, got {other}"),
+    }
+    assert!(
+        rendered.contains("INBOUND"),
+        "rendered error must name the reserved key: {rendered}"
+    );
+    assert!(
+        rendered.contains("doc-validation"),
+        "rendered error must name the doc-validation class: {rendered}"
+    );
+}
+
+#[test]
+fn inbound_section_optional() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+"#,
+    )
+    .expect("parse must succeed");
+    assert!(doc.inbound.is_none(), "no `inbound:` was declared");
 }
 
 #[test]

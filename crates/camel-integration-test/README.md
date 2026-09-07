@@ -7,7 +7,19 @@ of `camel test` (ADR-0069). A scenario document runs one action
 vocabulary: `send`, `receive`, `sleep`, and `validate`. A `send` takes
 an optional `method` HTTP token, uppercased at load. An invalid token
 fails doc validation with exit 2. A `send` with a body defaults to
-`POST`. A bodyless `send` defaults to `GET`. The parser bans the
+`POST`. A bodyless `send` defaults to `GET`. A document may declare a
+top-level `sendDeadline` field. It is a humantime duration that bounds
+every `send` action. It defaults to 30 s. An invalid value fails load
+with a `doc-validation` error naming `sendDeadline`. The bound uses
+real time only; there is no virtual time. A `send` to a `direct:` route
+may declare `expectReply`. The matcher verbs are the same as `validate`:
+`equals`, `regex`, `contains`, `startsWith`, `endsWith`, `exists`,
+`jsonSubset`. It asserts the synchronous reply body. An `expectReply`
+mismatch is a verdict-class failure naming the expectation and the
+actual body. `expectReply` on any other target, an `http:` partner or
+`fake:`, is a load-time error. Runnable reference:
+`tests/direct_reply_test.rs`. The
+parser bans the
 unit-tier keys (`inputs`, `expects`, `intercepts`) at load time, and
 it rejects `env` keys that collide with a declared `bindVar`. The
 harness provisions each `http:` partner on `127.0.0.1:0` and folds the
@@ -140,6 +152,51 @@ Partner expectations are exact-count, not subset like message
 expectations: the count must equal the filtered arrivals, never a lower
 bound.
 
+## Concurrency: the burst-send recipe
+
+Back-to-back `send:` actions with no intervening `receive:` dispatch
+genuinely concurrent requests. Each send returns at connect; the request
+writes land asynchronously. The partner recorder is the proof surface: a
+`validate` with a `partner` target counts the wire arrivals.
+
+The recipe sends a burst to one lane key, settles, then asserts the
+count. It mirrors the `IMMEDIATE_COUNT_DOC` shape:
+
+```yaml
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+    method: POST
+- sleep:
+    duration: 100ms
+- validate:
+    target: {partner: http://127.0.0.1:0/orders}
+    expectation: {count: 3}
+```
+
+The three sends park three responses on the same lane key. The sleep
+lets the writes land. The validate asserts the exact count of three.
+
+Runnable references: `tests/partner_verification_test.rs::immediate_count_assert_e2e`
+and `tests/http_partner_scripting_test.rs`.
+
+The v1 bound: same-key responses park in a bounded FIFO of 64. A burst
+past the bound fails apparatus-class, naming the lane key. The recipe
+has no native wall-clock concurrency-comparison primitive; that is a
+future consideration.
+
 ## `${name}` interpolation
 
 Scenario strings interpolate `${name}`. The surface covers three
@@ -181,6 +238,17 @@ The same name can carry two forms in one run.
 
 One-line rule: scenario = authority, route env = full URI. `${env:}`
 deliberately does not resolve in scenario strings.
+
+## `inbound:` section
+
+A document may declare `inbound: {bindVar: NAME}`. The harness
+provisions a staged port-0 listener, and route files interpolate the
+full-URL variable through `${env:NAME}`, for example `from:
+${env:NAME}/in`. The bound address is exposed on the run outcome as
+`inbound_bound`. Documents that pin a literal port keep working — the
+back-compat shape that predates `inbound:`. v1 bound: boot-owning
+library callers only; the CLI cannot run inbound documents (named
+infra-unavailable). Runnable reference: `tests/http_inbound_test.rs`.
 
 The [Testing chapter](../../docs/src/testing/index.md) documents the
 full action grammar, the partner adapters, and the exit contract.

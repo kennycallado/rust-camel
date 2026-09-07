@@ -1,0 +1,28 @@
+# Inbound consumer scenario, fixed-port back-compat shape (rc-5yon):
+# the document shape that predates `inbound:` — no `inbound:` section,
+# every URI pinning the literal loopback port the route binds. Proves
+# such documents stay valid alongside the staged-listener grammar.
+routeFiles:
+  - routes/consumer.yaml
+profile: default
+scenario:
+  - send:
+      to: http://127.0.0.1:28180/in
+      body: partner-request-5f2c
+      headers:
+        X-Scenario-Tag: e2e-inbound
+  - receive:
+      from: http://127.0.0.1:28180/in
+      deadline: 2s
+      extract:
+        status: status
+        replyRole: headers.X-Scenario-Role
+  - validate:
+      target: { variable: status }
+      expectation: 201
+  - validate:
+      target: { variable: replyRole }
+      expectation: sut
+  - validate:
+      target: { lastReceived: http://127.0.0.1:28180/in }
+      expectation: inbound-acknowledged

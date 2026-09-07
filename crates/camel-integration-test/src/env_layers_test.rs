@@ -73,3 +73,24 @@ fn env_allowlisted_passthrough_visible() {
     );
     assert_eq!(env.lookup("API_KEY").as_deref(), Some("secret-value"));
 }
+
+#[test]
+fn with_harness_var_extends_harness_layer() {
+    let base = LayeredEnv::new(
+        BTreeMap::from([("INBOUND".to_string(), "doc-value".to_string())]),
+        BTreeMap::new(),
+        Vec::new(),
+        ambient_from(&[]),
+    );
+    let extended = base.with_harness_var("INBOUND", "http://127.0.0.1:41000".to_string());
+    assert_eq!(
+        extended.lookup("INBOUND").as_deref(),
+        Some("http://127.0.0.1:41000"),
+        "the extension must land in the harness layer, above the doc map"
+    );
+    assert_eq!(
+        base.lookup("INBOUND").as_deref(),
+        Some("doc-value"),
+        "the receiver must stay untouched"
+    );
+}
