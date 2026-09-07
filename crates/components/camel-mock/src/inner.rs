@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use tokio::sync::{Mutex, Notify};
@@ -51,12 +52,35 @@ pub struct MockEndpointInner {
     pub(crate) assert_period_ms: u64,
     pub(crate) any_order: bool,
     pub(crate) expectations: Arc<std::sync::Mutex<MockExpectations>>,
+    /// Component-wide monotonic counter shared by every endpoint of the
+    /// same `MockComponent`. Stamped inside the `received`-lock critical
+    /// section on every record; never cleared.
+    pub(crate) arrival_counter: Arc<AtomicU64>,
+    /// Arrival indices paired positionally with the retained exchanges;
+    /// the two lists truncate and clear in lockstep. Guarded by its own
+    /// mutex; on the record path it is acquired while already holding
+    /// the `received` lock — keep this nesting order:
+    /// `arrival_indices` is never locked before `received`.
+    pub(crate) arrival_indices: Arc<Mutex<Vec<u64>>>,
 }
 
 impl MockEndpointInner {
     /// Return a snapshot of all exchanges retained so far.
     pub async fn get_received_exchanges(&self) -> Vec<Exchange> {
         self.received.lock().await.iter().cloned().collect()
+    }
+
+    /// Return a snapshot of the arrival indices paired with the currently
+    /// retained exchanges, in arrival order.
+    ///
+    /// Indices come from the component-wide monotonic counter shared by
+    /// every endpoint of the same `MockComponent`: merging the indices of
+    /// several endpoints and sorting yields the global arrival order.
+    /// [`reset`](Self::reset) clears the list but not the counter, so
+    /// post-reset indices keep increasing (no index reuse). Bounded
+    /// retention truncates indices in lockstep with exchanges.
+    pub async fn get_arrival_indices(&self) -> Vec<u64> {
+        self.arrival_indices.lock().await.clone()
     }
 
     /// Return the number of currently retained exchanges.
@@ -66,9 +90,12 @@ impl MockEndpointInner {
 
     /// Clear all retained exchanges and reset internal counters.
     ///
-    /// Useful between test cases to reuse the same mock endpoint.
+    /// Useful between test cases to reuse the same mock endpoint. Clears
+    /// the arrival indices but not the component-wide arrival counter —
+    /// post-reset arrivals keep increasing, so indices are never reused.
     pub async fn reset(&self) {
         self.received.lock().await.clear();
+        self.arrival_indices.lock().await.clear();
         let mut guard = self
             .fail_fast_error
             .lock()
@@ -388,6 +415,8 @@ impl Endpoint for MockEndpoint {
             copy_on_exchange: self.0.copy_on_exchange,
             fail_fast: self.0.fail_fast,
             fail_fast_error: Arc::clone(&self.0.fail_fast_error),
+            arrival_counter: Arc::clone(&self.0.arrival_counter),
+            arrival_indices: Arc::clone(&self.0.arrival_indices),
         }))
     }
 }
@@ -406,6 +435,8 @@ struct MockProducer {
     copy_on_exchange: bool,
     fail_fast: bool,
     fail_fast_error: Arc<std::sync::Mutex<Option<CamelError>>>,
+    arrival_counter: Arc<AtomicU64>,
+    arrival_indices: Arc<Mutex<Vec<u64>>>,
 }
 
 impl Service<Exchange> for MockProducer {
@@ -434,6 +465,8 @@ impl Service<Exchange> for MockProducer {
         let copy_on_exchange = self.copy_on_exchange;
         let fail_fast = self.fail_fast;
         let fail_fast_error = Arc::clone(&self.fail_fast_error);
+        let arrival_counter = Arc::clone(&self.arrival_counter);
+        let arrival_indices = Arc::clone(&self.arrival_indices);
         Box::pin(async move {
             // In fail-fast mode, check if a previous error was recorded
             if fail_fast
@@ -463,6 +496,12 @@ impl Service<Exchange> for MockProducer {
             };
 
             let mut guard = received.lock().await;
+            // Stamp the arrival index while holding the `received` lock:
+            // concurrent sends to this endpoint serialize here, so the
+            // index order matches the push order by construction. Stamping
+            // outside the lock would let two sends push [7, 6].
+            let arrival = arrival_counter.fetch_add(1, Ordering::Relaxed);
+            let mut indices = arrival_indices.lock().await;
             if guard.len() >= max_retained {
                 tracing::warn!(
                     endpoint_name = %name,
@@ -470,9 +509,14 @@ impl Service<Exchange> for MockProducer {
                     "max retained exchanges reached, dropping oldest"
                 );
                 guard.pop_front();
+                // Drop the index paired with the truncated exchange so
+                // indices always pair positionally with retained exchanges.
+                indices.remove(0);
             }
             guard.push_back(exchange_to_store);
+            indices.push(arrival);
             let count = guard.len();
+            drop(indices);
             drop(guard);
 
             debug!(
@@ -658,5 +702,148 @@ impl ExchangeAssert {
             );
         }
         self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — global arrival indices
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    use camel_component_api::{Exchange, Message, NoOpComponentContext, ProducerContext};
+    use tower::Service;
+
+    use crate::MockComponent;
+    use camel_component_api::Component;
+
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
+    #[tokio::test]
+    async fn arrival_indices_strictly_increasing_across_endpoints() {
+        let ctx = ProducerContext::new();
+        let component = MockComponent::new();
+        let ep_a = component
+            .create_endpoint("mock:a", &NoOpComponentContext)
+            .unwrap();
+        let ep_b = component
+            .create_endpoint("mock:b", &NoOpComponentContext)
+            .unwrap();
+        let mut pa = ep_a.create_producer(rt(), &ctx).unwrap();
+        let mut pb = ep_b.create_producer(rt(), &ctx).unwrap();
+
+        pa.call(Exchange::new(Message::new("a0"))).await.unwrap();
+        pb.call(Exchange::new(Message::new("b0"))).await.unwrap();
+        pa.call(Exchange::new(Message::new("a1"))).await.unwrap();
+        pb.call(Exchange::new(Message::new("b1"))).await.unwrap();
+
+        let a = component
+            .get_endpoint("a")
+            .unwrap()
+            .get_arrival_indices()
+            .await;
+        let b = component
+            .get_endpoint("b")
+            .unwrap()
+            .get_arrival_indices()
+            .await;
+        assert_eq!(a, vec![0, 2]);
+        assert_eq!(b, vec![1, 3]);
+
+        let mut merged = a;
+        merged.extend(b);
+        merged.sort_unstable();
+        assert!(
+            merged.windows(2).all(|w| w[0] < w[1]),
+            "merged indices must be strictly increasing, got {merged:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn arrival_indices_truncate_in_lockstep_with_retention() {
+        let ctx = ProducerContext::new();
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:x?retain=2", &NoOpComponentContext)
+            .unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        for body in ["first", "second", "third"] {
+            producer
+                .call(Exchange::new(Message::new(body)))
+                .await
+                .unwrap();
+        }
+
+        let inner = component.get_endpoint("x").unwrap();
+        let indices = inner.get_arrival_indices().await;
+        // Stamped 0, 1, 2 — the first index is dropped with its exchange.
+        assert_eq!(indices, vec![1, 2]);
+
+        let received = inner.get_received_exchanges().await;
+        assert_eq!(received.len(), indices.len());
+        assert_eq!(received[0].input.body.as_text(), Some("second"));
+        assert_eq!(received[1].input.body.as_text(), Some("third"));
+    }
+
+    #[tokio::test]
+    async fn reset_clears_indices_but_counter_stays_monotonic() {
+        let ctx = ProducerContext::new();
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:r", &NoOpComponentContext)
+            .unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        producer
+            .call(Exchange::new(Message::new("one")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("two")))
+            .await
+            .unwrap();
+
+        let inner = component.get_endpoint("r").unwrap();
+        assert_eq!(inner.get_arrival_indices().await, vec![0, 1]);
+
+        inner.reset().await;
+        assert!(inner.get_arrival_indices().await.is_empty());
+
+        producer
+            .call(Exchange::new(Message::new("three")))
+            .await
+            .unwrap();
+        // Component-wide counter is not reset: the post-reset index is 2.
+        assert_eq!(inner.get_arrival_indices().await, vec![2]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_sends_preserve_per_endpoint_order() {
+        let ctx = ProducerContext::new();
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:c", &NoOpComponentContext)
+            .unwrap();
+
+        let mut producers: Vec<_> = (0..32)
+            .map(|_| endpoint.create_producer(rt(), &ctx).unwrap())
+            .collect();
+        let sends = producers
+            .iter_mut()
+            .enumerate()
+            .map(|(i, p)| p.call(Exchange::new(Message::new(format!("m{i}")))));
+        let _ = futures::future::join_all(sends).await;
+
+        let inner = component.get_endpoint("c").unwrap();
+        let indices = inner.get_arrival_indices().await;
+        assert_eq!(indices.len(), 32);
+        assert!(
+            indices.windows(2).all(|w| w[0] < w[1]),
+            "per-endpoint indices must be strictly increasing, got {indices:?}"
+        );
     }
 }

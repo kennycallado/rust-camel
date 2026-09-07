@@ -1,0 +1,16 @@
+# =============================================================================
+# Route for the `camel test` sequence-demo example.
+#
+# A single `direct:` route through two `mock:` endpoints to a third one.
+# The paired `sequence-demo.test.yaml` document asserts the cross-endpoint
+# arrival order with a `sequence:` block. Route sends are awaited in step
+# order, so the asserted order is causal and deterministic.
+# =============================================================================
+
+routes:
+  - id: "sequence-demo"
+    from: "direct:start"
+    steps:
+      - to: "mock:step-a"
+      - to: "mock:step-b"
+      - to: "mock:result"

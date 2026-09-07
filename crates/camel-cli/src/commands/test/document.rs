@@ -66,6 +66,10 @@ pub struct TestDocument {
     /// Mandatory expectations, keyed by `mock:` URI before normalization.
     #[serde(default)]
     pub expects: BTreeMap<String, ExpectSet>,
+    /// Optional arrival-order assertion: `mock:` refs in expected
+    /// arrival order, normalized to bare endpoint names during
+    /// [`parse_test_document`] validation (duplicates allowed).
+    pub sequence: Option<Vec<String>>,
     /// Raw `settle` string (humantime format, e.g. `"500ms"`).
     pub settle: Option<String>,
     /// Parsed settle window, populated during validation.
@@ -610,6 +614,11 @@ pub enum TestDocError {
     ExpectsEmpty,
     /// An `expects` key lacks the required `mock:` scheme.
     ExpectKeyMissingScheme { key: String },
+    /// `sequence:` holds fewer than two entries.
+    SequenceTooShort,
+    /// A `sequence:` entry lacks the `mock:` scheme or names an empty
+    /// endpoint path.
+    SequenceBadRef { entry: String },
     /// One `expects` entry sets both `count` and `minCount`.
     CountAndMinCount(String),
     /// One `expects` entry sets both `count` and `maxCount`.
@@ -690,6 +699,15 @@ impl fmt::Display for TestDocError {
             ),
             Self::ExpectKeyMissingScheme { key } => {
                 write!(f, "expects key `{key}` must start with `mock:`")
+            }
+            Self::SequenceTooShort => {
+                write!(f, "sequence needs at least two entries")
+            }
+            Self::SequenceBadRef { entry } => {
+                write!(
+                    f,
+                    "sequence entry `{entry}` must be a mock: URI with a non-empty endpoint path"
+                )
             }
             Self::CountAndMinCount(endpoint) => write!(
                 f,
@@ -805,11 +823,14 @@ fn classify_yaml_error(raw: &str) -> TestDocError {
 /// `routes`); (b) non-empty `expects`; (c) every `expects` key uses the
 /// `mock:` scheme (then the map is rebuilt with bare endpoint names);
 /// (d) `count`/`minCount`/`maxCount` combination rules (`count` excludes
-/// both, a declared range must satisfy `minCount <= maxCount`); (e) `settle`
-/// range; (f) every input targets `direct:`; (g) intercepts validate and
-/// build rules; (h) `beans:` declarations validate (names, methods,
-/// per-kind config); (i) `repositories:` declarations validate (registry
-/// kinds, stub targets, blank names, built-in `memory` name).
+/// both, a declared range must satisfy `minCount <= maxCount`); (e)
+/// `sequence:` holds at least two entries, each a `mock:` URI with a
+/// non-empty endpoint path (then normalized to bare names, duplicates
+/// allowed); (f) `settle` range; (g) every input targets `direct:`;
+/// (h) intercepts validate and build rules; (i) `beans:` declarations
+/// validate (names, methods, per-kind config); (j) `repositories:`
+/// declarations validate (registry kinds, stub targets, blank names,
+/// built-in `memory` name).
 pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
     let mut doc = serde_yaml::from_str::<TestDocument>(text)
         .map_err(|e| classify_yaml_error(&e.to_string()))?;
@@ -864,7 +885,28 @@ pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
         }
         doc.expects.insert(bare, set);
     }
-    // (e) `settle`: humantime string with 0 < settle <= 5s.
+    // (e) `sequence`: at least two entries (a single-entry sequence is a
+    // count assertion in disguise), each a `mock:` URI with a non-empty
+    // endpoint path; normalize to bare names exactly as expects keys
+    // (duplicates allowed — the same endpoint may appear for consecutive
+    // arrivals).
+    if let Some(sequence) = doc.sequence.take() {
+        if sequence.len() < 2 {
+            return Err(TestDocError::SequenceTooShort);
+        }
+        let mut normalized = Vec::with_capacity(sequence.len());
+        for entry in sequence {
+            let Some(bare) = entry.strip_prefix(MOCK_SCHEME_PREFIX) else {
+                return Err(TestDocError::SequenceBadRef { entry });
+            };
+            if bare.is_empty() {
+                return Err(TestDocError::SequenceBadRef { entry });
+            }
+            normalized.push(bare.to_string());
+        }
+        doc.sequence = Some(normalized);
+    }
+    // (f) `settle`: humantime string with 0 < settle <= 5s.
     if let Some(raw) = doc.settle.clone() {
         let parsed = humantime::parse_duration(&raw)
             .map_err(|_| TestDocError::SettleOutOfRange(raw.clone()))?;
@@ -873,7 +915,7 @@ pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
         }
         doc.settle_parsed = Some(parsed);
     }
-    // (f) Inputs deliver through `direct:` endpoints only; each `expectReply`
+    // (g) Inputs deliver through `direct:` endpoints only; each `expectReply`
     // must declare at least one of `body` / `headers`.
     for input in &doc.inputs {
         if !input.to.starts_with(DIRECT_SCHEME_PREFIX) {

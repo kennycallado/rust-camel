@@ -1,0 +1,30 @@
+# =============================================================================
+# `camel test` document for the sequence-demo route.
+#
+# References the route file above, delivers one `direct:` input, asserts
+# per-endpoint expectations, and asserts the cross-endpoint arrival order
+# with `sequence:`. To observe intermediate sends of a real route, divert
+# copies to mock probes with `intercepts: {<uri>: {divertCopyTo: ...}}`
+# (see the intercepts demo) — probe copies deliver detached, so order over
+# probes is happened-order only; direct mock: sends are the deterministic
+# form shown here.
+# =============================================================================
+
+routeFiles: [sequence-demo.yaml]
+
+inputs:
+  - to: "direct:start"
+    body: "hello"
+
+expects:
+  mock:step-a:
+    count: 1
+    bodies: ["hello"]
+  mock:step-b:
+    count: 1
+    bodies: ["hello"]
+  mock:result:
+    count: 1
+    bodies: ["hello"]
+
+sequence: [mock:step-a, mock:step-b, mock:result]

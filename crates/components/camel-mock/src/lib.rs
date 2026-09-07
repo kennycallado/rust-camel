@@ -36,6 +36,7 @@
 
 use std::collections::{HashMap, VecDeque, hash_map::Entry};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use tokio::sync::{Mutex, Notify};
 
@@ -205,6 +206,11 @@ pub use matcher::{BodyMatcher, HeaderMatcher};
 pub struct MockComponent {
     registry: Arc<std::sync::Mutex<HashMap<String, Arc<MockEndpointInner>>>>,
     config: MockConfig,
+    /// Component-wide monotonic arrival counter, shared into every endpoint
+    /// inner at creation. Stamped once per recorded exchange inside the
+    /// endpoint's `received` lock so per-endpoint index order matches push
+    /// order by construction. Never reset — not even by endpoint `reset()`.
+    arrival_counter: Arc<AtomicU64>,
 }
 
 impl MockComponent {
@@ -217,6 +223,7 @@ impl MockComponent {
         Self {
             registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
             config,
+            arrival_counter: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -344,6 +351,8 @@ impl Component for MockComponent {
                     assert_period_ms,
                     any_order,
                     expectations: Arc::new(std::sync::Mutex::new(MockExpectations::new())),
+                    arrival_counter: Arc::clone(&self.arrival_counter),
+                    arrival_indices: Arc::new(Mutex::new(Vec::new())),
                 }));
                 (Arc::clone(created), true)
             }

@@ -180,7 +180,7 @@ the component crates. This section is the single reference.
   `HttpWireRequest` and Exchange projections do not unify.
 - **Unified grammar across tiers.** Rejected: ADR-0069 §2 stands.
 
-## Amendment 2026-09-07 — shared-algebra consumption
+## Amendment 1 — 2026-09-07 — shared-algebra consumption
 
 The Context statement that the unit tier's `expects` is endpoint-to-count
 only overstated the gap. `camel-mock` already carried the full seven-key
@@ -213,3 +213,25 @@ rejected setting two bounds together).
 The Decision sections stand unchanged. This amendment corrects the
 Context's framing; it does not revise the placement, purity, or staged-
 direction decisions.
+
+## Amendment 2 — 2026-09-07 — step 3 delivery shape
+
+Step 3 of the staged direction delivered the observational probes this ADR
+prescribed. The observational weave itself predated the ADR: `intercepts`
+with `divertCopyTo` landed 2026-08-23 (the declarative-intercepts change),
+so a probe endpoint was reachable from any route send before this ADR
+recorded the step. The genuine gap was the cross-endpoint arrival-order
+assertion.
+
+Step 3 lands as divert-copy probes plus the arrival-sequence assertion.
+`camel-mock` stamps a component-wide, strictly-increasing arrival index on
+every recorded exchange. `sequence:` evaluates a filtered complete
+interleaving over the listed endpoints: the arrivals at those endpoints,
+projected in global arrival order, must equal the declared list exactly,
+while arrivals at unlisted endpoints are ignored. Retention is bounded and
+the arrival indices truncate in lockstep with the retained exchanges.
+
+The ADR-0064 section 5 gate comes to this in substance: `skipTo` exists only as a
+test-document construct and never in the production route DSL. Observation
+is free; mutation stays gated. The Decision sections stand otherwise
+unchanged.

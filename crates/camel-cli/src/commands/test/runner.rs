@@ -337,6 +337,63 @@ async fn evaluate_endpoint(mock: &MockComponent, name: &str, set: &ExpectSet) ->
     }
 }
 
+/// Evaluate the `sequence:` arrival-order assertion: collect every
+/// arrival at the listed endpoints as `(arrival index, endpoint name)`
+/// pairs — a listed endpoint absent from the registry counts as zero
+/// arrivals — order them by the component-wide arrival index, and
+/// require the name projection to equal the declared list element-wise
+/// (arrivals at unlisted endpoints are ignored; a repeated entry
+/// matches the endpoint's consecutive arrivals). The first divergence
+/// is a verdict-class failure naming position, expected, and actual —
+/// symmetric when either side runs out first.
+async fn evaluate_sequence(mock: &MockComponent, declared: &[String]) -> EndpointResult {
+    // One collection pass per DISTINCT listed endpoint: duplicates in
+    // the declared list assert repeated arrivals, not double counting.
+    let mut arrivals: Vec<(u64, &str)> = Vec::new();
+    let mut listed: Vec<&str> = Vec::new();
+    for name in declared {
+        let bare = name.as_str();
+        if listed.contains(&bare) {
+            continue;
+        }
+        listed.push(bare);
+        if let Some(inner) = mock.get_endpoint(bare) {
+            for index in inner.get_arrival_indices().await {
+                arrivals.push((index, bare));
+            }
+        }
+    }
+    // Indices are component-wide and strictly increasing, so the sort
+    // yields the filtered complete interleaving of listed arrivals.
+    arrivals.sort_unstable_by_key(|&(index, _)| index);
+    let positions = declared.len().max(arrivals.len());
+    for position in 0..positions {
+        let failure = match (declared.get(position), arrivals.get(position)) {
+            (Some(expected), Some((_, actual))) if expected == actual => continue,
+            (Some(expected), Some((_, actual))) => format!(
+                "sequence mismatch at position {position}: expected {expected}, got {actual}"
+            ),
+            (Some(expected), None) => format!(
+                "sequence mismatch at position {position}: expected {expected}, got <no further arrival>"
+            ),
+            (None, Some((_, actual))) => format!(
+                "sequence mismatch at position {position}: expected <end of sequence>, got {actual}"
+            ),
+            // Unreachable: `positions` is the max of the two lengths, so
+            // every index below it is present on at least one side.
+            (None, None) => break,
+        };
+        return EndpointResult {
+            endpoint: "<sequence>".to_string(),
+            outcome: Err(failure),
+        };
+    }
+    EndpointResult {
+        endpoint: "<sequence>".to_string(),
+        outcome: Ok(()),
+    }
+}
+
 /// Render a received body for reply failure messages (text verbatim, JSON
 /// compactly, other variants via their debug form).
 fn render_body(body: &Body) -> String {
@@ -483,8 +540,17 @@ async fn run_phases(
         }
     }
 
-    // (e) Settle traffic.
-    let names: Vec<String> = doc.expects.keys().cloned().collect();
+    // (e) Settle traffic over the union of `expects` keys and `sequence`
+    // entries, so sequence-listed endpoints absent from `expects` still
+    // quiesce; with no `sequence` the set is exactly the expects keys.
+    let mut names: Vec<String> = doc.expects.keys().cloned().collect();
+    if let Some(sequence) = &doc.sequence {
+        for entry in sequence {
+            if !names.contains(entry) {
+                names.push(entry.clone());
+            }
+        }
+    }
     let quiet = doc.settle_duration().unwrap_or(DEFAULT_QUIET);
     if let Err(e) = settle(mock, &names, quiet, route_started_at).await {
         return TestDocResult {
@@ -510,6 +576,13 @@ async fn run_phases(
             let label = format!("reply[{index}] {}", input.to);
             endpoint_results.push(evaluate_reply_expectation(expect, reply, &label));
         }
+    }
+    // Sequence assertion: post-settle and post per-endpoint evaluation,
+    // same assertion phase; the row reuses the `EndpointResult` shape so
+    // the driver prints one PASS/FAIL line (label `<sequence>`) and a
+    // mismatch lands in the exit-1 verdict class.
+    if let Some(sequence) = &doc.sequence {
+        endpoint_results.push(evaluate_sequence(mock, sequence).await);
     }
     TestDocResult {
         endpoint_results,

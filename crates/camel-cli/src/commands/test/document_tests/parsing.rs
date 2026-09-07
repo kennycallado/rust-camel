@@ -847,6 +847,77 @@ fn equals_wrapped_scalar_maps_to_json() {
 }
 
 #[test]
+fn sequence_too_short_is_document_error() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+sequence: [mock:only]
+"#;
+    let err = err_of(yaml);
+    assert!(
+        matches!(err, TestDocError::SequenceTooShort),
+        "single-entry sequence must be rejected, got: {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "sequence needs at least two entries",
+        "display must state the minimum-entry rule, got: {err}"
+    );
+}
+
+#[test]
+fn sequence_bad_ref_is_document_error() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+sequence: ["mock:probe-a", "direct:x"]
+"#;
+    let err = err_of(yaml);
+    assert!(
+        matches!(
+            err,
+            TestDocError::SequenceBadRef { ref entry } if entry == "direct:x"
+        ),
+        "non-mock sequence entry must be rejected naming the ref, got: {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "sequence entry `direct:x` must be a mock: URI with a non-empty endpoint path",
+        "display must name the offending entry, got: {err}"
+    );
+}
+
+#[test]
+fn sequence_entries_normalize_to_bare_names() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+sequence: ["mock:probe-a", "mock:probe-b"]
+"#;
+    let doc = parse_test_document(yaml).expect("mock: sequence entries should parse"); // allow-unwrap
+    assert_eq!(
+        doc.sequence,
+        Some(vec!["probe-a".to_string(), "probe-b".to_string()]),
+        "sequence entries must normalize to bare names like expects keys"
+    );
+}
+
+#[test]
 fn backcompat_all_bare_documents_parse() {
     let yaml = r#"
 routes:

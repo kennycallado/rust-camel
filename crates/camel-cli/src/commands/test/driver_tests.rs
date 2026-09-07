@@ -978,6 +978,229 @@ async fn range_bound_fails_above() {
     );
 }
 
+/// Write the two-mock sequence document: route `direct:start` →
+/// `mock:probe-a` → `mock:probe-b` (direct sends are awaited in step
+/// order, so arrival order is causal and deterministic — divert-copy
+/// probes deliver detached wire-tap copies and would only assert
+/// happened order), plus the declared `sequence:` list body
+/// (`sequence` renders the YAML list body, e.g.
+/// `"mock:probe-a", "mock:probe-b"`).
+fn write_seq_doc(dir: &Path, name: &str, sequence: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - to: "mock:probe-a"
+      - to: "mock:probe-b"
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:probe-a:
+    count: 1
+  mock:probe-b:
+    count: 1
+sequence: [{sequence}]
+"#
+        ),
+    )
+    .expect("write sequence doc"); // allow-unwrap
+    path
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sequence_passes_causally_ordered_sends() {
+    let dir = temp_dir("seq-ordered-pass");
+    let path = write_seq_doc(&dir, "a.test.yaml", "\"mock:probe-a\", \"mock:probe-b\"");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 0, "causally-ordered sequence must pass");
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("0 failed"), "out: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sequence_reversed_fails_naming_first_divergence() {
+    let dir = temp_dir("seq-reversed-fail");
+    let path = write_seq_doc(&dir, "a.test.yaml", "\"mock:probe-b\", \"mock:probe-a\"");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(
+        summary.exit_code, 1,
+        "reversed sequence must fail as a verdict"
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("position 0"), "out: {out}");
+    assert!(out.contains("expected probe-b"), "out: {out}");
+    assert!(out.contains("got probe-a"), "out: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sequence_repeats_and_narrowing() {
+    let dir = temp_dir("seq-repeats-noise");
+    let path = dir.join("a.test.yaml");
+    fs::write(
+        &path,
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - to: "mock:probe-a"
+      - to: "mock:probe-b"
+      - to: "mock:probe-a"
+      - to: "mock:noise"
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:probe-a:
+    count: 2
+  mock:probe-b:
+    count: 1
+  mock:noise:
+    count: 1
+sequence: ["mock:probe-a", "mock:probe-b", "mock:probe-a"]
+"#,
+    )
+    .expect("write repeats doc"); // allow-unwrap
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(
+        summary.exit_code, 0,
+        "repeated entries must match consecutive arrivals; noise arrivals must be ignored"
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("0 failed"), "out: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sequence_arrivals_run_out_fails_naming_shortage() {
+    // Declared sequence lists three arrivals but the two-probe document
+    // delivers only two: the third entry must fail naming the missing
+    // arrival's position, expected endpoint, and the no-further-arrival
+    // marker.
+    let dir = temp_dir("seq-shortage");
+    let path = write_seq_doc(
+        &dir,
+        "a.test.yaml",
+        "\"mock:probe-a\", \"mock:probe-b\", \"mock:probe-a\"",
+    );
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(
+        summary.exit_code, 1,
+        "a declared arrival with no backing arrival must fail as a verdict"
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("position 2"), "out: {out}");
+    assert!(out.contains("expected probe-a"), "out: {out}");
+    assert!(out.contains("got <no further arrival>"), "out: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sequence_extra_arrival_fails_naming_surplus() {
+    // The declared sequence is satisfied, but the route sends one extra
+    // arrival after the last declared entry: the surplus must fail naming
+    // the position, the end-of-sequence marker, and the unexpected arrival.
+    // Direct mock: sends (deterministic causal order) with a third
+    // probe-a send for the surplus.
+    let dir = temp_dir("seq-surplus");
+    let path = dir.join("a.test.yaml");
+    fs::write(
+        &path,
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - to: "mock:probe-a"
+      - to: "mock:probe-b"
+      - to: "mock:probe-a"
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:probe-a:
+    count: 2
+  mock:probe-b:
+    count: 1
+sequence: ["mock:probe-a", "mock:probe-b"]
+"#,
+    )
+    .expect("write sequence surplus doc"); // allow-unwrap
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(
+        summary.exit_code, 1,
+        "an arrival past the declared sequence must fail as a verdict"
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("position 2"), "out: {out}");
+    assert!(out.contains("expected <end of sequence>"), "out: {out}");
+    assert!(out.contains("got probe-a"), "out: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn divert_copy_locked_end_to_end() {
+    let dir = temp_dir("divert-copy-lock");
+    let path = dir.join("a.test.yaml");
+    fs::write(
+        &path,
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - to: "seda:audit"
+      - to: "mock:sink"
+  - id: r2
+    from: "seda:audit"
+    steps:
+      - to: "mock:drained"
+inputs:
+  - to: "direct:start"
+    body: "x"
+intercepts:
+  seda:audit:
+    divertCopyTo: "mock:audit"
+expects:
+  mock:audit:
+    count: 1
+  mock:drained:
+    count: 1
+"#,
+    )
+    .expect("write divert lock doc"); // allow-unwrap
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(
+        summary.exit_code, 0,
+        "divert copy AND real delivery must both hold"
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("a.test.yaml#audit"),
+        "divert copy must be recorded: {out}"
+    );
+    assert!(
+        out.contains("a.test.yaml#drained"),
+        "real seda consumer must receive: {out}"
+    );
+    assert!(out.contains("2 passed, 0 failed"), "out: {out}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn max_count_zero_asserts_absence() {
     // No arrival inside the window: the absence claim holds.

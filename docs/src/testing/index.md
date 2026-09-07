@@ -165,6 +165,26 @@ Matcher mismatches are assertion failures. `camel test` prints a `FAIL` line tha
 
 Migration note: only literals whose single key is a matcher key change meaning in dual positions (`expectReply.body`, `expects.headers` values, `expectReply.headers` values). For example `expectReply: {body: {equals: "x"}}` previously meant literal equality of `{"equals": "x"}`. With matchers it selects `equals "x"`. Wrap the literal to keep the old meaning: `body: {equals: {equals: "x"}}`. `expects.bodies` entries were strings before, so matcher maps there add no migration. A sole `predicate` key, or a sole `jsonSubset` key on a header, parsed as a literal before; it now fails at parse with exit 2.
 
+`sequence` asserts cross-endpoint arrival order. It is a top-level list of `mock:` endpoint refs in the order the arrivals must have happened. The list needs at least two entries; fewer is a document error and `camel test` exits with code 2. Duplicates are allowed: the same endpoint may appear for consecutive arrivals. Each entry must carry the `mock:` scheme; the prefix is stripped to the bare endpoint name exactly as for an `expects` key, so `mock:probe-a` addresses the endpoint `probe-a`.
+
+The assertion projects the arrivals at the listed endpoints in global arrival order and requires the projection to equal the declared list exactly. Arrivals at unlisted endpoints are ignored, so the assertion narrows to the probes that matter while `expects` handles the rest. A mismatch is an assertion failure: `camel test` prints a `FAIL` line naming the first divergence — the position, the expected endpoint, and the actual endpoint — and exits with code 1. Parse errors (fewer than two entries, an entry that is not a `mock:` URI or names an empty endpoint path) exit with code 2.
+
+### Probe pattern
+
+Observe an intermediate route send by diverting a copy to a probe endpoint, then assert the order of those observations with `sequence:`. `divertCopyTo` copies the exchange to the probe before the real send continues, so the route is unchanged.
+
+```yaml
+intercepts:
+  seda:audit: {divertCopyTo: mock:probe-a}
+  seda:persist: {divertCopyTo: mock:probe-b}
+expects:
+  mock:probe-a: {count: 1}
+  mock:probe-b: {count: 1}
+sequence: [mock:probe-a, mock:probe-b]
+```
+
+Cross-endpoint order is deterministic only between causally-ordered sends — sequential route steps, reply chains. Two concurrent branches that race to different probes produce a happened-order that `sequence:` faithfully reports but that is nondeterministic between runs. Assert order only over sends the route orders; concurrent branches assert happened-order only.
+
 ### Reply assertions
 
 An input may declare `expectReply` to assert against the reply message the `direct:` producer returns. The block holds two optional keys: `body` and `headers`. At least one must be present. An empty `expectReply` is a document error.
