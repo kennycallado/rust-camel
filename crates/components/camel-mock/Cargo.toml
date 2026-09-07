@@ -14,6 +14,7 @@ categories.workspace = true
 [dependencies]
 camel-api.workspace = true
 camel-component-api.workspace = true
+camel-matchers.workspace = true
 serde_json.workspace = true
 tower.workspace = true
 tokio.workspace = true

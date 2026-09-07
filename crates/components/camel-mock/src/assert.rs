@@ -9,6 +9,9 @@ use crate::MockEndpointInner;
 use crate::expectations::BodyExpectation;
 use crate::matcher::compact_body;
 use camel_component_api::{Body, Exchange};
+use camel_matchers::CountBound;
+use camel_matchers::bound_holds;
+use camel_matchers::render_bound;
 
 /// Diagnostic cap for received-value and header-key lists.
 const DIAGNOSTIC_LIST_CAP: usize = 8;
@@ -106,6 +109,20 @@ pub enum MockAssertionError {
         endpoint: String,
         /// Minimum number of exchanges expected.
         minimum: usize,
+        /// Actual number of retained exchanges.
+        actual: usize,
+    },
+    /// An upper-bounded count expectation (`expect_maximum_count`, or a
+    /// [`CountBound::Range`] via `expect_bound`) not met.
+    ///
+    /// `bound` is the `camel_matchers::render_bound` rendering of the
+    /// recorded bound (e.g. `expected at most 2`, `expected between 1 and
+    /// 3`) so wording stays owned by the shared algebra.
+    CountBoundNotMet {
+        /// Endpoint name.
+        endpoint: String,
+        /// Rendered bound prefix from `camel_matchers::render_bound`.
+        bound: String,
         /// Actual number of retained exchanges.
         actual: usize,
     },
@@ -256,6 +273,14 @@ impl std::fmt::Display for MockAssertionError {
                 f,
                 "MockEndpoint '{endpoint}': expected at least {minimum} exchanges, got {actual}"
             ),
+            MockAssertionError::CountBoundNotMet {
+                endpoint,
+                bound,
+                actual,
+            } => write!(
+                f,
+                "MockEndpoint '{endpoint}': {bound} exchanges, got {actual}"
+            ),
             MockAssertionError::BodyCountMismatch {
                 endpoint,
                 expected,
@@ -368,10 +393,11 @@ impl MockEndpointInner {
     /// Single evaluation path shared by
     /// [`assert_satisfied`](crate::MockEndpointInner::assert_satisfied) and
     /// [`try_assert_satisfied`](crate::MockEndpointInner::try_assert_satisfied):
-    /// exact count, minimum count, then — only when expected bodies are
-    /// registered — body-count and per-body checks (exact bodies and body
-    /// matchers share one ordered slot list), then header, header-regex and
-    /// header-matcher checks (independent of the body gate).
+    /// the count bound (via `camel_matchers::bound_holds`), then — only
+    /// when expected bodies are registered — body-count and per-body
+    /// checks (exact bodies and body matchers share one ordered slot
+    /// list), then header, header-regex and header-matcher checks
+    /// (independent of the body gate).
     ///
     /// On a mismatch-class error the fail-fast latch is tripped first (when
     /// `fail_fast` is enabled), then the error is returned. A malformed
@@ -390,27 +416,35 @@ impl MockEndpointInner {
             .lock()
             .expect("expectations lock poisoned"); // allow-unwrap
 
-        // Exact count expectation — checked before bodies; a mismatch
-        // short-circuits all later checks.
-        if let Some(n) = guard.expected_count
-            && received.len() != n
+        // Count bound — checked before bodies; a mismatch short-circuits
+        // all later checks. Decided by the shared algebra on the current
+        // snapshot (the runner settles traffic before asserting; no
+        // polling).
+        if let Some(bound) = guard.count_bound.as_ref()
+            && !bound_holds(bound, received.len())
         {
-            return self.latch_err(MockAssertionError::CountMismatch {
-                endpoint: self.name.clone(),
-                expected: n,
-                actual: received.len(),
-            });
-        }
-
-        // Minimum count expectation.
-        if let Some(m) = guard.minimum_count
-            && received.len() < m
-        {
-            return self.latch_err(MockAssertionError::MinimumCountNotMet {
-                endpoint: self.name.clone(),
-                minimum: m,
-                actual: received.len(),
-            });
+            let actual = received.len();
+            let err = match bound {
+                CountBound::Exact(n) => MockAssertionError::CountMismatch {
+                    endpoint: self.name.clone(),
+                    expected: *n as usize,
+                    actual,
+                },
+                CountBound::AtLeast(m) => MockAssertionError::MinimumCountNotMet {
+                    endpoint: self.name.clone(),
+                    minimum: *m as usize,
+                    actual,
+                },
+                // Upper bounds (and any future bound form — the enum is
+                // `#[non_exhaustive]`) render through the shared
+                // `render_bound`, keeping the wording in camel-matchers.
+                other => MockAssertionError::CountBoundNotMet {
+                    endpoint: self.name.clone(),
+                    bound: render_bound(other),
+                    actual,
+                },
+            };
+            return self.latch_err(err);
         }
 
         // Body expectations — gated: no expected bodies ⇒ body-count and

@@ -290,6 +290,100 @@ expects:
 }
 
 #[test]
+fn count_with_maxcount_rejected() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+expects:
+  mock:result:
+    count: 1
+    maxCount: 2
+"#;
+    let err = err_of(yaml);
+    assert!(
+        matches!(
+            err,
+            TestDocError::CountAndMaxCount(ref endpoint) if endpoint == "result"
+        ),
+        "count+maxCount must be rejected, got: {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("expects entry `result` must not set both count and maxCount"),
+        "message must use the exclusivity verb shape, got: {err}"
+    );
+}
+
+#[test]
+fn min_exceeds_max_rejected() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+expects:
+  mock:result:
+    minCount: 3
+    maxCount: 2
+"#;
+    let err = err_of(yaml);
+    assert!(
+        matches!(
+            err,
+            TestDocError::MinCountAboveMaxCount {
+                ref endpoint,
+                min: 3,
+                max: 2
+            } if endpoint == "result"
+        ),
+        "minCount above maxCount must be rejected, got: {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("expects entry `result` must not set minCount 3 above maxCount 2"),
+        "message must name the empty range, got: {err}"
+    );
+}
+
+#[test]
+fn min_count_at_max_count_accepted() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+expects:
+  mock:result:
+    minCount: 2
+    maxCount: 2
+"#;
+    let doc = parse_test_document(yaml).expect("equal min/max is a valid range"); // allow-unwrap
+    let set = doc
+        .expects
+        .get("result")
+        .expect("normalized key `result` present"); // allow-unwrap
+    assert_eq!((set.min_count, set.max_count), (Some(2), Some(2)));
+}
+
+#[test]
+fn max_count_alone_parses() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+expects:
+  mock:result:
+    maxCount: 0
+"#;
+    let doc = parse_test_document(yaml).expect("maxCount alone should parse"); // allow-unwrap
+    let set = doc
+        .expects
+        .get("result")
+        .expect("normalized key `result` present"); // allow-unwrap
+    assert_eq!(set.max_count, Some(0));
+    assert!(set.count.is_none() && set.min_count.is_none());
+}
+
+#[test]
 fn settle_zero_rejected() {
     let yaml = r#"
 routes:

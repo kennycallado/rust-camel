@@ -1,5 +1,7 @@
 //! Expectations recorded on a mock endpoint for batch-style assertion.
 
+use camel_matchers::CountBound;
+
 use crate::matcher::{BodyMatcher, HeaderMatcher};
 
 /// One ordered entry in the expected-body list.
@@ -27,12 +29,11 @@ pub struct MockExpectations {
     pub(crate) expected_headers: Vec<(String, serde_json::Value)>,
     pub(crate) expected_header_regexes: Vec<(String, String)>,
     pub(crate) expected_header_matchers: Vec<(String, HeaderMatcher)>,
-    /// Exact exchange-count expectation enforced by
-    /// [`crate::MockEndpointInner::assert_satisfied`].
-    pub(crate) expected_count: Option<usize>,
-    /// Minimum exchange-count expectation enforced by
-    /// [`crate::MockEndpointInner::assert_satisfied`].
-    pub(crate) minimum_count: Option<usize>,
+    /// Count bound (from the shared `camel_matchers` algebra) enforced by
+    /// [`crate::MockEndpointInner::assert_satisfied`]; `None` means no count
+    /// expectation. One bound per endpoint: a later setter replaces the
+    /// earlier one.
+    pub(crate) count_bound: Option<CountBound>,
 }
 
 impl Default for MockExpectations {
@@ -49,8 +50,7 @@ impl MockExpectations {
             expected_headers: Vec::new(),
             expected_header_regexes: Vec::new(),
             expected_header_matchers: Vec::new(),
-            expected_count: None,
-            minimum_count: None,
+            count_bound: None,
         }
     }
 
@@ -79,13 +79,9 @@ impl MockExpectations {
         self.expected_header_matchers.push((key, matcher));
     }
 
-    /// Set the exact expected exchange count.
-    pub(crate) fn set_expected_count(&mut self, n: usize) {
-        self.expected_count = Some(n);
-    }
-
-    /// Set the minimum expected exchange count.
-    pub(crate) fn set_minimum_count(&mut self, n: usize) {
-        self.minimum_count = Some(n);
+    /// Set the count bound enforced at assertion time. Replaces any
+    /// previously recorded bound (one bound per endpoint).
+    pub(crate) fn set_count_bound(&mut self, bound: CountBound) {
+        self.count_bound = Some(bound);
     }
 }

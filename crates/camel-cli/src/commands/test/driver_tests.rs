@@ -885,3 +885,125 @@ async fn filtered_stdout_matches_direct_run() {
         "survivors' stdout must be identical to running them directly"
     );
 }
+
+/// Write a document whose route forwards each input to `mock:out`
+/// `arrivals` times and expects `minCount`/`maxCount` on it.
+fn write_range_doc(dir: &Path, name: &str, arrivals: usize, min: usize, max: usize) -> PathBuf {
+    let path = dir.join(name);
+    let mut steps = String::new();
+    for _ in 0..arrivals {
+        steps.push_str("      - to: \"mock:out\"\n");
+    }
+    fs::write(
+        &path,
+        format!(
+            r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+{steps}inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    minCount: {min}
+    maxCount: {max}
+"#
+        ),
+    )
+    .expect("write range doc"); // allow-unwrap
+    path
+}
+
+/// Write a document whose route sends to `mock:out` only when the filter
+/// predicate passes (`sends`); the endpoint is created at route-add either
+/// way, and `maxCount: 0` is an absence claim over the settled window.
+fn write_absence_doc(dir: &Path, name: &str, sends: bool) -> PathBuf {
+    let path = dir.join(name);
+    let needle = if sends { "x" } else { "never-sent" };
+    fs::write(
+        &path,
+        format!(
+            r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - filter:
+          simple: "${{body}} == '{needle}'"
+          steps:
+            - to: "mock:out"
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    maxCount: 0
+settle: 200ms
+"#
+        ),
+    )
+    .expect("write absence doc"); // allow-unwrap
+    path
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn range_bound_passes_inside() {
+    let dir = temp_dir("range-pass");
+    let path = write_range_doc(&dir, "a.test.yaml", 2, 1, 2);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 0);
+    assert_eq!(summary.passed, 1, "in-range arrivals must pass");
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("PASS"), "out: {out}");
+    assert!(out.contains("a.test.yaml#out"), "out: {out}");
+    assert!(out.contains("1 passed, 0 failed"), "out: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn range_bound_fails_above() {
+    let dir = temp_dir("range-fail");
+    let path = write_range_doc(&dir, "a.test.yaml", 3, 1, 2);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 1);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("MockEndpoint 'out': expected between 1 and 2 exchanges, got 3"),
+        "range failure must render the shared bound text: {out}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn max_count_zero_asserts_absence() {
+    // No arrival inside the window: the absence claim holds.
+    let dir = temp_dir("max-zero-pass");
+    let path = write_absence_doc(&dir, "pass.test.yaml", false);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(
+        summary.exit_code, 0,
+        "maxCount 0 with no arrivals must pass"
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("PASS"), "out: {out}");
+    assert!(out.contains("pass.test.yaml#out"), "out: {out}");
+
+    // Same-window arrival: the absence claim fails with the at-most text.
+    let dir = temp_dir("max-zero-fail");
+    let path = write_absence_doc(&dir, "fail.test.yaml", true);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 1);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("MockEndpoint 'out': expected at most 0 exchanges, got 1"),
+        "an arrival must break the maxCount 0 claim: {out}"
+    );
+}

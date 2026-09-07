@@ -8,6 +8,7 @@
 use std::fmt;
 
 use camel_component_api::Body;
+use camel_matchers::{Expectation, expectation_matches};
 use regex::Regex;
 use serde_json::Value;
 
@@ -38,26 +39,24 @@ impl BodyMatcher {
     pub fn matches(&self, actual: &Body) -> bool {
         match self {
             BodyMatcher::Equals(expected) => body_eq(expected, actual),
-            BodyMatcher::Regex(pattern) => match actual {
-                Body::Text(text) => compile(pattern).is_some_and(|re| re.is_match(text)),
-                _ => false,
-            },
-            BodyMatcher::Contains(needle) => match actual {
-                Body::Text(text) => text.contains(needle),
-                _ => false,
-            },
-            BodyMatcher::StartsWith(prefix) => match actual {
-                Body::Text(text) => text.starts_with(prefix),
-                _ => false,
-            },
-            BodyMatcher::EndsWith(suffix) => match actual {
-                Body::Text(text) => text.ends_with(suffix),
-                _ => false,
-            },
+            BodyMatcher::Regex(pattern) => text_only(actual).is_some_and(|value| {
+                expectation_matches(&Expectation::Regex(pattern.clone()), &value)
+            }),
+            BodyMatcher::Contains(needle) => text_only(actual).is_some_and(|value| {
+                expectation_matches(&Expectation::Contains(needle.clone()), &value)
+            }),
+            BodyMatcher::StartsWith(prefix) => text_only(actual).is_some_and(|value| {
+                expectation_matches(&Expectation::StartsWith(prefix.clone()), &value)
+            }),
+            BodyMatcher::EndsWith(suffix) => text_only(actual).is_some_and(|value| {
+                expectation_matches(&Expectation::EndsWith(suffix.clone()), &value)
+            }),
             BodyMatcher::Exists => !matches!(actual, Body::Empty),
             BodyMatcher::JsonSubset(pattern) => {
                 pattern.is_object()
-                    && json_value(actual).is_some_and(|received| json_subset(pattern, &received))
+                    && json_value(actual).is_some_and(|received| {
+                        expectation_matches(&Expectation::JsonSubset(pattern.clone()), &received)
+                    })
             }
         }
     }
@@ -193,26 +192,22 @@ pub(crate) fn compact_body(body: &Body) -> String {
     }
 }
 
+/// The body text as a JSON string value, if the body is text. Every
+/// other body variant projects to `None` so the string verbs fail
+/// closed on non-text bodies.
+fn text_only(body: &Body) -> Option<Value> {
+    match body {
+        Body::Text(text) => Some(Value::String(text.clone())),
+        _ => None,
+    }
+}
+
 /// Extract the JSON value from a body, if it is JSON or parseable text.
 fn json_value(body: &Body) -> Option<Value> {
     match body {
         Body::Json(v) => Some(v.clone()),
         Body::Text(text) => serde_json::from_str(text).ok(),
         _ => None,
-    }
-}
-
-/// Recursive JSON subset match: every pattern key must exist in `received`
-/// with a value that is JSON-equal or, for objects, a recursive subset.
-fn json_subset(pattern: &Value, received: &Value) -> bool {
-    match (pattern, received) {
-        (Value::Object(p), Value::Object(r)) => p
-            .iter()
-            .all(|(key, pv)| r.get(key).is_some_and(|rv| json_subset(pv, rv))),
-        (Value::Array(p), Value::Array(r)) => {
-            p.len() == r.len() && p.iter().zip(r.iter()).all(|(a, b)| a == b)
-        }
-        _ => pattern == received,
     }
 }
 
@@ -259,6 +254,74 @@ mod tests {
             BodyMatcher::Contains("a".into()).mismatch_note(&bytes_body),
             Some("body is not text")
         );
+    }
+
+    #[test]
+    fn string_verbs_delegate_through_text_projection() {
+        let pattern = "^order-[0-9]+$".to_string();
+        let body = Body::Text("order-42".into());
+        assert!(BodyMatcher::Regex(pattern.clone()).matches(&body));
+        // Same verdict as the shared algebra applied to the projected
+        // `Value::String`: the matcher is a thin projection plus
+        // delegation.
+        assert_eq!(
+            BodyMatcher::Regex(pattern.clone()).matches(&body),
+            expectation_matches(
+                &Expectation::Regex(pattern.clone()),
+                &Value::String("order-42".into())
+            )
+        );
+        // A JSON body projects no text, so `contains` fails even though
+        // the serialized JSON would contain the needle.
+        let json_body = Body::Json(json!({"total": 42}));
+        assert!(!BodyMatcher::Contains("total".into()).matches(&json_body));
+    }
+
+    #[test]
+    fn non_text_bodies_fail_closed_for_string_verbs() {
+        let matchers = [
+            BodyMatcher::Regex("x".into()),
+            BodyMatcher::Contains("x".into()),
+            BodyMatcher::StartsWith("x".into()),
+            BodyMatcher::EndsWith("x".into()),
+        ];
+        let json_body = Body::Json(json!({"x": 1}));
+        let bytes_body = Body::Bytes(vec![120u8].into());
+        for matcher in &matchers {
+            assert!(!matcher.matches(&json_body), "{matcher:?} over json");
+            assert!(!matcher.matches(&bytes_body), "{matcher:?} over bytes");
+            assert!(!matcher.matches(&Body::Empty), "{matcher:?} over empty");
+            assert_eq!(matcher.mismatch_note(&json_body), Some("body is not text"));
+            assert_eq!(matcher.mismatch_note(&bytes_body), Some("body is not text"));
+        }
+    }
+
+    #[test]
+    fn json_subset_local_duplicate_deleted() {
+        // Grep oracle (ADR-0072 step 2): the local recursive-subset
+        // implementation was deleted in favor of the shared algebra in
+        // `camel-matchers`; this file must not define it anymore. The
+        // needle is the deleted definition's signature, assembled from
+        // split literals so this file's own source text does not contain
+        // the contiguous needle (test fn names such as
+        // `json_subset_arrays_exact` share the prefix and must not trip
+        // the oracle).
+        let source = include_str!("matcher.rs");
+        let needle = concat!("fn json_", "subset(pattern");
+        assert!(!source.contains(needle));
+    }
+
+    #[test]
+    fn json_subset_delegation_preserves_verdicts() {
+        let matcher = BodyMatcher::JsonSubset(json!({"status": "ok", "meta": {"seq": 3}}));
+        let superset = Body::Json(json!({"id": 7, "status": "ok", "meta": {"seq": 3, "ts": 9}}));
+        assert!(matcher.matches(&superset));
+        let mismatched = Body::Json(json!({"status": "ok", "meta": {"seq": 4}}));
+        assert!(!matcher.matches(&mismatched));
+        // A scalar pattern fails regardless of the body: the
+        // object-pattern guard rejects it before delegation.
+        assert!(!BodyMatcher::JsonSubset(json!(5)).matches(&Body::Json(json!(5))));
+        assert!(!BodyMatcher::JsonSubset(json!(5)).matches(&Body::Text("5".into())));
     }
 
     #[test]

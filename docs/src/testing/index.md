@@ -137,7 +137,7 @@ The stub beans mirror the `bean:` step. The step looks up a bean by name and cal
 
 ### Endpoint expectations
 
-`expects` maps a `mock:` endpoint name to an expectation object. The object may hold `count` or `minCount`, a `bodies` list, and a `headers` map. `count` and `minCount` are mutually exclusive.
+`expects` maps a `mock:` endpoint name to an expectation object. The object may hold `count`, `minCount`, `maxCount`, a `bodies` list, and a `headers` map. `count` is mutually exclusive with `minCount` and with `maxCount`. `minCount` together with `maxCount` means the inclusive range `[minCount, maxCount]`; `minCount` above `maxCount` is a document error. An explicit `maxCount: 0` asserts absence: the endpoint must receive no exchanges during the settle window. Example: `expects: {mock: out: {minCount: 1, maxCount: 2}}` passes with 1 or 2 exchanges and fails with 3.
 
 `bodies` uses strict grammar. Each entry is a bare string or a single-key matcher map. A bare string is exact equality (`equals`). A map with one recognized body-matcher key selects that matcher. Any other form is a document error. `camel test` exits with code 2 and names the field and the key.
 

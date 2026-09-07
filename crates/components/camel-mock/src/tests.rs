@@ -1648,14 +1648,15 @@ async fn count_minimum_violated_fails() {
 }
 
 #[tokio::test]
-async fn count_exact_and_minimum_enforced_together() {
-    use std::panic::AssertUnwindSafe;
+async fn count_bound_later_setter_replaces_earlier() {
     let component = MockComponent::new();
     let endpoint = component
         .create_endpoint("mock:count-both", &NoOpComponentContext)
         .unwrap();
     let inner = component.get_endpoint("count-both").unwrap();
 
+    // One bound per endpoint: the later setter replaces the earlier one
+    // (AtLeast(1) replaces Exact(2)), so three arrivals satisfy it.
     inner.expect_count(2);
     inner.expect_minimum_count(1);
 
@@ -1668,19 +1669,95 @@ async fn count_exact_and_minimum_enforced_together() {
             .unwrap();
     }
 
-    let payload = AssertUnwindSafe(inner.assert_satisfied())
-        .catch_unwind()
+    inner
+        .try_assert_satisfied()
         .await
-        .expect_err("assert_satisfied should panic on exact count mismatch");
-    let msg = panic_message(payload);
-    assert!(
-        msg.contains("expected 2 exchanges") && msg.contains("got 3"),
-        "message should report the exact mismatch, got: {msg}"
+        .expect("the replacing AtLeast(1) bound must hold at 3 arrivals"); // allow-unwrap
+}
+
+#[tokio::test]
+async fn count_at_most_exceeded_reports_bound_text() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:count-at-most", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("count-at-most").unwrap();
+
+    inner.expect_maximum_count(1);
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    for i in 0..2 {
+        producer
+            .call(Exchange::new(Message::new(format!("m{i}"))))
+            .await
+            .unwrap();
+    }
+
+    let err = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("AtMost(1) must fail at 2 arrivals"); // allow-unwrap
+    assert_eq!(
+        err.to_string(),
+        "MockEndpoint 'count-at-most': expected at most 1 exchanges, got 2",
+        "at-most failure must render through the shared bound text"
     );
-    assert!(
-        !msg.contains("at least"),
-        "exact mismatch must be reported even though the minimum was satisfied, got: {msg}"
+}
+
+#[tokio::test]
+async fn count_range_above_reports_bound_text() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:count-range", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("count-range").unwrap();
+
+    inner.expect_bound(camel_matchers::CountBound::Range(1, 2));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    for i in 0..3 {
+        producer
+            .call(Exchange::new(Message::new(format!("m{i}"))))
+            .await
+            .unwrap();
+    }
+
+    let err = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("Range(1, 2) must fail at 3 arrivals"); // allow-unwrap
+    assert_eq!(
+        err.to_string(),
+        "MockEndpoint 'count-range': expected between 1 and 2 exchanges, got 3",
+        "range failure must render through the shared bound text"
     );
+}
+
+#[tokio::test]
+async fn count_range_inside_passes() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:count-range-pass", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("count-range-pass").unwrap();
+
+    inner.expect_bound(camel_matchers::CountBound::Range(1, 2));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    for i in 0..2 {
+        producer
+            .call(Exchange::new(Message::new(format!("m{i}"))))
+            .await
+            .unwrap();
+    }
+
+    inner
+        .try_assert_satisfied()
+        .await
+        .expect("Range(1, 2) must hold at 2 arrivals"); // allow-unwrap
 }
 
 #[tokio::test]

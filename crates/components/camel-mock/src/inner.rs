@@ -16,6 +16,7 @@ use tower::Service;
 
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
 use camel_component_api::{Consumer, Endpoint, ProducerContext, RuntimeObservability};
+use camel_matchers::CountBound;
 use tracing::debug;
 
 use crate::MockAssertionError;
@@ -177,22 +178,48 @@ impl MockEndpointInner {
 
     /// Set an exact count expectation: `assert_satisfied` panics unless the
     /// number of retained exchanges equals `n`.
+    ///
+    /// Sugar for [`expect_bound`](Self::expect_bound) with
+    /// [`CountBound::Exact`].
     pub fn expect_count(&self, n: usize) {
-        let mut guard = self
-            .expectations
-            .lock()
-            .expect("expectations lock poisoned"); // allow-unwrap
-        guard.set_expected_count(n);
+        self.expect_bound(CountBound::Exact(n as u64));
     }
 
     /// Set a minimum count expectation: `assert_satisfied` panics unless at
     /// least `n` exchanges are retained.
+    ///
+    /// Sugar for [`expect_bound`](Self::expect_bound) with
+    /// [`CountBound::AtLeast`].
     pub fn expect_minimum_count(&self, n: usize) {
+        self.expect_bound(CountBound::AtLeast(n as u64));
+    }
+
+    /// Set a maximum count expectation (an absence claim): `assert_satisfied`
+    /// panics unless at most `n` exchanges are retained.
+    ///
+    /// Sugar for [`expect_bound`](Self::expect_bound) with
+    /// [`CountBound::AtMost`].
+    pub fn expect_maximum_count(&self, n: usize) {
+        self.expect_bound(CountBound::AtMost(n as u64));
+    }
+
+    /// Set a count bound from the shared matcher algebra: `assert_satisfied`
+    /// panics unless the number of retained exchanges satisfies `bound`
+    /// (evaluated on the post-settle snapshot). Exactly one bound is kept per
+    /// endpoint — a later setter replaces the earlier one.
+    pub fn expect_bound(&self, bound: CountBound) {
         let mut guard = self
             .expectations
             .lock()
             .expect("expectations lock poisoned"); // allow-unwrap
-        guard.set_minimum_count(n);
+        if guard.count_bound.is_some() {
+            debug!(
+                endpoint_name = %self.name,
+                new = ?bound,
+                "a later setter replaced an earlier count bound"
+            );
+        }
+        guard.set_count_bound(bound);
     }
 
     /// Add an expected body to the expectations list.
@@ -256,11 +283,13 @@ impl MockEndpointInner {
     ///
     /// # Panics
     ///
-    /// Panics if an expected exchange count (exact or minimum, see
-    /// [`expect_count`](Self::expect_count) and
-    /// [`expect_minimum_count`](Self::expect_minimum_count)) is not met, if
-    /// expected bodies or body matchers do not match received bodies (in
-    /// order or any order depending on `any_order` config), if expected
+    /// Panics if the recorded count bound (see
+    /// [`expect_bound`](Self::expect_bound) and its
+    /// [`expect_count`](Self::expect_count) /
+    /// [`expect_minimum_count`](Self::expect_minimum_count) /
+    /// [`expect_maximum_count`](Self::expect_maximum_count) sugar) is not
+    /// met, if expected bodies or body matchers do not match received bodies
+    /// (in order or any order depending on `any_order` config), if expected
     /// headers are missing, if header regex patterns do not match, or if
     /// header matchers fail.
     pub async fn assert_satisfied(&self) {

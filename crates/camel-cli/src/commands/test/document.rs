@@ -260,10 +260,15 @@ pub enum InputBody {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ExpectSet {
-    /// Exact received count; mutually exclusive with `minCount`.
+    /// Exact received count; mutually exclusive with `minCount` and
+    /// `maxCount`.
     pub count: Option<usize>,
-    /// Minimum received count; mutually exclusive with `count`.
+    /// Minimum received count; mutually exclusive with `count`. Paired with
+    /// `maxCount` it forms an inclusive range.
     pub min_count: Option<usize>,
+    /// Maximum received count; mutually exclusive with `count`. Paired with
+    /// `minCount` it forms an inclusive range.
+    pub max_count: Option<usize>,
     /// Ordered expected bodies under the strict matcher grammar (bare
     /// strings are exact `equals`).
     #[serde(default, deserialize_with = "deserialize_bodies")]
@@ -607,6 +612,18 @@ pub enum TestDocError {
     ExpectKeyMissingScheme { key: String },
     /// One `expects` entry sets both `count` and `minCount`.
     CountAndMinCount(String),
+    /// One `expects` entry sets both `count` and `maxCount`.
+    CountAndMaxCount(String),
+    /// One `expects` entry sets a `minCount` above its `maxCount` (an
+    /// empty range).
+    MinCountAboveMaxCount {
+        /// Bare endpoint name of the entry.
+        endpoint: String,
+        /// Declared `minCount`.
+        min: usize,
+        /// Declared `maxCount`.
+        max: usize,
+    },
     /// `settle` failed to parse or falls outside `0 < settle <= 5s`.
     SettleOutOfRange(String),
     /// An input `to` target lacks the required `direct:` scheme.
@@ -677,6 +694,14 @@ impl fmt::Display for TestDocError {
             Self::CountAndMinCount(endpoint) => write!(
                 f,
                 "expects entry `{endpoint}` must not set both count and minCount"
+            ),
+            Self::CountAndMaxCount(endpoint) => write!(
+                f,
+                "expects entry `{endpoint}` must not set both count and maxCount"
+            ),
+            Self::MinCountAboveMaxCount { endpoint, min, max } => write!(
+                f,
+                "expects entry `{endpoint}` must not set minCount {min} above maxCount {max}"
             ),
             Self::SettleOutOfRange(raw) => {
                 write!(
@@ -779,11 +804,12 @@ fn classify_yaml_error(raw: &str) -> TestDocError {
 /// (a) exactly one route source (`routeFiles`, `routeFilesFromRoot`, or
 /// `routes`); (b) non-empty `expects`; (c) every `expects` key uses the
 /// `mock:` scheme (then the map is rebuilt with bare endpoint names);
-/// (d) `count`/`minCount` exclusivity; (e) `settle` range; (f) every
-/// input targets `direct:`; (g) intercepts validate and build rules;
-/// (h) `beans:` declarations validate (names, methods, per-kind config);
-/// (i) `repositories:` declarations validate (registry kinds, stub targets,
-/// blank names, built-in `memory` name).
+/// (d) `count`/`minCount`/`maxCount` combination rules (`count` excludes
+/// both, a declared range must satisfy `minCount <= maxCount`); (e) `settle`
+/// range; (f) every input targets `direct:`; (g) intercepts validate and
+/// build rules; (h) `beans:` declarations validate (names, methods,
+/// per-kind config); (i) `repositories:` declarations validate (registry
+/// kinds, stub targets, blank names, built-in `memory` name).
 pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
     let mut doc = serde_yaml::from_str::<TestDocument>(text)
         .map_err(|e| classify_yaml_error(&e.to_string()))?;
@@ -815,12 +841,26 @@ pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
             return Err(TestDocError::ExpectKeyMissingScheme { key: key.clone() });
         }
     }
-    // Normalize to bare endpoint names, rejecting count+minCount combos (d).
+    // Normalize to bare endpoint names, rejecting the count-combination
+    // rules (d): `count` excludes both `minCount` and `maxCount`, and a
+    // declared range must be non-empty (`minCount <= maxCount`).
     let raw_expects = std::mem::take(&mut doc.expects);
     for (key, set) in raw_expects {
         let bare = key[MOCK_SCHEME_PREFIX.len()..].to_string();
         if set.count.is_some() && set.min_count.is_some() {
             return Err(TestDocError::CountAndMinCount(bare));
+        }
+        if set.count.is_some() && set.max_count.is_some() {
+            return Err(TestDocError::CountAndMaxCount(bare));
+        }
+        if let (Some(min), Some(max)) = (set.min_count, set.max_count)
+            && min > max
+        {
+            return Err(TestDocError::MinCountAboveMaxCount {
+                endpoint: bare,
+                min,
+                max,
+            });
         }
         doc.expects.insert(bare, set);
     }

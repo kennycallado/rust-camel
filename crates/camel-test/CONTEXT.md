@@ -91,3 +91,4 @@ mock dependency at the builder call site.
 - ADR-0049: camel-test is outside the contract-enum scope.
 - ADR-0007: Runtime crash propagation; the test teardown guard is not part of that path.
 - ADR-0012: camel-test has no `error!` policy sites.
+- ADR-0072: camel-test re-exports the shared matcher types `CountBound` and `Expectation` from camel-matchers, the shared assertion algebra.

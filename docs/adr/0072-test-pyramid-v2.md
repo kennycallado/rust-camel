@@ -179,3 +179,37 @@ the component crates. This section is the single reference.
 - **One observation trait over both tiers.** Rejected in section 3.
   `HttpWireRequest` and Exchange projections do not unify.
 - **Unified grammar across tiers.** Rejected: ADR-0069 §2 stands.
+
+## Amendment 2026-09-07 — shared-algebra consumption
+
+The Context statement that the unit tier's `expects` is endpoint-to-count
+only overstated the gap. `camel-mock` already carried the full seven-key
+matcher vocabulary over `Body`: its grammar mirrored the mock-testkit
+rules, and the scenario tier's wave-D grammar mirrored the same keys. The
+two tiers spoke one vocabulary all along.
+
+The real defects were the duplicated ad-hoc algebra and the missing upper
+bounds. Two copies of the matching logic lived in two crates, and neither
+supported a bounded count. The gap was not vocabulary; it was a shared
+core and a count bound.
+
+Step 2 (change `expects-matcher-growth`) is the worked example of per-tier
+observation this
+ADR prescribes. `camel-mock` delegates its string and json verbs to the
+shared core through the `text_only` and `json_value` projections. The unit
+tier projects its own observation into the core at the call site instead
+of unifying it with the scenario tier's wire records.
+
+The same step completes the count bounds. `CountBound` carries the state,
+`maxCount` joins the grammar, and an explicit `maxCount: 0` asserts absence
+over the post-settle snapshot. The count vocabulary that the original
+Context credited only to the scenario tier now lands in the unit tier too.
+
+One programmatic note: the mock's expectation state now carries a single
+count bound per endpoint. Programmatic setters keep that rule — a later
+`expect_bound` replaces an earlier one (the document grammar always
+rejected setting two bounds together).
+
+The Decision sections stand unchanged. This amendment corrects the
+Context's framing; it does not revise the placement, purity, or staged-
+direction decisions.

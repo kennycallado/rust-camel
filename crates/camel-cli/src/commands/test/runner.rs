@@ -294,8 +294,13 @@ fn set_expectations(inner: &camel_component_mock::MockEndpointInner, set: &Expec
     if let Some(n) = set.count {
         inner.expect_count(n);
     }
-    if let Some(m) = set.min_count {
-        inner.expect_minimum_count(m);
+    match (set.min_count, set.max_count) {
+        (Some(min), Some(max)) => {
+            inner.expect_bound(camel_matchers::CountBound::Range(min as u64, max as u64));
+        }
+        (Some(m), None) => inner.expect_minimum_count(m),
+        (None, Some(max)) => inner.expect_maximum_count(max),
+        (None, None) => {}
     }
     if let Some(bodies) = &set.bodies {
         for matcher in bodies {
