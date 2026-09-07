@@ -2264,7 +2264,7 @@ dependencies = [
  "camel-config",
  "camel-core",
  "camel-dsl",
- "form_urlencoded",
+ "camel-matchers",
  "futures",
  "http",
  "http-body-util",
@@ -2415,6 +2415,15 @@ dependencies = [
  "toml 1.1.5+spec-1.1.0",
  "tower 0.5.3",
  "tracing",
+]
+
+[[package]]
+name = "camel-matchers"
+version = "0.41.0"
+dependencies = [
+ "form_urlencoded",
+ "regex",
+ "serde_json",
 ]
 
 [[package]]

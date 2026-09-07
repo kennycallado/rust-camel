@@ -1,0 +1,477 @@
+//! Pure matcher algebra shared by the test tiers: the message
+//! expectation grammar, the recorded-request count bound grammar, and
+//! the pure predicates over them. The crate has zero camel
+//! dependencies so unit and integration tiers can share one matcher
+//! implementation (ADR-0072).
+
+use std::collections::BTreeMap;
+
+/// The recorded-request count bound of a [`RequestExpectation`]:
+/// exactly one bound form per expectation. Poll semantics per bound
+/// (arrivals only add, so the filtered count is monotone
+/// non-decreasing):
+///
+/// - Without a deadline, one immediate snapshot decides for every
+///   bound.
+/// - [`CountBound::Exact`] polls until a snapshot's count equals `n`;
+///   a snapshot above never passes.
+/// - [`CountBound::AtLeast`] succeeds early, once the count reaches
+///   `n` (sound: the count only grows).
+/// - [`CountBound::AtMost`] is an absence claim over the window: it
+///   waits the full deadline, fails immediately on any snapshot above
+///   `n`, and decides on the final snapshot — an early passing
+///   snapshot cannot prove the count stays within bounds.
+/// - [`CountBound::Range`] fails immediately above the maximum and
+///   otherwise waits the full deadline, deciding on the final
+///   snapshot within `[min, max]`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum CountBound {
+    /// Exactly `n` matching requests.
+    Exact(u64),
+    /// At least `n` matching requests (early success at `n` or more).
+    AtLeast(u64),
+    /// At most `n` matching requests (absence claim over the window).
+    AtMost(u64),
+    /// Between `min` and `max` matching requests, inclusive.
+    Range(u64, u64),
+}
+
+/// The path filter of a [`RequestExpectation`] over the recorded
+/// path-and-query; at most one filter per expectation.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum PathFilter {
+    /// Exact path-and-query match (strict bytes).
+    Exact(String),
+    /// Substring containment against the recorded path-and-query.
+    Contains(String),
+    /// Regular expression match, compile-verified at load time.
+    Matches(String),
+}
+
+/// A recorded-request expectation: a count bound plus optional
+/// `method`, `path`, and `query` subset filters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestExpectation {
+    /// The count bound the recorded requests must satisfy.
+    pub bound: CountBound,
+    /// Optional request-method filter.
+    pub method: Option<String>,
+    /// Optional request-path filter (path-and-query).
+    pub path: Option<PathFilter>,
+    /// Optional query subset filter: every declared pair must be
+    /// present (order- and encoding-independent) in the recorded
+    /// request's percent-decoded query.
+    pub query: Option<BTreeMap<String, String>>,
+}
+
+/// A validation expectation. The grammar keys mirror the mock-testkit
+/// matcher rules: `equals`, `regex`, `contains`, `startsWith`,
+/// `endsWith`, `exists`, `jsonSubset`.
+///
+/// Grammar (dual, value-style): a bare value is a literal
+/// `equals`; an object with exactly one recognized matcher key is that
+/// matcher (this reading takes precedence over the literal one); any
+/// other object — zero, multiple, or unrecognized keys — is a literal
+/// `equals` compared structurally. `regex` patterns are
+/// compile-verified at load time, matching the unit-tier matcher
+/// rules.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Expectation {
+    /// Exact equality against the value.
+    Equals(serde_json::Value),
+    /// Regular expression match, compile-verified at load time.
+    Regex(String),
+    /// Substring containment.
+    Contains(String),
+    /// Prefix match.
+    StartsWith(String),
+    /// Suffix match.
+    EndsWith(String),
+    /// The value under validation is present.
+    Exists,
+    /// Recursive-subset match against an object.
+    JsonSubset(serde_json::Value),
+}
+
+/// Whether one snapshot's filtered count satisfies the bound: the
+/// decision predicate of the no-deadline read and of the final expiry
+/// snapshot.
+pub fn bound_holds(bound: &CountBound, actual: usize) -> bool {
+    let actual = actual as u64;
+    match bound {
+        CountBound::Exact(n) => actual == *n,
+        CountBound::AtLeast(n) => actual >= *n,
+        CountBound::AtMost(n) => actual <= *n,
+        CountBound::Range(min, max) => actual >= *min && actual <= *max,
+    }
+}
+
+/// Whether the poll may settle early on this snapshot. `Exact`
+/// settles at equality and `AtLeast` at its floor — both sound
+/// because arrivals only add, so a reached count stays reached.
+/// `AtMost` and a `Range` never settle early: a passing snapshot
+/// cannot prove the count stays within bounds while the window is
+/// open.
+pub fn settles_early(bound: &CountBound, actual: usize) -> bool {
+    match bound {
+        CountBound::Exact(_) | CountBound::AtLeast(_) => bound_holds(bound, actual),
+        CountBound::AtMost(_) | CountBound::Range(..) => false,
+    }
+}
+
+/// Whether this snapshot has already broken an upper bound beyond
+/// recovery (`AtMost` above its ceiling, a `Range` above its
+/// maximum): arrivals only add, so the claim fails on the first
+/// observation instead of waiting the window out.
+pub fn above_ceiling(bound: &CountBound, actual: usize) -> bool {
+    let actual = actual as u64;
+    match bound {
+        CountBound::Exact(_) | CountBound::AtLeast(_) => false,
+        CountBound::AtMost(n) => actual > *n,
+        CountBound::Range(_, max) => actual > *max,
+    }
+}
+
+/// The percent-decoded query pairs of a path-and-query: everything
+/// after the first `?`, parsed with `form_urlencoded`, which
+/// percent-decodes `%XX` and `+`. A path without a query yields no
+/// pairs.
+pub fn query_pairs(path_and_query: &str) -> Vec<(String, String)> {
+    match path_and_query.split_once('?') {
+        Some((_, query)) => form_urlencoded::parse(query.as_bytes())
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Counts the recorded requests that pass all filters: `method`
+/// compares ASCII-case-insensitively (callers may project any
+/// casing), the path filter matches
+/// the recorded path-and-query — `Exact` byte-for-byte, `Contains`
+/// by substring, `Matches` by regex — and the `query` subset requires
+/// every declared pair to appear among the request's
+/// percent-decoded query pairs, in any position order. A `None`
+/// filter passes everything, and all filters combine conjunctively.
+///
+/// Each request is projected as its `(method, path_and_query)` pair.
+/// The regex of a `Matches` filter compiles once per call, not once
+/// per recorded request; an invalid pattern matches nothing, failing
+/// closed.
+pub fn matching_count<'a>(
+    requests: impl IntoIterator<Item = (&'a str, &'a str)>,
+    method: Option<&str>,
+    path_filter: Option<&PathFilter>,
+    query: Option<&BTreeMap<String, String>>,
+) -> usize {
+    // The regex of a `Matches` filter compiles once per call, not once
+    // per recorded request. An invalid pattern (the parser rejects it
+    // first) matches nothing, failing closed.
+    let matches_regex = match path_filter {
+        Some(PathFilter::Matches(pattern)) => regex::Regex::new(pattern).ok(),
+        _ => None,
+    };
+    requests
+        .into_iter()
+        .filter(|(request_method, path)| {
+            let path_matches = match path_filter {
+                None => true,
+                Some(PathFilter::Exact(p)) => p.as_str() == *path,
+                Some(PathFilter::Contains(s)) => path.contains(s.as_str()),
+                Some(PathFilter::Matches(_)) => {
+                    matches_regex.as_ref().is_some_and(|re| re.is_match(path))
+                }
+            };
+            let query_subset = query.is_none_or(|declared| {
+                let pairs = query_pairs(path);
+                declared
+                    .iter()
+                    .all(|(key, value)| pairs.iter().any(|(k, v)| k == key && v == value))
+            });
+            method.is_none_or(|m| m.eq_ignore_ascii_case(request_method))
+                && path_matches
+                && query_subset
+        })
+        .count()
+}
+
+/// Renders a count bound in its own grammar for mismatch details:
+/// `Exact(3)` renders `expected 3` — the historical phrasing the
+/// exact-count tests pin byte-for-byte — `AtLeast(3)` renders
+/// `expected at least 3`, `AtMost(2)` renders `expected at most 2`,
+/// and `Range(2, 4)` renders `expected between 2 and 4`.
+pub fn render_bound(bound: &CountBound) -> String {
+    match bound {
+        CountBound::Exact(n) => format!("expected {n}"),
+        CountBound::AtLeast(n) => format!("expected at least {n}"),
+        CountBound::AtMost(n) => format!("expected at most {n}"),
+        CountBound::Range(min, max) => format!("expected between {min} and {max}"),
+    }
+}
+
+/// The pure per-form boolean of a validation expectation against a
+/// value: `Equals` compares by equality; `Regex` failing to compile
+/// matches nothing (fail closed), otherwise matching the stringified
+/// value; `Contains`/`StartsWith`/`EndsWith` match the stringified
+/// value; `Exists` holds for any non-null value; `JsonSubset`
+/// recursive-subset matches via [`json_subset`].
+pub fn expectation_matches(expectation: &Expectation, value: &serde_json::Value) -> bool {
+    match expectation {
+        Expectation::Equals(expected) => value == expected,
+        Expectation::Regex(pattern) => {
+            regex::Regex::new(pattern).is_ok_and(|regex| regex.is_match(&stringify(value)))
+        }
+        Expectation::Contains(needle) => stringify(value).contains(needle),
+        Expectation::StartsWith(prefix) => stringify(value).starts_with(prefix),
+        Expectation::EndsWith(suffix) => stringify(value).ends_with(suffix),
+        Expectation::Exists => value != &serde_json::Value::Null,
+        Expectation::JsonSubset(pattern) => json_subset(pattern, value),
+    }
+}
+
+/// Renders a value for string matchers: strings as-is, anything else
+/// as its JSON form.
+pub fn stringify(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Recursive-subset match: every key in `pattern` must exist in
+/// `actual` with a recursively subset-matching value; values outside
+/// `pattern` are ignored. Non-object patterns compare by equality.
+fn json_subset(pattern: &serde_json::Value, actual: &serde_json::Value) -> bool {
+    match (pattern, actual) {
+        (serde_json::Value::Object(pattern_object), serde_json::Value::Object(actual_object)) => {
+            pattern_object.iter().all(|(key, pattern_value)| {
+                actual_object
+                    .get(key)
+                    .is_some_and(|actual_value| json_subset(pattern_value, actual_value))
+            })
+        }
+        _ => pattern == actual,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bound_holds_covers_every_form_at_edges() {
+        let cases = [
+            (CountBound::Exact(2), [false, false, true, false, false]),
+            (CountBound::AtLeast(2), [false, false, true, true, true]),
+            (CountBound::AtMost(2), [true, true, true, false, false]),
+            (CountBound::Range(1, 3), [false, true, true, true, false]),
+        ];
+        for (bound, holds) in cases {
+            for (count, expected) in holds.into_iter().enumerate() {
+                assert_eq!(
+                    bound_holds(&bound, count),
+                    expected,
+                    "{bound:?} at count {count}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settles_early_absence_claims_never_settle() {
+        for count in 0..=5usize {
+            assert!(
+                !settles_early(&CountBound::AtMost(5), count),
+                "AtMost(5) at count {count}"
+            );
+            assert!(
+                !settles_early(&CountBound::Range(0, 5), count),
+                "Range(0, 5) at count {count}"
+            );
+            assert_eq!(
+                settles_early(&CountBound::Exact(2), count),
+                count == 2,
+                "Exact(2) at count {count}"
+            );
+            assert_eq!(
+                settles_early(&CountBound::AtLeast(2), count),
+                count >= 2,
+                "AtLeast(2) at count {count}"
+            );
+        }
+    }
+
+    #[test]
+    fn above_ceiling_only_upper_breaches() {
+        assert!(above_ceiling(&CountBound::AtMost(2), 3));
+        assert!(above_ceiling(&CountBound::Range(1, 2), 3));
+        assert!(!above_ceiling(&CountBound::Exact(2), 99));
+        assert!(!above_ceiling(&CountBound::AtLeast(2), 99));
+        assert!(!above_ceiling(&CountBound::AtMost(2), 2));
+    }
+
+    #[test]
+    fn matching_count_query_subset_order_and_encoding_independent() {
+        let declared = BTreeMap::from([
+            ("a".to_string(), "1".to_string()),
+            ("b".to_string(), "2".to_string()),
+        ]);
+        let reordered_and_encoded = [("GET", "/x?b=2&a=1"), ("POST", "/x?a=%31&b=%32")];
+        assert_eq!(
+            matching_count(reordered_and_encoded, None, None, Some(&declared)),
+            2
+        );
+        assert_eq!(
+            matching_count([("GET", "/x?a=1")], None, None, Some(&declared)),
+            0
+        );
+
+        let only_a = BTreeMap::from([("a".to_string(), "1".to_string())]);
+        assert_eq!(
+            matching_count([("GET", "/x?a=1")], None, None, Some(&only_a)),
+            1
+        );
+        assert_eq!(
+            matching_count([("GET", "/x?b=2")], None, None, Some(&declared)),
+            0
+        );
+    }
+
+    #[test]
+    fn matching_count_invalid_regex_fails_closed() {
+        let filter = PathFilter::Matches("(".to_string());
+        assert_eq!(
+            matching_count([("GET", "/anything")], None, Some(&filter), None),
+            0
+        );
+    }
+
+    #[test]
+    fn matching_count_method_case_insensitive() {
+        let requests = [("POST", "/o"), ("GET", "/o")];
+        assert_eq!(matching_count(requests, Some("post"), None, None), 1);
+    }
+
+    #[test]
+    fn matching_count_path_forms() {
+        let requests = [("GET", "/o?a=1"), ("POST", "/o?a=1&x=2"), ("GET", "/diff")];
+        let exact = PathFilter::Exact("/o?a=1".to_string());
+        let contains = PathFilter::Contains("/o".to_string());
+        let matches = PathFilter::Matches("^/o".to_string());
+        assert_eq!(matching_count(requests, None, Some(&exact), None), 1);
+        assert_eq!(matching_count(requests, None, Some(&contains), None), 2);
+        assert_eq!(matching_count(requests, None, Some(&matches), None), 2);
+    }
+
+    #[test]
+    fn query_pairs_no_question_mark() {
+        assert!(query_pairs("/noquery").is_empty());
+        assert_eq!(
+            query_pairs("/q?a=1"),
+            vec![("a".to_string(), "1".to_string())]
+        );
+    }
+
+    #[test]
+    fn query_pairs_plus_decoding() {
+        assert_eq!(
+            query_pairs("/x?a=1+2"),
+            vec![("a".to_string(), "1 2".to_string())]
+        );
+    }
+
+    #[test]
+    fn expectation_matches_string_forms() {
+        let value = serde_json::json!("hello world");
+        assert!(expectation_matches(
+            &Expectation::Contains("world".to_string()),
+            &value
+        ));
+        assert!(expectation_matches(
+            &Expectation::StartsWith("hello".to_string()),
+            &value
+        ));
+        assert!(expectation_matches(
+            &Expectation::EndsWith("world".to_string()),
+            &value
+        ));
+        assert!(expectation_matches(&Expectation::Exists, &value));
+        assert!(expectation_matches(
+            &Expectation::Regex("^hello".to_string()),
+            &value
+        ));
+        assert!(expectation_matches(
+            &Expectation::Equals(serde_json::json!("hello world")),
+            &value
+        ));
+        assert!(!expectation_matches(
+            &Expectation::Contains("nope".to_string()),
+            &value
+        ));
+    }
+
+    #[test]
+    fn expectation_matches_object_forms() {
+        let value = serde_json::json!({"n": "café", "s": "hello world"});
+        assert!(expectation_matches(
+            &Expectation::Equals(serde_json::json!({"n": "café", "s": "hello world"})),
+            &value
+        ));
+        assert!(expectation_matches(
+            &Expectation::JsonSubset(serde_json::json!({"n": "café"})),
+            &value
+        ));
+        assert!(expectation_matches(
+            &Expectation::Regex("caf".to_string()),
+            &value
+        ));
+        assert!(expectation_matches(&Expectation::Exists, &value));
+        assert!(!expectation_matches(
+            &Expectation::JsonSubset(serde_json::json!({"n": "other"})),
+            &value
+        ));
+        assert!(!expectation_matches(
+            &Expectation::Exists,
+            &serde_json::Value::Null
+        ));
+        assert!(!expectation_matches(
+            &Expectation::Regex("(".to_string()),
+            &value
+        ));
+    }
+
+    #[test]
+    fn json_subset_recursive_objects() {
+        let actual = serde_json::json!({"user": {"name": "María", "role": "admin"}, "extra": 1});
+        assert!(expectation_matches(
+            &Expectation::JsonSubset(serde_json::json!({"user": {"name": "María"}})),
+            &actual
+        ));
+        assert!(!expectation_matches(
+            &Expectation::JsonSubset(serde_json::json!({"user": {"name": "other"}})),
+            &actual
+        ));
+    }
+
+    #[test]
+    fn render_bound_forms() {
+        let bounds = [
+            CountBound::Exact(3),
+            CountBound::AtLeast(3),
+            CountBound::AtMost(2),
+            CountBound::Range(2, 4),
+        ];
+        let rendered: Vec<String> = bounds.iter().map(render_bound).collect();
+        for text in &rendered {
+            assert!(!text.is_empty(), "empty render for {text:?}");
+        }
+        for (index, left) in rendered.iter().enumerate() {
+            for right in &rendered[index + 1..] {
+                assert_ne!(left, right, "duplicate render `{left}`");
+            }
+        }
+    }
+}

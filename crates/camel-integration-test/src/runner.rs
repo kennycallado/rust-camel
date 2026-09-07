@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use camel_api::Value;
+use camel_matchers::{expectation_matches, stringify};
 
 use crate::adapters::redact_wire_path;
 use crate::adapters::{
@@ -620,63 +621,67 @@ async fn validate_action(
                 // `partner` target with the message expectation.
                 ScenarioTarget::Partner(_) => return Err(unpaired_validate(index)),
             };
+            // The per-form booleans delegate to the shared core
+            // (`camel_matchers::expectation_matches`); the detail
+            // strings stay here, where subject rendering and
+            // redaction live.
             match expectation {
-                Expectation::Equals(expected) => {
-                    if &value == expected {
-                        Ok(())
-                    } else {
-                        Err(ScenarioFailure::ValidationMismatch {
-                            action: index,
-                            detail: format!("{subject}: expected {expected}, got {value}"),
-                        })
-                    }
-                }
+                Expectation::Equals(expected) => check(
+                    index,
+                    expectation_matches(expectation, &value),
+                    format!("{subject}: expected {expected}, got {value}"),
+                ),
+                // The parser pre-verifies regex patterns at load time,
+                // so the invalid-regex arm is unreachable through the
+                // harness; it stays for the byte-identical verdicts,
+                // short-circuiting before the core delegation (core's
+                // Regex arm returns false on compile-fail).
                 Expectation::Regex(pattern) => {
-                    let regex = regex::Regex::new(pattern).map_err(|error| {
-                        ScenarioFailure::ValidationMismatch {
+                    if let Err(error) = regex::Regex::new(pattern) {
+                        return Err(ScenarioFailure::ValidationMismatch {
                             action: index,
                             detail: format!("invalid regex `{pattern}`: {error}"),
-                        }
-                    })?;
-                    if regex.is_match(&stringify(&value)) {
-                        Ok(())
-                    } else {
-                        Err(ScenarioFailure::ValidationMismatch {
-                            action: index,
-                            detail: format!("{subject}: `{pattern}` did not match {value}"),
-                        })
+                        });
                     }
+                    check(
+                        index,
+                        expectation_matches(expectation, &value),
+                        format!("{subject}: `{pattern}` did not match {value}"),
+                    )
                 }
                 Expectation::Contains(needle) => check(
                     index,
-                    stringify(&value).contains(needle),
+                    expectation_matches(expectation, &value),
                     format!("{subject}: did not contain `{needle}`: {value}"),
                 ),
                 Expectation::StartsWith(prefix) => check(
                     index,
-                    stringify(&value).starts_with(prefix),
+                    expectation_matches(expectation, &value),
                     format!("{subject}: did not start with `{prefix}`: {value}"),
                 ),
                 Expectation::EndsWith(suffix) => check(
                     index,
-                    stringify(&value).ends_with(suffix),
+                    expectation_matches(expectation, &value),
                     format!("{subject}: did not end with `{suffix}`: {value}"),
                 ),
-                Expectation::Exists => {
-                    if value == Value::Null {
-                        Err(ScenarioFailure::ValidationMismatch {
-                            action: index,
-                            detail: format!("{subject}: expected a value, got null"),
-                        })
-                    } else {
-                        Ok(())
-                    }
-                }
+                Expectation::Exists => check(
+                    index,
+                    expectation_matches(expectation, &value),
+                    format!("{subject}: expected a value, got null"),
+                ),
                 Expectation::JsonSubset(pattern) => check(
                     index,
-                    json_subset(pattern, &value),
+                    expectation_matches(expectation, &value),
                     format!("{subject}: not a superset of {pattern}: {value}"),
                 ),
+                // Foreign `#[non_exhaustive]` variants (none today):
+                // the harness has no matcher for them, so they fail
+                // closed.
+                _ => Err(ScenarioFailure::ValidationMismatch {
+                    action: index,
+                    detail: "validate expectation kind is not supported by the message grammar"
+                        .to_string(),
+                }),
             }
         }
         // The parser never pairs a partner expectation with a
@@ -773,29 +778,4 @@ fn walk_path(value: &Value, path: &str) -> Option<Value> {
         current = current.as_object()?.get(key)?;
     }
     Some(current.clone())
-}
-
-/// Renders a value for string matchers: strings as-is, anything else
-/// as its JSON form.
-fn stringify(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
-}
-
-/// Recursive-subset match: every key in `pattern` must exist in
-/// `actual` with a recursively subset-matching value; values outside
-/// `pattern` are ignored. Non-object patterns compare by equality.
-fn json_subset(pattern: &Value, actual: &Value) -> bool {
-    match (pattern, actual) {
-        (Value::Object(pattern_object), Value::Object(actual_object)) => {
-            pattern_object.iter().all(|(key, pattern_value)| {
-                actual_object
-                    .get(key)
-                    .is_some_and(|actual_value| json_subset(pattern_value, actual_value))
-            })
-        }
-        _ => pattern == actual,
-    }
 }

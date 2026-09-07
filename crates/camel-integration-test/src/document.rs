@@ -31,6 +31,11 @@ use serde::{Deserialize, Deserializer};
 // The partner-script grammar lives in its own module; the public
 // types are re-exported here so the document API stays one surface.
 pub use crate::partner_script::{PartnerFault, PartnerScript, PartnerScriptResponse};
+// The matcher algebra lives in the shared pure core (camel-matchers);
+// re-exported here so the document API stays one surface. The raw
+// serde stage below constructs these core types directly.
+pub use camel_matchers::RequestExpectation as PartnerExpectation;
+pub use camel_matchers::{CountBound, Expectation, PathFilter};
 
 // ---------------------------------------------------------------------------
 // Public model
@@ -266,97 +271,6 @@ pub fn partner_scripts_for(
             })
             .collect(),
     )
-}
-
-/// A validation expectation. The grammar keys mirror the mock-testkit
-/// matcher rules: `equals`, `regex`, `contains`, `startsWith`,
-/// `endsWith`, `exists`, `jsonSubset`.
-///
-/// Grammar (dual, `expectReply.body` style): a bare value is a literal
-/// `equals`; an object with exactly one recognized matcher key is that
-/// matcher (this reading takes precedence over the literal one); any
-/// other object — zero, multiple, or unrecognized keys — is a literal
-/// `equals` compared structurally. `regex` patterns are
-/// compile-verified at load time, matching the unit-tier matcher
-/// rules.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum Expectation {
-    /// Exact equality against the value.
-    Equals(Value),
-    /// Regular expression match, compile-verified at load time.
-    Regex(String),
-    /// Substring containment.
-    Contains(String),
-    /// Prefix match.
-    StartsWith(String),
-    /// Suffix match.
-    EndsWith(String),
-    /// The value under validation is present.
-    Exists,
-    /// Recursive-subset match against an object.
-    JsonSubset(Value),
-}
-
-/// The recorded-request count bound of a [`PartnerExpectation`]:
-/// exactly one bound form per expectation. Poll semantics per bound
-/// (arrivals only add, so the filtered count is monotone
-/// non-decreasing):
-///
-/// - Without a deadline, one immediate snapshot decides for every
-///   bound.
-/// - [`CountBound::Exact`] polls until a snapshot's count equals `n`;
-///   a snapshot above never passes.
-/// - [`CountBound::AtLeast`] succeeds early, once the count reaches
-///   `n` (sound: the count only grows).
-/// - [`CountBound::AtMost`] is an absence claim over the window: it
-///   waits the full deadline, fails immediately on any snapshot above
-///   `n`, and decides on the final snapshot — an early passing
-///   snapshot cannot prove the count stays within bounds.
-/// - [`CountBound::Range`] fails immediately above the maximum and
-///   otherwise waits the full deadline, deciding on the final
-///   snapshot within `[min, max]`.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum CountBound {
-    /// Exactly `n` matching requests.
-    Exact(u64),
-    /// At least `n` matching requests (early success at `n` or more).
-    AtLeast(u64),
-    /// At most `n` matching requests (absence claim over the window).
-    AtMost(u64),
-    /// Between `min` and `max` matching requests, inclusive.
-    Range(u64, u64),
-}
-
-/// The path filter of a [`PartnerExpectation`] over the recorded
-/// path-and-query; at most one filter per expectation.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum PathFilter {
-    /// Exact path-and-query match (strict bytes).
-    Exact(String),
-    /// Substring containment against the recorded path-and-query.
-    Contains(String),
-    /// Regular expression match, compile-verified at load time.
-    Matches(String),
-}
-
-/// The partner expectation of a `validate` action with a `partner`
-/// target: a recorded-request count bound plus optional `method`,
-/// `path`, and `query` subset filters.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PartnerExpectation {
-    /// The count bound the recorded requests must satisfy.
-    pub bound: CountBound,
-    /// Optional request-method filter.
-    pub method: Option<String>,
-    /// Optional request-path filter (path-and-query).
-    pub path: Option<PathFilter>,
-    /// Optional query subset filter: every declared pair must be
-    /// present (order- and encoding-independent) in the recorded
-    /// request's percent-decoded query.
-    pub query: Option<BTreeMap<String, String>>,
 }
 
 /// The expectation of a `validate` action, keyed by its target: the

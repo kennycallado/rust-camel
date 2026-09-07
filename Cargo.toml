@@ -83,6 +83,7 @@ camel-core = { path = "crates/camel-core", version = "=0.41.0" }
 camel-processor = { path = "crates/camel-processor", version = "=0.41.0" }
 camel-health = { path = "crates/camel-health", version = "=0.41.0" }
 camel-integration-test = { path = "crates/camel-integration-test", version = "=0.41.0" }
+camel-matchers = { path = "crates/camel-matchers", version = "=0.41.0" }
 camel-bridge = { path = "crates/services/camel-bridge", version = "=0.41.0" }
 camel-function = { path = "crates/services/camel-function", version = "=0.41.0" }
 camel-dsl = { path = "crates/camel-dsl", version = "=0.41.0" }

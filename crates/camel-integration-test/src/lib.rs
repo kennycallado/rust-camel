@@ -32,12 +32,14 @@ pub use adapters::{
     PartnerRouter, ReceiveError, ReceiveTimeout, RecordedSend, TransportError,
 };
 pub use boot_scenario::{ScenarioRun, boot_scenario};
+pub use camel_matchers::RequestExpectation as PartnerExpectation;
+pub use camel_matchers::{CountBound, Expectation, PathFilter};
 #[cfg(feature = "http")]
 pub use document::partner_scripts_for;
 pub use document::{
-    CountBound, DocError, EndpointRef, Expectation, PartnerExpectation, PartnerFault,
-    PartnerScript, PartnerScriptResponse, PathFilter, Provisioning, RouteSource, ScenarioAction,
-    ScenarioDocument, ScenarioTarget, ValidateExpectation, parse_scenario_document,
+    DocError, EndpointRef, PartnerFault, PartnerScript, PartnerScriptResponse, Provisioning,
+    RouteSource, ScenarioAction, ScenarioDocument, ScenarioTarget, ValidateExpectation,
+    parse_scenario_document,
 };
 pub use env_layers::{AmbientLookup, LayeredEnv, ambient_std};
 pub use runner::{

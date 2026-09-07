@@ -1,0 +1,15 @@
+[package]
+name = "camel-matchers"
+description = "Pure matcher algebra shared by the rust-camel test tiers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+regex = { workspace = true }
+serde_json = { workspace = true }
+form_urlencoded = "1.2"
+
+[lints]
+workspace = true

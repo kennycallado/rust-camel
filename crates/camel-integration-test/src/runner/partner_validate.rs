@@ -17,7 +17,13 @@ use crate::adapters::http::HttpWireRequest;
 use crate::adapters::redact_wire_path;
 use crate::document::PartnerExpectation;
 #[cfg(feature = "http")]
-use crate::document::{CountBound, PathFilter};
+use crate::document::PathFilter;
+// The pure predicates live in camel-matchers; this layer only
+// sequences recorded-request snapshots against them.
+#[cfg(feature = "http")]
+pub(crate) use camel_matchers::render_bound;
+#[cfg(feature = "http")]
+use camel_matchers::{above_ceiling, bound_holds, settles_early};
 
 use super::ScenarioFailure;
 
@@ -29,13 +35,9 @@ use super::ScenarioFailure;
 const PARTNER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Counts the recorded requests that pass all filters (feature
-/// `http`): `method` compares ASCII-case-insensitively (wire records
-/// are uppercased; the expectation may declare any casing), the path
-/// filter matches the recorded path-and-query — `Exact` byte-for-byte,
-/// `Contains` by substring, `Matches` by regex — and the `query`
-/// subset requires every declared pair to appear among the request's
-/// percent-decoded query pairs, in any position order. A `None`
-/// filter passes everything, and all filters combine conjunctively.
+/// `http`): the `method`, `path`, and `query` subset semantics per
+/// [`camel_matchers::matching_count`], each request projected as its
+/// `(method, path_and_query)` pair of raw wire bytes.
 ///
 /// This layer is the only place wire leniency lives: arrival-lane
 /// keys stay strict raw wire bytes, never canonicalized.
@@ -46,91 +48,14 @@ pub(crate) fn matching_requests(
     path_filter: Option<&PathFilter>,
     query: Option<&BTreeMap<String, String>>,
 ) -> usize {
-    // The regex of a `Matches` filter compiles once per call, not once
-    // per recorded request. An invalid pattern (the parser rejects it
-    // first) matches nothing, failing closed.
-    let matches_regex = match path_filter {
-        Some(PathFilter::Matches(pattern)) => regex::Regex::new(pattern).ok(),
-        _ => None,
-    };
-    requests
-        .iter()
-        .filter(|request| {
-            let path_matches = match path_filter {
-                None => true,
-                Some(PathFilter::Exact(p)) => p.as_str() == request.path.as_str(),
-                Some(PathFilter::Contains(s)) => request.path.contains(s.as_str()),
-                Some(PathFilter::Matches(_)) => matches_regex
-                    .as_ref()
-                    .is_some_and(|re| re.is_match(&request.path)),
-            };
-            let query_subset = query.is_none_or(|declared| {
-                let pairs = query_pairs(&request.path);
-                declared
-                    .iter()
-                    .all(|(key, value)| pairs.iter().any(|(k, v)| k == key && v == value))
-            });
-            method.is_none_or(|m| m.eq_ignore_ascii_case(&request.method))
-                && path_matches
-                && query_subset
-        })
-        .count()
-}
-
-/// The percent-decoded query pairs of a recorded path-and-query
-/// (feature `http`): everything after the first `?`, parsed with
-/// `form_urlencoded`, which percent-decodes `%XX` and `+`. A path
-/// without a query yields no pairs.
-#[cfg(feature = "http")]
-fn query_pairs(path_and_query: &str) -> Vec<(String, String)> {
-    match path_and_query.split_once('?') {
-        Some((_, query)) => form_urlencoded::parse(query.as_bytes())
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect(),
-        None => Vec::new(),
-    }
-}
-
-/// Whether one snapshot's filtered count satisfies the bound: the
-/// decision predicate of the no-deadline read and of the final expiry
-/// snapshot.
-#[cfg(feature = "http")]
-fn bound_holds(bound: &CountBound, actual: usize) -> bool {
-    let actual = actual as u64;
-    match bound {
-        CountBound::Exact(n) => actual == *n,
-        CountBound::AtLeast(n) => actual >= *n,
-        CountBound::AtMost(n) => actual <= *n,
-        CountBound::Range(min, max) => actual >= *min && actual <= *max,
-    }
-}
-
-/// Whether the poll may settle early on this snapshot. `Exact`
-/// settles at equality and `AtLeast` at its floor — both sound
-/// because arrivals only add, so a reached count stays reached.
-/// `AtMost` and a `Range` never settle early: a passing snapshot
-/// cannot prove the count stays within bounds while the window is
-/// open.
-#[cfg(feature = "http")]
-fn settles_early(bound: &CountBound, actual: usize) -> bool {
-    match bound {
-        CountBound::Exact(_) | CountBound::AtLeast(_) => bound_holds(bound, actual),
-        CountBound::AtMost(_) | CountBound::Range(..) => false,
-    }
-}
-
-/// Whether this snapshot has already broken an upper bound beyond
-/// recovery (`AtMost` above its ceiling, a `Range` above its
-/// maximum): arrivals only add, so the claim fails on the first
-/// observation instead of waiting the window out.
-#[cfg(feature = "http")]
-fn above_ceiling(bound: &CountBound, actual: usize) -> bool {
-    let actual = actual as u64;
-    match bound {
-        CountBound::Exact(_) | CountBound::AtLeast(_) => false,
-        CountBound::AtMost(n) => actual > *n,
-        CountBound::Range(_, max) => actual > *max,
-    }
+    camel_matchers::matching_count(
+        requests
+            .iter()
+            .map(|request| (request.method.as_str(), request.path.as_str())),
+        method,
+        path_filter,
+        query,
+    )
 }
 
 /// Asserts the partner expectation against the router's
@@ -294,21 +219,6 @@ pub(crate) fn partner_mismatch_detail(
     detail
 }
 
-/// Renders a count bound in its own grammar for mismatch details:
-/// `Exact(3)` renders `expected 3` — the historical phrasing the
-/// exact-count tests pin byte-for-byte — `AtLeast(3)` renders
-/// `expected at least 3`, `AtMost(2)` renders `expected at most 2`,
-/// and `Range(2, 4)` renders `expected between 2 and 4`.
-#[cfg(feature = "http")]
-pub(crate) fn render_bound(bound: &CountBound) -> String {
-    match bound {
-        CountBound::Exact(n) => format!("expected {n}"),
-        CountBound::AtLeast(n) => format!("expected at least {n}"),
-        CountBound::AtMost(n) => format!("expected at most {n}"),
-        CountBound::Range(min, max) => format!("expected between {min} and {max}"),
-    }
-}
-
 /// Renders the applied filters of a partner expectation for mismatch
 /// details (the ADR-0051 redaction law, extended to filter payloads):
 /// the method renders `method GET`; an `Exact` path filter renders
@@ -333,6 +243,11 @@ pub(crate) fn render_filters(expected: &PartnerExpectation, secret_keys: &[Strin
         }
         Some(PathFilter::Matches(_)) => {
             clauses.push("pathMatches <pattern elided>".to_string());
+        }
+        // Foreign `#[non_exhaustive]` variants (none today): render by
+        // kind with the payload elided, like Contains/Matches above.
+        Some(_) => {
+            clauses.push("path <filter elided>".to_string());
         }
         None => {}
     }
