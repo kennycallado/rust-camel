@@ -110,39 +110,25 @@ misuse with exit 2.
 
 ### Requirement: Ordered scenario actions
 
-The system SHALL execute `scenario:` documents as ordered actions with
-`send`, `receive` carrying a mandatory deadline, `sleep`, `validate`, and
-scenario variables with extraction from received messages. A `send`
-action SHALL accept an optional `method` field, normalized to
-uppercase and validated as an RFC 7230 token at load. An absent method
-SHALL infer `POST` for a body and `GET` for no body.
+Scenario actions SHALL execute in document order. A receive SHALL carry a mandatory deadline. A document MAY declare a top-level `sendDeadline` bounding every send action; when absent, the thirty-second default applies. An unparseable `sendDeadline` SHALL fail at load time with exit 2.
 
-Scenario variables form one namespace. A harness endpoint reference
-with `bindVar` SHALL fill that variable at boot, before the first
-action. An `extract` SHALL overwrite on receive. Last writer wins. A
-`bindVar` value SHALL be the bound authority, host and port.
+#### Scenario: document send deadline bounds every send
 
-Endpoint strings in `send` and `receive`, body string leaves, and
-`send` header values SHALL resolve `${name}` placeholders against the
-scenario variables. Substitution SHALL be raw, with no
-percent-encoding. `$${` SHALL escape to a literal `${`. A variable
-unset at resolution time SHALL fail `scenario-var-unresolved`, exit 1,
-naming the variable. `${env:}` SHALL NOT resolve in scenario strings.
+- **GIVEN** a document declaring `sendDeadline: 500ms` and a send action whose connection hangs
+- **WHEN** the action runs
+- **THEN** the send fails apparatus-class at the document deadline, naming the bound
 
-The initial registered-adapter lookup SHALL use the original declared
-endpoint key, before interpolation. The wire target SHALL then interpolate variables
-and, for a harness-provisioned reference, replace only the authority
-with the selected partner's bound authority, preserving the
-interpolated path and query. The declared URI SHALL never reach a
-socket connect. After interpolation, an endpoint whose authority
-equals a bound partner authority SHALL dispatch to that partner.
+#### Scenario: absent send deadline keeps the thirty-second default
 
-Adapter level, a send parks its roundtrip receiver under a generation
-counter. A later send on the same endpoint replaces the entry under a
-new generation. When the earlier send fails before receiving an HTTP
-response, its cleanup SHALL NOT remove the later entry, and a
-following receive SHALL consume the later send's roundtrip.
+- **GIVEN** a document without `sendDeadline` and a send that completes
+- **WHEN** the actions run
+- **THEN** send behavior is unchanged from the fixed default
 
+#### Scenario: invalid send deadline is a load error
+
+- **GIVEN** a document declaring `sendDeadline: soon`
+- **WHEN** the document loads
+- **THEN** the load fails with exit 2 naming `sendDeadline`
 #### Scenario: send then receive within deadline
 
 - **GIVEN** a full-tier scenario that sends a body and receives on a partner
@@ -301,13 +287,19 @@ per document, and the harness SHALL NOT mutate the process environment.
 
 ### Requirement: Failure taxonomy
 
-The system SHALL inherit exit codes 0, 1, 2 with an epistemic split: verdict
-failures (`receive-timeout`, `validation-mismatch`, runtime
-`scenario-var-unresolved`) exit 1; apparatus failures (`doc-validation`,
-`tier-filter-collision`, `partner-bind-failure`, `partner-startup-failure`,
-`action-transport-failure`, `infra-unavailable`, `full-boot-failure`,
-`shutdown-failure`) exit 2. Every adapter operation SHALL carry a deadline.
+Scenario runs SHALL keep the epistemic exit split: 0 = pass, 1 = verdict-class (system under test failed), 2 = apparatus-class (harness failure) and load/misuse errors. Harness-side queue overflow conditions SHALL surface as apparatus-class failures carrying their own name, never as verdict-class receive timeouts.
 
+#### Scenario: arrival lane overflow is an apparatus failure
+
+- **GIVEN** a partner path whose arrival lane dropped arrivals after filling
+- **WHEN** a subsequent receive on that path times out
+- **THEN** the run fails with exit 2 as an apparatus arrival-lane-overflow naming the dropped count, not as a verdict receive-timeout
+
+#### Scenario: client lane FIFO overflow is an apparatus failure
+
+- **GIVEN** more same-key in-flight sends than the client lane FIFO bound
+- **WHEN** the overflowing send launches
+- **THEN** the send fails apparatus-class naming the lane key and the bound
 #### Scenario: receive timeout is a verdict failure
 
 - **GIVEN** a `receive` with a deadline whose partner never sends
@@ -758,7 +750,13 @@ exit 2.
 
 ### Requirement: Wire-fidelity lane key and mismatch diagnostics
 
-Partner arrival lanes MUST key on the strict wire `path_and_query` bytes of each recorded request; receive paths derive from the declared partner endpoint URI. The key MUST stay strict (never canonicalized) so producer-side byte drift remains detectable. When matching fails, the harness MUST report the wire evidence: receive-timeout errors list the wire paths that arrived in the lane group, and partner-count mismatches list the recorded paths. Harness HTTP targets with an empty or absent path MUST fail as apparatus errors, never silently defaulting to `/`.
+The strict wire-bytes lane key SHALL keep its fidelity contract. Multiple in-flight sends under one lane key SHALL park their responses in a bounded FIFO ordered by wire arrival; receives under that key SHALL consume the oldest parked response first.
+
+#### Scenario: same-key sends park in arrival order
+
+- **GIVEN** three sends to one lane key with no intervening receives
+- **WHEN** three receives on that key follow
+- **THEN** each receive resolves the oldest parked response first, in wire order
 
 #### Scenario: Query-bearing receive matches after wire fidelity
 
@@ -792,29 +790,31 @@ Partner arrival lanes MUST key on the strict wire `path_and_query` bytes of each
 
 ### Requirement: Scenario boot shares the camel run composition root
 
-The FULL-tier scenario boot SHALL boot through the same composition-root
-wiring as `camel run` (ADR-0069 §4, §10), in the same order: sealed
-config load, context preparation, security compile-context build,
-bind-acknowledgement install, component-bundle cascade, route discovery,
-SQL startup checks from the discovered definitions, route registration,
-context start. It SHALL build the security compile context from the
-sealed `CamelConfig` through the shared builder, install `[binds]`
-public-exposure acknowledgements through the shared installer, register
-ADR-0033 fail-closed SQL startup checks from the discovered routes, and
-load the document's route source through camel-dsl route discovery
-(two-pass template materialization included) with the config's
-`stream_caching.threshold` and the built security context. All
-`${env:NAME}` resolution SHALL go exclusively through the scenario layered
-environment injected as the discovery lookup — the scenario boot SHALL NOT
-resolve placeholders through the process or ambient environment.
-Keycloak/oidc security configuration SHALL be rejected before any builder
-call with `CamelError::AuthProviderUnavailable`; the scenario runner
-SHALL classify that variant as the `infra-unavailable` document-error
-class (classification by variant, never message text) — the tier runs
-offline (no network), and only the native provider is supported in v1.
-Wasm `security.policies`/`security.permissions` SHALL be rejected
-fail-closed with a configuration error naming the v1 tier limitation.
+The scenario tier SHALL boot through the same composition root as `camel run`: sealed config load and root-anchored route resolution follow the boot root, which is the nearest ancestor directory (including the document's own) containing a `Camel.toml`. Relative `routeFiles` entries SHALL resolve against the scenario document's own directory. A document with no `Camel.toml` ancestor SHALL fail named with exit 2 before boot.
 
+#### Scenario: boot root is the nearest Camel.toml ancestor
+
+- **GIVEN** a scenario document at `tests/integration/layers/map/static.test.yaml` and a `Camel.toml` at `tests/integration/`
+- **WHEN** the tier boots the document
+- **THEN** the sealed config loads from `tests/integration/Camel.toml` and the boot succeeds
+
+#### Scenario: no Camel.toml ancestor fails named
+
+- **GIVEN** a scenario document with no `Camel.toml` in any ancestor directory
+- **WHEN** the tier loads it
+- **THEN** the run fails with exit 2 naming the missing project root
+
+#### Scenario: relative routeFiles stay document-anchored
+
+- **GIVEN** a nested scenario document declaring `routeFiles: [routes.yaml]` with `routes.yaml` colocated next to the document
+- **WHEN** the tier boots from the ancestor root
+- **THEN** `routeFiles` resolve against the document directory and the boot succeeds
+
+#### Scenario: routeFilesFromRoot follows the resolved root
+
+- **GIVEN** a nested scenario document declaring `routeFilesFromRoot: [routes/x.yaml]` present under the ancestor root's route space
+- **WHEN** the tier boots from the ancestor root
+- **THEN** the root-anchored paths resolve against the resolved boot root, not the document directory
 #### Scenario: security_policy route boots in the tier
 
 - **GIVEN** a scenario project whose Camel.toml declares native security
@@ -950,4 +950,64 @@ assertion kinds through their own changes).
 - **WHEN** the document loads
 - **THEN** the run reports `doc-validation` naming the field and
   exits 2
+
+### Requirement: Load-time document validation
+
+The scenario document loader SHALL reject statically-detectable document defects at load time with exit 2, before partner binding or boot, following the reserved-provisioning gate pattern.
+
+#### Scenario: inline routes rejected at load
+
+- **GIVEN** a scenario document whose route source is inline `routes:`
+- **WHEN** the document loads
+- **THEN** the load fails with exit 2 directing the author to `routeFiles`, before any partner binds
+
+#### Scenario: harness provisioning without bound authority rejected at load
+
+- **GIVEN** a `provisioning: harness` entry with a `direct:` or `fake:` ref that also declares a `bindVar`
+- **WHEN** the document loads
+- **THEN** the load fails with exit 2 naming the entry and the missing bound authority
+
+#### Scenario: expectReply on a partner send is a load error
+
+- **GIVEN** a send to an `http` partner ref or a `fake:` ref declaring `expectReply`
+- **WHEN** the document loads
+- **THEN** the load fails with exit 2 naming the action index and the `expectReply` field
+
+### Requirement: Direct reply assertion
+
+The scenario tier SHALL assert the synchronous reply of a `direct:` send through an `expectReply` field parsed into the shared matcher algebra (`camel-matchers::Expectation`, the same verbs as `validate`). `expectReply` on any non-`direct:` target SHALL fail at load time (the fake adapter records sends and produces no synchronous reply). An `expectReply` mismatch SHALL fail verdict-class naming the expectation and the actual reply body.
+
+#### Scenario: expectReply matches the direct reply body
+
+- **GIVEN** a request/reply route behind `direct:reply` and a send declaring `expectReply: {contains: "ack"}`
+- **WHEN** the send completes
+- **THEN** the reply body satisfies the expectation and the action passes
+
+#### Scenario: expectReply mismatch is a verdict failure
+
+- **GIVEN** a send declaring `expectReply` whose reply body violates the expectation
+- **WHEN** the send completes
+- **THEN** the run fails verdict-class naming the expectation and the actual reply body
+
+### Requirement: Inbound listener provisioning
+
+The scenario harness SHALL provision inbound listeners on an ephemeral port and expose the bound address to route URIs through variable interpolation, reusing staged listener consumption. Documents pinning literal ports SHALL keep working unchanged.
+
+#### Scenario: inbound listener binds port zero
+
+- **GIVEN** a document declaring an inbound listener with a `bindVar`
+- **WHEN** the harness provisions it
+- **THEN** the listener binds `127.0.0.1:0` and the variable carries the bound `http://host:port` address
+
+#### Scenario: route consumer serves on the staged listener
+
+- **GIVEN** a route URI interpolating the inbound `bindVar`
+- **WHEN** the document boots and a request targets the bound address
+- **THEN** the route consumer serves from the staged listener without a second bind
+
+#### Scenario: fixed-port inbound documents stay valid
+
+- **GIVEN** an inbound document pinning a literal port in the route URI (the pre-change shape)
+- **WHEN** it loads and boots
+- **THEN** the behavior is unchanged
 

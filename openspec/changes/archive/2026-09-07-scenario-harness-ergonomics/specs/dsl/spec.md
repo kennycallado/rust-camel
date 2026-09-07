@@ -27,3 +27,29 @@ Route discovery SHALL resolve `${env:}` placeholders through the injected enviro
 - **GIVEN** a literal block scalar whose content contains `${env:X}`
 - **WHEN** discovery interpolates with `X` defined
 - **THEN** the placeholder resolves inside the block content, matching raw-splice behavior
+#### Scenario: injected lookup resolves placeholders
+
+- **GIVEN** a route file containing `from: direct:${env:TIER_ONLY}` and an
+  injected lookup that maps `TIER_ONLY` to `start`
+- **WHEN** discovery runs through the env-injected entry
+- **THEN** the route compiles with the `direct:start` endpoint
+
+#### Scenario: process environment is not consulted
+
+- **GIVEN** a route file containing `${env:PROC_ONLY}`, a process
+  environment that defines `PROC_ONLY`, and an injected lookup that
+  returns `None` for `PROC_ONLY`
+- **WHEN** discovery runs through the env-injected entry
+- **THEN** discovery fails with the environment error naming `PROC_ONLY`
+  and the file path, without reading the process environment
+
+#### Scenario: templates materialize through the injected entry
+
+- **GIVEN** a route file declaring one template and two templated routes,
+  and an injected lookup resolving every placeholder the file uses
+- **WHEN** discovery runs through the env-injected entry with a threshold
+  and a security compile context
+- **THEN** both templated routes materialize and compile with the given
+  threshold and security context, identical to the process-environment
+  entry over the same file after equivalent interpolation
+
