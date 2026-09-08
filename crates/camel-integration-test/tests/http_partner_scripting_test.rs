@@ -705,7 +705,7 @@ async fn run_doc(yaml: &str) -> (DocumentOutcome, BTreeMap<String, HttpRecorder>
 
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired, &router, &mut vars);
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     (outcome, recorders)
 }
 
@@ -1135,7 +1135,7 @@ async fn two_layer_bindvar_both_visible() {
 
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),

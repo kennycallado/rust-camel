@@ -71,9 +71,19 @@ const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct BootHandle {
     jms_pool: Arc<camel_component_jms::JmsBridgePool>,
     cxf_pool: Arc<camel_component_cxf::CxfBridgePool>,
+    datasource_catalog: Arc<dyn DatasourceCatalog>,
 }
 
 impl BootHandle {
+    /// The single datasource catalog of the booted cascade.
+    ///
+    /// Single-catalog invariant: callers resolve pools through the same
+    /// catalog the component cascade registered factories on; one datasource
+    /// name, one pool.
+    pub fn datasource_catalog(&self) -> Arc<dyn DatasourceCatalog> {
+        Arc::clone(&self.datasource_catalog)
+    }
+
     /// Graceful teardown with the default 30-second pool deadline.
     pub async fn shutdown(&self, ctx: &mut CamelContext) -> Result<(), CamelError> {
         self.shutdown_with_deadline(ctx, DEFAULT_SHUTDOWN_TIMEOUT)
@@ -353,7 +363,11 @@ pub async fn boot(
     // jsonpath/xpath under feature gates. A direct `CamelContext::builder().build()`
     // caller gets `LanguagesConfig::default()` (rust-camel runtime defaults).
 
-    Ok(BootHandle { jms_pool, cxf_pool })
+    Ok(BootHandle {
+        jms_pool,
+        cxf_pool,
+        datasource_catalog: Arc::clone(&datasource_catalog),
+    })
 }
 
 #[cfg(test)]
@@ -443,6 +457,49 @@ mod tests {
             ctx.registry().get("kafka").is_some(),
             "kafka must resolve with the kafka feature enabled"
         );
+    }
+
+    /// The booted handle exposes the datasource catalog the cascade threaded
+    /// into the Sql/SurrealDb bundles, so scenario runners can resolve pools
+    /// through the same single catalog (one datasource name, one pool).
+    #[tokio::test]
+    async fn boot_handle_exposes_datasource_catalog() {
+        use camel_api::datasource::DatasourceConfig;
+        use std::collections::HashMap;
+
+        let mut datasources = HashMap::new();
+        datasources.insert(
+            "appdb".to_string(),
+            DatasourceConfig {
+                db_url: "sqlite::memory:?cache=shared".to_string(),
+                provider: None,
+                max_connections: None,
+                min_connections: None,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                ssl_mode: None,
+                ssl_root_cert: None,
+                ssl_cert: None,
+                ssl_key: None,
+                extra: HashMap::new(),
+            },
+        );
+        let config = CamelConfig {
+            datasources,
+            ..CamelConfig::default()
+        };
+        let mut ctx = CamelConfig::configure_context_with_beans(&config, None)
+            .await
+            .expect("configure_context_with_beans must succeed");
+        let handle = boot(&mut ctx, &config, Path::new(env!("CARGO_MANIFEST_DIR")))
+            .await
+            .expect("boot must register the cascade");
+
+        let appdb = handle
+            .datasource_catalog()
+            .get_config("appdb")
+            .expect("booted handle must expose the appdb datasource");
+        assert_eq!(appdb.db_url, "sqlite::memory:?cache=shared");
     }
 
     #[tokio::test]

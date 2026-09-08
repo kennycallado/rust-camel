@@ -135,7 +135,7 @@ impl std::fmt::Debug for RouteSource {
 
 /// One ordered scenario action (ADR-0069 section 11, adopted from
 /// Citrus: `send`, `receive` with a mandatory deadline, `sleep`,
-/// `validate`).
+/// `validate`, `sql`).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ScenarioAction {
@@ -191,6 +191,22 @@ pub enum ScenarioAction {
         /// consumption time.
         elapsed_at_least: Option<Duration>,
     },
+    /// Seed datasource state before the route assertions run (bd
+    /// rc-25lup.1): execute the ordered `prepare` mutation statements
+    /// against the named datasource's pool through the scenario `sql:`
+    /// vocabulary. Reads are rejected at load (`is_read_statement`):
+    /// the `validate` sql target owns reads, and the two vocabularies
+    /// never mix. Activation is demand-gated behind the harness `sql`
+    /// feature (the `inbound:`/`http` precedent, ADR-0069 §8); the
+    /// grammar and validation run in every build.
+    Sql {
+        /// The datasource name as declared under `[datasources.*]` in
+        /// `Camel.toml`.
+        datasource: String,
+        /// Ordered SQL mutation statements, executed in order against
+        /// the datasource's pool.
+        prepare: Vec<String>,
+    },
 }
 
 impl ScenarioAction {
@@ -219,6 +235,9 @@ impl ScenarioAction {
                 ScenarioTarget::Variable(_) => Vec::new(),
             },
             Self::Sleep { .. } => Vec::new(),
+            // A `sql:` action references a named datasource, never an
+            // endpoint: it declares no bindings.
+            Self::Sql { .. } => Vec::new(),
         }
     }
 }
@@ -812,6 +831,45 @@ fn inbound_from_raw(value: serde_yaml::Value) -> Result<InboundListener, DocErro
     Ok(InboundListener { bind_var })
 }
 
+/// Converts a raw `sql:` action into the model, feature-split so the
+/// arm type checks in both configurations (bd rc-25lup.1).
+///
+/// Validation (read/empty-prepare defects, naming the action and
+/// statement index) runs in every build BEFORE the gate; only a
+/// structurally valid action reaches the demand gate, which — without
+/// the harness `sql` feature — rejects it naming the feature and the
+/// rebuild instruction (the `inbound:`/`http` precedent, ADR-0069 §8).
+#[cfg(feature = "sql")]
+fn sql_action_from_raw(
+    raw: crate::sql_action::RawSqlAction,
+    index: usize,
+) -> Result<ScenarioAction, DocError> {
+    let validated = crate::sql_action::validate_sql_action(&raw, index)
+        .map_err(|message| DocError::Validation { index, message })?;
+    Ok(ScenarioAction::Sql {
+        datasource: validated.datasource,
+        prepare: validated.prepare,
+    })
+}
+
+/// The feature-off twin: the same validation hook, then the named
+/// demand-gate error instead of the action.
+#[cfg(not(feature = "sql"))]
+fn sql_action_from_raw(
+    raw: crate::sql_action::RawSqlAction,
+    index: usize,
+) -> Result<ScenarioAction, DocError> {
+    if let Err(message) = crate::sql_action::validate_sql_action(&raw, index) {
+        return Err(DocError::Validation { index, message });
+    }
+    Err(DocError::Validation {
+        index,
+        message: "`sql` requires the `sql` feature, which this harness build does \
+                  not enable: rebuild with `--features sql` (demand-gated activation)"
+            .to_string(),
+    })
+}
+
 /// Parses inline `routes` through the shared DSL parser. `parse_yaml`
 /// expects a top-level `routes:` key; the inline value (the array under
 /// `routes:`) is wrapped back into that shape, the same as the unit-tier
@@ -825,18 +883,18 @@ fn parse_inline_routes(value: &serde_yaml::Value) -> Result<Vec<RouteDefinition>
 }
 
 /// Converts one raw action item into the public model. An item is a
-/// single-key map (`send`, `receive`, `sleep`, `validate`); dispatch
+/// single-key map (`send`, `receive`, `sleep`, `validate`, `sql`); dispatch
 /// runs here, not in serde, so every failure carries the action index.
 fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction, DocError> {
     let action_error = |message: String| DocError::Validation { index, message };
     let serde_yaml::Value::Mapping(ref map) = item else {
         return Err(action_error(format!(
-            "action must be a single-key map (`send`, `receive`, `sleep`, `validate`), got {item:?}"
+            "action must be a single-key map (`send`, `receive`, `sleep`, `validate`, `sql`), got {item:?}"
         )));
     };
     let Some((key, content)) = map.iter().next() else {
         return Err(action_error(
-            "action must be a single-key map (`send`, `receive`, `sleep`, `validate`), got an empty map"
+            "action must be a single-key map (`send`, `receive`, `sleep`, `validate`, `sql`), got an empty map"
                 .to_string(),
         ));
     };
@@ -967,8 +1025,19 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                 elapsed_at_least,
             })
         }
+        crate::sql_action::SQL_ACTION_KEY => {
+            let raw: crate::sql_action::RawSqlAction =
+                serde_yaml::from_value(content.clone()).map_err(action_error_from_serde)?;
+            // Ordering mandate (bd rc-25lup.1): validation runs BEFORE
+            // the feature demand gate, so a read or an empty prepare
+            // list fails doc-validation naming the action index and the
+            // statement index in BOTH feature configurations — the
+            // document defect is independent of what this build can
+            // execute (the inbound grammar precedent).
+            sql_action_from_raw(raw, index)
+        }
         other => Err(action_error(format!(
-            "unknown action `{other}`; expected `send`, `receive`, `sleep`, or `validate`"
+            "unknown action `{other}`; expected `send`, `receive`, `sleep`, `validate`, or `sql`"
         ))),
     }
 }

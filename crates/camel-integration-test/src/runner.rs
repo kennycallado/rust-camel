@@ -30,8 +30,10 @@
 //! [`SEND_DEADLINE`].
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use camel_api::datasource::DatasourceCatalog;
 use camel_api::{Body, Exchange, Value};
 use camel_matchers::{expectation_matches, stringify};
 
@@ -337,7 +339,9 @@ pub async fn run_scenario(
     let started_at = Instant::now();
     let send_deadline = effective_send_deadline(doc);
     for (index, action) in doc.scenario.iter().enumerate() {
-        run_action(action, index, router, vars, started_at, send_deadline).await?;
+        // The single-action loop has no boot of its own, so a `sql:`
+        // action here has no datasource catalog and fails closed.
+        run_action(action, index, router, vars, started_at, send_deadline, None).await?;
     }
     Ok(ScenarioVerdict::Pass)
 }
@@ -385,6 +389,12 @@ pub struct DocumentOutcome {
 /// router, one recorded outcome per action, stopping at the first
 /// failure (the whole-document contract, library-level).
 ///
+/// `datasource_catalog` is the booted cascade's single datasource
+/// catalog (bd rc-25lup.1): a `sql:` action resolves its pool through
+/// it, so the seeds land in the same pools the routes use. Callers
+/// without a boot pass `None`; a `sql:` action then fails closed
+/// instead of silently seeding nothing.
+///
 /// When the document declares a `logs:` block (rc-tdgh5), a capture
 /// window opens at document start (behind the harness's process-seat
 /// ownership — a foreign subscriber fails the document through
@@ -402,6 +412,7 @@ pub async fn run_scenario_document(
     doc: &ScenarioDocument,
     router: &PartnerRouter,
     vars: &mut ScenarioVars,
+    datasource_catalog: Option<&Arc<dyn DatasourceCatalog>>,
 ) -> DocumentOutcome {
     // Log-capture window (rc-tdgh5): open at document start when the
     // document declares a `logs:` block — and only when the harness's
@@ -436,7 +447,17 @@ pub async fn run_scenario_document(
         if failed {
             break;
         }
-        match run_action(action, index, router, vars, started_at, send_deadline).await {
+        match run_action(
+            action,
+            index,
+            router,
+            vars,
+            started_at,
+            send_deadline,
+            datasource_catalog,
+        )
+        .await
+        {
             Ok(()) => per_action.push(Ok(ScenarioVerdict::Pass)),
             Err(failure) => {
                 per_action.push(Err(failure));
@@ -549,7 +570,9 @@ fn as_tracing_level(level: LogLevel) -> tracing::Level {
 
 /// Executes one action at its scenario index. The shared primitive of
 /// [`run_scenario`] and [`run_scenario_document`]; every failure
-/// carries the action index.
+/// carries the action index. A `sql:` action seeds through
+/// `datasource_catalog` (`None` fails closed — see
+/// [`run_scenario_document`]).
 async fn run_action(
     action: &ScenarioAction,
     index: usize,
@@ -557,6 +580,7 @@ async fn run_action(
     vars: &mut ScenarioVars,
     started_at: Instant,
     send_deadline: Duration,
+    datasource_catalog: Option<&Arc<dyn DatasourceCatalog>>,
 ) -> Result<(), ScenarioFailure> {
     match action {
         ScenarioAction::Send {
@@ -591,6 +615,55 @@ async fn run_action(
         }
         ScenarioAction::Validate { .. } => {
             validate_action(action, index, started_at, router, vars).await?;
+        }
+        ScenarioAction::Sql {
+            datasource,
+            prepare,
+        } => {
+            // Apparatus class (exit 2): seeding is harness-side state
+            // preparation — a failure here means the scenario never
+            // got its declared preconditions, never that the system
+            // under test misbehaved.
+            #[cfg(feature = "sql")]
+            {
+                let Some(catalog) = datasource_catalog else {
+                    return Err(ScenarioFailure::ActionTransport {
+                        action: index,
+                        source: TransportError::Other {
+                            message: "sql action: no datasource catalog is available; the \
+                                      boot-owning caller must pass the cascade's catalog"
+                                .to_string(),
+                        },
+                    });
+                };
+                let sql = crate::sql_action::SqlAction {
+                    datasource: datasource.clone(),
+                    prepare: prepare.clone(),
+                };
+                crate::sql_action::execute_sql_prepare(catalog, &sql)
+                    .await
+                    .map_err(|message| ScenarioFailure::ActionTransport {
+                        action: index,
+                        source: TransportError::Other { message },
+                    })?;
+            }
+            // Defense-in-depth: the document parser rejects `sql:`
+            // without the feature, so only a directly-constructed
+            // document reaches this arm (the boot-level inbound
+            // precedent).
+            #[cfg(not(feature = "sql"))]
+            {
+                let _ = (datasource, prepare, datasource_catalog);
+                return Err(ScenarioFailure::ActionTransport {
+                    action: index,
+                    source: TransportError::Other {
+                        message: "the `sql:` action requires the `sql` feature, which this \
+                                  harness build does not enable: rebuild with \
+                                  `--features sql` (demand-gated activation)"
+                            .to_string(),
+                    },
+                });
+            }
         }
     }
     Ok(())

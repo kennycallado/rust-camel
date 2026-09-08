@@ -33,6 +33,7 @@ pub mod inbound;
 /// `[opened_at, now)` interval contains the event timestamp.
 pub mod log_capture;
 pub mod runner;
+pub mod sql_action;
 pub mod tier;
 
 /// Partner-script grammar of the scenario document's `partners:` map;
@@ -63,6 +64,12 @@ pub use runner::{
     DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, run_scenario,
     run_scenario_document,
 };
+#[cfg(feature = "sql")]
+pub use sql_action::execute_sql_prepare;
+pub use sql_action::{
+    RawSqlAction, SQL_ACTION_KEY, SQL_MEMORY_NOT_SHARED, SqlAction, ensure_sqlite_memory_shared,
+    is_read_statement, sanitize_db_error, validate_sql_action,
+};
 pub use tier::{DocumentInputs, Tier, derive_tier};
 
 /// Scenario document parser contract tests (the six named tests from
@@ -91,3 +98,7 @@ mod adapters_test;
 /// HTTP partner adapter tests (the named tests from task 3.1).
 #[cfg(all(test, feature = "http"))]
 mod http_partner_test;
+
+/// Scenario `sql:` action executor tests (bd rc-25lup.1).
+#[cfg(all(test, feature = "sql"))]
+mod sql_action_test;

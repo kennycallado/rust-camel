@@ -229,7 +229,7 @@ fn method_scenario_document(
 async fn outbound_bridge_validates_wire() {
     let fixture = boot_fixture().await;
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars).await;
+    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars, None).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -255,7 +255,7 @@ async fn outbound_bridge_validates_wire() {
 async fn explicit_put_reaches_partner() {
     let fixture = boot_method_fixture("PUT", "put-ok").await;
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars).await;
+    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars, None).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -280,7 +280,7 @@ async fn explicit_put_reaches_partner() {
 async fn bodyless_post_reaches_partner() {
     let fixture = boot_method_fixture("POST", "post-ok").await;
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars).await;
+    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars, None).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -335,7 +335,7 @@ async fn outbound_bridge_header_corruption_fails() {
         logs: fixture.doc.logs,
     };
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&corrupted, &fixture.router, &mut vars).await;
+    let outcome = run_scenario_document(&corrupted, &fixture.router, &mut vars, None).await;
     assert_eq!(outcome.verdict, None, "the corrupted header must fail");
     let mismatch = outcome
         .per_action
@@ -372,7 +372,7 @@ async fn shutdown_failure_does_not_mask_verdict() {
 
     let mut vars = ScenarioVars::new();
     let mut outcome: DocumentOutcome =
-        run_scenario_document(&fixture.doc, &fixture.router, &mut vars).await;
+        run_scenario_document(&fixture.doc, &fixture.router, &mut vars, None).await;
     // The boot-owning flow forwards the provisioned inbound address to
     // the outcome slot (rc-5yon); `None` for these fixtures.
     outcome.inbound_bound = fixture.inbound_bound;
@@ -423,7 +423,7 @@ async fn outbound_receive_deadline_is_real() {
     });
     let mut vars = ScenarioVars::new();
     let started = std::time::Instant::now();
-    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars).await;
+    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars, None).await;
     assert_eq!(outcome.verdict, None);
     let failure = outcome
         .per_action

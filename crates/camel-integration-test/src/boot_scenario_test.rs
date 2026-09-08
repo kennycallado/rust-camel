@@ -395,3 +395,122 @@ scenario:
         "error must carry the `camel test` guidance: {display}"
     );
 }
+
+/// A scenario document with no `sql:` action: the boot-time sqlite
+/// memory lint fires on the datasource config alone, before any action
+/// or route is considered. The declared route file need not exist — the
+/// lint runs before route discovery.
+const NO_SQL_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+  - sleep:
+      duration: 1s
+"#;
+
+/// Asserts the boot error is NOT the sql-memory-not-shared lint,
+/// panicking with `what` when it is.
+fn assert_not_memory_lint(
+    result: Result<crate::boot_scenario::ScenarioRun, CamelError>,
+    what: &str,
+) {
+    if let Err(err) = result {
+        let display = err.to_string();
+        assert!(
+            !display.contains(crate::SQL_MEMORY_NOT_SHARED),
+            "{what}: unexpected sql-memory-not-shared lint: {display}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bare_memory_sqlite_rejected() {
+    // A bare `sqlite::memory:` URL gives every pooled connection its
+    // own private in-memory database; the boot must reject it before
+    // any context preparation, naming the datasource (never the URL).
+    let (dir, doc) = project(
+        r#"
+[datasources.appdb]
+db_url = "sqlite::memory:"
+"#,
+        None,
+        NO_SQL_DOC,
+    );
+    let err = expect_boot_error(
+        boot_scenario(&doc, dir.path(), &empty_env()).await,
+        "a bare sqlite :memory: datasource must fail the boot",
+    );
+    assert!(
+        matches!(err, CamelError::Config(_)),
+        "expected Config, got: {err:?}"
+    );
+    let display = err.to_string();
+    assert!(
+        display.contains(crate::SQL_MEMORY_NOT_SHARED),
+        "error must carry the sql-memory-not-shared key: {display}"
+    );
+    assert!(
+        display.contains("appdb"),
+        "error must name the datasource: {display}"
+    );
+}
+
+#[tokio::test]
+async fn shared_cache_memory_sqlite_passes_lint() {
+    // `?cache=shared` makes all connections in the process share one
+    // in-memory database, so the lint must not fire. The boot may still
+    // fail later for unrelated reasons, so only the absence of the lint
+    // is asserted.
+    let (dir, doc) = project(
+        r#"
+[datasources.appdb]
+db_url = "sqlite::memory:?cache=shared"
+"#,
+        None,
+        NO_SQL_DOC,
+    );
+    assert_not_memory_lint(
+        boot_scenario(&doc, dir.path(), &empty_env()).await,
+        "a shared-cache sqlite :memory: datasource must pass the lint",
+    );
+}
+
+#[tokio::test]
+async fn file_backed_sqlite_unaffected() {
+    // A file-backed sqlite URL is not an in-memory database at all; the
+    // lint must not fire.
+    let (dir, doc) = project(
+        r#"
+[datasources.appdb]
+db_url = "sqlite:file:/tmp/x.db"
+"#,
+        None,
+        NO_SQL_DOC,
+    );
+    assert_not_memory_lint(
+        boot_scenario(&doc, dir.path(), &empty_env()).await,
+        "a file-backed sqlite datasource must pass the lint",
+    );
+}
+
+/// The lint is a config-shape check, so it runs even in a build without
+/// the `sql` feature.
+#[cfg(not(feature = "sql"))]
+#[tokio::test]
+async fn lint_is_ungated() {
+    let (dir, doc) = project(
+        r#"
+[datasources.appdb]
+db_url = "sqlite::memory:"
+"#,
+        None,
+        NO_SQL_DOC,
+    );
+    let err = expect_boot_error(
+        boot_scenario(&doc, dir.path(), &empty_env()).await,
+        "the sqlite memory lint must fire without the sql feature",
+    );
+    assert!(
+        err.to_string().contains(crate::SQL_MEMORY_NOT_SHARED),
+        "error must carry the sql-memory-not-shared key: {err}"
+    );
+}

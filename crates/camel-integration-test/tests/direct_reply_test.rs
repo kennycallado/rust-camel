@@ -44,7 +44,7 @@ async fn run_direct(doc: &ScenarioDocument, root: &Path) -> DocumentOutcome {
         Box::new(DirectStimulus::new(Arc::clone(&ctx))) as Box<dyn PartnerAdapter>,
     )]));
     let mut vars = camel_integration_test::ScenarioVars::new();
-    let mut outcome = run_scenario_document(doc, &router, &mut vars).await;
+    let mut outcome = run_scenario_document(doc, &router, &mut vars, None).await;
     // The boot result carries the inbound listener's bound address
     // (rc-5yon); the boot-owning run flow forwards it to the outcome
     // slot, like the shutdown slot below.

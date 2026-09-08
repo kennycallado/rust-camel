@@ -1,14 +1,16 @@
 //! Scenario-document execution (ADR-0069 sections 4, 5, 7, 10).
 //!
 //! Path selection lives in [`run_scenario_doc`]: a document whose wire
-//! schemes this build provisions beyond `fake` runs through the
-//! embedded full boot (`integration-http`: harness `http` partners,
-//! `direct` route stimulus); a `fake`-only document keeps the no-boot
-//! smoke path; any other scheme reports `infra-unavailable` naming the
-//! adapter. Both paths execute the ORIGINAL document through
-//! `run_scenario_document` and map the per-action outcome to rows
-//! through [`outcome_rows`]; the taxonomy exit mapping (verdict 1,
-//! apparatus 2, doc-validation 2) lives in the caller.
+//! schemes this build provisions beyond `fake` — or that carries a
+//! `sql:` action this build executes (bd rc-25lup.1) — runs through the
+//! embedded full boot (`integration-http`: harness `http` partners and
+//! `direct` route stimulus; `integration-sql`: the `sql:` datasource
+//! action); a `fake`-only document keeps the no-boot smoke path; any
+//! other scheme reports `infra-unavailable` naming the adapter. Both
+//! paths execute the ORIGINAL document through `run_scenario_document`
+//! and map the per-action outcome to rows through [`outcome_rows`];
+//! the taxonomy exit mapping (verdict 1, apparatus 2, doc-validation
+//! 2) lives in the caller.
 
 use std::path::Path;
 
@@ -25,13 +27,26 @@ const FAKE_SCHEME: &str = "fake";
 #[cfg(feature = "integration-http")]
 const BOOT_SCHEMES: [&str; 3] = [FAKE_SCHEME, "direct", "http"];
 
+/// The wire schemes the full-boot path provisions in an sql-only build
+/// (`integration-sql` without `integration-http`): no `http` partner,
+/// so an `http` endpoint falls back to the smoke path's
+/// `infra-unavailable` instead of a runtime failure.
+#[cfg(all(not(feature = "integration-http"), feature = "integration-sql"))]
+const BOOT_SCHEMES: [&str; 2] = [FAKE_SCHEME, "direct"];
+
 /// What this build's smoke path can provide, for the
 /// infra-unavailable message. Without `integration-http` the string is
-/// the historical one verbatim.
-#[cfg(not(feature = "integration-http"))]
+/// the historical one verbatim; `integration-sql` adds the `sql:`
+/// action it executes.
+#[cfg(all(not(feature = "integration-http"), not(feature = "integration-sql")))]
 const PROVIDED_ADAPTERS: &str = "only the `fake:` in-memory adapter";
-#[cfg(feature = "integration-http")]
+#[cfg(all(feature = "integration-http", not(feature = "integration-sql")))]
 const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter and the `http:` wire partner";
+#[cfg(all(not(feature = "integration-http"), feature = "integration-sql"))]
+const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter and the `sql:` datasource action";
+#[cfg(all(feature = "integration-http", feature = "integration-sql"))]
+const PROVIDED_ADAPTERS: &str =
+    "the `fake:` in-memory adapter, the `http:` wire partner, and the `sql:` datasource action";
 
 /// Outcome of running one scenario document: one row per executed
 /// action plus the apparatus-class flag for the exit mapping.
@@ -258,7 +273,11 @@ pub(super) async fn run_scenario_doc(
     doc: &camel_integration_test::ScenarioDocument,
     // Only the full-boot path reads the root; the featureless smoke
     // path takes it for signature stability.
-    #[cfg_attr(not(feature = "integration-http"), allow(unused_variables))] root: &Path,
+    #[cfg_attr(
+        not(any(feature = "integration-http", feature = "integration-sql")),
+        allow(unused_variables)
+    )]
+    root: &Path,
 ) -> ScenarioDocResult {
     // Log-capture seat (rc-tdgh5), scenario documents ONLY: claim the
     // process's tracing seat before this document's first boot,
@@ -271,13 +290,26 @@ pub(super) async fn run_scenario_doc(
     // the composition root's config-driven subscriber stay untouched.
     camel_integration_test::ensure_capture_subscriber();
     let wired = wire_endpoint_refs(doc);
-    #[cfg(feature = "integration-http")]
-    if wired.iter().any(|r| scheme_of(&r.endpoint) != FAKE_SCHEME)
-        && wired
-            .iter()
-            .all(|r| BOOT_SCHEMES.contains(&scheme_of(&r.endpoint)))
+    #[cfg(any(feature = "integration-http", feature = "integration-sql"))]
     {
-        return run_scenario_full_boot(doc, root).await;
+        // A `sql:` action full-boots in every build that executes it
+        // (bd rc-25lup.1): seeding rides the booted cascade's
+        // datasource catalog. A sql-only document wires no endpoints,
+        // so the scheme predicate below alone would never select the
+        // full boot for it. The parser rejects `sql:` in builds
+        // without `integration-sql`, so `has_sql` is `false` there.
+        let has_sql = doc
+            .scenario
+            .iter()
+            .any(|action| matches!(action, camel_integration_test::ScenarioAction::Sql { .. }));
+        if (wired.iter().any(|r| scheme_of(&r.endpoint) != FAKE_SCHEME)
+            && wired
+                .iter()
+                .all(|r| BOOT_SCHEMES.contains(&scheme_of(&r.endpoint))))
+            || has_sql
+        {
+            return run_scenario_full_boot(doc, root).await;
+        }
     }
     run_scenario_fake_smoke(doc, &wired).await
 }
@@ -337,7 +369,11 @@ async fn run_scenario_fake_smoke(
     let router = PartnerRouter::new(adapters);
 
     let mut vars = ScenarioVars::new();
-    let outcome = camel_integration_test::run_scenario_document(doc, &router, &mut vars).await;
+    // No boot on the smoke path: no datasource catalog exists, so a
+    // `sql:` action (unreachable here — the parser gated it) fails
+    // closed through the runner's None arm.
+    let outcome =
+        camel_integration_test::run_scenario_document(doc, &router, &mut vars, None).await;
     let (action_results, apparatus) = outcome_rows(doc, &outcome);
     ScenarioDocResult {
         action_results,
@@ -392,7 +428,7 @@ async fn http_secret_query_keys(
 /// ([`HttpPartner::start_permissive`]) otherwise — every unmatched
 /// request gets it for the document's lifetime, because outbound
 /// scenarios validate arrivals on the wire, not responses.
-#[cfg(feature = "integration-http")]
+#[cfg(any(feature = "integration-http", feature = "integration-sql"))]
 async fn run_scenario_full_boot(
     doc: &camel_integration_test::ScenarioDocument,
     root: &Path,
@@ -406,47 +442,62 @@ async fn run_scenario_full_boot(
 
     let wired = wire_endpoint_refs(doc);
 
-    // Load-time cross-check (ADR-0069 section 9): every `partners:` key
-    // must equal a wired harness `http` endpoint reference. A typo of a
-    // real key (`:0/order` vs `:0/orders`) fails here, at
-    // doc-validation, BEFORE any partner binds — never as a silent
-    // fall-through to the permissive default.
-    if let Some(partners) = &doc.partners {
-        let harness_http: std::collections::BTreeSet<&str> = wired
-            .iter()
-            .copied()
-            .filter(|r| is_harness_http(r))
-            .map(|r| r.endpoint.as_str())
-            .collect();
-        if let Some(key) = partners
-            .keys()
-            .find(|key| !harness_http.contains(key.as_str()))
-        {
-            return ScenarioDocResult {
-                action_results: Vec::new(),
-                doc_error: Some(format!(
-                    "doc-validation: partners[{key}]: no wired harness `http` endpoint \
-                     reference declares this key"
-                )),
-                apparatus: true,
-            };
+    // HTTP-only partner setup (ADR-0069 sections 8-9): the partners
+    // cross-check and the listener binds compile only with
+    // `integration-http`, so an sql-only build links and full-boots
+    // `sql:` documents without any partner machinery.
+    #[cfg(feature = "integration-http")]
+    let (mut adapters, harness_provisioned) = {
+        // Load-time cross-check (ADR-0069 section 9): every `partners:`
+        // key must equal a wired harness `http` endpoint reference. A
+        // typo of a real key (`:0/order` vs `:0/orders`) fails here, at
+        // doc-validation, BEFORE any partner binds — never as a silent
+        // fall-through to the permissive default.
+        if let Some(partners) = &doc.partners {
+            let harness_http: std::collections::BTreeSet<&str> = wired
+                .iter()
+                .copied()
+                .filter(|r| is_harness_http(r))
+                .map(|r| r.endpoint.as_str())
+                .collect();
+            if let Some(key) = partners
+                .keys()
+                .find(|key| !harness_http.contains(key.as_str()))
+            {
+                return ScenarioDocResult {
+                    action_results: Vec::new(),
+                    doc_error: Some(format!(
+                        "doc-validation: partners[{key}]: no wired harness `http` endpoint \
+                         reference declares this key"
+                    )),
+                    apparatus: true,
+                };
+            }
         }
-    }
 
-    // (a) Partners first: bind one listener per harness `http`
-    // endpoint (plain-string refs get none — their sends dial the
-    // literal interpolated URI), fold each env-tier bindVar into the
-    // harness-provisioned tier.
-    let (mut adapters, harness_provisioned) = match bind_partners(doc, &wired).await {
-        Ok((adapters, harness_provisioned)) => (adapters, harness_provisioned),
-        Err(doc_error) => {
-            return ScenarioDocResult {
-                action_results: Vec::new(),
-                doc_error: Some(doc_error),
-                apparatus: true,
-            };
+        // (a) Partners first: bind one listener per harness `http`
+        // endpoint (plain-string refs get none — their sends dial the
+        // literal interpolated URI), fold each env-tier bindVar into
+        // the harness-provisioned tier.
+        match bind_partners(doc, &wired).await {
+            Ok((adapters, harness_provisioned)) => (adapters, harness_provisioned),
+            Err(doc_error) => {
+                return ScenarioDocResult {
+                    action_results: Vec::new(),
+                    doc_error: Some(doc_error),
+                    apparatus: true,
+                };
+            }
         }
     };
+    #[cfg(not(feature = "integration-http"))]
+    let (mut adapters, harness_provisioned): (
+        std::collections::BTreeMap<String, Box<dyn camel_integration_test::PartnerAdapter>>,
+        std::collections::BTreeMap<String, String>,
+    ) = (
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    );
 
     // (b) The layered environment: harness-provisioned bindings win
     // over the document env; ambient reads stay behind the passthrough
@@ -504,7 +555,13 @@ async fn run_scenario_full_boot(
     let router = PartnerRouter::new(adapters);
 
     // ADR-0051 positive secret rule — see `http_secret_query_keys`.
+    #[cfg(feature = "integration-http")]
     router.set_secret_query_keys(http_secret_query_keys(&ctx).await);
+
+    // The single datasource catalog of the booted cascade (bd
+    // rc-25lup.1): `sql:` actions resolve their pools through it, so
+    // the seeds land in the same pools the routes use.
+    let datasource_catalog = run.boot.datasource_catalog();
 
     // (e) The whole document through the shared runner: one row per
     // executed action, stop at the first failure. The scenario-tier
@@ -515,7 +572,8 @@ async fn run_scenario_full_boot(
     let mut vars = ScenarioVars::new();
     let wired_refs: Vec<EndpointRef> = wired.iter().map(|r| (*r).clone()).collect();
     camel_integration_test::runner::fill_bind_vars(&wired_refs, &router, &mut vars);
-    let mut outcome = run_scenario_document(doc, &router, &mut vars).await;
+    let mut outcome =
+        run_scenario_document(doc, &router, &mut vars, Some(&datasource_catalog)).await;
     let (mut action_results, mut apparatus) = outcome_rows(doc, &outcome);
 
     // (f) Teardown, log-and-continue: a shutdown failure never masks

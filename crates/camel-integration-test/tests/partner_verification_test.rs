@@ -649,7 +649,7 @@ async fn run_doc(
     let (router, recorders, authorities) = bind_doc_partners(&doc).await;
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     (outcome, recorders, authorities)
 }
 
@@ -803,7 +803,7 @@ async fn deadline_polls_until_settle_e2e() {
 
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     dial.await.expect("the background dial task must join");
     assert_eq!(
         outcome.verdict,
@@ -897,7 +897,7 @@ async fn route_retries_faulted_partner_then_count_e2e() {
 
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -944,7 +944,7 @@ async fn at_least_settles_early() {
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
     burst.await.expect("the burst task must join");
 
@@ -1019,7 +1019,7 @@ async fn at_most_waits_full_window() {
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
     straggler.await.expect("the straggler task must join");
 
@@ -1044,7 +1044,7 @@ async fn at_most_fails_fast_above_bound() {
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
 
     assert_eq!(
@@ -1092,7 +1092,7 @@ async fn at_most_fails_fast_when_ceiling_crossed_mid_window() {
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
     breach.await.expect("the breaching dial task must join");
 
@@ -1127,7 +1127,7 @@ async fn at_most_zero_proves_absence_over_window() {
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
 
     assert_eq!(
@@ -1150,7 +1150,7 @@ async fn range_fails_fast_above_max() {
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
 
     assert_eq!(
@@ -1184,7 +1184,7 @@ async fn range_passes_on_final_snapshot() {
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
 
     assert_eq!(
@@ -1218,7 +1218,7 @@ async fn path_contains_tolerates_encoding_drift_end_to_end() {
     });
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     drift.await.expect("the drift task must join");
 
     assert_eq!(
@@ -1269,7 +1269,7 @@ async fn path_matches_and_query_subset_end_to_end() {
     });
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     arrivals.await.expect("the arrivals task must join");
 
     assert_eq!(

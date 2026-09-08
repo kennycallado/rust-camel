@@ -1638,3 +1638,139 @@ scenario:
         other => panic!("expected Validate, got {other:?}"),
     }
 }
+
+// -------------------------------------------------------------------------
+// The `sql:` action in a build WITHOUT the `sql` feature (bd rc-25lup.1).
+//
+// Ordering mandate: validation (read/empty-prepare defects) runs BEFORE
+// the demand gate, so document defects keep their statement-level
+// diagnostics in this configuration too; only a structurally valid
+// action reaches the named demand-gate error.
+// -------------------------------------------------------------------------
+
+/// A structurally valid `sql:` action is a named demand-gate error: it
+/// names the `sql` feature and the rebuild instruction.
+#[cfg(not(feature = "sql"))]
+#[test]
+fn sql_action_without_feature_is_named_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sql:
+    datasource: appdb
+    prepare:
+    - CREATE TABLE t (v TEXT)
+"#,
+    )
+    .expect_err("parse must fail without the sql feature");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "the error must name the action index");
+            assert!(
+                message.contains("`sql` requires the `sql` feature"),
+                "the error must name the demand gate: {message}"
+            );
+            assert!(
+                message.contains("--features sql"),
+                "the error must carry the rebuild instruction: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// A read prepare statement fails doc-validation (statement-level),
+/// not the demand gate: the document defect precedes activation.
+#[cfg(not(feature = "sql"))]
+#[test]
+fn sql_read_rejected_without_feature() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sql:
+    datasource: appdb
+    prepare:
+    - (SELECT 1)
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "the error must name the action index");
+            assert!(
+                message.contains("statement 0"),
+                "the error must name the statement index: {message}"
+            );
+            assert!(
+                !message.contains("feature"),
+                "validation must fire before the demand gate: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// A CTE read is a read too: the same validation-before-demand-gate
+/// ordering without the feature.
+#[cfg(not(feature = "sql"))]
+#[test]
+fn sql_with_rejected_without_feature() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sql:
+    datasource: appdb
+    prepare:
+    - with cte as (select 1) select * from cte
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "the error must name the action index");
+            assert!(
+                message.contains("statement 0"),
+                "the error must name the statement index: {message}"
+            );
+            assert!(
+                !message.contains("feature"),
+                "validation must fire before the demand gate: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// An empty prepare list names the action index before the demand
+/// gate fires.
+#[cfg(not(feature = "sql"))]
+#[test]
+fn sql_empty_prepare_rejected_without_feature() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sql:
+    datasource: appdb
+    prepare: []
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "the error must name the action index");
+            assert!(
+                message.contains("prepare list must not be empty"),
+                "the error must name the empty prepare list: {message}"
+            );
+            assert!(
+                !message.contains("feature"),
+                "validation must fire before the demand gate: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}

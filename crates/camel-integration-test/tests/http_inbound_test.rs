@@ -173,7 +173,7 @@ async fn inbound_consumer_honest_readiness() {
     drop(connected);
 
     let mut vars = inbound_vars(bound);
-    let mut outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars).await;
+    let mut outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars, None).await;
     // The boot-owning flow forwards the provisioned inbound address to
     // the outcome slot (rc-5yon); `None` for the fixed-port fixture.
     outcome.inbound_bound = fixture.inbound_bound;
@@ -208,7 +208,7 @@ async fn inbound_response_validated_on_wire() {
     // Pass variant: the pristine document — status 201, the stamped
     // reply header, the reply body — validates end to end.
     let mut vars = inbound_vars(bound);
-    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars).await;
+    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars, None).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -256,7 +256,7 @@ async fn inbound_response_validated_on_wire() {
         logs: fixture.doc.logs,
     };
     let mut vars = inbound_vars(bound);
-    let outcome = run_scenario_document(&corrupted, &fixture.router, &mut vars).await;
+    let outcome = run_scenario_document(&corrupted, &fixture.router, &mut vars, None).await;
     assert_eq!(outcome.verdict, None, "the corrupted body must fail");
     let mismatch = outcome
         .per_action
@@ -306,7 +306,7 @@ async fn fixed_port_backcompat() {
     drop(connected);
 
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars).await;
+    let outcome = run_scenario_document(&fixture.doc, &fixture.router, &mut vars, None).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),

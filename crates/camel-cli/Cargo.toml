@@ -112,7 +112,7 @@ serde_json.workspace = true
 ron = { workspace = true }
 
 [features]
-default = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "security"]
+default = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "integration-sql", "security"]
 otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # security forwards to the shared security-boot builder in camel-bundles
 # (scenario-shared-boot): default-on so `camel run` default builds keep
@@ -154,6 +154,11 @@ exec = ["dep:camel-component-exec"]
 # without this feature, scenario endpoints of scheme http keep the
 # infra-unavailable path.
 integration-http = ["camel-integration-test/http", "camel-integration-test/security"]
+# Integration-tier `sql:` action activation (bd rc-25lup.1, ADR-0069 §8
+# demand-gating): forwards to the harness's sql feature. Independent of
+# `integration-http` — an sql-only build runs full-boot documents whose
+# only actions are `sql:`.
+integration-sql = ["camel-integration-test/sql"]
 # Test-only: the e2e suites that spawn the real `camel` binary against
 # scenario documents stay out of the default suite (runtime and spawn
 # cost); the integration-http CI job enables them explicitly.

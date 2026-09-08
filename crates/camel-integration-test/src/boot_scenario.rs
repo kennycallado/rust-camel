@@ -116,6 +116,12 @@ pub async fn boot_scenario(
         ))
     })?;
 
+    // Boot-time lint (ungated): reject per-connection sqlite `:memory:`
+    // datasource URLs before any context preparation — a config-shape
+    // check, so it runs regardless of cargo features and before any
+    // pool is created.
+    crate::sql_action::ensure_sqlite_memory_shared(&config)?;
+
     let mut ctx = CamelConfig::configure_context_with_beans(&config, None).await?;
 
     // Tier security gate — a config-shape check, so it runs ungated

@@ -520,7 +520,7 @@ async fn document_run_all_pass_records_verdict() {
     let mut vars = ScenarioVars::new();
     vars.set("unset", Value::String("set".to_string()));
 
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     assert_eq!(
         outcome,
         DocumentOutcome {
@@ -558,7 +558,7 @@ async fn document_run_stops_at_first_failure() {
         },
     ]);
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     assert_eq!(outcome.per_action.len(), 2, "only two actions ran");
     assert_eq!(outcome.per_action[0], Ok(ScenarioVerdict::Pass));
     assert!(matches!(
@@ -608,7 +608,7 @@ async fn variable_mismatch_names_the_variable() {
         },
     ]);
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     assert_eq!(outcome.verdict, None);
     match &outcome.per_action[1] {
         Err(ScenarioFailure::ValidationMismatch { action: 1, detail }) => {
@@ -1223,7 +1223,7 @@ async fn immediate_count_passes_and_mismatch_names_counts() {
         partner_validate(2, None, None, None),
     ]);
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
 
     assert!(
         matches!(outcome.per_action[2], Ok(ScenarioVerdict::Pass)),
@@ -1267,7 +1267,7 @@ async fn filtered_mismatch_names_method_and_path_clauses() {
         partner_validate(2, Some("post"), Some("/orders"), None),
     ]);
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
 
     assert_eq!(outcome.verdict, None, "the filtered count must fail");
     let ScenarioFailure::ValidationMismatch { detail, .. } = first_failure(&outcome) else {
@@ -1320,7 +1320,7 @@ async fn poll_passes_once_count_settles() {
         Some(Duration::from_secs(5)),
     )]);
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     settling.await.expect("the settling task must finish");
 
     assert_eq!(
@@ -1351,7 +1351,7 @@ async fn overshoot_never_passes() {
         Some(Duration::from_secs(1)),
     )]);
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
 
     assert_eq!(
         outcome.verdict, None,
@@ -1388,7 +1388,7 @@ async fn deadline_expiry_reports_final_actual() {
         Some(Duration::from_secs(1)),
     )]);
     let mut vars = ScenarioVars::new();
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
 
     assert_eq!(outcome.verdict, None, "the count must never reach 3");
     let ScenarioFailure::ValidationMismatch { detail, .. } = first_failure(&outcome) else {
@@ -1859,4 +1859,296 @@ async fn unbound_send_failure_carries_redacted_endpoint() {
         endpoint.contains("authPassword=***"),
         "the redacted form must print: {endpoint}"
     );
+}
+
+// -------------------------------------------------------------------------
+// Scenario `sql:` action end-to-end (bd rc-25lup.1)
+//
+// Every test here is project-based like `boot_scenario_test`: a
+// temporary `Camel.toml` with a datasource, the minimal route file,
+// and a `.test.yaml` document parsed through
+// `parse_scenario_document`. The boot owns the catalog, so the run
+// exercises the exact production wiring: boot → `run.boot
+// .datasource_catalog()` → `run_scenario_document`.
+// -------------------------------------------------------------------------
+
+/// The shared-cache in-memory URL every sql e2e test boots with. The
+/// boot-time lint rejects the bare form. `max_connections = 1` keeps
+/// every statement on one connection so CREATE/INSERT state cannot
+/// split across pooled connections (the camel-sql `:memory:` test
+/// precedent: consumer.rs, health.rs, producer.rs, and the executor
+/// stub in `sql_action_test`).
+#[cfg(feature = "sql")]
+const SQL_E2E_DATASOURCE: &str = r#"
+[datasources.appdb]
+db_url = "sqlite::memory:?cache=shared"
+max_connections = 1
+"#;
+
+/// The minimal route file: one unconsumed `direct:` route, so the
+/// boot starts exactly one route and the `sql:` action is the only
+/// scenario behavior.
+#[cfg(feature = "sql")]
+const SQL_E2E_ROUTE: &str = r#"
+routes:
+  - id: boot-route
+    from: direct:start
+    steps:
+      - to: log:info
+"#;
+
+/// Writes the temporary sql e2e project (the datasource `Camel.toml`,
+/// the minimal route file, and the `.test.yaml` document) and returns
+/// the directory plus the parsed document. Only for VALID documents:
+/// parsing panics on a rejected one, so the load-error tests write
+/// their files directly.
+#[cfg(feature = "sql")]
+fn sql_project(doc: &str) -> (tempfile::TempDir, ScenarioDocument) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("Camel.toml"), SQL_E2E_DATASOURCE).expect("write Camel.toml");
+    std::fs::write(dir.path().join("routes.yaml"), SQL_E2E_ROUTE).expect("write route file");
+    let doc_path = dir.path().join("case.test.yaml");
+    std::fs::write(&doc_path, doc).expect("write document");
+    let document = crate::parse_scenario_document(&doc_path).expect("document parses");
+    (dir, document)
+}
+
+/// Writes the sql e2e project's `Camel.toml` and route file into
+/// `dir`, for the load-error tests that hand-write an invalid
+/// document.
+#[cfg(feature = "sql")]
+fn sql_project_files(dir: &tempfile::TempDir, doc: &str) -> std::path::PathBuf {
+    std::fs::write(dir.path().join("Camel.toml"), SQL_E2E_DATASOURCE).expect("write Camel.toml");
+    std::fs::write(dir.path().join("routes.yaml"), SQL_E2E_ROUTE).expect("write route file");
+    let doc_path = dir.path().join("case.test.yaml");
+    std::fs::write(&doc_path, doc).expect("write document");
+    doc_path
+}
+
+/// Boots the project with an empty layered environment and runs its
+/// document through [`run_scenario_document`] with the boot's own
+/// datasource catalog. The run is returned so a test can verify the
+/// seeded state through the same catalog before shutdown.
+#[cfg(feature = "sql")]
+async fn sql_e2e_run(
+    dir: &tempfile::TempDir,
+    doc: &ScenarioDocument,
+) -> (
+    crate::boot_scenario::ScenarioRun,
+    DocumentOutcome,
+    std::sync::Arc<dyn camel_api::datasource::DatasourceCatalog>,
+) {
+    use crate::env_layers::{LayeredEnv, ambient_std};
+    let env = LayeredEnv::new(BTreeMap::new(), BTreeMap::new(), Vec::new(), ambient_std());
+    let run = crate::boot_scenario::boot_scenario(doc, dir.path(), &env)
+        .await
+        .expect("the sql project must boot");
+    let catalog = run.boot.datasource_catalog();
+    let router = PartnerRouter::new(BTreeMap::new());
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(doc, &router, &mut vars, Some(&catalog)).await;
+    (run, outcome, catalog)
+}
+
+/// The full happy path: one `sql:` action seeds a table and the run
+/// passes; the test-side read through the SAME catalog the boot
+/// handed the runner pins the single-catalog invariant — the seeds
+/// landed in the pool the routes resolve.
+#[tokio::test]
+#[cfg(feature = "sql")]
+async fn sql_prepare_seeds_and_proceeds() {
+    use sqlx::Row;
+    let (dir, doc) = sql_project(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sql:
+    datasource: appdb
+    prepare:
+    - CREATE TABLE t (v TEXT)
+    - INSERT INTO t VALUES ('seed')
+"#,
+    );
+    let (mut run, outcome, catalog) = sql_e2e_run(&dir, &doc).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the seeded scenario must pass: {outcome:?}"
+    );
+    let handle = catalog.get_pool("appdb").await.expect("pool resolves");
+    let pool = handle.downcast::<sqlx::AnyPool>().expect("any pool");
+    let row = sqlx::query("SELECT COUNT(*) AS n FROM t")
+        .fetch_one(&*pool)
+        .await
+        .expect("the seeded table must be readable");
+    let n: i64 = row.get("n");
+    assert_eq!(n, 1, "exactly one seed row must exist");
+    run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
+}
+
+/// Item 0 is a read (`select` prefix): doc-validation names the action
+/// index and the statement index, and the document never boots.
+#[tokio::test]
+#[cfg(feature = "sql")]
+async fn sql_read_statement_is_load_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let doc_path = sql_project_files(
+        &dir,
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sql:
+    datasource: appdb
+    prepare:
+    - (SELECT 1)
+"#,
+    );
+    let err =
+        crate::parse_scenario_document(&doc_path).expect_err("a read prepare statement must fail");
+    match err {
+        crate::DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "the error must name the action index");
+            assert!(
+                message.contains("statement 0"),
+                "the error must name the statement index: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// A CTE read (`with` prefix) is a read too: the same load-error
+/// shape as the `select` prefix.
+#[tokio::test]
+#[cfg(feature = "sql")]
+async fn sql_with_statement_is_load_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let doc_path = sql_project_files(
+        &dir,
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sql:
+    datasource: appdb
+    prepare:
+    - with cte as (select 1) select * from cte
+"#,
+    );
+    let err = crate::parse_scenario_document(&doc_path).expect_err("a CTE read must fail");
+    match err {
+        crate::DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "the error must name the action index");
+            assert!(
+                message.contains("statement 0"),
+                "the error must name the statement index: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// An empty prepare list names the action index at load.
+#[tokio::test]
+#[cfg(feature = "sql")]
+async fn sql_empty_prepare_is_load_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let doc_path = sql_project_files(
+        &dir,
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sql:
+    datasource: appdb
+    prepare: []
+"#,
+    );
+    let err =
+        crate::parse_scenario_document(&doc_path).expect_err("an empty prepare list must fail");
+    match err {
+        crate::DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "the error must name the action index");
+            assert!(
+                message.contains("prepare list must not be empty"),
+                "the error must name the empty prepare list: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// A UNIQUE violation on statement [2] stops the run, names the
+/// statement index, and redacts both the datasource URL and the row
+/// value the statement carried (ADR-0051): the diagnostic must carry
+/// neither the configured db_url nor the seeded literal.
+#[tokio::test]
+#[cfg(feature = "sql")]
+async fn sql_failure_redacts_and_stops() {
+    let (dir, doc) = sql_project(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sql:
+    datasource: appdb
+    prepare:
+    - CREATE TABLE t (v TEXT UNIQUE)
+    - INSERT INTO t VALUES ('LEAKROW7')
+    - INSERT INTO t VALUES ('LEAKROW7')
+"#,
+    );
+    let (mut run, outcome, _catalog) = sql_e2e_run(&dir, &doc).await;
+    assert_eq!(outcome.verdict, None, "the duplicate insert must fail");
+    assert_eq!(
+        outcome.per_action.len(),
+        1,
+        "only the failing action's outcome is recorded"
+    );
+    let Err(failure) = &outcome.per_action[0] else {
+        panic!("expected a failure, got {:?}", outcome.per_action[0]);
+    };
+    let text = failure.to_string();
+    assert!(
+        text.contains("statement [2]"),
+        "the failure must name the statement index: {text}"
+    );
+    assert!(
+        !text.contains("sqlite::memory:"),
+        "the datasource URL must be redacted: {text}"
+    );
+    assert!(
+        !text.contains("LEAKROW7"),
+        "the failing statement's literal must not print: {text}"
+    );
+    run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
+}
+
+/// An unknown datasource fails closed: the failure names the
+/// datasource and carries nothing URL-shaped.
+#[tokio::test]
+#[cfg(feature = "sql")]
+async fn sql_unknown_datasource_fails_closed() {
+    let (dir, doc) = sql_project(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sql:
+    datasource: nosuch
+    prepare:
+    - CREATE TABLE t (v TEXT)
+"#,
+    );
+    let (mut run, outcome, _catalog) = sql_e2e_run(&dir, &doc).await;
+    assert_eq!(outcome.verdict, None, "the unknown datasource must fail");
+    let Err(failure) = &outcome.per_action[0] else {
+        panic!("expected a failure, got {:?}", outcome.per_action[0]);
+    };
+    let text = failure.to_string();
+    assert!(
+        text.contains("nosuch"),
+        "the failure must name the datasource: {text}"
+    );
+    assert!(
+        !text.contains("sqlite::memory:"),
+        "no URL may leak through a failed datasource lookup: {text}"
+    );
+    run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
 }

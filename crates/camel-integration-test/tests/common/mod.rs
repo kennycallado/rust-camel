@@ -76,7 +76,7 @@ pub async fn run_logs_document(doc_yaml: &str, fixture: &str) -> DocumentOutcome
     let wired = wired_refs(&doc);
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&wired, &router, &mut vars);
-    let outcome = run_scenario_document(&doc, &router, &mut vars).await;
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
 
     let mut guard = ctx.lock().await;
     run.boot

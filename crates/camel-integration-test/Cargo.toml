@@ -48,6 +48,11 @@ http = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["http1", "client", "server"] }
 hyper-util = { workspace = true, optional = true, features = ["tokio"] }
+# Demand-gated SQL action activation (ADR-0069 §8, mirror of `http`):
+# the scenario `sql:` action executor and its sqlx dependency compile
+# only when scenarios prepare state through a datasource. The sqlite
+# driver rides along for the in-memory executor tests.
+sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "any", "sqlite"] }
 # Reply-value extraction for `expectReply` on `direct:` sends
 # (rc-qvz6): the reply body converts to a `serde_json::Value` for
 # the shared matcher verbs without the `http` feature.
@@ -80,6 +85,10 @@ http = [
     "dep:hyper",
     "dep:hyper-util",
 ]
+# Demand-gated SQL action activation (ADR-0069 §8, mirror of `http`):
+# the `sql:` action executor compiles only when scenarios prepare
+# state through a datasource.
+sql = ["dep:sqlx"]
 
 [lints]
 workspace = true
