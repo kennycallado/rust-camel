@@ -502,8 +502,16 @@ that reaches the wire SHALL be recorded before any scripting decision.
 
 A `validate` action MAY target a partner with
 `target: {partner: <declared endpoint URI>}`. The URI MUST equal a
-declared harness `http` endpoint ref; otherwise the run SHALL report
-`doc-validation` naming the URI and exit 2. The action SHALL assert on
+harness `http` endpoint ref declared by the scenario's own
+`send`/`receive` actions, OR the reference MUST use the object form
+with `provisioning: harness` on an `http` endpoint while a `partners:`
+entry names the URI — in which case the validate action's own
+reference declares the harness partner and SHALL wire it exactly as a
+`send`/`receive` reference does: the driver binds the partner, fills
+the reference's `bindVar` with the bound authority, and exposes it
+through the harness-provisioned env fold. Any other partner URI is a
+load error: the run SHALL report `doc-validation` naming the URI and
+exit 2. The action SHALL assert on
 the partner's recorded requests through an `expectation` map carrying
 exactly one bound form — `count: n` (exact), `atLeast: n`, `atMost: n`,
 or `atLeast` combined with `atMost` (a range, requiring
@@ -720,10 +728,24 @@ exit 2.
 
 #### Scenario: partner target with undeclared URI is a load error
 
-- **GIVEN** a validate action whose `partner` URI equals no declared
-  harness `http` endpoint ref
+- **GIVEN** a validate action whose `partner` URI is a plain string,
+  or an object form no `partners:` entry names, and it equals no
+  harness `http` endpoint ref declared by the scenario's
+  `send`/`receive` actions
 - **WHEN** the document loads
 - **THEN** the run reports `doc-validation` naming the URI and exits 2
+
+#### Scenario: object-form validate partner self-declares
+
+- **GIVEN** a scenario whose only reference to an `http` partner is a
+  validate action using the object form with `provisioning: harness`
+  and a `bindVar`, and a `partners:` entry naming the URI, with no
+  `send`/`receive` action referencing it
+- **WHEN** the scenario runs
+- **THEN** the driver binds the partner, fills the `bindVar` with the
+  bound authority, exposes it through the harness-provisioned env
+  fold, and the validate asserts on the partner's recorded requests —
+  with no sacrificial `receive` and no timeout verdict
 
 #### Scenario: deadline on a non-partner target is a load error
 
