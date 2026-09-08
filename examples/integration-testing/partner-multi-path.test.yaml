@@ -1,0 +1,67 @@
+# Partner multi-path scenario (partner-multi-path.test.yaml): ONE
+# declared harness endpoint serves TWO route dial paths. The route
+# dials `/orders` then `/billing` on the one `${env:MOCK}` authority,
+# and the `partners:` section scripts each path to a distinct body.
+#
+# The partner is declared ONCE through the object-form partner target
+# of the first validate: the harness folds `bindVar: MOCK` into both
+# tiers (scenario variables carry `host:port`, the route env carries
+# the full `http://host:port` form) before the action list runs. No
+# second endpoint, no second bindVar, no second listener — that
+# fan-out is the anti-pattern this pair replaces.
+#
+# The dynamic-reference receive resolves the registered partner BY
+# AUTHORITY (`http://${MOCK}/orders`) and drains the declared path's
+# arrival lane. Arrivals queue per path on that single listener, and
+# the receive sees the wire REQUEST (the response went to the route).
+# A sibling path asserts through the recorder: an exact-count partner
+# validate with a `path` filter. A receive `from` naming a sibling
+# path would still drain the declared lane (the lane key is the
+# registered endpoint), so per-path counts — not per-path receives —
+# are the assertion surface for paths the declaration does not name.
+#
+# The partner-target validates are exact-count: the count must equal
+# the recorded arrivals after the `path` filter, never a subset. The
+# deadline polls until the count settles or the deadline passes.
+routeFiles: [partner-multi-path.routes.yaml]
+scenario:
+  - send:
+      to: direct:start
+      body: fanout-payload
+  - validate:
+      target:
+        partner:
+          endpoint: http://127.0.0.1:0/orders
+          provisioning: harness
+          bindVar: MOCK
+      expectation: {count: 1, path: /orders}
+      deadline: 5s
+  - receive:
+      from: http://${MOCK}/orders
+      deadline: 5s
+      extract:
+        ordersPath: path
+        ordersBody: body
+  - validate:
+      target: {variable: ordersPath}
+      expectation: /orders
+  - validate:
+      target: {variable: ordersBody}
+      expectation: fanout-payload
+  - validate:
+      target:
+        partner:
+          endpoint: http://127.0.0.1:0/orders
+          provisioning: harness
+      expectation: {count: 1, path: /billing}
+      deadline: 5s
+partners:
+  http://127.0.0.1:0/orders:
+    - path: /orders
+      response:
+        status: 200
+        body: orders-ok
+    - path: /billing
+      response:
+        status: 200
+        body: billing-ok

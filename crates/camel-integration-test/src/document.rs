@@ -8,8 +8,11 @@
 //! values, an optional `envPassthrough:` allowlist, an optional
 //! endpoint-keyed `partners:` scripting map, an optional pinned
 //! `profile`, an optional document-level `sendDeadline` bounding
-//! every send, and an optional document-level `inbound:` listener
-//! declaration (feature `http`). Unknown fields are rejected.
+//! every send, an optional document-level `inbound:` listener
+//! declaration (feature `http`), and an optional document-level
+//! `logs:` assertion block (rc-tdgh5) whose grammar is clause-checked
+//! here and evaluated against the harness capture window at run time.
+//! Unknown fields are rejected.
 //!
 //! The scenario vocabulary and the unit-tier vocabulary (`inputs`,
 //! `expects`, `intercepts`) never mix in one document. A document with
@@ -28,8 +31,9 @@ use std::time::Duration;
 use camel_api::Value;
 use camel_core::RouteDefinition;
 use noyalib::compat::serde_yaml;
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
+
+use error::{RawEndpointRef, classify_yaml_error, endpoint_from_raw, parse_duration};
 
 // The partner-script grammar lives in its own module; the public
 // types are re-exported here so the document API stays one surface.
@@ -39,6 +43,11 @@ pub use crate::partner_script::{PartnerFault, PartnerScript, PartnerScriptRespon
 // serde stage below constructs these core types directly.
 pub use camel_matchers::RequestExpectation as PartnerExpectation;
 pub use camel_matchers::{CountBound, Expectation, PathFilter};
+// The load-error vocabulary and the raw endpoint-reference
+// conversion live in the submodule `error` (rc-0ahfl); `DocError`
+// stays re-exported here so the document API keeps one surface.
+pub mod error;
+pub use error::DocError;
 
 // ---------------------------------------------------------------------------
 // Public model
@@ -81,6 +90,14 @@ pub struct ScenarioDocument {
     /// in a build without the feature is a named load error (ADR-0069
     /// §8 demand-gated activation).
     pub inbound: Option<InboundListener>,
+    /// The document-level `logs:` assertion block (rc-tdgh5):
+    /// optional; when present, the runner opens a capture window at
+    /// document start and evaluates the clauses against the captured
+    /// events after the action loop. Requires the harness's capture
+    /// subscriber to own the process's tracing seat (first-wins
+    /// `try_init` before the boot); otherwise the document fails
+    /// through the apparatus class.
+    pub logs: Option<LogsAssertion>,
 }
 
 /// The route source of a scenario document. Exactly one form is
@@ -272,6 +289,40 @@ pub struct InboundListener {
     pub bind_var: String,
 }
 
+/// The document-level `logs:` assertion block (rc-tdgh5): log-content
+/// expectations the runner evaluates against the capture window that
+/// spans the document run. Conjunction across clauses — every entry of
+/// every list must hold; `None`-valued clauses assert nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LogsAssertion {
+    /// Substring markers: each entry must appear in at least one
+    /// captured event's message.
+    pub contains: Vec<String>,
+    /// Unanchored patterns: each entry must match at least one
+    /// captured event's message. Every pattern compiles at load time;
+    /// a non-compiling pattern is a load error.
+    pub regex: Vec<String>,
+    /// Severity ceiling: no captured event may carry a level above
+    /// this cap. `None` asserts nothing about levels.
+    pub no_level_above: Option<LogLevel>,
+}
+
+/// A `noLevelAbove` severity. The grammar accepts exactly
+/// `trace|debug|info|warn|error`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    /// Below `debug`.
+    Trace,
+    /// Below `info`.
+    Debug,
+    /// Below `warn`.
+    Info,
+    /// Below `error`.
+    Warn,
+    /// The most severe level.
+    Error,
+}
+
 /// The scripted responses a document's `partners:` entry maps to, for
 /// one endpoint key. `None` when the document declares no entry for
 /// the endpoint — the caller binds a permissive partner. `Some` maps
@@ -365,6 +416,10 @@ struct RawDocument {
     // themselves in every build, and the `http` feature gate fires
     // after structure (ADR-0069 §8 demand-gated activation).
     inbound: Option<serde_yaml::Value>,
+    // Document-level log assertions (rc-tdgh5): raw node; the clause
+    // walk (keys, level set, regex compile) runs during validation so
+    // every error names the offending clause.
+    logs: Option<serde_yaml::Value>,
     // Unit-tier vocabulary, present only to detect and name the mixing
     // ban violation.
     inputs: Option<serde_yaml::Value>,
@@ -420,242 +475,15 @@ struct RawValidate {
     elapsed_at_least: Option<String>,
 }
 
-/// Raw endpoint reference: bare string or map with `endpoint`,
-/// `provisioning`, and `bindVar`.
-#[derive(Debug, Clone)]
-struct RawEndpointRef {
-    endpoint: String,
-    provisioning: Option<String>,
-    bind_var: Option<String>,
-}
-
-impl RawEndpointRef {
-    /// Deserializes from a bare string (shorthand) or a map.
-    fn from_yaml_value(value: serde_yaml::Value) -> Result<Self, String> {
-        match value {
-            serde_yaml::Value::String(endpoint) => Ok(Self {
-                endpoint,
-                provisioning: None,
-                bind_var: None,
-            }),
-            serde_yaml::Value::Mapping(ref map) => {
-                // Field-by-field extraction: a hand-rolled map walk gives
-                // errors that name the offending key, which the
-                // deny_unknown_fields machinery of the compat shim
-                // cannot.
-                let mut endpoint: Option<String> = None;
-                let mut provisioning: Option<String> = None;
-                let mut bind_var: Option<String> = None;
-                for (key, value) in map {
-                    match key.as_str() {
-                        "endpoint" | "provisioning" | "bindVar" => {
-                            let text = value.as_str().ok_or_else(|| {
-                                format!(
-                                    "endpoint reference `{key}` must be a string, got {value:?}"
-                                )
-                            })?;
-                            match key.as_str() {
-                                "endpoint" => endpoint = Some(text.to_string()),
-                                "provisioning" => provisioning = Some(text.to_string()),
-                                _ => bind_var = Some(text.to_string()),
-                            }
-                        }
-                        other => {
-                            return Err(format!("unknown field `{other}` in endpoint reference"));
-                        }
-                    }
-                }
-                let endpoint = endpoint
-                    .ok_or_else(|| "endpoint reference requires the `endpoint` key".to_string())?;
-                Ok(Self {
-                    endpoint,
-                    provisioning,
-                    bind_var,
-                })
-            }
-            other => Err(format!(
-                "endpoint reference must be a string or a map, got {other:?}"
-            )),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for RawEndpointRef {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = serde_yaml::Value::deserialize(deserializer)?;
-        RawEndpointRef::from_yaml_value(value).map_err(D::Error::custom)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
-/// Parse and validation errors for scenario documents.
-///
-/// Exit-code mapping for the CLI adapter (ADR-0069 section 7):
-/// classification is by variant, never by message text. Every variant
-/// is a load-time failure and maps to exit 2.
-///
-/// - `doc-validation` class — Display carries the `doc-validation:`
-///   token: `NotTestDocument`, `MissingScenario`, `MixedVocabulary`,
-///   `Validation`, `ReservedEnvKey`, `InlineRoutes`,
-///   `InlineRoutesRejected`, `ProvisioningWithoutAuthority`,
-///   `ExpectReplyOnUnsupportedSend`.
-/// - `infra-unavailable` class — `UnsupportedProvisioning` (reserved
-///   provisioning grammar; Display names the class).
-/// - Unit-tier message parity — `RouteSourceMissing` and
-///   `RouteSourceConflict` render the unit-tier parser's messages
-///   verbatim, without the token, so both parsers report identical
-///   text; the CLI maps them to exit 2 as doc parse errors, the same
-///   as the unit tier does today.
-/// - Read and serde failures — `Io`, `Yaml`, `UnknownField` map to
-///   exit 2 as doc parse errors (unreadable file, broken grammar).
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum DocError {
-    /// The document file could not be read.
-    #[error("failed to read test document {path}: {source}")]
-    Io {
-        /// Path of the unreadable document.
-        path: PathBuf,
-        /// Underlying read failure.
-        source: std::io::Error,
-    },
-    /// Malformed YAML or a type mismatch at the serde layer.
-    #[error("invalid test document: {0}")]
-    Yaml(String),
-    /// A `deny_unknown_fields` rejection.
-    #[error("unknown field in test document: {0}")]
-    UnknownField(String),
-    /// The path lacks the reserved `.test.yaml` / `.test.yml` suffix.
-    #[error(
-        "doc-validation: not a test document: {path} (reserved suffixes are `.test.yaml` and `.test.yml`)"
-    )]
-    NotTestDocument {
-        /// The rejected path.
-        path: PathBuf,
-    },
-    /// The document declares no `scenario:` section.
-    #[error("doc-validation: scenario document must declare a `scenario:` section")]
-    MissingScenario,
-    /// The document mixes the scenario vocabulary with unit-tier
-    /// sections.
-    #[error(
-        "doc-validation: mixed vocabulary: a document with `scenario:` must not declare unit-tier fields (found: {found})"
-    )]
-    MixedVocabulary {
-        /// The unit-tier fields found, backticked and comma-joined.
-        found: String,
-    },
-    /// No route source is declared. Same message as the unit-tier
-    /// parser.
-    #[error(
-        "exactly one route source (`routeFiles`, `routeFilesFromRoot`, or `routes`) is required"
-    )]
-    RouteSourceMissing,
-    /// More than one route source is declared. Same message as the
-    /// unit-tier parser.
-    #[error("route sources {present} are mutually exclusive; exactly one route source is required")]
-    RouteSourceConflict {
-        /// The declared keys, backticked and comma-joined.
-        present: String,
-    },
-    /// An action failed validation; `index` is the position in the
-    /// `scenario:` list. An empty `scenario:` list is rejected with
-    /// index 0 (the section, not an action, failed).
-    #[error("doc-validation: scenario[{index}]: {message}")]
-    Validation {
-        /// Zero-based position of the action in the `scenario:` list.
-        index: usize,
-        /// What failed.
-        message: String,
-    },
-    /// The endpoint declares a provisioning source that is reserved in
-    /// v1; only `harness` is supported.
-    #[error(
-        "doc-validation: unsupported provisioning `{value}` for endpoint `{endpoint}`: only `harness` is supported in v1 (infra-unavailable class)"
-    )]
-    UnsupportedProvisioning {
-        /// The rejected provisioning value.
-        value: String,
-        /// The endpoint that declared it.
-        endpoint: String,
-    },
-    /// A `provisioning: harness` endpoint reference declares a
-    /// `bindVar` while its scheme (`direct:` or `fake:`) binds no
-    /// partner, so the variable would never receive a bound authority
-    /// and the entry fails later as a verdict-class var-resolution
-    /// error (rc-j87j). Rejected at load instead.
-    #[error(
-        "doc-validation: endpoint `{endpoint}` declares `bindVar` but its `{ref_scheme}:` reference binds no harness partner, so the variable would never receive a bound authority (exit-2 doc-validation class)"
-    )]
-    ProvisioningWithoutAuthority {
-        /// The endpoint whose reference cannot fill the variable.
-        endpoint: String,
-        /// The scheme of the endpoint reference (`direct` or `fake`).
-        ref_scheme: String,
-    },
-    /// A document `env` key equals an endpoint's `bindVar`. The
-    /// reserved set is exactly the `bindVar` values declared by the
-    /// document's own endpoints; the harness binding wins.
-    #[error(
-        "doc-validation: env key `{key}` is reserved: it is the harness bind variable of endpoint `{endpoint}`"
-    )]
-    ReservedEnvKey {
-        /// The reserved key.
-        key: String,
-        /// The endpoint that reserved it.
-        endpoint: String,
-    },
-    /// A `partners` entry failed validation; `endpoint` is the entry
-    /// key of the failing script list.
-    #[error("doc-validation: partners[{endpoint}]: {message}")]
-    Partners {
-        /// The endpoint key of the failing entry.
-        endpoint: String,
-        /// What failed.
-        message: String,
-    },
-    /// Inline `routes` failed to parse.
-    #[error("doc-validation: inline routes: {0}")]
-    InlineRoutes(String),
-    /// The document's route source is inline `routes`. Inline
-    /// definitions cannot boot in v1; the author must declare
-    /// `routeFiles`. Rejected at load, before partners bind, instead
-    /// of failing the boot afterward (rc-9dpx).
-    #[error(
-        "doc-validation: inline `routes` are rejected at load: declare `routeFiles` instead (inline definitions cannot boot in the scenario tier; exit 2)"
-    )]
-    InlineRoutesRejected,
-    /// A send declares `expectReply` on a scheme that produces no
-    /// synchronous reply: only the context-stimulus `direct:` send
-    /// returns one. Partner sends (`http`/`https`) park their
-    /// roundtrips for a later `receive`, and `fake:` adapters record
-    /// sends without answering, so the assertion could never run
-    /// (rc-qvz6). Rejected at load, naming the action index, the
-    /// scheme, and the literal `expectReply` field.
-    #[error(
-        "doc-validation: scenario[{index}]: `expectReply` is only valid on a `direct:` send, not `{scheme}` (exit 2)"
-    )]
-    ExpectReplyOnUnsupportedSend {
-        /// Zero-based position of the action in the `scenario:` list.
-        index: usize,
-        /// The scheme of the send's endpoint reference.
-        scheme: String,
-    },
-}
-
-/// Classifies a compat-layer (serde_yaml) error text, mirroring the
-/// unit-tier classifier.
-fn classify_yaml_error(raw: &str) -> DocError {
-    if raw.contains("unknown field") {
-        return DocError::UnknownField(raw.to_string());
-    }
-    DocError::Yaml(raw.to_string())
+/// Raw `logs:` block (rc-tdgh5): keys and level stay raw so the
+/// clause walk can name the offending entry; conversion happens during
+/// validation, never at the serde layer.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RawLogs {
+    contains: Option<Vec<String>>,
+    regex: Option<Vec<String>>,
+    no_level_above: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -679,7 +507,10 @@ fn classify_yaml_error(raw: &str) -> DocError {
 /// `provisioning: harness` target whose `http` URI a `partners:` entry
 /// names. The optional `inbound:` section converts
 /// between (g) and (h): grammar in every build, activation
-/// demand-gated behind `http` (ADR-0069 §8).
+/// demand-gated behind `http` (ADR-0069 §8). (j) The optional
+/// `logs:` block converts (clause grammar: contains markers,
+/// load-compiled regex, the noLevelAbove level set) with
+/// clause-naming load errors.
 pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError> {
     if !camel_dsl::discovery::is_test_document(path) {
         return Err(DocError::NotTestDocument {
@@ -874,6 +705,10 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
         .as_deref()
         .map(|raw_deadline| parse_duration(raw_deadline, 0, "sendDeadline"))
         .transpose()?;
+    // (j) Document-level log assertions (rc-tdgh5): the clause walk
+    // runs during validation so a malformed block is a load error
+    // naming the offending clause.
+    let logs = raw.logs.map(logs_from_raw).transpose()?;
     Ok(ScenarioDocument {
         source_path: path.to_path_buf(),
         route_source,
@@ -884,6 +719,44 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
         profile: raw.profile,
         send_deadline,
         inbound,
+        logs,
+    })
+}
+
+/// Converts the raw `logs:` node (rc-tdgh5). Malformed blocks are load
+/// errors through [`DocError::LogsBlock`]: an unknown key, a level
+/// outside `trace|debug|info|warn|error`, or a regex that does not
+/// compile — each error names the offending clause.
+fn logs_from_raw(value: serde_yaml::Value) -> Result<LogsAssertion, DocError> {
+    let block_error = |detail: String| DocError::LogsBlock { detail };
+    let raw: RawLogs = serde_yaml::from_value(value).map_err(|e| block_error(e.to_string()))?;
+    let no_level_above = raw
+        .no_level_above
+        .as_deref()
+        .map(|raw_level| match raw_level {
+            "trace" => Ok(LogLevel::Trace),
+            "debug" => Ok(LogLevel::Debug),
+            "info" => Ok(LogLevel::Info),
+            "warn" => Ok(LogLevel::Warn),
+            "error" => Ok(LogLevel::Error),
+            other => Err(block_error(format!(
+                "`logs.noLevelAbove` must be one of trace|debug|info|warn|error, got `{other}`"
+            ))),
+        })
+        .transpose()?;
+    for pattern in raw.regex.iter().flatten() {
+        // Compile-time gate: the runner matches unanchored, so a
+        // pattern that compiles here always compiles there.
+        if let Err(error) = regex::Regex::new(pattern) {
+            return Err(block_error(format!(
+                "`logs.regex` entry `{pattern}` does not compile: {error}"
+            )));
+        }
+    }
+    Ok(LogsAssertion {
+        contains: raw.contains.unwrap_or_default(),
+        regex: raw.regex.unwrap_or_default(),
+        no_level_above,
     })
 }
 
@@ -1138,39 +1011,6 @@ fn build_target(value: &serde_yaml::Value, index: usize) -> Result<ScenarioTarge
     }
 }
 
-/// Applies the provisioning gate: only `harness` (or absent) passes,
-/// and a harness entry whose reference scheme binds no partner
-/// (`direct:`, `fake:`) must not declare a `bindVar` — the variable
-/// would never receive a bound authority (rc-j87j). A
-/// `direct:`/`fake:` entry without a `bindVar` stays legal.
-fn endpoint_from_raw(raw: RawEndpointRef) -> Result<EndpointRef, DocError> {
-    let provisioning = match raw.provisioning.as_deref() {
-        None => None,
-        Some("harness") => Some(Provisioning::Harness),
-        Some(value) => {
-            return Err(DocError::UnsupportedProvisioning {
-                value: value.to_string(),
-                endpoint: raw.endpoint.clone(),
-            });
-        }
-    };
-    if provisioning == Some(Provisioning::Harness)
-        && raw.bind_var.is_some()
-        && let Some(scheme) = ref_scheme(&raw.endpoint)
-        && (scheme == "direct" || scheme == "fake")
-    {
-        return Err(DocError::ProvisioningWithoutAuthority {
-            endpoint: raw.endpoint.clone(),
-            ref_scheme: scheme.to_string(),
-        });
-    }
-    Ok(EndpointRef {
-        endpoint: raw.endpoint,
-        provisioning,
-        bind_var: raw.bind_var,
-    })
-}
-
 /// The scheme prefix of an endpoint URI: the non-empty text before
 /// the first `:`, or `None` when the URI carries no scheme — which
 /// requires the separator; a colon-less string (`orders`) is a bare
@@ -1178,15 +1018,6 @@ fn endpoint_from_raw(raw: RawEndpointRef) -> Result<EndpointRef, DocError> {
 fn ref_scheme(endpoint: &str) -> Option<&str> {
     let (scheme, _) = endpoint.split_once(':')?;
     (!scheme.is_empty()).then_some(scheme)
-}
-
-/// Parses a humantime duration string, naming the action index on
-/// failure.
-fn parse_duration(raw: &str, index: usize, field: &str) -> Result<Duration, DocError> {
-    humantime::parse_duration(raw).map_err(|e| DocError::Validation {
-        index,
-        message: format!("invalid {field} `{raw}`: {e}"),
-    })
 }
 
 /// Whether `s` is a valid HTTP token: non-empty and composed only of

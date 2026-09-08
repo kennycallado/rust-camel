@@ -1,0 +1,10 @@
+# Log-assertion fixture (rc-tdgh5): the same direct-driven route as
+# marker-info, logging at WARN — the severity a `noLevelAbove: info`
+# block must catch, with the offending event's level,
+# `camel_component_log` target, and rendered message listed in the
+# diagnostic.
+routes:
+  - id: marker-warn
+    from: direct:start
+    steps:
+      - to: log:marker?level=WARN

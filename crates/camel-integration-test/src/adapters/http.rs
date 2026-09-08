@@ -391,8 +391,10 @@ impl HttpPartner {
     ) -> Result<IncomingMessage, ReceiveError> {
         // Same origin-form shape the listener keys lanes by: path and
         // query. An empty or absent path is an apparatus error — the
-        // declaration names no lane.
-        let path = ParsedTarget::parse(lane_key)
+        // declaration names no lane. The parse renders its declaration
+        // echo through the stored secret-key set (ADR-0051).
+        let secret_keys = self.stored_secret_query_keys();
+        let path = ParsedTarget::parse(lane_key, &secret_keys)
             .map_err(ReceiveError::Transport)?
             .target;
         let lane = lane_for(&self.inner.server.arrivals, &path);
@@ -408,7 +410,6 @@ impl HttpPartner {
             // evidence both redacted (ADR-0051).
             Ok(None) | Err(_) => {
                 let dropped = lane.dropped.load(Ordering::Relaxed);
-                let secret_keys = self.stored_secret_query_keys();
                 if dropped > 0 {
                     // A lane that dropped arrivals while the scenario
                     // was not receiving is a harness defect, not a
@@ -575,8 +576,15 @@ impl ClientLane {
                 bound: LANE_FIFO_CAPACITY,
             });
         }
-        // (b) Validate the target URI.
-        let target = ParsedTarget::parse(target_uri)?;
+        // (b) Validate the target URI. The parse renders its
+        // declaration echo through the lane's stored secret-key set
+        // (ADR-0051).
+        let secret_keys = self
+            .secret_query_keys
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let target = ParsedTarget::parse(target_uri, &secret_keys)?;
         // (c) Dial inline: connection refused fails the send here.
         let stream = TcpStream::connect((target.host.as_str(), target.port))
             .await
@@ -724,10 +732,16 @@ struct ParsedTarget {
 
 impl ParsedTarget {
     /// Parses an endpoint URI for the client role. Only scheme
-    /// `http` is supported: the partner speaks plain loopback.
-    fn parse(endpoint: &str) -> Result<Self, TransportError> {
+    /// `http` is supported: the partner speaks plain loopback. The
+    /// declaration echo inside apparatus errors renders through
+    /// [`redact_wire_path`] with `secret_keys`, so a secret-marked
+    /// query value never prints (ADR-0051).
+    fn parse(endpoint: &str, secret_keys: &[String]) -> Result<Self, TransportError> {
         let invalid = |detail: String| TransportError::Other {
-            message: format!("endpoint {endpoint}: {detail}"),
+            message: format!(
+                "endpoint {}: {detail}",
+                redact_wire_path(endpoint, secret_keys)
+            ),
         };
         let uri = Uri::try_from(endpoint).map_err(|e| invalid(format!("invalid uri: {e}")))?;
         match uri.scheme_str() {
@@ -758,12 +772,10 @@ impl ParsedTarget {
             })
             .unwrap_or("");
         if !authored_target.starts_with('/') {
-            // redaction: the raw declaration names itself in this
-            // apparatus error, but the secret-key set lives on the
-            // router and adapters, not on this free fn — threading it
-            // in would be new plumbing beyond the sweep's reach. The
-            // leak needs a doubly-pathological declaration (no path
-            // AND a secret-bearing query).
+            // An empty or absent path names no lane: an apparatus
+            // error, never a silent `/` lane. The declaration echo
+            // renders through `invalid`, whose redaction masks any
+            // secret-marked query value (ADR-0051).
             return Err(invalid(
                 "empty or absent path: a harness target must declare a request path, never a silent `/` lane"
                     .to_string(),
@@ -1130,7 +1142,7 @@ mod tests {
     /// `serve` is a wire-recording concern, not a declaration parse).
     #[test]
     fn parsed_target_empty_path_is_apparatus_error() {
-        let error = ParsedTarget::parse("http://host").expect_err("an empty path must fail");
+        let error = ParsedTarget::parse("http://host", &[]).expect_err("an empty path must fail");
         match error {
             TransportError::Other { message } => {
                 assert!(
@@ -1140,6 +1152,48 @@ mod tests {
                 assert!(
                     message.contains("path"),
                     "must name the missing path: {message}"
+                );
+            }
+            other => panic!("expected an apparatus-class transport error, got {other:?}"),
+        }
+    }
+
+    /// The empty-path apparatus error redacts a secret-marked query
+    /// value (ADR-0051): the declaration echo keeps the raw
+    /// `authPassword=` key span but masks the value — the secret
+    /// never prints.
+    #[test]
+    fn empty_path_error_redacts_secret_query_value() {
+        let error =
+            ParsedTarget::parse("http://host?authPassword=x", &["authPassword".to_string()])
+                .expect_err("an empty path must fail");
+        match error {
+            TransportError::Other { message } => {
+                assert!(
+                    message.contains("authPassword=***"),
+                    "the secret value must be masked: {message}"
+                );
+                assert!(
+                    !message.contains("authPassword=x"),
+                    "the secret must never print raw: {message}"
+                );
+            }
+            other => panic!("expected an apparatus-class transport error, got {other:?}"),
+        }
+    }
+
+    /// With no secret keys configured the empty-path error names the
+    /// declaration's query unchanged — the diagnostic stays maximally
+    /// informative for non-secret pairs.
+    #[test]
+    fn empty_path_error_keeps_plain_query_diagnostic() {
+        let error =
+            ParsedTarget::parse("http://host?flag=a", &[]).expect_err("an empty path must fail");
+        match error {
+            TransportError::Other { message } => {
+                assert!(
+                    message.contains("http://host?flag=a"),
+                    "must name the declaration unchanged: {message}"
                 );
             }
             other => panic!("expected an apparatus-class transport error, got {other:?}"),

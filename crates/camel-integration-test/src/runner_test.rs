@@ -56,6 +56,7 @@ fn doc_with(actions: Vec<ScenarioAction>) -> ScenarioDocument {
         profile: None,
         send_deadline: None,
         inbound: None,
+        logs: None,
     }
 }
 
@@ -527,6 +528,7 @@ async fn document_run_all_pass_records_verdict() {
             verdict: Some(ScenarioVerdict::Pass),
             final_failure: None,
             inbound_bound: None,
+            logs_failure: None,
         }
     );
 }

@@ -1,0 +1,10 @@
+# Log-assertion fixture (rc-tdgh5): the route logs the exchange body
+# through the camel-log component at INFO. The rendered event is the
+# composite `[marker] Body: <body>` on target `camel_component_log`,
+# so the scenario's `logs.contains` markers assert against message
+# substrings and `logs.regex` entries match unanchored.
+routes:
+  - id: marker-info
+    from: direct:start
+    steps:
+      - to: log:marker?level=INFO

@@ -294,4 +294,34 @@ partners:
     response: {status: 200, body: tile}
 ```
 
+One declared harness endpoint and one `bindVar` can serve every path a
+route dials. The route's `to:` URIs share the one authority and differ
+only in path, for example `http://${MOCK}/orders` and
+`http://${MOCK}/billing`. The `partners:` section scripts each path
+under the same declared key, one entry per path with its own response
+body. The two-key rule governs resolution: the declared endpoint string
+is the provisioning key that binds the listener, and an interpolated
+reference such as `http://${MOCK}/billing` is a dynamic reference the
+router resolves to the already-bound partner by authority. Arrivals queue
+per request path on that single listener.
+
+Do not declare one endpoint per path. The N-bindVar fan-out provisions
+one listener per path for what is one logical partner, and the extra
+bindings reassign ports spuriously; this caused the 2026-09-06 pilot
+incident. The receive drains the declared endpoint's own lane, so
+sibling paths assert through exact-count partner validates with `path`
+filters. The runnable example pair lives in
+[`examples/integration-testing/partner-multi-path.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/integration-testing/partner-multi-path.test.yaml) and [`partner-multi-path.routes.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/integration-testing/partner-multi-path.routes.yaml).
+
+A migration note for suites that grew one script per assertion: express
+each independent assertion chain as its own scenario document.
+Documents run independently, and the runner continues past a failing
+document, so one `camel test` run reports every chain. ADR-0069
+section 11 keeps the ordered action list as the pin: the actions inside
+one document stay ordered.
+
 Back-to-back `send:` actions with no intervening `receive:` dispatch genuinely concurrent requests. The crate [README](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/README.md) documents the burst-send recipe for asserting the concurrent arrivals. A `direct:` send may declare `expectReply` to assert the route's synchronous reply; the README's usage/grammar area details the verb. The scenario-tier field takes matcher verbs directly, unlike the unit tier's `expectReply` block.
+
+A scenario document may declare one document-level `logs:` block. The harness captures every tracing event emitted while the document runs, and it evaluates the block after the action list completes. Three clauses exist, and every declared clause must hold. `contains` lists substrings of captured event messages. `regex` lists unanchored patterns; each pattern matches against the composite camel-log message. `noLevelAbove` sets a level cap over the whole document window; the cap spans every target, route processors and harness tasks alike. An unknown level, an invalid pattern, or an unknown key fails the load.
+
+Log capture is process-global. Documents that run concurrently in one process attribute events conservatively: the harness files an event in every open window, so a sibling document's WARN can fail this document's `noLevelAbove` cap. Serialize log-asserting documents, or keep them on the current-thread itest path, when a document needs strict isolation.

@@ -18,7 +18,8 @@
 //! - Apparatus class — the scenario never got a meaningful answer:
 //!   [`ScenarioFailure::ActionTransport`],
 //!   [`ScenarioFailure::PartnerStartup`],
-//!   [`ScenarioFailure::ShutdownFailure`].
+//!   [`ScenarioFailure::ShutdownFailure`],
+//!   [`ScenarioFailure::LogCaptureUnavailable`].
 //!
 //! Verdict-class failures map to exit 1 at the CLI; apparatus-class
 //! failures map to exit 2, as do doc-validation failures before the
@@ -39,8 +40,8 @@ use crate::adapters::{
     IncomingMessage, OutgoingMessage, PartnerRouter, ReceiveError, TransportError, lanes_suffix,
 };
 use crate::document::{
-    EndpointRef, Expectation, Provisioning, ScenarioAction, ScenarioDocument, ScenarioTarget,
-    ValidateExpectation,
+    EndpointRef, Expectation, LogLevel, LogsAssertion, Provisioning, ScenarioAction,
+    ScenarioDocument, ScenarioTarget, ValidateExpectation,
 };
 
 /// Partner verification for the `validate` action's `partner` target
@@ -278,6 +279,17 @@ pub enum ScenarioFailure {
         /// Teardown failure detail.
         message: String,
     },
+    /// The document declares a `logs:` block but the harness's capture
+    /// subscriber does not own the process's tracing seat (apparatus
+    /// class, `log-capture-unavailable`, rc-tdgh5): a foreign tracing
+    /// subscriber won the first-wins `try_init`, so the events the
+    /// block asserts against never reach the harness. The scenario
+    /// never got a meaningful answer.
+    #[error("log-capture-unavailable: {detail}")]
+    LogCaptureUnavailable {
+        /// Why capture cannot run (the foreign-subscriber condition).
+        detail: String,
+    },
 }
 
 /// Fills the harness bind variables into `vars` (ADR-0069 §9): every
@@ -358,11 +370,28 @@ pub struct DocumentOutcome {
     /// the caller never filled it; the post-boot slot, as
     /// `final_failure` is the post-verdict slot.
     pub inbound_bound: Option<std::net::SocketAddr>,
+    /// Document-level `logs:` block violation (rc-tdgh5): a rendered
+    /// diagnostic naming each violated clause — for `noLevelAbove`,
+    /// each offending event's level, target, and message. `Some` only
+    /// when every action passed and the logs evaluation then failed,
+    /// so `verdict` is `None` alongside it. `None` when the document
+    /// declares no `logs:` block, the block passed, an action failed
+    /// first (the block never evaluated), or capture was unavailable
+    /// (the apparatus failure lives in `per_action`).
+    pub logs_failure: Option<String>,
 }
 
 /// Executes a scenario document's actions in order against the
 /// router, one recorded outcome per action, stopping at the first
 /// failure (the whole-document contract, library-level).
+///
+/// When the document declares a `logs:` block (rc-tdgh5), a capture
+/// window opens at document start (behind the harness's process-seat
+/// ownership — a foreign subscriber fails the document through
+/// [`ScenarioFailure::LogCaptureUnavailable`] first) and the block
+/// evaluates after the action loop against the window's events: a
+/// violation fills [`DocumentOutcome::logs_failure`] with the verdict
+/// `None`.
 ///
 /// Partners route through `router`; a `send` addressed to a context
 /// component reaches the booted system under test through the
@@ -374,6 +403,29 @@ pub async fn run_scenario_document(
     router: &PartnerRouter,
     vars: &mut ScenarioVars,
 ) -> DocumentOutcome {
+    // Log-capture window (rc-tdgh5): open at document start when the
+    // document declares a `logs:` block — and only when the harness's
+    // capture subscriber owns the process's tracing seat. A foreign
+    // subscriber won the first-wins race: the document fails through
+    // the apparatus class before any action runs, because the events
+    // the block asserts against would never reach the harness.
+    let capture_window = match &doc.logs {
+        None => None,
+        Some(_) if crate::log_capture::capture_installed() => {
+            Some(crate::log_capture::open_window())
+        }
+        Some(_) => {
+            return DocumentOutcome {
+                per_action: vec![Err(ScenarioFailure::LogCaptureUnavailable {
+                    detail: "the `logs:` block needs the harness log-capture subscriber, but a foreign tracing subscriber owns this process (first-wins try_init); install nothing before the scenario harness".to_string(),
+                })],
+                verdict: None,
+                final_failure: None,
+                logs_failure: None,
+                inbound_bound: None,
+            };
+        }
+    };
     // The scenario-start anchor every `elapsedAtLeast` bound measures
     // against; taken once per run, before the first action.
     let started_at = Instant::now();
@@ -392,7 +444,19 @@ pub async fn run_scenario_document(
             }
         }
     }
-    let verdict = if failed {
+    // Logs evaluation (rc-tdgh5): only when no action failed, against
+    // the window that spanned the run. Closing unregisters the window
+    // (conservative attribution for every later window); an action
+    // failure skips evaluation and drops the handle, which unregisters
+    // the window the same way.
+    let logs_failure = match (&doc.logs, capture_window) {
+        (Some(assertion), Some(window)) if !failed => {
+            let events = window.close();
+            evaluate_logs(assertion, &events)
+        }
+        _ => None,
+    };
+    let verdict = if failed || logs_failure.is_some() {
         None
     } else {
         Some(ScenarioVerdict::Pass)
@@ -401,7 +465,85 @@ pub async fn run_scenario_document(
         per_action,
         verdict,
         final_failure: None,
+        logs_failure,
         inbound_bound: None,
+    }
+}
+
+/// Evaluates the document-level `logs:` block against the closed
+/// window's events (rc-tdgh5). Conjunction across clauses: every
+/// `contains` marker must appear in at least one event message, every
+/// `regex` entry must match at least one (unanchored), and no event
+/// may carry a level above `noLevelAbove`. `Some(diagnostic)` names
+/// every violated clause; for `noLevelAbove` it lists each offending
+/// event's level, target, and message.
+fn evaluate_logs(
+    assertion: &LogsAssertion,
+    events: &[crate::log_capture::LogEvent],
+) -> Option<String> {
+    let mut violations: Vec<String> = Vec::new();
+    for marker in &assertion.contains {
+        if !events
+            .iter()
+            .any(|event| event.message.contains(marker.as_str()))
+        {
+            violations.push(format!(
+                "`logs.contains` entry `{marker}` matched no captured event"
+            ));
+        }
+    }
+    for pattern in &assertion.regex {
+        // The load-time gate compiled every pattern; a compile failure
+        // here is unreachable, reported rather than panicked (defense
+        // in depth).
+        match regex::Regex::new(pattern) {
+            Ok(compiled) => {
+                if !events.iter().any(|event| compiled.is_match(&event.message)) {
+                    violations.push(format!(
+                        "`logs.regex` entry `{pattern}` matched no captured event"
+                    ));
+                }
+            }
+            Err(error) => violations.push(format!(
+                "`logs.regex` entry `{pattern}` does not compile: {error}"
+            )),
+        }
+    }
+    if let Some(cap) = assertion.no_level_above {
+        let offenders: Vec<&crate::log_capture::LogEvent> = events
+            .iter()
+            .filter(|event| event.level < as_tracing_level(cap))
+            .collect();
+        if !offenders.is_empty() {
+            let listed = offenders
+                .iter()
+                .map(|event| format!("{} {} {}", event.level, event.target, event.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            violations.push(format!(
+                "`logs.noLevelAbove` violated by {} event(s): {listed}",
+                offenders.len()
+            ));
+        }
+    }
+    if violations.is_empty() {
+        None
+    } else {
+        Some(violations.join("; "))
+    }
+}
+
+/// Maps the document grammar's level onto `tracing`'s ordering.
+/// `tracing` orders levels by verbosity — `TRACE` is the greatest,
+/// `ERROR` the least — so an event more SEVERE than the cap compares
+/// LESS than the cap's level (`event.level < cap`).
+fn as_tracing_level(level: LogLevel) -> tracing::Level {
+    match level {
+        LogLevel::Trace => tracing::Level::TRACE,
+        LogLevel::Debug => tracing::Level::DEBUG,
+        LogLevel::Info => tracing::Level::INFO,
+        LogLevel::Warn => tracing::Level::WARN,
+        LogLevel::Error => tracing::Level::ERROR,
     }
 }
 

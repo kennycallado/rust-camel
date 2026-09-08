@@ -85,6 +85,7 @@ routes:
             inbound: Some(InboundListener {
                 bind_var: "INBOUND".to_string(),
             }),
+            logs: None,
         };
         let env = LayeredEnv::new(BTreeMap::new(), BTreeMap::new(), Vec::new(), ambient_std());
         let mut run = boot_scenario(&doc, dir.path(), &env)

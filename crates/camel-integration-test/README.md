@@ -239,6 +239,11 @@ The same name can carry two forms in one run.
 One-line rule: scenario = authority, route env = full URI. `${env:}`
 deliberately does not resolve in scenario strings.
 
+The multi-path pattern builds on this rule: one declared partner and
+one `bindVar` serve every path a route dials on that authority
+(runnable pair: `examples/integration-testing/partner-multi-path.test.yaml`
++ `partner-multi-path.routes.yaml`).
+
 ## `inbound:` section
 
 A document may declare `inbound: {bindVar: NAME}`. The harness

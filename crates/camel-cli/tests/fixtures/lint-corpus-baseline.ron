@@ -235,6 +235,20 @@
         ],
     ),
 
+    // Runnable multi-path partner example (scenario-tier-p3-sweep,
+    // rc-2miu). Same by-design class as partner-retry above: the two
+    // producer URIs are `${env:MOCK}/orders` and `${env:MOCK}/billing`,
+    // harness-injected bindVar placeholders the catalog cannot verify
+    // outside the scenario tier — unverified-scheme Info plus the
+    // no-default R-SCHEMA Error.
+    (
+        "examples/integration-testing/partner-multi-path.routes.yaml",
+        [
+            ("R-URI-known:unverified-scheme", "info"),
+            ("R-SCHEMA", "error"),
+        ],
+    ),
+
     // R-MOCK-IN-PRODUCTION — inline `mock:` sends in the sequence-demo
     // teaching route. Pre-existing main drift from wave-E's landed
     // arrival-sequence example (8fcb14e8): the file reached main without a

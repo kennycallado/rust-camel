@@ -129,6 +129,12 @@ The per-request-path queue a partner listener feeds and a server-role
 `receive` drains. The path is the part of the endpoint URI a listener
 can discriminate; lane depth is capped (`ARRIVAL_LANE_CAPACITY`), and a
 full lane drops the queue entry while the recorder keeps it.
+Resolution is per authority: a dynamic reference resolves the
+registered partner by authority and keeps its path on the wire, so one
+declared endpoint with one `bindVar` serves every path a route dials.
+Lanes exist per path on that single listener; a receive drains the
+declared endpoint's own lane, and sibling paths assert through the
+recorder.
 _Avoid_: inbox, backlog
 
 **selector**:

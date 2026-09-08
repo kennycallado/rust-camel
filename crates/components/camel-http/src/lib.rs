@@ -2509,16 +2509,23 @@ impl HttpProducer {
             let Some(query) = resolve_endpoint_query(config)? else {
                 return Ok(config.base_url.clone());
             };
-            let mut parsed = url::Url::parse(&config.base_url).map_err(|e| {
+            // Validation only (rc-ph7z2): a malformed base still errors
+            // through the redacted-diagnostic path below. The parsed value
+            // is NEVER re-emitted — assembly is verbatim string
+            // composition, authored bytes end-to-end: no WHATWG
+            // normalization (dot-segment collapse, default-port strip,
+            // scheme/host lowercasing), matching every other arm (Papal
+            // Direction A).
+            let _: url::Url = url::Url::parse(&config.base_url).map_err(|e| {
                 CamelError::ProcessorError(format!(
                     "invalid base URL '{}': {e}",
                     redact_url_for_diagnostics(&config.base_url)
                 ))
             })?;
-            // set_query keeps already-legal bytes byte-for-byte and keeps
-            // the Url base normalization the bridge pins expect.
-            parsed.set_query(Some(&query));
-            return Ok(parsed.to_string());
+            let mut url = config.base_url.clone();
+            url.push('?');
+            url.push_str(&query);
+            return Ok(url);
         }
 
         if let Some(uri) = exchange
@@ -7621,7 +7628,10 @@ mod tests {
             .push(("token".to_string(), "secret".to_string()));
         let exchange = exchange_with_path_and_query("/foo", "dropme=1");
         let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
-        assert_eq!(url, "http://x/?token=secret");
+        // Verbatim assembly: the old round-trip normalized the empty base
+        // path to `/` (`http://x/?token=secret`); authored bytes end-to-end
+        // no longer insert it.
+        assert_eq!(url, "http://x?token=secret");
         assert!(!url.contains("/foo"));
         assert!(!url.contains("dropme"));
     }
@@ -7690,7 +7700,7 @@ mod tests {
         // `%20 never +` is global for programmatic values — the bridge arm
         // uses the same encoder as the non-bridge path. Bridging
         // semantics (what gets bridged, precedence) are unchanged.
-        assert_eq!(url, "http://x/?b=x%20y");
+        assert_eq!(url, "http://x?b=x%20y");
         assert!(!url.contains('+'));
     }
 
@@ -7708,6 +7718,121 @@ mod tests {
         assert_eq!(url, "http://h/p?a=1");
         assert!(!url.contains("dropme"), "exchange query leaked: {url}");
         assert!(!url.contains("/ignored"), "exchange path leaked: {url}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bridge arm verbatim assembly (Papal Direction A): the bridged base is
+    // never round-tripped through `url::Url` normalization — authored bytes
+    // end-to-end, identical assembly to every other resolve_url arm.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_url_bridge_preserves_dot_segments() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://h/a/../b").unwrap();
+        cfg.bridge_endpoint = true;
+        cfg.query_params.push(("k".to_string(), "1".to_string()));
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+        // Dot segments are authored bytes; the old round-trip collapsed
+        // them (`/a/../b` → `/b`). Verbatim keeps them.
+        assert_eq!(url, "http://h/a/../b?k=1");
+    }
+
+    #[test]
+    fn resolve_url_bridge_preserves_default_port() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://h:80/p").unwrap();
+        cfg.bridge_endpoint = true;
+        cfg.query_params.push(("k".to_string(), "1".to_string()));
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+        // The old round-trip stripped the default port `:80`. Verbatim
+        // keeps it.
+        assert_eq!(url, "http://h:80/p?k=1");
+    }
+
+    #[test]
+    fn resolve_url_bridge_preserves_scheme_and_host_case() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://ExAMPLE.COM/p").unwrap();
+        cfg.bridge_endpoint = true;
+        cfg.query_params.push(("k".to_string(), "1".to_string()));
+        // `from_uri`'s scheme validation is case-sensitive, so the scheme
+        // case is applied on the stored base directly — the resolve path
+        // must carry whatever bytes the operator authored.
+        cfg.base_url = "HTTP://ExAMPLE.COM/p".to_string();
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+        // The old round-trip lowercased scheme and host. Verbatim keeps
+        // both authored.
+        assert_eq!(url, "HTTP://ExAMPLE.COM/p?k=1");
+    }
+
+    #[test]
+    fn resolve_url_bridge_no_query_emits_base_verbatim() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+        cfg.bridge_endpoint = true;
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+        // No resolved query: exactly the authored base — no synthetic `/`,
+        // no dangling `?`.
+        assert_eq!(url, "http://h/p");
+    }
+
+    #[test]
+    fn resolve_url_bridge_and_non_bridge_byte_identical() {
+        // (a) Bridged arm: the effective query comes from programmatic
+        // query_params.
+        let mut bridged = HttpEndpointConfig::from_uri("http://H:80/a/../b").unwrap();
+        bridged.bridge_endpoint = true;
+        bridged
+            .query_params
+            .push(("k".to_string(), "1".to_string()));
+        let bridge_url =
+            HttpProducer::resolve_url(&Exchange::new(Message::default()), &bridged).unwrap();
+
+        // (b) Non-bridge CamelHttpQuery composition path: same effective
+        // query riding the exchange header.
+        let plain = HttpEndpointConfig::from_uri("http://H:80/a/../b").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String("k=1".to_string()),
+        );
+        let plain_url = HttpProducer::resolve_url(&exchange, &plain).unwrap();
+
+        assert_eq!(bridge_url, plain_url);
+        assert_eq!(bridge_url, "http://H:80/a/../b?k=1");
+    }
+
+    #[test]
+    fn resolve_url_bridge_preserves_ipv6_authority_verbatim() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://[::1]:8080/p").unwrap();
+        cfg.bridge_endpoint = true;
+        cfg.query_params.push(("k".to_string(), "1".to_string()));
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+        assert_eq!(url, "http://[::1]:8080/p?k=1");
+    }
+
+    #[test]
+    fn resolve_url_bridge_empty_base_path_keeps_no_synthetic_slash() {
+        let cfg = HttpEndpointConfig::from_uri("http://h?x=1&bridgeEndpoint=true").unwrap();
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+        // Authored query on an empty base path: the old round-trip
+        // inserted a synthetic `/` (`http://h/?x=1`); verbatim does not.
+        assert_eq!(url, "http://h?x=1");
     }
 
     // -----------------------------------------------------------------------
@@ -8229,6 +8354,26 @@ mod tests {
             .and_then(|v| v.as_u64())
             .unwrap();
         assert_eq!(status, 200);
+    }
+
+    #[test]
+    fn resolve_url_bridge_malformed_base_errors_no_panic() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+        cfg.bridge_endpoint = true;
+        cfg.query_params.push(("k".to_string(), "1".to_string()));
+        // `from_uri` rejects the malformed authority, so the base is set on
+        // the stored config directly (same build shape as the scheme-case
+        // test). The bridge arm's validation-only parse (rc-ph7z2) must
+        // surface it as an error — no panic.
+        cfg.base_url = "http://[::1:bad".to_string();
+        let exchange = Exchange::new(Message::default());
+
+        let err = HttpProducer::resolve_url(&exchange, &cfg)
+            .expect_err("malformed bridge base URL must error");
+        assert!(
+            err.to_string().contains("invalid base URL"),
+            "error must name the invalid base URL: {err}"
+        );
     }
 
     #[test]

@@ -149,6 +149,12 @@ scenario:
 "#,
     );
     let doc = parse_scenario_document(&doc_path).expect("parse scenario doc"); // allow-unwrap
+    // Direct full-boot calls bypass `run_scenario_doc`'s capture install
+    // (scenario.rs first statement). If you add logs-document tests to
+    // this binary, route them through `run_scenario_doc` or call
+    // `ensure_capture_subscriber()` first — a direct boot that wins the
+    // subscriber seat first turns later log assertions into
+    // `LogCaptureUnavailable` flakes.
     let result = run_scenario_full_boot(&doc, root).await;
     assert_eq!(result.doc_error, None, "permissive bind must not error");
     assert!(!result.apparatus, "no apparatus failure is expected");
@@ -338,6 +344,7 @@ fn wiring_excludes_plain_string_validate_partner() {
         profile: None,
         send_deadline: None,
         inbound: None,
+        logs: None,
     };
     let wired = wire_endpoint_refs(&doc);
     let endpoints: Vec<&str> = wired.iter().map(|r| r.endpoint.as_str()).collect();
@@ -478,7 +485,7 @@ scenario:
     );
     assert!(
         result.apparatus,
-        "infra-unavailable is apparatus class (exit 2)"
+        "full-boot-failure is apparatus class (exit 2)"
     );
 }
 

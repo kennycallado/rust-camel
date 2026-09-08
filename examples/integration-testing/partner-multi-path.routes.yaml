@@ -1,0 +1,18 @@
+# Partner multi-path route: the system under test for
+# partner-multi-path.test.yaml. One direct-triggered route dials TWO
+# paths on the ONE harness-provisioned partner authority: the `to:`
+# steps share the `${env:MOCK}` authority and differ only in path
+# (`/orders`, then `/billing`).
+#
+# `${env:MOCK}` resolves through the scenario's layered environment at
+# boot (the harness folds the bound `http://host:port` authority in);
+# it is never set under the document's own `env`. One bindVar serves
+# both dial targets. Declaring one endpoint per path (one bindVar
+# each) would provision one listener per path and reassign ports for
+# what is one logical partner — the 2026-09-06 pilot incident.
+routes:
+  - id: multi-path-fanout
+    from: direct:start
+    steps:
+      - to: ${env:MOCK}/orders
+      - to: ${env:MOCK}/billing

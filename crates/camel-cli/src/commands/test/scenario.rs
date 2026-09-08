@@ -37,15 +37,17 @@ const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter and the `http:` w
 /// action plus the apparatus-class flag for the exit mapping.
 pub(super) struct ScenarioDocResult {
     /// Per-action verdict rows, in action order; `endpoint` holds the
-    /// row label (`scenario[i] <kind>`, or `shutdown` for the
-    /// post-verdict teardown slot).
+    /// row label (`scenario[i] <kind>`, `logs` for the document-level
+    /// `logs:` block slot, or `shutdown` for the post-verdict teardown
+    /// slot).
     pub action_results: Vec<EndpointResult>,
     /// Document-level error (`infra-unavailable`, `partner-bind-failure`,
     /// `full-boot-failure`): apparatus class, exit 2.
     pub doc_error: Option<String>,
     /// Any action failed with an apparatus-class failure
     /// (`action-transport-failure`, `partner-startup-failure`,
-    /// `shutdown-failure`): exit 2 regardless of verdict failures.
+    /// `shutdown-failure`, `log-capture-unavailable`): exit 2
+    /// regardless of verdict failures.
     pub apparatus: bool,
 }
 
@@ -62,6 +64,7 @@ pub(super) fn is_apparatus(failure: &camel_integration_test::ScenarioFailure) ->
             | F::PartnerStartup { .. }
             | F::ShutdownFailure { .. }
             | F::ArrivalLaneOverflow { .. }
+            | F::LogCaptureUnavailable { .. }
     )
 }
 
@@ -87,7 +90,7 @@ fn outcome_rows(
     outcome: &camel_integration_test::DocumentOutcome,
 ) -> (Vec<EndpointResult>, bool) {
     let mut apparatus = false;
-    let action_results = outcome
+    let mut action_results: Vec<EndpointResult> = outcome
         .per_action
         .iter()
         .enumerate()
@@ -108,6 +111,18 @@ fn outcome_rows(
             }
         })
         .collect();
+    // Document-level `logs:` block violation (rc-tdgh5): verdict class
+    // (exit 1), never apparatus — the actions all passed, so the system
+    // under test answered meaningfully and only the log assertion
+    // failed. The row rides `action_results`, so the caller's `failed`
+    // counter and the JUnit report pick it up exactly like an action
+    // failure; without it a violated block would report PASS, exit 0.
+    if let Some(diagnostic) = &outcome.logs_failure {
+        action_results.push(EndpointResult {
+            endpoint: "logs".to_string(),
+            outcome: Err(diagnostic.clone()),
+        });
+    }
     (action_results, apparatus)
 }
 
@@ -245,6 +260,16 @@ pub(super) async fn run_scenario_doc(
     // path takes it for signature stability.
     #[cfg_attr(not(feature = "integration-http"), allow(unused_variables))] root: &Path,
 ) -> ScenarioDocResult {
+    // Log-capture seat (rc-tdgh5), scenario documents ONLY: claim the
+    // process's tracing seat before this document's first boot,
+    // unconditionally and idempotently (the AtomicBool makes repeats
+    // cheap). Both execution paths below — full boot and fake smoke —
+    // run behind this call, so the first scenario document in any
+    // directory wins the first-wins try_init before any boot; a later
+    // non-logs scenario boot degrades to warn-and-skip. The LEAN/unit
+    // tier never enters this function, so its byte-pinned output and
+    // the composition root's config-driven subscriber stay untouched.
+    camel_integration_test::ensure_capture_subscriber();
     let wired = wire_endpoint_refs(doc);
     #[cfg(feature = "integration-http")]
     if wired.iter().any(|r| scheme_of(&r.endpoint) != FAKE_SCHEME)

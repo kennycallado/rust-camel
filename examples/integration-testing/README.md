@@ -18,6 +18,10 @@ Files:
   declares `provisioning: harness` and `bindVar: PARTNER`; the harness
   binds it on `127.0.0.1:0` and injects `PARTNER` into the layered
   environment.
+- `partner-multi-path.test.yaml` + `partner-multi-path.routes.yaml`:
+  one harness partner and one `bindVar` (`MOCK`) serving two route dial
+  paths (`/orders`, `/billing`) on one bound authority; the multi-path
+  pattern of the [Testing chapter](../../docs/src/testing/index.md).
 
 ## Build and run
 

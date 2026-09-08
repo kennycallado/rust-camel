@@ -218,6 +218,7 @@ fn method_scenario_document(
         profile: Some("default".to_string()),
         send_deadline: None,
         inbound: None,
+        logs: None,
     }
 }
 
@@ -331,6 +332,7 @@ async fn outbound_bridge_header_corruption_fails() {
         partners: None,
         send_deadline: fixture.doc.send_deadline,
         inbound: fixture.doc.inbound,
+        logs: fixture.doc.logs,
     };
     let mut vars = ScenarioVars::new();
     let outcome = run_scenario_document(&corrupted, &fixture.router, &mut vars).await;

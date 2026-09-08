@@ -1,0 +1,9 @@
+# Log-assertion fixture (rc-tdgh5): an INFO log route whose scenario
+# body carries the `processor ... emitted order` phrasing the
+# `logs.regex` vocabulary matches unanchored (for example
+# `processor .*emitted`).
+routes:
+  - id: processor-marker
+    from: direct:start
+    steps:
+      - to: log:marker?level=INFO

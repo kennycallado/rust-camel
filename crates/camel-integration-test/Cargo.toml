@@ -49,9 +49,14 @@ http-body-util = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["http1", "client", "server"] }
 hyper-util = { workspace = true, optional = true, features = ["tokio"] }
 # Reply-value extraction for `expectReply` on `direct:` sends
-# (rc-qvz6): the reply body converts to a `serde_json::Value` for the
-# shared matcher verbs without the `http` feature.
+# (rc-qvz6): the reply body converts to a `serde_json::Value` for
+# the shared matcher verbs without the `http` feature.
 serde_json.workspace = true
+# Process-global log capture (rc-tdgh5): the registry + capture layer
+# behind the scenario tier's document-level `logs:` assertions. The
+# workspace feature set satisfies the registry minimum and lets the
+# foreign-subscriber test build an fmt subscriber.
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

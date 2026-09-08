@@ -24,6 +24,14 @@ pub mod env_layers;
 /// consumer consumes the staged socket.
 #[cfg(feature = "http")]
 pub mod inbound;
+/// Process-global log capture (rc-tdgh5): the capture subscriber, the
+/// open windows, and the captured events behind the scenario tier's
+/// document-level `logs:` assertions. The harness claims the process's
+/// tracing seat before the composition root's boot (first-wins
+/// `try_init`); when it owns the seat, [`log_capture::CaptureLayer`]
+/// attributes every event to every open window whose
+/// `[opened_at, now)` interval contains the event timestamp.
+pub mod log_capture;
 pub mod runner;
 pub mod tier;
 
@@ -50,6 +58,7 @@ pub use document::{
 pub use env_layers::{AmbientLookup, LayeredEnv, ambient_std};
 #[cfg(feature = "http")]
 pub use inbound::provision_inbound;
+pub use log_capture::{LogEvent, WindowHandle, capture_installed, ensure_capture_subscriber};
 pub use runner::{
     DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, run_scenario,
     run_scenario_document,

@@ -302,6 +302,7 @@ async fn boot_inline_routes_still_rejected() {
         profile: None,
         send_deadline: None,
         inbound: None,
+        logs: None,
     };
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("Camel.toml"), "# minimal\n").expect("write Camel.toml");
@@ -344,6 +345,7 @@ async fn boot_rejects_inbound_without_http_feature() {
         inbound: Some(crate::InboundListener {
             bind_var: "INBOUND".to_string(),
         }),
+        logs: None,
     };
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("Camel.toml"), "# minimal\n").expect("write Camel.toml");
