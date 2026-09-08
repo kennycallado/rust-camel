@@ -150,6 +150,13 @@ the route producer sends. For an inbound route, a harness client drives the
 real consumer and validates the wire response. What arrives there is the
 proof: bytes, headers, status, timing.
 
+A proxy route whose upstream query varies per request has no literal
+arrival lane a `receive` can name, so its scenario asserts the harness
+record through a `validate` whose partner URI self-declares the harness
+reference in object form (`provisioning: harness` on an `http` endpoint plus a `partners:`
+entry naming the URI) rather than matching a `send`/`receive`
+reference; the sacrificial-receive workaround is forbidden by design.
+
 Transport interception and `mock:` expectations are secondary diagnostics.
 They never produce a green integration result. Mocks and interception are unit
 tier tools by ADR-0064 design.
@@ -270,6 +277,13 @@ who owns the lifecycle.
    harness's concern. Docker Compose, a CI service container, or a staging
    broker are all the same to the grammar. Reserved grammar value in v1. The
    runner rejects it as unsupported until an adapter activation needs it.
+
+The `harness` source also backs a validate self-declaration: a partner
+validate URI may name no `send`/`receive` reference when the object
+target form carries `provisioning: harness` on an `http` endpoint and a `partners:` entry
+names the URI. Proxy routes whose query varies per request use this
+channel, since those routes have no literal arrival lane (section 5) and
+a sacrificial receive is forbidden by design.
 
 The system under test is always the embedded boot. The harness never drives a
 deployed `camel run`. A live `camel run --watch` next to a test run is two

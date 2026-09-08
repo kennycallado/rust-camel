@@ -1495,3 +1495,81 @@ async fn lean_ignores_ambient_env() {
         "default must win over the ambient value"
     );
 }
+
+/// The pilot pattern (validate-partner-self-declare task 2): a proxy
+/// route dials an upstream with a varying query, and the document's
+/// ONLY partner reference is the validate action's object-form
+/// self-declaration (`provisioning: harness` + `bindVar: UPSTREAM`) —
+/// no sacrificial `receive` anywhere. The driver wires the validate
+/// ref like a send/receive ref, the scripted harness partner binds,
+/// the env tier folds `UPSTREAM -> http://<bound>` in (harness tier
+/// wins over the document env), and the route's `${env:UPSTREAM}`
+/// interpolates the bound listener at boot — the route file precedent
+/// is the flagship retry fixture (`${env:PARTNER_URL}/order`), and the
+/// loopback dial needs the `[components.http] allow_internal` opt-in
+/// the same fixture declares.
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_only_partner_proxies_varying_query() {
+    let dir = temp_dir("validate-only-partner");
+    let camel_toml = dir.join("Camel.toml");
+    fs::write(
+        &camel_toml,
+        "log_level = \"info\"\n\n[components.http]\nallow_internal = true\n",
+    )
+    .expect("write Camel.toml"); // allow-unwrap
+    let routes = dir.join("routes.yaml");
+    fs::write(
+        &routes,
+        r#"routes:
+  - id: tile-proxy
+    from: direct:start
+    steps:
+      - to: ${env:UPSTREAM}/tiles?bbox=1.2
+"#,
+    )
+    .expect("write routes.yaml"); // allow-unwrap
+    let path = dir.join("a.test.yaml");
+    fs::write(
+        &path,
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+- validate:
+    target:
+      partner:
+        endpoint: http://upstream/tiles
+        provisioning: harness
+        bindVar: UPSTREAM
+    expectation: {count: 1}
+    deadline: 5s
+partners:
+  http://upstream/tiles:
+  # The script matches the path-with-query as received
+  # (`HttpWireRequest::path` keeps query bytes), so the pass proves the
+  # varying query dialed the upstream verbatim.
+  - path: /tiles?bbox=1.2
+    response:
+      status: 200
+      body: tile
+"#,
+    )
+    .expect("write scenario doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![camel_toml, routes, path.clone(), dir.clone()]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    let out = String::from_utf8(out).expect("out is utf-8"); // allow-unwrap
+    assert_eq!(
+        summary.exit_code,
+        0,
+        "the validate-only partner run must pass — out: {out} | err: {}",
+        String::from_utf8_lossy(&err)
+    );
+    assert!(out.contains("PASS"), "out: {out}");
+    assert!(
+        out.contains("scenario[1] validate"),
+        "the validate action must run and pass: {out}"
+    );
+}

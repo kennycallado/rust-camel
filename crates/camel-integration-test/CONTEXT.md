@@ -60,6 +60,19 @@ The `bindVar` scenario variable the harness fills with an endpoint's
 bound address when provisioning is `harness`.
 _Avoid_: port variable, env override
 
+**partner validate target**:
+The `ScenarioTarget::Partner` case of a `validate` target. The
+assertion reads the partner's recorded request traffic. The endpoint
+URI must equal a harness endpoint reference declared by the scenario's
+own `send`/`receive` actions, or self-declare the reference: an object
+form with `provisioning: harness` on an `http` URI that also has a `partners:` entry
+naming it. A self-declared target wires the partner like a
+`send`/`receive` reference: the driver binds it, fills the `bindVar`,
+and exposes it through the harness-provisioned env fold, so a
+validate-only proxy scenario (per-request-varying queries, no literal
+arrival lane) runs with no sacrificial receive.
+_Avoid_: mock expectation (a partner target asserts recorded wire traffic)
+
 **expectation**:
 The matcher grammar of a `validate` action. Keys mirror the mock-testkit
 matcher rules: `equals`, `regex`, `contains`, `startsWith`, `endsWith`,

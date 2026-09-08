@@ -744,6 +744,232 @@ scenario:
 }
 
 #[test]
+fn object_form_partner_target_parses_with_bind_var() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://upstream/tiles
+      provisioning: harness
+- validate:
+    target:
+      partner:
+        endpoint: http://upstream/tiles
+        provisioning: harness
+        bindVar: upstream
+    expectation:
+      count: 1
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.get(1).expect("two actions");
+    match action {
+        ScenarioAction::Validate { target, .. } => match target {
+            ScenarioTarget::Partner(endpoint) => {
+                assert_eq!(
+                    endpoint.endpoint, "http://upstream/tiles",
+                    "target must keep the partner endpoint reference"
+                );
+                assert_eq!(
+                    endpoint.provisioning,
+                    Some(Provisioning::Harness),
+                    "object form must carry harness provisioning"
+                );
+                assert_eq!(
+                    endpoint.bind_var.as_deref(),
+                    Some("upstream"),
+                    "object form must carry the bindVar"
+                );
+            }
+            other => panic!("expected Partner, got {other:?}"),
+        },
+        other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+#[test]
+fn object_form_partner_self_declares_with_partners_entry() {
+    parse_case(
+        r#"
+routeFiles: [routes.yaml]
+partners:
+  http://upstream/tiles:
+  - response:
+      status: 200
+scenario:
+- send:
+    to: direct:start
+- validate:
+    target:
+      partner:
+        endpoint: http://upstream/tiles
+        provisioning: harness
+    expectation:
+      count: 1
+"#,
+    )
+    .expect(
+        "parse must succeed: the object-form target self-declares \
+         through its `partners:` entry",
+    );
+}
+
+#[test]
+fn bare_map_partner_without_provisioning_is_not_self_declaration() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+partners:
+  http://upstream/tiles:
+  - response:
+      status: 200
+scenario:
+- send:
+    to: direct:start
+- validate:
+    target:
+      partner:
+        endpoint: http://upstream/tiles
+        provisioning: harness
+        bindVar: upstream
+    expectation:
+      count: 1
+- validate:
+    target:
+      partner:
+        endpoint: http://upstream/tiles
+    expectation:
+      count: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 2, "error must name the bare-map action index");
+            assert!(
+                message.contains("http://upstream/tiles"),
+                "message must name the unmatched URI: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn object_form_partner_without_partners_entry_requires_send_receive() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+- validate:
+    target:
+      partner:
+        endpoint: http://upstream/tiles
+        provisioning: harness
+    expectation:
+      count: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("http://upstream/tiles"),
+                "message must name the unmatched URI: {message}"
+            );
+            assert!(
+                message.contains("partners:"),
+                "message must teach the `partners:` escape: {message}"
+            );
+            assert!(
+                message.contains("provisioning"),
+                "message must teach the `provisioning: harness` escape: {message}"
+            );
+            assert!(
+                message.contains("send"),
+                "message must teach the `send`/`receive` declaration escape: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn non_http_partner_scheme_is_not_self_declaration() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+partners:
+  https://upstream/tiles:
+  - response:
+      status: 200
+scenario:
+- send:
+    to: direct:start
+- validate:
+    target:
+      partner:
+        endpoint: https://upstream/tiles
+        provisioning: harness
+        bindVar: upstream
+    expectation:
+      count: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("https://upstream/tiles"),
+                "message must name the unmatched URI: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn validate_partner_bind_var_reserves_env_key() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+env:
+  upstream: http://anywhere
+scenario:
+- send:
+    to:
+      endpoint: http://upstream/tiles
+      provisioning: harness
+- validate:
+    target:
+      partner:
+        endpoint: http://upstream/tiles
+        provisioning: harness
+        bindVar: upstream
+    expectation:
+      count: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::ReservedEnvKey { key, endpoint } => {
+            assert_eq!(key, "upstream", "error must name the reserved key");
+            assert_eq!(
+                endpoint, "http://upstream/tiles",
+                "error must name the endpoint that reserved the key"
+            );
+        }
+        other => panic!("expected ReservedEnvKey, got {other}"),
+    }
+}
+
+#[test]
 fn deadline_on_lastreceived_is_load_error() {
     let err = parse_case(
         r#"

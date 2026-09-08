@@ -277,4 +277,21 @@ A scenario can script failure paths. A `partners:` entry may declare `delay`, `f
 
 A `validate` action with a `partner` target asserts the recorded-request count. The count is exact and non-negative. Optional `method` and `path` filters narrow it. A `deadline` polls until the count settles or the deadline passes. The runnable example pair lives in [`examples/integration-testing/partner-retry-route.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/integration-testing/partner-retry-route.test.yaml) and [`partner-retry.routes.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/integration-testing/partner-retry.routes.yaml).
 
+A partner target's URI must equal a harness endpoint reference the scenario's own `send`/`receive` actions declare, or self-declare one. The object target form self-declares: `provisioning: harness` on an `http` endpoint plus a `partners:` entry naming the URI. The validate's own reference then wires the partner exactly as a `send`/`receive` reference does: the driver binds the partner and fills the reference's `bindVar` with the bound authority.
+
+Proxy routes whose query varies per request need this form. The varying query makes each request dial a different wire path, so no literal arrival lane exists for a `receive` to name; the recorded traffic is the only assertion surface, and the scenario runs with no sacrificial receive. The route step reads the bound authority and appends the query — for example `to: ${env:UPSTREAM}/tiles?bbox=1.2`:
+
+```yaml
+scenario:
+- send: {to: direct:start}
+- validate:
+    target: {partner: {endpoint: http://upstream/tiles, provisioning: harness, bindVar: UPSTREAM}}
+    expectation: {count: 1}
+    deadline: 5s
+partners:
+  http://upstream/tiles:
+  - path: /tiles?bbox=1.2
+    response: {status: 200, body: tile}
+```
+
 Back-to-back `send:` actions with no intervening `receive:` dispatch genuinely concurrent requests. The crate [README](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/README.md) documents the burst-send recipe for asserting the concurrent arrivals. A `direct:` send may declare `expectReply` to assert the route's synchronous reply; the README's usage/grammar area details the verb. The scenario-tier field takes matcher verbs directly, unlike the unit tier's `expectReply` block.

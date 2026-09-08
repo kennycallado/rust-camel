@@ -188,6 +188,16 @@ impl ScenarioAction {
             Self::Receive { from, .. } => endpoint_bindings(from),
             Self::Validate { target, .. } => match target {
                 ScenarioTarget::LastReceived(endpoint) => endpoint_bindings(endpoint),
+                // A partner target carrying `provisioning: harness`
+                // declares a harness reference of its own: its `bindVar`
+                // reserves the env key exactly like a send/receive
+                // reference (rc-z1cjv). A plain-string target declares
+                // nothing.
+                ScenarioTarget::Partner(endpoint)
+                    if endpoint.provisioning == Some(Provisioning::Harness) =>
+                {
+                    endpoint_bindings(endpoint)
+                }
                 ScenarioTarget::Partner(_) => Vec::new(),
                 ScenarioTarget::Variable(_) => Vec::new(),
             },
@@ -208,7 +218,9 @@ pub enum ScenarioTarget {
     /// A partner endpoint: the assertion reads the partner's recorded
     /// request traffic. The URI must equal a harness endpoint
     /// reference declared by the scenario's own `send`/`receive`
-    /// actions.
+    /// actions, or self-declare the reference: an object form with
+    /// `provisioning: harness` on an `http` URI that also has a `partners:`
+    /// entry naming it.
     Partner(EndpointRef),
 }
 
@@ -661,9 +673,11 @@ fn classify_yaml_error(raw: &str) -> DocError {
 /// `expectReply` gate) with action-index errors; (g) each `partners`
 /// entry converts (script grammar, response status range) with
 /// entry-key errors; (h) no `env` key collides with a declared
-/// `bindVar`; (i) each `partner` validate target URI equals
-/// a harness endpoint reference declared by the scenario's own
-/// `send`/`receive` actions. The optional `inbound:` section converts
+/// `bindVar`; (i) each `partner` validate target URI equals a harness
+/// endpoint reference declared by the scenario's own `send`/`receive`
+/// actions, or self-declares the reference: an object-form
+/// `provisioning: harness` target whose `http` URI a `partners:` entry
+/// names. The optional `inbound:` section converts
 /// between (g) and (h): grammar in every build, activation
 /// demand-gated behind `http` (ADR-0069 §8).
 pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError> {
@@ -792,10 +806,13 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
     }
     // (i) Partner-target cross-check: a `partner` validate target URI
     // must equal a harness endpoint reference declared by the
-    // scenario's own `send`/`receive` actions (URI string equality).
-    // A typo'd URI would otherwise assert against traffic nobody
+    // scenario's own `send`/`receive` actions (URI string equality),
+    // or self-declare the reference: an object-form `provisioning:
+    // harness` target whose `http` URI a `partners:` entry names. A
+    // typo'd URI would otherwise assert against traffic nobody
     // records.
     let mut harness_uris: Vec<&str> = Vec::new();
+    let mut self_declared: Vec<&str> = Vec::new();
     let mut partner_targets: Vec<(usize, &EndpointRef)> = Vec::new();
     for (index, action) in scenario.iter().enumerate() {
         match action {
@@ -812,16 +829,37 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
             ScenarioAction::Validate {
                 target: ScenarioTarget::Partner(endpoint),
                 ..
-            } => partner_targets.push((index, endpoint)),
+            } => {
+                partner_targets.push((index, endpoint));
+                // Self-declaration grammar: object form with
+                // `provisioning: harness` (a bare string can carry no
+                // provisioning), an `http` scheme, and a `partners:`
+                // entry scripting the URI. A bare map `{endpoint: U}`
+                // without `provisioning: harness` also declares
+                // nothing: the object-form shape alone is not a
+                // self-declaration — `provisioning: harness` is the
+                // declaration act.
+                if endpoint.provisioning == Some(Provisioning::Harness)
+                    && ref_scheme(&endpoint.endpoint) == Some("http")
+                    && partners
+                        .as_ref()
+                        .is_some_and(|map| map.contains_key(&endpoint.endpoint))
+                {
+                    self_declared.push(endpoint.endpoint.as_str());
+                }
+            }
             _ => {}
         }
     }
     for (index, endpoint) in partner_targets {
-        if !harness_uris.contains(&endpoint.endpoint.as_str()) {
+        let declared = harness_uris.contains(&endpoint.endpoint.as_str())
+            || (endpoint.provisioning == Some(Provisioning::Harness)
+                && self_declared.contains(&endpoint.endpoint.as_str()));
+        if !declared {
             return Err(DocError::Validation {
                 index,
                 message: format!(
-                    "validate `partner` target `{}` does not match any harness endpoint reference declared by this scenario's `send`/`receive` actions",
+                    "validate `partner` target `{}` matches no harness partner: declare the URI through a `send`/`receive` reference with `provisioning: harness`, or self-declare it with an object-form target carrying `provisioning: harness` and a `partners:` entry naming the URI",
                     endpoint.endpoint
                 ),
             });

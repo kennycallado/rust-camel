@@ -227,6 +227,127 @@ scenario:
     assert_eq!(recorded[0].path, "/x");
 }
 
+/// The wiring arm under test (validate-partner-self-declare task 2):
+/// a validate action's object-form partner target self-declares its
+/// harness reference (`provisioning: harness` + `bindVar`), so
+/// `wire_endpoint_refs` must wire it exactly like a send/receive
+/// reference — and `bind_partners` must fold its `bindVar` into the
+/// harness-provisioned env tier route files interpolate.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn wiring_includes_object_form_validate_partner() {
+    let _wasm_acks_guard = crate::commands::run::WASM_ACKS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let project = TempProject::new("wiring-includes-object-form-validate");
+    let doc_path = write_project(
+        project.root(),
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+- validate:
+    target:
+      partner:
+        endpoint: http://127.0.0.1:0/tiles
+        provisioning: harness
+        bindVar: upstream
+    expectation: {count: 1}
+partners:
+  http://127.0.0.1:0/tiles:
+  - path: /tiles
+    response:
+      status: 200
+      body: tile
+"#,
+    );
+    let doc = parse_scenario_document(&doc_path).expect("parse scenario doc"); // allow-unwrap
+
+    // The wired refs: the send's `direct:start` AND the validate's
+    // self-declared partner URI, in declaration order.
+    let wired = wire_endpoint_refs(&doc);
+    let endpoints: Vec<&str> = wired.iter().map(|r| r.endpoint.as_str()).collect();
+    assert_eq!(
+        endpoints,
+        vec!["direct:start", "http://127.0.0.1:0/tiles"],
+        "the object-form validate partner must wire like a send/receive ref"
+    );
+
+    // The bind step: the wired validate ref binds its scripted
+    // partner and folds the bindVar into the harness env tier.
+    let (_adapters, harness_provisioned) = bind_partners(&doc, &wired)
+        .await
+        .expect("bind step must succeed"); // allow-unwrap
+    let bound = harness_provisioned
+        .get("upstream")
+        .expect("the validate ref's bindVar must land in the harness env tier"); // allow-unwrap
+    assert!(
+        bound.starts_with("http://"),
+        "the env tier keeps the `http://host:port` form route files interpolate: {bound}"
+    );
+}
+
+/// Shape lock: a plain-string validate partner target carries no
+/// provisioning, so the wiring arm must not wire it — only the send's
+/// reference wires. Constructed programmatically: the load-time
+/// cross-check rejects an undeclared plain-string target at parse
+/// (pinned by `undeclared_partner_target_exits_two`), and this lock is
+/// about wiring scope, not load-time rejection.
+#[test]
+fn wiring_excludes_plain_string_validate_partner() {
+    use camel_integration_test::{
+        CountBound, EndpointRef, PartnerExpectation, RouteSource, ScenarioAction, ScenarioTarget,
+        ValidateExpectation,
+    };
+
+    let doc = camel_integration_test::ScenarioDocument {
+        source_path: std::path::PathBuf::new(),
+        route_source: RouteSource::RouteFiles(Vec::new()),
+        scenario: vec![
+            ScenarioAction::Send {
+                to: EndpointRef {
+                    endpoint: "direct:start".to_string(),
+                    provisioning: None,
+                    bind_var: None,
+                },
+                body: None,
+                headers: None,
+                method: "GET".to_string(),
+                expect_reply: None,
+            },
+            ScenarioAction::Validate {
+                target: ScenarioTarget::Partner(EndpointRef {
+                    endpoint: "http://upstream/tiles".to_string(),
+                    provisioning: None,
+                    bind_var: None,
+                }),
+                expectation: ValidateExpectation::Partner(PartnerExpectation {
+                    bound: CountBound::Exact(1),
+                    method: None,
+                    path: None,
+                    query: None,
+                }),
+                deadline: None,
+                elapsed_at_least: None,
+            },
+        ],
+        partners: None,
+        env: None,
+        env_passthrough: None,
+        profile: None,
+        send_deadline: None,
+        inbound: None,
+    };
+    let wired = wire_endpoint_refs(&doc);
+    let endpoints: Vec<&str> = wired.iter().map(|r| r.endpoint.as_str()).collect();
+    assert_eq!(
+        endpoints,
+        vec!["direct:start"],
+        "a plain-string validate partner must stay inert: only the send wires"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn partners_key_typo_fails_load() {

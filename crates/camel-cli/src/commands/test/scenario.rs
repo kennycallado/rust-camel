@@ -117,17 +117,27 @@ fn scheme_of(endpoint: &str) -> &str {
 }
 
 /// The `send`/`receive` endpoint references a scenario wires, in
-/// declaration order, deduplicated by endpoint URI.
+/// declaration order, deduplicated by endpoint URI. A validate
+/// action's object-form partner target carrying `provisioning:
+/// harness` self-declares its harness reference (the grammar Task 1
+/// of validate-partner-self-declare pinned), so it wires exactly like
+/// a send/receive reference: the `seen` dedup below prevents
+/// double-wiring when a send/receive also names the URI, and a
+/// plain-string target (no provisioning) stays inert.
 fn wire_endpoint_refs(
     doc: &camel_integration_test::ScenarioDocument,
 ) -> Vec<&camel_integration_test::EndpointRef> {
-    use camel_integration_test::ScenarioAction as A;
+    use camel_integration_test::{Provisioning, ScenarioAction as A, ScenarioTarget};
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for action in &doc.scenario {
         let reference = match action {
             A::Send { to, .. } => to,
             A::Receive { from, .. } => from,
+            A::Validate {
+                target: ScenarioTarget::Partner(ep),
+                ..
+            } if ep.provisioning == Some(Provisioning::Harness) => ep,
             _ => continue,
         };
         if seen.insert(reference.endpoint.clone()) {
