@@ -48,9 +48,9 @@ pub use model::{
 pub use openapi::generate_openapi;
 pub use util::MAX_ROUTE_FILE_SIZE;
 pub use yaml::{
-    RouteDslRoute, RouteDslRoutes, RouteDslStep, load_from_file, load_from_file_with_env,
-    parse_yaml, parse_yaml_to_canonical, parse_yaml_to_declarative, parse_yaml_with_threshold,
-    parse_yaml_with_threshold_and_security,
+    RouteDslRoute, RouteDslRoutes, RouteDslStep, extract_rest_blocks_from_file_with_env,
+    load_from_file, load_from_file_with_env, parse_yaml, parse_yaml_to_canonical,
+    parse_yaml_to_declarative, parse_yaml_with_threshold, parse_yaml_with_threshold_and_security,
 };
 
 pub use template::json::{parse_json_templated_routes, parse_json_templates};

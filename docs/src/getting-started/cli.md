@@ -254,6 +254,8 @@ The command prints a pretty JSON document to stdout. The top-level `openapi` fie
 
 If a file has no `rest:` blocks, the command exits with an error. Validation warnings print to stderr.
 
+`${env:}` placeholders in `rest:` blocks resolve default-only at generate time. String-typed positions take the concrete default in the emitted document; integer- and boolean-typed positions with a placeholder fail generation. The process environment is never read.
+
 ## Next steps
 
 - See [First route in YAML](yaml-route.md) for a complete walkthrough.

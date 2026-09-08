@@ -114,6 +114,8 @@ Generation fails fast on three conditions. A file with no `rest:` blocks exits w
 
 A body verb with no `request_schema` produces a warning and a weak stub. A non-204 verb with no response schema does the same. Regenerate the document whenever the `rest:` blocks change. The document mirrors the runtime contract.
 
+`${env:}` placeholders in `rest:` blocks resolve default-only at generate time. A placeholder in a string-typed position takes the concrete default in the emitted document. A placeholder in an integer- or boolean-typed position fails generation; this is tree-walk canon parity with boot, lint, and the LEAN tier. A token without a default fails and names the variable. `$${env:X}` stays literal. The command never reads the process environment.
+
 ## camel plugin new
 
 Create a WASM plugin project from a template. The CLI writes a Cargo workspace member with the right target and the right dependencies. It also writes a sample `lib.rs` for the chosen plugin type.

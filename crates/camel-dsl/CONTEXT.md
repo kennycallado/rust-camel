@@ -82,9 +82,11 @@ variable without a default fails the load naming the variable
 (`Environment variable 'NAME' not set (required by <path>)` — the same
 wording the LEAN runner surfaces as its doc error). The process environment
 is never read; the lookup-injectable variant
-`load_from_file_with_env(path, lookup)` is the sole injection point for
-ambient values. Escapes (`$$`, `$${env:...}`) apply; both entries keep the
-16 MiB cap and path-annotated parse errors.
+`load_from_file_with_env(path, lookup)` is the injection point for
+ambient values (the rest-block sibling
+`extract_rest_blocks_from_file_with_env` carries the same lookup seam for
+the `camel openapi generate` surface). Escapes (`$$`, `$${env:...}`)
+apply; both entries keep the 16 MiB cap and path-annotated parse errors.
 _Avoid_: env-aware loading, pre-parse substitution (the tree walk
 interpolates parsed scalars; only the fallback splices raw text)
 

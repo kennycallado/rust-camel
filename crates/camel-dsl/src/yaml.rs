@@ -2109,6 +2109,60 @@ pub fn load_from_file_with_env(
     })
 }
 
+/// Lookup-injectable sibling of [`extract_rest_blocks`] for file input:
+/// reads the file under the shared 16 MiB cap and resolves `${env:NAME}`
+/// placeholders through `lookup` (never the process environment) before
+/// extracting the `rest:` blocks. Extension dispatch mirrors discovery's
+/// `interpolate_for_parse` with one deliberate divergence: `.json` uses the
+/// legacy whole-text splice ([`crate::env_interpolation::interpolate_env_with`]),
+/// while `yaml`, `yml`, **and extension-less** files all take the
+/// tree-walk-first YAML seam
+/// ([`crate::env_interpolation::interpolate_yaml_source`]) — discovery routes
+/// unknown extensions to the splice arm, but this surface keeps its
+/// historical YAML-parse behavior (and comment hermeticity) for them.
+/// Same error wording as [`load_from_file_with_env`]: an unresolved variable
+/// without default fails naming the variable; parse errors are annotated
+/// with the file path.
+pub fn extract_rest_blocks_from_file_with_env(
+    path: &Path,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<RouteDslRest>, CamelError> {
+    info!(path = %path.display(), "extracting rest blocks from file");
+    let content = read_route_file_capped(path).map_err(|e| {
+        // log-policy: system-broken
+        error!(path = %path.display(), error = %e, "failed to load routes from file");
+        e
+    })?;
+    let not_set = |var: String| {
+        CamelError::RouteError(format!(
+            "Environment variable '{var}' not set (required by {})",
+            path.display()
+        ))
+    };
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("json") => {
+            let interpolated = crate::env_interpolation::interpolate_env_with(&content, lookup)
+                .map_err(not_set)?;
+            let dsl: RouteDslRoutes = serde_json::from_str(&interpolated).map_err(|e| {
+                // log-policy: system-broken
+                error!(error = %e, "json parse failed");
+                CamelError::RouteError(format!("JSON parse error: {e} (in {})", path.display()))
+            })?;
+            Ok(dsl.rest)
+        }
+        _ => {
+            let interpolated = crate::env_interpolation::interpolate_yaml_source(&content, lookup)
+                .map_err(not_set)?;
+            extract_rest_blocks(&interpolated).map_err(|e| match e {
+                CamelError::RouteError(msg) => {
+                    CamelError::RouteError(format!("{msg} (in {})", path.display()))
+                }
+                other => other,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5303,6 +5357,242 @@ routes:
             load_from_file(&path).is_err(),
             "load_from_file must reject the int placeholder identically"
         );
+    }
+
+    // --- extract_rest_blocks_from_file_with_env (rc-gykds) ---
+
+    #[test]
+    fn extract_rest_from_file_string_default_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-string.yaml",
+            "rest:\n  - host: ${env:HOST:-0.0.0.0}\n    port: 9090\n    path: /api/users\n    operations:\n      - method: GET\n        operation_id: listUsers\n        to: direct:listUsers\n",
+        );
+
+        let rest = extract_rest_blocks_from_file_with_env(&path, &|_| None).unwrap();
+        assert_eq!(rest[0].host, "0.0.0.0");
+    }
+
+    #[test]
+    fn extract_rest_from_file_int_field_fails_type_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-int.yaml",
+            "rest:\n  - host: 127.0.0.1\n    port: ${env:PORT:-8080}\n",
+        );
+
+        let err = match extract_rest_blocks_from_file_with_env(&path, &|_| None) {
+            Ok(_) => panic!("expected int placeholder to fail type mismatch"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        // Plain `u16` field, so the error class is the shim's type-mismatch
+        // wording (`expected unsigned integer, found string`) — the same
+        // class as the loader's boot-parity int test (which asserts the
+        // untagged-variant wording for an enum field), NOT the named-variable
+        // doc error.
+        assert!(
+            msg.contains("type mismatch")
+                && msg.contains("expected unsigned integer")
+                && msg.contains("found string"),
+            "expected type-mismatch wording, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not set"),
+            "int placeholder with default must not surface the named-var error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("Environment variable"),
+            "int placeholder with default must not name the env var, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn extract_rest_from_file_no_default_names_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-no-def.yaml",
+            "rest:\n  - host: ${env:REST_HOST}\n",
+        );
+
+        let err = match extract_rest_blocks_from_file_with_env(&path, &|_| None) {
+            Ok(_) => panic!("expected unset env error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("REST_HOST"),
+            "expected var name in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("not set"),
+            "expected lowercase 'not set', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn extract_rest_from_file_escape_stays_literal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-escape.yaml",
+            "rest:\n  - host: $${env:KEEP:-x}\n    path: a$$b\n",
+        );
+
+        let rest = extract_rest_blocks_from_file_with_env(&path, &|_| None).unwrap();
+        assert_eq!(rest[0].host, "${env:KEEP:-x}");
+        assert_eq!(rest[0].path, "a$b");
+    }
+
+    #[test]
+    fn extract_rest_from_file_comment_placeholder_harmless() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-comment.yaml",
+            "# ${env:MISSING}\nrest:\n  - host: literal-host\n",
+        );
+
+        let rest = extract_rest_blocks_from_file_with_env(&path, &|_| None).unwrap();
+        assert_eq!(rest[0].host, "literal-host");
+    }
+
+    #[test]
+    fn extract_rest_from_file_round_trip_fragile_parse_error_not_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-roundtrip-fragile.yaml",
+            "rest:\n  - host: !mytag ${env:RC_GYKDS_T:-hello}\n",
+        );
+
+        let err = match extract_rest_blocks_from_file_with_env(&path, &|_| None) {
+            Ok(_) => panic!("expected tagged-node rest block to fail typed deserialization"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        // The placeholder is resolvable (default `hello`), so the failure is
+        // the document's own parse/deserialization error — never the
+        // interpolation-layer env wording. This proves the splice fallback
+        // ran.
+        assert!(
+            !msg.contains("not set"),
+            "resolvable placeholder must not surface the env error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("RC_GYKDS_T"),
+            "resolvable placeholder must not name the env var, got: {msg}"
+        );
+        assert!(
+            msg.contains("YAML parse error"),
+            "expected the document's own parse error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn extract_rest_from_file_json_string_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-string.json",
+            r#"{"rest":[{"host":"${env:HOST:-0.0.0.0}","port":9090,"path":"/api/users","operations":[{"method":"GET","operation_id":"listUsers","to":"direct:listUsers"}]}]}"#,
+        );
+
+        let rest = extract_rest_blocks_from_file_with_env(&path, &|_| None).unwrap();
+        assert_eq!(rest[0].host, "0.0.0.0");
+    }
+
+    #[test]
+    fn extract_rest_from_file_json_int_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-int.json",
+            r#"{"rest":[{"host":"127.0.0.1","port":"${env:PORT:-8080}"}]}"#,
+        );
+
+        let err = match extract_rest_blocks_from_file_with_env(&path, &|_| None) {
+            Ok(_) => panic!("expected json int placeholder to fail"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type"),
+            "expected type mismatch, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not set"),
+            "int placeholder with default must not surface the named-var error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn extract_rest_from_file_json_no_default_names_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-no-def.json",
+            r#"{"rest":[{"host":"${env:REST_HOST}"}]}"#,
+        );
+
+        let err = match extract_rest_blocks_from_file_with_env(&path, &|_| None) {
+            Ok(_) => panic!("expected unset env error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("REST_HOST"),
+            "expected var name in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("not set"),
+            "expected lowercase 'not set', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn extract_rest_from_file_oversized_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized-rest.yaml");
+        std::fs::write(&path, "rest: []").unwrap();
+        // Extend the file past the 16 MiB cap (sparse file, no actual disk usage)
+        let file = File::create(&path).unwrap();
+        file.set_len(16 * 1024 * 1024 + 1).unwrap();
+        drop(file);
+
+        let err = match extract_rest_blocks_from_file_with_env(&path, &|_| None) {
+            Ok(_) => panic!("expected oversized file error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeds max"),
+            "expected size cap error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("parse error"),
+            "size cap must reject before parsing, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn extract_rest_from_file_ambient_env_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-ambient.yaml",
+            "rest:\n  - host: ${env:RC_GYKDS_VAR:-0.0.0.0}\n",
+        );
+
+        unsafe { std::env::set_var("RC_GYKDS_VAR", "evil") };
+        let _guard = EnvGuard {
+            var: "RC_GYKDS_VAR",
+        };
+        let rest = extract_rest_blocks_from_file_with_env(&path, &|_| None).unwrap();
+        assert_eq!(rest[0].host, "0.0.0.0");
     }
 
     #[test]
