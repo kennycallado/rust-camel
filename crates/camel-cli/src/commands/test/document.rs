@@ -25,6 +25,7 @@ use camel_api::Body;
 use camel_component_mock::BodyMatcher;
 use camel_component_mock::HeaderMatcher;
 use camel_core::intercept::{InterceptAction, InterceptRule, InterceptRules};
+use camel_dsl::env_interpolation::interpolate_env_with;
 use camel_integration_test::ScenarioDocument;
 use noyalib::compat::serde_yaml;
 use regex::Regex;
@@ -661,6 +662,9 @@ pub enum TestDocError {
     /// A matcher entry failed grammar validation; the message carries the
     /// precise reason verbatim.
     InvalidMatcher(String),
+    /// A `${env:NAME}` placeholder in an identifier field resolved to
+    /// nothing (default-only lookup, ambient env never consulted).
+    EnvUnresolved { var: String, field: String },
 }
 
 impl fmt::Display for TestDocError {
@@ -751,6 +755,12 @@ impl fmt::Display for TestDocError {
             Self::InvalidRepositories(msg) => write!(f, "{msg}"),
             Self::InvalidReply(msg) => write!(f, "{msg}"),
             Self::InvalidMatcher(msg) => write!(f, "{msg}"),
+            Self::EnvUnresolved { var, field } => {
+                write!(
+                    f,
+                    "Environment variable '{var}' not set (required by {field})"
+                )
+            }
         }
     }
 }
@@ -819,7 +829,14 @@ fn classify_yaml_error(raw: &str) -> TestDocError {
 }
 
 /// Parses and validates a `*.test.yaml` document. Validation order:
-/// (a) exactly one route source (`routeFiles`, `routeFilesFromRoot`, or
+/// (a0) identifier fields interpolate `${env:...}` default-only (parity
+/// with route sources; see the mock-testkit spec requirement) — exactly:
+/// (1) `repositories` map keys in every registry map (`cache`,
+/// `idempotent`, `claimCheck`); (2) `beans` map keys; (3) `intercepts`
+/// map keys (source URIs) and their action target values (`skipTo`,
+/// `divertCopyTo`); (4) `mock:` references — `expects` map keys and
+/// `sequence` entries; (5) `inputs[].to` values; (a) exactly
+/// one route source (`routeFiles`, `routeFilesFromRoot`, or
 /// `routes`); (b) non-empty `expects`; (c) every `expects` key uses the
 /// `mock:` scheme (then the map is rebuilt with bare endpoint names);
 /// (d) `count`/`minCount`/`maxCount` combination rules (`count` excludes
@@ -834,6 +851,10 @@ fn classify_yaml_error(raw: &str) -> TestDocError {
 pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
     let mut doc = serde_yaml::from_str::<TestDocument>(text)
         .map_err(|e| classify_yaml_error(&e.to_string()))?;
+
+    // (a0) Identifier fields interpolate `${env:...}` default-only (parity
+    // with route sources; see the mock-testkit spec requirement).
+    interpolate_identifier_fields(&mut doc)?;
 
     // (a) Exactly one route source: collect the declared keys and require
     // the count to be one — zero or several is a conflict.
@@ -1102,6 +1123,124 @@ fn validate_repositories(doc: &TestDocument) -> Result<(), TestDocError> {
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Interpolates `${env:NAME}` / `${env:NAME:-default}` placeholders in one
+/// identifier field. The lookup is default-only — the ambient environment is
+/// never consulted — mirroring how route sources resolve identifiers at
+/// parse time. The `&|_| None` closure is the future LayeredEnv injection
+/// point (rc-l7m7t); an unresolved variable surfaces as
+/// [`TestDocError::EnvUnresolved`] naming the variable and the field.
+fn interpolate_identifier(value: &str, position: &str) -> Result<String, TestDocError> {
+    interpolate_env_with(value, &|_| None).map_err(|var| TestDocError::EnvUnresolved {
+        var,
+        field: position.to_string(),
+    })
+}
+
+/// Rebuilds one identifier map key-by-key through
+/// [`interpolate_identifier`] (values pass through untouched). An
+/// already-present resolved key is a collision and is rejected with the
+/// error built by `collision`.
+fn rebuild_identifier_map<V>(
+    map: BTreeMap<String, V>,
+    position: &str,
+    collision: impl Fn(&str) -> TestDocError,
+) -> Result<BTreeMap<String, V>, TestDocError> {
+    let mut rebuilt = BTreeMap::new();
+    for (key, value) in map {
+        let resolved = interpolate_identifier(&key, position)?;
+        if rebuilt.contains_key(&resolved) {
+            return Err(collision(&resolved));
+        }
+        rebuilt.insert(resolved, value);
+    }
+    Ok(rebuilt)
+}
+
+/// Step (a0): identifier fields interpolate `${env:...}` default-only
+/// (parity with route sources; see the mock-testkit spec requirement).
+/// The identifier fields are exactly: (1) `repositories` map keys in every
+/// registry map (`cache`, `idempotent`, `claimCheck`); (2) `beans` map
+/// keys; (3) `intercepts` map keys (source URIs) and their action target
+/// values (`skipTo`, `divertCopyTo`); (4) `mock:` references — `expects`
+/// map keys and `sequence` entries; (5) `inputs[].to` values.
+///
+/// Map keys rebuild key-by-key, leaving values untouched; `sequence`
+/// entries and `inputs[].to` interpolate in place. Assertion data (matcher
+/// contents, input `body`/`headers`/`expectReply`) stays literal. Two keys
+/// of one map that resolve to the same string collide and are rejected
+/// with an error naming the map and the resolved value (no silent stub
+/// shadowing); `sequence` duplicates stay allowed per the arrival-sequence
+/// canon.
+fn interpolate_identifier_fields(doc: &mut TestDocument) -> Result<(), TestDocError> {
+    if let Some(repos) = doc.repositories.as_mut() {
+        for (kind, map) in [
+            (SUPPORTED_REGISTRY_KINDS[0], &mut repos.cache),
+            (SUPPORTED_REGISTRY_KINDS[1], &mut repos.idempotent),
+            (SUPPORTED_REGISTRY_KINDS[2], &mut repos.claim_check),
+        ] {
+            if let Some(map) = map.as_mut() {
+                *map = rebuild_identifier_map(
+                    std::mem::take(map),
+                    &format!("repositories.{kind}"),
+                    |resolved| {
+                        TestDocError::InvalidRepositories(format!(
+                            "repositories.{kind}: duplicate repository name \
+                             `{resolved}` after interpolation"
+                        ))
+                    },
+                )?;
+            }
+        }
+    }
+    if let Some(beans) = doc.beans.as_mut() {
+        *beans = rebuild_identifier_map(std::mem::take(beans), "beans", |resolved| {
+            TestDocError::InvalidBeans(format!(
+                "beans: duplicate bean name `{resolved}` after interpolation"
+            ))
+        })?;
+    }
+    // `intercepts:`: source keys interpolate first, then the action
+    // targets interpolate in place; the collision error names the resolved
+    // source URI.
+    if let Some(intercepts) = doc.intercepts.as_mut() {
+        let taken = std::mem::take(intercepts);
+        *intercepts = rebuild_identifier_map(taken, "intercepts", |resolved| {
+            TestDocError::InterceptInvalid(format!(
+                "intercepts: duplicate source `{resolved}` after interpolation"
+            ))
+        })?;
+        for action in intercepts.values_mut() {
+            if let Some(target) = action.skip_to.as_mut() {
+                *target = interpolate_identifier(target, "intercepts.skipTo")?;
+            }
+            if let Some(target) = action.divert_copy_to.as_mut() {
+                *target = interpolate_identifier(target, "intercepts.divertCopyTo")?;
+            }
+        }
+    }
+    // `expects:`: keys are `mock:` references; the collision message names
+    // the FULL resolved key — scheme stripping happens later, at step (c).
+    doc.expects =
+        rebuild_identifier_map(std::mem::take(&mut doc.expects), "expects", |resolved| {
+            TestDocError::Yaml(format!(
+                "duplicate expectation endpoint `{resolved}` after interpolation"
+            ))
+        })?;
+    // `sequence:` entries interpolate in place; duplicates remain allowed
+    // per the arrival-sequence canon — NO collision guard.
+    if let Some(sequence) = doc.sequence.as_mut() {
+        for (index, entry) in sequence.iter_mut().enumerate() {
+            *entry = interpolate_identifier(entry, &format!("sequence[{index}]"))?;
+        }
+    }
+    // `inputs[].to` interpolates in place; `body`, `headers`, and
+    // `expectReply` are assertion data and stay literal.
+    for (index, input) in doc.inputs.iter_mut().enumerate() {
+        input.to = interpolate_identifier(&input.to, &format!("inputs[{index}].to"))?;
     }
     Ok(())
 }

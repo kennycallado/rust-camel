@@ -1573,3 +1573,43 @@ partners:
         "the validate action must run and pass: {out}"
     );
 }
+
+/// Spec scenario "no-default identifier fails naming the variable at exit
+/// 2", driver level: a document whose `repositories.cache` key carries a
+/// no-default `${env:NO_SUCH_VAR}` placeholder fails document validation —
+/// the driver reports the parse-error class (exit 2) on stderr, naming the
+/// variable.
+#[tokio::test(flavor = "multi_thread")]
+async fn env_unresolved_identifier_exits_2() {
+    let dir = temp_dir("env-unresolved");
+    let path = dir.join("a.test.yaml");
+    fs::write(
+        &path,
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - to: "mock:out"
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    count: 1
+repositories:
+  cache:
+    "${env:NO_SUCH_VAR}": memory
+"#,
+    )
+    .expect("write env-unresolved doc"); // allow-unwrap
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 2);
+    let err = String::from_utf8(err).unwrap();
+    assert!(
+        err.contains("NO_SUCH_VAR"),
+        "err must name the unresolved variable: {err}"
+    );
+}
