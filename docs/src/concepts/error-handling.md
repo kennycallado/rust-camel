@@ -164,6 +164,49 @@ clause wins. Each clause can carry its own retry, its own `handled_by`
 endpoint, and its own disposition. Put broad clauses before specific clauses.
 A broad clause first shadows the rest.
 
+### Catch-all clause (kind: "*")
+
+The `kind: "*"` clause matches every error kind. Declare it last because
+evaluation is first-match-wins. A specific clause declared before it keeps
+precedence. Combining `kind: "*"` with `message_contains` narrows the clause
+by message. Both conditions must hold.
+
+The pattern `kind: "*"` with `handled: true` and `retry.handled_by` gives the
+handler route full ownership of the HTTP response. The handler sets the status
+through the `CamelHttpResponseCode` header, the body, and custom headers.
+Custom headers must be string-valued.
+
+```yaml
+routes:
+  - id: "catch-all"
+    from: "direct:catch-all"
+    error_handler:
+      on_exceptions:
+        - kind: "*"
+          handled: true
+          retry:
+            max_attempts: 1
+            handled_by: "direct:shaper"
+    steps:
+      - bean:
+          name: "validate"
+          method: "process"
+  - id: "shaper"
+    from: "direct:shaper"
+    steps:
+      - set_body:
+          value: "shaped"
+      - set_header:
+          key: "X-Custom"
+          value: "yes"
+      - set_header:
+          key: "CamelHttpResponseCode"
+          value: "422"
+```
+
+The `do_try` catch wildcard (`exception: ["*"]`) is the segment-scoped
+equivalent. It applies within a `do_try` block instead of the whole route.
+
 ### Global error handler
 
 Set a default handler on `CamelContext`. Routes without a per-route handler

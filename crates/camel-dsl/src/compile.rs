@@ -879,6 +879,11 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
 }
 
 fn ensure_known_exception_kind(kind: &str) -> Result<(), CamelError> {
+    // `"*"` is a reserved wildcard token matching every CamelError variant
+    // (mirrors doTry's CatchMatcher wildcard).
+    if kind == "*" {
+        return Ok(());
+    }
     if supported_exception_kinds().contains(&kind) {
         Ok(())
     } else {
@@ -911,6 +916,8 @@ fn supported_exception_kinds() -> Vec<&'static str> {
 
 fn exception_kind_matches(kind: &str, err: &CamelError) -> bool {
     match kind {
+        // Reserved wildcard token: matches every CamelError variant.
+        "*" => true,
         "ComponentNotFound" => matches!(err, CamelError::ComponentNotFound(_)),
         "EndpointCreationFailed" => matches!(err, CamelError::EndpointCreationFailed(_)),
         "ProcessorError" => matches!(err, CamelError::ProcessorError(_)),
@@ -3117,6 +3124,110 @@ mod tests {
         assert!(!exception_kind_matches(
             "ConsumerStopping",
             &CamelError::ProcessorError("x".into())
+        ));
+    }
+
+    #[test]
+    fn wildcard_kind_passes_validation() {
+        assert!(ensure_known_exception_kind("*").is_ok());
+    }
+
+    #[test]
+    fn wildcard_kind_matches_every_variant() {
+        assert!(exception_kind_matches(
+            "*",
+            &CamelError::ValidationError("x".into())
+        ));
+        assert!(exception_kind_matches(
+            "*",
+            &CamelError::ProcessorError("x".into())
+        ));
+        assert!(exception_kind_matches("*", &CamelError::Io("x".into())));
+        assert!(exception_kind_matches(
+            "*",
+            &CamelError::CircuitOpen("x".into())
+        ));
+    }
+
+    #[test]
+    fn unknown_kind_still_rejected() {
+        let err = ensure_known_exception_kind("NoSuchKind").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown exception kind"),
+            "reject message must carry 'unknown exception kind': {msg}"
+        );
+    }
+
+    #[test]
+    fn wildcard_narrowed_by_message_falls_through() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![
+                DeclarativeOnException {
+                    kind: Some("*".into()),
+                    message_contains: Some("timeout".into()),
+                    retry: None,
+                    steps: vec![],
+                    handled: None,
+                    continued: None,
+                },
+                DeclarativeOnException {
+                    kind: Some("*".into()),
+                    message_contains: None,
+                    retry: None,
+                    steps: vec![],
+                    handled: None,
+                    continued: None,
+                },
+            ]),
+            use_original_message: false,
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(config.policies.len(), 2);
+        assert!((config.policies[0].matches)(&CamelError::Io(
+            "connection timeout".into()
+        )));
+        assert!(!(config.policies[0].matches)(&CamelError::Io(
+            "disk full".into()
+        )));
+        assert!((config.policies[1].matches)(&CamelError::Io(
+            "disk full".into()
+        )));
+    }
+
+    #[test]
+    fn wildcard_policy_matcher_is_catch_all_and_conjuncts_message() {
+        let def = |message_contains: Option<String>| DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("*".into()),
+                message_contains,
+                retry: None,
+                steps: vec![],
+                handled: None,
+                continued: None,
+            }]),
+            use_original_message: false,
+        };
+
+        let narrowed =
+            compile_error_handler(def(Some("timeout".into()))).expect("compile should succeed");
+        assert_eq!(narrowed.policies.len(), 1);
+        assert!((narrowed.policies[0].matches)(&CamelError::Io(
+            "connection timeout".into()
+        )));
+        assert!(!(narrowed.policies[0].matches)(&CamelError::Io(
+            "disk full".into()
+        )));
+
+        let catch_all = compile_error_handler(def(None)).expect("compile should succeed");
+        assert_eq!(catch_all.policies.len(), 1);
+        assert!((catch_all.policies[0].matches)(
+            &CamelError::ValidationError("anything".into())
         ));
     }
 
