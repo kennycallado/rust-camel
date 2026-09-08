@@ -1133,3 +1133,44 @@ satisfied.
 - **WHEN** an event is emitted while both windows are open
 - **THEN** the event is attributed to both windows — `contains`/`regex` are at-least semantics and `noLevelAbove` is a conservative superset (a sibling document's warning can fail this document's cap)
 
+### Requirement: SQLite shared-cache mandate
+
+The scenario boot SHALL reject any configured datasource whose `db_url` is
+a SQLite in-memory URL (`sqlite::memory:` or `sqlite://:memory:` in any
+letter case) whose query string does not carry `cache=shared`, failing
+with the `sql-memory-not-shared` error class naming the datasource. The
+check SHALL run ungated: with or without the `sql` Cargo feature, and for
+documents with or without `sql:` actions.
+
+Rationale: SQLite `:memory:` databases are per-connection and the pool
+default is more than one connection — INSERT and SELECT on different pool
+connections hit different databases, a silent green lie. `cache=shared` is
+the mandated remedy.
+
+#### Scenario: bare memory sqlite fails boot
+
+- **GIVEN** a Camel.toml declaring `[datasources.appdb] db_url =
+  "sqlite::memory:"`
+- **WHEN** the scenario boots
+- **THEN** boot fails with `sql-memory-not-shared` naming `appdb`, whether
+  or not the document uses a `sql:` action
+
+#### Scenario: shared cache passes
+
+- **GIVEN** a Camel.toml declaring `db_url = "sqlite::memory:?cache=shared"`
+- **WHEN** the scenario boots
+- **THEN** boot proceeds past the check
+
+#### Scenario: file-backed sqlite is unaffected
+
+- **GIVEN** a Camel.toml declaring a `sqlite::file:` or `sqlite:file:` URL
+- **WHEN** the scenario boots
+- **THEN** the shared-cache check does not apply
+
+#### Scenario: lint fires without the sql feature or sql actions
+
+- **GIVEN** a workspace built without the `sql` feature, a scenario
+  document with no `sql:` action, and a bare `sqlite::memory:` datasource
+- **WHEN** the scenario boots
+- **THEN** the boot still fails `sql-memory-not-shared`
+
