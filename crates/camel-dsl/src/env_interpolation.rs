@@ -1,9 +1,9 @@
 //! `${env:}` interpolation for route sources (rc-ayke).
 //!
 //! Two paths share one string scanner (the `interpolate_string` core behind
-//! [`interpolate_env_with`] and [`interpolate_env_tree`]):
+//! [`interpolate_env_with`] and `interpolate_env_tree`):
 //!
-//! - **Parse-tree walk** ([`interpolate_env_tree`]): the canonical YAML
+//! - **Parse-tree walk** (`interpolate_env_tree`): the canonical YAML
 //!   path. Interpolation runs on the scalars of the parsed tree, so YAML
 //!   comments are never interpolated — a placeholder inside a comment
 //!   (e.g. a commented-out line referencing a removed var) cannot fail
@@ -89,7 +89,7 @@ pub fn interpolate_env_with(
 }
 
 /// Canonical interpolation strategy for a YAML route source (rc-93wct):
-/// parse-tree interpolation first ([`interpolate_env_tree`] — comments are
+/// parse-tree interpolation first (`interpolate_env_tree` — comments are
 /// never interpolated and a substituted leaf keeps STRING typing), falling
 /// back to the legacy whole-text splice ([`interpolate_env_with`]) when the
 /// document does not survive the YAML round-trip. An unresolved variable
