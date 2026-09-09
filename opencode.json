@@ -1,28 +1,29 @@
 {
   "$schema": "https://opencode.ai/config.json",
-
   "instructions": [
     "./.opencode/instructions/behavior.md",
     "./.opencode/instructions/ultrathink.md"
   ],
-
   "permission": {
     "external_directory": {
+      "*": "ask",
       "/tmp/**": "allow",
       "~/.agents/**": "allow",
       "~/.cargo/registry/**": "allow",
       "~/.config/rust-camel/**": "allow",
-      "*": "ask"
+      "/home/shared/rust-camel-worktrees/**": "allow"
     },
-
     "bash": {
-      "git push*": "deny",
-      "*": "allow"
+      "*": "allow",
+      "git push*": "deny"
     }
   },
-
   "mcp": {
-    "context-mode": { "enabled": true },
-    "gh_grep": { "enabled": true }
+    "context-mode": {
+      "enabled": true
+    },
+    "gh_grep": {
+      "enabled": true
+    }
   }
 }
