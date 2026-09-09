@@ -488,23 +488,39 @@ struct LaneEntry {
     rx: oneshot::Receiver<Result<IncomingMessage, TransportError>>,
 }
 
+/// The client-lane map key: the registered partner key joined with
+/// the wire request path-and-query through `\x1f` (the US separator,
+/// a byte no valid URI authority or origin-form path carries, so the
+/// join is collision-free). Client-role parking is path-aware (bd
+/// rc-cr5yf): two paths of one partner park on distinct keys, and
+/// the bounded-FIFO wire-arrival canon holds per key. Both the
+/// launch and the take side compose through this one function, so
+/// the two keys agree by construction.
+fn lane_map_key(lane_key: &str, target_path: &str) -> String {
+    format!("{lane_key}\x1f{target_path}")
+}
+
 /// The router-owned http client role: every http-scheme `send` the
 /// router dispatches dials through this lane, and every http
 /// `receive` checks it first for the parked roundtrip
 /// (client-role-first).
 ///
-/// Same-key sends park their responses in a bounded FIFO (depth
-/// [`LANE_FIFO_CAPACITY`]) in wire arrival order; a launch beyond the
-/// bound fails apparatus-class
+/// Parking is path-aware (bd rc-cr5yf): the map key is the
+/// registered partner key joined with the wire path-and-query
+/// ([`lane_map_key`]), so roundtrips on different paths of one
+/// partner never share a FIFO. Same-key sends park their responses
+/// in a bounded FIFO (depth [`LANE_FIFO_CAPACITY`]) in wire arrival
+/// order; a launch beyond the bound fails apparatus-class
 /// ([`TransportError::LaneFifoOverflow`]). The map lock is a
 /// `std::sync::Mutex`, held only for map access and never across an
 /// await.
 pub struct ClientLane {
-    /// Per lane key, the bounded FIFO of parked responses, filled by
-    /// [`launch`](Self::launch) and drained oldest-first by
-    /// [`take`](Self::take). `Arc`-shared with the spawned exchanges
-    /// so a post-connect failure can park its error under its own
-    /// generation ([`fail_lane_entry`](Self::fail_lane_entry)).
+    /// Per composite lane key ([`lane_map_key`]), the bounded FIFO of
+    /// parked responses, filled by [`launch`](Self::launch) and
+    /// drained oldest-first by [`take`](Self::take). `Arc`-shared
+    /// with the spawned exchanges so a post-connect failure can park
+    /// its error under its own generation
+    /// ([`fail_lane_entry`](Self::fail_lane_entry)).
     in_flight: Arc<Mutex<BTreeMap<String, VecDeque<LaneEntry>>>>,
     /// Monotonic source of entry generations: every launch stamps its
     /// entry with a fresh value, so the spawned exchange's failure
@@ -546,9 +562,12 @@ impl ClientLane {
     /// dial happens inline: a parse or connect failure returns
     /// [`TransportError`] from this call with NO lane entry inserted,
     /// so the caller observes the failure on the send itself (the
-    /// whole send stays under the runner's send deadline). Only a
-    /// live connection books the generation-stamped entry whose
-    /// response the router's `receive` consumes; when the key's FIFO
+    /// whole send stays under the runner's send deadline). The lane
+    /// books under the composite of the lane key and the parsed
+    /// target path ([`lane_map_key`]): parking is path-aware, so two
+    /// paths of one partner never share a FIFO. Only a live
+    /// connection books the generation-stamped entry whose response
+    /// the router's `receive` consumes; when the composite key's FIFO
     /// already holds [`LANE_FIFO_CAPACITY`] parked responses, the
     /// launch fails apparatus-class
     /// ([`TransportError::LaneFifoOverflow`]) instead of overwriting
@@ -563,29 +582,40 @@ impl ClientLane {
         target_uri: &str,
         msg: OutgoingMessage,
     ) -> Result<(), TransportError> {
-        // (a) Refuse a full FIFO before any wire effect: the
-        // overflow fails before the dial, before the wire-path
-        // evidence records, and before a generation is stamped. The
-        // booking site re-checks under the insert lock, so the bound
-        // holds under concurrent launches too.
-        if lock_through(&self.in_flight)
-            .get(lane_key)
-            .is_some_and(|fifo| fifo.len() >= LANE_FIFO_CAPACITY)
-        {
-            return Err(TransportError::LaneFifoOverflow {
-                lane_key: lane_key.to_string(),
-                bound: LANE_FIFO_CAPACITY,
-            });
-        }
-        // (b) Validate the target URI. The parse renders its
-        // declaration echo through the lane's stored secret-key set
-        // (ADR-0051).
+        // (a) Validate the target URI first — the composite map key
+        // needs the parsed path. The parse renders its declaration
+        // echo through the lane's stored secret-key set (ADR-0051).
         let secret_keys = self
             .secret_query_keys
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         let target = ParsedTarget::parse(target_uri, &secret_keys)?;
+        let map_key = lane_map_key(lane_key, &target.target);
+        // The overflow diagnostic names the lane key and its path
+        // half, each redacted (ADR-0051): the raw composite — and any
+        // secret-marked query value it embeds — never leaves the
+        // module, and the runner's render-site redaction stays a
+        // second, idempotent defense.
+        let rendered_key = format!(
+            "{} {}",
+            redact_wire_path(lane_key, &secret_keys),
+            redact_wire_path(&target.target, &secret_keys)
+        );
+        // (b) Refuse a full FIFO before any wire effect: the
+        // overflow fails before the dial, before the wire-path
+        // evidence records, and before a generation is stamped. The
+        // booking site re-checks under the insert lock, so the bound
+        // holds under concurrent launches too.
+        if lock_through(&self.in_flight)
+            .get(map_key.as_str())
+            .is_some_and(|fifo| fifo.len() >= LANE_FIFO_CAPACITY)
+        {
+            return Err(TransportError::LaneFifoOverflow {
+                lane_key: rendered_key,
+                bound: LANE_FIFO_CAPACITY,
+            });
+        }
         // (c) Dial inline: connection refused fails the send here.
         let stream = TcpStream::connect((target.host.as_str(), target.port))
             .await
@@ -609,10 +639,10 @@ impl ClientLane {
         }
         {
             let mut lanes = lock_through(&self.in_flight);
-            let fifo = lanes.entry(lane_key.to_string()).or_default();
+            let fifo = lanes.entry(map_key.clone()).or_default();
             if fifo.len() >= LANE_FIFO_CAPACITY {
                 return Err(TransportError::LaneFifoOverflow {
-                    lane_key: lane_key.to_string(),
+                    lane_key: rendered_key,
                     bound: LANE_FIFO_CAPACITY,
                 });
             }
@@ -623,7 +653,7 @@ impl ClientLane {
         // generation only: any other entry on the key's FIFO (an
         // earlier or later send's) stays intact.
         let lane = Arc::clone(&self);
-        let key = lane_key.to_string();
+        let key = map_key;
         tokio::spawn(async move {
             let result = perform_exchange(stream, &target, msg).await;
             match result {
@@ -645,19 +675,29 @@ impl ClientLane {
         Ok(())
     }
 
-    /// Takes the response parked under the lane key, if any; the
-    /// router's client-role-first receive calls this before any
-    /// server-role delegation. The key's FIFO drains oldest-first
-    /// (wire arrival order); the empty FIFO leaves the map.
+    /// Takes the response parked under the composite of `lane_key`
+    /// and `uri`'s parsed path-and-query ([`lane_map_key`]), if any;
+    /// the router's client-role-first receive calls this before any
+    /// server-role delegation. A reference that fails to parse (a
+    /// bare authority carries no path) misses every path-aware key:
+    /// the probe answers `None` and the server-role receive raises
+    /// its own apparatus error (ps97b canon). The composite key's
+    /// FIFO drains oldest-first (wire arrival order); the empty FIFO
+    /// leaves the map.
     pub(crate) fn take(
         &self,
         lane_key: &str,
+        uri: &str,
     ) -> Option<oneshot::Receiver<Result<IncomingMessage, TransportError>>> {
+        // The secret-key set is empty here: the parse failure is
+        // discarded, so its declaration echo never renders.
+        let target = ParsedTarget::parse(uri, &[]).ok()?;
+        let map_key = lane_map_key(lane_key, &target.target);
         let mut lanes = lock_through(&self.in_flight);
-        let fifo = lanes.get_mut(lane_key)?;
+        let fifo = lanes.get_mut(map_key.as_str())?;
         let entry = fifo.pop_front()?;
         if fifo.is_empty() {
-            lanes.remove(lane_key);
+            lanes.remove(map_key.as_str());
         }
         Some(entry.rx)
     }
@@ -1208,9 +1248,10 @@ mod tests {
     #[test]
     fn fail_lane_entry_is_conditional() {
         let lane = ClientLane::new();
+        let map_key = lane_map_key("K", "/x");
         let (_, rx) = oneshot::channel();
         lock_through(&lane.in_flight).insert(
-            "K".to_string(),
+            map_key.clone(),
             VecDeque::from([LaneEntry { generation: 2, rx }]),
         );
         let error = || TransportError::Other {
@@ -1219,22 +1260,57 @@ mod tests {
 
         // A stale generation is rejected; the FIFO's only entry stays
         // untouched.
-        assert!(!lane.fail_lane_entry("K", 1, error()));
+        assert!(!lane.fail_lane_entry(&map_key, 1, error()));
         assert_eq!(
             lock_through(&lane.in_flight)
-                .get("K")
+                .get(&map_key)
                 .and_then(|fifo| fifo.front())
                 .map(|entry| entry.generation),
             Some(2)
         );
 
         // The entry's own generation parks the error in place.
-        assert!(lane.fail_lane_entry("K", 2, error()));
-        let mut rx = lane.take("K").expect("the entry stays present");
+        assert!(lane.fail_lane_entry(&map_key, 2, error()));
+        let mut rx = lane
+            .take("K", "http://h/x")
+            .expect("the entry stays present");
         match rx.try_recv() {
             Ok(Err(TransportError::Other { message })) => assert_eq!(message, "boom"),
             other => panic!("the parked error must surface on receive, got {other:?}"),
         }
+    }
+
+    /// Path-aware parking (bd rc-cr5yf): entries booked under two
+    /// paths of one lane key drain by their own path — a crossed
+    /// probe order cannot cross-match, and a probe naming a third
+    /// path misses both.
+    #[test]
+    fn take_drains_only_the_probed_path() {
+        let lane = ClientLane::new();
+        let book = |path: &str, generation| {
+            let (_, rx) = oneshot::channel();
+            lock_through(&lane.in_flight).insert(
+                lane_map_key("K", path),
+                VecDeque::from([LaneEntry { generation, rx }]),
+            );
+        };
+        book("/a", 1);
+        book("/b", 2);
+
+        // The crossed probes each drain their own path's entry.
+        assert!(lane.take("K", "http://h/b").is_some());
+        assert!(lane.take("K", "http://h/a").is_some());
+        // A third path of the same key parks nothing: the probe
+        // misses and the receive falls through to the server role.
+        assert!(lane.take("K", "http://h/c").is_none());
+        // A bare authority composes no path-aware key: the probe
+        // misses (the server-role receive owns that error).
+        assert!(lane.take("K", "http://h").is_none());
+        // The query bytes join the composite key: an exact-query
+        // probe drains, a divergent query misses.
+        book("/q?v=1", 3);
+        assert!(lane.take("K", "http://h/q?v=1").is_some());
+        assert!(lane.take("K", "http://h/q?v=2").is_none());
     }
 
     // -----------------------------------------------------------------

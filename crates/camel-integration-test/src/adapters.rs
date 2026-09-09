@@ -515,10 +515,14 @@ impl PartnerRouter {
     /// Receives under the two-key contract, client-role-first: derive
     /// the lane key ([`Self::lane_key_for`], falling back to the
     /// declared string for plain strings), return a roundtrip parked
-    /// by the router's own client lane when one exists, and otherwise
-    /// delegate the server-role receive to the adapter registered
-    /// under that key. [`TransportError::Unbound`] only when neither a
-    /// parked roundtrip nor a registered adapter exists.
+    /// by the router's own client lane when one exists — probed under
+    /// the composite of the lane key and the interpolated reference's
+    /// own path (path-aware parking, bd rc-cr5yf), so a receive
+    /// drains its own path's roundtrip and never another path's —
+    /// and otherwise delegate the server-role receive to the adapter
+    /// registered under that key. [`TransportError::Unbound`] only
+    /// when neither a parked roundtrip nor a registered adapter
+    /// exists.
     pub async fn receive(
         &self,
         declared: &str,
@@ -529,7 +533,7 @@ impl PartnerRouter {
             .lane_key_for(declared, interpolated)
             .unwrap_or_else(|| declared.to_string());
         #[cfg(feature = "http")]
-        if let Some(parked) = self.client_lane.take(&lane_key) {
+        if let Some(parked) = self.client_lane.take(&lane_key, interpolated) {
             return self
                 .client_lane
                 .await_parked(interpolated, deadline, parked)

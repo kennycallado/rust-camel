@@ -270,14 +270,17 @@ configured section before a route compiles.
 
 ### Partner receives resolve the wire role by dispatch state
 
-`HttpPartner::receive` first checks for a response parked by its own
-client-role `send`; the parked response wins (client role). Otherwise
-the call awaits the next arrival queued on the endpoint's request path
-(server role), bounded by the deadline. The v1 bound: server-role
-arrivals queue per path; the client role keeps one response in flight
-per endpoint URI. Arrivals map into `IncomingMessage` with the request
-line (`method`, `path`) and `status: None` — requests carry no status;
-status validation is inbound work.
+The router's `receive` first probes the client lane for a roundtrip
+parked by a client-role `send`; the parked response wins (client
+role), and the probe keys on the registered partner key joined with
+the wire path-and-query of the interpolated reference — parking is
+path-aware, bounded FIFO per key, oldest-first within one path. A
+probe miss falls to the partner adapter, which awaits the next
+arrival queued on the endpoint's request path (server role), bounded
+by the deadline. Server-role arrivals queue per path. Arrivals map
+into `IncomingMessage` with the request line (`method`, `path`) and
+`status: None` — requests carry no status; status validation is
+inbound work.
 
 ### Partner lanes key on strict wire bytes
 

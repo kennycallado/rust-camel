@@ -270,3 +270,48 @@ async fn lane_fifo_overflow_is_apparatus() {
         "the refused send must reach no wire"
     );
 }
+
+/// The overflow diagnostic names the composite lane key with the path
+/// half redacted (ADR-0051): a secret-marked query value on the
+/// overflowed path renders masked, both in the key half and the path
+/// half, so the apparatus failure never echoes the secret.
+#[tokio::test]
+async fn lane_fifo_overflow_redacts_secret_query() {
+    // Permissive 200s: every booked exchange resolves quickly, and
+    // the entries stay parked until a receive takes them, so the
+    // FIFO fills from completed roundtrips alone.
+    let partner = HttpPartner::start_permissive(200)
+        .await
+        .expect("partner binds 127.0.0.1:0");
+    let uri = format!("http://{}/orders?authPassword=sekrit", partner.bound_addr());
+    let router = PartnerRouter::new(BTreeMap::new());
+    router.set_secret_query_keys(vec!["authPassword".to_string()]);
+
+    for _ in 0..64 {
+        router
+            .send(&uri, &uri, send_msg("bulk"))
+            .await
+            .expect("the first 64 sends book inside the FIFO");
+    }
+
+    let overflow = router.send(&uri, &uri, send_msg("one-too-many")).await;
+    let Err(error) = &overflow else {
+        panic!("the 65th send must fail at the transport, got {overflow:?}");
+    };
+    let TransportError::LaneFifoOverflow { lane_key, .. } = error else {
+        panic!("the overflow must be the apparatus variant, got {error:?}");
+    };
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("/orders"),
+        "the overflow names the path: {rendered}"
+    );
+    assert!(
+        lane_key.contains("authPassword=***") && rendered.contains("authPassword=***"),
+        "both key and path halves mask the secret: {rendered}"
+    );
+    assert!(
+        !rendered.contains("sekrit"),
+        "the overflow never echoes the secret: {rendered}"
+    );
+}

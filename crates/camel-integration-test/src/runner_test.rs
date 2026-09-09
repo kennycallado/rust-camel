@@ -1750,10 +1750,86 @@ async fn raw_lane_fifo_overflow_redacts_at_the_mapping() {
     );
 }
 
-/// A body validation on a query-bearing declaration prints the
-/// REDACTED subject — never the raw declared endpoint — so a
-/// successful receive followed by a failing `received:` body check
-/// leaks no secret value into the FAIL line (ADR-0051).
+/// A raw third-party overflow key carrying a space inside a secret
+/// query value stays ONE value at the runner's render site: the
+/// pre-rendered two-half shape is the only string that redacts per
+/// half, so splitting can never sever a secret value and print its
+/// tail (ADR-0051 fail-safe).
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn raw_overflow_key_with_space_redacts_whole() {
+    let declared = "http://host/login";
+    let router = PartnerRouter::new(BTreeMap::from([(
+        declared.to_string(),
+        Box::new(CannedOverflow {
+            lane_key: "http://host/login?authPassword=hunter 2&x=1".to_string(),
+            bound: 64,
+        }) as Box<dyn PartnerAdapter>,
+    )]));
+    router.set_secret_query_keys(vec!["authPassword".to_string()]);
+    let doc = doc_with(vec![ScenarioAction::Send {
+        to: endpoint(declared),
+        body: None,
+        headers: None,
+        method: "POST".to_string(),
+        expect_reply: None,
+    }]);
+    let mut vars = ScenarioVars::new();
+    let failure = run_scenario(&doc, &router, &mut vars)
+        .await
+        .expect_err("the send must fail at the transport");
+    let text = failure.to_string();
+    assert!(
+        !text.contains("hunter") && !text.contains(" 2"),
+        "no fragment of the severed secret value may print: {text}"
+    );
+    assert!(
+        text.contains("authPassword=***"),
+        "the whole value masks: {text}"
+    );
+}
+
+/// The pre-rendered two-half overflow form ("key path", the http
+/// lane's own render) redacts per half: a secret in the key half
+/// masks, and the path half stays visible instead of merging into
+/// the key half's query span (ADR-0051).
+#[tokio::test]
+#[cfg(feature = "http")]
+async fn prerendered_overflow_form_redacts_per_half() {
+    let declared = "http://host/login";
+    let router = PartnerRouter::new(BTreeMap::from([(
+        declared.to_string(),
+        Box::new(CannedOverflow {
+            lane_key: "http://host/login?authPassword=hunter2 /orders?x=1".to_string(),
+            bound: 64,
+        }) as Box<dyn PartnerAdapter>,
+    )]));
+    router.set_secret_query_keys(vec!["authPassword".to_string()]);
+    let doc = doc_with(vec![ScenarioAction::Send {
+        to: endpoint(declared),
+        body: None,
+        headers: None,
+        method: "POST".to_string(),
+        expect_reply: None,
+    }]);
+    let mut vars = ScenarioVars::new();
+    let failure = run_scenario(&doc, &router, &mut vars)
+        .await
+        .expect_err("the send must fail at the transport");
+    let text = failure.to_string();
+    assert!(
+        !text.contains("hunter2"),
+        "the key half's secret masks: {text}"
+    );
+    assert!(
+        text.contains("authPassword=***"),
+        "the key half keeps its redacted shape: {text}"
+    );
+    assert!(
+        text.contains("/orders?x=1"),
+        "the path half stays visible, not swallowed: {text}"
+    );
+}
 #[tokio::test]
 async fn body_validation_failure_carries_redacted_subject() {
     let declared = "http://host/login?authPassword=hunter2&x=1";

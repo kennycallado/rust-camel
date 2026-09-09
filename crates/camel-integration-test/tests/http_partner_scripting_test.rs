@@ -1288,16 +1288,17 @@ partners:
       body: parked-ok
 "#;
 
-/// Oldest-first characterization document: two dynamic-ref sends park
-/// their roundtrips `/a` (a-ok) then `/b` (b-ok) — no reply
-/// expectation, the roundtrips stay parked. The receives are CROSSED
-/// against the parking order: the first receive names
-/// `http://${MOCK}/b` yet must drain the OLDEST parked roundtrip
-/// (`a-ok`), and the second names `http://${MOCK}/a` yet gets `b-ok`.
-/// A path-matched implementation would hand each receive its own
-/// path's roundtrip and fail both validates. This pins the path-blind
-/// parking order the receive deferral rests on (bd rc-cr5yf).
-const OLDEST_FIRST_DOC: &str = r#"
+/// Path-aware characterization document (bd rc-cr5yf): two
+/// dynamic-ref sends park their roundtrips `/a` (a-ok) then `/b`
+/// (b-ok) — no reply expectation, the roundtrips stay parked, each
+/// under its own path's lane key. The receives are CROSSED against
+/// the parking order: the first receive names `http://${MOCK}/b` and
+/// must drain the `/b` roundtrip (b-ok), the second names
+/// `http://${MOCK}/a` and gets a-ok. An oldest-first path-blind
+/// implementation would hand the first receive the older `/a`
+/// roundtrip and fail both validates. This pins the path-aware
+/// parking contract.
+const PATH_AWARE_DOC: &str = r#"
 routeFiles: [routes.yaml]
 scenario:
 - send:
@@ -1316,12 +1317,12 @@ scenario:
     target:
       lastReceived: 'http://${MOCK}/b'
     expectation:
-      contains: a-ok
+      contains: b-ok
 - validate:
     target:
       lastReceived: 'http://${MOCK}/a'
     expectation:
-      contains: b-ok
+      contains: a-ok
 partners:
   http://127.0.0.1:0/orders:
   - method: POST
@@ -1609,19 +1610,21 @@ async fn roundtrip_receive_first_then_take_still_works() {
 }
 
 /// Characterization (bd rc-cr5yf): two dynamic-ref sends park their
-/// roundtrips, and the receives are CROSSED against the parking
-/// order — the receive naming `/b` drains the OLDEST parked roundtrip
-/// (`a-ok`) and the receive naming `/a` gets `b-ok`, both witnessed by
-/// the document's crossed `lastReceived` validates. A path-matched
-/// implementation fails both. This pins the path-blind parking order
-/// the receive deferral rests on.
+/// roundtrips under their own path's lane keys, and the receives are
+/// CROSSED against the parking order — the receive naming `/b`
+/// drains the `/b` roundtrip (`b-ok`) and the receive naming `/a`
+/// gets `a-ok`, both witnessed by the document's `lastReceived`
+/// validates. An oldest-first path-blind implementation drains the
+/// older `/a` roundtrip into the `/b` receive and fails both. This
+/// pins the path-aware parking contract: no cross-match between
+/// paths, oldest-first within one path.
 #[tokio::test]
-async fn standalone_roundtrip_receives_match_oldest_first_path_blind() {
-    let (outcome, recorders) = run_doc_one_partner(OLDEST_FIRST_DOC).await;
+async fn standalone_roundtrip_receives_drain_their_own_path() {
+    let (outcome, recorders) = run_doc_one_partner(PATH_AWARE_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
-        "the receives must drain the parked roundtrips oldest-first: {outcome:?}"
+        "each receive must drain its own path's parked roundtrip: {outcome:?}"
     );
 
     let recorded = recorders.recorded_requests();

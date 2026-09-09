@@ -744,14 +744,33 @@ async fn send_action(
         },
     })?;
     let reply = sent.map_err(|source| {
-        // Render-site defense: the lane key is the declared endpoint
-        // URI, and a third-party adapter may hand the overflow over
-        // RAW; the runner holds the secret set, and redaction is
-        // idempotent on already-masked output (ADR-0051).
+        // Render-site defense: the http lane pre-renders its
+        // composite "key path" overflow form with each half
+        // redacted, but a third-party adapter may hand the overflow
+        // over RAW; the runner holds the secret set. Only the exact
+        // pre-rendered shape (one space, path half leading `/`)
+        // redacts per half — one pass over that shape would merge
+        // two query-bearing halves into a single pair and swallow
+        // the path half. Any other string, including a raw
+        // third-party key, redacts as ONE value: splitting an
+        // arbitrary string could sever a secret value across halves
+        // and print its tail (fail-safe, idempotent, ADR-0051).
         let source = match source {
             TransportError::LaneFifoOverflow { lane_key, bound } => {
+                let rendered = match lane_key.split_once(' ') {
+                    Some((key_half, path_half))
+                        if !key_half.contains(' ') && path_half.starts_with('/') =>
+                    {
+                        format!(
+                            "{} {}",
+                            redact_wire_path(key_half, &router.secret_query_keys()),
+                            redact_wire_path(path_half, &router.secret_query_keys())
+                        )
+                    }
+                    _ => redact_wire_path(&lane_key, &router.secret_query_keys()),
+                };
                 TransportError::LaneFifoOverflow {
-                    lane_key: redact_wire_path(&lane_key, &router.secret_query_keys()),
+                    lane_key: rendered,
                     bound,
                 }
             }

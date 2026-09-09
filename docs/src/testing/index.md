@@ -343,9 +343,10 @@ http://${MOCK}/orders` drains the orders lane, `from:
 http://${MOCK}/billing` drains the billing lane. A dynamic receive must
 name a path — a bare authority is an apparatus error. The registered
 key remains the adapter-lookup key; the path on the wire picks the lane.
-In the client role, standalone roundtrip receives match oldest-first
-regardless of path, so prefer `expectReply` or path-filtered validates
-(bd rc-cr5yf). The runnable example pair lives in
+In the client role, standalone roundtrip receives drain their own
+path's parked roundtrip oldest-first: two receives naming different
+paths of one partner never cross-match (bd rc-cr5yf). The runnable
+example pair lives in
 [`examples/integration-testing/partner-multi-path.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/integration-testing/partner-multi-path.test.yaml) and [`partner-multi-path.routes.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/integration-testing/partner-multi-path.routes.yaml).
 
 A migration note for suites that grew one script per assertion: express
