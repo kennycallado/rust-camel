@@ -3911,9 +3911,12 @@ mod tests {
             "producer should fail when nothing is listening"
         );
         let msg = result.unwrap_err().to_string();
+        // Port 0 on loopback: ECONNREFUSED on Linux, EADDRNOTAVAIL on macOS.
         assert!(
-            msg.contains("connection refused"),
-            "expected connection refused error, got: {msg}"
+            msg.contains("connection refused")
+                || msg.contains("Can't assign requested address")
+                || msg.contains("os error 49"),
+            "expected connect refusal (ECONNREFUSED or EADDRNOTAVAIL), got: {msg}"
         );
     }
 
