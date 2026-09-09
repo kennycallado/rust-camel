@@ -271,6 +271,18 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
     ) -> Result<StepDisposition, CamelError> {
         let (disposition, producer) = self.resolve_producer(policy);
 
+        // rc-fu1of: a non-matching policy with no DLC silently propagates —
+        // the operator sees "handler never ran" with no signal why. Emit a
+        // diagnostic naming the error kind so `kind:` vocabulary gaps are
+        // discoverable. debug! (not warn!): non-matching is an expected,
+        // selective-policy path, and this fires per failed exchange.
+        if policy.is_none() && producer.is_none() {
+            tracing::debug!(
+                kind = %error.variant_name(),
+                "no on_exceptions policy matched and no dead-letter channel configured; propagating error"
+            );
+        }
+
         // Run on_steps if present (using the SAME policy identified by PolicyId).
         // Skip on_steps for Propagate disposition to prevent double side-effects:
         // on_steps results would be discarded (snapshot restored), and the DLC

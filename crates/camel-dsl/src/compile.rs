@@ -911,6 +911,9 @@ fn supported_exception_kinds() -> Vec<&'static str> {
         "Config",
         "AlreadyConsumed",
         "StreamLimitExceeded",
+        "Unauthenticated",
+        "Unauthorized",
+        "ValidationError",
     ]
 }
 
@@ -938,6 +941,13 @@ fn exception_kind_matches(kind: &str, err: &CamelError) -> bool {
         "Config" => matches!(err, CamelError::Config(_)),
         "AlreadyConsumed" => matches!(err, CamelError::AlreadyConsumed),
         "StreamLimitExceeded" => matches!(err, CamelError::StreamLimitExceeded(_)),
+        // HTTP-relevant kinds (rc-fu1of): raised in-pipeline by validation
+        // processors and auth checks. Pre-pipeline HTTP auth denials bypass
+        // the route handler entirely, so these arms only fire for errors
+        // raised inside the route body.
+        "Unauthenticated" => matches!(err, CamelError::Unauthenticated(_)),
+        "Unauthorized" => matches!(err, CamelError::Unauthorized(_)),
+        "ValidationError" => matches!(err, CamelError::ValidationError(_)),
         _ => false,
     }
 }
@@ -2347,9 +2357,59 @@ mod tests {
             "Config",
             "AlreadyConsumed",
             "StreamLimitExceeded",
+            "Unauthenticated",
+            "Unauthorized",
+            "ValidationError",
         ];
 
         assert_eq!(supported_exception_kinds(), expected);
+    }
+
+    #[test]
+    fn test_compile_error_handler_http_error_kinds_match() {
+        // rc-fu1of: the HTTP-relevant kinds (ValidationError → 400,
+        // Unauthenticated → 401, Unauthorized → 403) must be matchable by
+        // `kind:` clauses, not just by fragile message_contains.
+        for (kind, err) in [
+            (
+                "ValidationError",
+                CamelError::ValidationError("body".into()),
+            ),
+            (
+                "Unauthenticated",
+                CamelError::Unauthenticated("no token".into()),
+            ),
+            ("Unauthorized", CamelError::Unauthorized("forbidden".into())),
+        ] {
+            let config = compile_error_handler(DeclarativeErrorHandler {
+                dead_letter_channel: None,
+                retry: None,
+                on_exceptions: Some(vec![DeclarativeOnException {
+                    kind: Some(kind.into()),
+                    message_contains: None,
+                    retry: None,
+                    steps: vec![],
+                    handled: None,
+                    continued: None,
+                }]),
+                use_original_message: false,
+            })
+            .expect("compile should succeed");
+
+            assert_eq!(
+                config.policies.len(),
+                1,
+                "kind {kind} should compile to one policy"
+            );
+            assert!(
+                (config.policies[0].matches)(&err),
+                "kind {kind} should match its CamelError variant"
+            );
+            assert!(
+                !(config.policies[0].matches)(&CamelError::Io("other".into())),
+                "kind {kind} should not match unrelated variants"
+            );
+        }
     }
 
     #[test]
