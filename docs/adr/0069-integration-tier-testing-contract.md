@@ -252,15 +252,21 @@ suite keeps its runtime and composition.
 
 1. HTTP, both directions. Outbound bridge and proxy regressions justify it
    (rc-eoft, rc-f0cn). The rc-w1u9 readiness work is already satisfied.
-2. WS, after the consumer-client role lands (rc-39d6).
-3. gRPC is a loopback candidate. It needs no Docker. It activates on demand.
-4. Kafka, JMS, and other broker adapters wait for an adapter-specific
+2. SQL, as the `sql:` scenario action against named datasources
+   (rc-25lup.1, rc-25lup.2). It landed 2026-09-08.
+3. WS, after the consumer-client role lands (rc-39d6).
+4. gRPC is a loopback candidate. It needs no Docker. It activates on demand.
+5. Kafka, JMS, and other broker adapters wait for an adapter-specific
    regression.
 
 Each adapter is a Cargo feature. There is no all-components feature. CI runs a
-dedicated `integration-http` job with path filters. Broker scenarios run in an
-isolated or scheduled job. Loopback tests carry no `#[ignore]` marker. That is
-the ADR-0054 rule, not a new one. The loopback budget is seconds.
+dedicated `integration-http` job with path filters. A dedicated
+`integration-sql` job proves that the sql feature stands alone: it builds
+`camel-cli` with `--no-default-features --features integration-sql,itest-e2e`
+and runs the scenario e2e suite, so the full-boot path runs without
+`integration-http`. Broker scenarios run in an isolated or scheduled job.
+Loopback tests carry no `#[ignore]` marker. That is the ADR-0054 rule, not a
+new one. The loopback budget is seconds.
 
 ### 9. Partner provisioning sources
 

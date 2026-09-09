@@ -277,11 +277,14 @@ Scenario documents run through one of two execution paths. The build selects the
 |-------|------------------|----------------|
 | default | `fake:` only | No-boot smoke path. Any other scheme reports `infra-unavailable`, names the adapter, and exits 2. |
 | `integration-http` | `fake:`, `direct:`, `http:` | Embedded full boot. Real composition root, real wire, harness partner listeners. Any other scheme reports `infra-unavailable`, names the adapter, and exits 2. |
+| `integration-sql` | no scenario endpoint references required; `sql:` actions | Embedded full boot. An `sql:`-only document runs without `integration-http`. |
 
 The default build provides only the in-memory `fake:` partner adapter. A scenario whose endpoints are all `fake:` runs the no-boot smoke path. A `fake:`-only scenario keeps that path in any build.
 
 The `integration-http` feature is enabled by default in `camel-cli`
 since 2026-09-05. The build boots the real composition root. A scenario whose endpoints are all `fake:`, `direct:`, or `http:` qualifies. Each `http:` endpoint binds a harness partner listener on `127.0.0.1:0`. A `direct:` send stimulates the booted context through its own producer path. The document runs over the real wire.
+
+The `integration-sql` feature is independent of `integration-http`. It is on by default in `camel-cli`. An `sql:`-only document boots the same composition root without `integration-http`. The `integration-sql` CI job proves this independence: it builds `camel-cli` with `--no-default-features --features integration-sql,itest-e2e` and runs the scenario e2e suite.
 
 Filters combine as AND across kinds and OR within repeats of one kind. The tier filter counts as a kind. When at least one filter is given and no document survives, `camel test` prints a misuse error naming the filters and exits 2. An invalid glob pattern prints to stderr and exits 2 before any document runs.
 

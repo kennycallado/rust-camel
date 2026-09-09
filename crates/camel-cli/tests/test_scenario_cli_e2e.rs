@@ -11,12 +11,16 @@
 //! route-stamped header for the run to exit 0.
 #![cfg(feature = "itest-e2e")]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+
+#[cfg(feature = "integration-http")]
+use std::path::PathBuf;
 
 /// The Task 3.2 outbound fixture project: `Camel.toml`, `routes/`, and
 /// the scenario document, under `camel-integration-test`'s test
 /// fixtures.
+#[cfg(feature = "integration-http")]
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../camel-integration-test/tests/fixtures/outbound")
 }

@@ -1,16 +1,18 @@
-name: Integration HTTP
+name: Integration SQL
 
 on:
   pull_request:
     branches: ["main"]
     paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/components/camel-sql/**"
       - "crates/camel-integration-test/**"
       - "crates/camel-bundles/**"
-      - "crates/camel-cli/src/commands/**"
+      - "crates/camel-cli/src/**"
+      - "crates/camel-cli/tests/test_scenario_cli_e2e.rs"
       - "crates/camel-cli/Cargo.toml"
-      - "crates/components/camel-http/**"
-      - "crates/components/camel-sql/**"
-      - ".github/workflows/integration-http.yml"
+      - ".github/workflows/integration-sql.yml"
 
 permissions:
   contents: read
@@ -23,8 +25,8 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
-  integration-http:
-    name: Integration HTTP (ubuntu-latest)
+  integration-sql:
+    name: Integration SQL independence (ubuntu-latest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,15 +40,8 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-      - name: Install libclang for bindgen
-        run: sudo apt-get install -y libclang-dev
-      - name: Integration-tier http scenarios (camel-integration-test)
-        run: cargo test -p camel-integration-test --features http
-      - name: Bundles with kafka feature (camel-bundles)
-        run: cargo test -p camel-bundles --features kafka
-      - name: CLI tier filter tests (camel-cli)
-        run: cargo test -p camel-cli --features integration-http,itest-e2e --test test_tier_filters
-      - name: CLI scenario e2e (camel-cli)
-        run: cargo test -p camel-cli --features integration-http,itest-e2e --test test_scenario_cli_e2e
-      - name: Bundles default suite (camel-bundles)
-        run: cargo test -p camel-bundles
+      - name: SQL independence proof (camel-cli, no default features)
+        run: >
+          cargo test -p camel-cli --no-default-features
+          --features integration-sql,itest-e2e
+          --test test_scenario_cli_e2e
