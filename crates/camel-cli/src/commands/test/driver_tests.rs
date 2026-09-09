@@ -1496,6 +1496,325 @@ async fn lean_ignores_ambient_env() {
     );
 }
 
+/// The document `env:` map steers the file-route lookup (rc-l7m7t): the
+/// `set_header.value` placeholder resolves to the fixture value `docval`
+/// first, the `:-default` only as fallback. `set_header.value` is the
+/// real string-typed field the spec's `title` placeholder lands on.
+#[tokio::test(flavor = "multi_thread")]
+async fn doc_env_steers_file_route_field() {
+    let dir = temp_dir("doc-env-file");
+    let route = write_string_header_route_file(&dir, "docenv.routes.yaml", "${env:LEAN_T:-hello}");
+    let doc_path = dir.join("a.test.yaml");
+    fs::write(
+        &doc_path,
+        r#"
+env:
+  LEAN_T: docval
+routeFiles:
+  - docenv.routes.yaml
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    count: 1
+"#,
+    )
+    .expect("write doc-env routeFiles doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    let doc = parse_doc_at(&doc_path);
+    let defs = match runner::load_routes(&doc, &dir).await {
+        Ok(defs) => defs,
+        Err(e) => panic!("route load must succeed: {e}"),
+    };
+    assert_eq!(
+        header_value(&defs),
+        &camel_api::declarative::ValueSourceDef::Literal(serde_json::Value::String(
+            "docval".to_string()
+        )),
+        "document env value must win over the inline default"
+    );
+}
+
+/// The document `env:` map also feeds the inline-`routes:` seam: the
+/// `${env:P:-one}` placeholder resolves to the fixture value `two`.
+#[tokio::test(flavor = "multi_thread")]
+async fn doc_env_steers_inline_routes_field() {
+    let dir = temp_dir("doc-env-inline");
+    let doc_path = dir.join("a.test.yaml");
+    fs::write(
+        &doc_path,
+        r#"
+env:
+  P: two
+routes:
+  - id: p-route
+    from: "direct:start"
+    steps:
+      - set_header:
+          key: k
+          value: ${env:P:-one}
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    count: 1
+"#,
+    )
+    .expect("write doc-env inline doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![doc_path.clone(), dir.clone()]);
+    let doc = parse_doc_at(&doc_path);
+    let defs = match runner::load_routes(&doc, &dir).await {
+        Ok(defs) => defs,
+        Err(e) => panic!("route load must succeed: {e}"),
+    };
+    assert_eq!(
+        header_value(&defs),
+        &camel_api::declarative::ValueSourceDef::Literal(serde_json::Value::String(
+            "two".to_string()
+        )),
+        "inline placeholder must resolve from the document env"
+    );
+}
+
+/// A no-default placeholder resolves from the document `env:` map alone —
+/// no unresolved-variable error when the fixture supplies the value.
+#[tokio::test(flavor = "multi_thread")]
+async fn doc_env_no_default_resolves() {
+    let dir = temp_dir("doc-env-no-default");
+    let route = write_string_header_route_file(&dir, "nodefault.routes.yaml", "${env:LEAN_DEF}");
+    let doc_path = dir.join("a.test.yaml");
+    fs::write(
+        &doc_path,
+        r#"
+env:
+  LEAN_DEF: supplied
+routeFiles:
+  - nodefault.routes.yaml
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    count: 1
+"#,
+    )
+    .expect("write doc-env no-default doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    let doc = parse_doc_at(&doc_path);
+    let defs = match runner::load_routes(&doc, &dir).await {
+        Ok(defs) => defs,
+        Err(e) => panic!("route load must succeed: {e}"),
+    };
+    assert_eq!(
+        header_value(&defs),
+        &camel_api::declarative::ValueSourceDef::Literal(serde_json::Value::String(
+            "supplied".to_string()
+        )),
+        "no-default placeholder must resolve from the document env"
+    );
+}
+
+/// Typing semantics are unchanged when the document env map supplies the
+/// value: the substituted leaf keeps STRING typing, so the int-typed
+/// `circuit_breaker.open_duration_ms` still fails the load exactly as
+/// `camel run` rejects the file (boot parity; numeric knobs stay on the
+/// rc-v1sw track).
+#[tokio::test(flavor = "multi_thread")]
+async fn doc_env_int_position_still_fails() {
+    let dir = temp_dir("doc-env-int");
+    let route = write_cb_route_file(&dir, "cb.routes.yaml");
+    let doc_path = dir.join("a.test.yaml");
+    fs::write(
+        &doc_path,
+        r#"
+env:
+  CB_MS: "500"
+routeFiles:
+  - cb.routes.yaml
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    count: 1
+"#,
+    )
+    .expect("write doc-env int doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    let doc = parse_doc_at(&doc_path);
+    let err = match runner::load_routes(&doc, &dir).await {
+        Ok(_) => panic!("int-field placeholder must fail the load (boot parity)"),
+        Err(e) => e,
+    };
+    assert!(err.contains("cb.routes.yaml"), "err: {err}");
+    assert!(
+        !err.contains("not set"),
+        "must not carry the named-var wording: {err}"
+    );
+}
+
+/// Fixture values are data, never re-scanned: the env value carrying
+/// placeholder-shaped text lands in the route verbatim, with no second
+/// interpolation pass over it.
+#[tokio::test(flavor = "multi_thread")]
+async fn env_value_never_interpolated_route() {
+    let dir = temp_dir("env-value-verbatim");
+    let route = write_string_header_route_file(&dir, "verbatim.routes.yaml", "${env:A:-d}");
+    let doc_path = dir.join("a.test.yaml");
+    fs::write(
+        &doc_path,
+        r#"
+env:
+  A: "${env:B:-x}literal"
+routeFiles:
+  - verbatim.routes.yaml
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    count: 1
+"#,
+    )
+    .expect("write verbatim doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    let doc = parse_doc_at(&doc_path);
+    let defs = match runner::load_routes(&doc, &dir).await {
+        Ok(defs) => defs,
+        Err(e) => panic!("route load must succeed: {e}"),
+    };
+    assert_eq!(
+        header_value(&defs),
+        &camel_api::declarative::ValueSourceDef::Literal(serde_json::Value::String(
+            "${env:B:-x}literal".to_string()
+        )),
+        "fixture value text must land verbatim, never re-interpolated"
+    );
+}
+
+/// The steering scenario end to end (rc-l7m7t): the document env map
+/// resolves BOTH the doc-side `repositories.cache` stub key (parse-time
+/// identifier pass) and the route-side `cache.repository` reference (the
+/// file-route lookup this task threads) to the same fixture value
+/// `faststub`, so the stub registers and the cache step binds to it. The
+/// tier derivation is asserted directly: the env-map-present document
+/// provably stays unit (LEAN) tier.
+#[tokio::test(flavor = "multi_thread")]
+async fn steering_repository_e2e() {
+    let dir = temp_dir("steering-repo");
+    let route = dir.join("cache.routes.yaml");
+    fs::write(
+        &route,
+        r#"
+routes:
+  - id: cache-route
+    from: "direct:start"
+    steps:
+      - cache:
+          repository: "${env:CACHE_REPO_NAME:-persistent}"
+          key: k
+          on_miss:
+            - to: "mock:out"
+"#,
+    )
+    .expect("write steering cache route file"); // allow-unwrap
+    let doc_path = dir.join("a.test.yaml");
+    fs::write(
+        &doc_path,
+        r#"
+env:
+  CACHE_REPO_NAME: faststub
+routeFiles:
+  - cache.routes.yaml
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    count: 1
+repositories:
+  cache:
+    "${env:CACHE_REPO_NAME:-persistent}": memory
+"#,
+    )
+    .expect("write steering doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    let doc = parse_doc_at(&doc_path);
+    // Doc side: the parse-time identifier pass resolved the stub key.
+    let cache = doc
+        .repositories
+        .as_ref()
+        .and_then(|repos| repos.cache.as_ref())
+        .expect("cache stubs present"); // allow-unwrap
+    assert_eq!(cache.len(), 1, "exactly one stub key: {cache:?}");
+    assert!(
+        cache.contains_key("faststub"),
+        "stub key must resolve via doc env: {cache:?}"
+    );
+    // Route side: the file-route lookup resolved the cache step's
+    // repository reference to the same fixture value.
+    let defs = match runner::load_routes(&doc, &dir).await {
+        Ok(defs) => defs,
+        Err(e) => panic!("route load must succeed: {e}"),
+    };
+    let repository = defs
+        .first()
+        .expect("route definition present") // allow-unwrap
+        .steps()
+        .iter()
+        .find_map(|step| match step {
+            camel_core::BuilderStep::Cache { repository, .. } => repository.as_ref(),
+            _ => None,
+        })
+        .expect("cache step present"); // allow-unwrap
+    assert_eq!(
+        repository, "faststub",
+        "route-side reference must resolve via doc env"
+    );
+    // The env-map-present document provably stays unit tier.
+    assert!(
+        matches!(unit_tier(&doc, &defs), Tier::Lean),
+        "env-map-present document must stay LEAN tier"
+    );
+    // End to end: the driver registers the stub under the resolved name
+    // and the route's cache step resolves against it — no registration
+    // error, run green.
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[doc_path], &mut out, &mut err).await;
+    let out = String::from_utf8(out).expect("out is utf-8"); // allow-unwrap
+    assert_eq!(
+        summary.exit_code,
+        0,
+        "steered repository run must pass — out: {out} | err: {}",
+        String::from_utf8_lossy(&err)
+    );
+}
+
+/// Regression pin for the added env layer: a variable present ONLY in the
+/// process environment stays unresolved — ambient is never a resolution
+/// source, with or without a document env map.
+#[tokio::test(flavor = "multi_thread")]
+async fn ambient_only_stays_unresolved() {
+    let dir = temp_dir("ambient-only");
+    let route =
+        write_string_header_route_file(&dir, "ambient-only.routes.yaml", "${env:AMBIENT_ONLY}");
+    let doc_path = write_route_files_doc(&dir, "a.test.yaml", "ambient-only.routes.yaml");
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    // The guard restores the prior value on drop, so a panicking
+    // assertion cannot leak the ambient value into other tests.
+    let _env = EnvVarGuard::set("AMBIENT_ONLY", "ambient");
+    let doc = parse_doc_at(&doc_path);
+    let err = match runner::load_routes(&doc, &dir).await {
+        Ok(_) => panic!("ambient-only variable must stay unresolved"),
+        Err(e) => e,
+    };
+    assert!(err.contains("AMBIENT_ONLY"), "err: {err}");
+    assert!(err.contains("not set"), "err: {err}");
+}
+
 /// The pilot pattern (validate-partner-self-declare task 2): a proxy
 /// route dials an upstream with a varying query, and the document's
 /// ONLY partner reference is the validate action's object-form

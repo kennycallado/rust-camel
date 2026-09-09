@@ -85,6 +85,12 @@ pub struct TestDocument {
     pub beans: Option<BTreeMap<String, BeanDeclDoc>>,
     /// Declarative repository stubs keyed by registry kind.
     pub repositories: Option<RepositoriesDoc>,
+    /// Fixture values consulted by every unit-tier interpolation seam
+    /// (route files, inline routes, identifier fields) before inline
+    /// `${env:NAME:-default}` defaults; never the ambient environment;
+    /// values are never themselves interpolated.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 impl TestDocument {
@@ -829,7 +835,8 @@ fn classify_yaml_error(raw: &str) -> TestDocError {
 }
 
 /// Parses and validates a `*.test.yaml` document. Validation order:
-/// (a0) identifier fields interpolate `${env:...}` default-only (parity
+/// (a0) identifier fields interpolate `${env:...}` through the document
+/// `env:` fixture closure first, then inline defaults (parity
 /// with route sources; see the mock-testkit spec requirement) — exactly:
 /// (1) `repositories` map keys in every registry map (`cache`,
 /// `idempotent`, `claimCheck`); (2) `beans` map keys; (3) `intercepts`
@@ -852,7 +859,8 @@ pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
     let mut doc = serde_yaml::from_str::<TestDocument>(text)
         .map_err(|e| classify_yaml_error(&e.to_string()))?;
 
-    // (a0) Identifier fields interpolate `${env:...}` default-only (parity
+    // (a0) Identifier fields interpolate `${env:...}` through the
+    // document `env:` fixture closure first, then inline defaults (parity
     // with route sources; see the mock-testkit spec requirement).
     interpolate_identifier_fields(&mut doc)?;
 
@@ -1128,13 +1136,18 @@ fn validate_repositories(doc: &TestDocument) -> Result<(), TestDocError> {
 }
 
 /// Interpolates `${env:NAME}` / `${env:NAME:-default}` placeholders in one
-/// identifier field. The lookup is default-only — the ambient environment is
-/// never consulted — mirroring how route sources resolve identifiers at
-/// parse time. The `&|_| None` closure is the future LayeredEnv injection
-/// point (rc-l7m7t); an unresolved variable surfaces as
-/// [`TestDocError::EnvUnresolved`] naming the variable and the field.
-fn interpolate_identifier(value: &str, position: &str) -> Result<String, TestDocError> {
-    interpolate_env_with(value, &|_| None).map_err(|var| TestDocError::EnvUnresolved {
+/// identifier field. The lookup is the document `env:` fixture closure
+/// (rc-l7m7t): document env values first, then inline defaults — the
+/// ambient environment is still never consulted in the unit tier, mirroring
+/// how route sources resolve identifiers at parse time. An unresolved
+/// variable surfaces as [`TestDocError::EnvUnresolved`] naming the variable
+/// and the field.
+fn interpolate_identifier(
+    value: &str,
+    position: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, TestDocError> {
+    interpolate_env_with(value, lookup).map_err(|var| TestDocError::EnvUnresolved {
         var,
         field: position.to_string(),
     })
@@ -1143,15 +1156,17 @@ fn interpolate_identifier(value: &str, position: &str) -> Result<String, TestDoc
 /// Rebuilds one identifier map key-by-key through
 /// [`interpolate_identifier`] (values pass through untouched). An
 /// already-present resolved key is a collision and is rejected with the
-/// error built by `collision`.
+/// error built by `collision`. `lookup` is forwarded to every key
+/// interpolation (the document `env:` closure).
 fn rebuild_identifier_map<V>(
     map: BTreeMap<String, V>,
     position: &str,
     collision: impl Fn(&str) -> TestDocError,
+    lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<BTreeMap<String, V>, TestDocError> {
     let mut rebuilt = BTreeMap::new();
     for (key, value) in map {
-        let resolved = interpolate_identifier(&key, position)?;
+        let resolved = interpolate_identifier(&key, position, lookup)?;
         if rebuilt.contains_key(&resolved) {
             return Err(collision(&resolved));
         }
@@ -1160,8 +1175,10 @@ fn rebuild_identifier_map<V>(
     Ok(rebuilt)
 }
 
-/// Step (a0): identifier fields interpolate `${env:...}` default-only
-/// (parity with route sources; see the mock-testkit spec requirement).
+/// Step (a0): identifier fields interpolate `${env:...}` through the
+/// document `env:` fixture closure first, then inline defaults (parity
+/// with route sources; see the mock-testkit spec requirement; rc-l7m7t) —
+/// the ambient environment is still never consulted in the unit tier.
 /// The identifier fields are exactly: (1) `repositories` map keys in every
 /// registry map (`cache`, `idempotent`, `claimCheck`); (2) `beans` map
 /// keys; (3) `intercepts` map keys (source URIs) and their action target
@@ -1176,6 +1193,10 @@ fn rebuild_identifier_map<V>(
 /// shadowing); `sequence` duplicates stay allowed per the arrival-sequence
 /// canon.
 fn interpolate_identifier_fields(doc: &mut TestDocument) -> Result<(), TestDocError> {
+    // The clone is required: this pass mutates other `doc` fields while
+    // the lookup closure reads the env map.
+    let env = doc.env.clone();
+    let lookup = &|name: &str| env.get(name).cloned();
     if let Some(repos) = doc.repositories.as_mut() {
         for (kind, map) in [
             (SUPPORTED_REGISTRY_KINDS[0], &mut repos.cache),
@@ -1192,55 +1213,70 @@ fn interpolate_identifier_fields(doc: &mut TestDocument) -> Result<(), TestDocEr
                              `{resolved}` after interpolation"
                         ))
                     },
+                    lookup,
                 )?;
             }
         }
     }
     if let Some(beans) = doc.beans.as_mut() {
-        *beans = rebuild_identifier_map(std::mem::take(beans), "beans", |resolved| {
-            TestDocError::InvalidBeans(format!(
-                "beans: duplicate bean name `{resolved}` after interpolation"
-            ))
-        })?;
+        *beans = rebuild_identifier_map(
+            std::mem::take(beans),
+            "beans",
+            |resolved| {
+                TestDocError::InvalidBeans(format!(
+                    "beans: duplicate bean name `{resolved}` after interpolation"
+                ))
+            },
+            lookup,
+        )?;
     }
     // `intercepts:`: source keys interpolate first, then the action
     // targets interpolate in place; the collision error names the resolved
     // source URI.
     if let Some(intercepts) = doc.intercepts.as_mut() {
         let taken = std::mem::take(intercepts);
-        *intercepts = rebuild_identifier_map(taken, "intercepts", |resolved| {
-            TestDocError::InterceptInvalid(format!(
-                "intercepts: duplicate source `{resolved}` after interpolation"
-            ))
-        })?;
+        *intercepts = rebuild_identifier_map(
+            taken,
+            "intercepts",
+            |resolved| {
+                TestDocError::InterceptInvalid(format!(
+                    "intercepts: duplicate source `{resolved}` after interpolation"
+                ))
+            },
+            lookup,
+        )?;
         for action in intercepts.values_mut() {
             if let Some(target) = action.skip_to.as_mut() {
-                *target = interpolate_identifier(target, "intercepts.skipTo")?;
+                *target = interpolate_identifier(target, "intercepts.skipTo", lookup)?;
             }
             if let Some(target) = action.divert_copy_to.as_mut() {
-                *target = interpolate_identifier(target, "intercepts.divertCopyTo")?;
+                *target = interpolate_identifier(target, "intercepts.divertCopyTo", lookup)?;
             }
         }
     }
     // `expects:`: keys are `mock:` references; the collision message names
     // the FULL resolved key — scheme stripping happens later, at step (c).
-    doc.expects =
-        rebuild_identifier_map(std::mem::take(&mut doc.expects), "expects", |resolved| {
+    doc.expects = rebuild_identifier_map(
+        std::mem::take(&mut doc.expects),
+        "expects",
+        |resolved| {
             TestDocError::Yaml(format!(
                 "duplicate expectation endpoint `{resolved}` after interpolation"
             ))
-        })?;
+        },
+        lookup,
+    )?;
     // `sequence:` entries interpolate in place; duplicates remain allowed
     // per the arrival-sequence canon — NO collision guard.
     if let Some(sequence) = doc.sequence.as_mut() {
         for (index, entry) in sequence.iter_mut().enumerate() {
-            *entry = interpolate_identifier(entry, &format!("sequence[{index}]"))?;
+            *entry = interpolate_identifier(entry, &format!("sequence[{index}]"), lookup)?;
         }
     }
     // `inputs[].to` interpolates in place; `body`, `headers`, and
     // `expectReply` are assertion data and stay literal.
     for (index, input) in doc.inputs.iter_mut().enumerate() {
-        input.to = interpolate_identifier(&input.to, &format!("inputs[{index}].to"))?;
+        input.to = interpolate_identifier(&input.to, &format!("inputs[{index}].to"), lookup)?;
     }
     Ok(())
 }

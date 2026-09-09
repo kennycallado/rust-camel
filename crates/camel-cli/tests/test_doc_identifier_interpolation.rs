@@ -1,11 +1,12 @@
 //! Integration tests for doc-side identifier interpolation (step (a0) of
 //! [`parse_test_document`]): identifier fields interpolate
-//! `${env:NAME}` / `${env:NAME:-default}` placeholders with a default-only
-//! lookup — the ambient process environment is never consulted — giving
-//! identifier name-match parity with route sources. Covered field-groups:
-//! `repositories:` and `beans:` map keys, `intercepts:` keys and their
-//! action target values, `expects:` map keys, `sequence:` entries, and
-//! `inputs[].to` values.
+//! `${env:NAME}` / `${env:NAME:-default}` placeholders with a lookup that
+//! consults the document `env:` fixture map first, then inline defaults —
+//! the ambient process environment is never consulted (env-driven-knobs,
+//! rc-l7m7t) — preserving identifier name-match parity with route sources.
+//! Covered field-groups: `repositories:` and `beans:` map keys,
+//! `intercepts:` keys and their action target values, `expects:` map keys,
+//! `sequence:` entries, and `inputs[].to` values.
 //!
 //! Task 1.3 adds the end-to-end witnesses (the doc-side resolved name
 //! meets the route-side interpolated reference inside `run_test_doc`),
@@ -14,10 +15,12 @@
 //!
 //! These tests never read or write environment variables (`env::set_var` /
 //! `env::var` are forbidden here): env-independence is asserted by never
-//! touching the env API, since the lookup is default-only by construction.
+//! touching the env API, since the lookup is the document `env:` closure
+//! by construction.
 //!
 //! Spec: openspec/changes/doc-identifier-interpolation-parity (Tasks 1.1,
-//! 1.2, and 1.3).
+//! 1.2, and 1.3); env-driven-knobs (Task 1.1) threads the document `env:`
+//! map into the lookup.
 
 use std::fs;
 use std::path::PathBuf;
@@ -869,5 +872,165 @@ expects:
             .expect("routeFilesFromRoot declared"), // allow-unwrap
         &["${env:ROOT_DIR:-cfg}/r.yaml".to_string()],
         "routeFilesFromRoot must carry the literal entry"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// env-driven-knobs Task 1.1: document `env:` fixture map lookup
+// ---------------------------------------------------------------------------
+
+/// A non-string `env:` value is rejected at parse time by serde: the error
+/// states a string was expected at the `env` field — an integer, boolean,
+/// or null value never reaches the identifier pass. Before the field
+/// existed, `deny_unknown_fields` rejected the `env` key as unknown
+/// instead.
+#[test]
+fn env_non_string_value_rejected() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - to: "mock:out"
+expects:
+  mock:out:
+    count: 1
+env:
+  CB_MS: 500
+"#;
+    let err = parse_test_document(yaml).expect_err("non-string env value must fail parse"); // allow-unwrap
+    let display = err.to_string();
+    assert!(
+        !display.contains("unknown field"),
+        "the `env` key must be a known field, got: {display}"
+    );
+    assert!(
+        display.contains("env.CB_MS"),
+        "serde error must locate the `env` field, got: {display}"
+    );
+    assert!(
+        display.contains("expected string"),
+        "serde error must state a string was expected, got: {display}"
+    );
+}
+
+/// A no-default placeholder resolves through the document `env:` map: the
+/// bean registers under `audit` — no unresolved-variable error.
+#[test]
+fn env_no_default_identifier_resolves() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - to: "mock:out"
+expects:
+  mock:out:
+    count: 1
+env:
+  BEAN_NAME: audit
+beans:
+  "${env:BEAN_NAME}":
+    kind: echo
+"#;
+    let doc = parse_test_document(yaml).expect("document should parse"); // allow-unwrap
+    let beans = doc.bean_decls().expect("beans block declared"); // allow-unwrap
+    assert!(
+        beans.contains_key("audit"),
+        "bean names must contain the doc-env-resolved `audit`, got: {beans:?}"
+    );
+}
+
+/// Document env values steer identifier keys ahead of inline defaults: the
+/// `repositories.cache` key resolves to `faststub`, not `persistent`
+/// (parse-level half of the steering scenario; the run-level half is Task
+/// 1.2's driver test).
+#[test]
+fn env_steers_identifier_key() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - to: "mock:out"
+expects:
+  mock:out:
+    count: 1
+env:
+  CACHE_REPO_NAME: faststub
+repositories:
+  cache:
+    "${env:CACHE_REPO_NAME:-persistent}": memory
+"#;
+    let doc = parse_test_document(yaml).expect("document should parse"); // allow-unwrap
+    let stubs = doc.repository_stubs().expect("repositories block declared"); // allow-unwrap
+    let cache = stubs.cache.as_ref().expect("cache map declared"); // allow-unwrap
+    assert!(
+        cache.contains_key("faststub"),
+        "cache keys must contain the doc-env-resolved `faststub`, got: {cache:?}"
+    );
+}
+
+/// The duplicate guard sees doc-env-resolved keys: a literal `y` key and a
+/// placeholder key that resolves to `y` through the document env map
+/// collide, and the error names the map and the resolved value.
+#[test]
+fn env_two_keys_collide_via_doc_values() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - to: "mock:out"
+expects:
+  mock:out:
+    count: 1
+env:
+  A: y
+repositories:
+  cache:
+    "${env:A:-x}": memory
+    y: memory
+"#;
+    let err = parse_test_document(yaml).expect_err("collision must fail parse"); // allow-unwrap
+    let TestDocError::InvalidRepositories(msg) = err else {
+        panic!("expected InvalidRepositories, got: {err:?}");
+    };
+    assert!(
+        msg.contains("repositories.cache"),
+        "error must name the map, got: {msg}"
+    );
+    assert!(
+        msg.contains("`y`"),
+        "error must name the doc-env-resolved `y`, got: {msg}"
+    );
+}
+
+/// Fixture values are data, never re-scanned: a doc env value carrying
+/// placeholder text reaches the bean key as the literal `${env:B}`.
+#[test]
+fn env_value_text_never_scanned_identifier() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - to: "mock:out"
+expects:
+  mock:out:
+    count: 1
+env:
+  A: "${env:B}"
+beans:
+  "${env:A:-d}":
+    kind: echo
+"#;
+    let doc = parse_test_document(yaml).expect("document should parse"); // allow-unwrap
+    let beans = doc.bean_decls().expect("beans block declared"); // allow-unwrap
+    let keys: Vec<_> = beans.keys().collect();
+    assert_eq!(
+        keys,
+        vec!["${env:B}"],
+        "the bean key must be the literal env value text, got: {beans:?}"
     );
 }

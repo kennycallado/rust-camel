@@ -229,6 +229,30 @@ Stubs are lossy. The `R-REPOSITORY-STUB` warning on stderr names each stubbed re
 
 The example pair lives in [`examples/yaml-dsl/config/repositories-demo.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/repositories-demo.yaml) and [`repositories-demo.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/repositories-demo.test.yaml).
 
+### Env fixtures
+
+An optional `env:` map declares string fixture values for the unit-tier interpolation seams. Route files, inline `routes:` sources, and the doc-side identifier fields (repository and bean stub keys, intercept sources and targets, `mock:` references, `inputs[].to`) consult the map before their inline `:-default`. The map is the only resolution source beyond the defaults: the ambient process environment is never read, so runs stay hermetic.
+
+```yaml
+env:
+  CACHE_REPO_NAME: faststub
+repositories:
+  cache:
+    "${env:CACHE_REPO_NAME:-persistent}": memory
+```
+
+The placeholder on the stub key resolves to `faststub`. A route file carrying the matching reference resolves through the same map, so the step asks for the repository the document stubbed:
+
+```yaml
+- cache:
+    repository: "${env:CACHE_REPO_NAME:-persistent}"
+    key: k
+```
+
+Both sides name `faststub`; the stub registers and the route loads. Without the `env:` map the same placeholder pair would resolve to the default `persistent` on both sides — the stub key and the step would still agree, but the fixture steers the name without editing either file.
+
+Every `env:` value must be a string. An integer, boolean, or null value is a document error. Values are data, never re-interpolated: the value text is substituted verbatim, so a value that itself looks like a placeholder stays literal. Typing follows the route-side contract: a substituted leaf keeps string typing, so an integer- or boolean-typed field carrying a placeholder fails the document exactly as `camel run` rejects it, even when the `env:` map supplies the value. Numeric-typed knobs are tracked separately.
+
 ### CI output and filters
 
 `camel test` accepts five flags for CI use: `--junit`, `--filter-file`, `--filter-endpoint`, `--unit`, and `--integration`.

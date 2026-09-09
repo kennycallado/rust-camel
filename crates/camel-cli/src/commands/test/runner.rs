@@ -142,17 +142,23 @@ pub(crate) fn find_camel_toml_root(start: &Path) -> Option<PathBuf> {
 /// `Camel.toml` directory found by [`find_camel_toml_root`]; no such root
 /// is a document error ([`TestDocError::NoProjectRoot`]). `routeFiles`
 /// paths resolve relative to `doc_dir`, and both file forms load through
-/// `camel_dsl::load_from_file` (the same per-file parser `camel run` uses,
-/// including the 16 MiB cap, path-annotated errors, and default-only env
-/// interpolation). Inline `routes` are re-serialized to YAML, interpolated
-/// with the same default-only lookup, then parsed through
+/// `camel_dsl::load_from_file_with_env` (the same per-file parser `camel
+/// run` uses, including the 16 MiB cap and path-annotated errors). Inline
+/// `routes` are re-serialized to YAML, interpolated through the same
+/// `camel_dsl::interpolate_yaml_source` seam, then parsed through
 /// `camel_dsl::parse_yaml`.
+///
+/// All three route sources resolve `${env:}` placeholders through the
+/// document `env:` map first (rc-l7m7t), then inline `:-default`s — the
+/// ambient environment is never consulted. Typing semantics are unchanged:
+/// a substituted leaf keeps STRING typing, so an int-typed field carrying a
+/// placeholder fails the load exactly as `camel run` rejects the file, even
+/// when the document env map supplies the value (string-typed substitution;
+/// numeric knobs stay on the rc-v1sw track).
 ///
 /// All three route sources share the tree-walk-first loader semantics of
 /// `camel_dsl::interpolate_yaml_source` (rc-93wct boot parity): comments
-/// never interpolate, a substituted leaf keeps STRING typing — so a
-/// string-typed field interpolates while an int-typed field carrying a
-/// placeholder fails the load exactly as `camel run` rejects the file —
+/// never interpolate, fixture values are never re-scanned as placeholders,
 /// and documents that do not survive the YAML round-trip fall back to the
 /// legacy whole-text splice.
 ///
@@ -162,6 +168,10 @@ pub(super) async fn load_routes(
     doc: &TestDocument,
     doc_dir: &Path,
 ) -> Result<Vec<camel_core::RouteDefinition>, String> {
+    // The lookup is the document env closure (rc-l7m7t): fixture values
+    // first, inline `:-default`s second, ambient never. `doc` is borrowed
+    // immutably here, so no clone is needed.
+    let lookup = &|name: &str| doc.env.get(name).cloned();
     if let Some(files) = &doc.route_files_from_root {
         let root = find_camel_toml_root(doc_dir).ok_or_else(|| {
             TestDocError::NoProjectRoot {
@@ -172,8 +182,8 @@ pub(super) async fn load_routes(
         let mut defs = Vec::new();
         for path in files {
             let full = root.join(path);
-            let loaded =
-                camel_dsl::load_from_file(&full).map_err(|e| format!("{}: {e}", full.display()))?;
+            let loaded = camel_dsl::load_from_file_with_env(&full, lookup)
+                .map_err(|e| format!("{}: {e}", full.display()))?;
             defs.extend(loaded);
         }
         Ok(defs)
@@ -181,8 +191,8 @@ pub(super) async fn load_routes(
         let mut defs = Vec::new();
         for path in files {
             let full = doc_dir.join(path);
-            let loaded =
-                camel_dsl::load_from_file(&full).map_err(|e| format!("{}: {e}", full.display()))?;
+            let loaded = camel_dsl::load_from_file_with_env(&full, lookup)
+                .map_err(|e| format!("{}: {e}", full.display()))?;
             defs.extend(loaded);
         }
         Ok(defs)
@@ -194,7 +204,7 @@ pub(super) async fn load_routes(
         let text = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))
             .map_err(|e| format!("failed to serialize inline routes: {e}"))?;
         // Boot parity: same seam as the file forms (see doc comment above).
-        let interpolated = camel_dsl::interpolate_yaml_source(&text, &|_| None).map_err(|var| {
+        let interpolated = camel_dsl::interpolate_yaml_source(&text, lookup).map_err(|var| {
             format!("Environment variable '{var}' not set (required by inline routes)")
         })?;
         camel_dsl::parse_yaml(&interpolated).map_err(|e| format!("inline routes: {e}"))
