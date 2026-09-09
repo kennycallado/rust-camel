@@ -331,6 +331,12 @@ impl RedisTopology for SentinelTopology {
 pub fn topology_from_config(
     config: &RedisEndpointConfig,
 ) -> Result<Arc<dyn RedisTopology>, CamelError> {
+    // Fail-closed TLS feature check (bd rc-ayy11): every client-building path
+    // (producer, PubSub consumer, queue consumer, health, sentinel) funnels
+    // through here, so an endpoint that resolved to TLS without the `tls`
+    // cargo feature dies with a clear Config error at creation time instead
+    // of the redis crate's InvalidClientConfig inside a retry loop.
+    config.validate_tls()?;
     match &config.topology_kind {
         TopologyKind::Standalone => Ok(Arc::new(StandaloneTopology::new(config))),
         #[cfg(feature = "sentinel")]
@@ -374,14 +380,23 @@ fn node_redis_connection_info(config: &RedisEndpointConfig) -> redis::RedisConne
 
 /// Build the [`redis::sentinel::SentinelNodeConnectionInfo`] for the Redis
 /// nodes (not the sentinels) from the endpoint's node credentials.
+///
+/// When the endpoint resolved to TLS (`rediss-sentinel://`), the resolved
+/// master/replica connections also use TLS (`TlsMode::Secure`) — the scheme
+/// must not encrypt only the sentinel discovery hop (bd rc-ayy11).
+/// `redis::TlsMode` is not feature-gated, so this compiles without the
+/// `tls` cargo feature; `RedisEndpointConfig::validate_tls` guards the
+/// feature-absent case at `topology_from_config` before any connect.
 #[cfg(feature = "sentinel")]
 fn sentinel_node_conn_info(
     config: &RedisEndpointConfig,
 ) -> Option<redis::sentinel::SentinelNodeConnectionInfo> {
-    Some(
-        redis::sentinel::SentinelNodeConnectionInfo::default()
-            .set_redis_connection_info(node_redis_connection_info(config)),
-    )
+    let mut info = redis::sentinel::SentinelNodeConnectionInfo::default()
+        .set_redis_connection_info(node_redis_connection_info(config));
+    if config.is_ssl_enabled() {
+        info = info.set_tls_mode(redis::TlsMode::Secure);
+    }
+    Some(info)
 }
 
 #[cfg(test)]
@@ -460,6 +475,28 @@ mod tests {
             info.addr()
         );
         assert_eq!(info.redis_settings().db(), 3);
+    }
+
+    #[tokio::test]
+    #[cfg(not(feature = "tls"))]
+    async fn topology_from_config_rejects_tls_without_feature() {
+        let mut cfg = RedisEndpointConfig::from_uri("rediss://redis-prod:6379?command=GET")
+            .expect("valid uri");
+        cfg.resolve_defaults();
+        let result = topology_from_config(&cfg);
+        assert!(
+            matches!(result, Err(CamelError::Config(_))),
+            "topology_from_config must fail closed with a Config error when the \
+             endpoint resolved to TLS but the tls cargo feature is absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn topology_from_config_accepts_plaintext_without_feature() {
+        let mut cfg =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").expect("valid uri");
+        cfg.resolve_defaults();
+        assert!(topology_from_config(&cfg).is_ok());
     }
 
     #[tokio::test]

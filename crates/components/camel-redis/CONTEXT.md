@@ -52,12 +52,26 @@ commands.rs`.
 
 ## Batch 6 — Security hardening
 
-### `effective_tls()` (`fn effective_tls`, config.rs:346)
+### `effective_tls()` (`fn effective_tls`, config.rs)
 
-Auto-enables TLS for non-loopback hosts when `tls=false`. Logic in `effective_tls()`:
-- Returns `true` if `tls` is explicitly true, OR host is not `localhost`, `127.*`, `::1`, or `0.0.0.0`.
-- Triggers a `tracing::warn!` at runtime (`build_url()`, `apply_defaults()`) reporting the auto-enable.
-- `validate_tls()` returns `Config` error if the `redis` crate lacks a TLS feature (`tls-rustls-*` or `tls-native-tls`).
+Auto-enables TLS for non-loopback hosts when nothing explicit is set. Precedence in `effective_tls()`:
+- `tls_mode: Option<bool>` (tri-state, bd rc-ayy11) wins outright: `Some(true)` forces TLS on (even loopback), `Some(false)` forces TLS off (the global counterpart of `?ssl=false`). This exists because a `bool` cannot distinguish "unset" from "explicitly false" — a plain `tls: false` used to be silently upgraded.
+- Else `tls = true` (legacy force-on) enables TLS.
+- Else TLS auto-enables when the host is not `localhost`, `127.*`, `::1`, or `0.0.0.0`.
+- Triggers a `tracing::warn!` on the auto-enable path only (`build_url()`, `apply_defaults()`); an explicit `tls_mode` choice is never warned about. The warn names both opt-outs (`tls_mode=false`, URI `?ssl=false`).
+- `RedisConfig::validate_tls()` returns a `Config` error if the `redis` crate lacks a TLS feature (`tls-rustls-*` or `tls-native-tls`).
+
+### `RedisEndpointConfig::validate_tls()` (`fn validate_tls`, config.rs; wired in `fn topology_from_config`, topology.rs)
+
+Fail-closed TLS feature guard on the single client-building choke point (producer, PubSub consumer, queue consumer, health check, sentinel). Two TLS sources trip it: the endpoint's resolved `ssl` flag, and a `rediss://` sentinel node URL in a structured sentinel block (which encrypts at the redis-crate layer regardless of the endpoint `ssl` flag). When either requires TLS but the `tls` cargo feature is absent, `topology_from_config` returns a `Config` error at endpoint creation. The messages avoid transient-classifier words (no "connection") so `is_transient_redis_error` never retries them (ADR-0012), and embed no host or URL (ADR-0051). Before bd rc-ayy11 the PubSub path surfaced the redis crate's raw `InvalidClientConfig` feature error inside the bounded reconnect loop.
+
+### Sentinel node TLS propagation (`fn sentinel_node_conn_info`, topology.rs, bd rc-ayy11)
+
+`rediss-sentinel://` endpoints set `TlsMode::Secure` on `SentinelNodeConnectionInfo`, so the resolved master connections use TLS too — not only the sentinel discovery hop. `redis::TlsMode` is not feature-gated; the feature-absent case is rejected earlier by `validate_tls` at the choke point.
+
+### `redis-tls` default-on in camel-cli (`crates/camel-cli/Cargo.toml`, bd rc-ayy11)
+
+The release binary forwards `camel-component-redis/tls` through the default-on `redis-tls` feature: auto-upgrade would otherwise hard-fail against every remote Redis instance in feature-less builds. Pure-rust webpki roots; cross-compilation unaffected.
 
 ### `connection_timeout_secs` (`struct RedisConfig`, config.rs:253)
 

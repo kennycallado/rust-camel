@@ -129,7 +129,18 @@ The Consumer's mode comes from the URI command. `SUBSCRIBE` and `PSUBSCRIBE` use
 
 ## Security
 
-The component supports TLS through the `rediss://` URI scheme or the `ssl=true` parameter. The two are equivalent. TLS auto-enables for non-loopback hosts when the `redis` crate is compiled with a TLS feature (`tls-rustls-webpki-roots`, `tls-rustls-native-certs`, or `tls-native-tls`). The component logs a `tracing::warn!` when auto-enabling TLS. A missing feature gate stops startup with the required `cargo add` command.
+The component supports TLS through the `rediss://` URI scheme or the `ssl=true` parameter. The two are equivalent.
+
+TLS auto-enables for non-loopback hosts. This is the secure-by-default posture. The auto-enable check uses the `host` from the `[components.redis]` block. An endpoint that names its own host in the URI follows the global decision when it sets no `ssl` parameter. The component logs a `tracing::warn!` when auto-enabling TLS. Two opt-outs keep the connection plaintext:
+
+- `?ssl=false` on the endpoint URI. The endpoint-level value wins over the global config.
+- `tls_mode = false` in the `[components.redis]` block. This forces TLS off for every endpoint that does not set `ssl` itself. `tls_mode = true` forces TLS on for those endpoints, even for loopback hosts. When `tls_mode` is unset, auto-enable applies.
+
+Sentinel endpoints select TLS by scheme (`redis-sentinel://` or `rediss-sentinel://`). The global TLS settings do not apply to them.
+
+The `tls` boolean stays as a legacy force-on flag. Set `tls = true` to enable TLS on loopback hosts. The boolean cannot force TLS off: a plain `tls = false` keeps the auto-enable for remote hosts. Use `tls_mode = false` or `?ssl=false` for that.
+
+A build without a TLS feature (`tls-rustls-webpki-roots`, `tls-rustls-native-certs`, or `tls-native-tls`) rejects every TLS endpoint at startup with a `Config` error. The error names the missing feature. The error is never classified as transient, so no retry loop runs. The `camel` release binary compiles the `redis-tls` feature by default, so remote Redis works without extra build steps.
 
 The component redacts passwords in `Debug` output. Passwords with special characters (`@`, `:`, `/`) are percent-encoded in the connection URL. The `safe_endpoint()` helper returns a credential-free identifier for tracing.
 

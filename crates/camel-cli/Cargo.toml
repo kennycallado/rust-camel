@@ -112,7 +112,7 @@ serde_json.workspace = true
 ron = { workspace = true }
 
 [features]
-default = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "integration-sql", "security"]
+default = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "integration-sql", "security", "redis-tls"]
 otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # security forwards to the shared security-boot builder in camel-bundles
 # (scenario-shared-boot): default-on so `camel run` default builds keep
@@ -146,6 +146,11 @@ kafka-static = ["dep:camel-component-kafka", "cmake-build"]
 # Use mqtt-tls to enable TLS support (mqtts:// URIs).
 mqtt = ["dep:camel-component-mqtt", "camel-bundles/mqtt"]
 mqtt-tls = ["mqtt", "camel-component-mqtt/tls"]
+# Redis TLS, default-on: the component auto-upgrades non-loopback hosts to
+# TLS (secure-by-default), so a binary without TLS support hard-fails against
+# every remote Redis instance. Pure-rust webpki roots — no native deps, so
+# release cross-compilation is unaffected. bd rc-ayy11.
+redis-tls = ["camel-component-redis/tls"]
 surrealdb = ["dep:camel-component-surrealdb", "camel-bundles/surrealdb"]
 # exec activates the fail-closed system command execution component.
 exec = ["dep:camel-component-exec"]

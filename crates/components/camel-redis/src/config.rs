@@ -249,6 +249,12 @@ pub struct RedisConfig {
     pub password: Option<String>,
     /// Enable TLS connections. Default: false.
     pub tls: bool,
+    /// Explicit TLS override. `None` (default) keeps the secure-by-default
+    /// auto-upgrade for non-loopback hosts; `Some(true)` forces TLS on even
+    /// for loopback; `Some(false)` forces TLS off — the global counterpart
+    /// of `?ssl=false` on the endpoint URI.
+    #[serde(default)]
+    pub tls_mode: Option<bool>,
     /// Optional path to a CA certificate file for TLS verification. Default: None.
     pub tls_ca_cert: Option<String>,
     /// TLS connection timeout in seconds. Default: 10.
@@ -275,6 +281,7 @@ impl std::fmt::Debug for RedisConfig {
             .field("port", &self.port)
             .field("password", &redacted_opt(&self.password))
             .field("tls", &self.tls)
+            .field("tls_mode", &self.tls_mode)
             .field("tls_ca_cert", &redacted_opt(&self.tls_ca_cert))
             .field("connection_timeout_secs", &self.connection_timeout_secs)
             .field("reconnect", &self.reconnect)
@@ -292,6 +299,7 @@ impl Default for RedisConfig {
             port: 6379,
             password: None,
             tls: false,
+            tls_mode: None,
             tls_ca_cert: None,
             connection_timeout_secs: 10,
             reconnect: NetworkRetryPolicy::default(),
@@ -323,6 +331,14 @@ impl RedisConfig {
         self
     }
 
+    /// Set the explicit TLS override. `Some(false)` opts out of the
+    /// non-loopback auto-upgrade (global counterpart of `?ssl=false`);
+    /// `None` restores the secure-by-default auto-upgrade.
+    pub fn with_tls_mode(mut self, v: Option<bool>) -> Self {
+        self.tls_mode = v;
+        self
+    }
+
     pub fn with_tls_ca_cert(mut self, v: impl Into<String>) -> Self {
         self.tls_ca_cert = Some(v.into());
         self
@@ -347,20 +363,27 @@ impl RedisConfig {
 
     /// Returns the effective TLS setting for this config.
     ///
-    /// TLS is auto-enabled for non-loopback hosts even when `tls` is `false`.
-    /// This allows secure-by-default connections to remote Redis instances
-    /// without requiring explicit TLS configuration.
+    /// Precedence: `tls_mode` (explicit tri-state) wins outright — `Some(false)`
+    /// forces TLS off even for non-loopback hosts, mirroring `?ssl=false` on
+    /// the endpoint URI. Otherwise `tls = true` forces TLS on. Otherwise TLS
+    /// auto-enables for non-loopback hosts (secure-by-default). The tri-state
+    /// exists because a `bool` cannot distinguish "unset" from "explicitly
+    /// false"; without it, a programmatic `tls: false` was silently upgraded.
     pub fn effective_tls(&self) -> bool {
-        self.tls || {
-            let host = &self.host;
-            let normalized = host.trim_start_matches('[').trim_end_matches(']');
-            normalized != "localhost"
-                && !normalized.starts_with("127.")
-                && normalized != "::1"
-                && normalized != "0.0.0.0"
-                && !normalized.starts_with("::ffff:127.")
-                && !normalized.starts_with("::ffff:0:127.")
+        if let Some(explicit) = self.tls_mode {
+            return explicit;
         }
+        if self.tls {
+            return true;
+        }
+        let host = &self.host;
+        let normalized = host.trim_start_matches('[').trim_end_matches(']');
+        normalized != "localhost"
+            && !normalized.starts_with("127.")
+            && normalized != "::1"
+            && normalized != "0.0.0.0"
+            && !normalized.starts_with("::ffff:127.")
+            && !normalized.starts_with("::ffff:0:127.")
     }
 
     /// Build the Redis connection URL from this config.
@@ -370,11 +393,12 @@ impl RedisConfig {
     pub fn build_url(&self) -> Result<String, CamelError> {
         let effective_tls = self.effective_tls();
 
-        // Warn when auto-enabling TLS
-        if effective_tls && !self.tls {
+        // Warn when auto-enabling TLS (only on the auto-upgrade path — an
+        // explicit tls_mode choice is never "silent" and never warned about)
+        if effective_tls && self.tls_mode.is_none() && !self.tls {
             tracing::warn!(
                 host = %self.host,
-                "Redis auto-enabling TLS for non-loopback host (config had tls=false)"
+                "Redis auto-enabling TLS for non-loopback host (opt out with tls_mode=false or URI ?ssl=false)"
             );
         }
 
@@ -804,10 +828,10 @@ impl RedisEndpointConfig {
         if self.ssl.is_none() {
             let effective = defaults.effective_tls();
             self.ssl = Some(effective);
-            if effective && !defaults.tls {
+            if effective && defaults.tls_mode.is_none() && !defaults.tls {
                 tracing::warn!(
                     host = %self.host.as_deref().unwrap_or(""),
-                    "Redis auto-enabling TLS for non-loopback host (config had tls=false)"
+                    "Redis auto-enabling TLS for non-loopback host (opt out with tls_mode=false or URI ?ssl=false)"
                 );
             }
         }
@@ -879,6 +903,48 @@ impl RedisEndpointConfig {
     /// Panics if `resolve_defaults()` has not been called yet (ssl is `None`).
     pub fn is_ssl_enabled(&self) -> bool {
         self.ssl.unwrap_or(false)
+    }
+
+    /// Fail-closed TLS feature check for every client-building path.
+    ///
+    /// Returns a `Config` error when this endpoint requires TLS but the
+    /// `redis` crate was not compiled with TLS support (`tls` cargo feature).
+    /// Two sources count as "requires TLS": the endpoint's resolved `ssl`
+    /// flag (from `rediss://`, `?ssl=true`, or the global auto-upgrade), and
+    /// a `rediss://` sentinel node URL in a structured sentinel block — the
+    /// latter encrypts at the redis-crate layer regardless of the endpoint
+    /// `ssl` flag. Called from `topology_from_config` — the single choke
+    /// point shared by the producer, the PubSub consumer, the queue
+    /// consumer, and the health check — so the failure surfaces at endpoint
+    /// creation instead of the redis crate's raw feature error inside a
+    /// reconnect loop.
+    ///
+    /// The messages deliberately avoid transient-classifier words such as
+    /// "connection" so `is_transient_redis_error` never treats them as
+    /// retryable (ADR-0012), and embed no host or URL (ADR-0051).
+    pub fn validate_tls(&self) -> Result<(), CamelError> {
+        if self.is_ssl_enabled() && !cfg!(feature = "tls") {
+            return Err(CamelError::Config(
+                "Redis TLS is enabled for this endpoint but the component was built \
+                 without TLS support. Rebuild camel-redis with the `tls` feature \
+                 (redis/tls-rustls-webpki-roots) or disable TLS for this endpoint"
+                    .into(),
+            ));
+        }
+        #[cfg(feature = "sentinel")]
+        if let TopologyKind::Sentinel(s) = &self.topology_kind
+            && cfg!(not(feature = "tls"))
+            && s.nodes.iter().any(|n| sentinel_node_url_requires_tls(n))
+        {
+            return Err(CamelError::Config(
+                "A sentinel node URL uses a TLS scheme (rediss:// or valkeys://) but the \
+                 component was built without TLS support. Rebuild camel-redis with the \
+                 `tls` feature (redis/tls-rustls-webpki-roots) or use redis:// sentinel \
+                 node URLs"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Build the Redis connection URL.
@@ -954,6 +1020,26 @@ impl RedisEndpointConfig {
             base
         }
     }
+}
+
+/// Returns true when a sentinel node URL selects a TLS transport.
+///
+/// Parses through `redis::parse_redis_url` — the same feature-independent
+/// `url::Url` parsing redis-rs uses — and checks the normalized scheme
+/// against the TLS schemes (`rediss`, `valkeys`). This inherits the url
+/// crate's WHATWG preprocessing exactly (lowercased scheme, stripped C0
+/// controls and tabs/newlines, host validation) instead of mirroring it.
+///
+/// `IntoConnectionInfo` is deliberately NOT used: redis 1.6.0 fails it for
+/// TLS-scheme URLs at parse time when built without a TLS feature ("can't
+/// connect with TLS, the feature is not enabled") — the exact cryptic error
+/// this guard exists to preempt, and the guard only runs when the feature
+/// is absent. URLs `parse_redis_url` rejects return false and fail closed
+/// later in `SentinelTopology::new` (`embed_sentinel_creds` parses every
+/// node and rejects it there).
+#[cfg_attr(not(feature = "sentinel"), allow(dead_code))]
+fn sentinel_node_url_requires_tls(node: &str) -> bool {
+    redis::parse_redis_url(node).is_some_and(|url| matches!(url.scheme(), "rediss" | "valkeys"))
 }
 
 // ── Transient error detection ────────────────────────────────────────────────
@@ -1485,7 +1571,8 @@ mod tests {
     }
 
     #[test]
-    fn test_redis_build_url_uses_rediss_when_tls_enabled() {
+    #[cfg(not(feature = "tls"))]
+    fn test_redis_build_url_errors_when_tls_without_feature() {
         let config = RedisConfig {
             host: "localhost".into(),
             port: 6379,
@@ -1509,6 +1596,7 @@ mod tests {
 
     // REDIS-006: TLS validation
     #[test]
+    #[cfg(not(feature = "tls"))]
     fn test_tls_without_feature_returns_error() {
         // When tls=true but redis/tls feature not available, expect Err
         let config = RedisConfig {
@@ -2095,6 +2183,244 @@ mod tests {
             cfg.effective_tls(),
             "explicit tls=true should work even on loopback"
         );
+    }
+
+    // ── rc-ayy11: tls_mode tri-state (explicit tls:false force-off) ────────────
+
+    #[test]
+    fn test_effective_tls_explicit_false_forces_off_non_loopback() {
+        let cfg = RedisConfig {
+            host: "redis-prod.example.com".into(),
+            tls_mode: Some(false),
+            ..RedisConfig::default()
+        };
+        assert!(
+            !cfg.effective_tls(),
+            "tls_mode=Some(false) must force TLS off even for non-loopback host"
+        );
+    }
+
+    #[test]
+    fn test_effective_tls_unset_still_auto_upgrades_non_loopback() {
+        let cfg = RedisConfig {
+            host: "redis-prod.example.com".into(),
+            tls: false,
+            tls_mode: None,
+            ..RedisConfig::default()
+        };
+        assert!(
+            cfg.effective_tls(),
+            "unset tls_mode must keep the secure-by-default auto-upgrade"
+        );
+    }
+
+    #[test]
+    fn test_effective_tls_mode_true_forces_on_loopback() {
+        let cfg = RedisConfig {
+            host: "localhost".into(),
+            tls_mode: Some(true),
+            ..RedisConfig::default()
+        };
+        assert!(
+            cfg.effective_tls(),
+            "tls_mode=Some(true) must force TLS on even for loopback"
+        );
+    }
+
+    #[test]
+    fn test_with_tls_mode_builder_sets_field() {
+        let cfg = RedisConfig::default().with_tls_mode(Some(false));
+        assert_eq!(cfg.tls_mode, Some(false));
+    }
+
+    #[test]
+    fn test_build_url_force_off_keeps_plaintext_scheme_for_non_loopback() {
+        let cfg = RedisConfig {
+            host: "redis-prod.example.com".into(),
+            tls_mode: Some(false),
+            ..RedisConfig::default()
+        };
+        let url = cfg.build_url().unwrap();
+        assert!(
+            url.starts_with("redis://"),
+            "tls_mode=Some(false) must build a plaintext URL: {url}"
+        );
+    }
+
+    #[test]
+    fn test_apply_defaults_honors_global_force_off() {
+        let mut config =
+            RedisEndpointConfig::from_uri("redis://redis-prod:6379?command=GET").unwrap();
+        let defaults = RedisConfig {
+            host: "redis-prod".into(),
+            tls_mode: Some(false),
+            ..RedisConfig::default()
+        };
+        config.apply_defaults(&defaults);
+        assert_eq!(
+            config.ssl,
+            Some(false),
+            "global tls_mode=Some(false) must propagate as endpoint ssl=Some(false)"
+        );
+    }
+
+    #[test]
+    fn test_apply_defaults_auto_upgrade_still_propagates() {
+        let mut config =
+            RedisEndpointConfig::from_uri("redis://redis-prod:6379?command=GET").unwrap();
+        let defaults = RedisConfig {
+            host: "redis-prod".into(),
+            ..RedisConfig::default()
+        };
+        config.apply_defaults(&defaults);
+        assert_eq!(
+            config.ssl,
+            Some(true),
+            "unset tls_mode must auto-upgrade the endpoint for non-loopback host"
+        );
+    }
+
+    #[test]
+    fn test_apply_defaults_uri_ssl_false_wins_over_global_force_on() {
+        let mut config =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&ssl=false").unwrap();
+        let defaults = RedisConfig {
+            host: "localhost".into(),
+            tls_mode: Some(true),
+            ..RedisConfig::default()
+        };
+        config.apply_defaults(&defaults);
+        assert_eq!(
+            config.ssl,
+            Some(false),
+            "endpoint ssl=false must win over the global tls_mode setting"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn test_build_url_auto_upgrade_yields_rediss_with_feature() {
+        let cfg = RedisConfig {
+            host: "redis-prod.example.com".into(),
+            ..RedisConfig::default()
+        };
+        let url = cfg.build_url().unwrap();
+        assert!(
+            url.starts_with("rediss://"),
+            "auto-upgrade must build a TLS URL when the feature is compiled: {url}"
+        );
+    }
+
+    // ── rc-ayy11: endpoint TLS feature validation (choke-point guard) ─────────
+
+    #[test]
+    #[cfg(not(feature = "tls"))]
+    fn test_endpoint_validate_tls_errors_without_feature() {
+        let mut config =
+            RedisEndpointConfig::from_uri("rediss://redis-prod:6379?command=GET").unwrap();
+        config.resolve_defaults();
+        let err = config.validate_tls().unwrap_err();
+        match &err {
+            CamelError::Config(msg) => {
+                assert!(
+                    msg.contains("without TLS support"),
+                    "error must name the missing feature: {msg}"
+                );
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
+        assert!(
+            !is_transient_redis_error(&err),
+            "validate_tls error must never classify as transient/retryable"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn test_endpoint_validate_tls_ok_with_feature() {
+        let mut config =
+            RedisEndpointConfig::from_uri("rediss://redis-prod:6379?command=GET").unwrap();
+        config.resolve_defaults();
+        assert!(config.validate_tls().is_ok());
+    }
+
+    #[test]
+    fn test_endpoint_validate_tls_ok_when_ssl_off() {
+        let mut config =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").unwrap();
+        config.resolve_defaults();
+        assert!(config.validate_tls().is_ok());
+    }
+
+    #[test]
+    #[cfg(all(feature = "sentinel", not(feature = "tls")))]
+    fn test_endpoint_validate_tls_rejects_rediss_sentinel_nodes() {
+        for node in [
+            "rediss://s1:26379",
+            "REDISS://s1:26379",
+            "valkeys://s1:26379",
+        ] {
+            let mut config =
+                RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").unwrap();
+            config.topology_kind = TopologyKind::Sentinel(SentinelConfig {
+                nodes: vec![node.into()],
+                master_name: "mymaster".into(),
+                ..SentinelConfig::default()
+            });
+            config.resolve_defaults();
+            let err = config.validate_tls().unwrap_err();
+            match &err {
+                CamelError::Config(msg) => {
+                    assert!(
+                        msg.contains("TLS scheme"),
+                        "error must name the TLS node URL scheme: {msg}"
+                    );
+                }
+                other => panic!("expected Config error, got {other:?}"),
+            }
+            assert!(
+                !is_transient_redis_error(&err),
+                "sentinel TLS guard error must never classify as transient/retryable"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "sentinel", feature = "tls"))]
+    fn test_endpoint_validate_tls_ok_rediss_nodes_with_feature() {
+        for node in ["rediss://s1:26379", "valkeys://s1:26379"] {
+            let mut config =
+                RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").unwrap();
+            config.topology_kind = TopologyKind::Sentinel(SentinelConfig {
+                nodes: vec![node.into()],
+                master_name: "mymaster".into(),
+                ..SentinelConfig::default()
+            });
+            config.resolve_defaults();
+            assert!(config.validate_tls().is_ok());
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "sentinel")]
+    fn test_sentinel_node_url_requires_tls_scheme_matrix() {
+        assert!(sentinel_node_url_requires_tls("rediss://s1:26379"));
+        assert!(sentinel_node_url_requires_tls("REDISS://s1:26379"));
+        assert!(sentinel_node_url_requires_tls("valkeys://s1:26379"));
+        assert!(sentinel_node_url_requires_tls("  rediss://s1:26379  "));
+        // WHATWG normalization: embedded tabs/newlines are stripped before
+        // scheme matching, and leading C0 controls count as stripped too,
+        // so these still resolve to TLS in redis-rs.
+        assert!(sentinel_node_url_requires_tls("\trediss://s1:26379"));
+        assert!(sentinel_node_url_requires_tls("re\ndiss://s1:26379"));
+        assert!(sentinel_node_url_requires_tls("\0 rediss://s1:26379"));
+        assert!(!sentinel_node_url_requires_tls("redis://s1:26379"));
+        assert!(!sentinel_node_url_requires_tls("valkey://s1:26379"));
+        assert!(!sentinel_node_url_requires_tls("unix:///tmp/s.sock"));
+        assert!(!sentinel_node_url_requires_tls("not-a-url"));
+        // Invalid TLS URLs (no host) fail parse_redis_url and stay false;
+        // they fail closed later in SentinelTopology::new instead.
+        assert!(!sentinel_node_url_requires_tls("rediss://["));
     }
 
     #[test]
