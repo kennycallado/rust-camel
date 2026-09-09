@@ -357,3 +357,32 @@ Back-to-back `send:` actions with no intervening `receive:` dispatch genuinely c
 A scenario document may declare one document-level `logs:` block. The harness captures every tracing event emitted while the document runs, and it evaluates the block after the action list completes. Three clauses exist, and every declared clause must hold. `contains` lists substrings of captured event messages. `regex` lists unanchored patterns; each pattern matches against the composite camel-log message. `noLevelAbove` sets a level cap over the whole document window; the cap spans every target, route processors and harness tasks alike. An unknown level, an invalid pattern, or an unknown key fails the load.
 
 Log capture is process-global. Documents that run concurrently in one process attribute events conservatively: the harness files an event in every open window, so a sibling document's WARN can fail this document's `noLevelAbove` cap. Serialize log-asserting documents, or keep them on the current-thread itest path, when a document needs strict isolation.
+
+#### Datasource steering
+
+A scenario reads SQL state through the booted context's datasource catalog. The datasource itself lives in `Camel.toml`, not in the document: the `datasource:` field of a `sql:` action and of a `validate` sql target names a key from the `[datasources]` table. That table is a strict interpolation surface. Leaf values resolve `${env:NAME}` and `${env:NAME:-default}`, and a residual marker fails the load instead of passing through (see [`crates/camel-config/CONTEXT.md`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-config/CONTEXT.md)).
+
+```toml
+[datasources.appdb]
+db_url = "${env:APPDB_URL:-sqlite::memory:?cache=shared}"
+```
+
+At boot the placeholder resolves through the same layered source as the route files. The source checks harness-provisioned `bindVar` values first, then document `env:` values, then variables listed in `envPassthrough:`, then the inline default ([ADR-0069](../adr/0069-integration-tier-testing-contract.md) section 4). A hermetic document pins the value itself:
+
+```yaml
+env:
+  APPDB_URL: "sqlite::memory:?cache=shared"
+```
+
+The shared cache is a requirement, not a preference. A sqlite `:memory:` database is per-connection. An INSERT on one pooled connection and a SELECT on another can therefore hit different databases, and a validation can pass against state the document never seeded. The boot rejects `sqlite::memory:` without `cache=shared` with the `sql-memory-not-shared` error ([`crates/camel-integration-test/CONTEXT.md`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/CONTEXT.md)).
+
+A document that needs a real database lists the variable in `envPassthrough:` and keeps the inline default:
+
+```yaml
+envPassthrough:
+- APPDB_URL
+```
+
+The CI job or Compose file then supplies `APPDB_URL`, for example a service-container Postgres URL. The harness never provisions the database. The address arrives through the variable, so the surrounding infrastructure stays the author's concern (ADR-0069 section 9).
+
+Two laws keep the surface orthogonal. The datasource name (`appdb`) is an identifier path, and interpolation never touches it. The `db_url` value is an env leaf path, and the layered source always resolves it. The same laws govern every strict-prefix table ([`crates/camel-config/CONTEXT.md`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-config/CONTEXT.md)), so this section describes one instance of a general steering pattern, not a datasource-specific rule (bd rc-l7m7t, bd rc-4hexo).

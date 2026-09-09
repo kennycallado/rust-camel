@@ -247,6 +247,14 @@ JSON explicit-pattern gating, file size caps, two-pass template
 materialization) with the config's `stream_caching.threshold` and the
 built security compile context.
 
+The boot also guards the sqlite hermetic default. A `sqlite::memory:`
+datasource URL without `cache=shared` is rejected during boot, before
+context preparation, with the `sql-memory-not-shared` error
+(`ensure_sqlite_memory_shared`): the
+`:memory:` database is per-connection, so pooled statements would read
+different databases and a validation could pass against state the
+document never seeded.
+
 ### The scenario tier gates security offline
 
 The tier runs offline: no network. Keycloak/oidc security configuration
