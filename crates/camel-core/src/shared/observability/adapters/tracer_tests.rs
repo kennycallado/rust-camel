@@ -3,8 +3,12 @@
 //! Span-exporting tests use `span_test_util`, which installs ONE global
 //! in-memory `SdkTracerProvider` per test binary; test bodies using it are
 //! serialized by a process-wide mutex and filter exported spans by their
-//! own trace id. The remaining tests assert only provider-independent
-//! behavior (error propagation, clone semantics, readiness).
+//! own trace id. Every test that runs a TracingProcessor call path must
+//! acquire that lock: a lock-free span would export into whichever
+//! lock-holding test sits between its `reset()` and `finish()` reads
+//! (rc-uyld). The remaining tests assert only provider-independent
+//! behavior without running the processor (name format, pure helpers,
+//! readiness-time rejection).
 
 use super::*;
 use crate::shared::observability::adapters::span_test_util::{finish, test_spans};
@@ -356,6 +360,7 @@ async fn step_error_emits_exception_event() {
 
 #[tokio::test]
 async fn test_tracing_processor_minimal() {
+    let _spans = test_spans().await;
     let inner = BoxProcessor::new(IdentityProcessor);
     let mut tracer = TracingProcessor::new(
         inner,
@@ -375,6 +380,7 @@ async fn test_tracing_processor_minimal() {
 
 #[tokio::test]
 async fn test_tracing_processor_medium_detail() {
+    let _spans = test_spans().await;
     let inner = BoxProcessor::new(IdentityProcessor);
     let mut tracer = TracingProcessor::new(
         inner,
@@ -394,6 +400,7 @@ async fn test_tracing_processor_medium_detail() {
 
 #[tokio::test]
 async fn test_tracing_processor_full_detail() {
+    let _spans = test_spans().await;
     let inner = BoxProcessor::new(IdentityProcessor);
     let mut tracer = TracingProcessor::new(
         inner,
@@ -418,6 +425,7 @@ async fn test_tracing_processor_full_detail() {
 
 #[tokio::test]
 async fn test_tracing_processor_clone() {
+    let _spans = test_spans().await;
     let inner = BoxProcessor::new(IdentityProcessor);
     let tracer = TracingProcessor::new(
         inner,
@@ -437,6 +445,7 @@ async fn test_tracing_processor_clone() {
 
 #[tokio::test]
 async fn test_tracing_processor_propagates_otel_context() {
+    let _spans = test_spans().await;
     let inner = BoxProcessor::new(IdentityProcessor);
     let mut tracer = TracingProcessor::new(
         inner,
@@ -505,6 +514,7 @@ async fn test_tracing_processor_with_parent_context() {
 
 #[tokio::test]
 async fn test_tracing_processor_records_error() {
+    let _spans = test_spans().await;
     // Create a processor that always fails
     let failing_processor = BoxProcessor::from_fn(|_ex: Exchange| async move {
         Err(CamelError::ProcessorError("intentional test error".into()))
@@ -550,6 +560,7 @@ async fn test_tracing_processor_span_name_format() {
 
 #[tokio::test]
 async fn test_tracing_processor_chained_propagation() {
+    let _spans = test_spans().await;
     // Test that multiple processors in a chain properly propagate context
     let processor1 = BoxProcessor::new(IdentityProcessor);
     let mut tracer1 = TracingProcessor::new(
@@ -664,6 +675,7 @@ impl Service<Exchange> for PermitGateInner {
 
 #[tokio::test]
 async fn tracing_processor_does_not_re_ready_clone() {
+    let _spans = test_spans().await;
     let mock_inner = BoxProcessor::new(PermitGateInner::new());
     let mut tracing_proc = TracingProcessor::new(
         mock_inner,
@@ -687,6 +699,7 @@ async fn tracing_processor_does_not_re_ready_clone() {
 
 #[tokio::test]
 async fn tracing_processor_reusable_across_sequential_cycles() {
+    let _spans = test_spans().await;
     let mock_inner = BoxProcessor::new(PermitGateInner::new());
     let mut tracing_proc = TracingProcessor::new(
         mock_inner,
@@ -835,6 +848,7 @@ async fn rejection_counted_not_errored() {
 /// breaker-as-step or error-handler rethrow routes CircuitOpen through
 /// a traced segment.
 async fn circuit_open_skip_branch_not_errored() {
+    let _spans = test_spans().await;
     let collector = Arc::new(RecordingMetrics {
         calls: std::sync::Mutex::new(Vec::new()),
     });
@@ -1006,6 +1020,7 @@ async fn metrics_off_tracer_on() {
 /// lever.
 #[tokio::test]
 async fn duration_family_disabled_but_errors_survive() {
+    let _spans = test_spans().await;
     let collector = Arc::new(RecordingMetrics {
         calls: std::sync::Mutex::new(Vec::new()),
     });

@@ -16,7 +16,10 @@ use camel_core::route_controller::DefaultRouteController;
 use camel_core::{CamelContext, Registry, RouteDefinition};
 use tower::ServiceExt;
 
-use crate::common::{TEST_TIMEOUT, boot_context_with_intercept, send_to_direct, test_rt};
+use crate::common::{
+    TEST_TIMEOUT, boot_context_with_intercept, raw_seda_producer, send_awaiting_consumers,
+    send_to_direct, send_to_direct_result, test_rt,
+};
 
 /// Two rules for the same URI: the first declared rule must win.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -83,7 +86,12 @@ async fn empty_rule_set_leaves_the_send_untouched() {
         .expect("consumer route must register");
         ctx.start().await.expect("context start failed");
 
-        send_to_direct(ctx, "direct:in", Exchange::new(Message::new("sentinel"))).await;
+        // The seda enqueue is this pipeline's only side effect, so the
+        // send can safely wait out the Immediate-mode activation race.
+        send_awaiting_consumers("direct call", || {
+            send_to_direct_result(ctx, "direct:in", Exchange::new(Message::new("sentinel")))
+        })
+        .await;
 
         let arrival = mock
             .get_endpoint("arrival")
@@ -214,23 +222,16 @@ async fn skip_replaces_the_enqueue() {
     q.await_exchanges(1, TEST_TIMEOUT).await;
     q.assert_exchange_count(1).await;
 
-    // Enqueue a distinguishable BARRIER directly into seda:q via a separately
-    // created seda producer — no interception applies to this direct send.
-    let seda = ctx
-        .registry()
-        .get("seda")
-        .expect("seda component not registered");
-    let producer_ctx = ctx.producer_context();
-    let endpoint = seda
-        .create_endpoint("seda:q", &ctx)
-        .expect("failed to create seda endpoint");
-    let producer = endpoint
-        .create_producer(test_rt(), &producer_ctx)
-        .expect("failed to create seda producer");
-    producer
-        .oneshot(Exchange::new(Message::new("BARRIER")))
-        .await
-        .expect("seda enqueue should succeed");
+    // Enqueue a distinguishable BARRIER directly into seda:q via a raw seda
+    // producer — no interception applies to this direct send. The send
+    // waits out the Immediate-mode consumer activation race.
+    let producer = raw_seda_producer(&ctx, "seda:q");
+    send_awaiting_consumers("seda enqueue", || {
+        producer
+            .clone()
+            .oneshot(Exchange::new(Message::new("BARRIER")))
+    })
+    .await;
 
     // The seda consumer must deliver the BARRIER downstream — proof the
     // intercepted sentinel never entered the queue.
