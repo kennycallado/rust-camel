@@ -65,3 +65,10 @@ The strict wire-bytes lane key SHALL keep its fidelity contract. The client-role
 - **WHEN** two standalone roundtrip receives follow, crossed against the send order (the first names `/b`, the second names `/a`)
 - **THEN** each receive drains the parked roundtrip of its own path — the `/b` receive gets the `/b` roundtrip and the `/a` receive gets the `/a` roundtrip, no cross-match
 - **AND** sends to one path with no intervening receives still drain oldest-first by wire arrival within that path's lane
+
+#### Scenario: Standalone roundtrip receives under dynamic references are path-blind
+
+- **GIVEN** a standalone roundtrip receive naming a dynamic reference
+- **WHEN** another path of the same partner is used by a different receive
+- **THEN** lanes are keyed on path+key (this scenario is superseded by
+  "drain their own path" above; name retained through archive for continuity)
