@@ -48,12 +48,12 @@ pub use adapters::{
 };
 pub use boot_scenario::{ScenarioRun, boot_scenario};
 pub use camel_matchers::RequestExpectation as PartnerExpectation;
-pub use camel_matchers::{CountBound, Expectation, PathFilter};
+pub use camel_matchers::{CountBound, Expectation, PathFilter, RowsExpectation};
 #[cfg(feature = "http")]
 pub use document::partner_scripts_for;
 pub use document::{
     DocError, EndpointRef, InboundListener, PartnerFault, PartnerScript, PartnerScriptResponse,
-    Provisioning, RouteSource, ScenarioAction, ScenarioDocument, ScenarioTarget,
+    Provisioning, RouteSource, ScenarioAction, ScenarioDocument, ScenarioTarget, SqlTarget,
     ValidateExpectation, parse_scenario_document,
 };
 pub use env_layers::{AmbientLookup, LayeredEnv, ambient_std};
@@ -102,3 +102,10 @@ mod http_partner_test;
 /// Scenario `sql:` action executor tests (bd rc-25lup.1).
 #[cfg(all(test, feature = "sql"))]
 mod sql_action_test;
+
+/// `validate` sql-target executor tests (bd rc-25lup.2, task 3.1):
+/// the poll lattice, projection, mismatch redaction, and the
+/// feature-off twin. Compiles in BOTH feature configurations — the
+/// test bodies split internally per config.
+#[cfg(test)]
+mod sql_validate_test;

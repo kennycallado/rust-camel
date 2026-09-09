@@ -24,6 +24,12 @@ use std::collections::BTreeMap;
 /// - [`CountBound::Range`] fails immediately above the maximum and
 ///   otherwise waits the full deadline, deciding on the final
 ///   snapshot within `[min, max]`.
+///
+/// These semantics document a monotone subject: arrivals only add,
+/// so the filtered count is non-decreasing and a reached count stays
+/// reached. SQL row counts are NOT monotone — a DELETE shrinks the
+/// row set — so SQL count assertions never settle early; the final
+/// snapshot at the deadline decides.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum CountBound {
@@ -94,6 +100,33 @@ pub enum Expectation {
     Exists,
     /// Recursive-subset match against an object.
     JsonSubset(serde_json::Value),
+    /// Matches any value including null; the wildcard verb (`ignore`
+    /// at the grammar layer, the Citrus `@ignore@` equivalent).
+    Any,
+}
+
+/// The sql-target row-shape expectation: exactly one row shape is
+/// populated at parse time — concrete row patterns or a row-count
+/// bound (`rows` XOR `bound`).
+///
+/// `columns` names the projection the assertion applies to; it is
+/// applied at the call site, which projects the observed rows by
+/// column name before matching (ADR-0072 §3 — the algebra is
+/// parameterized, observation is per-tier).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowsExpectation {
+    /// Optional projection: the column names the observed rows are
+    /// narrowed to before matching, applied by name at the call site.
+    pub columns: Option<Vec<String>>,
+    /// Whether the rows may match in any order; `false` matches
+    /// positionally in declaration order.
+    pub unordered: bool,
+    /// Concrete row patterns, one expectation per projected cell.
+    /// Populated exactly when `bound` is `None`.
+    pub rows: Option<Vec<Vec<Expectation>>>,
+    /// Row-count bound over the projected rows. Populated exactly
+    /// when `rows` is `None`.
+    pub bound: Option<CountBound>,
 }
 
 /// Whether one snapshot's filtered count satisfies the bound: the
@@ -115,6 +148,11 @@ pub fn bound_holds(bound: &CountBound, actual: usize) -> bool {
 /// `AtMost` and a `Range` never settle early: a passing snapshot
 /// cannot prove the count stays within bounds while the window is
 /// open.
+///
+/// Early-settle soundness assumes a monotone subject (arrivals only
+/// add). SQL row sets are NOT monotone — a DELETE shrinks them — so
+/// SQL validation must not settle early; the final snapshot at
+/// deadline decides (papal e_opus, bd rc-25lup.2, 2026-09-09).
 pub fn settles_early(bound: &CountBound, actual: usize) -> bool {
     match bound {
         CountBound::Exact(_) | CountBound::AtLeast(_) => bound_holds(bound, actual),
@@ -216,8 +254,9 @@ pub fn render_bound(bound: &CountBound) -> String {
 /// value: `Equals` compares by equality; `Regex` failing to compile
 /// matches nothing (fail closed), otherwise matching the stringified
 /// value; `Contains`/`StartsWith`/`EndsWith` match the stringified
-/// value; `Exists` holds for any non-null value; `JsonSubset`
-/// recursive-subset matches via [`json_subset`].
+/// value; `Exists` holds for any non-null value; `Any` matches every
+/// value including null; `JsonSubset` recursive-subset matches via
+/// [`json_subset`].
 pub fn expectation_matches(expectation: &Expectation, value: &serde_json::Value) -> bool {
     match expectation {
         Expectation::Equals(expected) => value == expected,
@@ -229,7 +268,95 @@ pub fn expectation_matches(expectation: &Expectation, value: &serde_json::Value)
         Expectation::EndsWith(suffix) => stringify(value).ends_with(suffix),
         Expectation::Exists => value != &serde_json::Value::Null,
         Expectation::JsonSubset(pattern) => json_subset(pattern, value),
+        Expectation::Any => true,
     }
+}
+
+/// Whether a set of row patterns matches observed rows. Ordered
+/// (`unordered == false`): the row counts are equal and every pattern
+/// row satisfies its expectations positionally against the actual row
+/// at the same index. Unordered: the row counts are equal and a
+/// perfect matching exists between pattern rows and actual rows —
+/// decided with Kuhn's augmenting-path bipartite matching over the
+/// cell-compatibility matrix, never factorial backtracking. Expected
+/// rows are iterated in declaration order, so the decision is
+/// deterministic.
+pub fn rows_match(
+    expected: &[Vec<Expectation>],
+    actual: &[Vec<serde_json::Value>],
+    unordered: bool,
+) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    if !unordered {
+        return expected
+            .iter()
+            .zip(actual)
+            .all(|(pattern, row)| row_pattern_matches(pattern, row));
+    }
+    // Compatibility matrix: `compat[p][r]` — pattern row `p` matches
+    // actual row `r`.
+    let compat: Vec<Vec<bool>> = expected
+        .iter()
+        .map(|pattern| {
+            actual
+                .iter()
+                .map(|row| row_pattern_matches(pattern, row))
+                .collect()
+        })
+        .collect();
+    // `match_of_row[r]` is the pattern row currently assigned to
+    // actual row `r`.
+    let mut match_of_row: Vec<Option<usize>> = vec![None; actual.len()];
+    for pattern in 0..expected.len() {
+        let mut visited = vec![false; actual.len()];
+        if !try_augment(pattern, &compat, &mut match_of_row, &mut visited) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether one pattern row matches one actual row: same length and
+/// every cell satisfies its expectation.
+fn row_pattern_matches(pattern: &[Expectation], row: &[serde_json::Value]) -> bool {
+    pattern.len() == row.len()
+        && pattern
+            .iter()
+            .zip(row)
+            .all(|(expectation, value)| expectation_matches(expectation, value))
+}
+
+/// Kuhn's augmenting path: whether pattern row `pattern` can reach an
+/// unmatched actual row by reassigning the patterns currently holding
+/// the rows it is compatible with. `visited` marks the actual rows
+/// probed on this path.
+fn try_augment(
+    pattern: usize,
+    compat: &[Vec<bool>],
+    match_of_row: &mut [Option<usize>],
+    visited: &mut [bool],
+) -> bool {
+    for (row, &compatible) in compat[pattern].iter().enumerate() {
+        if !compatible || visited[row] {
+            continue;
+        }
+        visited[row] = true;
+        match match_of_row[row] {
+            None => {
+                match_of_row[row] = Some(pattern);
+                return true;
+            }
+            Some(holder) => {
+                if try_augment(holder, compat, match_of_row, visited) {
+                    match_of_row[row] = Some(pattern);
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Renders a value for string matchers: strings as-is, anything else
@@ -454,6 +581,111 @@ mod tests {
             &Expectation::JsonSubset(serde_json::json!({"user": {"name": "other"}})),
             &actual
         ));
+    }
+
+    #[test]
+    fn any_matches_all_values_including_null() {
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!(0),
+            serde_json::json!("x"),
+            serde_json::json!([1, 2]),
+            serde_json::json!({"k": "v"}),
+        ] {
+            assert!(
+                expectation_matches(&Expectation::Any, &value),
+                "Any vs {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn any_distinct_from_exists() {
+        assert!(!expectation_matches(
+            &Expectation::Exists,
+            &serde_json::Value::Null
+        ));
+        assert!(expectation_matches(
+            &Expectation::Any,
+            &serde_json::Value::Null
+        ));
+    }
+
+    fn two_row_pattern() -> Vec<Vec<Expectation>> {
+        vec![
+            vec![
+                Expectation::Equals(serde_json::json!(1)),
+                Expectation::Contains("li".to_string()),
+            ],
+            vec![Expectation::Equals(serde_json::json!(2)), Expectation::Any],
+        ]
+    }
+
+    #[test]
+    fn rows_match_ordered_positional() {
+        let expected = two_row_pattern();
+        let actual = vec![
+            vec![serde_json::json!(1), serde_json::json!("alice")],
+            vec![serde_json::json!(2), serde_json::json!("bob")],
+        ];
+        assert!(rows_match(&expected, &actual, false));
+        let swapped = vec![actual[1].clone(), actual[0].clone()];
+        assert!(!rows_match(&expected, &swapped, false));
+    }
+
+    #[test]
+    fn rows_match_length_mismatch_fails() {
+        let expected = two_row_pattern();
+        let actual = vec![vec![serde_json::json!(1), serde_json::json!("alice")]];
+        assert!(!rows_match(&expected, &actual, false));
+        assert!(!rows_match(&expected, &actual, true));
+    }
+
+    #[test]
+    fn rows_match_unordered_reorder() {
+        let expected = two_row_pattern();
+        let actual = vec![
+            vec![serde_json::json!(2), serde_json::json!("bob")],
+            vec![serde_json::json!(1), serde_json::json!("alice")],
+        ];
+        assert!(rows_match(&expected, &actual, true));
+    }
+
+    #[test]
+    fn rows_match_unordered_duplicates() {
+        let expected = vec![
+            vec![Expectation::Equals(serde_json::json!(1))],
+            vec![Expectation::Equals(serde_json::json!(1))],
+        ];
+        let same = vec![vec![serde_json::json!(1)], vec![serde_json::json!(1)]];
+        assert!(rows_match(&expected, &same, true));
+        let mixed = vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]];
+        assert!(!rows_match(&expected, &mixed, true));
+    }
+
+    #[test]
+    fn rows_match_kuhn_needs_augmenting() {
+        let expected = vec![
+            vec![Expectation::Any, Expectation::Any],
+            vec![Expectation::Equals(serde_json::json!(1)), Expectation::Any],
+        ];
+        let actual = vec![
+            vec![serde_json::json!(1), serde_json::json!("x")],
+            vec![serde_json::json!(2), serde_json::json!("a")],
+        ];
+        // Pattern 0 matches both rows, pattern 1 only the first:
+        // greedy first-fit strands pattern 1, the augmenting path
+        // reassigns pattern 0 to the second row.
+        assert!(rows_match(&expected, &actual, true));
+        assert!(!rows_match(&expected, &actual, false));
+    }
+
+    #[test]
+    fn rows_match_wildcard_including_null_cells() {
+        let expected = vec![vec![Expectation::Any]];
+        let actual = vec![vec![serde_json::Value::Null]];
+        assert!(rows_match(&expected, &actual, false));
+        assert!(rows_match(&expected, &actual, true));
     }
 
     #[test]

@@ -156,6 +156,16 @@ pub fn ensure_capture_subscriber() {
     }
 }
 
+/// A scoped dispatch carrying the capture layer: exercises `on_event`
+/// and window attribution without touching the process-global
+/// subscriber seat, so tests stay deterministic whatever the binary's
+/// test ordering installed globally (the same escape hatch these unit
+/// tests use).
+#[cfg(test)]
+pub(crate) fn scoped_capture_dispatch() -> tracing::Dispatch {
+    tracing::Dispatch::new(tracing_subscriber::registry().with(CaptureLayer))
+}
+
 /// The capture layer: appends every event to every open window whose
 /// `[opened_at, now)` interval contains the event timestamp.
 struct CaptureLayer;

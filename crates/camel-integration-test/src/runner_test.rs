@@ -6,10 +6,29 @@
 //! tokio runtime; deadlines are real monotonic time and stay at
 //! test-scale magnitudes.
 
+#[cfg(all(test, feature = "sql"))]
+use std::any::Any;
 use std::collections::BTreeMap;
+#[cfg(all(test, feature = "sql"))]
+use std::collections::HashMap;
+#[cfg(all(test, feature = "sql"))]
+use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(all(test, feature = "sql"))]
+use camel_api::datasource::{
+    CheckFuture, CreatePoolFuture, DatasourceCatalog, DatasourceConfig, DatasourceHandle,
+    PoolFactory,
+};
+#[cfg(all(test, feature = "sql"))]
+use camel_api::error::CamelError;
+#[cfg(all(test, feature = "sql"))]
+use camel_api::lifecycle::HealthStatus;
 use camel_api::{Body, Exchange, Message, Value};
+#[cfg(all(test, feature = "sql"))]
+use camel_core::datasource::RuntimeDatasourceCatalog;
+#[cfg(all(test, feature = "sql"))]
+use camel_matchers::RowsExpectation;
 use futures::future::BoxFuture;
 
 #[cfg(feature = "http")]
@@ -20,13 +39,15 @@ use crate::adapters::{
 };
 use crate::document::{
     EndpointRef, Expectation, Provisioning, RouteSource, ScenarioAction, ScenarioDocument,
-    ScenarioTarget, ValidateExpectation,
+    ScenarioTarget, SqlTarget, ValidateExpectation,
 };
 use crate::runner::{
     DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, effective_send_deadline,
     fill_bind_vars, interpolate_value, reply_body_value, resolve_placeholders, run_scenario,
     run_scenario_document,
 };
+#[cfg(all(test, feature = "sql"))]
+use crate::sql_action::{SqlAction, execute_sql_prepare};
 
 #[cfg(feature = "http")]
 use crate::adapters::http::{HttpPartner, HttpWireRequest};
@@ -2151,4 +2172,227 @@ scenario:
         "no URL may leak through a failed datasource lookup: {text}"
     );
     run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
+}
+
+// -------------------------------------------------------------------------
+// `validate` sql-target runner dispatch (bd rc-25lup.2, task 3.2)
+//
+// The dispatch under test is `run_action`'s target/expectation
+// pairing, exercised at the runner level through the public entries:
+// the catalog rides `run_scenario_document`'s `datasource_catalog`
+// parameter exactly as the production boot hands it over, and
+// `run_scenario` always passes `None`. The unit-level executor
+// behaviors (poll lattice, projection, redaction) live in
+// `sql_validate_test.rs` (task 3.1); the stub catalog pattern is
+// duplicated there module-privately, so it repeats here.
+// -------------------------------------------------------------------------
+
+/// The shared-cache in-memory URL every dispatch test uses. Tests
+/// name their own tables: the shared cache is process-wide, so
+/// parallel tests must not collide inside the one database.
+#[cfg(all(test, feature = "sql"))]
+const DB_URL: &str = "sqlite::memory:?cache=shared";
+
+#[cfg(all(test, feature = "sql"))]
+struct StubPoolFactory;
+
+#[cfg(all(test, feature = "sql"))]
+impl PoolFactory for StubPoolFactory {
+    fn create<'a>(&'a self, config: &'a DatasourceConfig) -> CreatePoolFuture<'a> {
+        Box::pin(async move {
+            // AnyPool connect fails without the compiled-in drivers
+            // registered (camel-sql pool_factory.rs precedent).
+            // max_connections(1) keeps all statements on one
+            // connection so CREATE/INSERT state cannot split across
+            // pooled connections.
+            sqlx::any::install_default_drivers();
+            let pool = sqlx::any::AnyPoolOptions::new()
+                .max_connections(1)
+                .connect(&config.db_url)
+                .await
+                .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+            Ok(Arc::new(pool) as Arc<dyn Any + Send + Sync>)
+        })
+    }
+
+    fn check<'a>(&'a self, _handle: &'a DatasourceHandle) -> CheckFuture<'a> {
+        Box::pin(async { HealthStatus::Healthy })
+    }
+
+    fn supported_schemes(&self) -> &[&str] {
+        &["sqlite"]
+    }
+
+    fn name(&self) -> &'static str {
+        "stub"
+    }
+}
+
+/// One catalog with a single `name` datasource over the shared
+/// in-memory SQLite database (the `sql_validate_test` pattern).
+#[cfg(all(test, feature = "sql"))]
+fn sqlite_catalog(name: &str) -> Arc<dyn DatasourceCatalog> {
+    let mut configs = HashMap::new();
+    configs.insert(
+        name.to_string(),
+        DatasourceConfig {
+            db_url: DB_URL.to_string(),
+            provider: None,
+            max_connections: None,
+            min_connections: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra: HashMap::new(),
+        },
+    );
+    let catalog = RuntimeDatasourceCatalog::new(configs);
+    assert!(
+        catalog
+            .register_factory("sqlite", Arc::new(StubPoolFactory))
+            .is_ok(),
+        "stub factory registration failed"
+    );
+    Arc::new(catalog)
+}
+
+/// Seeds `stmts` through the real prepare executor; a seed failure is
+/// a test-harness defect, never the subject under test.
+#[cfg(all(test, feature = "sql"))]
+async fn seed(catalog: &Arc<dyn DatasourceCatalog>, datasource: &str, stmts: &[&str]) {
+    let action = SqlAction {
+        datasource: datasource.to_string(),
+        prepare: stmts.iter().map(|stmt| stmt.to_string()).collect(),
+    };
+    if let Err(err) = execute_sql_prepare(catalog, &action).await {
+        panic!("seed failed: {err}");
+    }
+}
+
+/// The runner-level happy path: a `sql` target paired with the rows
+/// grammar routes through the dispatch into the catalog-backed
+/// executor, and the seeded ordered rows pass.
+#[tokio::test]
+#[cfg(all(test, feature = "sql"))]
+async fn validate_sql_routes_through_catalog() {
+    let catalog = sqlite_catalog("appdb");
+    seed(
+        &catalog,
+        "appdb",
+        &[
+            "CREATE TABLE t_dispatch (id INTEGER, name TEXT)",
+            "INSERT INTO t_dispatch VALUES (1, 'alice')",
+            "INSERT INTO t_dispatch VALUES (2, 'bob')",
+        ],
+    )
+    .await;
+    let doc = doc_with(vec![ScenarioAction::Validate {
+        target: ScenarioTarget::Sql(SqlTarget {
+            datasource: "appdb".to_string(),
+            query: "SELECT id, name FROM t_dispatch ORDER BY id".to_string(),
+        }),
+        expectation: ValidateExpectation::Rows(RowsExpectation {
+            columns: Some(vec!["id".to_string(), "name".to_string()]),
+            unordered: false,
+            rows: Some(vec![
+                vec![
+                    Expectation::Equals(Value::Number(1.into())),
+                    Expectation::Equals(Value::String("alice".to_string())),
+                ],
+                vec![
+                    Expectation::Equals(Value::Number(2.into())),
+                    Expectation::Equals(Value::String("bob".to_string())),
+                ],
+            ]),
+            bound: None,
+        }),
+        deadline: None,
+        elapsed_at_least: None,
+    }]);
+    let router = PartnerRouter::new(BTreeMap::new());
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, Some(&catalog)).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the seeded sql validate must pass: {outcome:?}"
+    );
+}
+
+/// The fail-closed backstop at the runner level: the same action with
+/// no catalog in hand is an apparatus-class failure naming the
+/// missing catalog, never a silently skipped assertion.
+#[tokio::test]
+#[cfg(all(test, feature = "sql"))]
+async fn validate_sql_without_catalog_fails_closed() {
+    let doc = doc_with(vec![ScenarioAction::Validate {
+        target: ScenarioTarget::Sql(SqlTarget {
+            datasource: "appdb".to_string(),
+            query: "SELECT id FROM t_dispatch_nocat".to_string(),
+        }),
+        expectation: ValidateExpectation::Rows(RowsExpectation {
+            columns: None,
+            unordered: false,
+            rows: Some(vec![vec![Expectation::Equals(Value::Number(1.into()))]]),
+            bound: None,
+        }),
+        deadline: None,
+        elapsed_at_least: None,
+    }]);
+    let router = PartnerRouter::new(BTreeMap::new());
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(
+        outcome.verdict, None,
+        "the missing catalog must fail the run: {outcome:?}"
+    );
+    match &outcome.per_action[0] {
+        Err(ScenarioFailure::ActionTransport { source, .. }) => {
+            let crate::adapters::TransportError::Other { message } = source else {
+                panic!("expected TransportError::Other, got {source:?}");
+            };
+            assert!(
+                message.contains("no datasource catalog"),
+                "the failure must name the missing catalog: {message}"
+            );
+        }
+        other => panic!("expected ActionTransport on action 0, got {other:?}"),
+    }
+}
+
+/// A `sql` target paired with the message grammar is a pairing the
+/// parser never produces: the runner fails closed with the
+/// unpaired-validate detail naming the sql/rows rule. The action is
+/// constructed directly — no catalog is ever touched, so the test
+/// compiles and runs in both feature configurations.
+#[tokio::test]
+async fn unpaired_validate_sql_message() {
+    let doc = doc_with(vec![ScenarioAction::Validate {
+        target: ScenarioTarget::Sql(SqlTarget {
+            datasource: "appdb".to_string(),
+            query: "SELECT 1".to_string(),
+        }),
+        expectation: ValidateExpectation::Message(Expectation::Exists),
+        deadline: None,
+        elapsed_at_least: None,
+    }]);
+    let router = PartnerRouter::new(BTreeMap::new());
+    let mut vars = ScenarioVars::new();
+    let failure = run_scenario(&doc, &router, &mut vars)
+        .await
+        .expect_err("the unpaired validate must fail the scenario");
+    let ScenarioFailure::ValidationMismatch { action: 0, detail } = failure else {
+        panic!("expected ValidationMismatch, got {failure:?}");
+    };
+    assert!(
+        detail.contains("sql"),
+        "the detail must name the sql target rule: {detail}"
+    );
+    assert!(
+        detail.contains("rows"),
+        "the detail must name the rows grammar rule: {detail}"
+    );
 }

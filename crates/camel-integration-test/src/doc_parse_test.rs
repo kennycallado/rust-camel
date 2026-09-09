@@ -2,14 +2,23 @@
 //!
 //! Unit-test module of the lib target, declared in `src/lib.rs` under
 //! `#[cfg(test)]`; `cargo test -p camel-integration-test --lib` runs
-//! these tests and nothing else. Every test is path-based: it writes a
-//! temporary `.test.yaml` document and parses it through
-//! [`crate::parse_scenario_document`].
+//! these tests and nothing else. Most tests are path-based: they write
+//! a temporary `.test.yaml` document and parse it through
+//! [`crate::parse_scenario_document`]. Matcher-grammar tests call the
+//! in-crate `expectation_from_value` parser directly (shared dual
+//! grammar, same verb set as the path-based readers).
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::document::is_http_token;
+use camel_matchers::expectation_matches;
+use serde_json::json;
+
+use crate::document::{
+    RowsExpectation, expectation_from_value, is_http_token, sql_expectation_from_value,
+    sql_query_lacks_order_by,
+};
 use crate::{
     CountBound, DocError, Expectation, PartnerExpectation, Provisioning, ScenarioAction,
     ScenarioDocument, ScenarioTarget, ValidateExpectation, parse_scenario_document,
@@ -1773,4 +1782,648 @@ scenario:
         }
         other => panic!("expected Validation, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// `ignore` verb (Task 2.1, sql-validate-target): the shared dual grammar
+// gains the wildcard verb, mirroring the `exists` no-argument law.
+// ---------------------------------------------------------------------------
+
+/// `{ignore: null}` parses to `Expectation::Any`: the wildcard verb,
+/// the Citrus `@ignore@` equivalent (shared dual grammar, same verb
+/// set as `exists`).
+#[test]
+fn ignore_verb_parses_to_any() {
+    let expectation = expectation_from_value(&json!({ "ignore": null }), 0, "expectation")
+        .expect("ignore with a null payload parses");
+    assert!(
+        matches!(expectation, Expectation::Any),
+        "expected Expectation::Any, got {expectation:?}"
+    );
+}
+
+/// A non-null payload is a grammar error mirroring the `exists` law:
+/// the wildcard takes no argument.
+#[test]
+fn ignore_takes_no_argument() {
+    let err = expectation_from_value(&json!({ "ignore": 5 }), 0, "expectation")
+        .expect_err("ignore with a payload must fail");
+    let display = err.to_string();
+    assert!(
+        display.contains("`ignore` takes no argument"),
+        "error must name the no-argument law: {display}"
+    );
+}
+
+/// Pins the verb's runtime meaning at the grammar layer: `Any` holds
+/// for every value including null.
+#[test]
+fn ignore_matches_any_cell() {
+    for value in [json!(null), json!(3), json!("x")] {
+        assert!(
+            expectation_matches(&Expectation::Any, &value),
+            "Any must match {value:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// sql validate target (Task 2.2, sql-validate-target): the `sql` key,
+// the sql expectation grammar, and the ORDER-BY nondeterminism advisory.
+// ---------------------------------------------------------------------------
+
+/// A validate action whose `sql` target parses keeps the datasource
+/// name and the doc-authored read query, and pairs the target with the
+/// row-shape grammar (`ValidateExpectation::Rows`).
+#[test]
+fn sql_target_parses() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: appdb
+        query: SELECT id FROM t ORDER BY id
+    expectation:
+      rows: [[1]]
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.first().expect("one action");
+    match action {
+        ScenarioAction::Validate {
+            target,
+            expectation,
+            ..
+        } => {
+            match target {
+                ScenarioTarget::Sql(target) => {
+                    assert_eq!(
+                        target.datasource, "appdb",
+                        "target must keep the datasource identifier"
+                    );
+                    assert_eq!(
+                        target.query, "SELECT id FROM t ORDER BY id",
+                        "target must keep the doc-authored read query"
+                    );
+                }
+                other => panic!("expected Sql, got {other:?}"),
+            }
+            assert_eq!(
+                expectation,
+                &ValidateExpectation::Rows(RowsExpectation {
+                    columns: None,
+                    unordered: false,
+                    rows: Some(vec![vec![Expectation::Equals(json!(1))]]),
+                    bound: None,
+                }),
+                "expectation must parse as the sql row shape"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+/// A mutation query is a doc-validation error naming the action index
+/// and the read rule: the validate sql target owns reads, the `sql:`
+/// prepare action owns mutations.
+#[test]
+fn mutation_query_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: appdb
+        query: INSERT INTO t VALUES (1)
+    expectation:
+      count: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("reads belong to the validate sql target"),
+                "error must state the read rule: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// A CTE read parses: the same prefix law the prepare-side lint uses.
+/// The expectation stays a count bound so this test emits no ORDER-BY
+/// advisory (the advisory owns its own windowed tests).
+#[test]
+fn with_prefix_query_accepts() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: appdb
+        query: with c as (select 1) select * from c
+    expectation:
+      count: 1
+"#,
+    )
+    .expect("parse must succeed");
+    match doc.scenario.first().expect("one action") {
+        ScenarioAction::Validate {
+            target: ScenarioTarget::Sql(target),
+            ..
+        } => {
+            assert_eq!(
+                target.query, "with c as (select 1) select * from c",
+                "the CTE read must parse verbatim"
+            );
+        }
+        other => panic!("expected Validate with Sql target, got {other:?}"),
+    }
+}
+
+/// A parenthesis-wrapped read parses: `is_read_statement` re-trims
+/// after each dropped `(` (expectation stays a count bound — no
+/// advisory).
+#[test]
+fn paren_wrapped_select_accepts() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: appdb
+        query: (select 1)
+    expectation:
+      count: 1
+"#,
+    )
+    .expect("parse must succeed");
+    match doc.scenario.first().expect("one action") {
+        ScenarioAction::Validate {
+            target: ScenarioTarget::Sql(target),
+            ..
+        } => {
+            assert_eq!(target.query, "(select 1)", "the wrapped read must parse");
+        }
+        other => panic!("expected Validate with Sql target, got {other:?}"),
+    }
+}
+
+/// An unknown field inside the `sql` payload is rejected by serde's
+/// deny-unknown rule, naming the offending key.
+#[test]
+fn sql_target_unknown_field_rejected() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: appdb
+        query: select 1
+        extra: true
+    expectation:
+      count: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("unknown field") && message.contains("extra"),
+                "serde deny-unknown error must name `extra`: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// Empty `datasource` and empty `query` are each doc-validation
+/// errors: an identifier law with an empty name asserts nothing.
+#[test]
+fn empty_datasource_or_query_rejected() {
+    let cases = [
+        (
+            "datasource",
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: ""
+        query: "select 1"
+    expectation:
+      count: 1
+"#,
+        ),
+        (
+            "query",
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: "appdb"
+        query: ""
+    expectation:
+      count: 1
+"#,
+        ),
+    ];
+    for (field, text) in cases {
+        let err = parse_case(text).expect_err("parse must fail");
+        match err {
+            DocError::Validation { index, message } => {
+                assert_eq!(index, 0, "error must name the action index");
+                assert!(
+                    message.contains(&format!("non-empty `{field}`")),
+                    "error must name the empty `{field}`: {message}"
+                );
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+}
+
+/// The poll deadline is valid on a sql target: the read runs against a
+/// live datasource and may be worth bounding.
+#[test]
+fn deadline_on_sql_target_accepts() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: appdb
+        query: select 1
+    expectation:
+      count: 1
+    deadline: 2s
+"#,
+    )
+    .expect("parse must succeed");
+    match doc.scenario.first().expect("one action") {
+        ScenarioAction::Validate { deadline, .. } => {
+            assert_eq!(
+                *deadline,
+                Some(Duration::from_secs(2)),
+                "deadline must parse as a humantime duration"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+/// Existing behavior stands: `deadline` on a `lastReceived` target is
+/// still rejected, and the error now names both valid targets.
+#[test]
+fn deadline_on_last_received_still_rejected() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      lastReceived: http://127.0.0.1:9999/hook
+    expectation:
+      equals: ok
+    deadline: 5s
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("`partner` or `sql`"),
+                "message must name both valid targets: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// `elapsedAtLeast` stays `lastReceived`-only: a sql read carries no
+/// wire arrival to measure.
+#[test]
+fn elapsed_at_least_on_sql_rejected() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: appdb
+        query: select 1
+    expectation:
+      count: 1
+    elapsedAtLeast: 1s
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("elapsedAtLeast"),
+                "message must name `elapsedAtLeast`: {message}"
+            );
+            assert!(
+                message.contains("lastReceived"),
+                "message must name the only valid target kind: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// Pins the ORDER-BY predicate: case-insensitive, `\s+` between the
+/// words (newlines included), and the documented string-literal false
+/// positive stays true (advisory-only).
+#[test]
+fn order_by_predicate() {
+    assert!(sql_query_lacks_order_by("SELECT * FROM t"));
+    assert!(!sql_query_lacks_order_by("select * from t order by id"));
+    assert!(
+        !sql_query_lacks_order_by("SELECT * FROM t ORDER\nBY id"),
+        "`\\s+` must cover the newline between the words"
+    );
+    assert!(
+        sql_query_lacks_order_by("select 'totally ordered by intent' from t"),
+        "documented false positive: a string literal trips the token search"
+    );
+}
+
+/// The `unordered` flag carries through to `RowsExpectation.unordered`.
+#[test]
+fn unordered_flag_parses() {
+    let rows = sql_expectation_from_value(&json!({ "unordered": true, "rows": [[1]] }), 0)
+        .expect("unordered flag parses");
+    assert!(rows.unordered, "unordered must carry through");
+    assert!(rows.rows.is_some(), "the rows shape stays populated");
+    assert_eq!(rows.bound, None, "the bound stays unset in the rows shape");
+}
+
+/// Row cells parse through the shared matcher grammar: literals, verb
+/// maps, and the `ignore`/`equals` null verbs alike.
+#[test]
+fn sql_expectation_rows_cells() {
+    let rows = sql_expectation_from_value(
+        &json!({
+            "rows": [
+                [1, "a"],
+                [2, {"contains": "b"}],
+                [{"ignore": null}, {"equals": null}]
+            ],
+            "columns": ["id", "name"]
+        }),
+        0,
+    )
+    .expect("rows shape parses");
+    assert_eq!(
+        rows.rows.as_ref().map(Vec::len),
+        Some(3),
+        "three row patterns must parse: {:?}",
+        rows.rows
+    );
+    assert_eq!(
+        rows.columns,
+        Some(vec!["id".to_string(), "name".to_string()]),
+        "the column projection must carry the declared names"
+    );
+    assert_eq!(rows.bound, None, "the rows shape leaves the bound unset");
+    let parsed = rows.rows.expect("rows populated");
+    assert_eq!(
+        parsed[1][1],
+        Expectation::Contains("b".to_string()),
+        "verb-map cells parse through the matcher grammar"
+    );
+    assert_eq!(
+        parsed[2][0],
+        Expectation::Any,
+        "the ignore verb parses to the wildcard"
+    );
+}
+
+/// The four count-key forms parse to their `CountBound` shapes with
+/// the partner semantics.
+#[test]
+fn sql_expectation_count_bound_forms() {
+    let bound = |value: serde_json::Value| {
+        sql_expectation_from_value(&value, 0)
+            .expect("count shape parses")
+            .bound
+    };
+    assert_eq!(bound(json!({ "count": 3 })), Some(CountBound::Exact(3)));
+    assert_eq!(bound(json!({ "atLeast": 2 })), Some(CountBound::AtLeast(2)));
+    assert_eq!(bound(json!({ "atMost": 5 })), Some(CountBound::AtMost(5)));
+    assert_eq!(
+        bound(json!({ "atLeast": 1, "atMost": 3 })),
+        Some(CountBound::Range(1, 3))
+    );
+}
+
+/// `rows` and any count key are exclusive: the error names both keys.
+#[test]
+fn sql_expectation_rows_and_bound_exclusive() {
+    let err = sql_expectation_from_value(&json!({ "rows": [[1]], "count": 1 }), 0)
+        .expect_err("rows and a bound cannot coexist");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("`rows`") && message.contains("`count`"),
+                "error must name both keys: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// An empty `rows` list asserts nothing and is rejected.
+#[test]
+fn sql_expectation_empty_rows_rejected() {
+    let err =
+        sql_expectation_from_value(&json!({ "rows": [] }), 0).expect_err("empty rows must fail");
+    let display = err.to_string();
+    assert!(
+        display.contains("`rows` must not be empty"),
+        "error must name the empty rows list: {display}"
+    );
+}
+
+/// A row whose width differs from the declared `columns` fails naming
+/// the action index AND the row index.
+#[test]
+fn sql_expectation_row_length_names_row_index() {
+    let err = sql_expectation_from_value(
+        &json!({ "columns": ["id", "name"], "rows": [[1, "a"], [1, "a", "extra"]] }),
+        0,
+    )
+    .expect_err("width mismatch must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("row 1"),
+                "error must name the offending row index: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// An unknown sql-expectation field fails listing the recognized keys.
+#[test]
+fn sql_expectation_unknown_field_rejected() {
+    let err = sql_expectation_from_value(&json!({ "rows": [[1]], "foo": 1 }), 0)
+        .expect_err("unknown field must fail");
+    let display = err.to_string();
+    assert!(
+        display.contains("unknown field `foo`"),
+        "error must name the unknown field: {display}"
+    );
+    for key in ["rows", "columns", "unordered", "count", "atLeast", "atMost"] {
+        assert!(
+            display.contains(&format!("`{key}`")),
+            "error must list the recognized key `{key}`: {display}"
+        );
+    }
+}
+
+/// `columns` must be a non-empty list of strings.
+#[test]
+fn sql_expectation_columns_must_be_nonempty_strings() {
+    let cases = [
+        json!({ "columns": [], "rows": [[1]] }),
+        json!({ "columns": [1], "rows": [[1]] }),
+    ];
+    for case in cases {
+        let err =
+            sql_expectation_from_value(&case, 0).expect_err("columns must be non-empty strings");
+        let display = err.to_string();
+        assert!(
+            display.contains("`columns`"),
+            "error must name `columns`: {display}"
+        );
+    }
+}
+
+/// Duplicate column names are rejected naming the duplicated column.
+#[test]
+fn sql_expectation_columns_duplicate_rejected() {
+    let err = sql_expectation_from_value(&json!({ "columns": ["id", "id"], "rows": [[1, 2]] }), 0)
+        .expect_err("duplicate columns must fail");
+    let display = err.to_string();
+    assert!(
+        display.contains("duplicate column name `id`"),
+        "error must name the duplicated column: {display}"
+    );
+}
+
+/// Serializes the two advisory tests' window sections: a window is
+/// open to every event in its interval, so a parallel sibling's
+/// advisory would land in the window under count.
+static ADVISORY_LOCK: Mutex<()> = Mutex::new(());
+
+/// An ordered `rows` assertion over a query without `ORDER BY` emits
+/// exactly one advisory warn naming the action index and the
+/// nondeterminism.
+///
+/// The parse runs under a scoped capture dispatch: the process-global
+/// subscriber seat is first-wins, and another module's test (a boot
+/// path) may own it by the time this runs — the scoped dispatch makes
+/// the capture deterministic whatever the seat's state.
+#[test]
+fn ordered_without_order_by_warns_once() {
+    let _guard = ADVISORY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dispatch = crate::log_capture::scoped_capture_dispatch();
+    let window = crate::log_capture::open_window();
+    let _doc = tracing::dispatcher::with_default(&dispatch, || {
+        parse_case(
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: appdb
+        query: SELECT id FROM t
+    expectation:
+      rows: [[1]]
+"#,
+        )
+        .expect("parse must succeed")
+    });
+    let events = window.close();
+    let advisories: Vec<_> = events
+        .iter()
+        .filter(|event| event.level == tracing::Level::WARN && event.message.contains("ORDER BY"))
+        .collect();
+    assert_eq!(
+        advisories.len(),
+        1,
+        "exactly one advisory warn must fire: {events:?}"
+    );
+    assert!(
+        advisories[0].message.contains("action 0"),
+        "the advisory names the action index: {}",
+        advisories[0].message
+    );
+    assert!(
+        advisories[0].message.contains("nondeterministic"),
+        "the advisory states the nondeterminism: {}",
+        advisories[0].message
+    );
+}
+
+/// An `unordered` shape never advises: the flag is the documented fix.
+/// Same scoped-dispatch capture as the ordered twin.
+#[test]
+fn unordered_without_order_by_does_not_warn() {
+    let _guard = ADVISORY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dispatch = crate::log_capture::scoped_capture_dispatch();
+    let window = crate::log_capture::open_window();
+    let _doc = tracing::dispatcher::with_default(&dispatch, || {
+        parse_case(
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: appdb
+        query: SELECT id FROM t
+    expectation:
+      unordered: true
+      rows: [[1]]
+"#,
+        )
+        .expect("parse must succeed")
+    });
+    let events = window.close();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.level == tracing::Level::WARN && event.message.contains("ORDER BY")),
+        "an unordered shape never advises: {events:?}"
+    );
 }

@@ -60,6 +60,19 @@ pub(crate) use partner_validate::{
     matching_requests, partner_mismatch_detail, render_bound, render_filters,
 };
 
+/// SQL row-shape verification for the `validate` action's `sql`
+/// target (bd rc-25lup.2): pool resolution, the fail-closed row
+/// mapping, the by-name projection, the non-monotone poll lattice,
+/// and the cell-free mismatch renderer.
+mod sql_validate;
+
+// The dispatch target of the runner's sql validate arm; the
+// re-exports below are its direct unit tests (`sql_validate_test`,
+// which compiles in BOTH feature configurations — hence the twin).
+#[cfg(all(test, feature = "sql"))]
+pub(crate) use sql_validate::any_row_to_tuple;
+pub(crate) use sql_validate::sql_validate_action;
+
 /// The default bounded deadline for every `send` action (ADR-0069
 /// §7: every adapter operation carries a deadline). A document-level
 /// `sendDeadline` overrides it (rc-tr4w).
@@ -614,7 +627,7 @@ async fn run_action(
             tokio::time::sleep(*duration).await;
         }
         ScenarioAction::Validate { .. } => {
-            validate_action(action, index, started_at, router, vars).await?;
+            validate_action(action, index, started_at, router, vars, datasource_catalog).await?;
         }
         ScenarioAction::Sql {
             datasource,
@@ -801,8 +814,9 @@ pub(crate) fn reply_body_value(exchange: &Exchange) -> Value {
 /// Parses reply bytes as JSON, falling back to a lossy-UTF-8 string
 /// when they are not JSON text: a text body holding JSON is observed
 /// as the structured value the matcher verbs expect, and any other
-/// text stays textual.
-fn reply_bytes_value(bytes: &[u8]) -> Value {
+/// text stays textual. Shared with the sql validate executor, whose
+/// blob cells obey the same law.
+pub(crate) fn reply_bytes_value(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(bytes).into_owned()))
 }
@@ -893,22 +907,27 @@ async fn receive_action(
 /// The `partner` target asserts the exact filtered count of the
 /// requests the harness partner recorded, read as the router's
 /// snapshot — one immediate read without a deadline, a polled one
-/// with it ([`partner_validate_action`]). Every other target applies
-/// the message grammar against `vars`; the deadline is partner-only
-/// (the grammar rejected it on these targets at parse time, so the
-/// message arm ignores it). An `elapsedAtLeast` bound on a
-/// `lastReceived` target checks the message's wire arrival against
-/// the scenario-start anchor before the grammar runs; the grammar
-/// rejected it on every other target at parse time. Mismatch details
-/// name the validation subject — the variable's name, the receiving
-/// endpoint, or the partner URI — so a corrupted-header regression is
-/// diagnosable from the failure text.
+/// with it ([`partner_validate_action`]). The `sql` target asserts
+/// the doc-authored read's row shape against the named datasource's
+/// pool through [`sql_validate_action`], which owns the deadline
+/// poll (SQL state is non-monotone, so its lattice differs from the
+/// partner's). Every other target applies the message grammar
+/// against `vars`; the deadline is partner/sql-only (the grammar
+/// rejected it on these targets at parse time, so the message arm
+/// ignores it). An `elapsedAtLeast` bound on a `lastReceived` target
+/// checks the message's wire arrival against the scenario-start
+/// anchor before the grammar runs; the grammar rejected it on every
+/// other target at parse time. Mismatch details name the validation
+/// subject — the variable's name, the receiving endpoint, or the
+/// partner URI — so a corrupted-header regression is diagnosable
+/// from the failure text.
 async fn validate_action(
     action: &ScenarioAction,
     index: usize,
     started_at: Instant,
     router: &PartnerRouter,
     vars: &ScenarioVars,
+    datasource_catalog: Option<&Arc<dyn DatasourceCatalog>>,
 ) -> Result<(), ScenarioFailure> {
     // run_action dispatches only the Validate variant here; the
     // fallback mirrors the impossible pairing arms below.
@@ -927,6 +946,14 @@ async fn validate_action(
         // deadline.
         (ScenarioTarget::Partner(endpoint), ValidateExpectation::Partner(expected)) => {
             partner_validate_action(index, &endpoint.endpoint, expected, *deadline, router).await
+        }
+        // The parser pairs a `sql` target with the row-shape grammar;
+        // this arm reads the datasource's live state and owns the
+        // deadline poll. A `None` catalog fails closed inside (the
+        // sql-action precedent), so a scenario never silently skips
+        // its assertion.
+        (ScenarioTarget::Sql(target), ValidateExpectation::Rows(expected)) => {
+            sql_validate_action(index, target, expected, *deadline, datasource_catalog).await
         }
         (_, ValidateExpectation::Message(expectation)) => {
             let (value, subject) = match target {
@@ -978,6 +1005,11 @@ async fn validate_action(
                 // Taken by the arm above: the grammar never pairs a
                 // `partner` target with the message expectation.
                 ScenarioTarget::Partner(_) => return Err(unpaired_validate(index)),
+                // Taken by the arm above: the grammar pairs a `sql`
+                // target with the rows grammar only; a message
+                // expectation here means a caller bypassed the
+                // parser.
+                ScenarioTarget::Sql(_) => return Err(unpaired_validate(index)),
             };
             // The per-form booleans delegate to the shared core
             // (`camel_matchers::expectation_matches`); the detail
@@ -1042,20 +1074,28 @@ async fn validate_action(
                 }),
             }
         }
-        // The parser never pairs a partner expectation with a
-        // non-partner target.
+        // The parser never pairs a partner or sql target with another
+        // kind's grammar, and never a rows expectation with a
+        // non-sql target: a `partner` target pairs with the partner
+        // count grammar, a `sql` target with the rows grammar
+        // (`rows` or a count bound), every other target with the
+        // message grammar.
         _ => Err(unpaired_validate(index)),
     }
 }
 
 /// The failure for a target/expectation pairing the grammar never
 /// produces: the parser pairs `partner` targets with the partner
-/// count grammar and every other target with the message grammar, so
-/// only a caller bypassing the parser reaches these arms.
+/// count grammar, `sql` targets with the rows grammar, and every
+/// other target with the message grammar, so only a caller bypassing
+/// the parser reaches these arms.
 fn unpaired_validate(index: usize) -> ScenarioFailure {
     ScenarioFailure::ValidationMismatch {
         action: index,
-        detail: "validate target kind does not pair with the expectation kind".to_string(),
+        detail: "validate target kind does not pair with the expectation kind: `partner` pairs \
+                 with the partner count grammar, `sql` with the rows grammar, and every other \
+                 target with the message grammar"
+            .to_string(),
     }
 }
 

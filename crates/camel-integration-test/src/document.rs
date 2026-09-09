@@ -42,7 +42,7 @@ pub use crate::partner_script::{PartnerFault, PartnerScript, PartnerScriptRespon
 // re-exported here so the document API stays one surface. The raw
 // serde stage below constructs these core types directly.
 pub use camel_matchers::RequestExpectation as PartnerExpectation;
-pub use camel_matchers::{CountBound, Expectation, PathFilter};
+pub use camel_matchers::{CountBound, Expectation, PathFilter, RowsExpectation};
 // The load-error vocabulary and the raw endpoint-reference
 // conversion live in the submodule `error` (rc-0ahfl); `DocError`
 // stays re-exported here so the document API keeps one surface.
@@ -173,15 +173,17 @@ pub enum ScenarioAction {
     /// Assert an expectation against a scenario target.
     Validate {
         /// What to validate: the last message received on an endpoint,
-        /// a scenario variable, or a partner's recorded traffic.
+        /// a scenario variable, a partner's recorded traffic, or a
+        /// datasource read.
         target: ScenarioTarget,
         /// Matcher expectation: the message grammar for `lastReceived`
         /// and `variable` targets, the partner count grammar for
-        /// `partner` targets.
+        /// `partner` targets, the sql row grammar for `sql` targets.
         expectation: ValidateExpectation,
-        /// Optional poll deadline. Only valid on `partner` targets,
-        /// whose counts settle asynchronously; without it the partner
-        /// assertion reads one immediate snapshot.
+        /// Optional poll deadline. Only valid on `partner` and `sql`
+        /// targets, whose assertions settle asynchronously or read a
+        /// live datasource; without it the partner assertion reads one
+        /// immediate snapshot.
         deadline: Option<Duration>,
         /// Optional minimum wire-arrival age. Only valid on
         /// `lastReceived` targets: the last received message must have
@@ -233,6 +235,10 @@ impl ScenarioAction {
                 }
                 ScenarioTarget::Partner(_) => Vec::new(),
                 ScenarioTarget::Variable(_) => Vec::new(),
+                // A sql target references a named datasource, never an
+                // endpoint: it declares no bindings (the `Variable`
+                // precedent).
+                ScenarioTarget::Sql(_) => Vec::new(),
             },
             Self::Sleep { .. } => Vec::new(),
             // A `sql:` action references a named datasource, never an
@@ -258,6 +264,25 @@ pub enum ScenarioTarget {
     /// `provisioning: harness` on an `http` URI that also has a `partners:`
     /// entry naming it.
     Partner(EndpointRef),
+    /// A named datasource: the assertion executes the doc-authored
+    /// read and validates the returned rows. Reads only — the `sql:`
+    /// prepare action owns mutations, and the two vocabularies never
+    /// mix (bd rc-25lup.2).
+    Sql(SqlTarget),
+}
+
+/// The sql `validate` target payload (bd rc-25lup.2): a read against a
+/// configured datasource. The datasource obeys the identifier law: it
+/// names an entry under `[datasources.*]` in `Camel.toml` and is never
+/// interpolated. The query is doc-authored read text; every statement
+/// that fails [`crate::sql_action::is_read_statement`] is rejected at
+/// load — the `sql:` prepare action owns mutations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SqlTarget {
+    /// The datasource name as declared under `[datasources.*]`.
+    pub datasource: String,
+    /// The read query executed against the datasource's pool.
+    pub query: String,
 }
 
 /// An endpoint reference: a bare endpoint string or a map with
@@ -395,7 +420,8 @@ pub fn partner_scripts_for(
 
 /// The expectation of a `validate` action, keyed by its target: the
 /// message matcher grammar for `lastReceived` and `variable` targets,
-/// the partner count grammar for `partner` targets.
+/// the partner count grammar for `partner` targets, the sql-target
+/// row shape for `sql` targets.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ValidateExpectation {
@@ -403,6 +429,10 @@ pub enum ValidateExpectation {
     Message(Expectation),
     /// Partner request-count expectation (`partner`).
     Partner(PartnerExpectation),
+    /// The sql-target row shape: concrete row patterns (`rows`) or a
+    /// row-count bound (`bound`), with an optional named projection
+    /// and order flag. `Message` and `Partner` unchanged.
+    Rows(RowsExpectation),
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +509,17 @@ struct RawSleep {
     duration: String,
 }
 
+/// Raw sql validate-target payload: the object under the `sql` key.
+/// Field names stay snake_case despite the `camelCase` rename (no
+/// multi-word fields today) — the attribute is load-bearing for the
+/// deny-unknown error and future fields.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RawSqlTarget {
+    datasource: String,
+    query: String,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RawValidate {
@@ -486,8 +527,8 @@ struct RawValidate {
     /// `variable` / `partner`) converts during validation.
     target: serde_yaml::Value,
     expectation: Value,
-    /// Raw humantime string; partner targets only, parsed during
-    /// validation so the error can name the action index.
+    /// Raw humantime string; partner and sql targets only, parsed
+    /// during validation so the error can name the action index.
     deadline: Option<String>,
     /// Raw humantime string; `lastReceived` targets only, parsed
     /// during validation so the error can name the action index.
@@ -983,14 +1024,17 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
             let deadline = match raw.deadline.as_deref() {
                 None => None,
                 // The poll deadline exists because a partner count
-                // settles asynchronously; on any other target it has
-                // no meaning and is a grammar error.
-                Some(raw_deadline) if matches!(target, ScenarioTarget::Partner(_)) => {
+                // settles asynchronously and a sql read runs against a
+                // live datasource; on any other target it has no
+                // meaning and is a grammar error.
+                Some(raw_deadline)
+                    if matches!(target, ScenarioTarget::Partner(_) | ScenarioTarget::Sql(_)) =>
+                {
                     Some(parse_duration(raw_deadline, index, "deadline")?)
                 }
                 Some(raw_deadline) => {
                     return Err(action_error(format!(
-                        "`deadline` is only valid on a `partner` validate target, got `{raw_deadline}`"
+                        "`deadline` is only valid on a `partner` or `sql` validate target, got `{raw_deadline}`"
                     )));
                 }
             };
@@ -1012,12 +1056,32 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                 ScenarioTarget::Partner(_) => ValidateExpectation::Partner(
                     partner_expectation_from_value(&raw.expectation, index)?,
                 ),
+                ScenarioTarget::Sql(_) => {
+                    ValidateExpectation::Rows(sql_expectation_from_value(&raw.expectation, index)?)
+                }
                 _ => ValidateExpectation::Message(expectation_from_value(
                     &raw.expectation,
                     index,
                     "expectation",
                 )?),
             };
+            // Nondeterminism advisory (bd rc-25lup.2): an ordered
+            // `rows` assertion over a query without `ORDER BY` depends
+            // on the database's row return order. Advisory only — the
+            // grammar accepts the document; the warning names the
+            // action index so a big scenario stays triageable.
+            if let (ScenarioTarget::Sql(target), ValidateExpectation::Rows(rows)) =
+                (&target, &expectation)
+                && !rows.unordered
+                && rows.rows.is_some()
+                && sql_query_lacks_order_by(&target.query)
+            {
+                tracing::warn!(
+                    "validate action {index}: sql query has no `ORDER BY`; the ordered `rows` \
+                     assertion is nondeterministic without it — declare `unordered: true` or \
+                     add `ORDER BY`"
+                );
+            }
             Ok(ScenarioAction::Validate {
                 target,
                 expectation,
@@ -1043,17 +1107,17 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
 }
 
 /// Builds a `validate` target from the raw `target` node: a single-key
-/// map (`lastReceived`, `variable`, or `partner`).
+/// map (`lastReceived`, `variable`, `partner`, or `sql`).
 fn build_target(value: &serde_yaml::Value, index: usize) -> Result<ScenarioTarget, DocError> {
     let action_error = |message: String| DocError::Validation { index, message };
     let serde_yaml::Value::Mapping(map) = value else {
         return Err(action_error(format!(
-            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`), got {value:?}"
+            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`, or `sql`), got {value:?}"
         )));
     };
     let Some((key, content)) = map.iter().next() else {
         return Err(action_error(
-            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`), got an empty map"
+            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`, or `sql`), got an empty map"
                 .to_string(),
         ));
     };
@@ -1074,8 +1138,36 @@ fn build_target(value: &serde_yaml::Value, index: usize) -> Result<ScenarioTarge
                 serde_yaml::from_value(content.clone()).map_err(|e| action_error(e.to_string()))?;
             Ok(ScenarioTarget::Partner(endpoint_from_raw(raw)?))
         }
+        "sql" => {
+            let raw: RawSqlTarget =
+                serde_yaml::from_value(content.clone()).map_err(|e| action_error(e.to_string()))?;
+            if raw.datasource.is_empty() {
+                return Err(action_error(
+                    "validate `sql` target requires a non-empty `datasource`".to_string(),
+                ));
+            }
+            if raw.query.is_empty() {
+                return Err(action_error(
+                    "validate `sql` target requires a non-empty `query`".to_string(),
+                ));
+            }
+            // Vocabulary split (bd rc-25lup.1): the validate sql target
+            // owns reads only; the `sql:` prepare action owns
+            // mutations. Mirrors the prepare-side rejection phrasing.
+            if !crate::sql_action::is_read_statement(&raw.query) {
+                return Err(action_error(
+                    "validate `sql` target: query is not a read (select/with prefix); reads \
+                     belong to the validate sql target, the `sql:` prepare action owns mutations"
+                        .to_string(),
+                ));
+            }
+            Ok(ScenarioTarget::Sql(SqlTarget {
+                datasource: raw.datasource,
+                query: raw.query,
+            }))
+        }
         other => Err(action_error(format!(
-            "unknown validate target `{other}`; expected `lastReceived`, `variable`, or `partner`"
+            "unknown validate target `{other}`; expected `lastReceived`, `variable`, `partner`, or `sql`"
         ))),
     }
 }
@@ -1120,7 +1212,14 @@ pub(crate) fn is_http_token(s: &str) -> bool {
 fn is_matcher_key(key: &str) -> bool {
     matches!(
         key,
-        "equals" | "regex" | "contains" | "startsWith" | "endsWith" | "exists" | "jsonSubset"
+        "equals"
+            | "regex"
+            | "contains"
+            | "startsWith"
+            | "endsWith"
+            | "exists"
+            | "ignore"
+            | "jsonSubset"
     )
 }
 
@@ -1131,7 +1230,7 @@ fn is_matcher_key(key: &str) -> bool {
 /// (`expectation`, `expectReply`) keeps one verb parser behind both
 /// readers (rc-qvz6): the verbs never fork between `validate` and
 /// send-level reply assertions.
-fn expectation_from_value(
+pub(crate) fn expectation_from_value(
     value: &Value,
     index: usize,
     field: &'static str,
@@ -1167,6 +1266,13 @@ fn expectation_from_value(
                     Ok(Expectation::Exists)
                 } else {
                     Err(invalid(format!("{field}: `exists` takes no argument")))
+                }
+            }
+            "ignore" => {
+                if payload.is_null() {
+                    Ok(Expectation::Any)
+                } else {
+                    Err(invalid(format!("{field}: `ignore` takes no argument")))
                 }
             }
             _ => {
@@ -1328,4 +1434,198 @@ fn backticked(fields: &[&str]) -> String {
         .map(|field| format!("`{field}`"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Applies the sql-target expectation grammar (bd rc-25lup.2): either
+/// concrete row patterns (`rows`, an optional `columns` projection, an
+/// optional `unordered` flag) or a row-count bound (`count`, `atLeast`,
+/// `atMost` — the partner count-key semantics: exactly one bound form,
+/// `atLeast <= atMost` for a range) — never both. Unknown keys fail.
+/// Field-by-field extraction, like the partner reader, so errors name
+/// the offending key and, for row shapes, the offending row index.
+pub(crate) fn sql_expectation_from_value(
+    value: &Value,
+    index: usize,
+) -> Result<RowsExpectation, DocError> {
+    const FIELD: &str = "sql expectation";
+    const KEYS: &[&str] = &["rows", "columns", "unordered", "count", "atLeast", "atMost"];
+    let invalid = |message: String| DocError::Validation { index, message };
+    let Value::Object(map) = value else {
+        return Err(invalid(format!(
+            "{FIELD} must be a map with `rows` or a count bound, got {value:?}"
+        )));
+    };
+    let mut rows: Option<Vec<Vec<Expectation>>> = None;
+    let mut columns: Option<Vec<String>> = None;
+    let mut unordered = false;
+    let mut count: Option<u64> = None;
+    let mut at_least: Option<u64> = None;
+    let mut at_most: Option<u64> = None;
+    for (key, payload) in map {
+        match key.as_str() {
+            "rows" => {
+                let Value::Array(raw_rows) = payload else {
+                    return Err(invalid(format!(
+                        "{FIELD}: `rows` must be a sequence of rows, got {payload}"
+                    )));
+                };
+                if raw_rows.is_empty() {
+                    return Err(invalid(format!("{FIELD}: `rows` must not be empty")));
+                }
+                let mut parsed_rows = Vec::with_capacity(raw_rows.len());
+                for (row_index, raw_row) in raw_rows.iter().enumerate() {
+                    let Value::Array(cells) = raw_row else {
+                        return Err(invalid(format!(
+                            "{FIELD}: `rows` row {row_index} must be a sequence of cell \
+                             expectations, got {raw_row}"
+                        )));
+                    };
+                    let mut row = Vec::with_capacity(cells.len());
+                    for cell in cells {
+                        row.push(expectation_from_value(cell, index, "rows")?);
+                    }
+                    parsed_rows.push(row);
+                }
+                rows = Some(parsed_rows);
+            }
+            "columns" => {
+                let Value::Array(raw_names) = payload else {
+                    return Err(invalid(format!(
+                        "{FIELD}: `columns` must be a sequence of column names, got {payload}"
+                    )));
+                };
+                if raw_names.is_empty() {
+                    return Err(invalid(format!("{FIELD}: `columns` must not be empty")));
+                }
+                let mut names = Vec::with_capacity(raw_names.len());
+                for raw_name in raw_names {
+                    let Some(name) = raw_name.as_str() else {
+                        return Err(invalid(format!(
+                            "{FIELD}: `columns` entries must be strings, got {raw_name}"
+                        )));
+                    };
+                    if names.iter().any(|existing| existing == name) {
+                        return Err(invalid(format!("{FIELD}: duplicate column name `{name}`")));
+                    }
+                    names.push(name.to_string());
+                }
+                columns = Some(names);
+            }
+            "unordered" => {
+                let Some(flag) = payload.as_bool() else {
+                    return Err(invalid(format!(
+                        "{FIELD}: `unordered` must be a boolean, got {payload}"
+                    )));
+                };
+                unordered = flag;
+            }
+            "count" | "atLeast" | "atMost" => {
+                let bound = payload.as_u64().ok_or_else(|| {
+                    invalid(format!(
+                        "{FIELD}: `{key}` must be a non-negative integer, got {payload}"
+                    ))
+                })?;
+                match key.as_str() {
+                    "count" => count = Some(bound),
+                    "atLeast" => at_least = Some(bound),
+                    _ => at_most = Some(bound),
+                }
+            }
+            other => {
+                return Err(invalid(format!(
+                    "{FIELD}: unknown field `{other}`; expected {}",
+                    backticked(KEYS)
+                )));
+            }
+        }
+    }
+    // Row patterns and a count bound describe different subjects (the
+    // returned rows vs their number): declaring both has no meaning.
+    if rows.is_some() && (count.is_some() || at_least.is_some() || at_most.is_some()) {
+        let mut bound_keys: Vec<&str> = Vec::new();
+        if count.is_some() {
+            bound_keys.push("count");
+        }
+        if at_least.is_some() {
+            bound_keys.push("atLeast");
+        }
+        if at_most.is_some() {
+            bound_keys.push("atMost");
+        }
+        return Err(invalid(format!(
+            "{FIELD}: `rows` and {} are exclusive: declare either row patterns or a row-count \
+             bound",
+            backticked(&bound_keys)
+        )));
+    }
+    // The count keys themselves follow the partner exclusivity law:
+    // exactly one bound form, and a range needs `atLeast <= atMost`.
+    if count.is_some() && (at_least.is_some() || at_most.is_some()) {
+        let mut others: Vec<&str> = Vec::new();
+        if at_least.is_some() {
+            others.push("atLeast");
+        }
+        if at_most.is_some() {
+            others.push("atMost");
+        }
+        return Err(invalid(format!(
+            "{FIELD}: `count` and {} are exclusive: declare exactly one bound form",
+            backticked(&others)
+        )));
+    }
+    let bound = if let Some(exact) = count {
+        Some(CountBound::Exact(exact))
+    } else if let (Some(min), Some(max)) = (at_least, at_most) {
+        if min > max {
+            return Err(invalid(format!(
+                "{FIELD}: `atLeast` ({min}) must not exceed `atMost` ({max})"
+            )));
+        }
+        Some(CountBound::Range(min, max))
+    } else if let Some(n) = at_least {
+        Some(CountBound::AtLeast(n))
+    } else {
+        at_most.map(CountBound::AtMost)
+    };
+    // An expectation that names neither shape asserts nothing and
+    // almost certainly hides a typo'd key.
+    if rows.is_none() && bound.is_none() {
+        return Err(invalid(format!(
+            "{FIELD}: requires either `rows` or a count bound: `count`, `atLeast`, or `atMost`"
+        )));
+    }
+    // When `columns` is declared, every row must match its width: the
+    // projection happens by name at the call site, so a mismatched row
+    // would silently misalign. Without `columns`, widths are checked
+    // at execution against the query's projection.
+    if let (Some(columns), Some(rows)) = (&columns, &rows) {
+        for (row_index, row) in rows.iter().enumerate() {
+            if row.len() != columns.len() {
+                return Err(invalid(format!(
+                    "{FIELD}: row {row_index} declares {} cells but `columns` names {}; the \
+                     widths must match",
+                    row.len(),
+                    columns.len()
+                )));
+            }
+        }
+    }
+    Ok(RowsExpectation {
+        columns,
+        unordered,
+        rows,
+        bound,
+    })
+}
+
+/// Whether the sql query carries no `ORDER BY` clause (bd rc-25lup.2):
+/// a case-insensitive token search for `order` and `by` separated by
+/// whitespace (`\s+` covers `ORDER\nBY`). A string literal containing
+/// the words (`select 'totally ordered by intent' from t`) trips the
+/// predicate — a documented false positive; the advisory only warns,
+/// it never rejects. The pattern is static: the `is_ok_and` fallback
+/// treats an impossible compile failure as "lacks", which only
+/// over-warns.
+pub(crate) fn sql_query_lacks_order_by(query: &str) -> bool {
+    !regex::Regex::new(r"(?i)\border\s+by\b").is_ok_and(|order_by| order_by.is_match(query))
 }
