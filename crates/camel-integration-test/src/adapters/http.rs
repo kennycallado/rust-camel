@@ -381,11 +381,10 @@ impl HttpPartner {
 
     /// Awaits the next listener arrival queued for the endpoint's
     /// request path (server role), bounded by the deadline. The path
-    /// comes from the registered lane key — the endpoint identity —
-    /// and `source_uri` names the failure.
+    /// comes from the interpolated reference — the receive's own
+    /// path-and-query — and `source_uri` names the failure.
     async fn await_arrival(
         &self,
-        lane_key: &str,
         source_uri: &str,
         deadline: Duration,
     ) -> Result<IncomingMessage, ReceiveError> {
@@ -394,7 +393,7 @@ impl HttpPartner {
         // declaration names no lane. The parse renders its declaration
         // echo through the stored secret-key set (ADR-0051).
         let secret_keys = self.stored_secret_query_keys();
-        let path = ParsedTarget::parse(lane_key, &secret_keys)
+        let path = ParsedTarget::parse(source_uri, &secret_keys)
             .map_err(ReceiveError::Transport)?
             .target;
         let lane = lane_for(&self.inner.server.arrivals, &path);
@@ -450,14 +449,16 @@ impl PartnerAdapter for HttpPartner {
 
     fn receive<'a>(
         &'a self,
-        lane_key: &'a str,
+        _lane_key: &'a str,
         source_uri: &'a str,
         deadline: Duration,
     ) -> BoxFuture<'a, Result<IncomingMessage, ReceiveError>> {
         // Server role only: await the next listener arrival queued for
-        // the registered key's request path. The client-role-first
-        // dispatch lives in the router, over the shared ClientLane.
-        Box::pin(async move { self.await_arrival(lane_key, source_uri, deadline).await })
+        // the interpolated reference's request path — `_lane_key`
+        // stays the router's adapter-lookup key and names no lane. The
+        // client-role-first dispatch lives in the router, over the
+        // shared ClientLane.
+        Box::pin(async move { self.await_arrival(source_uri, deadline).await })
     }
 
     fn bound_authority(&self) -> Option<String> {

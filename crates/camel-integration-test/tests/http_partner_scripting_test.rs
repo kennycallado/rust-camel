@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use camel_api::Value;
 use camel_integration_test::runner::fill_bind_vars;
 use camel_integration_test::{
     DirectStimulus, DocumentOutcome, EndpointRef, HttpPartner, HttpRecorder, LayeredEnv,
@@ -1159,4 +1160,472 @@ async fn two_layer_bindvar_both_visible() {
         .shutdown(&mut guard)
         .await
         .expect("clean shutdown must complete");
+}
+
+// --- Server-role receive lanes (rc-ps97b) --------------------------------
+//
+// The server-role receive derives its lane path from the receive's
+// own interpolated reference (path and query), never from the
+// registered key's path. The fixtures bind ONE partner under
+// [`RECEIVE_LANE_ORDERS`]; plain-string references resolve to it by
+// interpolated authority alone.
+
+/// The declared endpoint the receive-lane fixtures register: the
+/// partner binds under this raw `:0` URI, and `MOCK` interpolates to
+/// its bound bare authority on the scenario tier.
+const RECEIVE_LANE_ORDERS: &str = "http://127.0.0.1:0/orders";
+
+/// Sibling-path document: the routes dial `/orders` AND `/billing` on
+/// the one partner (each through its own `direct:` stimulus, so no
+/// response body ever feeds a second dial). A declared-key receive
+/// first drains the `/orders` lane (its path is the registered key's
+/// path under both parse sources), then the receive
+/// `from: http://${MOCK}/billing` must drain the BILLING arrival off
+/// its own lane. A server-role arrival carries the inbound request,
+/// so the discrimination is structural: draining the emptied
+/// `/orders` lane instead is a receive-timeout.
+const SIBLING_PATH_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:orders
+- send:
+    to: direct:billing
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: MOCK
+    deadline: 2s
+- receive:
+    from: 'http://${MOCK}/billing'
+    deadline: 2s
+"#;
+
+/// Bare-authority document: the receive addresses `http://${MOCK}`
+/// with no path. The parse must reject it as an apparatus error
+/// naming the declaration, never a silent `/` lane and never a
+/// receive-timeout.
+const BARE_AUTHORITY_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- receive:
+    from: 'http://${MOCK}'
+    deadline: 300ms
+"#;
+
+/// Query-matching document: the wire lane is `/api?x=1` (two route
+/// dials through one `direct:` stimulus), a receive on the exact
+/// path-and-query drains it, and a receive on `?x=2` times out naming
+/// the arrived wire lane.
+const QUERY_MATCH_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:probe
+- send:
+    to: direct:probe
+- receive:
+    from: 'http://${MOCK}/api?x=1'
+    deadline: 2s
+- receive:
+    from: 'http://${MOCK}/api?x=2'
+    deadline: 300ms
+"#;
+
+/// Declared-key regression document: a receive by the registered
+/// map-form endpoint (no roundtrip parked — the only prior send
+/// stimulates the route) drains the route-dialed `/orders` arrival
+/// off its lane. A server-role arrival carries the inbound request,
+/// so the drain itself is the whole proof.
+const DECLARED_KEY_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:probe
+- receive:
+    from:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+      bindVar: MOCK
+    deadline: 2s
+"#;
+
+/// Secret-query document: the receive addresses
+/// `http://${MOCK}?authPassword=x` (no path). The apparatus error
+/// names the declaration with the secret value masked (ADR-0051).
+const SECRET_QUERY_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- receive:
+    from: 'http://${MOCK}?authPassword=x'
+    deadline: 300ms
+"#;
+
+/// Standalone-roundtrip document: a dynamic-ref send parks a
+/// roundtrip and a standalone receive by the same reference drains it
+/// — the client-role-first dispatch is unchanged by the lane-path fix.
+const ROUNDTRIP_STANDALONE_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: 'http://${MOCK}/orders'
+    method: POST
+- receive:
+    from: 'http://${MOCK}/orders'
+    deadline: 2s
+- validate:
+    target:
+      lastReceived: 'http://${MOCK}/orders'
+    expectation:
+      contains: parked-ok
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /orders
+    response:
+      status: 200
+      body: parked-ok
+"#;
+
+/// Oldest-first characterization document: two dynamic-ref sends park
+/// their roundtrips `/a` (a-ok) then `/b` (b-ok) — no reply
+/// expectation, the roundtrips stay parked. The receives are CROSSED
+/// against the parking order: the first receive names
+/// `http://${MOCK}/b` yet must drain the OLDEST parked roundtrip
+/// (`a-ok`), and the second names `http://${MOCK}/a` yet gets `b-ok`.
+/// A path-matched implementation would hand each receive its own
+/// path's roundtrip and fail both validates. This pins the path-blind
+/// parking order the receive deferral rests on (bd rc-cr5yf).
+const OLDEST_FIRST_DOC: &str = r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: 'http://${MOCK}/a'
+    method: POST
+- send:
+    to: 'http://${MOCK}/b'
+    method: POST
+- receive:
+    from: 'http://${MOCK}/b'
+    deadline: 2s
+- receive:
+    from: 'http://${MOCK}/a'
+    deadline: 2s
+- validate:
+    target:
+      lastReceived: 'http://${MOCK}/b'
+    expectation:
+      contains: a-ok
+- validate:
+    target:
+      lastReceived: 'http://${MOCK}/a'
+    expectation:
+      contains: b-ok
+partners:
+  http://127.0.0.1:0/orders:
+  - method: POST
+    path: /a
+    response:
+      status: 200
+      body: a-ok
+  - method: POST
+    path: /b
+    response:
+      status: 200
+      body: b-ok
+"#;
+
+/// The `routes.yaml` one-dial-per-stimulus routes: each route dials
+/// exactly one env-tier target, so no dial's response body can feed
+/// the next dial's method choice.
+fn single_dial_routes(dials: &[(&str, &str)]) -> String {
+    let routes: Vec<String> = dials
+        .iter()
+        .map(|(stimulus, target)| {
+            format!(
+                "  - id: dial-{stimulus}\n    from: direct:{stimulus}\n    steps:\n      - to: ${{env:{target}}}\n"
+            )
+        })
+        .collect();
+    format!("routes:\n{}", routes.join(""))
+}
+
+/// Loads `yaml`, binds ONE partner under [`RECEIVE_LANE_ORDERS`]
+/// (scripted where the document declares the matching `partners:`
+/// entry, permissive otherwise), marks `authPassword` a secret query
+/// key (ADR-0051), seeds the scenario tier's `MOCK` with the bound
+/// bare authority, and runs the document without booting routes. The
+/// shape for pure roundtrip scenarios: plain-string send/receive
+/// references resolve to the partner by interpolated authority alone.
+async fn run_doc_one_partner(yaml: &str) -> (DocumentOutcome, HttpRecorder) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("case.test.yaml");
+    std::fs::write(&path, yaml).expect("write case file");
+    let doc = parse_scenario_document(&path).expect("document must load");
+
+    let scripts = partner_scripts_for(&doc, RECEIVE_LANE_ORDERS);
+    let partner = match scripts {
+        Some(scripts) => HttpPartner::start(scripts).await,
+        None => HttpPartner::start_permissive(200).await,
+    }
+    .expect("partner must bind 127.0.0.1:0");
+    let bound = partner.bound_addr().to_string();
+    let recorder = partner.recorder();
+
+    let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
+    adapters.insert(RECEIVE_LANE_ORDERS.to_string(), Box::new(partner));
+    let router = PartnerRouter::new(adapters);
+    router.set_secret_query_keys(vec!["authPassword".to_string()]);
+
+    let mut vars = ScenarioVars::new();
+    vars.set("MOCK", Value::String(bound));
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    (outcome, recorder)
+}
+
+/// Boots the document's routes and runs the document: one partner
+/// binds under [`RECEIVE_LANE_ORDERS`], each `dial_paths` entry gets
+/// an env-tier variable `MOCK_DIAL_N` carrying the full dial URI
+/// (`http://{bound}{path}`) for the routes file to produce against,
+/// the scenario tier's `MOCK` carries the bound bare authority, and
+/// the `direct:` stimuli the document names trigger the dials.
+/// Mirrors the two-layer fixture's env-tier wiring; the route-dialed
+/// arrivals park on the partner's server-role lanes with no roundtrip
+/// in the way.
+async fn run_doc_route_dialed(
+    yaml: &str,
+    routes_yaml: &str,
+    dial_paths: &[&str],
+) -> (DocumentOutcome, HttpRecorder) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    // The http producer's SSRF guard rejects loopback targets unless
+    // the project allows them — the same opt-in the outbound fixture
+    // declares.
+    std::fs::write(
+        root.join("Camel.toml"),
+        "log_level = \"info\"\n\n[components.http]\nallow_internal = true\n",
+    )
+    .expect("write Camel.toml");
+    std::fs::write(root.join("routes.yaml"), routes_yaml).expect("write routes.yaml");
+    let path = root.join("case.test.yaml");
+    std::fs::write(&path, yaml).expect("write case file");
+    let doc = parse_scenario_document(&path).expect("document must load");
+
+    let scripts = partner_scripts_for(&doc, RECEIVE_LANE_ORDERS);
+    let partner = match scripts {
+        Some(scripts) => HttpPartner::start(scripts).await,
+        None => HttpPartner::start_permissive(200).await,
+    }
+    .expect("partner must bind 127.0.0.1:0");
+    let bound = partner.bound_addr().to_string();
+    let recorder = partner.recorder();
+
+    let harness_provisioned: BTreeMap<String, String> = dial_paths
+        .iter()
+        .enumerate()
+        .map(|(n, suffix)| (format!("MOCK_DIAL_{n}"), format!("http://{bound}{suffix}")))
+        .collect();
+    let env = LayeredEnv::new(
+        doc.env.clone().unwrap_or_default(),
+        harness_provisioned,
+        doc.env_passthrough.clone().unwrap_or_default(),
+        ambient_std(),
+    );
+    let run = boot_scenario(&doc, root, &env)
+        .await
+        .expect("the full boot must succeed");
+    let ctx = Arc::new(tokio::sync::Mutex::new(run.ctx));
+
+    let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
+    for stimulus in ["direct:orders", "direct:billing", "direct:probe"] {
+        adapters.insert(
+            stimulus.to_string(),
+            Box::new(DirectStimulus::new(Arc::clone(&ctx))),
+        );
+    }
+    adapters.insert(RECEIVE_LANE_ORDERS.to_string(), Box::new(partner));
+    let router = PartnerRouter::new(adapters);
+    router.set_secret_query_keys(vec!["authPassword".to_string()]);
+
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    vars.set("MOCK", Value::String(bound));
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+
+    let mut guard = ctx.lock().await;
+    run.boot
+        .shutdown(&mut guard)
+        .await
+        .expect("clean shutdown must complete");
+    (outcome, recorder)
+}
+
+/// One partner, two dialed sibling paths, two receives: after the
+/// declared-key receive empties the `/orders` lane, the receive
+/// `from: http://${MOCK}/billing` must drain the BILLING arrival. The
+/// registered key's path is `/orders`; the receive's own reference
+/// names `/billing`, and only the reference counts.
+#[tokio::test]
+async fn dynamic_receive_sibling_path_drains_own_lane() {
+    let routes = single_dial_routes(&[("orders", "MOCK_DIAL_0"), ("billing", "MOCK_DIAL_1")]);
+    let (outcome, recorders) =
+        run_doc_route_dialed(SIBLING_PATH_DOC, &routes, &["/orders", "/billing"]).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the billing receive must drain the billing lane: {outcome:?}"
+    );
+
+    let recorded = recorders.recorded_requests();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "both route dials must reach the wire: {recorded:?}"
+    );
+    assert_eq!(recorded[0].path, "/orders");
+    assert_eq!(recorded[1].path, "/billing");
+}
+
+/// A receive `from: http://${MOCK}` (no path) is an apparatus-class
+/// transport error naming the declaration — never a silent `/` lane
+/// and never a receive-timeout.
+#[tokio::test]
+async fn dynamic_receive_bare_authority_is_apparatus() {
+    let (outcome, _recorders) = run_doc_one_partner(BARE_AUTHORITY_DOC).await;
+    assert_eq!(outcome.verdict, None, "the receive must fail");
+
+    let failure = outcome
+        .per_action
+        .first()
+        .and_then(|result| result.as_ref().err())
+        .expect("the receive must have failed");
+    let ScenarioFailure::ActionTransport { action, source } = failure else {
+        panic!("expected an apparatus transport failure, got {failure:?}");
+    };
+    assert_eq!(*action, 0, "the receive is the failing action");
+    let TransportError::Other { message } = source else {
+        panic!("expected a transport failure, got {source:?}");
+    };
+    assert!(
+        message.contains("empty or absent path"),
+        "the error must name the empty path: {message}"
+    );
+    assert!(
+        message.contains("http://127.0.0.1:"),
+        "the error must name the declaration: {message}"
+    );
+}
+
+/// The wire lane is `/api?x=1`: the matching receive drains it, and
+/// the `?x=2` receive times out listing the arrived wire path.
+#[tokio::test]
+async fn dynamic_receive_query_matches_wire_path_and_query() {
+    let routes = single_dial_routes(&[("probe", "MOCK_DIAL_0")]);
+    let (outcome, _recorders) = run_doc_route_dialed(QUERY_MATCH_DOC, &routes, &["/api?x=1"]).await;
+    assert_eq!(outcome.verdict, None, "the ?x=2 receive must time out");
+
+    assert!(
+        matches!(&outcome.per_action[2], Ok(ScenarioVerdict::Pass)),
+        "the exact path-and-query receive must drain its lane: {outcome:?}"
+    );
+    let failure = outcome
+        .per_action
+        .get(3)
+        .and_then(|result| result.as_ref().err())
+        .expect("the ?x=2 receive must have timed out");
+    let ScenarioFailure::ReceiveTimeout { lanes, .. } = failure else {
+        panic!("expected a receive-timeout, got {failure:?}");
+    };
+    assert!(
+        lanes.contains("/api?x=1"),
+        "the timeout must list the arrived wire lane: {lanes}"
+    );
+}
+
+/// Regression: a receive by the registered declared key (no roundtrip
+/// parked) drains its route-dialed arrival off the lane — the
+/// declared-key path is unchanged.
+#[tokio::test]
+async fn declared_key_receive_unchanged() {
+    let routes = single_dial_routes(&[("probe", "MOCK_DIAL_0")]);
+    let (outcome, _recorders) = run_doc_route_dialed(DECLARED_KEY_DOC, &routes, &["/orders"]).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the declared-key receive must drain its lane: {outcome:?}"
+    );
+}
+
+/// A receive `from: http://${MOCK}?authPassword=x` fails as an
+/// apparatus error whose declaration echo masks the secret value
+/// (ADR-0051): the raw pair never prints.
+#[tokio::test]
+async fn bare_authority_secret_query_redacted() {
+    let (outcome, _recorders) = run_doc_one_partner(SECRET_QUERY_DOC).await;
+    assert_eq!(outcome.verdict, None, "the receive must fail");
+
+    let failure = outcome
+        .per_action
+        .first()
+        .and_then(|result| result.as_ref().err())
+        .expect("the receive must have failed");
+    let ScenarioFailure::ActionTransport { source, .. } = failure else {
+        panic!("expected an apparatus transport failure, got {failure:?}");
+    };
+    let TransportError::Other { message } = source else {
+        panic!("expected a transport failure, got {source:?}");
+    };
+    assert!(
+        message.contains("empty or absent path"),
+        "the error must name the empty path: {message}"
+    );
+    assert!(
+        !message.contains("authPassword=x"),
+        "the raw secret value must never print: {message}"
+    );
+    assert!(
+        message.contains("authPassword=***"),
+        "the secret value must render masked: {message}"
+    );
+}
+
+/// Regression: a dynamic-ref standalone send parks a roundtrip and a
+/// standalone receive by the same reference drains it — the
+/// client-role-first dispatch is unchanged.
+#[tokio::test]
+async fn roundtrip_receive_first_then_take_still_works() {
+    let (outcome, recorders) = run_doc_one_partner(ROUNDTRIP_STANDALONE_DOC).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the standalone receive must drain the parked roundtrip: {outcome:?}"
+    );
+
+    let recorded = recorders.recorded_requests();
+    assert_eq!(recorded.len(), 1, "exactly one request must reach the wire");
+    assert_eq!(recorded[0].path, "/orders");
+}
+
+/// Characterization (bd rc-cr5yf): two dynamic-ref sends park their
+/// roundtrips, and the receives are CROSSED against the parking
+/// order — the receive naming `/b` drains the OLDEST parked roundtrip
+/// (`a-ok`) and the receive naming `/a` gets `b-ok`, both witnessed by
+/// the document's crossed `lastReceived` validates. A path-matched
+/// implementation fails both. This pins the path-blind parking order
+/// the receive deferral rests on.
+#[tokio::test]
+async fn standalone_roundtrip_receives_match_oldest_first_path_blind() {
+    let (outcome, recorders) = run_doc_one_partner(OLDEST_FIRST_DOC).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the receives must drain the parked roundtrips oldest-first: {outcome:?}"
+    );
+
+    let recorded = recorders.recorded_requests();
+    assert_eq!(recorded.len(), 2, "both sends must reach the wire");
+    assert_eq!(recorded[0].path, "/a");
+    assert_eq!(recorded[1].path, "/b");
 }

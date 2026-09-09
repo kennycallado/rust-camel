@@ -132,9 +132,12 @@ full lane drops the queue entry while the recorder keeps it.
 Resolution is per authority: a dynamic reference resolves the
 registered partner by authority and keeps its path on the wire, so one
 declared endpoint with one `bindVar` serves every path a route dials.
-Lanes exist per path on that single listener; a receive drains the
-declared endpoint's own lane, and sibling paths assert through the
-recorder.
+Lanes exist per path on that single listener. A dynamic-reference
+receive drains its own path's lane: a receive `from:
+http://${MOCK}/billing` drains the billing lane on the already-bound
+listener. The registered key remains the adapter-lookup key; the path
+on the wire picks the lane. A dynamic receive must name a path — a
+bare authority is an apparatus error.
 _Avoid_: inbox, backlog
 
 **selector**:

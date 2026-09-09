@@ -4,38 +4,30 @@
 # and the `partners:` section scripts each path to a distinct body.
 #
 # The partner is declared ONCE through the object-form partner target
-# of the first validate: the harness folds `bindVar: MOCK` into both
-# tiers (scenario variables carry `host:port`, the route env carries
-# the full `http://host:port` form) before the action list runs. No
-# second endpoint, no second bindVar, no second listener — that
-# fan-out is the anti-pattern this pair replaces.
+# of the validate: the harness folds `bindVar: MOCK` into both tiers
+# (scenario variables carry `host:port`, the route env carries the
+# full `http://host:port` form) before the action list runs. No second
+# endpoint, no second bindVar, no second listener — that fan-out is the
+# anti-pattern this pair replaces.
 #
-# The dynamic-reference receive resolves the registered partner BY
-# AUTHORITY (`http://${MOCK}/orders`) and drains the declared path's
-# arrival lane. Arrivals queue per path on that single listener, and
-# the receive sees the wire REQUEST (the response went to the route).
-# A sibling path asserts through the recorder: an exact-count partner
-# validate with a `path` filter. A receive `from` naming a sibling
-# path would still drain the declared lane (the lane key is the
-# registered endpoint), so per-path counts — not per-path receives —
-# are the assertion surface for paths the declaration does not name.
+# TWO dynamic-reference receives each name their own path, and each
+# drains its own arrival lane on the single listener:
+#   - receive `from: http://${MOCK}/orders`  drains the /orders lane
+#   - receive `from: http://${MOCK}/billing` drains the /billing lane
+# A dynamic receive must name a path — a bare authority is an apparatus
+# error. The registered key remains the adapter-lookup key; the path on
+# the wire picks the lane. Each receive sees the wire REQUEST (the
+# response went to the route).
 #
-# The partner-target validates are exact-count: the count must equal
-# the recorded arrivals after the `path` filter, never a subset. The
-# deadline polls until the count settles or the deadline passes.
+# One exact-count partner validate remains to prove the recorder
+# surface: it counts BOTH arrivals on the single listener independent
+# of the two receives (the recorder keeps an arrival even after its
+# lane is drained). The deadline polls until the count settles.
 routeFiles: [partner-multi-path.routes.yaml]
 scenario:
   - send:
       to: direct:start
       body: fanout-payload
-  - validate:
-      target:
-        partner:
-          endpoint: http://127.0.0.1:0/orders
-          provisioning: harness
-          bindVar: MOCK
-      expectation: {count: 1, path: /orders}
-      deadline: 5s
   - receive:
       from: http://${MOCK}/orders
       deadline: 5s
@@ -48,12 +40,21 @@ scenario:
   - validate:
       target: {variable: ordersBody}
       expectation: fanout-payload
+  - receive:
+      from: http://${MOCK}/billing
+      deadline: 5s
+      extract:
+        billingPath: path
+  - validate:
+      target: {variable: billingPath}
+      expectation: /billing
   - validate:
       target:
         partner:
           endpoint: http://127.0.0.1:0/orders
           provisioning: harness
-      expectation: {count: 1, path: /billing}
+          bindVar: MOCK
+      expectation: {count: 2}
       deadline: 5s
 partners:
   http://127.0.0.1:0/orders:

@@ -334,9 +334,15 @@ per request path on that single listener.
 Do not declare one endpoint per path. The N-bindVar fan-out provisions
 one listener per path for what is one logical partner, and the extra
 bindings reassign ports spuriously; this caused the 2026-09-06 pilot
-incident. The receive drains the declared endpoint's own lane, so
-sibling paths assert through exact-count partner validates with `path`
-filters. The runnable example pair lives in
+incident. Each dynamic-reference receive names its own path, and each
+drains its own arrival lane on the single listener: `from:
+http://${MOCK}/orders` drains the orders lane, `from:
+http://${MOCK}/billing` drains the billing lane. A dynamic receive must
+name a path — a bare authority is an apparatus error. The registered
+key remains the adapter-lookup key; the path on the wire picks the lane.
+In the client role, standalone roundtrip receives match oldest-first
+regardless of path, so prefer `expectReply` or path-filtered validates
+(bd rc-cr5yf). The runnable example pair lives in
 [`examples/integration-testing/partner-multi-path.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/integration-testing/partner-multi-path.test.yaml) and [`partner-multi-path.routes.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/integration-testing/partner-multi-path.routes.yaml).
 
 A migration note for suites that grew one script per assertion: express
