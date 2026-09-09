@@ -255,6 +255,30 @@ context preparation, with the `sql-memory-not-shared` error
 different databases and a validation could pass against state the
 document never seeded.
 
+### Boot teardown closes the datasource pools
+
+`BootHandle::shutdown_with_deadline` ends with a deadline-wrapped
+`datasource_catalog.close_all()` (bd rc-25lup.4): the sqlx factory's
+`close` drains each pool, so an in-memory sqlite database dies with its
+boot and a later document booting the same alias in the same process
+starts empty. The `boot_freshness` tests pin the guarantee in its
+load-bearing shape — a named shared-memory URI
+(`sqlite:file:<name>?mode=memory&cache=shared`), where connections
+share one named database and a lingering boot-A connection demonstrably
+leaks rows into boot B without the close (count 2, red-able) — plus the
+opposite contract for file-backed datasources, whose rows persist and
+whose cleanup is the document author's clean-first prepare (ADR-0069
+section 9 mirror). The default-no-op `close`/`close_all` trait methods
+live in `camel-api`; only pool-owning providers override them, and
+close resolves factories by NAME, never by registry key (the handle
+stores `factory.name()`). Memory fixtures pin `max_connections = 1`:
+with the Any driver each pooled connection gets a private in-memory
+database, so multi-connection pools split CREATE/INSERT state. Parallel
+document execution is a known limitation (bd rc-gcf9n): two
+concurrently booted documents sharing one memory alias could collide;
+the remedy when parallel lands is a per-boot unique memory URI
+(`file:memdb_{scenario}?mode=memory&cache=shared`).
+
 ### The scenario tier gates security offline
 
 The tier runs offline: no network. Keycloak/oidc security configuration

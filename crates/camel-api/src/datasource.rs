@@ -121,11 +121,21 @@ impl fmt::Debug for ResourceRef {
 pub type CreatePoolResult = Result<Arc<dyn Any + Send + Sync>, CamelError>;
 pub type CreatePoolFuture<'a> = Pin<Box<dyn Future<Output = CreatePoolResult> + Send + 'a>>;
 pub type CheckFuture<'a> = Pin<Box<dyn Future<Output = HealthStatus> + Send + 'a>>;
+pub type CloseFuture<'a> = Pin<Box<dyn Future<Output = Result<(), CamelError>> + Send + 'a>>;
 
 pub trait PoolFactory: Send + Sync + 'static {
     fn create<'a>(&'a self, config: &'a DatasourceConfig) -> CreatePoolFuture<'a>;
 
     fn check<'a>(&'a self, handle: &'a DatasourceHandle) -> CheckFuture<'a>;
+
+    /// Close a handle this factory created. The default is a no-op so
+    /// providers without an explicit close keep compiling; providers that
+    /// own pools (sqlx) override it so teardown drains their connections.
+    /// Close MAY run more than once per handle and MUST stay safe to
+    /// re-run (idempotent by contract).
+    fn close<'a>(&'a self, _handle: &'a DatasourceHandle) -> CloseFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
 
     fn supported_schemes(&self) -> &[&str];
 
@@ -141,12 +151,21 @@ pub trait PoolFactory: Send + Sync + 'static {
 
 pub type GetPoolFuture<'a> =
     Pin<Box<dyn Future<Output = Result<DatasourceHandle, CamelError>> + Send + 'a>>;
+pub type CloseAllFuture<'a> = Pin<Box<dyn Future<Output = Result<(), CamelError>> + Send + 'a>>;
 
 pub trait DatasourceCatalog: Send + Sync {
     fn get_config(&self, name: &str) -> Option<DatasourceConfig>;
     fn get_pool<'a>(&'a self, name: &'a str) -> GetPoolFuture<'a>;
     fn register_factory(&self, kind: &str, factory: Arc<dyn PoolFactory>)
     -> Result<(), CamelError>;
+
+    /// Close every initialized pool. The default is a no-op; the runtime
+    /// catalog overrides it so a boot teardown deterministically drains its
+    /// datasource connections (bd rc-25lup.4). Close MAY run again after a
+    /// completed run; implementors keep it safe to re-run.
+    fn close_all(&self) -> CloseAllFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 #[cfg(test)]

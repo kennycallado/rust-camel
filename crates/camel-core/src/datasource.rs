@@ -137,6 +137,58 @@ impl RuntimeDatasourceCatalog {
         })
     }
 
+    pub(crate) fn close_all(&self) -> camel_api::datasource::CloseAllFuture<'_> {
+        Box::pin(async move {
+            // Collect first: DashMap entry guards are not Send, and the
+            // returned future must be. Uninitialized cells never opened a
+            // pool — nothing to close.
+            let handles: Vec<DatasourceHandle> = self
+                .pools()
+                .iter()
+                .filter_map(|entry| entry.value().get().cloned())
+                .collect();
+
+            let mut first_failure: Option<CamelError> = None;
+            for handle in &handles {
+                // `DatasourceHandle::provider` carries the FACTORY NAME
+                // (`factory.name()`), but the registry key is an
+                // arbitrary `kind` string — a factory registered as
+                // ("postgresql", name "pg") must still close. Resolve by
+                // name match over the registered values, never by key.
+                let factory = {
+                    let factories = self.factories().read(); // allow-unwrap (parking_lot panics on poison)
+                    factories
+                        .values()
+                        .find(|f| f.name() == handle.provider)
+                        .cloned()
+                };
+                match factory {
+                    Some(factory) => {
+                        if let Err(e) = factory.close(handle).await {
+                            // log-policy: outside-contract
+                            tracing::warn!("datasource '{}' pool close failed: {}", handle.name, e);
+                            if first_failure.is_none() {
+                                first_failure = Some(e);
+                            }
+                        }
+                    }
+                    None => {
+                        // log-policy: outside-contract
+                        tracing::warn!(
+                            "datasource '{}' close skipped: factory '{}' not registered",
+                            handle.name,
+                            handle.provider
+                        );
+                    }
+                }
+            }
+            match first_failure {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
+        })
+    }
+
     fn resolve_factory(
         &self,
         config: &DatasourceConfig,
@@ -223,6 +275,10 @@ impl DatasourceCatalog for RuntimeDatasourceCatalog {
         factory: Arc<dyn PoolFactory>,
     ) -> Result<(), CamelError> {
         self.register_factory(kind, factory)
+    }
+
+    fn close_all(&self) -> camel_api::datasource::CloseAllFuture<'_> {
+        self.close_all()
     }
 }
 

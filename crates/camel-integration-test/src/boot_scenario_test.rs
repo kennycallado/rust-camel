@@ -514,3 +514,213 @@ db_url = "sqlite::memory:"
         "error must carry the sql-memory-not-shared key: {err}"
     );
 }
+
+/// Adversarial boot-freshness tests (bd rc-25lup.4). The "hermetic
+/// sqlite is per-boot = safe" claim is verified, not assumed: the boot
+/// teardown closes the datasource catalog's pools, a shared-cache
+/// sqlite in-memory database dies with its boot, and a later document
+/// booting the same alias in the same process starts empty. File-backed
+/// state is pinned as the opposite contract — it persists, so the
+/// author's clean-first prepare is the isolation mechanism there.
+#[cfg(feature = "sql")]
+mod boot_freshness {
+    use std::sync::Arc;
+
+    use camel_api::datasource::DatasourceCatalog;
+    use sqlx::Row;
+
+    use super::{DOC, ROUTE, boot_scenario, empty_env, project};
+    use crate::sql_action::{SqlAction, execute_sql_prepare};
+
+    // The landed family convention (camel-cli sql e2e precedent): with
+    // the Any driver each pooled connection gets a private in-memory
+    // database, so memory fixtures pin `max_connections = 1` to keep
+    // CREATE/INSERT/count on one connection.
+    const MEMORY_TOML: &str = r#"
+[datasources.appdb]
+db_url = "sqlite::memory:?cache=shared"
+max_connections = 1
+"#;
+
+    /// Seeds exactly one row (`label = tag`) through the real prepare
+    /// executor — the same path a `sql:` document action takes.
+    async fn seed(catalog: &Arc<dyn DatasourceCatalog>, tag: &str) {
+        execute_sql_prepare(
+            catalog,
+            &SqlAction {
+                datasource: "appdb".into(),
+                prepare: vec![
+                    "CREATE TABLE IF NOT EXISTS seeded (id INTEGER PRIMARY KEY, label TEXT)".into(),
+                    format!("INSERT INTO seeded (label) VALUES ('{tag}')"),
+                ],
+            },
+        )
+        .await
+        .expect("seed prepare");
+    }
+
+    /// Counts the `seeded` rows through the catalog's pool.
+    async fn count(catalog: &Arc<dyn DatasourceCatalog>) -> i64 {
+        let handle = catalog.get_pool("appdb").await.expect("pool");
+        let pool = handle.downcast::<sqlx::AnyPool>().expect("any pool");
+        let row = sqlx::query("SELECT COUNT(*) FROM seeded")
+            .fetch_one(&*pool)
+            .await
+            .expect("count query");
+        row.try_get::<i64, usize>(0).expect("count as i64")
+    }
+
+    #[tokio::test]
+    async fn second_boot_over_same_memory_alias_starts_empty() {
+        let (dir, doc) = project(MEMORY_TOML, Some(("routes.yaml", ROUTE)), DOC);
+
+        // Boot A seeds one row and tears down.
+        let mut run_a = boot_scenario(&doc, dir.path(), &empty_env())
+            .await
+            .expect("boot A");
+        let catalog_a = run_a.boot.datasource_catalog();
+        seed(&catalog_a, "a").await;
+        assert_eq!(
+            count(&catalog_a).await,
+            1,
+            "boot A must see its own seeded row"
+        );
+        run_a
+            .boot
+            .shutdown(&mut run_a.ctx)
+            .await
+            .expect("shutdown A");
+        drop(run_a);
+
+        // Boot B: same project, same alias, same process. The in-memory
+        // database must have died with boot A's pools — only B's own
+        // row may exist.
+        let mut run_b = boot_scenario(&doc, dir.path(), &empty_env())
+            .await
+            .expect("boot B");
+        let catalog_b = run_b.boot.datasource_catalog();
+        seed(&catalog_b, "b").await;
+        let count_b = count(&catalog_b).await;
+        assert_eq!(
+            count_b, 1,
+            "boot B must start from an empty database — boot A's rows leaked across boots"
+        );
+        run_b
+            .boot
+            .shutdown(&mut run_b.ctx)
+            .await
+            .expect("shutdown B");
+    }
+
+    /// Named shared-memory URIs (`file:memdb_x?mode=memory&cache=shared`)
+    /// genuinely share across connections AND across parses — the only
+    /// URL shape where a lingering boot-A connection leaks rows into a
+    /// later boot over the same URI. The teardown close seam is
+    /// load-bearing here: remove the `close_all` step and this test
+    /// fails with boot B counting boot A's rows (bd rc-25lup.4).
+    #[tokio::test]
+    async fn named_shared_memory_uri_dies_with_its_boot() {
+        // `sqlite:file:` matches no factory scheme prefix, so the
+        // provider key pins the sqlx factory explicitly.
+        const NAMED_TOML: &str = r#"
+[datasources.appdb]
+db_url = "sqlite:file:memdb_isolation_probe?mode=memory&cache=shared"
+max_connections = 1
+provider = "sqlx"
+"#;
+        let (dir, doc) = project(NAMED_TOML, Some(("routes.yaml", ROUTE)), DOC);
+
+        let mut run_a = boot_scenario(&doc, dir.path(), &empty_env())
+            .await
+            .expect("boot A");
+        let catalog_a = run_a.boot.datasource_catalog();
+        seed(&catalog_a, "a").await;
+        assert_eq!(count(&catalog_a).await, 1);
+        run_a
+            .boot
+            .shutdown(&mut run_a.ctx)
+            .await
+            .expect("shutdown A");
+        drop(run_a);
+
+        let mut run_b = boot_scenario(&doc, dir.path(), &empty_env())
+            .await
+            .expect("boot B");
+        let catalog_b = run_b.boot.datasource_catalog();
+        seed(&catalog_b, "b").await;
+        let count_b = count(&catalog_b).await;
+        assert_eq!(
+            count_b, 1,
+            "the named shared memory database must die with boot A — B sees A's rows"
+        );
+        run_b
+            .boot
+            .shutdown(&mut run_b.ctx)
+            .await
+            .expect("shutdown B");
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_the_datasource_pools() {
+        let (dir, doc) = project(MEMORY_TOML, Some(("routes.yaml", ROUTE)), DOC);
+
+        let mut run = boot_scenario(&doc, dir.path(), &empty_env())
+            .await
+            .expect("boot");
+        let catalog = run.boot.datasource_catalog();
+        seed(&catalog, "x").await;
+        let handle = catalog.get_pool("appdb").await.expect("pool");
+        let pool = handle.downcast::<sqlx::AnyPool>().expect("any pool");
+
+        run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
+
+        assert!(
+            pool.is_closed(),
+            "boot teardown must close the datasource pools (bd rc-25lup.4)"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_backed_state_persists_across_boots() {
+        let (dir, doc) = project("", Some(("routes.yaml", ROUTE)), DOC);
+        // `sqlite://<abs path>?mode=rwc` matches the factory's
+        // `sqlite://` prefix; `mode=rwc` lets the first boot create the
+        // file in the project tempdir.
+        let camel_toml = format!(
+            "[datasources.appdb]\ndb_url = \"sqlite://{}/shared.db?mode=rwc\"\n",
+            dir.path().display()
+        );
+        std::fs::write(dir.path().join("Camel.toml"), camel_toml).expect("rewrite Camel.toml");
+
+        // Boot A seeds one row into the file and tears down.
+        let mut run_a = boot_scenario(&doc, dir.path(), &empty_env())
+            .await
+            .expect("boot A");
+        let catalog_a = run_a.boot.datasource_catalog();
+        seed(&catalog_a, "a").await;
+        run_a
+            .boot
+            .shutdown(&mut run_a.ctx)
+            .await
+            .expect("shutdown A");
+        drop(run_a);
+
+        // Boot B over the same file: A's row IS visible — durable
+        // datasources are outside the per-boot freshness guarantee, and
+        // the document's clean-first prepare owns isolation.
+        let mut run_b = boot_scenario(&doc, dir.path(), &empty_env())
+            .await
+            .expect("boot B");
+        let catalog_b = run_b.boot.datasource_catalog();
+        let count_b = count(&catalog_b).await;
+        assert_eq!(
+            count_b, 1,
+            "file-backed rows persist across boots — the clean-first idiom owns isolation"
+        );
+        run_b
+            .boot
+            .shutdown(&mut run_b.ctx)
+            .await
+            .expect("shutdown B");
+    }
+}

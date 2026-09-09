@@ -2,7 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 
-use camel_api::datasource::{CheckFuture, CreatePoolFuture};
+use camel_api::datasource::{CheckFuture, CloseFuture, CreatePoolFuture};
 use camel_api::datasource::{DatasourceConfig, DatasourceHandle, PoolFactory};
 use camel_api::error::CamelError;
 use camel_api::lifecycle::HealthStatus;
@@ -77,6 +77,21 @@ impl PoolFactory for SqlPoolFactory {
         })
     }
 
+    fn close<'a>(&'a self, handle: &'a DatasourceHandle) -> CloseFuture<'a> {
+        Box::pin(async move {
+            let pool = handle.downcast::<AnyPool>().map_err(|e| {
+                CamelError::ProcessorError(format!(
+                    "datasource '{}': pool close downcast failed: {}",
+                    handle.name, e
+                ))
+            })?;
+            // sqlx `close()` is infallible: it signals closure and drains
+            // the connections; subsequent acquire calls fail closed.
+            pool.close().await;
+            Ok(())
+        })
+    }
+
     fn supported_schemes(&self) -> &[&str] {
         &["postgres", "postgresql", "mysql", "sqlite"]
     }
@@ -121,5 +136,81 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
         assert!(f.matches(&cfg));
+    }
+
+    #[tokio::test]
+    async fn sql_pool_factory_close_closes_the_pool() {
+        let f = SqlPoolFactory;
+        let cfg = DatasourceConfig {
+            db_url: "sqlite::memory:?cache=shared".into(),
+            provider: None,
+            max_connections: None,
+            min_connections: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra: std::collections::HashMap::new(),
+        };
+        let inner = f.create(&cfg).await.unwrap();
+        let pool = Arc::downcast::<AnyPool>(Arc::clone(&inner)).unwrap();
+        let handle = DatasourceHandle::new("appdb".into(), f.name().into(), Arc::clone(&inner));
+
+        f.close(&handle).await.unwrap();
+        assert!(
+            pool.is_closed(),
+            "factory close must drain the sqlx pool (bd rc-25lup.4)"
+        );
+    }
+
+    /// Probe (bd rc-25lup.4 review): does the named shared-memory URI
+    /// form genuinely share state across pooled connections? The
+    /// answer decides whether a lingering boot's connection could leak
+    /// rows into a later boot over the same URI.
+    #[tokio::test]
+    async fn named_shared_memory_uri_probe() {
+        use sqlx::Row;
+
+        let f = SqlPoolFactory;
+        let cfg = DatasourceConfig {
+            db_url: "sqlite:file:memdb_probe?mode=memory&cache=shared".into(),
+            provider: None,
+            max_connections: Some(3),
+            min_connections: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra: std::collections::HashMap::new(),
+        };
+        let inner = f.create(&cfg).await.unwrap();
+        let pool = Arc::downcast::<AnyPool>(Arc::clone(&inner)).unwrap();
+
+        sqlx::query("CREATE TABLE probe (v TEXT)")
+            .execute(&*pool)
+            .await
+            .expect("create");
+        // Force a second connection: hold one acquire while running the
+        // INSERT on another.
+        let conn1 = pool.acquire().await.expect("conn1");
+        sqlx::query("INSERT INTO probe VALUES ('x')")
+            .execute(&*pool)
+            .await
+            .expect("insert on a second connection");
+        drop(conn1);
+
+        let row = sqlx::query("SELECT COUNT(*) FROM probe")
+            .fetch_one(&*pool)
+            .await
+            .expect("count");
+        let n = row.try_get::<i64, usize>(0).expect("count i64");
+        assert_eq!(
+            n, 1,
+            "named shared memory URI must share across pool connections"
+        );
     }
 }

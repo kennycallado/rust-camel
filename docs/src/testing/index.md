@@ -390,3 +390,28 @@ envPassthrough:
 The CI job or Compose file then supplies `APPDB_URL`, for example a service-container Postgres URL. The harness never provisions the database. The address arrives through the variable, so the surrounding infrastructure stays the author's concern (ADR-0069 section 9).
 
 Two laws keep the surface orthogonal. The datasource name (`appdb`) is an identifier path, and interpolation never touches it. The `db_url` value is an env leaf path, and the layered source always resolves it. The same laws govern every strict-prefix table ([`crates/camel-config/CONTEXT.md`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-config/CONTEXT.md)), so this section describes one instance of a general steering pattern, not a datasource-specific rule (bd rc-l7m7t, bd rc-4hexo).
+
+#### Isolation and teardown
+
+Each scenario boot owns its datasource catalog and its pools. The boot teardown closes those pools after the context stops. An in-memory sqlite database therefore dies with its boot: a later document booting the same `[datasources]` alias in the same process starts from an empty database. `camel test` runs documents sequentially in one process, so this per-boot freshness keeps one document's seeded rows out of the next document's validations. The guarantee is a contract of the teardown seam, not an accident of driver internals ([`crates/camel-integration-test/CONTEXT.md`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/CONTEXT.md)).
+
+The guarantee is load-bearing for named shared-memory URIs. A datasource pinned to `sqlite:file:<name>?mode=memory&cache=shared` shares one named database across every connection that uses the name, in any boot. A lingering connection from an earlier boot would carry that database's rows into the later boot; the teardown close is what kills it. The adversarial tests pin this shape directly.
+
+One driver fact shapes memory fixtures: with the Any driver, each pooled connection over `sqlite::memory:` still gets a private in-memory database. Memory fixtures therefore pin `max_connections = 1` so CREATE, INSERT, and the validation SELECT stay on one connection (the convention the landed sql e2e tests set).
+
+Durable datasources are outside the per-boot guarantee. A file-backed sqlite database, or a service-container Postgres behind `envPassthrough:`, keeps its rows across boots. No harness mechanism cleans it between documents. Isolation for durable datasources is the document author's responsibility — the same law that governs user-provided infrastructure generally (ADR-0069 section 9): the harness provisions hermetic defaults, never cleanup for resources it does not own.
+
+The authoring convention for durable datasources is the prepare-action clean-first idiom: the first `sql:` prepare statement deletes the state a previous run may have left, before any INSERT re-seeds it.
+
+```yaml
+scenario:
+- sql:
+    datasource: appdb
+    prepare:
+    - DELETE FROM orders          # clean first: a prior document's rows
+    - INSERT INTO orders VALUES ('seed-a')
+```
+
+`DELETE FROM` (whole-table) or a table-recreating statement are the two clean-first shapes; `TRUNCATE` applies where the engine supports it. A document that skips the clean-first statement works only as long as it runs alone. The adversarial boot-freshness tests in `crates/camel-integration-test` pin both directions: a second memory-sqlite boot reads zero, a second file-backed boot reads everything.
+
+Known limitation, parallel mode (bd rc-gcf9n): `camel test` executes documents sequentially today. When parallel document execution lands, two concurrently booted documents that share one sqlite in-memory alias could collide on the same shared memory database. The planned remedy is a per-boot unique memory URI (`file:memdb_{scenario}?mode=memory&cache=shared`) minted by the harness for hermetic memory datasources; until then, documents that share a durable datasource must not run concurrently.

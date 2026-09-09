@@ -97,7 +97,10 @@ impl BootHandle {
     ///    shutdown),
     /// 2. `ctx.stop()` (routes plus context-registered lifecycles;
     ///    `BridgeCleanup` drains here),
-    /// 3. deadline-wrapped `pool.shutdown()` for JMS, then CXF.
+    /// 3. deadline-wrapped `pool.shutdown()` for JMS, then CXF,
+    /// 4. deadline-wrapped `datasource_catalog.close_all()` — the boot's
+    ///    datasource pools drain here, so a shared-cache sqlite in-memory
+    ///    database dies with its boot (bd rc-25lup.4).
     ///
     /// Every step runs even when an earlier one fails; the first failure is
     /// returned after the sequence completes. Failures are logged by the
@@ -143,6 +146,25 @@ impl BootHandle {
                 }
             }
             Err(_) => tracing::warn!("CXF pool shutdown timed out after {}s", deadline.as_secs()),
+        }
+
+        // Drain the boot's datasource pools: without this step a sqlx pool
+        // with `min_connections = 1` outlives the boot's scope, keeping a
+        // shared-cache sqlite in-memory database alive into the next
+        // document's boot in the same process (bd rc-25lup.4).
+        match tokio::time::timeout(deadline, self.datasource_catalog.close_all()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                // log-policy: system-broken
+                tracing::error!("datasource pool close failed: {}", e);
+                if failure.is_none() {
+                    failure = Some(e);
+                }
+            }
+            Err(_) => tracing::warn!(
+                "datasource pool close timed out after {}s",
+                deadline.as_secs()
+            ),
         }
 
         match failure {
