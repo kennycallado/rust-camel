@@ -3337,14 +3337,33 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
     }
 }
 
+/// Lowercase kind name for a JSON value, used in drop diagnostics so log
+/// readers see *why* a header had no scalar string form without the value
+/// itself ever entering diagnostics.
+const fn json_value_kind(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
 /// Select the HTTP response headers emitted by the consumer reply finaliser
 /// (ADR-0057 / rc-2jj2). Extracted from the inline filter in
 /// `dispatch_handler` for unit testability.
 ///
 /// Drops Camel-namespace headers, hop-by-hop/framing, request-only, and
 /// server-owned headers, plus `content-length`/`content-type` (re-derived),
-/// and any header named by a `Connection` token. Appends a single
-/// `Content-Type` from `user_content_type` falling back to
+/// and any header named by a `Connection` token. Scalar non-string values
+/// (`Number`/`Bool`) are stringified so `set_header("X-Retries", 3)` reaches
+/// the wire instead of being silently discarded (rc-lidtk); `null`, objects,
+/// and arrays have no single-value form and are dropped. Every drop is
+/// logged at DEBUG with the header name and reason — names only, never
+/// values, so credentials cannot leak into diagnostics (ADR-0051).
+/// Appends a single `Content-Type` from `user_content_type` falling back to
 /// `inferred_content_type` when either is present.
 fn select_response_headers(
     headers: &HashMap<String, serde_json::Value>,
@@ -3357,12 +3376,31 @@ fn select_response_headers(
             .filter(|(k, _)| k.eq_ignore_ascii_case("connection"))
             .filter_map(|(_, v)| v.as_str()),
     );
-    let mut selected: Vec<(String, String)> = headers
-        .iter()
-        .filter(|(k, _)| !k.starts_with("Camel"))
-        .filter(|(k, _)| !header_policy::excluded_response(k, &conn_tokens))
-        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-        .collect();
+    let mut selected: Vec<(String, String)> = Vec::new();
+    for (k, v) in headers {
+        if k.starts_with("Camel") {
+            debug!(header = %k, "reply header dropped: Camel namespace");
+            continue;
+        }
+        if header_policy::excluded_response(k, &conn_tokens) {
+            debug!(header = %k, "reply header dropped: emission policy");
+            continue;
+        }
+        let scalar = match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        };
+        match scalar {
+            Some(s) => selected.push((k.clone(), s)),
+            None => debug!(
+                header = %k,
+                value_kind = json_value_kind(v),
+                "reply header dropped: no scalar string form"
+            ),
+        }
+    }
     if let Some(ct) = user_content_type.or(inferred_content_type) {
         selected.push(("Content-Type".to_string(), ct));
     }
@@ -10121,6 +10159,75 @@ mod tests {
             names.contains(&"Cache-Control"),
             "Cache-Control must pass through"
         );
+    }
+
+    #[test]
+    fn response_stringifies_scalar_header_values() {
+        let mut headers = make_headers(&[("X-Label", "keep")]);
+        headers.insert("X-Retries".to_string(), serde_json::json!(3));
+        headers.insert("X-Ratio".to_string(), serde_json::json!(3.5));
+        headers.insert("X-Enabled".to_string(), serde_json::json!(true));
+        let selected = select_response_headers(&headers, None, None);
+        let get = |name: &str| -> Option<&str> {
+            selected
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(
+            get("X-Retries"),
+            Some("3"),
+            "integer header must be stringified"
+        );
+        assert_eq!(
+            get("X-Ratio"),
+            Some("3.5"),
+            "float header must be stringified"
+        );
+        assert_eq!(
+            get("X-Enabled"),
+            Some("true"),
+            "bool header must be stringified"
+        );
+        assert_eq!(
+            get("X-Label"),
+            Some("keep"),
+            "string header must pass through"
+        );
+    }
+
+    #[test]
+    fn response_drops_null_and_structured_header_values() {
+        let mut headers = make_headers(&[("X-Keep", "yes")]);
+        headers.insert("X-Null".to_string(), serde_json::Value::Null);
+        headers.insert("X-Obj".to_string(), serde_json::json!({"a": 1}));
+        headers.insert("X-Arr".to_string(), serde_json::json!([1, 2]));
+        let selected = select_response_headers(&headers, None, None);
+        let names: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
+        for dropped in ["X-Null", "X-Obj", "X-Arr"] {
+            assert!(
+                !names.contains(&dropped),
+                "{dropped} must not be emitted: no single-value form"
+            );
+        }
+        assert!(names.contains(&"X-Keep"), "scalar headers must survive");
+    }
+
+    #[test]
+    fn response_stringifies_scalars_despite_excluded_names() {
+        // Excluded names stay excluded regardless of value type: the policy
+        // filter runs before stringification, so numeric values cannot smuggle
+        // content-length or server-owned headers into the reply.
+        let mut headers = HashMap::new();
+        headers.insert("Content-Length".to_string(), serde_json::json!(999));
+        headers.insert("Date".to_string(), serde_json::json!(12345));
+        let selected = select_response_headers(&headers, None, None);
+        let names: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(
+            !names.contains(&"Content-Length"),
+            "content-length is re-derived by the server"
+        );
+        assert!(!names.contains(&"Date"), "date is server-owned");
     }
 
     // -----------------------------------------------------------------------
