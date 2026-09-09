@@ -3002,22 +3002,30 @@ impl Service<Exchange> for HttpProducer {
                         .filter_map(|(_, v)| v.as_str()),
                 );
 
-                for (key, value) in &exchange.input.headers {
-                    if !key.starts_with("Camel")
-                        && !config
-                            .skip_request_headers
-                            .iter()
-                            .any(|h| h.eq_ignore_ascii_case(key))
-                        && !header_policy::excluded_outbound(key, &conn_tokens)
-                        && let Some(val_str) = value.as_str()
-                        && let (Ok(name), Ok(val)) = (
-                            reqwest::header::HeaderName::from_bytes(key.as_bytes()),
-                            reqwest::header::HeaderValue::from_str(val_str),
-                        )
-                    {
-                        collected_headers.push((name, val));
+                let outbound = select_outbound_headers(
+                    &exchange.input.headers,
+                    &config.skip_request_headers,
+                    &conn_tokens,
+                );
+                for drop in &outbound.drops {
+                    if let Some(value_kind) = drop.value_kind {
+                        debug!(
+                            correlation_id = %exchange.correlation_id(),
+                            header = %drop.name,
+                            value_kind = value_kind,
+                            "outbound header dropped: {}",
+                            drop.reason
+                        );
+                    } else {
+                        debug!(
+                            correlation_id = %exchange.correlation_id(),
+                            header = %drop.name,
+                            "outbound header dropped: {}",
+                            drop.reason
+                        );
                     }
                 }
+                collected_headers.extend(outbound.accepted);
 
                 // Auth headers
                 if !config.bridge_endpoint {
@@ -3351,6 +3359,19 @@ const fn json_value_kind(v: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Scalar string form of a JSON value: strings pass through, `Number` and
+/// `Bool` are stringified, everything else has no single-value form.
+/// Shared by the consumer reply finaliser and the producer outbound filter
+/// so the two directions cannot drift apart (rc-lidtk / rc-8l23a).
+fn scalar_string_form(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 /// Select the HTTP response headers emitted by the consumer reply finaliser
 /// (ADR-0057 / rc-2jj2). Extracted from the inline filter in
 /// `dispatch_handler` for unit testability.
@@ -3386,13 +3407,7 @@ fn select_response_headers(
             debug!(header = %k, "reply header dropped: emission policy");
             continue;
         }
-        let scalar = match v {
-            serde_json::Value::String(s) => Some(s.clone()),
-            serde_json::Value::Number(n) => Some(n.to_string()),
-            serde_json::Value::Bool(b) => Some(b.to_string()),
-            _ => None,
-        };
-        match scalar {
+        match scalar_string_form(v) {
             Some(s) => selected.push((k.clone(), s)),
             None => debug!(
                 header = %k,
@@ -3405,6 +3420,103 @@ fn select_response_headers(
         selected.push(("Content-Type".to_string(), ct));
     }
     selected
+}
+
+/// One outbound header drop: the exchange header name, a stable reason
+/// string, and — when the drop was caused by the value having no scalar
+/// string form — the JSON value kind. Names and kinds only, never values
+/// (ADR-0051).
+#[derive(Debug)]
+struct OutboundHeaderDrop<'a> {
+    name: &'a str,
+    reason: &'static str,
+    value_kind: Option<&'static str>,
+}
+
+/// Outbound exchange-header selection result: headers accepted for the
+/// wire plus drop records for call-site DEBUG logging.
+struct OutboundHeaderSelection<'a> {
+    accepted: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
+    drops: Vec<OutboundHeaderDrop<'a>>,
+}
+
+/// Select the exchange headers the HTTP producer forwards on the outbound
+/// request (ADR-0057 / rc-8l23a). Extracted from the inline filter in
+/// `HttpProducer::call` for unit testability.
+///
+/// Drops `Camel`-namespace headers, names listed in `skip_request_headers`,
+/// hop-by-hop/framing and connection-token-named headers excluded by the
+/// outbound emission policy, and headers whose name or stringified value
+/// fails `HeaderName`/`HeaderValue` construction. Scalar non-string values
+/// (`Number`/`Bool`) are stringified so `set_header("X-Retries", 3)` reaches
+/// the wire instead of being silently discarded (rc-8l23a); `null`, objects,
+/// and arrays have no single-value form and are dropped. Drops are returned
+/// rather than logged so the call site can attach the correlation id; log
+/// consumers see names and kinds only, never values (ADR-0051).
+fn select_outbound_headers<'a>(
+    headers: &'a HashMap<String, serde_json::Value>,
+    skip_request_headers: &[String],
+    conn_tokens: &[String],
+) -> OutboundHeaderSelection<'a> {
+    let mut accepted = Vec::new();
+    let mut drops = Vec::new();
+    for (key, value) in headers {
+        if key.starts_with("Camel") {
+            drops.push(OutboundHeaderDrop {
+                name: key,
+                reason: "Camel namespace",
+                value_kind: None,
+            });
+            continue;
+        }
+        if skip_request_headers
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(key))
+        {
+            drops.push(OutboundHeaderDrop {
+                name: key,
+                reason: "skip_request_headers",
+                value_kind: None,
+            });
+            continue;
+        }
+        if header_policy::excluded_outbound(key, conn_tokens) {
+            drops.push(OutboundHeaderDrop {
+                name: key,
+                reason: "outbound emission policy",
+                value_kind: None,
+            });
+            continue;
+        }
+        let Some(val_str) = scalar_string_form(value) else {
+            drops.push(OutboundHeaderDrop {
+                name: key,
+                reason: "no scalar string form",
+                value_kind: Some(json_value_kind(value)),
+            });
+            continue;
+        };
+        let name = match reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
+            Ok(name) => name,
+            Err(_) => {
+                drops.push(OutboundHeaderDrop {
+                    name: key,
+                    reason: "invalid header name",
+                    value_kind: None,
+                });
+                continue;
+            }
+        };
+        match reqwest::header::HeaderValue::from_str(&val_str) {
+            Ok(val) => accepted.push((name, val)),
+            Err(_) => drops.push(OutboundHeaderDrop {
+                name: key,
+                reason: "invalid header value",
+                value_kind: None,
+            }),
+        }
+    }
+    OutboundHeaderSelection { accepted, drops }
 }
 
 #[cfg(test)]
@@ -4009,6 +4121,52 @@ mod tests {
         assert!(
             !request.to_ascii_lowercase().contains("authorization"),
             "Authorization must be stripped by skipRequestHeaders\n{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn producer_stringifies_scalar_header_values_on_wire() {
+        use tower::ServiceExt;
+
+        let (url, captured, _handle) = start_request_capturing_server().await;
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api/test?allowInternal=true"), &endpoint_ctx)
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header("X-Retries", serde_json::json!(3));
+        exchange
+            .input
+            .set_header("X-Enabled", serde_json::json!(true));
+        exchange
+            .input
+            .set_header("X-Obj", serde_json::json!({"a": 1}));
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let request = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("no outbound request captured");
+        let lower = request.to_ascii_lowercase();
+        assert!(
+            lower.contains("x-retries: 3"),
+            "numeric header must reach the wire stringified\n{request}"
+        );
+        assert!(
+            lower.contains("x-enabled: true"),
+            "bool header must reach the wire stringified\n{request}"
+        );
+        assert!(
+            !lower.contains("x-obj:"),
+            "object header has no single-value form and must not reach the wire\n{request}"
         );
     }
 
@@ -10228,6 +10386,139 @@ mod tests {
             "content-length is re-derived by the server"
         );
         assert!(!names.contains(&"Date"), "date is server-owned");
+    }
+
+    #[test]
+    fn outbound_stringifies_scalar_header_values() {
+        let mut headers = make_headers(&[("X-Label", "keep")]);
+        headers.insert("X-Retries".to_string(), serde_json::json!(3));
+        headers.insert("X-Ratio".to_string(), serde_json::json!(3.5));
+        headers.insert("X-Enabled".to_string(), serde_json::json!(true));
+        let outbound = select_outbound_headers(&headers, &[], &[]);
+        // HeaderName construction lowercases; lookups compare case-blind.
+        let get = |name: &str| -> Option<String> {
+            outbound
+                .accepted
+                .iter()
+                .find(|(k, _)| k.as_str().eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.to_str().unwrap().to_string())
+        };
+        assert_eq!(
+            get("X-Retries").as_deref(),
+            Some("3"),
+            "integer header must be stringified"
+        );
+        assert_eq!(
+            get("X-Ratio").as_deref(),
+            Some("3.5"),
+            "float header must be stringified"
+        );
+        assert_eq!(
+            get("X-Enabled").as_deref(),
+            Some("true"),
+            "bool header must be stringified"
+        );
+        assert_eq!(
+            get("X-Label").as_deref(),
+            Some("keep"),
+            "string header must pass through"
+        );
+        assert!(outbound.drops.is_empty(), "scalar headers must not drop");
+    }
+
+    #[test]
+    fn outbound_drops_null_and_structured_header_values() {
+        let mut headers = make_headers(&[("X-Keep", "yes")]);
+        headers.insert("X-Null".to_string(), serde_json::Value::Null);
+        headers.insert("X-Obj".to_string(), serde_json::json!({"a": 1}));
+        headers.insert("X-Arr".to_string(), serde_json::json!([1, 2]));
+        let outbound = select_outbound_headers(&headers, &[], &[]);
+        let has = |name: &str| {
+            outbound
+                .accepted
+                .iter()
+                .any(|(k, _)| k.as_str().eq_ignore_ascii_case(name))
+        };
+        assert!(has("X-Keep"), "scalar headers must survive");
+        for (name, kind) in [("X-Null", "null"), ("X-Obj", "object"), ("X-Arr", "array")] {
+            let dropped = outbound
+                .drops
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("{name} must have a drop record: {:?}", outbound.drops));
+            assert_eq!(
+                dropped.reason, "no scalar string form",
+                "{name} drop reason must name the value kind absence"
+            );
+            assert_eq!(dropped.value_kind, Some(kind), "{name} kind recorded");
+        }
+    }
+
+    #[test]
+    fn outbound_stringifies_scalars_despite_excluded_names() {
+        // Excluded names stay excluded regardless of value type: the policy
+        // filter runs before stringification, so numeric values cannot smuggle
+        // hop-by-hop or client-derived headers onto the wire.
+        let mut headers = HashMap::new();
+        headers.insert("Transfer-Encoding".to_string(), serde_json::json!(7));
+        headers.insert("Host".to_string(), serde_json::json!(12345));
+        headers.insert("X-Ok".to_string(), serde_json::json!(7));
+        let outbound = select_outbound_headers(&headers, &[], &[]);
+        let has = |name: &str| {
+            outbound
+                .accepted
+                .iter()
+                .any(|(k, _)| k.as_str().eq_ignore_ascii_case(name))
+        };
+        assert!(
+            !has("Transfer-Encoding"),
+            "hop-by-hop header must stay excluded"
+        );
+        assert!(!has("Host"), "host is destination-derived");
+        assert!(has("X-Ok"), "non-excluded scalar must be stringified");
+        assert!(
+            outbound
+                .drops
+                .iter()
+                .any(|d| d.name == "Transfer-Encoding" && d.reason == "outbound emission policy"),
+            "policy drop must be recorded before coercion"
+        );
+    }
+
+    #[test]
+    fn outbound_drops_invalid_names_values_and_skip_config() {
+        let mut headers = make_headers(&[("X-Good", "fine")]);
+        headers.insert("X Bad Name".to_string(), serde_json::json!("v"));
+        headers.insert(
+            "X-Control-Value".to_string(),
+            serde_json::json!("line1\nline2"),
+        );
+        headers.insert("X-Secret".to_string(), serde_json::json!("s3cr3t"));
+        headers.insert("CamelHttpQuery".to_string(), serde_json::json!("q=1"));
+        let skip = vec!["x-secret".to_string()];
+        let outbound = select_outbound_headers(&headers, &skip, &[]);
+        let has = |name: &str| {
+            outbound
+                .accepted
+                .iter()
+                .any(|(k, _)| k.as_str().eq_ignore_ascii_case(name))
+        };
+        assert!(has("X-Good"), "valid header must survive");
+        assert!(!has("X Bad Name"), "invalid header name must drop");
+        assert!(!has("X-Control-Value"), "control-char value must drop");
+        assert!(!has("X-Secret"), "skipped header must drop");
+        assert!(!has("CamelHttpQuery"), "Camel-namespace header must drop");
+        let reason = |n: &str| {
+            outbound
+                .drops
+                .iter()
+                .find(|d| d.name == n)
+                .map(|d| d.reason)
+        };
+        assert_eq!(reason("X Bad Name"), Some("invalid header name"));
+        assert_eq!(reason("X-Control-Value"), Some("invalid header value"));
+        assert_eq!(reason("X-Secret"), Some("skip_request_headers"));
+        assert_eq!(reason("CamelHttpQuery"), Some("Camel namespace"));
     }
 
     // -----------------------------------------------------------------------
