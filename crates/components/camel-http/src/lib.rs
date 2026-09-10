@@ -152,7 +152,7 @@ pub struct HttpEndpointConfig {
 impl std::fmt::Debug for HttpEndpointConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpEndpointConfig")
-            .field("base_url", &self.base_url)
+            .field("base_url", &mask_base_url_userinfo(&self.base_url))
             .field("http_method", &self.http_method)
             .field(
                 "throw_exception_on_failure",
@@ -2846,6 +2846,36 @@ fn encode_query_component(component: &str) -> String {
             }
         }
     }
+    out
+}
+
+/// Mask `user:pass@` userinfo in a base-URL string for the
+/// `HttpEndpointConfig` Debug surface (rc-dhkeo, ADR-0051
+/// redact-by-construction): byte-preserving string surgery — a
+/// `url::Url` roundtrip would WHATWG-normalize the rendered bytes. The
+/// camel grammar path may carry userinfo-style bytes
+/// (`http://user:pass@h/p`); they must never render in diagnostics.
+/// Returns the input unchanged when the authority carries no `@`.
+fn mask_base_url_userinfo(raw: &str) -> String {
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let after_scheme = &raw[scheme_end + 3..];
+    // The authority ends at the first path/query/fragment introducer.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    // rfind: when multiple `@` ride the authority, mask through the last —
+    // over-masking is safe, under-masking is not.
+    let Some(at) = authority.rfind('@') else {
+        return raw.to_string();
+    };
+    let mut out = String::with_capacity(raw.len());
+    out.push_str(&raw[..scheme_end + 3]);
+    out.push_str("***@");
+    out.push_str(&authority[at + 1..]);
+    out.push_str(&after_scheme[authority_end..]);
     out
 }
 
@@ -8393,6 +8423,30 @@ mod tests {
             merged.as_deref(),
             Some("k=1&k=2"),
             "intra-header duplicate keys ride verbatim"
+        );
+    }
+
+    /// rc-dhkeo: the Debug surface masks userinfo-style bytes in
+    /// `base_url` and leaves a userinfo-free base untouched, byte-for-byte.
+    #[test]
+    fn endpoint_config_debug_masks_base_url_userinfo() {
+        let mut config = HttpEndpointConfig::from_uri("http://h.example/p").unwrap();
+        config.base_url = "http://user:pass@h.example/p".to_string();
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("***@h.example"),
+            "userinfo must render masked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("user:pass"),
+            "no credentials in Debug output: {rendered}"
+        );
+
+        let plain = HttpEndpointConfig::from_uri("http://h.example/p").unwrap();
+        let rendered_plain = format!("{plain:?}");
+        assert!(
+            rendered_plain.contains("http://h.example/p"),
+            "a base without userinfo renders unchanged: {rendered_plain}"
         );
     }
 

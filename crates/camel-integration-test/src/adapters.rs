@@ -761,10 +761,13 @@ fn lock_through<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Masks secret-marked query values in a recorded wire path for
 /// diagnostics (ADR-0051 positive secret rule): a pair whose DECODED
-/// key is in `secret_keys` keeps its raw key span but has its value
-/// masked as `***`; every other pair keeps its authored bytes,
-/// unknown keys included — apparatus-internal diagnostics stay
-/// maximally informative. A percent-encoded secret key
+/// key matches `secret_keys` case-insensitively (rc-dhkeo — an authored
+/// `AuthPassword` masks against a declared `authpassword`; URI-key
+/// casing carries no meaning here, unlike option matching in
+/// `is_consumed_option`, which stays exact per Camel convention) keeps
+/// its raw key span but has its value masked as `***`; every other pair
+/// keeps its authored bytes, unknown keys included — apparatus-internal
+/// diagnostics stay maximally informative. A percent-encoded secret key
 /// (`%61uthPassword`) matches its decoded form. When
 /// [`raw_query_pairs`](camel_component_api::raw_query_pairs) rejects
 /// the query (a malformed key escape), the ENTIRE query portion is
@@ -782,7 +785,10 @@ pub(crate) fn redact_wire_path(path_and_query: &str, secret_keys: &[String]) -> 
         Ok(pairs) => pairs
             .into_iter()
             .map(|(decoded_key, raw_pair)| {
-                if secret_keys.contains(&decoded_key) {
+                if secret_keys
+                    .iter()
+                    .any(|secret| secret.eq_ignore_ascii_case(&decoded_key))
+                {
                     match raw_pair.split_once('=') {
                         // Mask the value; the raw key span stays as
                         // authored (an encoded secret key stays

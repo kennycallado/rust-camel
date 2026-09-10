@@ -158,3 +158,37 @@ async fn incoming_message_carries_arrival_instant() {
         "arrival sanity bound: the message was stamped milliseconds ago"
     );
 }
+
+// ---------------------------------------------------------------------------
+// redact_wire_path (ADR-0051 positive secret rule, rc-dhkeo)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn redact_wire_path_matches_secret_keys_case_insensitively() {
+    let secrets = vec!["authpassword".to_string()];
+    assert_eq!(
+        crate::adapters::redact_wire_path("/secure?AuthPassword=hunter2&ok=1", &secrets),
+        "/secure?AuthPassword=***&ok=1",
+        "mixed-case secret key masks; the raw key span stays as authored"
+    );
+    assert_eq!(
+        crate::adapters::redact_wire_path("/secure?AUTHPASSWORD=hunter2", &secrets),
+        "/secure?AUTHPASSWORD=***",
+        "uppercase secret key masks too"
+    );
+    assert_eq!(
+        crate::adapters::redact_wire_path("/secure?authpassword=hunter2", &secrets),
+        "/secure?authpassword=***",
+        "exact-case match keeps working"
+    );
+}
+
+#[test]
+fn redact_wire_path_non_secret_keys_untouched() {
+    let secrets = vec!["authpassword".to_string()];
+    assert_eq!(
+        crate::adapters::redact_wire_path("/p?auth=x&token=y", &secrets),
+        "/p?auth=x&token=y",
+        "unrelated keys ride unmasked — no over-redaction"
+    );
+}
