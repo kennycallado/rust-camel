@@ -1101,6 +1101,9 @@ pub fn is_auth_failure_message(msg: &str) -> bool {
         || m.contains("authenticationerror")
         || m.contains("client sent auth")
         || m.contains("authentication required")
+        // redis-rs AuthenticationFailed renders as "password authentication
+        // failed" (seen live in the rc-nkbb control-plane test).
+        || m.contains("password authentication failed")
 }
 
 /// Append sentinel-plane guidance to a sentinel-side connect error when it
@@ -2098,6 +2101,10 @@ mod tests {
             "AuthenticationError: 'ERR Client sent AUTH, but no password is set'"
         ));
         assert!(is_auth_failure_message("NOAUTH Authentication required"));
+        // redis-rs AuthenticationFailed spelling (observed live, rc-nkbb).
+        assert!(is_auth_failure_message(
+            "Password authentication failed - AuthenticationFailed"
+        ));
         // Non-auth errors are not flagged.
         assert!(!is_auth_failure_message("connection refused"));
         assert!(!is_auth_failure_message(
