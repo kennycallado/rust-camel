@@ -192,9 +192,8 @@ pub(crate) async fn validate_redirect_target_for_ssrf(
     url: &url::Url,
     allow_internal: bool,
 ) -> Result<Vec<std::net::SocketAddr>, CamelError> {
-    let host = classify_host(url).ok_or_else(|| {
-        CamelError::ProcessorError("Redirect URL has no host".to_string())
-    })?;
+    let host = classify_host(url)
+        .ok_or_else(|| CamelError::ProcessorError("Redirect URL has no host".to_string()))?;
     let port = url
         .port_or_known_default()
         .ok_or_else(|| CamelError::ProcessorError("Redirect URL has no port".to_string()))?;

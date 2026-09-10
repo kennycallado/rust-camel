@@ -2698,7 +2698,10 @@ fn invalid_allowed_uri_host_entry(segment: &str) -> CamelError {
 /// bracketed canonical form. A host-only entry permits any port; a
 /// `host:port` entry matches only the effective port — the explicit port
 /// or the scheme default (443 for https, 80 for http).
-pub(crate) fn uri_host_allowed(url_str: &str, fence: &[AllowedUriHost]) -> Result<bool, CamelError> {
+pub(crate) fn uri_host_allowed(
+    url_str: &str,
+    fence: &[AllowedUriHost],
+) -> Result<bool, CamelError> {
     let Ok(parsed) = url::Url::parse(url_str) else {
         return Ok(false);
     };
@@ -8777,7 +8780,10 @@ mod tests {
         // the registry lock — so scheduler yields order it deterministically
         // behind this loop).
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while ServerRegistry::global().bound_addr("127.0.0.1", port).is_none() {
+        while ServerRegistry::global()
+            .bound_addr("127.0.0.1", port)
+            .is_none()
+        {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "consumer server did not become ready on port {port}"
@@ -11122,9 +11128,8 @@ mod tests {
             .expect("server key present");
         // Explicit provider: the process default is ambiguous when multiple
         // crates pull rustls feature sets; the graph enables aws-lc-rs.
-        let provider = std::sync::Arc::new(
-            tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-        );
+        let provider =
+            std::sync::Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
         let tls_cfg = tokio_rustls::rustls::ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .expect("safe default protocol versions")
@@ -11356,12 +11361,14 @@ mod tests {
     async fn test_https_component_endpoints_share_pinned_cache_behaviorally() {
         use tower::ServiceExt;
 
-        let mut http_config = HttpConfig::default();
-        http_config.tls = Some(crate::config::TlsConfig {
-            enabled: true,
-            insecure: true,
+        let http_config = HttpConfig {
+            tls: Some(crate::config::TlsConfig {
+                enabled: true,
+                insecure: true,
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         let component = HttpsComponent::with_config(http_config);
         let (base_url, _handle) = spawn_tls_multi_accept_200().await;
         let baseline = component.pinned_cache.build_count();
