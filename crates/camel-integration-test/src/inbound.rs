@@ -1,9 +1,9 @@
 //! Inbound listener provisioning (feature `http`, rc-5yon).
 //!
 //! The document-level `inbound:` declaration names a bind variable.
-//! [`boot_scenario`](crate::boot_scenario) binds an OS-chosen port on
+//! [`boot_scenario`](crate::boot_scenario::boot_scenario) binds an OS-chosen port on
 //! `127.0.0.1` (port `0`), stages the pre-bound listener on the HTTP
-//! component's global [`ServerRegistry`] (ADR-0070 staged
+//! component's global ServerRegistry (ADR-0070 staged
 //! consumption), and extends the layered environment with the bound
 //! URL under the declared bindVar before route discovery — so route
 //! consumer URIs interpolate the staged socket and never pin a port.
@@ -13,7 +13,7 @@ use camel_api::CamelError;
 use crate::document::InboundListener;
 
 /// Binds `127.0.0.1:0`, stages the listener on the HTTP component's
-/// global [`ServerRegistry`], and returns the bound address.
+/// global ServerRegistry, and returns the bound address.
 ///
 /// Staging is keyed by the listener's actual local address and
 /// one-shot: the next exact-key `get_or_spawn` — the scenario route's
@@ -21,7 +21,7 @@ use crate::document::InboundListener;
 /// same key surfaces as a registry error. A fresh port-0 bind resolves
 /// a fresh port per call, so duplicate provisioning across documents
 /// cannot collide. Call before any component can spawn a consumer for
-/// the key; [`boot_scenario`](crate::boot_scenario) does exactly that.
+/// the key; [`boot_scenario`](crate::boot_scenario::boot_scenario) does exactly that.
 pub async fn provision_inbound(
     entry: &InboundListener,
 ) -> Result<std::net::SocketAddr, CamelError> {

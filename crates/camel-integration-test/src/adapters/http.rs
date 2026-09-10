@@ -1,6 +1,6 @@
 //! The HTTP partner adapter (ADR-0069 §5, §8; feature `http`).
 //!
-//! [`HttpPartner`] is the harness-owned SERVER side of an HTTP wire:
+//! HttpPartner is the harness-owned SERVER side of an HTTP wire:
 //! it binds a loopback listener (`127.0.0.1:0` only — no free-port
 //! probing, ADR-0069 §8) that records every request that reaches the
 //! wire, serves the first matching scripted response (each entry
@@ -9,7 +9,7 @@
 //! server-role `receive`.
 //!
 //! The CLIENT role lives one level up: [`PartnerRouter`]'s
-//! [`ClientLane`] performs every http client-role send (the dial and
+//! ClientLane performs every http client-role send (the dial and
 //! the parked roundtrip), keyed by lane key, so a send addressed to a
 //! declared endpoint and a receive addressed through a dynamic
 //! reference find the same lane. `HttpPartner` reports its bound
@@ -28,14 +28,14 @@
 //!   with `status: None` (requests carry no status). The recording and
 //!   the queue are the normative proof of what crossed the wire
 //!   (ADR-0069 §5).
-//! - Inbound (the scenario drives): the router's [`ClientLane`]
+//! - Inbound (the scenario drives): the router's ClientLane
 //!   `launch` performs a real HTTP request to the target URI; the
 //!   router's `receive` returns the parked response bounded by the
 //!   action deadline — its status, headers, and body.
 //!
 //! Server-role arrivals queue per path (depth
-//! [`ARRIVAL_LANE_CAPACITY`]); the client lane parks same-key
-//! responses in a bounded FIFO (depth [`LANE_FIFO_CAPACITY`]):
+//! ARRIVAL_LANE_CAPACITY); the client lane parks same-key
+//! responses in a bounded FIFO (depth LANE_FIFO_CAPACITY):
 //! receives consume the oldest parked response first, in wire
 //! arrival order, and a launch beyond the bound fails apparatus-class
 //! ([`TransportError::LaneFifoOverflow`]) — never a silent overwrite.
@@ -195,7 +195,7 @@ pub struct HttpWireRequest {
     pub body: Vec<u8>,
 }
 
-/// A handle onto an [`HttpPartner`]'s recorded wire requests, valid
+/// A handle onto an HttpPartner's recorded wire requests, valid
 /// after the partner itself moved into a
 /// [`PartnerRouter`](crate::adapters::PartnerRouter).
 #[derive(Clone)]
@@ -243,7 +243,7 @@ struct ServerState {
 
 /// Shared partner state: the bound listener's bookkeeping. The client
 /// role (in-flight roundtrips, dialing) lives in the router's
-/// [`ClientLane`], not here.
+/// ClientLane, not here.
 struct HttpInner {
     /// The address the listener bound.
     bound: SocketAddr,
@@ -507,15 +507,15 @@ fn lane_map_key(lane_key: &str, target_path: &str) -> String {
 ///
 /// Parking is path-aware (bd rc-cr5yf): the map key is the
 /// registered partner key joined with the wire path-and-query
-/// ([`lane_map_key`]), so roundtrips on different paths of one
+/// (lane_map_key), so roundtrips on different paths of one
 /// partner never share a FIFO. Same-key sends park their responses
-/// in a bounded FIFO (depth [`LANE_FIFO_CAPACITY`]) in wire arrival
+/// in a bounded FIFO (depth LANE_FIFO_CAPACITY) in wire arrival
 /// order; a launch beyond the bound fails apparatus-class
 /// ([`TransportError::LaneFifoOverflow`]). The map lock is a
 /// `std::sync::Mutex`, held only for map access and never across an
 /// await.
 pub struct ClientLane {
-    /// Per composite lane key ([`lane_map_key`]), the bounded FIFO of
+    /// Per composite lane key (lane_map_key), the bounded FIFO of
     /// parked responses, filled by [`launch`](Self::launch) and
     /// drained oldest-first by [`take`](Self::take). `Arc`-shared
     /// with the spawned exchanges so a post-connect failure can park
@@ -564,11 +564,11 @@ impl ClientLane {
     /// so the caller observes the failure on the send itself (the
     /// whole send stays under the runner's send deadline). The lane
     /// books under the composite of the lane key and the parsed
-    /// target path ([`lane_map_key`]): parking is path-aware, so two
+    /// target path (lane_map_key): parking is path-aware, so two
     /// paths of one partner never share a FIFO. Only a live
     /// connection books the generation-stamped entry whose response
     /// the router's `receive` consumes; when the composite key's FIFO
-    /// already holds [`LANE_FIFO_CAPACITY`] parked responses, the
+    /// already holds LANE_FIFO_CAPACITY parked responses, the
     /// launch fails apparatus-class
     /// ([`TransportError::LaneFifoOverflow`]) instead of overwriting
     /// a parked roundtrip — refused BEFORE the dial, so an overflow
@@ -676,7 +676,7 @@ impl ClientLane {
     }
 
     /// Takes the response parked under the composite of `lane_key`
-    /// and `uri`'s parsed path-and-query ([`lane_map_key`]), if any;
+    /// and `uri`'s parsed path-and-query (lane_map_key), if any;
     /// the router's client-role-first receive calls this before any
     /// server-role delegation. A reference that fails to parse (a
     /// bare authority carries no path) misses every path-aware key:
