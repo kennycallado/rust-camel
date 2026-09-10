@@ -1112,6 +1112,7 @@ pub(crate) fn enrich_sentinel_auth_error(msg: String) -> String {
     if !is_auth_failure_message(&msg) {
         return msg;
     }
+    // allow-secret: prose names the credential FIELDS, never values
     format!(
         "{msg}. Hint: this failed while authenticating to a SENTINEL node (control \
          plane) — check `sentinel_username`/`sentinel_password`. If you meant \
@@ -1125,6 +1126,7 @@ pub(crate) fn enrich_data_auth_error(msg: String) -> String {
     if !is_auth_failure_message(&msg) {
         return msg;
     }
+    // allow-secret: prose names the credential FIELDS, never values
     format!(
         "{msg}. Hint: this failed while authenticating to a Redis DATA node \
          (master/replica) — check `password`/`username`. If you meant sentinel \
