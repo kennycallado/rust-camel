@@ -1378,3 +1378,217 @@ stale_retention = "30s"
         .expect("EXISTS on db 0 of the new master");
     assert_eq!(exists_db0, 0, "post-failover key must not exist on db 0");
 }
+
+// ===========================================================================
+// Sentinel control-plane auth: sentinel_username/sentinel_password live
+// coverage (rc-nkbb). The sentinel process authenticates with its OWN ACL
+// user, DIFFERENT from the data-node ACL users, proving the two credential
+// planes are independent through the repository path.
+// ===========================================================================
+
+/// Ports for the control-plane-auth topology (distinct from every other
+/// suite's fixed ports).
+const SENT_CTRL_MASTER_PORT: u16 = 17501;
+const SENT_CTRL_SENTINEL_PORT: u16 = 27501;
+const SENT_CTRL_MASTER_NAME: &str = "mymaster";
+
+/// ACL user the SENTINEL PROCESS requires from its own clients (the
+/// control plane). Distinct from every data-node credential.
+const SENT_CTRL_SENTINEL_USERNAME: &str = "svc";
+const SENT_CTRL_SENTINEL_PASSWORD: &str = "sentinel-secret";
+
+/// Data-node ACL credentials (same shape as the ACL topology above).
+const SENT_CTRL_DATA_USERNAME: &str = "camel";
+const SENT_CTRL_DATA_PASSWORD: &str = "camel-secret";
+const SENT_CTRL_DEFAULT_PASSWORD: &str = "default-secret";
+
+/// Labels this suite's control-plane topology containers for stale cleanup.
+const SENT_CTRL_LABEL_KEY: &str = "org.rust-camel.redis-repositories-sentinel-ctrl";
+const SENT_CTRL_LABEL_VALUE: &str = "true";
+
+async fn remove_stale_sentinel_ctrl_containers() {
+    use std::collections::HashMap;
+
+    let docker = match bollard::Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+    filters.insert(
+        "label".to_string(),
+        vec![format!("{SENT_CTRL_LABEL_KEY}={SENT_CTRL_LABEL_VALUE}")],
+    );
+    let options = bollard::query_parameters::ListContainersOptionsBuilder::default()
+        .all(true)
+        .filters(&filters)
+        .build();
+    let stale = match docker.list_containers(Some(options)).await {
+        Ok(list) => list,
+        Err(_) => return,
+    };
+    let remove = bollard::query_parameters::RemoveContainerOptionsBuilder::default()
+        .force(true)
+        .build();
+    for container in stale {
+        if let Some(id) = container.id {
+            let _ = docker.remove_container(&id, Some(remove.clone())).await;
+        }
+    }
+}
+
+/// Boots one ACL master plus a sentinel whose OWN client surface requires
+/// the control-plane ACL user (`user default off`, named user on). The
+/// sentinel monitors the master through the data-plane `camel` user
+/// (`sentinel auth-user`/`auth-pass`), so both planes carry credentials,
+/// and they are DIFFERENT credentials — the exact confusion surface
+/// rc-swzq's error guidance names.
+async fn sentinel_ctrl_topology() -> ContainerAsync<GenericImage> {
+    remove_stale_sentinel_ctrl_containers().await;
+
+    let script = format!(
+        "set -e\n\
+         redis-server --port {SENT_CTRL_MASTER_PORT} \
+         --user default on '>{SENT_CTRL_DEFAULT_PASSWORD}' '~*' '&*' +@all \
+         --user {SENT_CTRL_DATA_USERNAME} on '>{SENT_CTRL_DATA_PASSWORD}' '~*' '&*' +@all \
+         --daemonize yes\n\
+         until redis-cli --no-auth-warning -a {SENT_CTRL_DEFAULT_PASSWORD} \
+         -p {SENT_CTRL_MASTER_PORT} ping | grep -q PONG; do sleep 0.1; done\n\
+         printf 'port {SENT_CTRL_SENTINEL_PORT}\\n\
+         user default off\\n\
+         user {SENT_CTRL_SENTINEL_USERNAME} on >{SENT_CTRL_SENTINEL_PASSWORD} ~* &* +@all\\n\
+         sentinel monitor {SENT_CTRL_MASTER_NAME} 127.0.0.1 {SENT_CTRL_MASTER_PORT} 1\\n\
+         sentinel auth-user {SENT_CTRL_MASTER_NAME} {SENT_CTRL_DATA_USERNAME}\\n\
+         sentinel auth-pass {SENT_CTRL_MASTER_NAME} {SENT_CTRL_DATA_PASSWORD}\\n\
+         sentinel down-after-milliseconds {SENT_CTRL_MASTER_NAME} 2000\\n' > /tmp/sentinel.conf\n\
+         exec redis-sentinel /tmp/sentinel.conf\n"
+    );
+
+    let image = GenericImage::new("redis", REDIS_IMAGE_TAG)
+        .with_cmd(["sh", "-c", &script])
+        .with_label(SENT_CTRL_LABEL_KEY, SENT_CTRL_LABEL_VALUE)
+        .with_mapped_port(
+            SENT_CTRL_MASTER_PORT,
+            ContainerPort::Tcp(SENT_CTRL_MASTER_PORT),
+        )
+        .with_mapped_port(
+            SENT_CTRL_SENTINEL_PORT,
+            ContainerPort::Tcp(SENT_CTRL_SENTINEL_PORT),
+        )
+        .with_ready_conditions(vec![WaitFor::message_on_stdout("+monitor")]);
+
+    image
+        .start()
+        .await
+        .expect("control-plane-auth sentinel topology failed to start")
+}
+
+/// Master port as resolved by the control-plane-auth sentinel, queried as
+/// the sentinel's own ACL user (proves the control-plane credential works
+/// on the raw path too).
+async fn sentinel_ctrl_master_port() -> Option<u16> {
+    let mut conn = try_raw_connection(&format!(
+        "redis://{SENT_CTRL_SENTINEL_USERNAME}:{SENT_CTRL_SENTINEL_PASSWORD}@127.0.0.1:{SENT_CTRL_SENTINEL_PORT}"
+    ))
+    .await?;
+    let (ip, port): (String, String) = redis::cmd("SENTINEL")
+        .arg("get-master-addr-by-name")
+        .arg(SENT_CTRL_MASTER_NAME)
+        .query_async(&mut conn)
+        .await
+        .ok()?;
+    if ip == "127.0.0.1" {
+        port.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Both credential planes authenticate independently through the repository
+/// path: the sentinel link uses the control-plane user, the resolved master
+/// link uses the data-plane user, and the round-trip only succeeds when
+/// BOTH are right.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_sentinel_control_plane_auth_live() {
+    let _guard = SENTINEL_TOPOLOGY_LOCK.lock().await;
+    let _container = sentinel_ctrl_topology().await;
+    install_crypto_provider();
+    support::wait::wait_until(
+        "control-plane-auth sentinel tracks the master",
+        Duration::from_secs(30),
+        Duration::from_millis(250),
+        || async { Ok(sentinel_ctrl_master_port().await == Some(SENT_CTRL_MASTER_PORT)) },
+    )
+    .await
+    .expect("control-plane-auth sentinel topology never became ready");
+
+    let toml = format!(
+        r#"
+[default.cache_repo]
+backend = "redis"
+sentinel_nodes = ["127.0.0.1:{SENT_CTRL_SENTINEL_PORT}"]
+master_name = "{SENT_CTRL_MASTER_NAME}"
+sentinel_username = "{SENT_CTRL_SENTINEL_USERNAME}"
+sentinel_password = "{SENT_CTRL_SENTINEL_PASSWORD}"
+username = "{SENT_CTRL_DATA_USERNAME}"
+password = "{SENT_CTRL_DATA_PASSWORD}"
+stale_retention = "30s"
+"#
+    );
+    let cfg = load_camel_toml(&toml);
+    let ctx = CamelConfig::configure_context(&cfg)
+        .await
+        .expect("context builds with both credential planes set");
+
+    let repo = ctx
+        .cache_repository("redis")
+        .expect("redis cache repository resolves via control-plane-auth sentinel config");
+
+    repo.set("ctrl-plane-k", cache_entry(), None)
+        .await
+        .expect("set succeeds with sentinel auth AND data auth as distinct users");
+    let got = repo
+        .get("ctrl-plane-k")
+        .await
+        .expect("get succeeds")
+        .expect("entry is present");
+    assert_eq!(got.bytes, cache_entry().bytes);
+
+    // Confusion 1 (rc-swzq live): the DATA password sent to the SENTINEL
+    // plane. configure_context's eager connect must fail, and the error
+    // must name the sentinel credential plane (hint guidance landed with
+    // rc-swzq) instead of a bare WRONGPASS.
+    let confused = format!(
+        r#"
+[default.cache_repo]
+backend = "redis"
+sentinel_nodes = ["127.0.0.1:{SENT_CTRL_SENTINEL_PORT}"]
+master_name = "{SENT_CTRL_MASTER_NAME}"
+sentinel_username = "{SENT_CTRL_SENTINEL_USERNAME}"
+sentinel_password = "{SENT_CTRL_DATA_PASSWORD}"
+username = "{SENT_CTRL_DATA_USERNAME}"
+password = "{SENT_CTRL_DATA_PASSWORD}"
+stale_retention = "30s"
+"#
+    );
+    let cfg = load_camel_toml(&confused);
+    let err = match CamelConfig::configure_context(&cfg).await {
+        Err(e) => e,
+        Ok(_) => panic!("data password on the sentinel plane must fail the eager connect"),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.to_lowercase().contains("sentinel"),
+        "the auth failure must name the sentinel credential plane, got: {msg}"
+    );
+
+    // Confusion 2 (raw control): the SENTINEL password sent to the DATA
+    // plane is rejected by the master with WRONGPASS.
+    let data_reject = try_raw_connection(&format!(
+        "redis://{SENT_CTRL_DATA_USERNAME}:{SENT_CTRL_SENTINEL_PASSWORD}@127.0.0.1:{SENT_CTRL_MASTER_PORT}"
+    ))
+    .await;
+    assert!(
+        data_reject.is_none(),
+        "the master must reject the sentinel-plane password on the data plane"
+    );
+}
