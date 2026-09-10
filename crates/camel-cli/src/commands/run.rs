@@ -87,6 +87,19 @@ pub async fn run(
     service_name: Option<String>,
     health_port: Option<u16>,
 ) -> Result<(), camel_api::CamelError> {
+    // 0. Register the SIGTERM stream BEFORE boot: a TERM arriving while
+    //    config load, the bundle cascade, discovery, or ctx.start() still
+    //    run would otherwise hit the default disposition and kill the
+    //    process before the shutdown select below arms (rc-z5zch — the
+    //    empty-discovery harness SIGTERMs on the zero-routes WARN, which
+    //    fires mid-boot). tokio buffers the pending signal; the run loop
+    //    consumes it as soon as it awaits, so a boot-time TERM completes
+    //    boot and then shuts down gracefully. Boot itself is not
+    //    interrupted mid-flight.
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("Failed to install SIGTERM handler"); // allow-unwrap
+
     // 1. Load config (fall back to empty config with serde defaults if Camel.toml not found)
     let mut camel_config: camel_config::config::CamelConfig = load_config_or_default(&config_path)?;
 
@@ -455,13 +468,12 @@ pub async fn run(
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => tracing::info!("Received Ctrl+C"),
+        // The stream was registered before boot (step 0); awaiting here
+        // consumes a TERM that arrived during boot (rc-z5zch).
         _ = async {
             #[cfg(unix)]
             {
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("Failed to install SIGTERM handler") // allow-unwrap
-                    .recv()
-                    .await
+                sigterm.recv().await
             }
             #[cfg(not(unix))]
             {
