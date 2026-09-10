@@ -1,6 +1,6 @@
 //! Tests for the Redis topology factory.
 //! Sibling file via `#[path]` so the production module stays scannable;
-//! still in-crate for private-function access (`read_standalone_ca_pem`).
+//! still in-crate for private-function access (`read_tls_ca_pem`).
 
 use super::*;
 
@@ -422,7 +422,7 @@ async fn ca_configured_topology_stores_ca_and_resolves() {
     // CA branch (the storage assertion below exercises the constructor
     // it calls into).
     assert_eq!(
-        read_standalone_ca_pem(&cfg).expect("ca read"),
+        read_tls_ca_pem(&cfg).expect("ca read"),
         Some(TEST_CA_PEM.as_bytes().to_vec())
     );
 
@@ -457,7 +457,7 @@ async fn ca_absent_topology_keeps_default_constructor() {
 
     // No `tls_ca_cert` configured: the factory's CA read yields `None`
     // (and never touches the filesystem).
-    assert_eq!(read_standalone_ca_pem(&cfg).expect("ca read"), None);
+    assert_eq!(read_tls_ca_pem(&cfg).expect("ca read"), None);
 
     let topology =
         topology_from_config(&cfg).unwrap_or_else(|e| panic!("TLS topology without CA: {e}"));
@@ -724,4 +724,87 @@ async fn sentinel_resolve_carries_username_to_master_connection() {
         !sentinel_cmds.contains("svc") && !sentinel_cmds.contains("AUTH"),
         "sentinel plane must not observe data-plane auth, saw: {sentinel_cmds}"
     );
+}
+
+// ── rc-hbde6: CA trust reaches the sentinel surface ────────────────────────
+// A `rediss-sentinel://` endpoint with `tls_ca_cert` must hand the PEM to
+// the SentinelClient build (both the sentinel links and the resolved
+// master links trust it); a plaintext sentinel endpoint ignores a
+// configured CA exactly like the standalone topology does.
+#[cfg(all(feature = "sentinel", feature = "tls"))]
+fn tls_sentinel_config(ca_path: Option<String>) -> RedisEndpointConfig {
+    use crate::sentinel_config::SentinelConfig;
+    RedisEndpointConfig {
+        host: None,
+        port: None,
+        command: crate::config::RedisCommand::Set,
+        channels: vec![],
+        key: None,
+        timeout: 1,
+        username: None,
+        password: None,
+        db: 0,
+        ssl: Some(true),
+        tls_ca_cert: ca_path,
+        reconnect: camel_component_api::NetworkRetryPolicy::default(),
+        connection_timeout_secs: 2,
+        topology_kind: crate::sentinel_config::TopologyKind::Sentinel(
+            SentinelConfig::default()
+                .with_nodes(vec!["rediss://127.0.0.1:26443".into()])
+                .with_master_name("mymaster"),
+        ),
+    }
+}
+
+#[cfg(all(feature = "sentinel", feature = "tls"))]
+#[test]
+fn sentinel_topology_factory_loads_ca_for_tls_endpoints() {
+    let (ca_pem, _server_pem, _server_key_pem) =
+        camel_component_api::test_support::tls::gen_server_cert();
+    let ca_file = camel_component_api::test_support::tls::write_pem_tmp("sentinel-ca", &ca_pem);
+
+    // TLS sentinel endpoint: the factory must read the CA (observable: an
+    // unreadable file fails closed with a Config error naming the path).
+    let mut missing = tls_sentinel_config(Some("/nonexistent/ca.pem".into()));
+    let err = match crate::topology::topology_from_config(&missing) {
+        Err(e) => e,
+        Ok(_) => panic!("TLS sentinel with an unreadable CA must fail closed"),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("/nonexistent/ca.pem") && msg.contains("failed to read"),
+        "error must name the unreadable CA path, got: {msg}"
+    );
+    assert!(
+        !crate::config::is_transient_redis_error(&err),
+        "the fail-closed CA read error must never classify transient"
+    );
+
+    // Readable CA: the topology builds (the PEM is consumed by the
+    // SentinelClientBuilder — root trust for both link surfaces).
+    let config = tls_sentinel_config(Some(ca_file.to_string_lossy().into_owned()));
+    crate::topology::topology_from_config(&config)
+        .expect("TLS sentinel topology builds with a readable CA");
+
+    // Constructor-level proof: new_with_ca rejects empty inputs the same
+    // way new() does (the CA-carrying happy path is covered above through
+    // the factory).
+    let empty = crate::topology::SentinelTopology::new_with_ca(
+        vec![],
+        "mymaster".into(),
+        None,
+        /* node_tls */ true,
+        /* node_username */ None,
+        /* node_password */ None,
+        /* node_db */ 0,
+        Some(ca_pem.into_bytes()),
+    );
+    assert!(empty.is_err(), "empty node list must fail closed");
+
+    // Plaintext sentinel endpoint: a configured CA is ignored (no TLS to
+    // trust), matching the standalone behavior — build succeeds and no
+    // filesystem access happens (a missing file does NOT fail closed).
+    missing.ssl = Some(false);
+    crate::topology::topology_from_config(&missing)
+        .expect("plaintext sentinel ignores even an unreadable configured CA");
 }

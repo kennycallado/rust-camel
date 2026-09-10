@@ -350,6 +350,96 @@ impl SentinelTopology {
             client: Arc::new(std::sync::Mutex::new(client)),
         })
     }
+
+    /// TLS variant of [`Self::new`] (rc-hbde6): trusts `ca_pem` (when
+    /// `Some`) as the root for every link the sentinel client opens — the
+    /// sentinel discovery connections AND the resolved master/replica
+    /// connections, which get `TlsMode::Secure` when `node_tls` is set.
+    ///
+    /// Uses redis-rs's [`SentinelClientBuilder`](redis::sentinel::SentinelClientBuilder)
+    /// (the plain `SentinelClient::build` cannot carry certificates): the
+    /// sentinel link settings come from the node URL schemes (`rediss://`
+    /// addresses TLS; a `Tcp` address with certificates is rejected by the
+    /// builder) plus `sentinel_creds`, the node link settings from the
+    /// explicit `node_*` parameters. Mirrors
+    /// [`StandaloneTopology::new_with_ca`]: the same fail-closed
+    /// `read_tls_ca_pem` gate in [`topology_from_config`] feeds both.
+    #[cfg(feature = "tls")]
+    #[allow(clippy::too_many_arguments)] // flat parameter list mirrors the two link surfaces
+    pub fn new_with_ca(
+        sentinel_nodes: Vec<String>,
+        master_name: String,
+        sentinel_creds: Option<(String, String)>,
+        node_tls: bool,
+        node_username: Option<String>,
+        node_password: Option<String>,
+        node_db: u16,
+        ca_pem: Option<Vec<u8>>,
+    ) -> Result<Self, CamelError> {
+        if sentinel_nodes.is_empty() || master_name.is_empty() {
+            return Err(CamelError::Config(
+                "sentinel requires nodes and master_name".into(),
+            ));
+        }
+
+        let addrs: Vec<redis::ConnectionAddr> = sentinel_nodes
+            .iter()
+            .map(|node| {
+                use redis::IntoConnectionInfo;
+                node.as_str()
+                    .into_connection_info()
+                    .map(|info| info.addr().clone())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                CamelError::Config(format!(
+                    "invalid sentinel node URL for the TLS topology: {e}"
+                ))
+            })?;
+
+        let mut builder = redis::sentinel::SentinelClientBuilder::new(
+            addrs,
+            master_name,
+            redis::sentinel::SentinelServerType::Master,
+        )
+        .map_err(|e| CamelError::Config(format!("failed to build sentinel client: {e}")))?;
+
+        if node_tls {
+            builder = builder.set_client_to_redis_tls_mode(redis::TlsMode::Secure);
+        }
+        if let Some(u) = node_username {
+            builder = builder.set_client_to_redis_username(u);
+        }
+        if let Some(p) = node_password {
+            builder = builder.set_client_to_redis_password(p);
+        }
+        builder = builder.set_client_to_redis_db(node_db as i64);
+
+        if let Some((u, p)) = &sentinel_creds {
+            if !u.is_empty() {
+                builder = builder.set_client_to_sentinel_username(u);
+            }
+            builder = builder.set_client_to_sentinel_password(p);
+        }
+
+        if let Some(pem) = &ca_pem {
+            let certs = redis::TlsCertificates {
+                client_tls: None,
+                root_cert: Some(pem.clone()),
+            };
+            builder = builder
+                .set_client_to_sentinel_certificates(certs.clone())
+                .set_client_to_redis_certificates(certs);
+        }
+
+        let client = builder.build().map_err(|e| {
+            CamelError::ProcessorError(format!("failed to build sentinel client: {e}"))
+        })?;
+
+        Ok(Self {
+            client: Arc::new(std::sync::Mutex::new(client)),
+        })
+    }
 }
 
 #[cfg(feature = "sentinel")]
@@ -405,18 +495,38 @@ pub fn topology_from_config(
     config.validate_tls()?;
     match &config.topology_kind {
         TopologyKind::Standalone => {
-            // The CA file is read ONLY here and ONLY for a TLS-enabled
-            // standalone endpoint: a configured CA on a plaintext endpoint
-            // or a sentinel endpoint is ignored without any filesystem
-            // access (CA trust on the sentinel surface is follow-up bd
-            // rc-hbde6). Feature-less builds never reach the CA path —
-            // validate_tls above already rejected TLS endpoints.
+            // The CA file is read ONLY for TLS-enabled endpoints (here and
+            // in the sentinel arm below): a configured CA on a plaintext
+            // endpoint is ignored without any filesystem access. Feature-less
+            // builds never reach the CA path — validate_tls above already
+            // rejected TLS endpoints.
             build_standalone_topology(config)
         }
-        #[cfg(feature = "sentinel")]
+        #[cfg(all(feature = "sentinel", feature = "tls"))]
         TopologyKind::Sentinel(s) => {
-            // CA trust on the sentinel surface is follow-up bd rc-hbde6; a
-            // configured tls_ca_cert is ignored for sentinel endpoints.
+            let sentinel_creds = Some((s.username.clone(), s.password.clone()))
+                .filter(|(u, p)| u.is_some() || p.is_some())
+                .map(|(u, p)| (u.unwrap_or_default(), p.unwrap_or_default()));
+            // TLS sentinel endpoint (`rediss-sentinel://`): the CA is read
+            // HERE, fail-closed, and trusted on both the sentinel links and
+            // the resolved master links (rc-hbde6). A configured CA on a
+            // plaintext sentinel endpoint returns None — ignored without
+            // any filesystem access, matching the standalone topology.
+            let ca_pem = read_tls_ca_pem(config)?;
+            let topology = SentinelTopology::new_with_ca(
+                s.nodes.clone(),
+                s.master_name.clone(),
+                sentinel_creds,
+                config.is_ssl_enabled(),
+                config.username.clone(),
+                config.password.clone(),
+                config.db,
+                ca_pem,
+            )?;
+            Ok(Arc::new(topology))
+        }
+        #[cfg(all(feature = "sentinel", not(feature = "tls")))]
+        TopologyKind::Sentinel(s) => {
             let sentinel_creds = Some((s.username.clone(), s.password.clone()))
                 .filter(|(u, p)| u.is_some() || p.is_some())
                 .map(|(u, p)| (u.unwrap_or_default(), p.unwrap_or_default()));
@@ -449,7 +559,7 @@ pub fn topology_from_config(
 fn build_standalone_topology(
     config: &RedisEndpointConfig,
 ) -> Result<Arc<dyn RedisTopology>, CamelError> {
-    let ca_pem = read_standalone_ca_pem(config)?;
+    let ca_pem = read_tls_ca_pem(config)?;
     Ok(Arc::new(StandaloneTopology::new_with_ca(config, ca_pem)))
 }
 
@@ -460,17 +570,18 @@ fn build_standalone_topology(
     Ok(Arc::new(StandaloneTopology::new(config)))
 }
 
-/// Read the configured TLS CA bundle for a standalone endpoint.
+/// Read the configured TLS CA bundle for a TLS-enabled endpoint (shared by
+/// the standalone and sentinel topologies).
 ///
 /// Returns `None` unless the endpoint is TLS-enabled AND `tls_ca_cert` is
 /// set — a configured CA on a plaintext endpoint is ignored without any
-/// filesystem access (the sentinel surface is out of scope, follow-up bd
-/// rc-hbde6). An unreadable file fails closed with a `Config` error naming
-/// the path; the message never contains file contents and deliberately
-/// avoids transient-classifier words so `is_transient_redis_error` never
-/// retries it (ADR-0012).
+/// filesystem access. An unreadable file fails closed with a `Config`
+/// error naming the path; the message never contains file contents and
+/// deliberately avoids transient-classifier words so
+/// `is_transient_redis_error` never retries it (ADR-0012, rc-ezi0f pins
+/// the Config early-return underneath).
 #[cfg(feature = "tls")]
-fn read_standalone_ca_pem(config: &RedisEndpointConfig) -> Result<Option<Vec<u8>>, CamelError> {
+fn read_tls_ca_pem(config: &RedisEndpointConfig) -> Result<Option<Vec<u8>>, CamelError> {
     let Some(path) = config.tls_ca_cert.as_deref() else {
         return Ok(None);
     };
@@ -508,6 +619,10 @@ fn node_redis_connection_info(config: &RedisEndpointConfig) -> redis::RedisConne
 /// `redis::TlsMode` is not feature-gated, so this compiles without the
 /// `tls` cargo feature; `RedisEndpointConfig::validate_tls` guards the
 /// feature-absent case at `topology_from_config` before any connect.
+// The TLS topology arm feeds the SentinelClientBuilder from the endpoint's
+// config fields instead of this wrapper, so with `tls` enabled the wrapper
+// is only reached from tests.
+#[cfg_attr(feature = "tls", allow(dead_code))]
 #[cfg(feature = "sentinel")]
 fn sentinel_node_conn_info(
     config: &RedisEndpointConfig,
