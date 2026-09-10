@@ -437,9 +437,10 @@ document whose input delivery failed SHALL skip settling, endpoint
 evaluation, and reply evaluation for that document. Exit codes: 0 when every
 expectation of every document passes; 1 when any expectation (endpoint or
 reply) fails, a settle timeout occurs, or a scenario verdict fails
-(`receive-timeout`, `validation-mismatch`, runtime `scenario-var-unresolved`);
+(`receive-timeout`, `validation-mismatch`);
 2 for misuse, unreadable files, document/route parse errors, input delivery
-failures, and apparatus failures (`doc-validation`, `tier-filter-collision`,
+failures, and apparatus failures (runtime `scenario-var-unresolved` — an
+unset variable is an authoring bug — `doc-validation`, `tier-filter-collision`,
 `partner-bind-failure`, `partner-startup-failure`, `action-transport-failure`,
 `infra-unavailable`, `full-boot-failure`, `shutdown-failure`). When classes
 coexist, precedence is 2 > 1 > 0. stdout SHALL carry one `PASS`/`FAIL` line

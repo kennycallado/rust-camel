@@ -751,9 +751,9 @@ async fn declared_empty_partners_serves_unmatched_500() {
 }
 
 /// A send referencing a variable nothing sets fails the action with
-/// the verdict class `VarUnresolved`, before any dial.
+/// the apparatus class `VarUnresolved` (rc-whof), before any dial.
 #[tokio::test]
-async fn unset_variable_fails_verdict() {
+async fn unset_variable_fails_apparatus() {
     let (outcome, _recorders) = common::run_doc(UNSET_VAR_DOC).await;
     assert_eq!(outcome.verdict, None);
 

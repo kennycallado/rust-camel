@@ -269,7 +269,7 @@ Identifier interpolation has a fixed grammar and scope. The doc-side identifier 
 
 Every executed document prints one tier annotation line before its `PASS`/`FAIL` rows: `[lean]` for the unit tier, `[full]` for the integration tier. CI parsers that consume stdout must account for these lines.
 
-Exit codes follow a fixed contract. Verdict failures exit 1: expectation mismatch, settle timeout, reply assertion failure, scenario `receive-timeout`, `validation-mismatch`, and runtime `scenario-var-unresolved`. Apparatus failures exit 2: `action-transport-failure`, `partner-startup-failure`, `shutdown-failure`, and `infra-unavailable`. Document validation failures exit 2: unreadable file, parse error, boot failure, and harness wiring errors. Precedence is 2 over 1 over 0.
+Exit codes follow a fixed contract. Verdict failures exit 1: expectation mismatch, settle timeout, reply assertion failure, scenario `receive-timeout`, and `validation-mismatch`. Apparatus failures exit 2: runtime `scenario-var-unresolved` (an unset variable is an authoring bug, not a product failure), `action-transport-failure`, `partner-startup-failure`, `shutdown-failure`, and `infra-unavailable`. Document validation failures exit 2: unreadable file, parse error, boot failure, and harness wiring errors. Precedence is 2 over 1 over 0.
 
 Scenario documents run through one of two execution paths. The build selects the path.
 

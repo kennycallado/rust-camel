@@ -111,7 +111,6 @@ pub async fn run_logs_document(doc_yaml: &str, fixture: &str) -> DocumentOutcome
 /// `fill_bind_vars` step share. Partner validate targets bind nothing
 /// of their own: the parse-time cross-check requires their URI to be
 /// declared by a send/receive, which is where the partner binds.
-#[cfg(feature = "http")]
 pub fn wired_refs(doc: &camel_integration_test::ScenarioDocument) -> Vec<EndpointRef> {
     doc.scenario
         .iter()
@@ -174,15 +173,7 @@ pub async fn run_doc(
     DocumentOutcome,
     BTreeMap<String, camel_integration_test::HttpRecorder>,
 ) {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("case.test.yaml");
-    std::fs::write(&path, yaml).expect("write case file");
-    let doc = parse_scenario_document(&path).expect("document must load");
-    let (router, recorders, _authorities) = bind_doc_partners(&doc).await;
-    let wired = wired_refs(&doc);
-    let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired, &router, &mut vars);
-    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    let (outcome, recorders, _authorities) = run_doc_with_authorities(yaml).await;
     (outcome, recorders)
 }
 

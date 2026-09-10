@@ -55,8 +55,8 @@ instrumentation is tracked separately.
 | Settle timeout | traffic does not quiesce within the quiet window plus the 5s instability budget | 1 |
 | Assertion failure | expectation mismatch reported by `MockEndpointInner::try_assert_satisfied` | 1 |
 | Reply assertion failure | `expectReply` mismatch on a captured reply (FAIL reply line) | 1 |
-| Scenario verdict failure | `receive-timeout`, `validation-mismatch`, runtime `scenario-var-unresolved` (FAIL action line) | 1 |
-| Scenario apparatus failure | `action-transport-failure`, `partner-startup-failure`, `shutdown-failure` (FAIL action line, ADR-0069 §7); `partner-startup-failure` is reserved in v1 — no adapter separates bind from handler start, bind failures report `partner-bind-failure` on stderr | 2 |
+| Scenario verdict failure | `receive-timeout`, `validation-mismatch` (FAIL action line) | 1 |
+| Scenario apparatus failure | runtime `scenario-var-unresolved` (authoring bug, rc-whof), `action-transport-failure`, `partner-startup-failure`, `shutdown-failure` (FAIL action line, ADR-0069 §7); `partner-startup-failure` is reserved in v1 — no adapter separates bind from handler start, bind failures report `partner-bind-failure` on stderr | 2 |
 | Infra unavailable | scenario endpoint scheme has no partner adapter in this build; stderr names the adapter | 2 |
 | Harness wiring error | a `send`/`receive` endpoint escapes the harness-built adapter map (doc-validation class, never a silent `ReceiveTimeout`) | 2 |
 | Tier filter collision | an explicitly named document derives the tier the `--unit`/`--integration` filter excludes | 2 |
