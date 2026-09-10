@@ -47,10 +47,14 @@ async fn send_to_direct_tolerant(
         match producer.oneshot(exchange.clone()).await {
             Ok(_) => return,
             Err(e) => {
-                // Startup race: direct consumer not yet registered. The direct
-                // component surfaces this as EndpointCreationFailed.
-                let is_startup_race = matches!(e, CamelError::EndpointCreationFailed(_))
-                    || e.to_string().contains("not registered");
+                // Startup race: direct consumer not yet registered. The
+                // direct component surfaces this as
+                // EndpointCreationFailed; the SEDA no-active-consumers
+                // gate shares the variant but fails fast — retrying
+                // duplicates executed side effects (rc-tgaxf).
+                let is_startup_race = !camel_component_seda::is_no_active_consumers_gate(&e)
+                    && (matches!(e, CamelError::EndpointCreationFailed(_))
+                        || e.to_string().contains("not registered"));
                 if is_startup_race && tokio::time::Instant::now() < deadline {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                     continue;

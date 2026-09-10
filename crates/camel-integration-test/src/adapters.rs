@@ -877,7 +877,12 @@ impl PartnerAdapter for DirectStimulus {
                         // poll_ready ("direct endpoint '{}' not registered",
                         // camel-direct/src/lib.rs) and call ("no consumer
                         // registered for direct:{name}"). No string matching.
-                        let is_startup_race = matches!(e, CamelError::EndpointCreationFailed(_));
+                        // The SEDA no-active-consumers gate shares the
+                        // variant but fails fast — retrying duplicates
+                        // executed side effects (rc-tgaxf).
+                        let is_startup_race =
+                            !camel_component_seda::is_no_active_consumers_gate(&e)
+                                && matches!(e, CamelError::EndpointCreationFailed(_));
                         if is_startup_race && tokio::time::Instant::now() < deadline {
                             tokio::time::sleep(STIMULUS_RETRY_SLEEP).await;
                             continue;

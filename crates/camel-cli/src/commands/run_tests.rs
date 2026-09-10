@@ -450,7 +450,11 @@ async fn direct_oneshot(
         match producer.oneshot(exchange.clone()).await {
             Ok(reply) => return Ok(reply),
             Err(e) => {
-                let is_startup_race = matches!(e, camel_api::CamelError::EndpointCreationFailed(_));
+                // Retry only the direct startup race; the SEDA
+                // no-active-consumers gate fails fast — retrying
+                // duplicates executed side effects (rc-tgaxf).
+                let is_startup_race = !camel_component_seda::is_no_active_consumers_gate(&e)
+                    && matches!(e, camel_api::CamelError::EndpointCreationFailed(_));
                 if is_startup_race && tokio::time::Instant::now() < deadline {
                     tokio::time::sleep(RETRY_SLEEP).await;
                     continue;

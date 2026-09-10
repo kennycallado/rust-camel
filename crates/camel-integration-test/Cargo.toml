@@ -33,6 +33,10 @@ camel-config.workspace = true
 # DirectStimulus delivers route stimulus through the booted context's
 # producer path — the same mechanism camel-test / camel run use.
 camel-component-api.workspace = true
+# Shared SEDA gate predicate (is_no_active_consumers_gate) for the
+# stimulus retry loop: gate errors fail fast instead of retrying
+# (rc-tgaxf, adopting rc-zjrx's landed predicate).
+camel-component-seda.workspace = true
 tower.workspace = true
 # HTTP partner adapter (feature `http`): the same hyper 1 stack that
 # sits under the workspace's reqwest users, driven directly so the

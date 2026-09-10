@@ -387,8 +387,12 @@ async fn send_await_reply(
         match producer.oneshot(exchange.clone()).await {
             Ok(ex) => return Ok(ex),
             Err(e) => {
-                let is_startup_race = matches!(e, CamelError::EndpointCreationFailed(_))
-                    || e.to_string().contains("not registered");
+                // Retry only the direct startup race; the SEDA
+                // no-active-consumers gate fails fast — retrying
+                // duplicates executed side effects (rc-tgaxf).
+                let is_startup_race = !camel_component_seda::is_no_active_consumers_gate(&e)
+                    && (matches!(e, CamelError::EndpointCreationFailed(_))
+                        || e.to_string().contains("not registered"));
                 if is_startup_race && tokio::time::Instant::now() < deadline {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                     continue;

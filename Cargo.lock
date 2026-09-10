@@ -2265,6 +2265,7 @@ dependencies = [
  "camel-bundles",
  "camel-component-api",
  "camel-component-http",
+ "camel-component-seda",
  "camel-config",
  "camel-core",
  "camel-dsl",
