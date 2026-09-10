@@ -217,7 +217,9 @@ mod tests {
 routeFiles: [routes.yaml]
 scenario:
 - send:
-    to: direct:start
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
 partners:
   http://127.0.0.1:0/orders:
   - method: POST
@@ -260,7 +262,9 @@ partners:
 routeFiles: [routes.yaml]
 scenario:
 - send:
-    to: direct:start
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
 partners:
   http://127.0.0.1:0/orders:
   - method: POST
@@ -296,7 +300,9 @@ scenario:
 routeFiles: [routes.yaml]
 scenario:
 - send:
-    to: direct:start
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
 partners:
   http://127.0.0.1:0/orders:
   - response:
@@ -322,7 +328,9 @@ partners:
 routeFiles: [routes.yaml]
 scenario:
 - send:
-    to: direct:start
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
 partners:
   http://127.0.0.1:0/orders:
   - times: 0
@@ -349,7 +357,9 @@ partners:
 routeFiles: [routes.yaml]
 scenario:
 - send:
-    to: direct:start
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
 partners:
   http://127.0.0.1:0/orders:
   - times: 4294967296
@@ -380,7 +390,9 @@ partners:
 routeFiles: [routes.yaml]
 scenario:
 - send:
-    to: direct:start
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
 partners:
   http://127.0.0.1:0/orders:
   - response:
@@ -407,7 +419,9 @@ partners:
 routeFiles: [routes.yaml]
 scenario:
 - send:
-    to: direct:start
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
 partners:
   http://127.0.0.1:0/orders:
   - method: POST
@@ -433,7 +447,9 @@ partners:
 routeFiles: [routes.yaml]
 scenario:
 - send:
-    to: direct:start
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
 partners:
   http://127.0.0.1:0/orders:
   - fault: reset
@@ -461,7 +477,9 @@ partners:
 routeFiles: [routes.yaml]
 scenario:
 - send:
-    to: direct:start
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
 partners:
   http://127.0.0.1:0/orders:
   - delay: 500xyz
@@ -519,7 +537,9 @@ partners:
 routeFiles: [routes.yaml]
 scenario:
 - send:
-    to: direct:start
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
 partners:
   http://127.0.0.1:0/orders:
   - times: 2

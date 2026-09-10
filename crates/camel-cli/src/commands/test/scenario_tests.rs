@@ -64,7 +64,9 @@ fn partner_scripts_map_defaults() {
 routeFiles: [routes.yaml]
 scenario:
 - send:
-    to: direct:start
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
 partners:
   http://127.0.0.1:0/orders:
   - method: POST

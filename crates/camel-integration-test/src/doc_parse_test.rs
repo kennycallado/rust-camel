@@ -826,6 +826,50 @@ scenario:
 }
 
 #[test]
+fn partners_key_typo_rejected_at_parse() {
+    // The reverse cross-check (bd rc-ilqg): a `partners:` key no
+    // wired harness `http` endpoint reference declares is a load
+    // error in the parser itself — library callers get the same
+    // rejection the CLI driver used to own. `:0/order` is a typo of
+    // the declared `:0/orders`.
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/orders
+      provisioning: harness
+partners:
+  http://127.0.0.1:0/order:
+  - method: POST
+    response:
+      status: 201
+"#,
+    )
+    .expect_err("parse must fail on the typo'd partners key");
+    match err {
+        DocError::Validation { index, ref message } => {
+            assert_eq!(index, 0, "section-level error: {message}");
+            assert!(
+                message.contains("http://127.0.0.1:0/order"),
+                "error must name the unmatched key: {message}"
+            );
+            assert!(
+                message.contains("no wired harness `http` endpoint"),
+                "error must teach the cross-check rule: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    let display = err.to_string();
+    assert!(
+        display.contains("doc-validation"),
+        "error must name the doc-validation class: {display}"
+    );
+}
+
+#[test]
 fn bare_map_partner_without_provisioning_is_not_self_declaration() {
     let err = parse_case(
         r#"

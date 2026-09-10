@@ -443,38 +443,12 @@ async fn run_scenario_full_boot(
     let wired = wire_endpoint_refs(doc);
 
     // HTTP-only partner setup (ADR-0069 sections 8-9): the partners
-    // cross-check and the listener binds compile only with
-    // `integration-http`, so an sql-only build links and full-boots
-    // `sql:` documents without any partner machinery.
+    // reverse cross-check moved into `parse_scenario_document`
+    // (library/CLI parity, bd rc-ilqg); the listener binds compile
+    // only with `integration-http`, so an sql-only build links and
+    // full-boots `sql:` documents without any partner machinery.
     #[cfg(feature = "integration-http")]
     let (mut adapters, harness_provisioned) = {
-        // Load-time cross-check (ADR-0069 section 9): every `partners:`
-        // key must equal a wired harness `http` endpoint reference. A
-        // typo of a real key (`:0/order` vs `:0/orders`) fails here, at
-        // doc-validation, BEFORE any partner binds — never as a silent
-        // fall-through to the permissive default.
-        if let Some(partners) = &doc.partners {
-            let harness_http: std::collections::BTreeSet<&str> = wired
-                .iter()
-                .copied()
-                .filter(|r| is_harness_http(r))
-                .map(|r| r.endpoint.as_str())
-                .collect();
-            if let Some(key) = partners
-                .keys()
-                .find(|key| !harness_http.contains(key.as_str()))
-            {
-                return ScenarioDocResult {
-                    action_results: Vec::new(),
-                    doc_error: Some(format!(
-                        "doc-validation: partners[{key}]: no wired harness `http` endpoint \
-                         reference declares this key"
-                    )),
-                    apparatus: true,
-                };
-            }
-        }
-
         // (a) Partners first: bind one listener per harness `http`
         // endpoint (plain-string refs get none — their sends dial the
         // literal interpolated URI), fold each env-tier bindVar into

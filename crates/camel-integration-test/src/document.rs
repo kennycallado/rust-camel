@@ -665,6 +665,28 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
             });
         }
     }
+    // Reverse cross-check (bd rc-ilqg, moved from the CLI driver so
+    // library callers get the identical rejection): every `partners:`
+    // key must equal a wired harness `http` endpoint reference —
+    // declared by a `send`/`receive` with `provisioning: harness`, or
+    // self-declared by an object-form partner target. A typo of a
+    // real key (`:0/order` vs `:0/orders`) fails here, at load,
+    // BEFORE any partner binds — never as a silent fall-through to
+    // the permissive default. Section-level: index 0.
+    if let Some(partners) = &partners {
+        let declared = |key: &str| {
+            (ref_scheme(key) == Some("http") && harness_uris.contains(&key))
+                || self_declared.contains(&key)
+        };
+        if let Some(key) = partners.keys().find(|key| !declared(key)) {
+            return Err(DocError::Validation {
+                index: 0,
+                message: format!(
+                    "partners[{key}]: no wired harness `http` endpoint reference declares this key"
+                ),
+            });
+        }
+    }
     // Document-level send bound: optional; a present value goes
     // through the same humantime grammar as the action deadlines,
     // naming the field on failure (index 0 — the section, not an
