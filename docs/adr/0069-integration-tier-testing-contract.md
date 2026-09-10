@@ -137,10 +137,12 @@ defaults third, otherwise unresolved. The pinned profile is passed the same
 way. This layered source is an input to the DSL and config loaders, not a
 process-global rewrite.
 
-Known limitation, recorded not solved here: `resolve_tree_walk` visits only
-string leaves. Placeholders in int-typed TOML fields do not resolve. Ports in
-URIs resolve today. The coercion enhancement is filed as rc-v1sw on its own
-merits.
+Known limitation, recorded when this ADR was written: `resolve_tree_walk`
+visited only string leaves, so placeholders in int-typed TOML fields did not
+resolve. Solved by the typed env probe (rc-45xig, rc-v1sw — landed
+2026-09-10): the provenance-tracking interpolation and smallest-first typed
+probe coerce clean-integer defaults at integer-typed positions in both the
+DSL YAML and camel-config TOML arms. Ports in URIs resolve today.
 
 ### 5. Partner-side assertions are the only normative proof
 
