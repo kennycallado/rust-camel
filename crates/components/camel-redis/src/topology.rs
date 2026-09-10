@@ -425,16 +425,28 @@ impl SentinelTopology {
             builder = builder.set_client_to_sentinel_password(p);
         }
 
-        // Per-plane certificate wiring (e_gpt final-review finding): redis-rs
-        // rejects certificates on a Tcp address, so the PEM installs ONLY on
-        // the planes that actually use TLS — the sentinel links when a node
-        // URL carries a TLS scheme, the data links when `node_tls` is set.
-        // Mixed planes (TLS sentinel, plaintext data — or the reverse) each
-        // trust the CA on their own plane only.
+        // Per-plane certificate wiring (e_gpt final-review round 2): redis-rs
+        // rejects certificates on a Tcp address, and its ONE certs setting
+        // covers every sentinel link, so the sentinel plane can only carry
+        // the CA when ALL sentinel node URLs use a TLS scheme. A CA
+        // configured against a MIXED-scheme node list is therefore
+        // inexpressible — fail closed with a Config error naming the
+        // constraint instead of letting the builder reject an arbitrary
+        // node. (Mixed schemes WITHOUT a CA stay allowed: each link then
+        // uses its own default roots.) The data plane installs the CA
+        // independently, whenever `node_tls` is set.
         if let Some(pem) = &ca_pem {
-            let sentinel_links_tls = sentinel_nodes
+            let tls_nodes = sentinel_nodes
                 .iter()
-                .any(|n| crate::config::sentinel_node_url_requires_tls(n));
+                .filter(|n| crate::config::sentinel_node_url_requires_tls(n))
+                .count();
+            let sentinel_links_tls = tls_nodes == sentinel_nodes.len();
+            if tls_nodes > 0 && !sentinel_links_tls {
+                return Err(CamelError::Config(
+                    "sentinel node URLs mix TLS and plaintext schemes: a configured                      tls_ca_cert applies to every sentinel link, so all sentinel nodes                      must use one scheme (rediss:// or redis://)"
+                        .into(),
+                ));
+            }
             let certs = redis::TlsCertificates {
                 client_tls: None,
                 root_cert: Some(pem.clone()),

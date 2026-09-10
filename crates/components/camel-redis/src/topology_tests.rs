@@ -879,3 +879,49 @@ fn sentinel_ca_read_gate_covers_tls_sentinel_nodes_with_plaintext_endpoint() {
         "gate must name the unreadable CA, got: {err}"
     );
 }
+
+// e_gpt final-review round 2: a MIXED-scheme sentinel node list with a
+// configured CA is inexpressible (redis-rs applies one certs setting to
+// every sentinel link and rejects certificates on Tcp addresses) — it must
+// fail closed with a Config error, while the same mixed list WITHOUT a CA
+// stays buildable (each link uses its own default roots).
+#[cfg(all(feature = "sentinel", feature = "tls"))]
+#[test]
+fn sentinel_ca_with_mixed_scheme_node_list_fails_closed() {
+    let mixed = vec![
+        "rediss://127.0.0.1:26443".to_string(),
+        "redis://127.0.0.1:26444".to_string(),
+    ];
+    let err = crate::topology::SentinelTopology::new_with_ca(
+        mixed.clone(),
+        "mymaster".into(),
+        None,
+        /* node_tls */ false,
+        None,
+        None,
+        /* node_db */ 0,
+        Some(b"mixed-ca".to_vec()),
+    )
+    .expect_err("a CA against a mixed-scheme sentinel list must fail closed");
+    match &err {
+        CamelError::Config(msg) => assert!(
+            msg.contains("mix TLS and plaintext schemes"),
+            "error must name the mixed-scheme constraint, got: {msg}"
+        ),
+        other => panic!("expected CamelError::Config, got: {other}"),
+    }
+    assert!(!crate::config::is_transient_redis_error(&err));
+
+    // Same mixed list without a CA: allowed (per-link default roots).
+    crate::topology::SentinelTopology::new_with_ca(
+        mixed,
+        "mymaster".into(),
+        None,
+        /* node_tls */ false,
+        None,
+        None,
+        /* node_db */ 0,
+        None,
+    )
+    .expect("mixed-scheme sentinel list without a CA must stay buildable");
+}
