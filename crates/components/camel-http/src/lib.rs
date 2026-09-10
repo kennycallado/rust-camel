@@ -11049,6 +11049,57 @@ mod tests {
         (base_url, handle)
     }
 
+    /// rc-0li3: local HTTPS responder — the TLS twin of
+    /// [`spawn_multi_accept_200`]. Accepts any number of TLS connections on
+    /// an ephemeral 127.0.0.1 port and answers each with a fixed 200. The
+    /// certificate comes from `camel_component_api::test_support`
+    /// (SANs: localhost, 127.0.0.1, ::1); clients run with
+    /// `tls.insecure = true`.
+    async fn spawn_tls_multi_accept_200() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::AsyncWriteExt;
+
+        let (_ca_pem, cert_pem, key_pem) =
+            camel_component_api::test_support::tls::gen_server_cert();
+        let certs: Vec<_> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .expect("parse server cert pem");
+        let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+            .expect("parse server key pem")
+            .expect("server key present");
+        // Explicit provider: the process default is ambiguous when multiple
+        // crates pull rustls feature sets; the graph enables aws-lc-rs.
+        let provider = std::sync::Arc::new(
+            tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
+        );
+        let tls_cfg = tokio_rustls::rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("safe default protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("build rustls server config");
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_cfg));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral 127.0.0.1 listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let base_url = format!("https://localhost:{port}");
+        let handle = tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut tls) = acceptor.accept(conn).await {
+                        let _ = tls
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                            .await;
+                        let _ = tls.shutdown().await;
+                    }
+                });
+            }
+        });
+        (base_url, handle)
+    }
+
     /// Port of a [`spawn_multi_accept_200`] base URL, for tests that must
     /// target a different authority (the 127.0.0.1 literal) on the same
     /// listener.
@@ -11236,6 +11287,54 @@ mod tests {
             "a dynamic-resolution sequence (fresh endpoint+producer per URI) \
              must reuse the component's one pinned cache entry; 0 builds \
              means the endpoints bypassed it, more than 1 means \
+             per-endpoint caches came back"
+        );
+    }
+
+    /// rc-0li3: BEHAVIORAL https sharing pin — two https endpoints created
+    /// through one `HttpsComponent` drive real TLS requests through the
+    /// component's single pinned cache. A regression that reintroduces
+    /// per-endpoint `PinnedClientCache::new` inside
+    /// `HttpsComponent::create_endpoint` leaves the component cache at
+    /// delta 0 and fails this test (the structural ptr_eq test cannot see
+    /// that).
+    #[tokio::test]
+    async fn test_https_component_endpoints_share_pinned_cache_behaviorally() {
+        use tower::ServiceExt;
+
+        let mut http_config = HttpConfig::default();
+        http_config.tls = Some(crate::config::TlsConfig {
+            enabled: true,
+            insecure: true,
+            ..Default::default()
+        });
+        let component = HttpsComponent::with_config(http_config);
+        let (base_url, _handle) = spawn_tls_multi_accept_200().await;
+        let baseline = component.pinned_cache.build_count();
+
+        let ctx = test_producer_ctx();
+        let endpoint_ctx = NoOpComponentContext;
+        for uri in [
+            format!("{base_url}/a?allowInternal=true&k=a"),
+            format!("{base_url}/b?allowInternal=true&k=b"),
+        ] {
+            let endpoint = component
+                .create_endpoint(&uri, &endpoint_ctx)
+                .expect("create https endpoint");
+            let producer = endpoint
+                .create_producer(rt(), &ctx)
+                .expect("create producer");
+            let exchange = Exchange::new(Message::default());
+            let reply = producer.oneshot(exchange).await;
+            assert!(reply.is_ok(), "https request failed: {reply:?}");
+        }
+
+        assert_eq!(
+            component.pinned_cache.build_count() - baseline,
+            1,
+            "endpoints of one HttpsComponent must share its pinned cache over \
+             real https requests; 0 builds means the endpoints bypassed it \
+             (per-endpoint cache regression), more than 1 means \
              per-endpoint caches came back"
         );
     }
