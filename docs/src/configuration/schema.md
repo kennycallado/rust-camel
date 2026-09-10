@@ -317,6 +317,7 @@ Persistent idempotent repository for the [Idempotent Consumer](../eip/idempotent
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `backend` | string | `"redb"` | `"redb"` (persistent on-disk store) or `"redis"` (persistent, shared across processes). |
+| `name` | string | absent | Registration-name override (also the redis keyspace segment). Defaults: `"redb"`/`"redis"`. Allowed charset `[A-Za-z0-9:_-]`. |
 | `path` | string | (required for redb) | Path to the `.redb` file. Must not be empty. Redb only. |
 | `durability` | string | `"immediate"` | `immediate` fsyncs on every key. `eventual` skips fsync. Redb only. |
 | `url` | string | (required for redis) | Standalone endpoint, `redis://` or `rediss://`. Mutually exclusive with `sentinel_nodes`. Redis only. |
@@ -344,6 +345,7 @@ Optional cache repository configuration. When unset, only the default `"memory"`
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `backend` | string | `"memory"` | `"memory"` (moka-backed, size-eviction only), `"redb"` (persistent, survives restarts), or `"redis"` (persistent, shared across processes). |
+| `name` | string | absent | Registration-name override (also the redis keyspace segment). Defaults: `"memory"`/`"persistent"`/`"redis"` (the `redb` default is a kept asymmetry). The memory backend only honors it when `max_capacity` is set. |
 | `path` | string | (required for redb) | Path to the `.redb` file. Created if it does not exist. Must not be empty. Redb only. |
 | `stale_retention` | duration string | `7d` (wiring fallback) | How long after expiry a stale entry stays readable. Redb: the sweep reclaims the entry after this window. Redis: the key expires at `expires_at + stale_retention`. Duration strings, for example `"168h"`, `"7d"`, `"30m"`. The value in force at `set()` time applies; later changes are not retroactive (see ADR-0065). Redb and redis. |
 | `max_entries` | integer | `1000000` | Maximum entry count for the redb backend; new-key writes are rejected at the cap. Redb only. |

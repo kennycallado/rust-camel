@@ -801,38 +801,81 @@ fn sentinel_topology_factory_loads_ca_for_tls_endpoints() {
     );
     assert!(empty.is_err(), "empty node list must fail closed");
 
-    // Plaintext sentinel endpoint: a configured CA is ignored (no TLS to
-    // trust), matching the standalone behavior — build succeeds and no
-    // filesystem access happens (a missing file does NOT fail closed).
+    // Plaintext sentinel endpoint with PLAINTEXT node URLs: a configured CA
+    // is ignored on every plane (no TLS to trust), matching the standalone
+    // behavior — build succeeds and no filesystem access happens (a missing
+    // file does NOT fail closed). The node URLs must be plain: rediss://
+    // nodes alone keep the sentinel plane in the CA read gate.
     missing.ssl = Some(false);
+    if let crate::sentinel_config::TopologyKind::Sentinel(ref mut sentinel) = missing.topology_kind
+    {
+        sentinel.nodes = vec!["redis://127.0.0.1:26443".into()];
+    }
     crate::topology::topology_from_config(&missing)
         .expect("plaintext sentinel ignores even an unreadable configured CA");
 }
 
-// r_glm holistic finding: the new_with_ca doc claims certificates on a Tcp
-// sentinel address are rejected by the builder — pin that claim so it cannot
-// drift from the redis-rs behavior it describes.
+// ── e_gpt final-review finding: mixed-plane sentinel TLS ────────────────────
+// TLS can be selected per plane: rediss:// sentinel node URLs encrypt the
+// SENTINEL links while the data links stay plaintext (and the reverse via
+// a TLS endpoint with plain sentinel nodes). A configured CA must install
+// only on the TLS planes — redis-rs rejects certificates on Tcp addresses,
+// so unconditional installation broke the reverse mix, and an ssl-only
+// read gate starved the sentinel-only mix.
 #[cfg(all(feature = "sentinel", feature = "tls"))]
 #[test]
-fn sentinel_tls_builder_rejects_certs_on_plaintext_nodes() {
-    let err = crate::topology::SentinelTopology::new_with_ca(
-        // Plaintext sentinel address, but a CA is configured.
+fn sentinel_tls_mixed_planes_each_trust_their_own_ca_surface() {
+    // Mix A: TLS sentinel links (rediss:// node), PLAINTEXT data links.
+    // The CA installs on the sentinel plane only; the builder must accept.
+    let topo = crate::topology::SentinelTopology::new_with_ca(
+        vec!["rediss://127.0.0.1:26443".into()],
+        "mymaster".into(),
+        None,
+        /* node_tls */ false,
+        None,
+        None,
+        /* node_db */ 0,
+        Some(b"mixed-ca".to_vec()),
+    );
+    assert!(
+        topo.is_ok(),
+        "TLS-sentinel/plaintext-data mix must build: {topo:?}"
+    );
+
+    // Mix B: PLAINTEXT sentinel links, TLS data links. Certificates on the
+    // Tcp sentinel addresses would be rejected by the builder — the CA must
+    // install on the data plane only, and the build must succeed.
+    let topo = crate::topology::SentinelTopology::new_with_ca(
         vec!["redis://127.0.0.1:26443".into()],
         "mymaster".into(),
         None,
         /* node_tls */ true,
-        /* node_username */ None,
-        /* node_password */ None,
+        None,
+        None,
         /* node_db */ 0,
-        Some(b"dummy-ca-pem".to_vec()),
-    )
-    .expect_err("certificates on a Tcp sentinel address must be rejected");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("failed to build sentinel client"),
-        "rejection must surface through the builder error, got: {msg}"
+        Some(b"mixed-ca".to_vec()),
     );
-    // ADR-0012 family boundary: setup defects are Config, never transient.
-    assert!(!crate::config::is_transient_redis_error(&err));
-    matches!(err, CamelError::Config(_));
+    assert!(
+        topo.is_ok(),
+        "plaintext-sentinel/TLS-data mix must build: {topo:?}"
+    );
+}
+
+// The factory read gate must fire on the SENTINEL plane too: a structured
+// rediss:// sentinel node with a plaintext endpoint still needs the CA
+// (fail-closed on an unreadable file proves the gate triggers).
+#[cfg(all(feature = "sentinel", feature = "tls"))]
+#[test]
+fn sentinel_ca_read_gate_covers_tls_sentinel_nodes_with_plaintext_endpoint() {
+    let mut config = tls_sentinel_config(Some("/nonexistent/ca.pem".into()));
+    config.ssl = Some(false);
+    // Keep the rediss:// node from the helper so the sentinel plane is TLS.
+    let err = match crate::topology::topology_from_config(&config) {
+        Err(e) => e,
+        Ok(_) => panic!("sentinel-plane TLS with an unreadable CA must fail closed"),
+    };
+    assert!(
+        err.to_string().contains("/nonexistent/ca.pem"),
+        "gate must name the unreadable CA, got: {err}"
+    );
 }

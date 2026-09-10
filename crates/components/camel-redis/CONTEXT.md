@@ -135,8 +135,10 @@ Sentinel is selected either by URI scheme or by a structured config block:
 Both are mutually exclusive with cluster config (ADR-0033). Without the
 `sentinel` cargo feature, any sentinel URI or non-empty sentinel block fails
 closed at startup. Sentinel node URLs are redacted in logs: credentials are
-percent-encoded into the node URL only inside `SentinelTopology::new`
-(`embed_sentinel_creds`), never printed.
+percent-encoded into the node URL inside `SentinelTopology::new`
+(`embed_sentinel_creds`) — or, on TLS builds (bd rc-hbde6), passed through
+`SentinelClientBuilder` setters in `SentinelTopology::new_with_ca` — never
+printed.
 
 ### Bounded reconnect vs supervision (ADR-0007)
 

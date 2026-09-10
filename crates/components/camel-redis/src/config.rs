@@ -1049,7 +1049,7 @@ impl RedisEndpointConfig {
 /// later in `SentinelTopology::new` (`embed_sentinel_creds` parses every
 /// node and rejects it there).
 #[cfg_attr(not(feature = "sentinel"), allow(dead_code))]
-fn sentinel_node_url_requires_tls(node: &str) -> bool {
+pub(crate) fn sentinel_node_url_requires_tls(node: &str) -> bool {
     redis::parse_redis_url(node).is_some_and(|url| matches!(url.scheme(), "rediss" | "valkeys"))
 }
 

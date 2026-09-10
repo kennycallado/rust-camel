@@ -359,9 +359,12 @@ impl SentinelTopology {
     /// Uses redis-rs's [`SentinelClientBuilder`](redis::sentinel::SentinelClientBuilder)
     /// (the plain `SentinelClient::build` cannot carry certificates): the
     /// sentinel link settings come from the node URL schemes (`rediss://`
-    /// addresses TLS; a `Tcp` address with certificates is rejected by the
-    /// builder) plus `sentinel_creds`, the node link settings from the
-    /// explicit `node_*` parameters. Mirrors
+    /// addresses TLS) plus `sentinel_creds`, the node link settings from
+    /// the explicit `node_*` parameters. The CA installs per plane — only
+    /// on TLS sentinel links and/or TLS data links, never on a `Tcp`
+    /// address (redis-rs rejects certificates there), so mixed
+    /// TLS-plaintext plane selections each trust the CA on their own
+    /// surface. Mirrors
     /// [`StandaloneTopology::new_with_ca`]: the same fail-closed
     /// `read_tls_ca_pem` gate in [`topology_from_config`] feeds both.
     #[cfg(feature = "tls")]
@@ -422,14 +425,26 @@ impl SentinelTopology {
             builder = builder.set_client_to_sentinel_password(p);
         }
 
+        // Per-plane certificate wiring (e_gpt final-review finding): redis-rs
+        // rejects certificates on a Tcp address, so the PEM installs ONLY on
+        // the planes that actually use TLS — the sentinel links when a node
+        // URL carries a TLS scheme, the data links when `node_tls` is set.
+        // Mixed planes (TLS sentinel, plaintext data — or the reverse) each
+        // trust the CA on their own plane only.
         if let Some(pem) = &ca_pem {
+            let sentinel_links_tls = sentinel_nodes
+                .iter()
+                .any(|n| crate::config::sentinel_node_url_requires_tls(n));
             let certs = redis::TlsCertificates {
                 client_tls: None,
                 root_cert: Some(pem.clone()),
             };
-            builder = builder
-                .set_client_to_sentinel_certificates(certs.clone())
-                .set_client_to_redis_certificates(certs);
+            if sentinel_links_tls {
+                builder = builder.set_client_to_sentinel_certificates(certs.clone());
+            }
+            if node_tls {
+                builder = builder.set_client_to_redis_certificates(certs);
+            }
         }
 
         // Setup defect, not a transport failure: a builder rejection means
@@ -590,7 +605,22 @@ fn read_tls_ca_pem(config: &RedisEndpointConfig) -> Result<Option<Vec<u8>>, Came
     let Some(path) = config.tls_ca_cert.as_deref() else {
         return Ok(None);
     };
-    if !config.is_ssl_enabled() {
+    // TLS can be selected on either plane independently: the endpoint's
+    // `ssl` flag (standalone + sentinel DATA links) or a structured
+    // `rediss://` sentinel node URL (the SENTINEL links — e_gpt final-review
+    // finding: keying on `ssl` alone ignored the sentinel plane and left a
+    // configured CA unread for a TLS-sentinel/plaintext-data mix).
+    #[cfg(feature = "sentinel")]
+    let sentinel_plane_tls = match &config.topology_kind {
+        crate::sentinel_config::TopologyKind::Sentinel(s) => s
+            .nodes
+            .iter()
+            .any(|n| crate::config::sentinel_node_url_requires_tls(n)),
+        _ => false,
+    };
+    #[cfg(not(feature = "sentinel"))]
+    let sentinel_plane_tls = false;
+    if !config.is_ssl_enabled() && !sentinel_plane_tls {
         return Ok(None);
     }
     let pem = std::fs::read(path).map_err(|e| {
