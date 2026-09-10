@@ -177,6 +177,12 @@ are neither unwrapped nor re-encoded.
 A raw byte forbidden in a query component produces a resolve error naming the
 offending byte — the serializer never silently re-encodes authored bytes.
 
+Apostrophe (0x27) is rejected even though RFC 3986 `pchar` admits it: reqwest's
+WHATWG URL parser re-encodes 0x27 as `%27` in every http/https query, so the
+raw byte can never ride the wire verbatim. Admitting it would silently
+normalize authored bytes; the wire-faithful authored form is the explicit
+`%27` escape (rc-nmupb).
+
 ### CamelHttpUri host fence (`allowedUriHosts`)
 
 Next to `bridgeEndpoint`, the outbound URL policy includes an opt-in

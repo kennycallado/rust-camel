@@ -2795,14 +2795,19 @@ fn merge_header_query(
     Ok(Some(parts.join("&")))
 }
 
-/// Bytes that may appear unescaped in a URI query component (RFC 3986
-/// `query = *( pchar / "/" / "?" )`): unreserved, sub-delims, `:`, `@`,
-/// `/`, `?`, plus the `%` escape introducer.
+/// Bytes that may appear unescaped in a URI query component. RFC 3986
+/// (`query = *( pchar / "/" / "?" )`) admits unreserved, sub-delims, `:`,
+/// `@`, `/`, `?`, and `%` — with ONE deliberate exclusion: the apostrophe
+/// (`'`, 0x27). reqwest's WHATWG URL parser re-encodes 0x27 to `%27` in the
+/// special-query percent-encode set (http/https), so an authored apostrophe
+/// can never ride the wire verbatim; admitting it would silently normalize
+/// authored bytes (rc-nmupb). Authors write `%27` explicitly when they mean
+/// the byte on the wire.
 fn is_legal_query_byte(byte: u8) -> bool {
     matches!(byte,
         b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
         | b'-' | b'.' | b'_' | b'~'
-        | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'='
+        | b'!' | b'$' | b'&' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'='
         | b':' | b'@' | b'/' | b'?'
         | b'%')
 }
@@ -8388,6 +8393,33 @@ mod tests {
             merged.as_deref(),
             Some("k=1&k=2"),
             "intra-header duplicate keys ride verbatim"
+        );
+    }
+
+    /// rc-nmupb: authored apostrophe (0x27) is RFC 3986 pchar-legal, but
+    /// reqwest's WHATWG parser re-encodes it as `%27` in every http/https
+    /// query — the raw byte can never ride the wire verbatim. Resolve
+    /// rejects it naming the byte; the authored `%27` escape is the
+    /// wire-faithful form and rides verbatim.
+    #[test]
+    fn resolve_url_authored_apostrophe_rejected_percent_escape_rides() {
+        let mut config = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+
+        config.raw_query = Some("q=it's".to_string());
+        let exchange = Exchange::new(Message::default());
+        let err = HttpProducer::resolve_url(&exchange, &config)
+            .expect_err("authored apostrophe must be rejected, not silently %27-normalized");
+        assert!(
+            err.to_string().contains("0x27"),
+            "error must name the apostrophe byte: {err}"
+        );
+
+        config.raw_query = Some("q=it%27s".to_string());
+        let url = HttpProducer::resolve_url(&exchange, &config)
+            .expect("authored %27 escape is wire-legal");
+        assert!(
+            url.contains("q=it%27s"),
+            "the authored escape must ride byte-for-byte: {url}"
         );
     }
 
