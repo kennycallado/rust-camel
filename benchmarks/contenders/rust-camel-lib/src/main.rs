@@ -16,7 +16,7 @@
 
 mod scenarios;
 
-/// The valid argv[1] values — printed on unknown/missing scenario.
+/// The valid `argv[1]` values — printed on unknown/missing scenario.
 const SCENARIOS: [&str; 7] = [
     "startup-minimal",
     "http-server",

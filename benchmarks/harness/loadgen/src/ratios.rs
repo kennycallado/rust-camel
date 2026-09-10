@@ -36,7 +36,7 @@
 //!
 //! ## CI method — percentile, deliberately not BCa
 //!
-//! [`bca`]'s acceleration term is jackknife-derived for a single-sample
+//! [`bca`](crate::bca)'s acceleration term is jackknife-derived for a single-sample
 //! statistic; for a ratio of two medians it is undefined. The interval is
 //! therefore a plain percentile bootstrap on the resampled ratio
 //! distribution (2.5th / 97.5th percentiles, linear interpolation).
@@ -47,7 +47,7 @@
 //! - **Independent** (`--independent`): each cell's indices are resampled
 //!   separately; output is tagged `UNPAIRED`.
 //!
-//! Determinism: a single [`bca::SplitMix64`] stream seeded by `--seed`
+//! Determinism: a single `bca::SplitMix64` stream seeded by `--seed`
 //! (default 0); identical inputs + seed ⇒ identical output line.
 
 use std::path::{Path, PathBuf};

@@ -536,7 +536,7 @@ impl KubernetesPlatformService {
     /// This method always installs [`NoopReadinessGate`] for the readiness gate, meaning
     /// pod readiness condition patches are **not** emitted. To enable cluster readiness
     /// checks, construct a [`KubernetesReadinessGate`](crate::KubernetesReadinessGate)
-    /// manually and use [`from_parts`] instead.
+    /// manually and use [`from_parts`](KubernetesPlatformService::from_parts) instead.
     pub async fn try_default(config: KubernetesPlatformConfig) -> Result<Self, PlatformError> {
         config.validate()?;
 

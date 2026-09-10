@@ -1,7 +1,7 @@
 //! The scenario action runner (ADR-0069 §5, §7).
 //!
 //! Executes a scenario's ordered actions against a
-//! [`PartnerRouter`](crate::adapters::PartnerRouter): `send`
+//! [`PartnerRouter`]: `send`
 //! dispatches through the adapter, `receive` awaits with the action's
 //! deadline and applies `extract` into [`ScenarioVars`], `sleep` uses
 //! tokio time, and `validate` evaluates the matcher grammar against
@@ -27,7 +27,7 @@
 //!
 //! Every await is bounded: `receive` carries the action deadline, and
 //! `send` is bounded by the document's `sendDeadline`, defaulting to
-//! [`SEND_DEADLINE`].
+//! `SEND_DEADLINE`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -362,7 +362,7 @@ pub async fn run_scenario(
 /// The outcome of executing a whole scenario document
 /// (ADR-0069 sections 5 and 7).
 ///
-/// [`run_scenario_document`](self::run_scenario_document) fills
+/// [`run_scenario_document`] fills
 /// `per_action` with one outcome per executed action and stops at the
 /// first failure; `verdict` is `Some(Pass)` only when every action
 /// passed. `final_failure` is the post-verdict slot: the caller that
@@ -420,7 +420,7 @@ pub struct DocumentOutcome {
 /// component reaches the booted system under test through the
 /// context-stimulus adapter the caller registered for that endpoint
 /// (see [`crate::adapters`]). The single-action
-/// [`run_scenario`] loop and this loop share [`run_action`].
+/// [`run_scenario`] loop and this loop share `run_action`.
 pub async fn run_scenario_document(
     doc: &ScenarioDocument,
     router: &PartnerRouter,

@@ -102,7 +102,7 @@ impl Endpoint for HttpStaticEndpoint {
 // ---------------------------------------------------------------------------
 
 /// Consumer that registers a static file mount into the shared
-/// [`HttpRouteRegistry`] and stays idle until cancelled.
+/// [`HttpRouteRegistry`](crate::HttpRouteRegistry) and stays idle until cancelled.
 ///
 /// On start:
 /// 1. Canonicalizes the configured `dir` (fails if not found).

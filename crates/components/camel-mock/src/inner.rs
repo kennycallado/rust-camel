@@ -175,7 +175,7 @@ impl MockEndpointInner {
     ///
     /// Panics immediately if called from a current-thread tokio runtime.
     /// Use `#[tokio::test(flavor = "multi_thread")]` or the async accessors
-    /// [`get_received_exchanges`] / [`await_exchanges`] instead.
+    /// [`get_received_exchanges`](MockEndpointInner::get_received_exchanges) / [`await_exchanges`] instead.
     ///
     /// [`await_exchanges`]: MockEndpointInner::await_exchanges
     pub fn exchange(&self, idx: usize) -> ExchangeAssert {

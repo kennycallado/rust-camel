@@ -256,7 +256,7 @@ pub fn render_bound(bound: &CountBound) -> String {
 /// value; `Contains`/`StartsWith`/`EndsWith` match the stringified
 /// value; `Exists` holds for any non-null value; `Any` matches every
 /// value including null; `JsonSubset` recursive-subset matches via
-/// [`json_subset`].
+/// `json_subset`.
 pub fn expectation_matches(expectation: &Expectation, value: &serde_json::Value) -> bool {
     match expectation {
         Expectation::Equals(expected) => value == expected,

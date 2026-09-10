@@ -296,7 +296,7 @@ pub trait PartnerAdapter: Send + Sync {
 ///
 /// Sends split into two keys — the declared endpoint string and the
 /// interpolated wire address — and http-scheme sends route through
-/// the router's own [`ClientLane`](http::ClientLane) (feature
+/// the router's own `ClientLane` (camel-component-http, feature
 /// `http`): a declared `:0` harness key dials the partner's bound
 /// address, a dynamic reference resolves by interpolated authority,
 /// and a plain string dials its literal URI — no `Unbound` failure

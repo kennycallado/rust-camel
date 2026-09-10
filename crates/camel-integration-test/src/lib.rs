@@ -28,7 +28,7 @@ pub mod inbound;
 /// open windows, and the captured events behind the scenario tier's
 /// document-level `logs:` assertions. The harness claims the process's
 /// tracing seat before the composition root's boot (first-wins
-/// `try_init`); when it owns the seat, [`log_capture::CaptureLayer`]
+/// `try_init`); when it owns the seat, `log_capture::CaptureLayer`
 /// attributes every event to every open window whose
 /// `[opened_at, now)` interval contains the event timestamp.
 pub mod log_capture;

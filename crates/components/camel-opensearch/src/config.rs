@@ -277,7 +277,7 @@ struct OpenSearchUriConfig {
 /// Format: `opensearch://host:port/index?operation=INDEX&username=X&password=Y`
 /// or `opensearchs://host:port/index?operation=SEARCH` (TLS enabled).
 ///
-/// # Fields with Global Defaults (Option<T>)
+/// # Fields with Global Defaults (`Option<T>`)
 ///
 /// These fields can be set via global defaults in Camel.toml. They are `Option<T>`
 /// to distinguish between "not set by URI" (`None`) and "explicitly set by URI" (`Some(v)`).

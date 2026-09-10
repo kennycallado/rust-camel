@@ -1,4 +1,4 @@
-//! producer.rs — ExecProducer: Service<Exchange> running the enforcement flow.
+//! producer.rs — ExecProducer: `Service<Exchange>` running the enforcement flow.
 //!
 //! Outcomes: pre/during-spawn failures => Err. Post-spawn conditions with output
 //! (timeout, exit-code mismatch) => Ok with result + headers (route branches via choice).

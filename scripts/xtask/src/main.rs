@@ -91,10 +91,10 @@ enum Commands {
     /// `scripts/xtask/allowlist-log-levels.txt`.
     LintLogLevels,
     /// Enforce ADR-0049: pub enums in the contract crates must be
-    /// #[non_exhaustive] or carry a `/// exhaustive-by-contract: <rationale>`
+    /// `#[non_exhaustive]` or carry a `/// exhaustive-by-contract: <rationale>`
     /// rustdoc note. Exits non-zero on violations.
     LintNonExhaustive,
-    /// Enforce ADR-0054: every #[ignore] must carry a reason string from a
+    /// Enforce ADR-0054: every `#[ignore]` must carry a reason string from a
     /// closed vocabulary. Exits non-zero on violations.
     LintIgnore,
     /// Validate CONTEXT.md and CONTEXT-MAP.md citation hygiene: path
@@ -4412,7 +4412,7 @@ fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Extract `name = "..."` from a Cargo.toml [package] section.
+/// Extract `name = "..."` from a Cargo.toml `[package]` section.
 fn extract_toml_name(content: &str) -> Option<String> {
     let mut in_package = false;
     for line in content.lines() {

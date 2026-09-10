@@ -182,11 +182,11 @@ pub enum MockAssertionError {
         /// Number of received exchanges at evaluation.
         received_count: usize,
         /// `{:?}`-formatted values of `key` across received exchanges that
-        /// carry it: up to [`DIAGNOSTIC_LIST_CAP`] values plus a final
+        /// carry it: up to `DIAGNOSTIC_LIST_CAP` values plus a final
         /// `+N more` entry on overflow.
         actual_values: Vec<String>,
         /// Sorted key list of the last received exchange: up to
-        /// [`DIAGNOSTIC_LIST_CAP`] keys plus a `+N more` suffix on
+        /// `DIAGNOSTIC_LIST_CAP` keys plus a `+N more` suffix on
         /// overflow; `None` when no exchange was received.
         last_headers: Option<String>,
     },
@@ -201,11 +201,11 @@ pub enum MockAssertionError {
         /// Number of received exchanges at evaluation.
         received_count: usize,
         /// `{:?}`-formatted values of `key` across received exchanges that
-        /// carry it: up to [`DIAGNOSTIC_LIST_CAP`] values plus a final
+        /// carry it: up to `DIAGNOSTIC_LIST_CAP` values plus a final
         /// `+N more` entry on overflow.
         actual_values: Vec<String>,
         /// Sorted key list of the last received exchange: up to
-        /// [`DIAGNOSTIC_LIST_CAP`] keys plus a `+N more` suffix on
+        /// `DIAGNOSTIC_LIST_CAP` keys plus a `+N more` suffix on
         /// overflow; `None` when no exchange was received.
         last_headers: Option<String>,
     },

@@ -5,7 +5,7 @@
 //!     .set_body(constant <1KB XML payload>)
 //!     .process(set BENCH_START = Instant::now())
 //!     .to(xslt:<shared/identity-transform.xsl>)
-//!     .process(emit BENCH_LATENCY <id> <duration_ns> to tmpfs file)
+//!     .process(emit BENCH_LATENCY \<id\> \<duration_ns\> to tmpfs file)
 //!
 //! `camel-xslt` delegates the transform to `bridges/xml` via gRPC
 //! mTLS — this is the bridge tax surface the T4a cell measures. The

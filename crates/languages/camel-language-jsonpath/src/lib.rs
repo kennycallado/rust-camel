@@ -29,7 +29,7 @@ pub struct JsonPathConfig {
     /// When `None`, no size limit is enforced.
     pub max_input_bytes: Option<usize>,
     /// Maximum allowed nesting depth for JSON values.
-    /// Defaults to [`DEFAULT_MAX_DEPTH`] (64).
+    /// Defaults to `DEFAULT_MAX_DEPTH` (64).
     pub max_depth: Option<usize>,
 }
 

@@ -72,7 +72,7 @@ pub struct CamelConfig {
     pub beans: HashMap<String, BeanConfig>,
 
     /// In-process scripting language limits (Rhai, Boa JS).
-    /// See [`LanguagesConfig`] for details.
+    /// See [`LanguagesConfig`](crate::LanguagesConfig) for details.
     #[serde(default)]
     pub languages: crate::LanguagesConfig,
 
@@ -95,7 +95,7 @@ pub struct CamelConfig {
     /// catch typos in sections like `[observability.health]`.
     ///
     /// When adding or removing top-level fields here, update
-    /// [`KNOWN_TOP_LEVEL_KEYS`] in the same change: a new field missing from the
+    /// `KNOWN_TOP_LEVEL_KEYS` in the same change: a new field missing from the
     /// const silently false-warns as an "unselected profile".
     #[serde(flatten)]
     pub _extra: HashMap<String, toml::Value>,
@@ -3064,9 +3064,9 @@ fn segs_display(segs: &[ConfigSeg]) -> String {
 
 /// Recursively resolve every string leaf of a TOML tree in place.
 ///
-/// Leaves whose top-level path segment is in [`STRICT_PREFIXES`] resolve via
-/// [`resolve_strict_leaf_with`]; every other leaf via
-/// [`resolve_plain_leaf_with`].
+/// Leaves whose top-level path segment is in `STRICT_PREFIXES` resolve via
+/// `resolve_strict_leaf_with`; every other leaf via
+/// `resolve_plain_leaf_with`.
 /// Path segments join with `.`; array indices render as `[i]`
 /// (e.g. `security.native.credentials[1].secret`).
 pub fn resolve_tree_placeholders(root: &mut toml::Value) -> Result<(), ConfigError> {

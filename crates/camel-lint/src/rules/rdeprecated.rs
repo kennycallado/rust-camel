@@ -2,7 +2,7 @@
 //!
 //! For each endpoint with a known scheme, resolves each provided option
 //! (including aliases) against the catalog's `uri_options`. When the
-//! canonical [`UriOption::deprecated`] is `Some(msg)`, emits a warning
+//! canonical [`UriOption`](camel_api::component_metadata::UriOption)::deprecated is `Some(msg)`, emits a warning
 //! bearing the deprecation message on the option key span.
 
 use camel_api::component_metadata::ComponentMetadataCatalog;

@@ -150,7 +150,7 @@ impl Document {
 
     /// Apply a suggested [`Fix`] to this document.
     ///
-    /// Substitutes `fix.replacement` into `fix.span` via [`apply_edit`], then
+    /// Substitutes `fix.replacement` into `fix.span` via [`apply_edit`](Document::apply_edit), then
     /// checks the result: if the re-parse produces a [`ParseFailure`], the edit
     /// is **rolled back** (the document is restored to its pre-edit state) and
     /// an `Err` is returned. Automated fixes must never break syntax.

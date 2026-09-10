@@ -480,7 +480,7 @@ impl ClusterConfig {
 ///
 /// Format: `redis://host:port?command=GET&...` or `redis://?command=GET` (no host/port)
 ///
-/// # Fields with Global Defaults (Option<T>)
+/// # Fields with Global Defaults (`Option<T>`)
 ///
 /// These fields can be set via global defaults in `Camel.toml`. They are `Option<T>`
 /// to distinguish between "not set by URI" (`None`) and "explicitly set by URI" (`Some(v)`).

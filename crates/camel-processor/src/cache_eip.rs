@@ -2,7 +2,7 @@
 //!
 //! Implements the Caching pattern (lookup → on-miss sub-pipeline → write-back)
 //! at the `OutcomePipeline` layer (one layer above Tower), mirroring
-//! [`IdempotentConsumerSegment`]. On a cache HIT the body is reconstructed from
+//! [`IdempotentConsumerSegment`](crate::IdempotentConsumerSegment). On a cache HIT the body is reconstructed from
 //! the stored [`CacheEntry`] and the on-miss sub-pipeline is skipped entirely;
 //! on a MISS the sub-pipeline runs and its result body is written back into the
 //! repository (subject to `max_entry_bytes`).
@@ -969,7 +969,7 @@ impl OutcomePipeline for CacheClearService {
 // ===========================================================================
 
 /// Outcome-aware segment that replaces the exchange body with a JSON snapshot
-/// of the repository's [`CacheStats`].
+/// of the repository's [`CacheStats`](camel_api::CacheStats).
 pub struct CacheStatsService {
     repository: Arc<dyn CacheRepository>,
     repository_name: String,

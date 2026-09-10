@@ -14,7 +14,7 @@
 //! [`ensure_security_supported`] is the fail-closed guard: without the
 //! `security` feature, any configured `[security.*]` section is rejected
 //! with an error naming the required feature, before any route compiles.
-//! With the feature, [`build_security_compile_context_from_config`] owns
+//! With the feature, `build_security_compile_context_from_config` owns
 //! every `[security.*]` section (moved from `camel-cli`'s `security.rs`,
 //! task 2.2).
 

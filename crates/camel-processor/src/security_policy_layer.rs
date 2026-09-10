@@ -17,7 +17,7 @@ use camel_api::{CamelError, Exchange};
 /// request boundary (`kernel_authenticate` + `install_carrier`) and the
 /// pre-pipeline dispatch check rejects carrier-less Exchanges on non-Public
 /// routes before the pipeline runs. The layer therefore sees an Exchange
-/// that already carries the sealed [`AuthenticatedPrincipal`] and only
+/// that already carries the sealed [`AuthenticatedPrincipal`](camel_auth::AuthenticatedPrincipal) and only
 /// evaluates the route policy against it — no carrier, no authorization
 /// path (fail closed). The Phase-1 legacy Bearer and anonymous-principal
 /// branches were deleted here.

@@ -5,7 +5,7 @@
 //! - [`SourceChannels`]: bounded tokio channels bridging async guest imports to host tasks
 //! - `HostWithStore` impl for async `accept-http`, `submit-exchange`; sync `Host` impl for
 //!   `is-cancelled`
-//! - [`run_http_listener`]: async axum task feeding HTTP requests into the channel
+//! - `run_http_listener`: async axum task feeding HTTP requests into the channel
 //! - [`run_pipeline_bridge`]: async task forwarding exchanges to the pipeline
 
 use std::sync::Arc;
@@ -815,7 +815,7 @@ pub(crate) async fn run_http_listener(
 /// forward them to the pipeline via [`ConsumerContext`].
 ///
 /// The WasmExchange→native conversion (and streaming-body drain setup) happens
-/// inside the import now (see [`source_exchange_to_native`]), so the bridge is
+/// inside the import now (see `source_exchange_to_native`), so the bridge is
 /// reduced to a pure forwarder. Sends [`SubmitOutcome::Accepted`] /
 /// [`SubmitOutcome::Stopped`] back to the guest via the oneshot reply channel.
 pub async fn run_pipeline_bridge(

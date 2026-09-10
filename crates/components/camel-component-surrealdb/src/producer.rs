@@ -1,4 +1,4 @@
-//! SurrealDbProducer — Service<Exchange> implementation handling 8 producer operations.
+//! SurrealDbProducer — Service\<Exchange\> implementation handling 8 producer operations.
 
 use std::collections::HashMap;
 use std::sync::Arc;

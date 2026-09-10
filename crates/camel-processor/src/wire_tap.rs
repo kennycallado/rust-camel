@@ -267,7 +267,7 @@ impl Service<Exchange> for WireTapService {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     /// Always ready (ADR-0019): the main route never blocks on tap readiness.
-    /// Tap endpoint readiness is driven inside [`run_tap`] on the fire-and-
+    /// Tap endpoint readiness is driven inside `run_tap` on the fire-and-
     /// forgetget path; a tap readiness error is logged and suppressed, never
     /// propagated to the main exchange.
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

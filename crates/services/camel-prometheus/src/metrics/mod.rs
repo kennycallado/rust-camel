@@ -95,7 +95,7 @@ impl PrometheusMetrics {
     /// Creates a new PrometheusMetrics instance with all metrics registered.
     ///
     /// Static family creation panics only on static-invariant violations —
-    /// see [`families::register_static_families`].
+    /// see `families::register_static_families`.
     pub fn new() -> Self {
         let registry = Registry::new();
         let families = families::register_static_families(&registry);

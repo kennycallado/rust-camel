@@ -11,7 +11,7 @@ use tower::Service;
 /// with rust-camel pipelines.
 ///
 /// Routes every call through a [`MultiplexedExecutor`], which owns the shared
-/// connection and re-resolves the master address through a [`RedisTopology`]
+/// connection and re-resolves the master address through a [`RedisTopology`](crate::topology::RedisTopology)
 /// on reconnect (enabling sentinel failover).
 #[derive(Clone)]
 pub struct RedisProducer {

@@ -1,6 +1,6 @@
 //! R-SECRET rule — flags secret options set to literal values.
 //!
-//! For each option whose catalog [`UriOption::secret`] is `true`, checks
+//! For each option whose catalog [`UriOption`](camel_api::component_metadata::UriOption)::secret is `true`, checks
 //! whether the provided value is a reference: a value containing `${` (env
 //! interpolation) or `{{` (placeholder interpolation) is acceptable; a
 //! literal value emits a warning.

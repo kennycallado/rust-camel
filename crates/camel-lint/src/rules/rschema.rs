@@ -15,7 +15,7 @@
 //! `${env:X:-d}` tokens resolve to their defaults (default-only lookup,
 //! never the process environment), and a whole-scalar token validates as
 //! the STRING default — the typing mirror of the boot path's tree-walk
-//! (see [`enforce_typing_mirror`]). One carve-out mirrors the boot
+//! (see `enforce_typing_mirror`). One carve-out mirrors the boot
 //! numeric-knob repair: a whole-scalar token whose default is a clean
 //! integer (i64-or-u64 parse; SYNC with camel-dsl `env_int_probe` and
 //! camel-config `clean_i64`) at an integer-typed schema position is
@@ -397,7 +397,7 @@ struct IntCandidate {
 /// An unquoted flow-style default (`${env:X:-[a,b]}`) splices `[a,b]`
 /// into the whole-text validation copy, where YAML re-parses it as a
 /// sequence/mapping — the node becomes NON-scalar and the scalar
-/// String-forcing arm in [`enforce_typing_mirror`] never sees it, leaving
+/// String-forcing arm in `enforce_typing_mirror` never sees it, leaving
 /// the re-inferred shape to false-positive against scalar-typed schema
 /// positions. The boot tree-walk keeps the substituted leaf a STRING no
 /// matter the default's shape, so the mirror restores that typing by

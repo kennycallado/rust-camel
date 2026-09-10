@@ -2,7 +2,7 @@
 //!
 //! Extracted from [`crate::serde_bridge`] to keep that module under the
 //! thermo-nuclear size threshold.  The three public items —
-//! [`BoxStreamProducer`], [`assemble_stream_body`], [`extract_stream_body`] —
+//! `BoxStreamProducer`, `assemble_stream_body`, `extract_stream_body` —
 //! are `pub(crate)` so [`crate::runtime`] can call them directly.
 
 use bytes::Bytes;

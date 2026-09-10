@@ -32,7 +32,7 @@ impl RedisIdempotentRepository {
     /// Connect to `endpoint` and build the repository.
     ///
     /// Validates `name` and `key_prefix` before any network I/O, then
-    /// eagerly connects (one topology resolution — see [`connection`]).
+    /// eagerly connects (one topology resolution — see `connection`).
     pub async fn connect(
         name: &str,
         endpoint: &RedisEndpointConfig,

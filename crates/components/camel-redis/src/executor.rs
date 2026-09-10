@@ -422,7 +422,7 @@ impl RedisCommandExecutor for MultiplexedExecutor {
 /// # Implementation note
 ///
 /// Uses a manual retry loop calling [`NetworkRetryPolicy::should_retry`] and
-/// [`NetworkRetryPolicy::delay_for`] rather than the shared [`retry_async`]
+/// [`NetworkRetryPolicy::delay_for`] rather than the shared [`retry_async`](camel_component_api::retry_async)
 /// helper. Manual loop needed because: (a) `executor.reconnect()` must run
 /// before each retry attempt (not the first attempt), so `retry_async`'s
 /// "always invoke op" model doesn't fit; (b) `&mut executor` / `&mut exchange`

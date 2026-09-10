@@ -97,7 +97,7 @@ pub struct ExecProfile {
     /// Startup-pinned executable path (NOT deserialized, NOT symlink-resolved).
     ///
     /// Resolved once via `which()` at validate-time. Stored as-is (no
-    /// `fs::canonicalize()`) to preserve argv[0] for multi-call binary
+    /// `fs::canonicalize()`) to preserve argv\[0\] for multi-call binary
     /// compat (BusyBox/uutils). See CONTEXT.md "Canonical executable / pin".
     #[serde(skip)]
     pub canonical_executable: Option<PathBuf>,

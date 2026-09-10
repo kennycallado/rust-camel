@@ -346,7 +346,7 @@ impl ConsumerContext {
 /// auth state before accepting connections. Declared routes carry the
 /// `SecurityPolicy` from the route controller; plan-only contexts (routes
 /// without a policy declaration) carry just the compiled
-/// [`RouteSecurityPlan`] (`policy = None`). Authentication itself runs
+/// [`RouteSecurityPlan`](camel_api::security_policy::RouteSecurityPlan) (`policy = None`). Authentication itself runs
 /// through the kernel fields (`plan` + `providers`).
 pub struct SecurityContext {
     /// Route policy, when the route declared one. `None` for plan-only

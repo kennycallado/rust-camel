@@ -186,7 +186,7 @@ impl From<crate::source_bindings::camel::plugin::types::WasmError> for CamelErro
     }
 }
 
-/// Map a WIT bindings [`plugin::WasmError`] to the canonical crate-level [`WasmError`].
+/// Map a WIT bindings [`plugin::WasmError`](crate::source_bindings::camel::plugin::types::WasmError) to the canonical crate-level [`WasmError`].
 ///
 /// Both the `call_process` and `process_streaming_exchange` paths encounter
 /// the WIT-level error type after [`peel_concurrent`] strips the wasmtime

@@ -159,13 +159,13 @@ pub fn exchange_to_wasm(exchange: &Exchange) -> Result<WasmExchange, CamelError>
 ///
 /// Streaming-aware variant of [`exchange_to_wasm`]: callers that have already
 /// built the input body inside `Store::run_concurrent` (e.g. via
-/// [`crate::stream_bridge::assemble_stream_body`]) pass it here instead of
-/// letting [`exchange_to_wasm`] call [`body_to_wasm`] internally —
+/// `crate::stream_bridge::assemble_stream_body`) pass it here instead of
+/// letting [`exchange_to_wasm`] call `body_to_wasm` internally —
 /// `body_to_wasm` cannot ship a `Body::Stream` (the `stream<u8>` handle needs
 /// the `&Accessor` only available under `run_concurrent`).
 ///
 /// The input headers, output message (still routed through
-/// [`message_to_wasm`]), properties, pattern, and correlation-id are taken
+/// `message_to_wasm`), properties, pattern, and correlation-id are taken
 /// from `exchange` unchanged.
 pub fn exchange_to_wasm_with_body(
     exchange: &Exchange,

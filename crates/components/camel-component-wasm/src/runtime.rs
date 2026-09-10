@@ -275,12 +275,12 @@ impl WasmRuntime {
     ///    which cannot be locked from the concurrent runtime thread.
     /// 2. Inside `run_concurrent`, the stream is re-attached as a
     ///    guest-readable `stream<u8>` via
-    ///    [`crate::stream_bridge::assemble_stream_body`].
+    ///    `crate::stream_bridge::assemble_stream_body`.
     ///
     /// A **no-progress watchdog** wraps the invocation: if no stream chunk is
     /// shipped within `no_progress_timeout`, the call fails with a timeout.
     /// Progress is signalled by a [`Notify`] shared with
-    /// [`crate::stream_bridge::BoxStreamProducer`], which pings it per shipped
+    /// `crate::stream_bridge::BoxStreamProducer`, which pings it per shipped
     /// chunk. `cancel` is forwarded to the producer (host-side cancellation
     /// ends the stream promptly); `max_bytes` caps total bytes before an
     /// overflow error.

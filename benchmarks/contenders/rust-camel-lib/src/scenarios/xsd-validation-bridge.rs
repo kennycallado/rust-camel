@@ -5,7 +5,7 @@
 //!     .set_body(constant <1KB XML payload>)
 //!     .process(set BENCH_START = Instant::now())
 //!     .to(validator:<shared/schema.xsd>)
-//!     .process(emit BENCH_LATENCY <id> <duration_ns> to tmpfs file)
+//!     .process(emit BENCH_LATENCY \<id\> \<duration_ns\> to tmpfs file)
 //!
 //! `camel-validator` delegates XSD validation to `bridges/xml` via
 //! gRPC mTLS (Xerces-J 2.12.2). The Apache Camel standalone + Quarkus

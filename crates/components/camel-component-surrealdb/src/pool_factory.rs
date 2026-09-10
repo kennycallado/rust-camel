@@ -1,4 +1,4 @@
-//! SurrealDB PoolFactory — creates Surreal<Any> clients and registers with the datasource catalog.
+//! SurrealDB PoolFactory — creates Surreal\<Any\> clients and registers with the datasource catalog.
 
 use std::any::Any as StdAny;
 use std::sync::Arc;
@@ -63,7 +63,7 @@ fn extra_str(config: &DatasourceConfig, key: &str) -> Result<String, camel_api::
 ///   exponential backoff per ADR-0013.
 ///
 /// - **Post-connect setup** (`signin → use_ns → use_db`): retried with the
-///   [`is_transaction_conflict`] classifier. SurrealDB v3 can return a
+///   [`is_transaction_conflict`](crate::error::is_transaction_conflict) classifier. SurrealDB v3 can return a
 ///   retryable `QueryError::TransactionConflict` from these calls when
 ///   multiple connections concurrently establish against the same ns/db and
 ///   contend on the catalog write transaction (e.g. parallel integration

@@ -5,7 +5,7 @@ use crate::ComponentRegistrar;
 /// Bundles own their TOML key and deserialize their own config block.
 /// `camel-cli` uses `register_bundle!` to wire them.
 pub trait ComponentBundle: Sized {
-    /// Key under [components.<key>] in Camel.toml.
+    /// Key under `[components.<key>]` in Camel.toml.
     fn config_key() -> &'static str;
 
     /// Deserialize the raw toml::Value block for this bundle.

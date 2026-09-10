@@ -8,7 +8,7 @@
 //! body. It never calls an LLM component and never issues a second call.
 //!
 //! Startup is driven by [`McpProducerLifecycle`] (wired through
-//! [`crate::endpoint::McpEndpoint::lifecycle`]): `start()` connects the remote
+//! (`crate::endpoint::McpEndpoint::lifecycle`): `start()` connects the remote
 //! via `RmcpClient::connect` and caches the client in the shared live map.
 //! Until that succeeds (or forever after it fails), [`McpProducer::poll_ready`]
 //! stays `Pending`, so a producer whose remote is incompatible never becomes

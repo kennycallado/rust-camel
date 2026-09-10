@@ -7,16 +7,16 @@
 //! caller-owned). A scenario driver that wants `logs:` assertions
 //! therefore claims the process's subscriber seat BEFORE the boot:
 //! [`ensure_capture_subscriber`] installs a registry carrying
-//! [`CaptureLayer`] through the same first-wins `try_init`.
+//! `CaptureLayer` through the same first-wins `try_init`.
 //!
 //! When the harness owns the seat, every event flows through
-//! [`CaptureLayer`], which appends each event to every open capture
+//! `CaptureLayer`, which appends each event to every open capture
 //! window whose `[opened_at, now)` interval contains the event
 //! timestamp — conservative attribution: a window opened after an
 //! event never sees it. Windows are process-global: [`WindowHandle`]
 //! registers a buffer in a static registry at open and unregisters at
 //! close (RAII on drop); the runner owns open/evaluate/close around
-//! the document run. Each buffer is capped at [`LOG_WINDOW_CAP`]
+//! the document run. Each buffer is capped at [`LOG_WINDOW_CAP`](crate::log_capture::LOG_WINDOW_CAP)
 //! events, drop-oldest with a head marker naming the truncation.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
