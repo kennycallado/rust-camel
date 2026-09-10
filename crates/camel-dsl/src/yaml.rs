@@ -2239,7 +2239,7 @@ impl std::error::Error for RoutesEnvError {
 /// placeholders through `lookup` (tree-walk first, legacy splice fallback —
 /// see [`crate::env_interpolation::interpolate_yaml_source`]), then parse
 /// the interpolated text through the loader-layer typed probe
-/// ([`crate::env_int_probe`]): a document whose only defect is a string
+/// (`crate::env_int_probe`): a document whose only defect is a string
 /// placeholder at an integer-typed position under `routes:` still loads,
 /// with exactly the integer positions coerced. Documents that parse today
 /// are unaffected (probing runs only after failure); JSON route files and

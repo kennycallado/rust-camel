@@ -19,7 +19,7 @@
 //! cannot preserve plain-scalar style through a round-trip, so the leaf
 //! stays a string here. Integer positions are coerced later by the
 //! loader-layer typed probe (env_int_probe), which this module feeds via
-//! provenance ([`interpolate_env_tree_with_provenance`]). Consumers that
+//! provenance (`interpolate_env_tree_with_provenance`). Consumers that
 //! need numbers inside URI strings still compose them there.
 //!
 //! Interpolated mapping keys that collide after interpolation collapse
@@ -193,7 +193,7 @@ pub(crate) enum ProvenanceSeg {
 }
 
 /// Structural path from the document root to a substituted leaf, in
-/// document order. Collected by [`interpolate_env_tree_with_provenance`]
+/// document order. Collected by `interpolate_env_tree_with_provenance`
 /// and consumed by the loader-layer typed probe (env_int_probe).
 pub(crate) type ProvenancePath = Vec<ProvenanceSeg>;
 
