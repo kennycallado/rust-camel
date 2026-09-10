@@ -9,7 +9,7 @@ use camel_api::is_ssrf_blocked_ip;
 use camel_component_api::CamelError;
 
 use crate::config::HttpConfig;
-use crate::{HttpEndpointConfig, build_client};
+use crate::{HttpEndpointConfig, build_client, redact_url_for_diagnostics, uri_host_allowed};
 
 /// Whether a header carries credentials that must not be replayed to a
 /// cross-origin redirect target (F2-5). Header names are case-insensitive
@@ -431,6 +431,20 @@ pub(crate) async fn send_with_ssrf_safe_redirects(
             current_body.clone()
         };
 
+        // allowedUriHosts fence (rc-sxe1x): every followRedirects hop is
+        // validated against the endpoint fence in addition to the SSRF
+        // checks — a fence-trusted origin must not pivot to any other host
+        // via a redirect. ADR-0071 scopes the fence to override
+        // resolution; this extends the same entries hop-by-hop.
+        if let Some(fence) = &endpoint_config.allowed_uri_hosts
+            && !uri_host_allowed(redirect_url.as_str(), fence)?
+        {
+            return Err(CamelError::ProcessorError(format!(
+                "Redirect Location host not allowed by allowedUriHosts fence: {}",
+                redact_url_for_diagnostics(redirect_url.as_str())
+            )));
+        }
+
         // SSRF validation: resolve and validate the redirect target
         let resolved_addrs =
             validate_redirect_target_for_ssrf(&redirect_url, endpoint_config.allow_internal)
@@ -851,5 +865,89 @@ mod tests {
             "neither the literal initial request nor the literal hop may \
              enter the pinned cache"
         );
+    }
+
+    /// rc-sxe1x: every followRedirects hop is validated against the
+    /// endpoint's `allowedUriHosts` fence — a redirect from the allowed
+    /// origin to a non-allowed host is rejected, not silently followed.
+    #[tokio::test]
+    async fn redirect_hop_to_non_allowed_host_rejected_by_fence() {
+        let (hop_base, _hop_handle) = spawn_200_responder().await;
+        let hop_port = responder_port(&hop_base);
+        let (entry_base, _entry_handle) =
+            spawn_302_responder(format!("http://127.0.0.1:{hop_port}/hop")).await;
+        let entry_port = responder_port(&entry_base);
+
+        let cache = PinnedClientCache::new(PINNED_CLIENT_TTL, PINNED_CLIENT_MAX_ENTRIES);
+        let shared = build_client(&HttpConfig::default(), None);
+        // Fence allows only the entry origin (localhost, any port); the
+        // hop target is the 127.0.0.1 literal — a different host.
+        let endpoint_config = HttpEndpointConfig::from_uri(
+            "http://localhost/?allowInternal=true&allowedUriHosts=localhost",
+        )
+        .expect("endpoint config parses");
+        assert!(
+            endpoint_config.allowed_uri_hosts.is_some(),
+            "allowedUriHosts option must parse into the fence"
+        );
+
+        let err = send_with_ssrf_safe_redirects(
+            &shared,
+            &shared,
+            &cache,
+            &HttpConfig::default(),
+            &endpoint_config,
+            reqwest::Method::GET,
+            &format!("http://localhost:{entry_port}/start"),
+            vec![],
+            None,
+            3,
+            None,
+        )
+        .await
+        .expect_err("redirect to a non-allowed host must be rejected");
+
+        assert!(
+            err.to_string().contains("allowedUriHosts"),
+            "error must name the fence, got: {err}"
+        );
+    }
+
+    /// rc-sxe1x positive control: a hop whose host IS in the fence follows
+    /// normally.
+    #[tokio::test]
+    async fn redirect_hop_to_allowed_host_followed_by_fence() {
+        let (hop_base, _hop_handle) = spawn_200_responder().await;
+        let hop_port = responder_port(&hop_base);
+        let (entry_base, _entry_handle) =
+            spawn_302_responder(format!("http://localhost:{hop_port}/hop")).await;
+        let entry_port = responder_port(&entry_base);
+
+        let cache = PinnedClientCache::new(PINNED_CLIENT_TTL, PINNED_CLIENT_MAX_ENTRIES);
+        let shared = build_client(&HttpConfig::default(), None);
+        // Fence allows localhost entries (any port) — entry and hop both
+        // qualify.
+        let endpoint_config = HttpEndpointConfig::from_uri(
+            "http://localhost/?allowInternal=true&allowedUriHosts=localhost",
+        )
+        .expect("endpoint config parses");
+
+        let response = send_with_ssrf_safe_redirects(
+            &shared,
+            &shared,
+            &cache,
+            &HttpConfig::default(),
+            &endpoint_config,
+            reqwest::Method::GET,
+            &format!("http://localhost:{entry_port}/start"),
+            vec![],
+            None,
+            3,
+            None,
+        )
+        .await
+        .expect("redirect to an allowed host must be followed");
+
+        assert_eq!(response.status(), 200);
     }
 }

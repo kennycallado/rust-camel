@@ -2688,7 +2688,7 @@ fn invalid_allowed_uri_host_entry(segment: &str) -> CamelError {
 /// bracketed canonical form. A host-only entry permits any port; a
 /// `host:port` entry matches only the effective port — the explicit port
 /// or the scheme default (443 for https, 80 for http).
-fn uri_host_allowed(url_str: &str, fence: &[AllowedUriHost]) -> Result<bool, CamelError> {
+pub(crate) fn uri_host_allowed(url_str: &str, fence: &[AllowedUriHost]) -> Result<bool, CamelError> {
     let Ok(parsed) = url::Url::parse(url_str) else {
         return Ok(false);
     };
@@ -2839,7 +2839,7 @@ fn encode_query_component(component: &str) -> String {
 /// query string (which commonly carries API keys/tokens). Host and path stay
 /// visible for diagnosability. Best-effort: on parse failure the raw string is
 /// returned truncated to 256 chars (never a secret-bearing suffix).
-fn redact_url_for_diagnostics(raw: &str) -> String {
+pub(crate) fn redact_url_for_diagnostics(raw: &str) -> String {
     const MAX_URL_LOG_LEN: usize = 256;
     match url::Url::parse(raw) {
         Ok(mut u) => {
