@@ -2555,6 +2555,16 @@ impl HttpProducer {
                 Some((base, query)) => (base, Some(query)),
                 None => (uri, None),
             };
+            // Resolve-time span validation for the override URI's own query
+            // (rc-m4xk1): a forbidden byte is a resolve error naming the
+            // byte, never a verbatim ride that later surfaces as a reqwest
+            // send error. Covers both downstream arms — the verbatim push
+            // and merge_header_query, which validates only the header side.
+            if let Some(query) = override_query {
+                for (_key, span) in raw_query_pairs(query)? {
+                    validate_raw_query_span(span)?;
+                }
+            }
             let mut url = base.to_string();
             if let Some(path) = exchange
                 .input
@@ -8329,6 +8339,55 @@ mod tests {
         assert!(
             err.to_string().contains("0x20"),
             "error must name the forbidden byte: {err}"
+        );
+    }
+
+    /// rc-m4xk1: the override URI's own query is span-validated at resolve
+    /// time — a forbidden byte in the override arm errors naming the byte,
+    /// instead of riding verbatim to a reqwest send error.
+    #[test]
+    fn resolve_url_override_query_forbidden_byte_errors() {
+        let config = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://h2/p?a=x y".to_string()),
+        );
+
+        let err = HttpProducer::resolve_url(&exchange, &config)
+            .expect_err("literal space in the override URI's query must error");
+
+        assert!(
+            err.to_string().contains("0x20"),
+            "error must name the forbidden byte from the override query: {err}"
+        );
+    }
+
+    /// rc-m4xk1 pin: decoded-key collision — a header pair whose key decodes
+    /// to a key already present in the higher-precedence query (here
+    /// `%61=2`, decoding to `a`) is dropped by the shared decoded-key
+    /// matching; the higher-precedence authored span rides verbatim.
+    #[test]
+    fn merge_header_query_decoded_key_collision_drops_header_pair() {
+        let merged = merge_header_query(Some("a=1"), "%61=2")
+            .expect("decoded-key collision must not be a parse error");
+        assert_eq!(
+            merged.as_deref(),
+            Some("a=1"),
+            "the higher-precedence span wins and the colliding header pair is dropped"
+        );
+    }
+
+    /// rc-m4xk1 pin: duplicate keys within ONE header query are not
+    /// deduplicated — both spans ride verbatim in authored order.
+    #[test]
+    fn merge_header_query_duplicate_keys_within_header_ride_verbatim() {
+        let merged = merge_header_query(None, "k=1&k=2")
+            .expect("duplicate header keys must not be a parse error");
+        assert_eq!(
+            merged.as_deref(),
+            Some("k=1&k=2"),
+            "intra-header duplicate keys ride verbatim"
         );
     }
 
