@@ -63,6 +63,11 @@ const STATUS_FAILED: u8 = 2;
 /// Only one `OtelService` should be active per process. Creating multiple
 /// instances (e.g., in tests) may leave stale batch exporter tasks running.
 /// Use `shutdown_logger_provider()` at process exit to fully clean up.
+///
+/// After `stop()`, the global meter provider installed by `start()` remains
+/// registered (the OpenTelemetry global API has no unset), but it is shut
+/// down; recordings after `stop()` hit a shut-down provider and are
+/// effectively no-ops.
 pub struct OtelService {
     config: OtelConfig,
     tracer_provider: Option<SdkTracerProvider>,
@@ -456,14 +461,21 @@ impl Lifecycle for OtelService {
             }
         }
 
-        // Shutdown MeterProvider (flushes periodic metric exporter)
-        if let Some(provider) = self.meter_provider.take() {
-            if let Err(e) = provider.force_flush() {
-                warn!("Error force-flushing MeterProvider: {:?}", e);
-            }
-            if let Err(e) = provider.shutdown() {
-                warn!("Error shutting down MeterProvider: {:?}", e);
-            }
+        // Shutdown MeterProvider. PeriodicReader::shutdown() performs the
+        // final collect+export and waits at most 5s (hardcoded in
+        // opentelemetry_sdk 0.32.1). We intentionally do NOT call
+        // force_flush() first: PeriodicReader::force_flush() waits
+        // UNBOUNDED for the reader thread, and that thread can stall
+        // forever inside the OTLP export when the ambient runtime cannot
+        // make progress (current-thread runtime blocked in the flush
+        // itself) — rc-q74u deadlock class.
+        if let Some(provider) = self.meter_provider.take()
+            && let Err(e) = provider.shutdown()
+        {
+            warn!(
+                error = ?e,
+                "Error shutting down MeterProvider; recent metrics may not have been delivered"
+            );
         }
 
         // Shutdown LoggerProvider (flushes batch log exporter)
@@ -517,8 +529,10 @@ impl Drop for OtelService {
             let _ = provider.shutdown();
         }
 
+        // MeterProvider: shutdown only — no force_flush(). See stop() for the
+        // rc-q74u deadlock rationale (PeriodicReader::force_flush is
+        // unbounded; shutdown is capped at 5s by the SDK).
         if let Some(provider) = self.meter_provider.take() {
-            let _ = provider.force_flush();
             let _ = provider.shutdown();
         }
 
@@ -979,5 +993,82 @@ mod tests {
 
         // Clean up
         let _ = service.logger_provider.take().map(|p| p.shutdown());
+    }
+
+    /// Regression test for rc-q74u: `stop()` must stay bounded when the
+    /// periodic metric reader has data and the OTLP export cannot make
+    /// progress.
+    ///
+    /// Deadlock chain (pre-fix): a metric recorded through the global meter
+    /// provider arms the SDK's `PeriodicReader` thread; `stop()` called
+    /// `force_flush()`, which waits on an UNBOUNDED channel receive while the
+    /// reader thread is stuck inside `futures_executor::block_on(tonic
+    /// export)` — a future that only makes progress when the ambient tokio
+    /// runtime is driven. On a current-thread runtime the sole driving thread
+    /// is the one blocked in the flush, so both sides wait forever.
+    ///
+    /// The repro runs on a dedicated thread with its own current-thread
+    /// runtime (the exact `#[tokio::test]` shape) and the test asserts
+    /// completion via `recv_timeout` — a renewed hang fails the test instead
+    /// of hanging the suite.
+    #[test]
+    #[serial_test::serial]
+    fn test_stop_bounded_when_metric_export_stalls() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel::<Result<(), String>>();
+        let handle = std::thread::Builder::new()
+            .name("q74u-repro".to_string())
+            .spawn(move || {
+                // Report panics through the channel so an unrelated failure
+                // surfaces immediately with its own diagnosis instead of
+                // burning the outer timeout as a bogus "hang".
+                let _ = tx.send(
+                    catch_unwind(AssertUnwindSafe(|| {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("repro runtime");
+                        rt.block_on(async {
+                            let config = OtelConfig::new("http://localhost:9999", "q74u-repro");
+                            let mut service = OtelService::new(config);
+                            service.start().await.expect("start");
+
+                            // Arm the PeriodicReader: record one metric through the
+                            // collector, which resolves instruments from the global
+                            // (== this service's) meter provider.
+                            let collector = service.as_metrics_collector().expect("collector");
+                            collector
+                                .record_exchange_duration("q74u-route", Duration::from_millis(5));
+
+                            // Pre-fix this hangs forever; post-fix shutdown() returns
+                            // within the SDK's 5s bound even though the reader thread
+                            // stays stalled (it is reaped at process exit).
+                            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                            let _ = service.stop().await;
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "stop() must be bounded when metric export stalls (rc-q74u)"
+                            );
+                        });
+                    }))
+                    .map_err(|payload| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_string())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "unknown panic".into())
+                    }),
+                );
+            })
+            .expect("spawn repro thread");
+
+        match rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(Ok(())) => {}
+            Ok(Err(panic_msg)) => panic!("repro thread failed (not a hang): {panic_msg}"),
+            Err(_) => panic!("repro thread did not finish: stop() hung (rc-q74u regression)"),
+        }
+        let _ = handle.join();
     }
 }
