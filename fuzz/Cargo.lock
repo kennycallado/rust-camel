@@ -222,7 +222,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "camel-api"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "camel-auth"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "camel-bean"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "camel-bean-macros"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-api"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "camel-core"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "camel-dsl"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "camel-api",
  "camel-auth",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "camel-endpoint"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "camel-endpoint-macros"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-api"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-simple"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "camel-processor"
-version = "0.40.0"
+version = "0.44.0"
 dependencies = [
  "async-stream",
  "async-trait",
