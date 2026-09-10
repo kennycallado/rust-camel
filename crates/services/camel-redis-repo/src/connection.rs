@@ -60,7 +60,13 @@ pub(crate) async fn connect_executor_with_topology(
     // wrapper remaps the component's ProcessorError connection failures to
     // Io, matching the repository transport contract. No spawn_blocking —
     // RedisTopology::resolve offloads internally where it must.
-    executor.refresh().await?;
+    tracing::debug!("redis repository eager connect (one topology resolution)");
+    if let Err(e) = executor.refresh().await {
+        // log-policy: outside-contract (the error is returned to the config
+        // loader; this line is startup diagnostics for the operator)
+        tracing::warn!("redis repository eager connect failed: {e}");
+        return Err(e);
+    }
 
     Ok(executor)
 }

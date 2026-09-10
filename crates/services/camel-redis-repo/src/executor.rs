@@ -182,11 +182,22 @@ impl RepoCommandExecutor for MultiplexedRepoExecutor {
     }
 
     async fn refresh(&self) -> Result<(), CamelError> {
-        self.inner
-            .refresh()
-            .await
-            .map(|_| ())
-            .map_err(|e| CamelError::Io(e.to_string()))
+        // rc-2or1: refresh is the sentinel-failover recovery path; without
+        // this line an operator cannot tell a healthy refresh from one that
+        // never happens.
+        tracing::debug!("redis repo executor refreshing connection (re-resolving topology)");
+        match self.inner.refresh().await {
+            Ok(_) => {
+                tracing::debug!("redis repo executor refreshed connection");
+                Ok(())
+            }
+            Err(e) => {
+                // log-policy: outside-contract (the error is returned to the
+                // caller; this line is operator diagnostics, not a failure report)
+                tracing::warn!("redis repo executor refresh failed: {e}");
+                Err(CamelError::Io(e.to_string()))
+            }
+        }
     }
 }
 

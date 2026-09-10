@@ -26,6 +26,11 @@ pub struct RedisIdempotentRepository {
     name: String,
     key_prefix: String,
     executor: Arc<dyn RepoCommandExecutor>,
+    /// Outcome-bearing commands lost to a transient failure (rc-2or1): each
+    /// increment is one `add` whose SET NX answer is unknown and whose
+    /// connection was refreshed for the NEXT call. An operator watching this
+    /// climb is in (or recovering from) a failover loop.
+    transient_refreshes: std::sync::atomic::AtomicU64,
 }
 
 impl RedisIdempotentRepository {
@@ -44,6 +49,15 @@ impl RedisIdempotentRepository {
         Self::with_executor(name, key_prefix, Arc::new(executor))
     }
 
+    /// Number of outcome-bearing `add` commands lost to transient failures
+    /// so far (rc-2or1). Each count refreshed the connection for the next
+    /// call; a climbing value means the repository is in (or recovering
+    /// from) a failover loop.
+    pub fn transient_refresh_count(&self) -> u64 {
+        self.transient_refreshes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Test seam: build the repository around an injected executor.
     ///
     /// Sync and network-free; validates both namespace tokens first — the
@@ -60,6 +74,7 @@ impl RedisIdempotentRepository {
             name: name.to_string(),
             key_prefix: key_prefix.to_string(),
             executor,
+            transient_refreshes: std::sync::atomic::AtomicU64::new(0),
         })
     }
 }
@@ -109,6 +124,13 @@ impl IdempotentRepository for RedisIdempotentRepository {
             Err(err) if is_transient_redis_error(&err) => {
                 // Refresh for the NEXT call only — the outcome-bearing
                 // SET NX is never re-issued (see the doc comment above).
+                self.transient_refreshes
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::debug!(
+                    repository = %self.name,
+                    error = %err,
+                    "idempotent add lost to transient failure; connection refreshed for next call"
+                );
                 let _ = self.executor.refresh().await;
                 Err(err)
             }
@@ -305,6 +327,40 @@ mod tests {
             ),
             other => panic!("expected CamelError::Config, got: {other}"),
         }
+    }
+
+    // rc-2or1: the C1 transient-Err branch must be observable — an operator
+    // diagnosing a failover loop needs a count of outcome-bearing commands
+    // lost to transient failures (each one refreshed the connection).
+    #[tokio::test]
+    async fn transient_add_increments_observability_counter() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let repo = repo(fake.clone());
+        assert_eq!(repo.transient_refresh_count(), 0, "counter starts at zero");
+
+        fake.push_result(Err(CamelError::Io("connection reset by peer".into())));
+        assert!(
+            repo.add("k").await.is_err(),
+            "transient failure surfaces as Err"
+        );
+        assert_eq!(
+            repo.transient_refresh_count(),
+            1,
+            "C1 transient-Err branch must count the refresh"
+        );
+
+        // Happy path does not count.
+        fake.push_result(Ok(redis::Value::SimpleString("OK".into())));
+        assert!(
+            repo.add("k2")
+                .await
+                .expect("refreshed executor serves the add")
+        );
+        assert_eq!(
+            repo.transient_refresh_count(),
+            1,
+            "successful add does not count"
+        );
     }
 
     #[tokio::test]
