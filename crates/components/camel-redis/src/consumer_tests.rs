@@ -492,3 +492,61 @@ async fn test_consumer_double_stop_is_safe() {
     // Second stop — should be safe (no panic, no error)
     assert!(consumer.stop().await.is_ok());
 }
+
+// rc-kxtkq: a pubsub session Err BEFORE readiness (retry budget exhausted,
+// unreachable broker) must surface the real Redis cause through the startup
+// handshake (ctx.mark_failed), not a dropped-startup-signal panic in the
+// harness. Error surfacing only — ADR-0007 supervision semantics unchanged.
+#[tokio::test]
+async fn pubsub_pre_ready_session_err_marks_startup_failed() {
+    use camel_component_api::StartupSignal;
+
+    // Unreachable broker (port 1: connection refused immediately) and a
+    // 1-attempt reconnect budget so the session returns Err pre-ready fast.
+    let mut config = RedisEndpointConfig::from_uri("redis://127.0.0.1:1?command=SUBSCRIBE")
+        .expect("valid standalone uri");
+    config.reconnect = camel_component_api::NetworkRetryPolicy {
+        max_attempts: 1,
+        initial_delay: Duration::from_millis(1),
+        ..camel_component_api::NetworkRetryPolicy::default()
+    };
+
+    let (tx, _rx) = mpsc::channel(1);
+    let (startup, startup_rx) = StartupSignal::pair();
+    let cancel_token = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel_token.clone(), "redis-pre-ready-err".to_string())
+        .with_startup(startup);
+
+    let topology = Arc::new(crate::topology::StandaloneTopology::new(&config));
+    let consumer_task = super::run_pubsub_consumer(
+        config,
+        vec!["never-ready".to_string()],
+        vec![],
+        ctx,
+        cancel_token,
+        // The Err arm records an increment_errors metric before returning;
+        // Noop tolerates it (Panic would abort before mark_failed lands).
+        Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
+        topology,
+    );
+
+    let (session_result, startup_result) = tokio::join!(
+        consumer_task,
+        tokio::time::timeout(Duration::from_secs(5), startup_rx.await_ready()),
+    );
+
+    // The session itself still fails (supervision unchanged, ADR-0007).
+    assert!(session_result.is_err(), "session must return Err");
+
+    // The startup handshake must resolve Failed carrying the Redis cause —
+    // before the fix it stayed Pending and start() panicked on the dropped
+    // startup signal instead of surfacing the error.
+    let startup_err = startup_result
+        .expect("startup handshake resolves within 5s")
+        .expect_err("startup must resolve Failed, not Ready");
+    let msg = startup_err.to_string();
+    assert!(
+        msg.contains("refused") || msg.contains("connection"),
+        "startup failure must carry the Redis cause, got: {msg}"
+    );
+}

@@ -291,6 +291,13 @@ async fn run_pubsub_consumer(
     // Same clone-per-closure pattern as `deliver` below.
     let ready_ctx = ctx.clone();
     let on_ready = Some(Box::new(move || ready_ctx.mark_ready()) as Box<dyn FnOnce() + Send>);
+    // Pre-ready failure surfacing (rc-kxtkq): when the session returns Err
+    // before the first subscribe ack, the runtime's startup await must see
+    // the Redis cause — without this the harness start() panics on the
+    // dropped startup signal instead. First-transition-wins makes the call
+    // a no-op once ready already fired (ADR-0007: surfacing only, no
+    // supervision change). Same clone-per-use pattern as `ready_ctx`.
+    let failed_ctx = ctx.clone();
     // Per-message delivery: build the Exchange and hand it to the pipeline.
     // A clone of `ctx` per message keeps the closure `Fn` (the session may
     // call it any number of times on one connection).
@@ -331,6 +338,10 @@ async fn run_pubsub_consumer(
                     info!("PubSub consumer received shutdown signal");
                 }
                 Err(e) => {
+                    // Surface the cause through the startup handshake before
+                    // anything else can observe the dropped signal (no-op if
+                    // readiness already fired — see `failed_ctx` above).
+                    failed_ctx.mark_failed(e.to_string());
                     if is_transient_redis_error(&e) {
                         // Budget exhaustion — the task ends, supervision fires (ADR-0007).
                         runtime_err
