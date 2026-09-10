@@ -67,6 +67,9 @@
   run: cargo xtask lint-metric-labels
 - name: schema-check
   run: cargo xtask schema --check
+- name: doc-build
+  run: RUSTDOCFLAGS="-D warnings" cargo doc -p camel-api -p camel-core
+    -p camel-builder -p camel-dsl -p camel-endpoint --no-deps
 - name: cargo-audit
   run: cargo audit
 ```
