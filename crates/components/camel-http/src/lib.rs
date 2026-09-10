@@ -8774,8 +8774,8 @@ mod tests {
 
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
 
-        // Readiness without a wall-clock sleep: poll the registry entry
-        // live, then yield so the spawned `start()` runs to completion of
+        // Readiness without a fixed wall-clock sleep: poll the registry
+        // entry live (1ms backoff, 5s deadline), then yield so the spawned `start()` runs to completion of
         // route registration (that tail path has no pending timers — only
         // the registry lock — so scheduler yields order it deterministically
         // behind this loop).
