@@ -510,3 +510,218 @@ async fn unreadable_ca_file_fails_closed() {
         "unreadable CA is a config error, never transient: {msg}"
     );
 }
+
+// ── Fake sentinel/master RESP servers (rc-1xc8) ──────────────────────────────
+// Minimal in-process nodes so the sentinel resolve path can be exercised
+// without Docker: the fake sentinel answers ROLE (sentinel role) and
+// SENTINEL MASTERS (announcing the fake master); the fake master answers
+// ROLE (master role) and records every command it sees — including the
+// AUTH the redis-rs connection-setup pipeline sends when the node
+// connection info carries credentials.
+
+#[cfg(feature = "sentinel")]
+mod fake_redis_node {
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// Role this fake node claims in its ROLE reply.
+    pub(crate) enum FakeRole {
+        /// Data-plane node: `["master", 0, []]`.
+        Master,
+        /// Sentinel: `["sentinel", ["orders"]]`, announcing the given
+        /// master port in SENTINEL MASTERS under name "orders".
+        Sentinel { master_port: u16 },
+    }
+
+    /// Bind a fake node on 127.0.0.1:0. Returns its address and the
+    /// shared log of commands received (space-joined args per command).
+    pub(crate) async fn spawn(role: FakeRole) -> (std::net::SocketAddr, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake node");
+        let addr = listener.local_addr().expect("fake node addr");
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_for_accept = Arc::clone(&log);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let log = Arc::clone(&log_for_accept);
+                let role_master_port = match &role {
+                    FakeRole::Master => None,
+                    FakeRole::Sentinel { master_port } => Some(*master_port),
+                };
+                tokio::spawn(async move {
+                    handle(stream, role_master_port, log).await;
+                });
+            }
+        });
+        (addr, log)
+    }
+
+    async fn handle(stream: TcpStream, master_port: Option<u16>, log: Arc<Mutex<Vec<String>>>) {
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        loop {
+            let args = match read_command(&mut reader).await {
+                Ok(Some(a)) => a,
+                Ok(None) | Err(_) => return,
+            };
+            log.lock().expect("fake node log").push(args.join(" "));
+            let reply = reply_for(&args, master_port);
+            if write_half.write_all(reply.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Read one RESP array-of-bulk-strings command. `Ok(None)` on EOF.
+    async fn read_command(
+        reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> std::io::Result<Option<Vec<String>>> {
+        let mut header = String::new();
+        if reader.read_line(&mut header).await? == 0 {
+            return Ok(None);
+        }
+        let count: usize = header
+            .trim()
+            .trim_start_matches('*')
+            .parse()
+            .map_err(|_| std::io::Error::other("bad RESP array header"))?;
+        let mut args = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut len_line = String::new();
+            reader.read_line(&mut len_line).await?;
+            let len: usize = len_line
+                .trim()
+                .trim_start_matches('$')
+                .parse()
+                .map_err(|_| std::io::Error::other("bad RESP bulk header"))?;
+            let mut buf = vec![0u8; len];
+            reader.read_exact(&mut buf).await?;
+            let mut crlf = [0u8; 2];
+            reader.read_exact(&mut crlf).await?;
+            args.push(String::from_utf8_lossy(&buf).into_owned());
+        }
+        Ok(Some(args))
+    }
+
+    fn reply_for(args: &[String], master_port: Option<u16>) -> String {
+        match args.first().map(String::as_str) {
+            Some("ROLE") => match master_port {
+                None => "*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n".to_string(),
+                Some(_) => "*2\r\n$8\r\nsentinel\r\n*1\r\n$6\r\norders\r\n".to_string(),
+            },
+            // Flat key/value map array: HashMap<String, String> parses this.
+            Some("SENTINEL") if args.get(1).map(String::as_str) == Some("MASTERS") => {
+                let port = master_port.expect("sentinel must know the master port");
+                format!(
+                    "*1\r\n*8\r\n\
+                     $4\r\nname\r\n$6\r\norders\r\n\
+                     $2\r\nip\r\n$9\r\n127.0.0.1\r\n\
+                     $4\r\nport\r\n${}\r\n{}\r\n\
+                     $5\r\nflags\r\n$6\r\nmaster\r\n",
+                    port.to_string().len(),
+                    port
+                )
+            }
+            // AUTH / SELECT / CLIENT SETINFO (pipelined setup): accept all.
+            _ => "+OK\r\n".to_string(),
+        }
+    }
+}
+
+// rc-1xc8: the OLD test asserted `is_some()` on the wrapper plus the INPUT
+// RedisConnectionInfo — nothing tied the wrapper's embedded info to the
+// connection actually built. This behavioral test drives the full resolve
+// path through in-process fakes: the built Client's connection info must
+// carry the username/password/db, and the fake MASTER must observe the
+// AUTH the redis-rs setup pipeline sends — while the SENTINEL plane sees
+// no data-plane credentials. If `sentinel_node_conn_info` ever rebuilds
+// its own RedisConnectionInfo (dropping the username), both assertions
+// fail.
+#[cfg(feature = "sentinel")]
+#[tokio::test]
+async fn sentinel_resolve_carries_username_to_master_connection() {
+    use fake_redis_node::{FakeRole, spawn as spawn_fake};
+    use std::time::Duration;
+
+    let (master_addr, master_log) = spawn_fake(FakeRole::Master).await;
+    let (sentinel_addr, sentinel_log) = spawn_fake(FakeRole::Sentinel {
+        master_port: master_addr.port(),
+    })
+    .await;
+
+    let config = RedisEndpointConfig {
+        host: None,
+        port: None,
+        command: crate::config::RedisCommand::Set,
+        channels: vec![],
+        key: None,
+        timeout: 1,
+        username: Some("svc".to_string()),
+        password: Some("p".to_string()),
+        db: 2,
+        ssl: None,
+        tls_ca_cert: None,
+        reconnect: camel_component_api::NetworkRetryPolicy::default(),
+        connection_timeout_secs: 2,
+        topology_kind: crate::sentinel_config::TopologyKind::Sentinel(
+            crate::sentinel_config::SentinelConfig::default()
+                .with_nodes(vec![format!("redis://{sentinel_addr}")])
+                .with_master_name("orders"),
+        ),
+    };
+
+    let topology = SentinelTopology::new(
+        vec![format!("redis://{sentinel_addr}")],
+        "orders".to_string(),
+        None,
+        sentinel_node_conn_info(&config),
+    )
+    .expect("sentinel topology builds");
+
+    let client = tokio::time::timeout(
+        Duration::from_secs(10),
+        topology.resolve(ServerKind::Master),
+    )
+    .await
+    .expect("resolve completes")
+    .expect("fake sentinel resolves the fake master");
+
+    // The built node connection carries the endpoint's data-plane creds.
+    let info = client.get_connection_info();
+    let redis_info = info.redis_settings();
+    assert_eq!(redis_info.username(), Some("svc"));
+    assert_eq!(redis_info.password(), Some("p"));
+    assert_eq!(redis_info.db(), 2);
+    assert_eq!(info.addr().to_string(), master_addr.to_string());
+
+    // Observable behavior: the fake master saw the redis-rs setup pipeline
+    // authenticate with the username (AUTH svc p) and SELECT the db.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let master_cmds = loop {
+        let joined = {
+            let log = master_log.lock().expect("master log");
+            log.join(" | ")
+        };
+        if joined.contains("AUTH svc p") || std::time::Instant::now() > deadline {
+            break joined;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        master_cmds.contains("AUTH svc p"),
+        "master must observe AUTH with the username, saw: {master_cmds}"
+    );
+    assert!(
+        master_cmds.contains("SELECT 2"),
+        "master must observe db selection, saw: {master_cmds}"
+    );
+
+    // Plane separation: the sentinel must NOT see data-plane credentials.
+    let sentinel_cmds = sentinel_log.lock().expect("sentinel log").join(" | ");
+    assert!(
+        !sentinel_cmds.contains("svc") && !sentinel_cmds.contains("AUTH"),
+        "sentinel plane must not observe data-plane auth, saw: {sentinel_cmds}"
+    );
+}
