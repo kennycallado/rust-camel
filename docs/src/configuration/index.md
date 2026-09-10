@@ -39,6 +39,8 @@ When `name` is omitted, the backend convention applies. The defaults are histori
 
 The cache `redb` default is `persistent`, not `redb` — an asymmetry kept for backward compatibility. Set `name` explicitly when the distinction matters to your routes.
 
+One caveat on the cache `memory` backend: the config only replaces the default memory repository when `max_capacity` is set. A `name` (or any other `cache_repo` key) on a memory table without `max_capacity` registers nothing — the built-in default stays.
+
 One boundary of the cross-repository prefix-collision rule: validation compares declared endpoints, not resolved addresses. A standalone `url` and a `sentinel_nodes` topology that both point at the same physical Redis instance and database are treated as distinct databases, because resolving the sentinel topology requires network I/O that `validate()` does not perform. The repositories stay separated by their distinct default key prefixes and name segments; set explicit `key_prefix` values when mixing both shapes against one instance.
 
 ## Environment overrides

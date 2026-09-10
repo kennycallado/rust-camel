@@ -108,10 +108,8 @@ impl HealthSource for ContextHealthSource {
     }
 }
 
-/// Build the redb-backed persistent cache repository from a validated
-/// `CacheRepoConfig`. Re-parses the byte-size and duration fields with strict
-/// error propagation — defense in depth for the (post-`validate()`) unreachable
-/// failure paths, so a malformed value is never silently coerced.
+// (rc-vl1l) Registration-name resolution lives above the builders so the
+// builder doc comments stay attached to their builders.
 /// Resolve the effective cache registration name (rc-vl1l): the `name`
 /// override when set, else the backend convention (`"persistent"` for redb,
 /// `"redis"` for redis, `"memory"` for memory). The same value feeds BOTH the
@@ -137,6 +135,10 @@ fn idempotent_repo_name(icfg: &IdempotentRepoConfig) -> String {
     }
 }
 
+/// Build the redb-backed persistent cache repository from a validated
+/// `CacheRepoConfig`. Re-parses the byte-size and duration fields with strict
+/// error propagation — defense in depth for the (post-`validate()`) unreachable
+/// failure paths, so a malformed value is never silently coerced.
 async fn build_persistent_cache_repo(
     ccfg: &CacheRepoConfig,
     shutdown_token: CancellationToken,

@@ -667,7 +667,7 @@ fn validate_repo_registration_name(field: &str, name: &str) -> Result<(), CamelE
         Ok(())
     } else {
         Err(CamelError::Config(format!(
-            "{field} '{name}': must be non-empty and use only [A-Za-z0-9:_-]              (glob metacharacters are forbidden)"
+            "{field} '{name}': must be non-empty and use only [A-Za-z0-9:_-] (glob metacharacters are forbidden)"
         )))
     }
 }

@@ -432,9 +432,14 @@ impl SentinelTopology {
                 .set_client_to_redis_certificates(certs);
         }
 
-        let client = builder.build().map_err(|e| {
-            CamelError::ProcessorError(format!("failed to build sentinel client: {e}"))
-        })?;
+        // Setup defect, not a transport failure: a builder rejection means
+        // the configuration mix is unusable (e.g. certificates on a Tcp
+        // sentinel address), so it lands in the Config family per the
+        // ADR-0012 error-family boundary (rc-ezi0f keeps Config out of the
+        // transient classifier).
+        let client = builder
+            .build()
+            .map_err(|e| CamelError::Config(format!("failed to build sentinel client: {e}")))?;
 
         Ok(Self {
             client: Arc::new(std::sync::Mutex::new(client)),

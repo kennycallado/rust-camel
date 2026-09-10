@@ -51,8 +51,10 @@ impl RedisIdempotentRepository {
 
     /// Number of outcome-bearing `add` commands lost to transient failures
     /// so far (rc-2or1). Each count refreshed the connection for the next
-    /// call; a climbing value means the repository is in (or recovering
-    /// from) a failover loop.
+    /// call. Introspection accessor for tests and operators holding the
+    /// repository handle; the live operator surface is the `tracing::debug!`
+    /// on the same branch, and wiring this counter into the metrics
+    /// collector family is tracked on the redis sweep bd (rc-pleop).
     pub fn transient_refresh_count(&self) -> u64 {
         self.transient_refreshes
             .load(std::sync::atomic::Ordering::Relaxed)

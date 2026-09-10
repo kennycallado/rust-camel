@@ -808,3 +808,31 @@ fn sentinel_topology_factory_loads_ca_for_tls_endpoints() {
     crate::topology::topology_from_config(&missing)
         .expect("plaintext sentinel ignores even an unreadable configured CA");
 }
+
+// r_glm holistic finding: the new_with_ca doc claims certificates on a Tcp
+// sentinel address are rejected by the builder — pin that claim so it cannot
+// drift from the redis-rs behavior it describes.
+#[cfg(all(feature = "sentinel", feature = "tls"))]
+#[test]
+fn sentinel_tls_builder_rejects_certs_on_plaintext_nodes() {
+    let err = crate::topology::SentinelTopology::new_with_ca(
+        // Plaintext sentinel address, but a CA is configured.
+        vec!["redis://127.0.0.1:26443".into()],
+        "mymaster".into(),
+        None,
+        /* node_tls */ true,
+        /* node_username */ None,
+        /* node_password */ None,
+        /* node_db */ 0,
+        Some(b"dummy-ca-pem".to_vec()),
+    )
+    .expect_err("certificates on a Tcp sentinel address must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("failed to build sentinel client"),
+        "rejection must surface through the builder error, got: {msg}"
+    );
+    // ADR-0012 family boundary: setup defects are Config, never transient.
+    assert!(!crate::config::is_transient_redis_error(&err));
+    matches!(err, CamelError::Config(_));
+}

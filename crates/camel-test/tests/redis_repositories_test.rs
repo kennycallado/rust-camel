@@ -1577,8 +1577,8 @@ stale_retention = "30s"
     };
     let msg = err.to_string();
     assert!(
-        msg.to_lowercase().contains("sentinel"),
-        "the auth failure must name the sentinel credential plane, got: {msg}"
+        msg.contains("Hint:") && msg.contains("sentinel_username"),
+        "the auth failure must carry the rc-swzq credential-plane guidance, got: {msg}"
     );
 
     // Confusion 2 (raw control): the SENTINEL password sent to the DATA
