@@ -1462,3 +1462,33 @@ remedy when parallel document execution lands.
 - **THEN** the second boot observes the first boot's rows, and the second
   document's prepare is responsible for cleaning them (clean-first idiom)
 
+
+### Requirement: Circuit-breaker route-level fallback
+
+The scenario tier SHALL drive the route-level `circuit_breaker` YAML
+surface (no programmatic fallback): a route whose wrapped upstream
+dials fail opens its breaker at `failure_threshold`, and the
+`fallback` pipeline MUST serve in place of the wrapped steps for the
+remainder of the boot. The shipped gate semantics hold: the tripping
+call itself always observes the failure, never the fallback.
+
+#### Scenario: fallback serves the stale cache entry on upstream failure
+
+- **GIVEN** a route wrapping a cache-seeded upstream dial in a
+  `circuit_breaker` with `failure_threshold: 1` whose `fallback` is
+  `cache_peek_stale`, a harness partner scripted `fault: close` as
+  the only upstream, and an opener document whose send seeds the
+  entry and fails the dial open
+- **WHEN** a consumer document sleeps past the entry's TTL and sends
+  on the same booted route
+- **THEN** the send short-circuits into the fallback, the reply body
+  is the past-expiry entry's value, and no consumer action fails
+
+#### Scenario: fallback cache miss stops the branch cleanly
+
+- **GIVEN** an open circuit whose `fallback` peeks a key nothing ever
+  wrote
+- **WHEN** the consumer document sends on the booted route
+- **THEN** the `cache_peek_stale` MISS Stops the fallback branch —
+  the send completes without a transport failure, no error
+  propagates, and the consumer document passes
