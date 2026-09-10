@@ -56,10 +56,15 @@ fn invalid_utf8_skipped() {
 #[test]
 fn alias_bomb_no_panic() {
     // 200 anchored sequence nodes followed by 2,000 alias references spread
-    // over them (10 per anchor). The geometry is load-bearing: with 200
-    // anchors the `alias_anchor_ratio = 10.0` heuristic does not trip
-    // (2,000 <= 10 x 200), so the run deterministically hits
-    // `max_alias_expansions = 1024` instead.
+    // over them (10 per anchor). Geometry is ratio-safe: 2,000 <= 10 x 200,
+    // so the `alias_anchor_ratio` heuristic cannot trip, and the jump-factor
+    // charge (2,000 x 2 nodes) sits far below the events x 100 threshold.
+    // The only reachable breach is `max_alias_expansions = 1024`, which trips
+    // at the 1025th alias as noyalib's `Error::RepetitionLimitExceeded`.
+    //
+    // Since noyalib 0.0.29 the compat-serde-yaml shim renders that variant
+    // with serde_yaml 0.9 upstream wording ("repetition limit exceeded");
+    // native Display still reads "alias expansion limit exceeded".
     //
     // The anchors and aliases ride in schema-valid positions
     // (`security_policy.roles`, a `Vec<String>`): deserialization drives
@@ -92,8 +97,20 @@ fn alias_bomb_no_panic() {
     };
     let msg = err.to_string();
     assert!(
-        msg.contains("alias expansion limit exceeded"),
+        msg.contains("repetition limit exceeded"),
         "expected the alias expansion budget to trip, got: {msg}"
+    );
+
+    // Display alone cannot distinguish the 1024-expansion budget from the
+    // alias/anchor ratio heuristic — the compat shim renders both as
+    // "repetition limit exceeded". Pin the variant itself.
+    let Err(compat_err) = noyalib::compat::serde_yaml::from_str::<serde_json::Value>(&yaml) else {
+        panic!("alias bomb document must be rejected by the compat shim");
+    };
+    assert!(
+        matches!(compat_err.inner(), noyalib::Error::RepetitionLimitExceeded),
+        "expected the expansion-budget variant, got: {:?}",
+        compat_err.inner()
     );
 }
 
