@@ -340,13 +340,11 @@ steps:
 }
 
 #[test]
-fn rschema_int_position_default_type_error() {
-    // Typing mirror (rc-93wct rev 2): a whole-scalar token at an
-    // integer position validates as the STRING "2" (tree-walk canon —
-    // numeric-looking substituted leaves keep string typing), and
-    // `max_requests` wants an integer → one Error anchored on the
-    // authored placeholder. Boot parity: the route fails to load there
-    // for the same reason.
+fn rschema_int_position_clean_default_no_diagnostic() {
+    // Integer-position carve-out (typing mirror int arm): `max_requests`
+    // wants an integer and the default `2` is a clean integer, so the
+    // validation copy carries the NUMBER — exactly as the boot loader
+    // coerces the leaf. No Error, no Info note, nothing.
     let source = "\
 id: r1
 from: direct:start
@@ -357,20 +355,13 @@ steps:
 ";
     let diags = analyze(source);
     let rschema = rschema_only(&diags);
-    let errors: Vec<_> = rschema
-        .iter()
-        .filter(|d| d.severity == Severity::Error)
-        .collect();
-    assert_eq!(
-        errors.len(),
-        1,
-        "expected exactly one type Error for the string-typed substituted \
-             default; got: {errors:?}"
-    );
     assert!(
-        slice(source, &errors[0].span).contains("${env:MY_LIMIT:-2}"),
-        "Error must anchor on the placeholder value node; sliced: {:?}",
-        slice(source, &errors[0].span)
+        rschema.is_empty(),
+        "int-position clean-integer default must produce no diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, d.message.as_str()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -485,12 +476,13 @@ steps:
 
 #[test]
 fn rschema_mixed_document_per_token() {
-    // Per-token semantics under the typing canon: the string-position
-    // WITH_DEF token validates cleanly with exactly one Info note,
-    // while the int-position ALSO_WITH_DEF token type-errors — each
-    // token judged at its own position. (A whole-document Err→raw
-    // fallback would re-literal BOTH tokens and lose the defaulted
-    // one's clean pass.)
+    // Per-token semantics under the typing canon + integer-position
+    // carve-out: the string-position WITH_DEF token validates cleanly
+    // with exactly one Info note, while the int-position ALSO_WITH_DEF
+    // token (clean integer default) is carved out — no diagnostic at
+    // all. Each token is judged at its own position. (A whole-document
+    // Err→raw fallback would re-literal BOTH tokens and lose the
+    // defaulted one's clean pass.)
     let source = "\
 id: ${env:WITH_DEF:-hello}
 from: direct:start
@@ -519,13 +511,19 @@ steps:
         .filter(|d| d.severity == Severity::Error)
         .collect();
     assert!(
-        errors
-            .iter()
-            .any(|d| slice(source, &d.span).contains("${env:ALSO_WITH_DEF:-2}")),
-        "expected a type Error anchored on the int-position placeholder; got: {:?}",
+        errors.is_empty(),
+        "int-position clean default must not be type-flagged; got: {:?}",
         errors
             .iter()
             .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema.iter().all(|d| !d.message.contains("ALSO_WITH_DEF")),
+        "carved-out int leaf must produce no diagnostic at all; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, d.message.as_str()))
             .collect::<Vec<_>>()
     );
 }
@@ -561,12 +559,14 @@ steps:
 // purity gate forbids anywhere under `src/`.
 
 #[test]
-fn rschema_int_field_env_unset_no_default_still_flags() {
+fn rschema_no_default_int_position_still_error() {
     // A whole-scalar token with no default keeps its literal instance
     // value and is explicitly flagged by the typing-mirror walk (boot
     // hard-fails on the unresolved variable). At an int position the
     // schema type check fires on the same authored placeholder too —
-    // the assertion holds for either source of the Error.
+    // the assertion holds for either source of the Error. The
+    // integer-position carve-out never applies: there is no default to
+    // coerce.
     let source = "\
 id: r1
 from: direct:start
@@ -586,6 +586,203 @@ steps:
             .map(|d| (d.severity, slice(source, &d.span)))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn int_position_notanumber_still_error() {
+    // The carve-out needs a CLEAN integer default: `notanumber` stays on
+    // the STRING validation copy → a schema type Error anchored on the
+    // authored placeholder (boot parity: the route fails there too).
+    let source = "\
+id: r1
+from: direct:start
+steps:
+  - throttle:
+      max_requests: ${env:MY_LIMIT:-notanumber}
+      period_secs: 1
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors
+            .iter()
+            .any(|d| slice(source, &d.span).contains("${env:MY_LIMIT:-notanumber}")),
+        "expected a type Error anchored on the placeholder; got: {:?}",
+        errors
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn int_position_leading_zero_still_error() {
+    // Leading zeros are not a clean integer (YAML 1.1 octal ambiguity):
+    // `007` keeps string typing → schema type Error, like boot.
+    let source = "\
+id: r1
+from: direct:start
+steps:
+  - throttle:
+      max_requests: ${env:MY_LIMIT:-007}
+      period_secs: 1
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors
+            .iter()
+            .any(|d| slice(source, &d.span).contains("${env:MY_LIMIT:-007}")),
+        "expected a type Error anchored on the placeholder; got: {:?}",
+        errors
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn int_default_at_polymorphic_position_keeps_info() {
+    // Guard-arm pin for the integer-position carve-out (Condition A):
+    // `set_header.value` is polymorphic in ROUTE_SCHEMA (no `type`
+    // constraint), so the STRING copy validates cleanly and the carve-out
+    // must NOT fire — the numeric-looking default `${env:H:-123}` keeps
+    // today's string-position behavior: exactly one Info note, zero
+    // Errors. A refactor that carved unconditionally (dropping the
+    // Condition A guard) would suppress the Info and fail this test.
+    let source = "\
+id: r1
+from: direct:start
+steps:
+  - set_header:
+      key: X-Custom
+      value: ${env:H:-123}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "polymorphic-position default must not be type-flagged; got: {errors:?}"
+    );
+    let infos: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .collect();
+    assert_eq!(
+        infos.len(),
+        1,
+        "expected exactly one Info note for the substituted default; got: {infos:?}"
+    );
+    assert!(
+        infos[0].message.contains(":-123"),
+        "Info must report the substituted `:-123` default; got: {}",
+        infos[0].message
+    );
+    assert!(
+        slice(source, &infos[0].span).contains("${env:H:-123}"),
+        "Info span must anchor on the authored placeholder; sliced: {:?}",
+        slice(source, &infos[0].span)
+    );
+}
+
+#[test]
+fn bool_position_placeholder_still_error() {
+    // Guard-arm pin for the integer-position carve-out (Condition B):
+    // `auto_startup` is a strict boolean field in ROUTE_SCHEMA. The
+    // clean-integer default `1` makes the leaf an IntCandidate, but the
+    // NUMBER copy still type-errors at the boolean position — Condition B
+    // keeps the STRING copy, so the schema type Error anchored on the
+    // authored placeholder survives (boot parity: the loader rejects the
+    // coerced number there too).
+    let source = "\
+id: r1
+from: direct:start
+auto_startup: ${env:AS:-1}
+steps:
+  - to: log:out
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors
+            .iter()
+            .any(|d| slice(source, &d.span).contains("${env:AS:-1}")),
+        "expected a type Error anchored on the bool-position placeholder; got: {:?}",
+        errors
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    // The Info note must ALSO survive: the candidate reached the carve-out
+    // loop, Condition A fired (string copy errors), and Condition B kept
+    // the STRING copy (the number copy errors too) — so the leaf is not
+    // carved and the substituted-default note is not suppressed. A
+    // refactor that let the number copy win at non-integer positions
+    // would carve the leaf, drop this Info, and fail the assertion.
+    let infos: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .collect();
+    assert_eq!(
+        infos.len(),
+        1,
+        "expected the substituted-default Info note to survive the bool \
+             position; got: {infos:?}"
+    );
+}
+
+#[test]
+fn clean_integer_lexical_gate() {
+    // SYNC gate pin: mirrors camel-dsl env_int_probe::clean_integer /
+    // camel-config clean_i64 — lexical `-?(0|[1-9][0-9]*)` (no leading
+    // zeros, no whitespace, no plus), then i64-or-u64 parse.
+    let clean = [
+        "0",
+        "2",
+        "-3",
+        "9223372036854775807",  // i64::MAX
+        "9223372036854775808",  // i64 overflow, u64 magnitude
+        "18446744073709551615", // u64::MAX
+    ];
+    for s in clean {
+        assert!(clean_integer(s).is_some(), "`{s}` must be a clean integer");
+    }
+    let not_clean = [
+        "",
+        "-",
+        "+2",
+        "007",
+        "-007",
+        "1e3",
+        " 2",
+        "2 ",
+        "1_000",
+        "2.0",
+        "true",
+        "99999999999999999999999", // > u64::MAX — overflow, boot rejects
+    ];
+    for s in not_clean {
+        assert!(
+            clean_integer(s).is_none(),
+            "`{s}` must NOT be a clean integer"
+        );
+    }
 }
 
 #[test]

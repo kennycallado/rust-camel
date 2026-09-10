@@ -2933,15 +2933,17 @@ fn build_from_toml_value_inner(
     // and env overrides, which the builder merges internally — walking the
     // pre-builder value would miss them.
     let mut merged_tree: toml::Value = built.try_deserialize()?;
-    resolve_tree_with(&mut merged_tree, lookup)?;
+    let provenance = resolve_tree_with_provenance(&mut merged_tree, lookup)?;
 
     // Strict deserialization: unlike the config crate's lenient coercion,
     // `toml::Value::try_into` rejects type mismatches (e.g. a quoted numeric
     // on a numeric field). This swap is intentional and pinned by
     // `placeholder_e2e::quoted_numeric_root_field_is_rejected_after_materialization`.
-    let mut config: CamelConfig = merged_tree
-        .try_into()
-        .map_err(|e| ConfigError::Message(format!("Failed to deserialize merged config: {e}")))?;
+    // On failure the typed probe (env-int-placeholder-typing) retries with
+    // clean-integer provenance leaves coerced to integers; literal quoted
+    // numerics carry no token, never enter the provenance set, and stay
+    // rejected.
+    let mut config: CamelConfig = deserialize_with_probe(&merged_tree, &provenance)?;
     // FR1 (deployment-resolvable-cache-repo-topology): topology values that
     // expanded empty (e.g. `url = "${env:REDIS_URL:-}"` with the var unset,
     // or a literal `""`) become absent before validation selects the
@@ -2997,6 +2999,69 @@ fn parse_include_list(value: &toml::Value, where_: &str) -> Result<Vec<String>, 
 pub(crate) const STRICT_PREFIXES: &[&str] =
     &["security", "datasources", "idempotent_repo", "cache_repo"];
 
+/// One STRUCTURAL path segment into the TOML tree. Keys are stored verbatim:
+/// a key that literally contains `.` or an index-like suffix navigates
+/// unambiguously (the dotted/indexed rendering is display-only — see
+/// [`segs_display`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfigSeg {
+    Key(String),
+    Index(usize),
+}
+
+/// Structural paths of the token-carrying leaves recorded while resolving,
+/// in document order (env-int-placeholder-typing). Feeds the typed probe at
+/// the deserialize boundary.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProvenanceSet(Vec<Vec<ConfigSeg>>);
+
+impl ProvenanceSet {
+    /// Recorded paths, in document order.
+    pub(crate) fn paths(&self) -> &[Vec<ConfigSeg>] {
+        &self.0
+    }
+}
+
+/// Navigate `segs` from `root` through tables and arrays; `None` when a
+/// segment does not apply (wrong node kind, missing key or out-of-range
+/// index).
+pub(crate) fn leaf_mut<'a>(
+    root: &'a mut toml::Value,
+    segs: &[ConfigSeg],
+) -> Option<&'a mut toml::Value> {
+    let mut node = root;
+    for seg in segs {
+        node = match (node, seg) {
+            (toml::Value::Table(table), ConfigSeg::Key(key)) => table.get_mut(key)?,
+            (toml::Value::Array(arr), ConfigSeg::Index(index)) => arr.get_mut(*index)?,
+            _ => return None,
+        };
+    }
+    Some(node)
+}
+
+/// Render segments in the walk's display format: keys join with `.`, array
+/// indices render as `[i]` (e.g. `security.native.credentials[1].secret`).
+/// NEVER use this for navigation — a key containing `.` is a single segment.
+#[cfg(test)]
+fn segs_display(segs: &[ConfigSeg]) -> String {
+    let mut out = String::new();
+    for seg in segs {
+        match seg {
+            ConfigSeg::Key(key) => {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(key);
+            }
+            ConfigSeg::Index(index) => {
+                out.push_str(&format!("[{index}]"));
+            }
+        }
+    }
+    out
+}
+
 /// Recursively resolve every string leaf of a TOML tree in place.
 ///
 /// Leaves whose top-level path segment is in [`STRICT_PREFIXES`] resolve via
@@ -3016,7 +3081,20 @@ pub fn resolve_tree_with(
     root: &mut toml::Value,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(), ConfigError> {
-    resolve_tree_walk(root, "", lookup)
+    resolve_tree_with_provenance(root, lookup).map(|_| ())
+}
+
+/// Lookup-injectable walk that ALSO returns the [`ProvenanceSet`]:
+/// resolution behavior is identical to [`resolve_tree_with`]; the extra
+/// return value feeds the typed probe at the deserialize boundary
+/// (env-int-placeholder-typing).
+pub(crate) fn resolve_tree_with_provenance(
+    root: &mut toml::Value,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<ProvenanceSet, ConfigError> {
+    let mut provenance = Vec::new();
+    resolve_tree_walk(root, "", &mut Vec::new(), &mut provenance, lookup)?;
+    Ok(ProvenanceSet(provenance))
 }
 
 /// The process-ambient lookup used by the `camel run` loader family.
@@ -3027,12 +3105,26 @@ fn ambient_lookup() -> impl Fn(&str) -> Option<String> {
 fn resolve_tree_walk(
     value: &mut toml::Value,
     path: &str,
+    segs: &mut Vec<ConfigSeg>,
+    provenance: &mut Vec<Vec<ConfigSeg>>,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(), ConfigError> {
     match value {
         toml::Value::String(s) => {
-            let top = path.split('.').next().unwrap_or_default();
-            if STRICT_PREFIXES.contains(&top) {
+            // Token-bearing leaf: record its structural path BEFORE
+            // resolving, so the resolved value can be probed at the
+            // deserialize boundary (env-int-placeholder-typing). Detection
+            // mirrors `resolve_plain_leaf_with`'s marker check.
+            if s.contains("${env:") || s.contains("$$") {
+                provenance.push(segs.clone());
+            }
+            // Strict/plain dispatch from the STRUCTURAL path's first key —
+            // never `path.split('.')`, which would misdispatch on a key
+            // that literally contains a dot.
+            if matches!(
+                segs.first(),
+                Some(ConfigSeg::Key(key)) if STRICT_PREFIXES.contains(&key.as_str())
+            ) {
                 resolve_strict_leaf_with(s, path, lookup)?;
             } else {
                 resolve_plain_leaf_with(s, path, lookup)?;
@@ -3040,7 +3132,11 @@ fn resolve_tree_walk(
         }
         toml::Value::Array(arr) => {
             for (i, item) in arr.iter_mut().enumerate() {
-                resolve_tree_walk(item, &format!("{path}[{i}]"), lookup)?;
+                segs.push(ConfigSeg::Index(i));
+                let walked =
+                    resolve_tree_walk(item, &format!("{path}[{i}]"), segs, provenance, lookup);
+                segs.pop();
+                walked?;
             }
         }
         toml::Value::Table(table) => {
@@ -3050,7 +3146,10 @@ fn resolve_tree_walk(
                 } else {
                     format!("{path}.{k}")
                 };
-                resolve_tree_walk(v, &child_path, lookup)?;
+                segs.push(ConfigSeg::Key(k.clone()));
+                let walked = resolve_tree_walk(v, &child_path, segs, provenance, lookup);
+                segs.pop();
+                walked?;
             }
         }
         _ => {}
@@ -3119,6 +3218,172 @@ fn resolve_plain_leaf_with(
         *value = resolved;
     }
     Ok(())
+}
+
+/// Maximum number of candidate leaves the subset search will enumerate
+/// (2^8 - 1 = 255 in-memory parses worst case). Documents with more
+/// candidates keep the first-pass error.
+const MAX_PROBE_CANDIDATES: usize = 8;
+
+/// Clean integer: the lexical form `-?(0|[1-9][0-9]*)` (no trim, no leading
+/// zeros — floats, bools, and `1e3` are not clean), then an exact i64 parse
+/// (overflow is not clean). Returns the integer the candidate coerces to.
+// SYNC: this rule is mirrored by camel-dsl's `clean_integer`
+// (crates/camel-dsl/src/env_int_probe.rs); crate purity forbids the
+// dependency. The DSL arm also accepts u64 magnitude; this mirror is
+// deliberately i64-only — u64-magnitude tokens stay on today's rejection
+// path. Update the pair together.
+fn clean_i64(s: &str) -> Option<i64> {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    let lexically_clean = match digits.as_bytes() {
+        // `0` alone — no leading zeros allowed.
+        [b'0'] => true,
+        // `[1-9]` followed by ASCII digits only.
+        [first, rest @ ..] if (b'1'..=b'9').contains(first) => {
+            rest.iter().all(|b| b.is_ascii_digit())
+        }
+        _ => false,
+    };
+    if !lexically_clean {
+        return None;
+    }
+    s.parse::<i64>().ok()
+}
+
+/// Advance `indices` to the next combination of its size over `0..universe`
+/// in lexicographic order; `false` when the enumeration is exhausted.
+fn next_combination(indices: &mut [usize], universe: usize) -> bool {
+    let size = indices.len();
+    if size == 0 {
+        return false;
+    }
+    for i in (0..size).rev() {
+        let max = universe - (size - i);
+        if indices[i] < max {
+            indices[i] += 1;
+            for j in i + 1..size {
+                indices[j] = indices[j - 1] + 1;
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Strict deserialization with a typed probe fallback
+/// (env-int-placeholder-typing). First pass is today's strict `try_into`;
+/// on failure, provenance leaves whose (post-resolution) string value is a
+/// clean i64 are coerced to `toml::Value::Integer` in cloned trees, candidate
+/// index subsets tried ascending size (lexicographic). First parse success
+/// wins; otherwise the original first-pass error stands. Documents that
+/// deserialize today are unaffected — probing runs only after failure.
+fn deserialize_with_probe(
+    merged_tree: &toml::Value,
+    provenance: &ProvenanceSet,
+) -> Result<CamelConfig, ConfigError> {
+    let first_attempt: Result<CamelConfig, _> = merged_tree.clone().try_into();
+    let first_err = match first_attempt {
+        Ok(config) => return Ok(config),
+        Err(e) => ConfigError::Message(format!("Failed to deserialize merged config: {e}")),
+    };
+
+    // Candidate leaves, document order: provenance paths that resolve to a
+    // String whose text `clean_i64` accepts.
+    let mut probe_tree = merged_tree.clone();
+    let mut candidates: Vec<(Vec<ConfigSeg>, i64)> = Vec::new();
+    for segs in provenance.paths() {
+        let coerced = match leaf_mut(&mut probe_tree, segs) {
+            Some(toml::Value::String(s)) => clean_i64(s),
+            _ => None,
+        };
+        if let Some(number) = coerced {
+            candidates.push((segs.clone(), number));
+        }
+    }
+    if candidates.is_empty() || candidates.len() > MAX_PROBE_CANDIDATES {
+        return Err(first_err);
+    }
+
+    let universe = candidates.len();
+    for size in 1..=universe {
+        let mut indices: Vec<usize> = (0..size).collect();
+        loop {
+            let mut tree = merged_tree.clone();
+            for &idx in &indices {
+                let (segs, number) = &candidates[idx];
+                if let Some(leaf) = leaf_mut(&mut tree, segs) {
+                    *leaf = toml::Value::Integer(*number);
+                }
+            }
+            let attempt: Result<CamelConfig, _> = tree.try_into();
+            if let Ok(config) = attempt {
+                return Ok(config);
+            }
+            if !next_combination(&mut indices, universe) {
+                break;
+            }
+        }
+    }
+    Err(first_err)
+}
+
+/// Unit tests for the provenance-recording resolver variant
+/// (env-int-placeholder-typing). Behavioral parity of the walk itself is
+/// pinned by `tests/placeholder_walk.rs` and `tests/placeholder_e2e.rs`.
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    fn tree(raw: &str) -> toml::Value {
+        toml::from_str(raw).expect("test fixture must be valid TOML")
+    }
+
+    fn static_lookup(value: &str) -> impl Fn(&str) -> Option<String> + '_ {
+        move |_| Some(value.to_string())
+    }
+
+    /// Only leaves carrying token text (`${env:` or `$$`) are recorded;
+    /// plain string leaves never enter the set.
+    #[test]
+    fn provenance_set_records_token_leaves() {
+        let lookup = static_lookup("1");
+        let mut root = tree(
+            r#"timeout_ms = "${env:T:-1}"
+log_level = "debug"
+"#,
+        );
+        let prov = resolve_tree_with_provenance(&mut root, &lookup).expect("resolve must succeed");
+        assert_eq!(prov.paths().len(), 1, "exactly the token leaf is recorded");
+        assert_eq!(
+            prov.paths()[0],
+            vec![ConfigSeg::Key("timeout_ms".to_string())]
+        );
+    }
+
+    /// Structural segments keep keys that literally contain a dot
+    /// unambiguous: navigation reaches the leaf, and the dotted form is
+    /// display-only.
+    #[test]
+    fn provenance_segments_navigate_keys_with_dots() {
+        let lookup = static_lookup("1");
+        let mut root = tree(
+            r#"[a]
+"b.c" = "${env:X:-1}"
+"#,
+        );
+        let prov = resolve_tree_with_provenance(&mut root, &lookup).expect("resolve must succeed");
+        assert_eq!(prov.paths().len(), 1);
+        assert_eq!(
+            prov.paths()[0],
+            vec![
+                ConfigSeg::Key("a".to_string()),
+                ConfigSeg::Key("b.c".to_string()),
+            ]
+        );
+        let leaf = leaf_mut(&mut root, &prov.paths()[0]).expect("segments must navigate");
+        assert_eq!(leaf.as_str(), Some("1"));
+        assert_eq!(segs_display(&prov.paths()[0]), "a.b.c");
+    }
 }
 
 /// Apply profile-based TOML section merging in-place.

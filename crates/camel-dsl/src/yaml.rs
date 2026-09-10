@@ -106,20 +106,50 @@ pub fn parse_yaml_to_declarative(yaml: &str) -> Result<Vec<DeclarativeRoute>, Ca
     annotate_format(InputFormat::Yaml, parse_yaml_to_declarative_inner(yaml))
 }
 
-fn parse_yaml_to_declarative_inner(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
-    let mut dsl: RouteDslRoutes = serde_yml::from_str(yaml).map_err(|e| {
-        // log-policy: system-broken
-        error!(error = %e, "yaml parse failed");
-        CamelError::RouteError(format!("YAML parse error: {e}"))
-    })?;
+/// Staged error for the route-document parse chain: the `serde_yml::from_str`
+/// stage versus the document-shape stage that follows (REST/MCP expansion,
+/// duplicate-ID checks, declarative conversion). The split makes logging
+/// scope dispatchable by type, not message: the logging wrapper
+/// ([`parse_yaml_to_declarative_inner`]) logs ONLY the `FromStr` stage — the
+/// shape stage has never logged — while the quiet probe paths
+/// ([`parse_yaml_for_probe`]) log nothing.
+#[derive(Debug)]
+pub(crate) enum DeserializeStageError {
+    /// The `serde_yml::from_str` stage failed.
+    FromStr(serde_yml::Error),
+    /// The document-shape stage (expansion, duplicate IDs, conversion) failed.
+    Shape(CamelError),
+}
+
+/// Map a staged parse error into the `CamelError` surface the parse entry
+/// points return. Shared by the logging wrapper and the quiet probe path so
+/// the two cannot drift in error wording.
+fn stage_error_to_camel_error(e: DeserializeStageError) -> CamelError {
+    match e {
+        DeserializeStageError::FromStr(err) => {
+            CamelError::RouteError(format!("YAML parse error: {err}"))
+        }
+        DeserializeStageError::Shape(err) => err,
+    }
+}
+
+/// Deserialize + shape-check a route document (expansion, duplicate IDs,
+/// declarative conversion). Logging-free: callers decide logging scope by
+/// stage via [`DeserializeStageError`].
+pub(crate) fn deserialize_route_doc(
+    yaml: &str,
+) -> Result<Vec<DeclarativeRoute>, DeserializeStageError> {
+    let mut dsl: RouteDslRoutes =
+        serde_yml::from_str(yaml).map_err(DeserializeStageError::FromStr)?;
     debug!(route_count = %dsl.routes.len(), rest_count = %dsl.rest.len(), "yaml routes parsed successfully");
 
     // Expand REST blocks into RouteDslRoute entries. Shared with the JSON
     // parser (review I2) — the helper performs cross-block validation
     // (duplicate method+path tuples, ambiguous templates per spec §6.3/§7.2).
     let prior_count = dsl.routes.len();
-    crate::rest::expand_rest_into(&mut dsl.routes, &dsl.rest)?;
-    crate::mcp::expand_mcp_into(&mut dsl.routes, &dsl.mcp)?;
+    crate::rest::expand_rest_into(&mut dsl.routes, &dsl.rest)
+        .map_err(DeserializeStageError::Shape)?;
+    crate::mcp::expand_mcp_into(&mut dsl.routes, &dsl.mcp).map_err(DeserializeStageError::Shape)?;
     if prior_count != dsl.routes.len() {
         debug!(
             routes_before = prior_count,
@@ -130,12 +160,27 @@ fn parse_yaml_to_declarative_inner(yaml: &str) -> Result<Vec<DeclarativeRoute>, 
     }
 
     // Check for duplicate route IDs across all routes (including REST-expanded).
-    crate::rest::check_duplicate_route_ids(&dsl.routes)?;
+    crate::rest::check_duplicate_route_ids(&dsl.routes).map_err(DeserializeStageError::Shape)?;
 
     dsl.routes
         .into_iter()
         .map(route_dsl_to_declarative_route)
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DeserializeStageError::Shape)
+}
+
+fn parse_yaml_to_declarative_inner(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
+    match deserialize_route_doc(yaml) {
+        Ok(routes) => Ok(routes),
+        Err(DeserializeStageError::FromStr(e)) => {
+            // log-policy: system-broken
+            error!(error = %e, "yaml parse failed");
+            Err(CamelError::RouteError(format!("YAML parse error: {e}")))
+        }
+        // The shape stage logs nothing (pre-split behavior preserved
+        // byte-identically).
+        Err(DeserializeStageError::Shape(e)) => Err(e),
+    }
 }
 
 /// Extract `rest:` blocks from YAML **without** lowering them to `http:` routes.
@@ -162,6 +207,27 @@ fn parse_yaml_inner(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
         .into_iter()
         .map(compile_declarative_route)
         .collect()
+}
+
+/// Declarative → `RouteDefinition` lowering stage (`compile_declarative_route`
+/// per route), logging-free. Pure companion of the staged deserialize chain —
+/// the quiet probe paths compose it so wrappers cannot drift.
+pub(crate) fn lower_declarative_to_routes(
+    routes: Vec<DeclarativeRoute>,
+) -> Result<Vec<RouteDefinition>, CamelError> {
+    routes.into_iter().map(compile_declarative_route).collect()
+}
+
+/// Quiet probe parse: deserialize + lower + YAML format annotation — the
+/// public [`parse_yaml`] contract (probe results flow to the same callers) —
+/// with ZERO failure-path logging: speculative probe attempts are expected
+/// failures and must not emit `error!`/`warn!`. The CALLER replays the final
+/// failure through the logging parser exactly once.
+pub(crate) fn parse_yaml_for_probe(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
+    let result = deserialize_route_doc(yaml)
+        .map_err(stage_error_to_camel_error)
+        .and_then(lower_declarative_to_routes);
+    annotate_format(InputFormat::Yaml, result)
 }
 
 pub fn parse_yaml_with_threshold(
@@ -202,6 +268,31 @@ fn parse_yaml_with_threshold_and_security_inner(
     security_ctx: SecurityCompileContext,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
     parse_yaml_to_declarative_inner(yaml)?
+        .into_iter()
+        .map(|route| {
+            compile_declarative_route_with_stream_cache_threshold(
+                route,
+                stream_cache_threshold,
+                security_ctx.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Quiet twin of [`parse_yaml_with_threshold_and_security`]: the same staged
+/// deserialize + threshold/security-aware lowering, sharing ONLY
+/// [`deserialize_route_doc`] with the logging parser, and emitting no
+/// failure-path logs. It exists for the loader-layer typed probe
+/// (`env_int_probe`), whose speculative attempts are expected failures. It
+/// must NOT use [`lower_declarative_to_routes`], which carries no
+/// threshold/security semantics.
+pub(crate) fn parse_yaml_with_threshold_and_security_quiet(
+    yaml: &str,
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+) -> Result<Vec<RouteDefinition>, CamelError> {
+    let routes = deserialize_route_doc(yaml).map_err(stage_error_to_camel_error)?;
+    routes
         .into_iter()
         .map(|route| {
             compile_declarative_route_with_stream_cache_threshold(
@@ -2077,12 +2168,16 @@ pub fn load_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
 /// Lookup-injectable variant of [`load_from_file`]: `${env:NAME}` placeholders
 /// in the raw file text resolve through `lookup` (never the process
 /// environment) before YAML parsing, using the same tree-walk-first strategy
-/// as discovery's YAML arm (`interpolate_yaml_source`): parse-tree
-/// interpolation first — comments never interpolate, substituted leaves keep
-/// string typing (boot parity for int-typed positions) — falling back to the
-/// legacy whole-text splice when the document does not survive the YAML
-/// round-trip. Same 16 MiB cap and path-annotated errors; an unresolved
-/// variable without default fails naming the variable.
+/// as discovery's YAML arm: parse-tree interpolation first — comments never
+/// interpolate, substituted leaves keep STRING typing at the interpolation
+/// seam — falling back to the legacy whole-text splice when the document does
+/// not survive the YAML round-trip. After a failed typed parse, the
+/// loader-layer probe coerces integer-typed positions under `routes:` to
+/// numbers via interpolation provenance (string/polymorphic positions are
+/// untouched; at most 8 candidate leaves; REST blocks and templates keep
+/// today's semantics) — see [`parse_routes_with_env`]. Same 16 MiB cap and
+/// path-annotated errors; an unresolved variable without default fails
+/// naming the variable.
 pub fn load_from_file_with_env(
     path: &Path,
     lookup: &dyn Fn(&str) -> Option<String>,
@@ -2093,20 +2188,86 @@ pub fn load_from_file_with_env(
         error!(path = %path.display(), error = %e, "failed to load routes from file");
         e
     })?;
-    let interpolated = crate::env_interpolation::interpolate_yaml_source(&content, lookup)
-        .map_err(|var| {
-            CamelError::RouteError(format!(
-                "Environment variable '{var}' not set (required by {})",
+    match parse_routes_with_env(&content, lookup) {
+        Ok(routes) => Ok(routes),
+        Err(RoutesEnvError::Unresolved(var)) => Err(CamelError::RouteError(format!(
+            "Environment variable '{var}' not set (required by {})",
+            path.display()
+        ))),
+        Err(RoutesEnvError::Parse(e)) => match e {
+            CamelError::RouteError(msg) => Err(CamelError::RouteError(format!(
+                "{msg} (in {})",
                 path.display()
-            ))
-        })?;
-    let annotated = annotate_format(InputFormat::Yaml, parse_yaml_inner(&interpolated));
-    annotated.map_err(|e| match e {
-        CamelError::RouteError(msg) => {
-            CamelError::RouteError(format!("{msg} (in {})", path.display()))
+            ))),
+            other => Err(other),
+        },
+    }
+}
+
+/// Typed error surface of [`parse_routes_with_env`]: callers distinguish an
+/// unresolved `${env:NAME}` variable from a route-document parse failure BY
+/// TYPE — no message inspection.
+#[derive(Debug)]
+pub enum RoutesEnvError {
+    /// A `${env:NAME}` placeholder did not resolve (no value, no default).
+    Unresolved(String),
+    /// The interpolated document failed route parsing (after any probe).
+    Parse(CamelError),
+}
+
+impl std::fmt::Display for RoutesEnvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RoutesEnvError::Unresolved(var) => {
+                write!(f, "Environment variable '{var}' not set")
+            }
+            RoutesEnvError::Parse(e) => write!(f, "{e}"),
         }
-        other => other,
-    })
+    }
+}
+
+impl std::error::Error for RoutesEnvError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RoutesEnvError::Unresolved(_) => None,
+            RoutesEnvError::Parse(e) => Some(e),
+        }
+    }
+}
+
+/// Interpolation + typed parse in one seam: resolve `${env:NAME}`
+/// placeholders through `lookup` (tree-walk first, legacy splice fallback —
+/// see [`crate::env_interpolation::interpolate_yaml_source`]), then parse
+/// the interpolated text through the loader-layer typed probe
+/// ([`crate::env_int_probe`]): a document whose only defect is a string
+/// placeholder at an integer-typed position under `routes:` still loads,
+/// with exactly the integer positions coerced. Documents that parse today
+/// are unaffected (probing runs only after failure); JSON route files and
+/// REST/template subtrees never probe.
+///
+/// On final parse failure the seam replays the interpolated text through
+/// the logging [`parse_yaml`] exactly once (preserving today's error log
+/// for genuinely broken documents) and returns the original first-pass
+/// annotated error.
+pub fn parse_routes_with_env(
+    raw: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<RouteDefinition>, RoutesEnvError> {
+    let (text, provenance) =
+        crate::env_interpolation::interpolate_yaml_source_with_provenance(raw, lookup)
+            .map_err(RoutesEnvError::Unresolved)?;
+    match crate::env_int_probe::parse_with_probe(&text, provenance.as_deref(), parse_yaml_for_probe)
+    {
+        Ok(routes) => Ok(routes),
+        Err(first) => {
+            // Final-failure replay (logging only): re-run the interpolated
+            // text through the logging parser exactly once so genuinely
+            // broken documents keep today's error log. The returned error
+            // stays the original first-pass failure.
+            let _ = parse_yaml(&text);
+            Err(RoutesEnvError::Parse(first))
+        }
+    }
 }
 
 /// Lookup-injectable sibling of [`extract_rest_blocks`] for file input:
@@ -5167,6 +5328,123 @@ routes:
         path
     }
 
+    /// Asserts the first step is a `throttle` whose compiled config carries
+    /// `max_requests == expected` (the integer-probe acceptance shape).
+    fn assert_throttle_max_requests(routes: &[RouteDefinition], expected: usize) {
+        match &routes[0].steps()[0] {
+            camel_core::route::BuilderStep::Throttle { config, .. } => {
+                assert_eq!(config.max_requests, expected);
+            }
+            other => panic!("expected throttle step, got: {other:?}"),
+        }
+    }
+
+    /// The demo shape: `throttle.max_requests` driven by an env placeholder
+    /// with an integer default — loads via the typed probe, unset case.
+    #[test]
+    fn load_from_file_with_env_int_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "throttle-int-default.yaml",
+            "routes:\n  - id: throttle-int\n    from: \"direct:start\"\n    steps:\n      - throttle:\n          max_requests: ${env:DWD_WARM_MAX_REQUESTS:-2}\n          period_secs: 1\n",
+        );
+
+        let routes = load_from_file_with_env(&path, &|_| None).unwrap();
+        assert_throttle_max_requests(&routes, 2);
+    }
+
+    #[test]
+    fn load_from_file_with_env_int_lookup_five() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "throttle-int-five.yaml",
+            "routes:\n  - id: throttle-int\n    from: \"direct:start\"\n    steps:\n      - throttle:\n          max_requests: ${env:DWD_WARM_MAX_REQUESTS:-2}\n          period_secs: 1\n",
+        );
+
+        let routes = load_from_file_with_env(&path, &|name| {
+            (name == "DWD_WARM_MAX_REQUESTS").then(|| "5".into())
+        })
+        .unwrap();
+        assert_throttle_max_requests(&routes, 5);
+    }
+
+    #[test]
+    fn unresolved_int_position_names_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "throttle-unresolved.yaml",
+            "routes:\n  - id: throttle-unresolved\n    from: \"direct:start\"\n    steps:\n      - throttle:\n          max_requests: ${env:NOPE}\n          period_secs: 1\n",
+        );
+
+        let err = match load_from_file_with_env(&path, &|_| None) {
+            Ok(_) => panic!("expected unset env error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NOPE"),
+            "expected var name in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("not set"),
+            "expected lowercase 'not set', got: {msg}"
+        );
+        assert!(
+            !msg.contains("did not match"),
+            "must not leak serde error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn embedded_token_int_position_fails() {
+        // An embedded token (`p-${env:...}`) is never provenance, so the
+        // probe has no candidates — the pass-1 type error stands.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "throttle-embedded.yaml",
+            "routes:\n  - id: throttle-embedded\n    from: \"direct:start\"\n    steps:\n      - throttle:\n          max_requests: p-${env:RC_N:-2}\n          period_secs: 1\n",
+        );
+
+        let err = match load_from_file_with_env(&path, &|_| None) {
+            Ok(_) => panic!("expected embedded-token int position to fail"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("did not match any variant"),
+            "expected the pass-1 type error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not set"),
+            "resolvable default must not surface the env error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn notanumber_int_position_fails() {
+        // `notanumber` is not a clean integer — no candidate, pass-1 error.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "throttle-notanumber.yaml",
+            "routes:\n  - id: throttle-notanumber\n    from: \"direct:start\"\n    steps:\n      - throttle:\n          max_requests: ${env:RC_J:-notanumber}\n          period_secs: 1\n",
+        );
+
+        let err = match load_from_file_with_env(&path, &|_| None) {
+            Ok(_) => panic!("expected non-integer default to fail"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("did not match any variant"),
+            "expected the pass-1 type error, got: {}",
+            err
+        );
+    }
+
     #[test]
     fn load_from_file_interpolates_string_placeholder() {
         let dir = tempfile::tempdir().unwrap();
@@ -5181,7 +5459,7 @@ routes:
     }
 
     #[test]
-    fn load_from_file_int_placeholder_fails_boot_parity() {
+    fn load_from_file_int_placeholder_loads_via_probe() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_route_file(
             &dir,
@@ -5189,23 +5467,11 @@ routes:
             "routes:\n  - id: throttle-env\n    from: \"direct:start\"\n    steps:\n      - throttle:\n          max_requests: ${env:MY_LIMIT:-2}\n          period_secs: 1\n",
         );
 
-        let err = match load_from_file(&path) {
-            Ok(_) => panic!("expected int placeholder to fail boot parity"),
-            Err(e) => e,
-        };
-        let msg = err.to_string();
-        // The substituted leaf keeps STRING typing, so the throttle step
-        // fails untagged-variant deserialization — the same error class
-        // discovery's YAML arm produces for the same file (boot parity),
-        // NOT the named-variable doc error.
-        assert!(
-            msg.contains("did not match any variant"),
-            "expected untagged-variant type mismatch (discovery parity class), got: {msg}"
-        );
-        assert!(
-            !msg.contains("not set"),
-            "int placeholder with default must not surface the named-var error, got: {msg}"
-        );
+        // The typed probe coerces the integer position after the failed
+        // typed parse — the same load outcome discovery's YAML arm produces
+        // for the same file (boot parity), never the named-variable error.
+        let routes = load_from_file(&path).unwrap();
+        assert_throttle_max_requests(&routes, 2);
     }
 
     #[test]
@@ -5343,20 +5609,14 @@ routes:
         );
         let pattern = path.to_string_lossy().to_string();
 
-        let discovery_err = match crate::discovery::discover_routes(&[pattern]) {
-            Ok(_) => panic!("discovery must reject the int placeholder (boot parity)"),
-            Err(e) => e,
-        };
-        assert!(
-            discovery_err
-                .to_string()
-                .contains("did not match any variant"),
-            "discovery must surface the same untagged-variant type mismatch as the loader, got: {discovery_err}"
-        );
-        assert!(
-            load_from_file(&path).is_err(),
-            "load_from_file must reject the int placeholder identically"
-        );
+        // Both arms load the int placeholder through the typed probe with
+        // the same coerced value (boot parity).
+        let discovery_routes = crate::discovery::discover_routes(&[pattern]).unwrap();
+        assert_eq!(discovery_routes.len(), 1);
+        assert_throttle_max_requests(&discovery_routes, 2);
+
+        let loaded = load_from_file(&path).unwrap();
+        assert_throttle_max_requests(&loaded, 2);
     }
 
     // --- extract_rest_blocks_from_file_with_env (rc-gykds) ---

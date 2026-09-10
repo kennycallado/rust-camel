@@ -908,3 +908,98 @@ async fn placeholder_string_field_publishes_info_not_error() {
 
     shutdown_server(cw, cr, handle).await;
 }
+
+/// Opening a route whose integer-typed field (`throttle.max_requests`)
+/// carries a whole-scalar env placeholder with a clean-integer default
+/// (`${env:RC93WCT_LIMIT:-2}`) must publish NO Error anywhere and no Info
+/// note for the field either — the integer-position carve-out validates
+/// the leaf as the NUMBER, exactly as the boot loader coerces it. The LSP
+/// shares the camel-lint engine, so the carve-out applies session-wide.
+#[tokio::test]
+async fn placeholder_int_field_publishes_no_error() {
+    let engine = make_engine();
+    let (mut cw, mut cr, handle) = spawn_server(engine).await;
+
+    // Initialize
+    send_jsonrpc(
+        &mut cw,
+        "initialize",
+        serde_json::json!({"processId": null, "rootUri": null, "capabilities": {}}),
+        1,
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+    let _init = read_jsonrpc(&mut cr).await.expect("init response");
+    send_notification(&mut cw, "initialized", serde_json::json!({}))
+        .await
+        .unwrap(); // allow-unwrap — test helper
+
+    // didOpen: envelope-form route with a whole-scalar
+    // placeholder-with-default on the integer-typed `max_requests` field.
+    send_notification(
+        &mut cw,
+        "textDocument/didOpen",
+        serde_json::json!({
+            "textDocument": {
+                "uri": "file:///rc93wct-int.route.yaml",
+                "languageId": "camel-route",
+                "version": 1,
+                "text": "routes:\n  - id: r1\n    from: \"direct:start\"\n    steps:\n      - throttle:\n          max_requests: ${env:RC93WCT_LIMIT:-2}\n          period_secs: 1\n"
+            }
+        }),
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+
+    // didOpen publishes immediately (only didChange is debounced): drain
+    // every publishDiagnostics arriving in a short window.
+    let mut notifications: Vec<Value> = Vec::new();
+    while let Ok(Some(v)) =
+        tokio::time::timeout(Duration::from_millis(200), read_jsonrpc(&mut cr)).await
+    {
+        if v["method"] == "textDocument/publishDiagnostics" {
+            notifications.push(v);
+        }
+    }
+    assert!(
+        !notifications.is_empty(),
+        "expected publishDiagnostics after didOpen"
+    );
+
+    // LSP over-the-wire severity integers: ERROR = 1, INFORMATION = 3.
+    const ERROR: i64 = 1;
+    const INFORMATION: i64 = 3;
+
+    let all_diags: Vec<&Value> = notifications
+        .iter()
+        .filter_map(|n| n["params"]["diagnostics"].as_array())
+        .flatten()
+        .collect();
+
+    // The document is fully valid under the integer-position carve-out
+    // (the substituted `max_requests` leaf validates as the NUMBER), so
+    // any ERROR-severity diagnostic anywhere in the published set is a
+    // false positive.
+    let error_anywhere = all_diags.iter().any(|d| d["severity"] == ERROR);
+    assert!(
+        !error_anywhere,
+        "valid document must not publish any Error; got: {all_diags:?}"
+    );
+
+    // The carve-out emits no Info note for the int leaf either (the
+    // default was not kept as a string). The bare catalog in this test
+    // engine adds an unrelated unverified-scheme Info for `direct:`,
+    // which names no variable.
+    let int_notes: Vec<&str> = all_diags
+        .iter()
+        .filter(|d| d["severity"] == INFORMATION)
+        .filter_map(|d| d["message"].as_str())
+        .filter(|m| m.contains("RC93WCT_LIMIT"))
+        .collect();
+    assert!(
+        int_notes.is_empty(),
+        "carved-out int leaf must not publish an Info note; got: {int_notes:?}"
+    );
+
+    shutdown_server(cw, cr, handle).await;
+}

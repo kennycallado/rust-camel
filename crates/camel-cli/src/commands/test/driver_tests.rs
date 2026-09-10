@@ -1342,25 +1342,30 @@ async fn lean_file_route_string_placeholder_loads() {
 }
 
 /// A placeholder on the integer-typed `circuit_breaker.open_duration_ms`
-/// fails the route load — the substituted leaf keeps STRING typing exactly
-/// as `camel run` rejects the same file (boot parity; LEAN never accepts a
-/// route the boot path rejects), so the doc error is the route-load
-/// failure naming the file, never the named-var wording.
+/// loads through the loader's typed probe — the file forms share the
+/// `camel_dsl::load_from_file_with_env` seam with `camel run` (boot
+/// parity: LEAN accepts exactly what the boot path accepts), so the
+/// route loads with the `:-default` coerced to `open_duration_ms == 750`.
 #[tokio::test(flavor = "multi_thread")]
-async fn lean_file_route_int_placeholder_doc_error() {
+async fn lean_file_route_int_placeholder_loads() {
     let dir = temp_dir("lean-file-int");
     let route = write_cb_route_file(&dir, "cb.routes.yaml");
     let doc_path = write_route_files_doc(&dir, "a.test.yaml", "cb.routes.yaml");
     let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
     let doc = parse_doc_at(&doc_path);
-    let err = match runner::load_routes(&doc, &dir).await {
-        Ok(_) => panic!("int-field placeholder must fail the load (boot parity)"),
-        Err(e) => e,
+    let defs = match runner::load_routes(&doc, &dir).await {
+        Ok(defs) => defs,
+        Err(e) => panic!("route load must succeed: {e}"),
     };
-    assert!(err.contains("cb.routes.yaml"), "err: {err}");
-    assert!(
-        !err.contains("not set"),
-        "must not carry the named-var wording: {err}"
+    let cb = defs
+        .first()
+        .expect("route definition present") // allow-unwrap
+        .circuit_breaker_config()
+        .expect("circuit breaker config present"); // allow-unwrap
+    assert_eq!(
+        cb.open_duration,
+        std::time::Duration::from_millis(750),
+        "int-position placeholder must load via the typed probe"
     );
 }
 
@@ -1406,13 +1411,14 @@ expects:
 }
 
 /// An inline `routes:` block carrying a placeholder on the integer-typed
-/// `circuit_breaker.open_duration_ms` fails the document the same way the
-/// file form does — the substituted leaf keeps STRING typing, so the load
-/// fails as a route-load error, never with the named-var wording (boot
-/// parity; the only test that pins the inline branch to
-/// `interpolate_yaml_source` instead of the legacy text splice).
+/// `circuit_breaker.open_duration_ms` loads through the same typed seam
+/// as the file forms (boot parity): the runner's inline branch feeds the
+/// `camel_dsl::parse_routes_with_env` seam, so the loader's typed probe
+/// coerces the whole-scalar leaf and the route loads with
+/// `open_duration_ms == 750` (the only test that pins the inline branch
+/// to the typed seam instead of the legacy text splice).
 #[tokio::test(flavor = "multi_thread")]
-async fn lean_inline_routes_int_placeholder_doc_error() {
+async fn lean_inline_routes_int_placeholder_loads() {
     let dir = temp_dir("lean-inline-int");
     let doc_path = dir.join("a.test.yaml");
     fs::write(
@@ -1437,14 +1443,19 @@ expects:
     .expect("write inline cb doc"); // allow-unwrap
     let _guard = CleanupPaths(vec![doc_path.clone(), dir.clone()]);
     let doc = parse_doc_at(&doc_path);
-    let err = match runner::load_routes(&doc, &dir).await {
-        Ok(_) => panic!("int-field placeholder must fail the load (boot parity)"),
-        Err(e) => e,
+    let defs = match runner::load_routes(&doc, &dir).await {
+        Ok(defs) => defs,
+        Err(e) => panic!("route load must succeed: {e}"),
     };
-    assert!(err.contains("inline routes"), "err: {err}");
-    assert!(
-        !err.contains("not set"),
-        "must not carry the named-var wording: {err}"
+    let cb = defs
+        .first()
+        .expect("route definition present") // allow-unwrap
+        .circuit_breaker_config()
+        .expect("circuit breaker config present"); // allow-unwrap
+    assert_eq!(
+        cb.open_duration,
+        std::time::Duration::from_millis(750),
+        "inline int-position placeholder must load via the typed probe"
     );
 }
 
@@ -1616,13 +1627,13 @@ expects:
     );
 }
 
-/// Typing semantics are unchanged when the document env map supplies the
-/// value: the substituted leaf keeps STRING typing, so the int-typed
-/// `circuit_breaker.open_duration_ms` still fails the load exactly as
-/// `camel run` rejects the file (boot parity; numeric knobs stay on the
-/// rc-v1sw track).
+/// Typing semantics follow boot when the document env map supplies the
+/// value: the int-typed `circuit_breaker.open_duration_ms` placeholder
+/// loads through the loader's typed probe with the document env value,
+/// exactly as `camel run` accepts the same file (boot parity), so the
+/// route loads with `open_duration_ms == 500`.
 #[tokio::test(flavor = "multi_thread")]
-async fn doc_env_int_position_still_fails() {
+async fn doc_env_int_position_loads_via_probe() {
     let dir = temp_dir("doc-env-int");
     let route = write_cb_route_file(&dir, "cb.routes.yaml");
     let doc_path = dir.join("a.test.yaml");
@@ -1644,14 +1655,19 @@ expects:
     .expect("write doc-env int doc"); // allow-unwrap
     let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
     let doc = parse_doc_at(&doc_path);
-    let err = match runner::load_routes(&doc, &dir).await {
-        Ok(_) => panic!("int-field placeholder must fail the load (boot parity)"),
-        Err(e) => e,
+    let defs = match runner::load_routes(&doc, &dir).await {
+        Ok(defs) => defs,
+        Err(e) => panic!("route load must succeed: {e}"),
     };
-    assert!(err.contains("cb.routes.yaml"), "err: {err}");
-    assert!(
-        !err.contains("not set"),
-        "must not carry the named-var wording: {err}"
+    let cb = defs
+        .first()
+        .expect("route definition present") // allow-unwrap
+        .circuit_breaker_config()
+        .expect("circuit breaker config present"); // allow-unwrap
+    assert_eq!(
+        cb.open_duration,
+        std::time::Duration::from_millis(500),
+        "document env value must flow through the same probe (boot parity)"
     );
 }
 

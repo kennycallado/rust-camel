@@ -15,10 +15,12 @@
 //! # Typing semantics (design decision, camel-config precedent)
 //!
 //! An interpolated leaf that resolves to numeric- or boolean-looking text
-//! KEEPS string typing after the tree walk. The legacy raw-splice used to
-//! re-parse such text as a number; the YAML `Value` tree cannot preserve
-//! plain-scalar style through a round-trip, so the leaf stays a string.
-//! Consumers that need numbers compose them inside URI strings instead.
+//! KEEPS STRING typing at the interpolation seam: the YAML `Value` tree
+//! cannot preserve plain-scalar style through a round-trip, so the leaf
+//! stays a string here. Integer positions are coerced later by the
+//! loader-layer typed probe (env_int_probe), which this module feeds via
+//! provenance ([`interpolate_env_tree_with_provenance`]). Consumers that
+//! need numbers inside URI strings still compose them there.
 //!
 //! Interpolated mapping keys that collide after interpolation collapse
 //! last-wins, matching the loader's own duplicate-key behavior (parity
@@ -90,10 +92,13 @@ pub fn interpolate_env_with(
 
 /// Canonical interpolation strategy for a YAML route source (rc-93wct):
 /// parse-tree interpolation first (`interpolate_env_tree` — comments are
-/// never interpolated and a substituted leaf keeps STRING typing), falling
-/// back to the legacy whole-text splice ([`interpolate_env_with`]) when the
-/// document does not survive the YAML round-trip. An unresolved variable
-/// from either path surfaces as `Err(var_name)`.
+/// never interpolated and a substituted leaf keeps STRING typing at the
+/// interpolation seam; integer positions are coerced later by the
+/// loader-layer typed probe, env_int_probe, which this module feeds via
+/// provenance), falling back to the legacy whole-text splice
+/// ([`interpolate_env_with`]) when the document does not survive the YAML
+/// round-trip. An unresolved variable from either path surfaces as
+/// `Err(var_name)`.
 ///
 /// Both the discovery YAML arm and `load_from_file_with_env` route through
 /// this seam so the loader cannot drift from discovery semantics.
@@ -101,10 +106,27 @@ pub fn interpolate_yaml_source(
     raw: &str,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<String, String> {
-    match interpolate_env_tree(raw, lookup) {
-        Ok(content) => Ok(content),
+    interpolate_yaml_source_with_provenance(raw, lookup).map(|(content, _)| content)
+}
+
+/// [`interpolate_yaml_source`] paired with provenance: on the tree-walk
+/// path it additionally returns the structural paths (see
+/// [`ProvenancePath`]) of every leaf whose authored scalar was exactly one
+/// whole-scalar `${env:...}` token (see [`is_whole_scalar_env_token`]).
+/// When the legacy whole-text splice runs (the document did not survive
+/// the YAML round-trip) the provenance is `None` — the fallback carries no
+/// provenance and never feeds the typed probe. The `Err(var_name)` surface
+/// and the fallback trigger are identical to [`interpolate_yaml_source`].
+pub(crate) fn interpolate_yaml_source_with_provenance(
+    raw: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<(String, Option<Vec<ProvenancePath>>), String> {
+    match interpolate_env_tree_with_provenance(raw, lookup) {
+        Ok((content, paths)) => Ok((content, Some(paths))),
         Err(TreeInterpolateError::Unresolved(var_name)) => Err(var_name),
-        Err(TreeInterpolateError::Fallback) => interpolate_env_with(raw, lookup),
+        Err(TreeInterpolateError::Fallback) => {
+            interpolate_env_with(raw, lookup).map(|content| (content, None))
+        }
     }
 }
 
@@ -159,6 +181,22 @@ pub(crate) enum TreeInterpolateError {
     Fallback,
 }
 
+/// One structural segment of a substituted leaf's provenance path: a
+/// mapping key or a sequence index. Structural segments (not a joined
+/// string) stay safe for keys containing `.` or `[i]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProvenanceSeg {
+    /// Mapping key leading to the walked node (the interpolated key text).
+    Key(String),
+    /// Sequence index leading to the walked node.
+    Index(usize),
+}
+
+/// Structural path from the document root to a substituted leaf, in
+/// document order. Collected by [`interpolate_env_tree_with_provenance`]
+/// and consumed by the loader-layer typed probe (env_int_probe).
+pub(crate) type ProvenancePath = Vec<ProvenanceSeg>;
+
 /// Parse-tree `${env:}` interpolation for YAML documents.
 ///
 /// Parses `raw` with the crate's canonical YAML shim (`noyalib::compat::
@@ -170,15 +208,37 @@ pub(crate) enum TreeInterpolateError {
 /// Scalars whose text contains no `${` or `$$` token pass through
 /// untouched, minimizing round-trip drift. An unresolved var propagates
 /// as [`TreeInterpolateError::Unresolved`]. Numeric/boolean-looking
-/// results keep string typing (see the module docs).
+/// results keep STRING typing at the interpolation seam; integer
+/// positions are coerced later by the loader-layer typed probe
+/// (env_int_probe), which this module feeds via provenance (see the
+/// module docs).
+#[cfg_attr(not(test), allow(dead_code))] // delegate kept for pins; the probe seam (Phase 1) consumes the provenance variant
 pub(crate) fn interpolate_env_tree(
     raw: &str,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<String, TreeInterpolateError> {
+    interpolate_env_tree_with_provenance(raw, lookup).map(|(doc, _)| doc)
+}
+
+/// [`interpolate_env_tree`] paired with provenance: same parse/walk/
+/// serialize, but it additionally returns the structural paths of every
+/// leaf whose authored scalar was exactly one whole-scalar `${env:...}`
+/// token (see [`is_whole_scalar_env_token`]) at the moment it substituted,
+/// in document order. Mapping keys and leaves with embedded tokens are
+/// never recorded; escaped forms (`$${env:...}`, `$$`) are literal text,
+/// not substitutions, and are never recorded. The substituted leaf itself
+/// keeps STRING typing at this seam — provenance feeds the loader-layer
+/// typed probe (env_int_probe), which does any coercion.
+pub(crate) fn interpolate_env_tree_with_provenance(
+    raw: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<(String, Vec<ProvenancePath>), TreeInterpolateError> {
     let mut root: serde_yml::Value =
         serde_yml::from_str(raw).map_err(|_| TreeInterpolateError::Fallback)?;
-    interpolate_value(&mut root, lookup)?;
-    serde_yml::to_string(&root).map_err(|_| TreeInterpolateError::Fallback)
+    let mut paths = Vec::new();
+    interpolate_value(&mut root, lookup, &mut Vec::new(), &mut paths)?;
+    let doc = serde_yml::to_string(&root).map_err(|_| TreeInterpolateError::Fallback)?;
+    Ok((doc, paths))
 }
 
 /// Whether a scalar's text carries any placeholder or escape token.
@@ -186,29 +246,55 @@ fn has_env_token(s: &str) -> bool {
     s.contains("${") || s.contains("$$")
 }
 
+/// Whether the ENTIRE scalar is exactly one unescaped `${env:NAME}` or
+/// `${env:NAME:-default}` token — the plain token form of `env_regex()`
+/// spanning the whole string. Escaped forms (`$${env:...}`, `$$`) are
+/// literal text, not substitutions, and never match; a token embedded in
+/// larger text (`x${env:A}`, `${env:A}y`) does not either.
+pub(crate) fn is_whole_scalar_env_token(s: &str) -> bool {
+    env_regex()
+        .captures(s)
+        .and_then(|caps| caps.get(3))
+        .is_some_and(|m| m.start() == 0 && m.end() == s.len())
+}
+
 /// Recursive tree walk applying `interpolate_string` to scalars that carry
 /// a placeholder or escape token; all other nodes pass through untouched.
+/// `path` is the structural path of the current node; every whole-scalar
+/// token leaf substituted along the way is appended to `paths` (in
+/// document order) at the moment it substitutes. Mapping keys are
+/// interpolated but never recorded.
 fn interpolate_value(
     value: &mut serde_yml::Value,
     lookup: &dyn Fn(&str) -> Option<String>,
+    path: &mut Vec<ProvenanceSeg>,
+    paths: &mut Vec<ProvenancePath>,
 ) -> Result<(), TreeInterpolateError> {
     match value {
         serde_yml::Value::String(s) => {
             if has_env_token(s) {
+                let whole_token = is_whole_scalar_env_token(s);
                 *s = interpolate_string(s, lookup).map_err(TreeInterpolateError::Unresolved)?;
+                if whole_token {
+                    paths.push(path.clone());
+                }
             }
             Ok(())
         }
         serde_yml::Value::Sequence(seq) => {
-            for item in seq.iter_mut() {
-                interpolate_value(item, lookup)?;
+            for (index, item) in seq.iter_mut().enumerate() {
+                path.push(ProvenanceSeg::Index(index));
+                interpolate_value(item, lookup, path, paths)?;
+                path.pop();
             }
             Ok(())
         }
         serde_yml::Value::Mapping(map) => {
             // The shim's Mapping keys are strings — interpolate them too.
             // Keys are not mutable in place (`iter_mut` yields `&String`),
-            // so rebuilt entries replace the originals in order.
+            // so rebuilt entries replace the originals in order. Keys are
+            // never provenance: only whole-scalar token leaves feed the
+            // typed probe.
             let mut rebuilt = serde_yml::Mapping::new();
             for (key, val) in map.iter() {
                 let mut key = key.clone();
@@ -216,8 +302,10 @@ fn interpolate_value(
                     key = interpolate_string(&key, lookup)
                         .map_err(TreeInterpolateError::Unresolved)?;
                 }
+                path.push(ProvenanceSeg::Key(key.clone()));
                 let mut val = val.clone();
-                interpolate_value(&mut val, lookup)?;
+                interpolate_value(&mut val, lookup, path, paths)?;
+                path.pop();
                 rebuilt.insert(key, val);
             }
             *map = rebuilt;
@@ -456,5 +544,101 @@ mod tests {
         let legacy = interpolate_env_with(input, &lookup)
             .expect("legacy splice must resolve the placeholder inside the tagged node");
         assert_eq!(legacy, "value: !mytag ok\n");
+    }
+
+    // ---- provenance tracking (env-int-placeholder-typing) ----
+
+    #[test]
+    fn provenance_records_whole_scalar_leaf() {
+        let input = "routes:\n- id: r\n  steps:\n  - throttle:\n      max_requests: ${env:A:-2}\n      period_ms: 7\n";
+        let (doc, provenance) = interpolate_yaml_source_with_provenance(input, &|name| {
+            (name == "A").then(|| "2".to_string())
+        })
+        .expect("tree walk must interpolate the whole-scalar token");
+        let paths = provenance.expect("tree-walk path must carry provenance");
+        assert_eq!(
+            paths,
+            vec![vec![
+                ProvenanceSeg::Key("routes".to_string()),
+                ProvenanceSeg::Index(0),
+                ProvenanceSeg::Key("steps".to_string()),
+                ProvenanceSeg::Index(0),
+                ProvenanceSeg::Key("throttle".to_string()),
+                ProvenanceSeg::Key("max_requests".to_string()),
+            ]],
+            "exactly the substituted leaf, in document order (period_ms and \
+             key positions absent), got: {doc}"
+        );
+    }
+
+    #[test]
+    fn provenance_excludes_embedded_and_keys() {
+        let input = "k${env:A:-1}: v-${env:B:-2}\n";
+        let (doc, provenance) =
+            interpolate_yaml_source_with_provenance(input, &|_| Some("x".to_string()))
+                .expect("embedded tokens must interpolate");
+        assert!(
+            provenance
+                .expect("tree-walk path must carry provenance")
+                .is_empty(),
+            "embedded-token leaves and mapping keys are never provenance, got: {doc}"
+        );
+        assert!(
+            doc.contains("kx: v-x"),
+            "both tokens must substitute, got: {doc}"
+        );
+    }
+
+    #[test]
+    fn provenance_excludes_escapes() {
+        let input = "a: $${env:A:-2}\nb: ${env:B:-3}\n";
+        let (doc, provenance) = interpolate_yaml_source_with_provenance(input, &|_| None)
+            .expect("defaults must resolve both leaves");
+        let paths = provenance.expect("tree-walk path must carry provenance");
+        assert_eq!(
+            paths,
+            vec![vec![ProvenanceSeg::Key("b".to_string())]],
+            "only the unescaped whole-scalar token is provenance, got: {doc}"
+        );
+        let parsed: serde_yml::Value = serde_yml::from_str(&doc).expect("output must re-parse");
+        assert_eq!(
+            parsed.get("a").and_then(serde_yml::Value::as_str),
+            Some("${env:A:-2}"),
+            "escaped leaf is literal text, got: {doc}"
+        );
+    }
+
+    #[test]
+    fn fallback_yields_none_provenance() {
+        let lookup = |name: &str| (name == "X").then(|| "ok".to_string());
+        let input = "value: !mytag ${env:X}\n";
+        let (doc, provenance) = interpolate_yaml_source_with_provenance(input, &lookup)
+            .expect("legacy splice must resolve the tagged document");
+        assert_eq!(doc, "value: !mytag ok\n");
+        assert!(
+            provenance.is_none(),
+            "the legacy fallback carries no provenance"
+        );
+    }
+
+    #[test]
+    fn is_whole_scalar_env_token_edges() {
+        assert!(is_whole_scalar_env_token("${env:A}"));
+        assert!(is_whole_scalar_env_token("${env:A:-2}"));
+        assert!(
+            !is_whole_scalar_env_token("$${env:A:-2}"),
+            "escaped form is literal text, not a substitution"
+        );
+        assert!(
+            !is_whole_scalar_env_token("$$"),
+            "bare $$ escape is literal"
+        );
+        assert!(!is_whole_scalar_env_token("x${env:A}"), "embedded prefix");
+        assert!(!is_whole_scalar_env_token("${env:A}y"), "embedded suffix");
+        assert!(
+            !is_whole_scalar_env_token("${env:A} ${env:B}"),
+            "two tokens"
+        );
+        assert!(!is_whole_scalar_env_token("plain"), "no token at all");
     }
 }

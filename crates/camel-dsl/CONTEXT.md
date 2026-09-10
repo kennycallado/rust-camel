@@ -73,12 +73,35 @@ default; this entry is the hermetic variant)
 `load_from_file` resolves `${env:NAME}` placeholders with the same
 tree-walk-first strategy as discovery's YAML arm (`interpolate_yaml_source`,
 rc-93wct): the parsed tree is interpolated scalar-by-scalar — comments are
-never interpolated, and a substituted leaf keeps STRING typing (wave-E
-canon), so a placeholder on an int-typed field (e.g. `throttle.max_requests`)
-fails the load at deserialization — boot parity with discovery/`camel run`.
-Documents that do not survive the YAML round-trip fall back to the legacy
-whole-text splice. A `:-default` token resolves to the default, and an unset
-variable without a default fails the load naming the variable
+never interpolated, and a substituted leaf keeps STRING typing at the
+interpolation seam (wave-E canon). The provenance layer
+(`fn interpolate_yaml_source_with_provenance`, `env_interpolation.rs:120`)
+records every whole-scalar substituted leaf as a STRUCTURAL path
+(`enum ProvenanceSeg`, `Key`/`Index` segments, `env_interpolation.rs:188`);
+embedded tokens, mapping keys, and `$$` escapes are never provenance. The
+typed probe (`fn parse_with_probe`, `env_int_probe.rs:152`) runs only AFTER
+a failed typed parse: candidates are provenance paths under the top-level
+`routes:` key whose value passes `fn clean_integer` (`env_int_probe.rs:44`;
+lexical `-?(0|[1-9][0-9]*)`, then an exact i64-or-u64 parse), and candidate
+index subsets are tried smallest-first in document order (cap 8,
+`MAX_PROBE_CANDIDATES`) against a QUIET parser oracle — first success wins,
+otherwise the original first-pass error stands. A placeholder on an
+int-typed field (e.g. `throttle.max_requests`) therefore LOADS, coerced to
+the number; string and polymorphic positions keep string typing. Scope is
+routes-only: REST blocks, route templates, and the legacy whole-text
+fallback (which carries no provenance) are never probed. The public seam is
+`fn parse_routes_with_env` (`yaml.rs:2252`) plus its typed
+`enum RoutesEnvError` (`yaml.rs:2211`) — callers distinguish
+`Unresolved(var)` from `Parse(..)` BY TYPE. On final failure the seam
+replays the text through the logging parser exactly once. Discovery's YAML
+arm shares the same probe (`fn discover_routes_inner`, `discovery.rs:301`),
+wrapping a quiet threshold/security twin
+(`fn parse_yaml_with_threshold_and_security_quiet`, `yaml.rs:289`). The
+template arm reads a narrowed
+`struct TemplateSections` view (`template/yaml.rs:24`) that no longer
+re-validates `routes`/`rest`/`mcp` — a behavior loosening for out-of-tree
+callers; bd rc-28b90 tracks the archive-time review. A `:-default` token resolves to the default, and an
+unset variable without a default fails the load naming the variable
 (`Environment variable 'NAME' not set (required by <path>)` — the same
 wording the LEAN runner surfaces as its doc error). The process environment
 is never read; the lookup-injectable variant

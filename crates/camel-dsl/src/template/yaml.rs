@@ -4,22 +4,91 @@
 use camel_api::template::{
     RouteTemplateSpec, TemplateError, TemplateParameterSpec, TemplatedRouteSpec,
 };
+use serde::Deserialize;
 
-use crate::route_ast::{RouteDslRoutes, RouteDslTemplate, RouteDslTemplateParameter};
+use crate::route_ast::{RouteDslTemplate, RouteDslTemplateParameter, RouteDslTemplatedRoute};
 
 // serde_yml migrated to noyalib (compat-serde-yaml shim) — closes RUSTSEC-2025-0068.
 // Module alias preserves call-site paths byte-for-byte.
 use noyalib::compat::serde_yaml as serde_yml;
 
+/// Template-section view of a route document: `templates` and
+/// `templated_routes` only, WITHOUT re-validating the `routes`/`rest`/`mcp`
+/// sections. Discovery's route arm gates route validity first, and the
+/// typed-probe path (env-int-placeholder-typing) coerces integer
+/// placeholder leaves only for the ROUTE parse — the interpolated text
+/// handed to template extraction can still carry a string at an
+/// integer-typed route position. Mapping-only enforcement mirrors
+/// `RouteDslRoutes` (rc-m5ah: positional sequences are rejected); the
+/// manual `Deserialize` impl below carries it.
+struct TemplateSections {
+    templates: Vec<RouteDslTemplate>,
+    templated_routes: Vec<RouteDslTemplatedRoute>,
+}
+
+/// Field-for-field mirror of [`TemplateSections`] carrying the serde field
+/// attributes; the mapping-only enforcement lives in the manual
+/// `Deserialize` impl below (same shape as `RouteDslRoutes`).
+#[derive(Deserialize)]
+struct TemplateSectionsMapping {
+    #[serde(default)]
+    templates: Vec<RouteDslTemplate>,
+    #[serde(default)]
+    templated_routes: Vec<RouteDslTemplatedRoute>,
+}
+
+// Deliberate pattern-mirror of RouteDslRoutes' mapping-only Deserialize (rc-m5ah) — not ceremony.
+impl<'de> Deserialize<'de> for TemplateSections {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Accepts mappings only. Sequences, scalars, and `null` fail with
+        /// the visitor's `expecting` message — the same construction
+        /// `RouteDslRoutes` uses so both serde front-ends reject the same
+        /// document shapes.
+        struct TemplateSectionsVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TemplateSectionsVisitor {
+            type Value = TemplateSections;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a route document mapping (YAML mapping)")
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                TemplateSectionsMapping::deserialize(serde::de::value::MapAccessDeserializer::new(
+                    map,
+                ))
+                .map(|m| TemplateSections {
+                    templates: m.templates,
+                    templated_routes: m.templated_routes,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(TemplateSectionsVisitor)
+    }
+}
+
 /// Parse the `templates` section of a YAML document into [`RouteTemplateSpec`]s.
 ///
 /// Converts the raw `serde_yml::Value` route body into `serde_json::Value`
 /// so it can be processed by the materializer.
+///
+/// This is the `TemplateSections` view: only the `templates` section is
+/// deserialized, so unknown fields in sibling sections (e.g. a typo like
+/// `templaes:`) and invalid `routes`/`rest` content are NOT rejected here —
+/// discovery's route arm performs the full-document validation (bd rc-28b90,
+/// archive review pending).
 pub fn parse_yaml_templates(yaml_str: &str) -> Result<Vec<RouteTemplateSpec>, TemplateError> {
-    let routes: RouteDslRoutes =
+    let sections: TemplateSections =
         serde_yml::from_str(yaml_str).map_err(|e| TemplateError::InvalidBody(e.to_string()))?;
 
-    routes
+    sections
         .templates
         .into_iter()
         .map(yaml_template_to_spec)
@@ -27,13 +96,19 @@ pub fn parse_yaml_templates(yaml_str: &str) -> Result<Vec<RouteTemplateSpec>, Te
 }
 
 /// Parse the `templated_routes` section of a YAML document into [`TemplatedRouteSpec`]s.
+///
+/// This is the `TemplateSections` view: only the `templated_routes` section
+/// is deserialized, so unknown fields in sibling sections (e.g. a typo like
+/// `templaes:`) and invalid `routes`/`rest` content are NOT rejected here —
+/// discovery's route arm performs the full-document validation (bd rc-28b90,
+/// archive review pending).
 pub fn parse_yaml_templated_routes(
     yaml_str: &str,
 ) -> Result<Vec<TemplatedRouteSpec>, TemplateError> {
-    let routes: RouteDslRoutes =
+    let sections: TemplateSections =
         serde_yml::from_str(yaml_str).map_err(|e| TemplateError::InvalidBody(e.to_string()))?;
 
-    Ok(routes
+    Ok(sections
         .templated_routes
         .into_iter()
         .map(|yt| TemplatedRouteSpec {

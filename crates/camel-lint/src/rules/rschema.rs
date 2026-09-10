@@ -15,8 +15,13 @@
 //! `${env:X:-d}` tokens resolve to their defaults (default-only lookup,
 //! never the process environment), and a whole-scalar token validates as
 //! the STRING default — the typing mirror of the boot path's tree-walk
-//! (see [`enforce_typing_mirror`]). Whole-scalar no-default tokens are
-//! explicit Errors; comment tokens produce nothing.
+//! (see [`enforce_typing_mirror`]). One carve-out mirrors the boot
+//! numeric-knob repair: a whole-scalar token whose default is a clean
+//! integer (i64-or-u64 parse; SYNC with camel-dsl `env_int_probe` and
+//! camel-config `clean_i64`) at an integer-typed schema position is
+//! validated as the NUMBER instead, so such leaves produce no diagnostic.
+//! Whole-scalar no-default tokens are explicit Errors; comment tokens
+//! produce nothing.
 //!
 //! - Most keywords (type/enum/pattern/const/format/minimum/`exclusiveMinimum`/
 //!   anyOf/oneOf/minItems/maxItems/required) anchor on the JSON-pointer
@@ -112,7 +117,15 @@ impl Rule for RSchemaRule {
         // numeric/boolean types the boot tree-walk never produces) and
         // collect whole-scalar no-default tokens for explicit Errors.
         let mut unresolved: Vec<UnresolvedPlaceholder> = Vec::new();
-        enforce_typing_mirror(&parsed, &mut value, "", &doc.raw, &mut unresolved);
+        let mut int_candidates: Vec<IntCandidate> = Vec::new();
+        enforce_typing_mirror(
+            &parsed,
+            &mut value,
+            "",
+            &doc.raw,
+            &mut unresolved,
+            &mut int_candidates,
+        );
 
         // Info spans resolve against the interpolated (pre-envelope) `value`
         // tree BEFORE it is moved into the wrapped `instance`: leaf paths in
@@ -142,13 +155,17 @@ impl Rule for RSchemaRule {
             })
             .collect();
 
-        let instance = match envelope_depth {
-            0 => value,
-            1 => serde_json::json!({ "routes": value }),
-            _ => serde_json::json!({ "routes": [value] }),
-        };
-
         let validator = VALIDATOR.get_or_init(compile_validator);
+
+        // Integer-position carve-out (typing mirror int arm): for every
+        // clean-integer whole-scalar default, also validate a NUMBER
+        // copy; when the STRING copy flags the leaf's chain but the
+        // NUMBER copy is clean there, the NUMBER copy is the honest boot
+        // equivalent and becomes the validation instance. The leaf's
+        // Info note is dropped with it (the default was not kept as a
+        // string).
+        let (instance, carved_spans) =
+            integer_carve_out_instance(validator, &parsed, value, envelope_depth, &int_candidates);
 
         let mut diagnostics = Vec::new();
         for err in validator.iter_errors(&instance) {
@@ -213,6 +230,11 @@ impl Rule for RSchemaRule {
             let Some(span) = span else {
                 continue;
             };
+            if carved_spans.contains(&span) {
+                // Carved-out leaf: the default was not kept as a string,
+                // so the substituted-string Info note would be a lie.
+                continue;
+            }
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::RSchema,
                 severity: Severity::Info,
@@ -332,6 +354,18 @@ struct UnresolvedPlaceholder {
     span: Span,
 }
 
+/// A whole-scalar `${env:VAR:-d}` token whose default is a clean integer
+/// (i64-or-u64 magnitude) — a candidate for the integer-position
+/// carve-out.
+struct IntCandidate {
+    /// Leaf path in `value` coordinates (noyalib form, pre-envelope).
+    path: String,
+    /// Authored span of the leaf (== the Info-note span for this leaf).
+    span: Span,
+    /// The default as a JSON number (i64 or u64 magnitude).
+    number: serde_json::Number,
+}
+
 /// Typing-mirror walk over the interpolated instance (rc-93wct rev 2).
 ///
 /// The validation copy is a whole-text splice, so YAML re-infers
@@ -342,7 +376,10 @@ struct UnresolvedPlaceholder {
 /// - a leaf whose AUTHORED scalar (original CST slice from `doc.raw`,
 ///   quotes/whitespace trimmed) is EXACTLY one substituted `${env:X:-d}`
 ///   token is forced to the JSON STRING `"d"` — int/bool positions then
-///   type-error against the string, string positions pass cleanly;
+///   type-error against the string, string positions pass cleanly; a
+///   clean-integer default (`-?(0|[1-9][0-9]*)`, i64-or-u64 parse) is
+///   ALSO recorded as an [`IntCandidate`] so `analyze` can validate a
+///   NUMBER copy of that leaf (integer-position carve-out);
 /// - a whole-scalar `${env:X}` (no default, unescaped) keeps its literal
 ///   instance value and is collected for an explicit Error — even at a
 ///   string position, where the literal placeholder validates as an
@@ -397,6 +434,7 @@ fn enforce_typing_mirror(
     path: &str,
     raw: &str,
     unresolved: &mut Vec<UnresolvedPlaceholder>,
+    int_candidates: &mut Vec<IntCandidate>,
 ) {
     match value {
         serde_json::Value::Object(map) => {
@@ -410,7 +448,7 @@ fn enforce_typing_mirror(
                 } else {
                     format!("{path}.{k}")
                 };
-                enforce_typing_mirror(parsed, v, &child, raw, unresolved);
+                enforce_typing_mirror(parsed, v, &child, raw, unresolved, int_candidates);
             }
         }
         serde_json::Value::Array(items) => {
@@ -419,7 +457,14 @@ fn enforce_typing_mirror(
                 return;
             }
             for (i, v) in items.iter_mut().enumerate() {
-                enforce_typing_mirror(parsed, v, &format!("{path}[{i}]"), raw, unresolved);
+                enforce_typing_mirror(
+                    parsed,
+                    v,
+                    &format!("{path}[{i}]"),
+                    raw,
+                    unresolved,
+                    int_candidates,
+                );
             }
         }
         _ => {
@@ -433,6 +478,17 @@ fn enforce_typing_mirror(
             match whole_scalar_env_token(authored) {
                 Some(WholeScalarEnvToken::WithDefault { default }) => {
                     *value = serde_json::Value::String(sanitize_env_value(&default));
+                    // Integer-position carve-out candidate: a clean-integer
+                    // default also gets a NUMBER validation copy in
+                    // `analyze` (the boot loader coerces such a leaf when
+                    // the schema position wants an integer).
+                    if let Some(number) = clean_integer(&default) {
+                        int_candidates.push(IntCandidate {
+                            path: path.to_string(),
+                            span,
+                            number,
+                        });
+                    }
                 }
                 Some(WholeScalarEnvToken::NoDefault { var }) => {
                     unresolved.push(UnresolvedPlaceholder { var, span });
@@ -467,6 +523,172 @@ fn enforce_typing_mirror(
             }
         }
     }
+}
+
+/// SYNC: lexical+parse gate mirroring camel-dsl's
+/// `env_int_probe::clean_integer` (i64-or-u64 magnitude) and
+/// camel-config's `clean_i64` (i64-only); crate purity forbids the
+/// dependencies. Update all three together.
+///
+/// Lexical form `-?(0|[1-9][0-9]*)` — ASCII digits, optional leading `-`,
+/// no leading zeros (YAML 1.1 octal ambiguity), no whitespace, no plus —
+/// then a successful i64 or u64 parse; ROUTE_SCHEMA enforces the target
+/// field's bounds. Returns the default as a JSON number for the
+/// integer-position carve-out validation copy.
+fn clean_integer(s: &str) -> Option<serde_json::Number> {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    let lexically_clean = match digits.as_bytes() {
+        // `0` alone — no leading zeros allowed.
+        [b'0'] => true,
+        // `[1-9]` followed by ASCII digits only.
+        [first, rest @ ..] if first.is_ascii_digit() && *first != b'0' => {
+            rest.iter().all(|b| b.is_ascii_digit())
+        }
+        _ => false,
+    };
+    if !lexically_clean {
+        return None;
+    }
+    if let Ok(n) = s.parse::<i64>() {
+        return Some(serde_json::Number::from(n));
+    }
+    s.parse::<u64>().ok().map(serde_json::Number::from)
+}
+
+/// Wrap a `value`-coordinates tree into the `{routes: [...]}` envelope
+/// form implied by `envelope_depth` (see `analyze` for the depth table).
+fn wrap_envelope(value: serde_json::Value, envelope_depth: usize) -> serde_json::Value {
+    match envelope_depth {
+        0 => value,
+        1 => serde_json::json!({ "routes": value }),
+        _ => serde_json::json!({ "routes": [value] }),
+    }
+}
+
+/// Whether a leaf- or ancestor-anchored span covers `inner`. The STRING
+/// copy's schema type violation for a whole-scalar token may be reported
+/// by jsonschema directly at the leaf (`type` keyword) or collapsed into
+/// an anyOf/oneOf Error at an ancestor node (branch failures surface at
+/// the nearest non-matching schema node, e.g. the step object) — either
+/// way the error's resolved span covers the leaf's authored span.
+fn span_covers(outer: Span, inner: &Span) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
+}
+
+/// Integer-position carve-out (typing mirror int arm).
+///
+/// For every [`IntCandidate`] leaf (whole-scalar `${env:X:-d}` token with
+/// a clean-integer default), validates two copies against ROUTE_SCHEMA:
+/// the STRING copy the typing mirror produces, and a variant where that
+/// leaf is the NUMBER. The NUMBER copy wins exactly when the STRING copy
+/// produces an Error anchored at the leaf's chain (its span covers the
+/// leaf) AND the NUMBER copy produces no error there — the boot loader
+/// coerces such a leaf, so flagging it would be a false positive. The
+/// returned instance is then the accumulated NUMBER copy (identical to
+/// the STRING copy everywhere else: changing one scalar leaf can only
+/// affect errors anchored at that leaf or its ancestors). Any other
+/// outcome keeps today's STRING-copy behavior (Info note for valid string
+/// positions; Error for bool positions, non-integer defaults, no-default
+/// tokens). The carved leaves' spans come back for Info-note suppression.
+fn integer_carve_out_instance(
+    validator: &Validator,
+    parsed: &cst::Document,
+    value: serde_json::Value,
+    envelope_depth: usize,
+    candidates: &[IntCandidate],
+) -> (serde_json::Value, Vec<Span>) {
+    if candidates.is_empty() {
+        return (wrap_envelope(value, envelope_depth), Vec::new());
+    }
+    let string_instance = wrap_envelope(value.clone(), envelope_depth);
+    let string_errors: Vec<_> = validator.iter_errors(&string_instance).collect();
+    let mut working = value;
+    let mut carved_spans = Vec::new();
+    for cand in candidates {
+        // Condition A: the STRING copy flags the leaf's chain (error span
+        // covers the leaf — leaf-anchored or ancestor-collapsed).
+        let string_flags_leaf = string_errors.iter().any(|err| {
+            let noya_path = instance_path_to_noyalib(err.instance_path().as_str(), envelope_depth);
+            span_covers(
+                crate::document::value_span_for(parsed, &noya_path),
+                &cand.span,
+            )
+        });
+        if !string_flags_leaf {
+            continue;
+        }
+        // Condition B: applying the number to the accumulated tree clears
+        // the leaf's chain. Any remaining error there (minimum/maximum/
+        // enum on the coerced number) keeps today's behavior — boot
+        // rejects those too.
+        let mut probe = working.clone();
+        if !set_leaf_at(
+            &mut probe,
+            &cand.path,
+            serde_json::Value::Number(cand.number.clone()),
+        ) {
+            continue;
+        }
+        let probe_instance = wrap_envelope(probe.clone(), envelope_depth);
+        let probe_flags_leaf = validator.iter_errors(&probe_instance).any(|err| {
+            let noya_path = instance_path_to_noyalib(err.instance_path().as_str(), envelope_depth);
+            span_covers(
+                crate::document::value_span_for(parsed, &noya_path),
+                &cand.span,
+            )
+        });
+        if probe_flags_leaf {
+            continue;
+        }
+        working = probe;
+        carved_spans.push(cand.span.clone());
+    }
+    (wrap_envelope(working, envelope_depth), carved_spans)
+}
+
+/// Overwrite the leaf at a noyalib-style `value`-coordinates path
+/// (`a.b[0].c`, possibly rooted at `[0]`) with `new`. Returns `false`
+/// when a segment is missing or mistyped (defensive: the typing mirror
+/// walked the same tree to collect the candidate).
+fn set_leaf_at(root: &mut serde_json::Value, path: &str, new: serde_json::Value) -> bool {
+    let mut cur = root;
+    for part in path.split('.') {
+        let (key, indices) = split_index_suffix(part);
+        if !key.is_empty() {
+            let serde_json::Value::Object(map) = cur else {
+                return false;
+            };
+            let Some(child) = map.get_mut(key) else {
+                return false;
+            };
+            cur = child;
+        }
+        for idx in indices {
+            let serde_json::Value::Array(items) = cur else {
+                return false;
+            };
+            let Some(child) = items.get_mut(idx) else {
+                return false;
+            };
+            cur = child;
+        }
+    }
+    *cur = new;
+    true
+}
+
+/// Split `name[0][1]` into `("name", [0, 1])`; a part that starts with an
+/// index (`[0]`, the legacy-array root form) yields `("", [0])`.
+fn split_index_suffix(part: &str) -> (&str, Vec<usize>) {
+    let Some((key, rest)) = part.split_once('[') else {
+        return (part, Vec::new());
+    };
+    let trimmed = rest.strip_suffix(']').unwrap_or(rest);
+    let indices = trimmed
+        .split("][")
+        .filter_map(|s| s.parse::<usize>().ok())
+        .collect();
+    (key, indices)
 }
 
 /// Convert a JSON-pointer instance path to a noyalib CST query path.

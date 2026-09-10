@@ -104,6 +104,23 @@ component grows a genuine credential leaf, the principle says extend
 `PropertiesResolver` (properties.rs) is a legacy `{{...}}` public API
 retained for compatibility; it is OFF the load path.
 
+PROVENANCE + TYPED PROBE (env-int-placeholder-typing): the walk also returns a
+`struct ProvenanceSet` (`config.rs:3016`) of STRUCTURAL
+`enum ConfigSeg` (`config.rs:3007`) paths for token-bearing string leaves
+only — recorded before resolution, in document order. Resolution behavior
+is unchanged; `fn resolve_tree_with` delegates to
+`fn resolve_tree_with_provenance` (`config.rs:3091`) and discards the set.
+At the strict `try_into` boundary, the probe
+(`fn deserialize_with_probe`, `config.rs:3280`) first runs today's strict
+deserialization; on failure it tries candidate subsets ascending-size (cap
+8), coercing leaves whose post-resolution text passes
+`fn clean_i64` (`config.rs:3236`; i64-only, a SYNC mirror of camel-dsl's
+u64-inclusive `clean_integer`) to `toml::Value::Integer` in cloned trees.
+First success wins; otherwise the original first-pass error stands. Because
+`CAMEL_*` overrides merge into the raw tree BEFORE the walk, a token-bearing
+override is recorded and probes too. Literal quoted numerics carry no token,
+never enter the set, and stay rejected.
+
 **Env-override allowlist (L-C2).**
 `CAMEL_*` overrides merge through a fixed allowlist (`ALLOWED_ENV_OVERRIDES`). Any other `CAMEL_*` variable is ignored with a warning. The merge dispatches on value kind. `LEGACY_STRING_ENV_OVERRIDES` (`CAMEL_CACHE_REPO_BACKEND`, `CAMEL_CACHE_REPO_PATH`, `CAMEL_CACHE_REPO_STALE_RETENTION`) passes the raw value through verbatim as a string, with no numeric or boolean coercion. It is deliberately NOT empty-skippable: an empty value overrides the file value and fails validation loudly. `STRING_ENV_OVERRIDES` (the six newer string-typed cache_repo scalars) and `EMPTY_SCALAR_ENV_OVERRIDES` (those six plus `CAMEL_CACHE_REPO_DB`) keep their scopes unchanged. The string set is a subset of the empty-skip set, so an empty value never reaches typed deserialization. `CAMEL_CACHE_REPO_SENTINEL_NODES` is the only CSV-list override. An empty value replaces the file list and normalizes to absent on redis. Duration fields (`stale_retention`, `sweep_interval`) require humantime units. A unitless numeric value fails validation with `cache_repo.stale_retention: invalid duration '604800' — use a unit-bearing form such as '7d' or '24h'` (same shape for `cache_repo.sweep_interval`). Contract: [cache-repo-configuration spec](../../openspec/specs/cache-repo-configuration/spec.md).
 

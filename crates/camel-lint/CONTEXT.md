@@ -38,11 +38,24 @@ to their default before schema validation (`$${env:...}`/`$$` escapes
 apply), and the rule replicates the boot tree-walk TYPING: a value leaf
 whose authored scalar is exactly one substituted `${env:X:-d}` token
 (whole-scalar; quotes/whitespace trimmed) validates as the STRING `"d"`, so
-numeric/boolean re-inference is suppressed. Consequently integer- and
-boolean-typed positions produce a schema type Error anchored on the
-authored placeholder (boot parity: the route fails to load there for the
-same reason), while string-typed positions validate cleanly and emit one
-Info note per substituted default, span-anchored on the authored
+numeric/boolean re-inference is suppressed. String-typed positions validate
+cleanly and emit one Info note per substituted default, span-anchored on the
+authored placeholder. Integer-typed positions take a carve-out: a default
+that passes the clean-integer rule is ALSO validated as a NUMBER copy, and
+when the STRING copy errors at the leaf's chain while the NUMBER copy is
+clean, the NUMBER copy wins — no diagnostic and no Info note (boot parity:
+the loader's typed probe coerces such a leaf). Accepted divergences
+(opposite-direction, boot-fails-while-lint-silent): (a) lint applies the
+carve-out to every candidate with no cap, while the boot probe stops at
+eight candidates — a document with more than eight integer-position
+placeholders fails to load (first-pass error) yet lints clean; (b) the
+embedded schema does not enforce Rust integer bounds (jsonschema built
+without the `format` feature; schemars emits `format: uint`, not
+`maximum`), so an out-of-range default at a bounded field (e.g. u32
+`failure_threshold: ${env:FT:-5000000000}`) carves clean in lint while
+the boot typed parse rejects it (design-accepted). Any other outcome keeps the
+STRING copy: boolean-typed positions, non-integer or leading-zero defaults,
+and no-default tokens stay schema type Errors anchored on the authored
 placeholder. Known ceiling — structure-changing defaults: an unquoted
 flow-style default (for example `:-[a,b]`) splices into a non-scalar node
 in the validation copy, and a default containing `}` breaks the token
@@ -57,7 +70,11 @@ Per-token semantics: a whole-document error fallback is forbidden. The
 interpolator lives in `src/env_interpolation.rs` — a SYNC mirror of the
 whole-text splice arm of `camel-dsl::env_interpolation`, because crate
 purity forbids depending on camel-dsl; update both together (rc-ayke
-CROSS-DEP). The ambient-env hermeticity witness lives in
+CROSS-DEP). The integer carve-out's `fn clean_integer` (`rschema.rs:538`)
+is the third SYNC copy of the clean-integer rule: it mirrors camel-dsl
+`env_int_probe::clean_integer` (i64-or-u64 magnitude) and camel-config
+`clean_i64` (i64-only); update all three together. The ambient-env
+hermeticity witness lives in
 `tests/env_hermeticity.rs` (poisoning the process environment requires
 `std::env`, banned under `src/`).
 

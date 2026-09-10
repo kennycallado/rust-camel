@@ -144,17 +144,16 @@ pub(crate) fn find_camel_toml_root(start: &Path) -> Option<PathBuf> {
 /// paths resolve relative to `doc_dir`, and both file forms load through
 /// `camel_dsl::load_from_file_with_env` (the same per-file parser `camel
 /// run` uses, including the 16 MiB cap and path-annotated errors). Inline
-/// `routes` are re-serialized to YAML, interpolated through the same
-/// `camel_dsl::interpolate_yaml_source` seam, then parsed through
-/// `camel_dsl::parse_yaml`.
+/// `routes` are re-serialized to YAML and load through the same
+/// `camel_dsl::parse_routes_with_env` seam as the file forms.
 ///
 /// All three route sources resolve `${env:}` placeholders through the
 /// document `env:` map first (rc-l7m7t), then inline `:-default`s — the
-/// ambient environment is never consulted. Typing semantics are unchanged:
-/// a substituted leaf keeps STRING typing, so an int-typed field carrying a
-/// placeholder fails the load exactly as `camel run` rejects the file, even
-/// when the document env map supplies the value (string-typed substitution;
-/// numeric knobs stay on the rc-v1sw track).
+/// ambient environment is never consulted. Typing semantics follow boot
+/// (env-int-placeholder-typing): string-valued positions keep string
+/// typing, while integer-typed positions carrying a whole-scalar
+/// placeholder load through the loader's typed probe (boot parity),
+/// including when the document env map supplies the value.
 ///
 /// All three route sources share the tree-walk-first loader semantics of
 /// `camel_dsl::interpolate_yaml_source` (rc-93wct boot parity): comments
@@ -197,17 +196,24 @@ pub(super) async fn load_routes(
         }
         Ok(defs)
     } else if let Some(value) = &doc.routes {
-        // `parse_yaml` expects a top-level `routes:` key; wrap the inline
-        // value (the array under `routes:`) back into that shape.
+        // `parse_routes_with_env` expects a top-level `routes:` key; wrap
+        // the inline value (the array under `routes:`) back into that
+        // shape.
         let mut mapping = serde_yaml::Mapping::new();
         mapping.insert("routes", value.clone());
         let text = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))
             .map_err(|e| format!("failed to serialize inline routes: {e}"))?;
-        // Boot parity: same seam as the file forms (see doc comment above).
-        let interpolated = camel_dsl::interpolate_yaml_source(&text, lookup).map_err(|var| {
-            format!("Environment variable '{var}' not set (required by inline routes)")
-        })?;
-        camel_dsl::parse_yaml(&interpolated).map_err(|e| format!("inline routes: {e}"))
+        // Boot parity: the same typed seam as the file forms (see doc
+        // comment above) — integer-typed positions load through the
+        // loader's typed probe, string-valued positions keep string
+        // typing. The two error arms are distinguished by type.
+        match camel_dsl::parse_routes_with_env(&text, lookup) {
+            Ok(defs) => Ok(defs),
+            Err(camel_dsl::RoutesEnvError::Unresolved(var)) => Err(format!(
+                "Environment variable '{var}' not set (required by inline routes)"
+            )),
+            Err(camel_dsl::RoutesEnvError::Parse(e)) => Err(format!("inline routes: {e}")),
+        }
     } else {
         Err("document declares none of routeFiles, routeFilesFromRoot, or routes".to_string())
     }

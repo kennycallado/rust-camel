@@ -3,6 +3,10 @@
 // purity forbids the dependency. Update both together.
 // `interpolated_validation_copy` / `whole_scalar_env_token` are lint-side
 // helpers (validation copy + typing mirror) with no camel-dsl counterpart.
+// The clean-integer gate for the typing-mirror integer-position carve-out
+// lives in rschema.rs (`clean_integer`) — SYNC'd with camel-dsl
+// `env_int_probe::clean_integer` and camel-config `clean_i64`; this file
+// has no clean-integer logic and needs no behavioral counterpart.
 
 use regex::Regex;
 use std::sync::OnceLock;

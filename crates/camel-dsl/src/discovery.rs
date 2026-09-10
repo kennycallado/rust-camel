@@ -10,7 +10,9 @@ use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::Path;
 
-use crate::env_interpolation::{interpolate_env_with, interpolate_yaml_source};
+use crate::env_interpolation::{
+    ProvenancePath, interpolate_env_with, interpolate_yaml_source_with_provenance,
+};
 use crate::json::parse_json_with_threshold_and_security;
 use crate::model::SecurityCompileContext;
 use crate::template::materializer::materialize_and_compile;
@@ -278,17 +280,21 @@ fn process_env_lookup(name: &str) -> Option<String> {
 ///
 /// YAML and YML use the shared tree-walk-first seam
 /// ([`interpolate_yaml_source`]) so YAML comments are never interpolated;
-/// every other format (JSON: the YAML-shim tree re-serializes to YAML,
-/// not JSON) falls back to the legacy whole-text splice. An unresolved
-/// variable from either path surfaces as `Err(var_name)`.
+/// the YAML arm additionally returns interpolation provenance (structural
+/// paths of whole-scalar substituted leaves) to feed the loader-layer
+/// typed probe (`env_int_probe`). `None` provenance means "no probe": the
+/// legacy whole-text splice ran (the document did not survive the YAML
+/// round-trip) or the format is not YAML (JSON: the YAML-shim tree
+/// re-serializes to YAML, not JSON). An unresolved variable from either
+/// path surfaces as `Err(var_name)`.
 fn interpolate_for_parse(
     raw: &str,
     ext: Option<&str>,
     lookup: EnvLookup<'_>,
-) -> Result<String, String> {
+) -> Result<(String, Option<Vec<ProvenancePath>>), String> {
     match ext {
-        Some("yaml") | Some("yml") => interpolate_yaml_source(raw, lookup),
-        _ => interpolate_env_with(raw, lookup),
+        Some("yaml") | Some("yml") => interpolate_yaml_source_with_provenance(raw, lookup),
+        _ => interpolate_env_with(raw, lookup).map(|text| (text, None)),
     }
 }
 
@@ -364,23 +370,43 @@ fn discover_routes_inner(
             // With an injected lookup the process environment is never read.
             let fallback_lookup: EnvLookup<'_> = &process_env_lookup;
             let lookup = env_lookup.unwrap_or(fallback_lookup);
-            let content = interpolate_for_parse(&raw_content, ext.as_deref(), lookup).map_err(
-                |var_name| DiscoveryError::Env {
+            let (content, provenance) = interpolate_for_parse(&raw_content, ext.as_deref(), lookup)
+                .map_err(|var_name| DiscoveryError::Env {
                     path: path_str.clone(),
                     var_name,
-                },
-            )?;
+                })?;
 
             // Parse based on extension — collect templates, templated specs, and regular routes
             match ext.as_deref() {
                 Some("yaml") | Some("yml") => {
-                    // Parse regular routes
-                    let file_routes = parse_yaml_with_threshold_and_security(
+                    // Typed probe over interpolation provenance
+                    // (env-int-placeholder-typing): pass 1 parses through a
+                    // QUIET twin of the threshold/security parser
+                    // (speculative probe attempts must not log); on final
+                    // failure the original text re-runs through the LOGGING
+                    // parser exactly once (today's error log and error
+                    // text), then maps through the existing error path.
+                    let threshold = stream_cache_threshold
+                        .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD);
+                    let quiet_probe_parse = |text: &str| {
+                        crate::yaml::parse_yaml_with_threshold_and_security_quiet(
+                            text,
+                            threshold,
+                            security_ctx.clone().unwrap_or_default(),
+                        )
+                    };
+                    let file_routes = crate::env_int_probe::parse_with_probe(
                         &content,
-                        stream_cache_threshold
-                            .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD),
-                        security_ctx.clone().unwrap_or_default(),
+                        provenance.as_deref(),
+                        quiet_probe_parse,
                     )
+                    .or_else(|_| {
+                        parse_yaml_with_threshold_and_security(
+                            &content,
+                            threshold,
+                            security_ctx.clone().unwrap_or_default(),
+                        )
+                    })
                     .map_err(|e| DiscoveryError::Yaml {
                         path: path_str.clone(),
                         error: e.to_string(),
@@ -1839,5 +1865,153 @@ routes:
         assert_eq!(injected.len(), parsed.len());
         assert_eq!(injected[0].route_id(), parsed[0].route_id());
         assert_eq!(injected[0].from_uri(), parsed[0].from_uri());
+    }
+
+    // ── Typed probe through discovery (env-int-placeholder-typing) ────
+
+    fn assert_discovered_throttle(routes: &[RouteDefinition], expected: usize) {
+        match &routes[0].steps()[0] {
+            camel_core::route::BuilderStep::Throttle { config, .. } => {
+                assert_eq!(config.max_requests, expected);
+            }
+            other => panic!("expected throttle step, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn discovery_int_placeholder_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("int-placeholder.yaml");
+        fs::write(
+            &file_path,
+            "routes:\n  - id: disc-int\n    from: \"direct:start\"\n    steps:\n      - throttle:\n          max_requests: ${env:DWD_WARM_MAX_REQUESTS:-2}\n          period_secs: 1\n",
+        )
+        .unwrap();
+        let pattern = file_path.to_string_lossy().to_string();
+
+        let routes = discover_routes_with_threshold_security_and_env(
+            &[pattern],
+            4096,
+            SecurityCompileContext::default(),
+            &|n| (n == "DWD_WARM_MAX_REQUESTS").then(|| "5".into()),
+        )
+        .unwrap();
+        assert_discovered_throttle(&routes, 5);
+    }
+
+    #[test]
+    fn discovery_int_placeholder_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("int-placeholder-default.yaml");
+        fs::write(
+            &file_path,
+            "routes:\n  - id: disc-int-default\n    from: \"direct:start\"\n    steps:\n      - throttle:\n          max_requests: ${env:DWD_WARM_MAX_REQUESTS:-2}\n          period_secs: 1\n",
+        )
+        .unwrap();
+        let pattern = file_path.to_string_lossy().to_string();
+
+        let routes = discover_routes_with_threshold_security_and_env(
+            &[pattern],
+            4096,
+            SecurityCompileContext::default(),
+            &|_| None,
+        )
+        .unwrap();
+        assert_discovered_throttle(&routes, 2);
+    }
+
+    #[test]
+    fn templates_and_int_placeholder_route_coexist() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("tpl-int-coexist.yaml");
+        fs::write(
+            &file_path,
+            r#"
+routes:
+  - id: coexisting-direct
+    from: "direct:start"
+    steps:
+      - throttle:
+          max_requests: ${env:COEXIST_MAX_REQUESTS:-2}
+          period_secs: 1
+templates:
+  - id: coexist-tpl
+    parameters:
+      - name: target
+    routes:
+      - id: "coexist-tpl-body"
+        from: "{{target}}"
+        steps: []
+templated_routes:
+  - route_template_ref: coexist-tpl
+    route_id: "coexist-materialized"
+    parameters:
+      target: "direct:materialized"
+"#,
+        )
+        .unwrap();
+        let pattern = file_path.to_string_lossy().to_string();
+
+        let routes = discover_routes_with_threshold_security_and_env(
+            &[pattern],
+            4096,
+            SecurityCompileContext::default(),
+            &|n| (n == "COEXIST_MAX_REQUESTS").then(|| "5".into()),
+        )
+        .unwrap();
+
+        assert_eq!(routes.len(), 2);
+
+        // The probed direct route carries the injected integer.
+        let direct = routes
+            .iter()
+            .find(|r| r.route_id() == "coexisting-direct")
+            .expect("direct route discovered");
+        match &direct.steps()[0] {
+            camel_core::route::BuilderStep::Throttle { config, .. } => {
+                assert_eq!(config.max_requests, 5);
+            }
+            other => panic!("expected throttle step, got: {other:?}"),
+        }
+
+        // The templated route materialized and compiled in the same pass.
+        let templated = routes
+            .iter()
+            .find(|r| r.route_id() == "coexist-materialized")
+            .expect("templated route materialized");
+        assert_eq!(templated.from_uri(), "direct:materialized");
+    }
+
+    #[test]
+    fn json_int_placeholder_still_fails() {
+        // Non-goal pin: JSON route files never probe — a string at an
+        // integer position stays a discovery error.
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("int-placeholder.json");
+        fs::write(
+            &file_path,
+            r#"{"routes":[{"id":"json-int","from":"direct:start","steps":[{"throttle":{"max_requests":"${env:J:-2}","period_secs":1}}]}]}"#,
+        )
+        .unwrap();
+        let pattern = file_path.to_string_lossy().to_string();
+
+        let err = match discover_routes_with_threshold_security_and_env(
+            &[pattern],
+            4096,
+            SecurityCompileContext::default(),
+            &|_| None,
+        ) {
+            Ok(_) => panic!("expected JSON int placeholder to stay rejected"),
+            Err(e) => e,
+        };
+        match &err {
+            DiscoveryError::Json { error, .. } => {
+                assert!(
+                    error.contains("did not match any variant") || error.contains("invalid type"),
+                    "expected a typed parse error, got: {error}"
+                );
+            }
+            other => panic!("expected DiscoveryError::Json, got: {other:?}"),
+        }
     }
 }
