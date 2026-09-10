@@ -169,57 +169,82 @@ pub(crate) async fn resolve_and_validate_host(
 /// Validates a redirect target URL for SSRF. If the host is a domain name,
 /// resolves it and checks all resulting IPs. Returns the resolved socket
 /// addresses on success so the caller can pin them via `resolve_to_addrs`.
+/// Classified URL host. `Url::host_str()` renders an IPv6 literal
+/// bracketed (`[::1]`), which `IpAddr::parse` rejects — the historical bug
+/// that routed IPv6-literal targets down the DNS-resolver branch where
+/// `lookup_host("[::1]")` can never resolve (rc-uwaj). `Url::host()` yields
+/// the unbracketed `Host::Ipv6`/`Host::Ipv4` for literals, so classification
+/// via this enum treats both IP families as literals.
+enum ClassifiedHost {
+    Ip(std::net::IpAddr),
+    Domain(String),
+}
+
+fn classify_host(url: &url::Url) -> Option<ClassifiedHost> {
+    match url.host()? {
+        url::Host::Domain(domain) => Some(ClassifiedHost::Domain(domain.to_string())),
+        url::Host::Ipv4(ip) => Some(ClassifiedHost::Ip(ip.into())),
+        url::Host::Ipv6(ip) => Some(ClassifiedHost::Ip(ip.into())),
+    }
+}
+
 pub(crate) async fn validate_redirect_target_for_ssrf(
     url: &url::Url,
     allow_internal: bool,
 ) -> Result<Vec<std::net::SocketAddr>, CamelError> {
-    let Some(host_str) = url.host_str() else {
-        return Err(CamelError::ProcessorError(
-            "Redirect URL has no host".to_string(),
-        ));
-    };
+    let host = classify_host(url).ok_or_else(|| {
+        CamelError::ProcessorError("Redirect URL has no host".to_string())
+    })?;
     let port = url
         .port_or_known_default()
         .ok_or_else(|| CamelError::ProcessorError("Redirect URL has no port".to_string()))?;
 
-    // If the host is an IP literal, check it directly
-    if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
-        let is_blocked = is_ssrf_blocked_ip(&ip);
-        if !allow_internal && is_blocked {
-            return Err(CamelError::ProcessorError(format!(
-                "Redirect target is a blocked IP: {}",
-                ip
-            )));
+    match host {
+        // If the host is an IP literal (IPv4 or unbracketed IPv6), check it
+        // directly — never the DNS resolver.
+        ClassifiedHost::Ip(ip) => {
+            let is_blocked = is_ssrf_blocked_ip(&ip);
+            if !allow_internal && is_blocked {
+                return Err(CamelError::ProcessorError(format!(
+                    "Redirect target is a blocked IP: {}",
+                    ip
+                )));
+            }
+            // Under allow_internal: reject public IPs with HTTP
+            if allow_internal && !is_blocked && url.scheme() == "http" {
+                return Err(CamelError::ProcessorError(format!(
+                    "Redirect to public IP '{}' not allowed over HTTP (use HTTPS)",
+                    ip
+                )));
+            }
+            Ok(vec![std::net::SocketAddr::new(ip, port)])
         }
-        // Under allow_internal: reject public IPs with HTTP
-        if allow_internal && !is_blocked && url.scheme() == "http" {
-            return Err(CamelError::ProcessorError(format!(
-                "Redirect to public IP '{}' not allowed over HTTP (use HTTPS)",
-                ip
-            )));
+        ClassifiedHost::Domain(host_str) => {
+            // Domain name: use shared resolver with DNS timeout (always
+            // resolves for pinning)
+            let addrs = resolve_and_validate_host(&host_str, port, allow_internal)
+                .await
+                .map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "Failed to resolve redirect host '{host_str}': {e}"
+                    ))
+                })?;
+
+            // Under allow_internal with HTTP: reject if any resolved IP is
+            // public
+            if allow_internal
+                && url.scheme() == "http"
+                && let Some(public_addr) = addrs.iter().find(|sa| !is_ssrf_blocked_ip(&sa.ip()))
+            {
+                return Err(CamelError::ProcessorError(format!(
+                    "Redirect host '{host_str}' resolves to public IP {} — not allowed over HTTP (use HTTPS)",
+                    public_addr.ip()
+                )));
+            }
+
+            Ok(addrs)
         }
-        return Ok(vec![std::net::SocketAddr::new(ip, port)]);
     }
-
-    // Domain name: use shared resolver with DNS timeout (always resolves for pinning)
-    let addrs = resolve_and_validate_host(host_str, port, allow_internal)
-        .await
-        .map_err(|e| {
-            CamelError::ProcessorError(format!("Failed to resolve redirect host '{host_str}': {e}"))
-        })?;
-
-    // Under allow_internal with HTTP: reject if any resolved IP is public
-    if allow_internal
-        && url.scheme() == "http"
-        && let Some(public_addr) = addrs.iter().find(|sa| !is_ssrf_blocked_ip(&sa.ip()))
-    {
-        return Err(CamelError::ProcessorError(format!(
-            "Redirect host '{host_str}' resolves to public IP {} — not allowed over HTTP (use HTTPS)",
-            public_addr.ip()
-        )));
-    }
-
-    Ok(addrs)
 }
 
 /// Resolves the initial request URL's hostname, validates all resolved IPs against the
@@ -248,22 +273,21 @@ pub(crate) async fn resolve_initial_url_for_ssrf(
     let parsed = url::Url::parse(url)
         .map_err(|e| CamelError::ProcessorError(format!("Invalid URL: {}", e)))?;
 
-    let Some(host_str) = parsed.host_str() else {
-        return Ok(None);
+    // IP literals (IPv4 and IPv6) are validated directly in
+    // validate_url_for_ssrf — no pinning needed
+    let host_str = match classify_host(&parsed) {
+        None => return Ok(None),
+        Some(ClassifiedHost::Ip(_)) => return Ok(None),
+        Some(ClassifiedHost::Domain(domain)) => domain,
     };
-
-    // IP literals are validated directly in validate_url_for_ssrf — no pinning needed
-    if host_str.parse::<std::net::IpAddr>().is_ok() {
-        return Ok(None);
-    }
 
     let port = parsed.port_or_known_default().ok_or_else(|| {
         CamelError::ProcessorError(format!("URL '{}' has no recognizable port", url))
     })?;
 
-    let host_str_clone = host_str.to_string();
+    let host_str_clone = host_str.clone();
     // Always resolve for DNS pinning — even under allow_internal
-    let addrs = resolve_and_validate_host(host_str, port, allow_internal)
+    let addrs = resolve_and_validate_host(&host_str, port, allow_internal)
         .await
         .map_err(|e| {
             CamelError::ProcessorError(format!("Failed to resolve host '{host_str_clone}': {e}"))
@@ -280,7 +304,7 @@ pub(crate) async fn resolve_initial_url_for_ssrf(
         )));
     }
 
-    Ok(Some((host_str.to_string(), addrs)))
+    Ok(Some((host_str, addrs)))
 }
 
 /// Sends an HTTP request with manual redirect following and per-hop SSRF validation.
@@ -414,14 +438,15 @@ pub(crate) async fn send_with_ssrf_safe_redirects(
 
         // Build the per-hop client with DNS pinning: hostname targets build
         // through the endpoint's pinned-client cache; IP-literal targets
-        // reuse the shared unpinned client and never enter the cache.
-        let redirect_host = redirect_url.host_str().unwrap_or("");
-        if redirect_host.parse::<std::net::IpAddr>().is_ok() {
+        // (IPv4 and IPv6) reuse the shared unpinned client and never enter
+        // the cache.
+        let redirect_host = redirect_url.host_str().unwrap_or("").to_string();
+        if matches!(classify_host(&redirect_url), Some(ClassifiedHost::Ip(_))) {
             current_client = shared_client.clone();
         } else {
             current_client = pinned_cache
-                .get_or_build(redirect_host, &resolved_addrs, || {
-                    build_client(http_config, Some((redirect_host, &resolved_addrs)))
+                .get_or_build(&redirect_host, &resolved_addrs, || {
+                    build_client(http_config, Some((redirect_host.as_str(), &resolved_addrs)))
                 })
                 .await;
         }
@@ -570,6 +595,59 @@ mod tests {
         assert!(
             result.is_ok(),
             "Should allow redirect to 127.0.0.1 when allow_internal=true"
+        );
+    }
+
+    /// rc-uwaj: an IPv6-literal redirect target is classified via
+    /// `Url::host()` (`Host::Ipv6`), not the bracketed `host_str()` string —
+    /// `[::1]` must take the literal branch (validated directly), never the
+    /// DNS resolver, which cannot resolve a bracketed name.
+    #[tokio::test]
+    async fn test_validate_redirect_target_ipv6_literal_treated_as_literal() {
+        let url = url::Url::parse("http://[::1]:8080/internal").unwrap();
+        let addrs = validate_redirect_target_for_ssrf(&url, true)
+            .await
+            .expect("IPv6 literal must validate as a literal, not via DNS");
+        assert_eq!(
+            addrs,
+            vec!["[::1]:8080".parse::<std::net::SocketAddr>().unwrap()],
+            "the literal's own address comes back pinned to the URL port"
+        );
+    }
+
+    /// rc-uwaj: IPv6 literals stay inside the SSRF blocklist regime — the
+    /// loopback IPv6 literal is a blocked IP when allow_internal=false.
+    #[tokio::test]
+    async fn test_validate_redirect_target_ipv6_literal_blocked_when_not_internal() {
+        let url = url::Url::parse("http://[::1]:8080/internal").unwrap();
+        let err = validate_redirect_target_for_ssrf(&url, false)
+            .await
+            .expect_err("blocked IPv6 literal must be rejected without allow_internal");
+        assert!(
+            err.to_string().contains("blocked IP"),
+            "error must name the blocked-IP class, got: {err}"
+        );
+    }
+
+    /// rc-uwaj regression guard: IPv4 literals classify exactly as before.
+    #[tokio::test]
+    async fn test_validate_redirect_target_ipv4_literal_unchanged() {
+        let url = url::Url::parse("http://127.0.0.1:9000/internal").unwrap();
+        let addrs = validate_redirect_target_for_ssrf(&url, true).await.unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].ip().to_string(), "127.0.0.1");
+        assert_eq!(addrs[0].port(), 9000);
+    }
+
+    /// rc-uwaj: IPv6-literal initial URLs return None (no pinning), same as
+    /// IPv4 literals — not a resolver round-trip on a bracketed string.
+    #[tokio::test]
+    async fn test_resolve_initial_url_ipv6_literal_returns_none() {
+        let out = resolve_initial_url_for_ssrf("http://[::1]:8080/internal", true).await;
+        assert_eq!(
+            out.expect("IPv6 literal initial URL must not error"),
+            None,
+            "IP literals need no DNS pinning"
         );
     }
 
