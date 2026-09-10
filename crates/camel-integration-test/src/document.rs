@@ -48,6 +48,8 @@ pub use camel_matchers::{CountBound, Expectation, PathFilter, RowsExpectation};
 // stays re-exported here so the document API keeps one surface.
 pub mod error;
 pub use error::DocError;
+pub mod logs;
+pub use logs::{LogLevel, LogsAssertion};
 pub mod validate;
 pub use validate::{ScenarioTarget, SqlTarget, ValidateExpectation};
 use validate::{backticked, partner_expectation_from_value};
@@ -302,40 +304,6 @@ pub struct InboundListener {
     pub bind_var: String,
 }
 
-/// The document-level `logs:` assertion block (rc-tdgh5): log-content
-/// expectations the runner evaluates against the capture window that
-/// spans the document run. Conjunction across clauses — every entry of
-/// every list must hold; `None`-valued clauses assert nothing.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LogsAssertion {
-    /// Substring markers: each entry must appear in at least one
-    /// captured event's message.
-    pub contains: Vec<String>,
-    /// Unanchored patterns: each entry must match at least one
-    /// captured event's message. Every pattern compiles at load time;
-    /// a non-compiling pattern is a load error.
-    pub regex: Vec<String>,
-    /// Severity ceiling: no captured event may carry a level above
-    /// this cap. `None` asserts nothing about levels.
-    pub no_level_above: Option<LogLevel>,
-}
-
-/// A `noLevelAbove` severity. The grammar accepts exactly
-/// `trace|debug|info|warn|error`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogLevel {
-    /// Below `debug`.
-    Trace,
-    /// Below `info`.
-    Debug,
-    /// Below `warn`.
-    Info,
-    /// Below `error`.
-    Warn,
-    /// The most severe level.
-    Error,
-}
-
 /// The scripted responses a document's `partners:` entry maps to, for
 /// one endpoint key. `None` when the document declares no entry for
 /// the endpoint — the caller binds a permissive partner. `Some` maps
@@ -485,17 +453,6 @@ struct RawValidate {
     /// Raw humantime string; `lastReceived` targets only, parsed
     /// during validation so the error can name the action index.
     elapsed_at_least: Option<String>,
-}
-
-/// Raw `logs:` block (rc-tdgh5): keys and level stay raw so the
-/// clause walk can name the offending entry; conversion happens during
-/// validation, never at the serde layer.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct RawLogs {
-    contains: Option<Vec<String>>,
-    regex: Option<Vec<String>>,
-    no_level_above: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -720,7 +677,7 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
     // (j) Document-level log assertions (rc-tdgh5): the clause walk
     // runs during validation so a malformed block is a load error
     // naming the offending clause.
-    let logs = raw.logs.map(logs_from_raw).transpose()?;
+    let logs = raw.logs.map(logs::logs_from_raw).transpose()?;
     Ok(ScenarioDocument {
         source_path: path.to_path_buf(),
         route_source,
@@ -732,43 +689,6 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
         send_deadline,
         inbound,
         logs,
-    })
-}
-
-/// Converts the raw `logs:` node (rc-tdgh5). Malformed blocks are load
-/// errors through [`DocError::LogsBlock`]: an unknown key, a level
-/// outside `trace|debug|info|warn|error`, or a regex that does not
-/// compile — each error names the offending clause.
-fn logs_from_raw(value: serde_yaml::Value) -> Result<LogsAssertion, DocError> {
-    let block_error = |detail: String| DocError::LogsBlock { detail };
-    let raw: RawLogs = serde_yaml::from_value(value).map_err(|e| block_error(e.to_string()))?;
-    let no_level_above = raw
-        .no_level_above
-        .as_deref()
-        .map(|raw_level| match raw_level {
-            "trace" => Ok(LogLevel::Trace),
-            "debug" => Ok(LogLevel::Debug),
-            "info" => Ok(LogLevel::Info),
-            "warn" => Ok(LogLevel::Warn),
-            "error" => Ok(LogLevel::Error),
-            other => Err(block_error(format!(
-                "`logs.noLevelAbove` must be one of trace|debug|info|warn|error, got `{other}`"
-            ))),
-        })
-        .transpose()?;
-    for pattern in raw.regex.iter().flatten() {
-        // Compile-time gate: the runner matches unanchored, so a
-        // pattern that compiles here always compiles there.
-        if let Err(error) = regex::Regex::new(pattern) {
-            return Err(block_error(format!(
-                "`logs.regex` entry `{pattern}` does not compile: {error}"
-            )));
-        }
-    }
-    Ok(LogsAssertion {
-        contains: raw.contains.unwrap_or_default(),
-        regex: raw.regex.unwrap_or_default(),
-        no_level_above,
     })
 }
 
