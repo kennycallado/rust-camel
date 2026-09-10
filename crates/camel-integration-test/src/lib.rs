@@ -103,6 +103,12 @@ mod http_partner_test;
 #[cfg(all(test, feature = "sql"))]
 mod sql_action_test;
 
+/// Shared cfg(test) SQLite stub-catalog support (bd rc-mu3aq): stub
+/// pool factory, catalog builder, and seed helpers for the sql test
+/// modules.
+#[cfg(all(test, feature = "sql"))]
+mod sql_stub;
+
 /// `validate` sql-target executor tests (bd rc-25lup.2, task 3.1):
 /// the poll lattice, projection, mismatch redaction, and the
 /// feature-off twin. Compiles in BOTH feature configurations — the
