@@ -2209,6 +2209,158 @@ rest:
             "JSON schema must NOT contain set_header_if_absent"
         );
     }
+
+    #[test]
+    fn resequence_stream_defaults_are_pinned() {
+        let yaml = r#"
+routes:
+  - id: r
+    from: timer:t
+    steps:
+      - resequence:
+          stream:
+            sequence: "header.seq"
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        let stream = match &parsed.routes[0].steps[0] {
+            RouteDslStep::Resequence(step) => step.resequence.stream.as_ref().unwrap(),
+            _ => panic!("expected resequence"),
+        };
+        assert_eq!(stream.capacity, 1000);
+        assert_eq!(stream.gap_timeout, 5000);
+    }
+
+    #[test]
+    fn parameters_scalar_rejected_by_yaml_frontend() {
+        let yaml = r#"
+routes:
+  - id: r
+    from: timer:t
+    parameters: "x"
+"#;
+        let rejected = serde_yml::from_str::<RouteDslRoutes>(yaml).is_err();
+        assert!(
+            rejected,
+            "scalar `parameters` must be rejected by the front-end"
+        );
+    }
+
+    #[test]
+    fn string_parameters_expecting_message_is_pinned() {
+        // noyalib reports its own "type mismatch" text without consulting the
+        // visitor's `expecting`, so surface the message by driving
+        // `deserialize_string_parameters` with a string deserializer.
+        let err = match deserialize_string_parameters(serde::de::value::StrDeserializer::<
+            serde::de::value::Error,
+        >::new("x"))
+        {
+            Ok(_) => panic!("expected parameters expecting error"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("a map of string parameter values"), "{err}");
+    }
+
+    #[test]
+    fn non_string_parameter_value_names_key() {
+        let yaml = r#"
+routes:
+  - id: r
+    from: timer:t
+    parameters:
+      retries: 3
+"#;
+        let err = match serde_yml::from_str::<RouteDslRoutes>(yaml) {
+            Ok(_) => panic!("expected key-naming error"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("`retries`"), "{err}");
+        assert!(err.contains("must be a string"), "{err}");
+    }
+
+    #[test]
+    fn parameter_value_expects_a_string() {
+        // Isolated pin for ParameterValueVisitor::expecting: through the
+        // front-ends the inner expecting text is swallowed by the outer
+        // key-naming error, so drive the visitor directly with an integer.
+        let err = match ParameterValue::deserialize(serde::de::value::U64Deserializer::<
+            serde::de::value::Error,
+        >::new(3))
+        {
+            Ok(_) => panic!("expected type error"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("a string"), "{err}");
+    }
+
+    #[test]
+    fn null_parameters_route_through_null_visitor_arms() {
+        // YAML `null` reaches `visit_unit`/`visit_none` through noyalib's
+        // `deserialize_map` and deserializes to an empty map (serde_json
+        // rejects null up front — see the `deserialize_string_parameters`
+        // doc comment). The direct-deserializer twins below pin both arms
+        // independent of front-end routing.
+        let yaml = r#"
+routes:
+  - id: r
+    from: timer:t
+    parameters: ~
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        assert!(
+            parsed.routes[0].parameters.is_empty(),
+            "null parameters must deserialize to an empty map"
+        );
+    }
+
+    #[test]
+    fn unit_deserializer_yields_empty_parameters() {
+        let params = deserialize_string_parameters(serde::de::value::UnitDeserializer::<
+            serde::de::value::Error,
+        >::new())
+        .unwrap();
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn none_deserializer_yields_empty_parameters() {
+        struct NoneDeserializer;
+
+        impl<'de> serde::Deserializer<'de> for NoneDeserializer {
+            type Error = serde::de::value::Error;
+
+            fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+            where
+                V: serde::de::Visitor<'de>,
+            {
+                visitor.visit_none()
+            }
+
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str
+                string bytes byte_buf option unit unit_struct newtype_struct seq
+                tuple tuple_struct map struct enum identifier ignored_any
+            }
+        }
+
+        let params = deserialize_string_parameters(NoneDeserializer).unwrap();
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn non_mapping_root_reports_expecting_message() {
+        // noyalib reports its own "type mismatch" text for a seq root without
+        // consulting the visitor's `expecting`, so surface the message by
+        // deserializing through a seq value deserializer (serde's default
+        // `visit_seq` fallback reports `invalid_type` with the expecting text).
+        let de = serde::de::value::SeqDeserializer::new(std::iter::empty::<
+            serde::de::value::UnitDeserializer<serde::de::value::Error>,
+        >());
+        let err = match RouteDslRoutes::deserialize(de) {
+            Ok(_) => panic!("expected root-shape error"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("a route document mapping"), "{err}");
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

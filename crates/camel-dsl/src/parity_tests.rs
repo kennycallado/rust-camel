@@ -802,3 +802,65 @@ fn seq_shaped_document_rejected_by_both_frontends() {
     assert!(serde_json::from_str::<RouteDslRoutes>("{}").is_ok());
     assert!(serde_yml::from_str::<RouteDslRoutes>("{}").is_ok());
 }
+
+/// Promoted fuzz regression (rc-wpl45, dsl_parity run 33984285881): the
+/// harness reported the YAML arm rejecting a document the JSON arm
+/// accepts, with a minimized `to` value containing a printable `*`.
+/// The asterisk itself is non-reproducible — `ToStep.to` is a plain
+/// `String` (route_ast.rs) and neither front-end validates the URI at
+/// deserialization, so both minimized documents parse accept-both; the
+/// run's crash signature is consistent with the already-pinned DEL-byte
+/// class (see the `harness_del_document_does_not_panic` pin in the fuzz
+/// crate). This test freezes the accept-both contract: a printable `*`
+/// inside a `to` URI must never make one front-end reject what the
+/// other accepts.
+///
+/// The `dsl_parity` harness feeds the SAME JSON-syntax bytes to BOTH
+/// front-ends (YAML 1.2 flow syntax) — that flow-style path is the
+/// actual fuzz-crash surface. Each minimized document below is replayed
+/// verbatim through both `serde_json` and `serde_yml`; the block-YAML
+/// variants pin native block authoring as superset coverage.
+#[test]
+fn asterisk_in_to_uri_keeps_strict_parity() {
+    let json_inputs = [
+        r#"{"routes":[{"id":"r1","from":"dtart","steps":[{"to":"di*wwwwwwnd"}]}]}"#,
+        r#"{"routes":[{"id":"r1","from":"dtart","steps":[{"to":"di*rect:e..."}]}]}"#,
+    ];
+    // Replay the exact harness bytes (YAML 1.2 flow syntax) through BOTH
+    // front-ends: the flow-style double-quoted scalar path is the
+    // fuzz-crash surface a noyalib regression would hit.
+    for json in json_inputs {
+        assert!(
+            serde_json::from_str::<RouteDslRoutes>(json).is_ok(),
+            "JSON front-end must accept flow-syntax `*` in to-URI: {json}"
+        );
+        assert!(
+            serde_yml::from_str::<RouteDslRoutes>(json).is_ok(),
+            "YAML front-end must accept flow-syntax `*` in to-URI: {json}"
+        );
+    }
+    // Superset coverage: the equivalent native block-YAML authoring form
+    // must stay accepted too.
+    let yaml_inputs = [
+        r#"
+routes:
+  - id: r1
+    from: dtart
+    steps:
+      - to: "di*wwwwwwnd"
+"#,
+        r#"
+routes:
+  - id: r1
+    from: dtart
+    steps:
+      - to: "di*rect:e..."
+"#,
+    ];
+    for yaml in yaml_inputs {
+        assert!(
+            serde_yml::from_str::<RouteDslRoutes>(yaml).is_ok(),
+            "YAML front-end must accept block-YAML `*` in to-URI: {yaml}"
+        );
+    }
+}
