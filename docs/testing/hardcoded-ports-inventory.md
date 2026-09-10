@@ -9,13 +9,15 @@ inventory classifies every literal by risk class and states the
 migration pattern. It supersedes the stale line references in the
 epic's children (see "Stale-reference corrections").
 
-The audit's headline: **no test binary binds a hardcoded port
-today**. Every live listener binds `:0` (kernel-assigned), every
-remaining literal is either a container-internal dial, a
-config-parse assertion, or a documented pinned-port fixture. The
-nextest blockers that remain are the global-state class and the two
-pinned inbound fixtures listed below, not cross-binary port
-collisions.
+The audit's headline: **no cross-binary hardcoded-port collision
+exists today**. No test binary binds a hardcoded port that any other
+binary also binds: every shared-surface listener binds `:0`
+(kernel-assigned), and every remaining literal is either a
+container-internal dial, a config-parse assertion, or a
+documented pinned-port fixture used by exactly one test in one
+binary (`18221`; the examples job owns `18097`/`18221` separately).
+The nextest blockers that remain are the global-state class and the
+migrate-on-touch pinned fixtures below.
 
 ## Per-binary literal table (current tree)
 

@@ -164,8 +164,14 @@ async fn run_two_docs(
         panic!("exactly two documents must run");
     };
     let (first, second) = (first.clone(), second.clone());
+    // A shutdown failure fills the LAST document's post-verdict slot
+    // and never masks the recorded verdicts (the `direct_reply_test`
+    // pattern).
+    let mut second = second;
     if let Err(e) = run.boot.shutdown(&mut *ctx.lock().await).await {
-        tracing::error!(error = %e, "shutdown after circuit docs failed");
+        second.final_failure = Some(ScenarioFailure::ShutdownFailure {
+            message: e.to_string(),
+        });
     }
     (first, second)
 }
