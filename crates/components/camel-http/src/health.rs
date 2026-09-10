@@ -108,7 +108,14 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // Timeout-semantics tests run under `start_paused = true` (rc-wsx2y):
+    // the virtual clock removes wall-clock dependence — the probe's 50ms
+    // sleep and the 5ms check timeout resolve instantly via auto-advance.
+    // Caveat: this proves the timeout SEMANTICS on tokio's paused clock; the
+    // real-time path is not exercised here (rc-8cw1 forensics: the one-time
+    // red there was OOM attribution, not an assertion race).
+
+    #[tokio::test(start_paused = true)]
     async fn http_health_check_healthy_when_probe_succeeds() {
         let probe = Arc::new(MockProbe::new(|| Box::pin(async { Ok(()) })));
         let check = HttpHealthCheck::with_probe_for_tests(probe, Duration::from_millis(50));
@@ -120,7 +127,7 @@ mod tests {
         assert!(result.message.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn http_health_check_unhealthy_when_probe_fails() {
         let probe = Arc::new(MockProbe::new(|| {
             Box::pin(async { Err(CamelError::ProcessorError("listener not bound".to_string())) })
@@ -139,7 +146,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn http_health_check_unhealthy_when_probe_times_out() {
         let probe = Arc::new(MockProbe::new(|| {
             Box::pin(async {
