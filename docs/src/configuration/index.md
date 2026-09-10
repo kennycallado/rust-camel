@@ -39,6 +39,8 @@ When `name` is omitted, the backend convention applies. The defaults are histori
 
 The cache `redb` default is `persistent`, not `redb` — an asymmetry kept for backward compatibility. Set `name` explicitly when the distinction matters to your routes.
 
+One boundary of the cross-repository prefix-collision rule: validation compares declared endpoints, not resolved addresses. A standalone `url` and a `sentinel_nodes` topology that both point at the same physical Redis instance and database are treated as distinct databases, because resolving the sentinel topology requires network I/O that `validate()` does not perform. The repositories stay separated by their distinct default key prefixes and name segments; set explicit `key_prefix` values when mixing both shapes against one instance.
+
 ## Environment overrides
 
 After includes and profile merges, the loader overlays a fixed allowlist of `CAMEL_*` environment variables onto the merged tree. The loader ignores a `CAMEL_*` variable outside the allowlist and logs a warning. Two exceptions, `CAMEL_PROFILE` and `CAMEL_CONFIG_FILE`, select the profile and the config file itself. They do not override config fields and do not warn.

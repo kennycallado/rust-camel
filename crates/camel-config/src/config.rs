@@ -1138,6 +1138,21 @@ fn normalize_empty_topology_fields(
 /// master + db. Returns `None` when normalization fails; the caller
 /// compares `Option`s directly so `None == None` claims collision, but
 /// `validate()` makes this unreachable — a validated endpoint always yields `Some`.
+///
+/// # Known boundary (rc-eztw)
+///
+/// The key compares DECLARED identity, not RESOLVED addresses: a
+/// standalone `url` endpoint and a `sentinel_nodes` topology that resolve
+/// to the same physical instance and database produce different keys
+/// (`standalone|…` vs `sentinel|…`) and are never flagged as sharing one
+/// database. Detecting the alias would require resolving the sentinel
+/// topology — network I/O — inside `validate()`, which is deliberately
+/// pure and side-effect free. The blast radius is bounded: repository
+/// `clear` is prefix-scoped SCAN+UNLINK (never FLUSH), the `{name}`
+/// keyspace segment differs between the cache and idempotent repositories
+/// by construction, and explicit `name`/`key_prefix` settings make the
+/// separation operator-visible (see the registration-names section in
+/// `docs/src/configuration/index.md`).
 fn redis_database_key(
     url: Option<&str>,
     sentinel_nodes: Option<&[String]>,

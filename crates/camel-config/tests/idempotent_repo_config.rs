@@ -513,3 +513,39 @@ url = "redis://h:6379"
         "absent name keeps the backend convention default"
     );
 }
+
+// ── rc-eztw: the collision rule compares DECLARED identity ───────────────
+// A standalone url and a sentinel topology that resolve to the same
+// physical instance are NOT flagged: resolving sentinel topology is
+// network I/O, out of validate()'s pure scope (documented boundary — see
+// redis_database_key's doc comment and the configuration guide). This test
+// PINS that boundary so a future network-at-validate change updates it
+// knowingly.
+#[test]
+fn collision_rule_does_not_flag_standalone_vs_sentinel_aliasing() {
+    // cache on a standalone url, idempotent via sentinel, both defaulting
+    // to identical effective key prefixes would collide IF the sentinel
+    // resolved to the same physical host:port. Declared identity differs,
+    // so validation passes by design.
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+key_prefix = "camel:shared"
+
+[idempotent_repo]
+backend = "redis"
+sentinel_nodes = ["127.0.0.1:26379"]
+master_name = "mymaster"
+key_prefix = "camel:shared"
+"#,
+    );
+    cfg.validate().expect(
+        "standalone vs sentinel declared shapes never compare equal — the documented rc-eztw boundary",
+    );
+
+    // The pure-declaration mechanism itself: the two keys differ on shape,
+    // not on resolved address.
+    // (asserted indirectly above; the direct unit lives next to the rule)
+}
