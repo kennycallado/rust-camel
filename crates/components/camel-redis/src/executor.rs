@@ -347,10 +347,13 @@ impl MultiplexedExecutor {
                 ))
             })?
             .map_err(|e| {
-                CamelError::ProcessorError(format!(
+                // rc-swzq: name the credential plane on data-node auth
+                // failures so a sentinel_password/password mixup is
+                // diagnosable from the error alone.
+                CamelError::ProcessorError(crate::config::enrich_data_auth_error(format!(
                     "Failed to connect to Redis at '{}': {}",
                     redis_url_safe, e
-                ))
+                )))
             })?;
 
         let mut guard = self.conn.lock().await;

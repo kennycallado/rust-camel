@@ -1082,6 +1082,54 @@ pub fn is_transient_redis_error(err: &CamelError) -> bool {
         || msg.contains("read only")
 }
 
+// ── Auth-failure credential-plane guidance ──────────────────────────────────
+
+/// Returns true when a Redis error message looks like an authentication
+/// failure (WRONGPASS, NOAUTH, invalid username-password pair, or a client
+/// sending credentials to an AUTH-less server).
+///
+/// Users frequently set `sentinel_password` when they meant the data-node
+/// `password` (or vice versa); the raw Redis error does not say WHICH
+/// credential plane failed, so the connect paths append plane guidance when
+/// this returns true (rc-swzq).
+pub fn is_auth_failure_message(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("wrongpass")
+        || m.contains("noauth")
+        || m.contains("invalid username-password")
+        || m.contains("invalid username/password")
+        || m.contains("authenticationerror")
+        || m.contains("client sent auth")
+        || m.contains("authentication required")
+}
+
+/// Append sentinel-plane guidance to a sentinel-side connect error when it
+/// looks like an auth failure; non-auth errors pass through unchanged.
+pub(crate) fn enrich_sentinel_auth_error(msg: String) -> String {
+    if !is_auth_failure_message(&msg) {
+        return msg;
+    }
+    format!(
+        "{msg}. Hint: this failed while authenticating to a SENTINEL node (control \
+         plane) — check `sentinel_username`/`sentinel_password`. If you meant \
+         master/replica (data plane) auth, set `password`/`username` instead"
+    )
+}
+
+/// Append data-plane guidance to a master/replica connect error when it
+/// looks like an auth failure; non-auth errors pass through unchanged.
+pub(crate) fn enrich_data_auth_error(msg: String) -> String {
+    if !is_auth_failure_message(&msg) {
+        return msg;
+    }
+    format!(
+        "{msg}. Hint: this failed while authenticating to a Redis DATA node \
+         (master/replica) — check `password`/`username`. If you meant sentinel \
+         (control plane) auth, set `sentinel_password`/`sentinel_username`; \
+         `sentinel_password` does not authenticate data nodes"
+    )
+}
+
 // ── Command idempotency classification ──────────────────────────────────────
 
 /// Returns true if the command is idempotent (safe to retry without risk of
@@ -2036,6 +2084,60 @@ mod tests {
         assert!(!is_transient_redis_error(&CamelError::Config(
             "tls connect refused by policy: timed out waiting for config".into()
         )));
+    }
+
+    // rc-swzq: auth-failure errors must name the credential plane that
+    // failed and hint at the sentinel_password/password mixup.
+    #[test]
+    fn auth_failure_detection_and_plane_guidance() {
+        // Detection: the shapes redis-rs surfaces for bad credentials.
+        assert!(is_auth_failure_message(
+            "WRONGPASS invalid username-password pair or user is disabled"
+        ));
+        assert!(is_auth_failure_message(
+            "AuthenticationError: 'ERR Client sent AUTH, but no password is set'"
+        ));
+        assert!(is_auth_failure_message("NOAUTH Authentication required"));
+        // Non-auth errors are not flagged.
+        assert!(!is_auth_failure_message("connection refused"));
+        assert!(!is_auth_failure_message(
+            "WRONGTYPE Operation against a key"
+        ));
+
+        // Confusion 1: sentinel_password set when the SENTINEL plane rejects.
+        let sentinel = enrich_sentinel_auth_error(
+            "sentinel resolve: WRONGPASS invalid username-password pair".into(),
+        );
+        assert!(sentinel.contains("SENTINEL"), "got: {sentinel}");
+        assert!(
+            sentinel.contains("sentinel_username") && sentinel.contains("sentinel_password"),
+            "must name the sentinel fields: {sentinel}"
+        );
+        assert!(
+            !sentinel.contains("sentinel_password<"), // no secret leakage shape
+            "{sentinel}"
+        );
+
+        // Confusion 2: data-plane auth failure while the user set only
+        // sentinel_password.
+        let data = enrich_data_auth_error(
+            "Failed to connect to Redis at 'redis://m:6379/0': WRONGPASS invalid username-password pair".into(),
+        );
+        assert!(data.contains("data"), "must name the data plane: {data}");
+        assert!(
+            data.contains("password") && !data.contains("sentinel_password does not authenticate"),
+            "must point at the data password field: {data}"
+        );
+
+        // Non-auth errors pass through unchanged.
+        assert_eq!(
+            enrich_sentinel_auth_error("sentinel resolve: connection refused".into()),
+            "sentinel resolve: connection refused"
+        );
+        assert_eq!(
+            enrich_data_auth_error("Failed to connect to Redis at 'x': io error".into()),
+            "Failed to connect to Redis at 'x': io error"
+        );
     }
 
     // REDIS-002: Idempotency classification

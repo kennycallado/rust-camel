@@ -370,7 +370,12 @@ impl RedisTopology for SentinelTopology {
                 })
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("sentinel resolve join: {e}")))?
-                .map_err(CamelError::ProcessorError)?;
+                .map_err(|e| {
+                    // rc-swzq: name the credential plane on sentinel-side
+                    // auth failures so a sentinel_password/password mixup is
+                    // diagnosable from the error alone.
+                    CamelError::ProcessorError(crate::config::enrich_sentinel_auth_error(e))
+                })?;
                 Ok(client)
             }
             ServerKind::Replica => Err(CamelError::ProcessorError(
