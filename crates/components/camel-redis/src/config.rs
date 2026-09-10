@@ -1059,7 +1059,17 @@ fn sentinel_node_url_requires_tls(node: &str) -> bool {
 /// resolved by reconnecting (e.g. connection reset, timeout, I/O error).
 ///
 /// Business errors (WRONGTYPE, NOSCRIPT, etc.) and config errors are NOT transient.
+///
+/// `Config` errors early-return false before substring matching (ADR-0012
+/// error-family boundaries): a Config error is a setup defect, never a
+/// transport hiccup, so retrying cannot resolve it. This also keeps
+/// transient-looking substrings embedded in Config messages (e.g. a CA file
+/// path containing "readonly") from misclassifying the fail-closed CA-read
+/// error as transient.
 pub fn is_transient_redis_error(err: &CamelError) -> bool {
+    if matches!(err, CamelError::Config(_)) {
+        return false;
+    }
     let msg = err.to_string().to_lowercase();
     msg.contains("connection")
         || msg.contains("io error")
@@ -2006,6 +2016,25 @@ mod tests {
         )));
         assert!(!is_transient_redis_error(&CamelError::Config(
             "bad config".into()
+        )));
+    }
+
+    // rc-ezi0f: Config errors are never transient, even when their message
+    // embeds transient-looking substrings (e.g. a CA file path containing
+    // "readonly"). Without the Config early-return the fail-closed CA-read
+    // error feeds the retry loop, breaking its fail-closed guarantee.
+    #[test]
+    fn is_transient_redis_error_rejects_config_errors_with_transient_substrings() {
+        // Fail-closed CA-read error shape (topology.rs embeds the path).
+        assert!(!is_transient_redis_error(&CamelError::Config(
+            "failed to read TLS CA cert file /mnt/readonly/ca.pem".into()
+        )));
+        // Other transient-looking substrings inside Config messages.
+        assert!(!is_transient_redis_error(&CamelError::Config(
+            "connection info missing for eof recovery".into()
+        )));
+        assert!(!is_transient_redis_error(&CamelError::Config(
+            "tls connect refused by policy: timed out waiting for config".into()
         )));
     }
 
