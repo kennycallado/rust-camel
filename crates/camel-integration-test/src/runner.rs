@@ -51,6 +51,9 @@ use crate::document::{
 /// poll, and the mismatch-detail renderers.
 mod partner_validate;
 
+#[cfg(test)]
+mod partner_validate_test;
+
 // Test-only re-exports: these primitives are exercised directly by
 // `runner_test`, while the runner itself only calls
 // `partner_validate_action`.
