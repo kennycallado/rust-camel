@@ -2800,12 +2800,14 @@ fn merge_header_query(
 
 /// Bytes that may appear unescaped in a URI query component. RFC 3986
 /// (`query = *( pchar / "/" / "?" )`) admits unreserved, sub-delims, `:`,
-/// `@`, `/`, `?`, and `%` — with ONE deliberate exclusion: the apostrophe
-/// (`'`, 0x27). reqwest's WHATWG URL parser re-encodes 0x27 to `%27` in the
-/// special-query percent-encode set (http/https), so an authored apostrophe
-/// can never ride the wire verbatim; admitting it would silently normalize
-/// authored bytes (rc-nmupb). Authors write `%27` explicitly when they mean
-/// the byte on the wire.
+/// `@`, `/`, `?`, and `%` — with ONE deliberate exclusion from the RFC set:
+/// the apostrophe (`'`, 0x27). reqwest's WHATWG URL parser re-encodes 0x27
+/// to `%27` in the special-query percent-encode set (http/https), so an
+/// authored apostrophe can never ride the wire verbatim; admitting it would
+/// silently normalize authored bytes (rc-nmupb). Authors write `%27`
+/// explicitly when they mean the byte on the wire. The WHATWG set's other
+/// extras (`"`, `` ` ``, `<`, `>`) are already rejected here — they are not
+/// RFC 3986 query-legal bytes, so no special exclusion is needed for them.
 fn is_legal_query_byte(byte: u8) -> bool {
     matches!(byte,
         b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
@@ -8478,6 +8480,19 @@ mod tests {
             url.contains("q=it%27s"),
             "the authored escape must ride byte-for-byte: {url}"
         );
+
+        // The rest of reqwest's WHATWG special-query set shares the same
+        // rationale and is rejected alongside (`"` and backtick are not
+        // RFC 3986 query-legal bytes; `<`/`>` likewise).
+        for &byte in b"\"`<>" {
+            config.raw_query = Some(format!("k={}x", byte as char));
+            let err = HttpProducer::resolve_url(&exchange, &config)
+                .expect_err("WHATWG special-query byte must be rejected");
+            assert!(
+                err.to_string().contains(&format!("0x{byte:02X}")),
+                "error must name byte 0x{byte:02X}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -8775,10 +8790,10 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
 
         // Readiness without a fixed wall-clock sleep: poll the registry
-        // entry live (1ms backoff, 5s deadline), then yield so the spawned `start()` runs to completion of
-        // route registration (that tail path has no pending timers — only
-        // the registry lock — so scheduler yields order it deterministically
-        // behind this loop).
+        // entry live (1ms backoff, 5s deadline), then yield so the spawned
+        // `start()` completes route registration (that tail path has no
+        // pending timers — only the registry lock — so scheduler yields
+        // order it deterministically behind this loop).
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         while ServerRegistry::global()
             .bound_addr("127.0.0.1", port)
