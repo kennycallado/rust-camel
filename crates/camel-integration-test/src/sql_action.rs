@@ -95,9 +95,21 @@ pub fn sanitize_db_error(err_text: &str, db_url: &str) -> String {
 /// Boot-time lint (ungated): rejects per-connection sqlite `:memory:`
 /// datasource URLs, which give every pooled connection its own private
 /// in-memory database — an INSERT through one connection and a SELECT
-/// through another can hit different databases. The fix is the shared
-/// cache (`?cache=shared`), which makes all connections in the process
-/// share one in-memory database.
+/// through another can hit different databases.
+///
+/// The remediation message names two accepted forms:
+///
+/// - Named shared-memory URI, the scenario-tier convention, e.g.
+///   `sqlite:file:memdb_appdb?mode=memory&cache=shared`. All pool
+///   connections share one named in-memory database; the name is stable
+///   across connections and parses with the sqlx driver. `sqlite:file:`
+///   matches no automatic datasource factory prefix (factories match
+///   `scheme://` or `scheme::`), so the config must also pin
+///   `provider = "sqlx"`.
+/// - Bare shared cache, `sqlite::memory:?cache=shared`. Accepted, but
+///   each parse gets a sqlx-assigned private name, and pool connections
+///   under the Any driver can hold private databases — pin
+///   `max_connections = 1` with this form.
 ///
 /// Iterates `config.datasources` in BTreeMap order (the config stores a
 /// `HashMap`, whose iteration order is unspecified) so diagnostics are
@@ -117,9 +129,13 @@ pub fn ensure_sqlite_memory_shared(config: &CamelConfig) -> Result<(), CamelErro
             if !remainder.contains("cache=shared") {
                 return Err(CamelError::Config(format!(
                     "{}: datasource '{}' uses a per-connection sqlite :memory: URL without \
-                     cache=shared; INSERT and SELECT can hit different databases. Use \
-                     sqlite::memory:?cache=shared",
-                    SQL_MEMORY_NOT_SHARED, name
+                     cache=shared; INSERT and SELECT can hit different databases. Prefer the \
+                     named shared-memory URI sqlite:file:memdb_{}?mode=memory&cache=shared; \
+                     sqlite:file: matches no automatic datasource prefix, so also set \
+                     provider = \"sqlx\". The bare sqlite::memory:?cache=shared URL is also \
+                     accepted, but cross-connection sharing is not guaranteed; set \
+                     max_connections = 1 so state stays on one connection",
+                    SQL_MEMORY_NOT_SHARED, name, name
                 )));
             }
         }
@@ -171,7 +187,31 @@ pub async fn execute_sql_prepare(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+    use camel_api::datasource::DatasourceConfig;
+
+    fn lint_config(db_url: &str) -> CamelConfig {
+        let mut config = CamelConfig::default();
+        config.datasources.insert(
+            "appdb".to_string(),
+            DatasourceConfig {
+                db_url: db_url.to_string(),
+                provider: None,
+                max_connections: None,
+                min_connections: None,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                ssl_mode: None,
+                ssl_root_cert: None,
+                ssl_cert: None,
+                ssl_key: None,
+                extra: HashMap::new(),
+            },
+        );
+        config
+    }
 
     fn raw(datasource: &str, prepare: Vec<&str>) -> RawSqlAction {
         RawSqlAction {
@@ -253,5 +293,32 @@ mod tests {
     #[test]
     fn sanitizer_empty_url_noop() {
         assert_eq!(sanitize_db_error("boom", ""), "boom");
+    }
+
+    #[test]
+    fn lint_message_steers_to_named_form() {
+        let err = ensure_sqlite_memory_shared(&lint_config("sqlite::memory:")).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains(SQL_MEMORY_NOT_SHARED), "got: {text}");
+        assert!(
+            text.contains("sqlite:file:memdb_appdb?mode=memory&cache=shared"),
+            "got: {text}"
+        );
+        assert!(text.contains("provider"), "got: {text}");
+        assert!(text.contains("max_connections = 1"), "got: {text}");
+        assert!(!text.contains("<name>"), "got: {text}");
+        assert!(!text.contains("<scenario>"), "got: {text}");
+    }
+
+    #[test]
+    fn lint_accepts_bare_shared_form() {
+        let config = lint_config("sqlite::memory:?cache=shared");
+        assert!(ensure_sqlite_memory_shared(&config).is_ok());
+    }
+
+    #[test]
+    fn lint_named_file_uri_passes() {
+        let config = lint_config("sqlite:file:memdb_appdb?mode=memory&cache=shared");
+        assert!(ensure_sqlite_memory_shared(&config).is_ok());
     }
 }

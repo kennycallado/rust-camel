@@ -368,17 +368,20 @@ A scenario reads SQL state through the booted context's datasource catalog. The 
 
 ```toml
 [datasources.appdb]
-db_url = "${env:APPDB_URL:-sqlite::memory:?cache=shared}"
+provider = "sqlx"
+db_url = "${env:APPDB_URL:-sqlite:file:memdb_demo?mode=memory&cache=shared}"
 ```
 
 At boot the placeholder resolves through the same layered source as the route files. The source checks harness-provisioned `bindVar` values first, then document `env:` values, then variables listed in `envPassthrough:`, then the inline default ([ADR-0069](../adr/0069-integration-tier-testing-contract.md) section 4). A hermetic document pins the value itself:
 
 ```yaml
 env:
-  APPDB_URL: "sqlite::memory:?cache=shared"
+  APPDB_URL: "sqlite:file:memdb_demo?mode=memory&cache=shared"
 ```
 
-The shared cache is a requirement, not a preference. A sqlite `:memory:` database is per-connection. An INSERT on one pooled connection and a SELECT on another can therefore hit different databases, and a validation can pass against state the document never seeded. The boot rejects `sqlite::memory:` without `cache=shared` with the `sql-memory-not-shared` error ([`crates/camel-integration-test/CONTEXT.md`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/CONTEXT.md)).
+The shared cache is a requirement, not a preference, for every `:memory:` datasource. A bare sqlite `:memory:` database is per-connection. An INSERT on one pooled connection and a SELECT on another can therefore hit different databases, and a validation can pass against state the document never seeded. The boot rejects `sqlite::memory:` without `cache=shared` with the `sql-memory-not-shared` error ([`crates/camel-integration-test/CONTEXT.md`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/CONTEXT.md)).
+
+The recipe above shows the recommended shape, the named shared-memory URI. A name such as `memdb_demo` holds one database, and every pool connection shares it, so the author selects `max_connections` for the workload. `sqlite:file:` matches no automatic datasource factory prefix, so the datasource pins `provider = "sqlx"`. The bare `sqlite::memory:?cache=shared` form is still accepted. Its shared name comes from sqlx-internal naming, and with the Any driver each pooled connection can hold a private database. Pin `max_connections = 1` with that form.
 
 A document that needs a real database lists the variable in `envPassthrough:` and keeps the inline default:
 
@@ -397,7 +400,7 @@ Each scenario boot owns its datasource catalog and its pools. The boot teardown 
 
 The guarantee is load-bearing for named shared-memory URIs. A datasource pinned to `sqlite:file:<name>?mode=memory&cache=shared` shares one named database across every connection that uses the name, in any boot. A lingering connection from an earlier boot would carry that database's rows into the later boot; the teardown close is what kills it. The adversarial tests pin this shape directly.
 
-One driver fact shapes memory fixtures: with the Any driver, each pooled connection over `sqlite::memory:` still gets a private in-memory database. Memory fixtures therefore pin `max_connections = 1` so CREATE, INSERT, and the validation SELECT stay on one connection (the convention the landed sql e2e tests set).
+The scenario-tier convention for memory fixtures is the named shared-memory URI, for example `sqlite:file:memdb_demo?mode=memory&cache=shared`. A named memory URI shares one database across every pool connection. The author therefore selects `max_connections` for the workload, and the `named_shared_memory_uri_probe` in the sqlx pool factory pins multi-connection sharing. The bare `sqlite::memory:?cache=shared` form is still accepted, but with the Any driver each pooled connection can hold a private database there, so that form pins `max_connections = 1`.
 
 Durable datasources are outside the per-boot guarantee. A file-backed sqlite database, or a service-container Postgres behind `envPassthrough:`, keeps its rows across boots. No harness mechanism cleans it between documents. Isolation for durable datasources is the document author's responsibility — the same law that governs user-provided infrastructure generally (ADR-0069 section 9): the harness provisions hermetic defaults, never cleanup for resources it does not own.
 
@@ -414,4 +417,4 @@ scenario:
 
 `DELETE FROM` (whole-table) or a table-recreating statement are the two clean-first shapes; `TRUNCATE` applies where the engine supports it. A document that skips the clean-first statement works only as long as it runs alone. The adversarial boot-freshness tests in `crates/camel-integration-test` pin both directions: a second memory-sqlite boot reads zero, a second file-backed boot reads everything.
 
-Known limitation, parallel mode (bd rc-gcf9n): `camel test` executes documents sequentially today. When parallel document execution lands, two concurrently booted documents that share one sqlite in-memory alias could collide on the same shared memory database. The planned remedy is a per-boot unique memory URI (`file:memdb_{scenario}?mode=memory&cache=shared`) minted by the harness for hermetic memory datasources; until then, documents that share a durable datasource must not run concurrently.
+Known limitation, parallel mode (bd rc-gcf9n): `camel test` executes documents sequentially today. When parallel document execution lands, two concurrently booted documents that share one memory name could collide on the same shared memory database. The planned remedy is a per-boot unique suffix in the memory name (`memdb_{scenario}_{boot}`) minted by the harness for hermetic memory datasources. This note records a plan, not a rule for the current runner. Until parallel lands, documents that share a durable datasource must not run concurrently.

@@ -97,15 +97,15 @@ fn sql_only_doc_boots_full() {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(
         dir.path().join("Camel.toml"),
-        // max_connections = 1 keeps every statement on one connection
-        // so CREATE/INSERT state cannot split across pooled
-        // connections (the camel-sql `:memory:` test precedent: with
-        // the Any driver each pooled connection still gets a private
-        // in-memory database, the split the executor stub in
-        // `sql_action_test` pins the same way).
+        // Named shared-memory URI: every pool connection shares the
+        // same in-process database (the sqlx provider pin is required
+        // because no automatic prefix matches `sqlite:file:`), so
+        // max_connections = 1 is a conservative fixture choice, not a
+        // correctness requirement.
         r#"
 [datasources.appdb]
-db_url = "sqlite::memory:?cache=shared"
+db_url = "sqlite:file:memdb_cli_e2e_prepare?mode=memory&cache=shared"
+provider = "sqlx"
 max_connections = 1
 "#,
     )
@@ -150,13 +150,14 @@ scenario:
     );
 }
 
-/// A shared datasource config for the sql validate e2e fixtures: the
-/// landed sql-only precedent — `cache=shared` in-memory sqlite with
-/// `max_connections = 1` so CREATE/INSERT state and the validate's
-/// read stay on one pooled connection.
+/// A shared datasource config for the sql validate e2e fixtures: a
+/// named shared-cache in-memory sqlite (explicit sqlx provider pin —
+/// no automatic prefix matches `sqlite:file:`) with the conservative
+/// `max_connections = 1` kept from the sql-only precedent.
 const SQL_VALIDATE_CAMEL_TOML: &str = r#"
 [datasources.appdb]
-db_url = "sqlite::memory:?cache=shared"
+db_url = "sqlite:file:memdb_cli_e2e_validate?mode=memory&cache=shared"
+provider = "sqlx"
 max_connections = 1
 "#;
 
@@ -284,13 +285,17 @@ fn sql_validate_e2e_fail_redacts() {
     // literals ('alice', 'bob') and the unmatched expectation literal
     // ('charlie') must all be absent from it. (Counts and column names
     // render; numeric seed cells deliberately share their spelling with
-    // the counts, so only text literals are asserted.) The db_url is
+    // the counts, so only text literals are asserted.) The db_url
+    // (sqlite:file:memdb_cli_e2e_validate?mode=memory&cache=shared) is
     // held against the WHOLE output — no subsystem may render it —
     // while the cell literals are held against the report line only:
     // sqlx's own DEBUG statement logs echo the doc-authored prepare
     // statements to stdout (boot-time subsystem logging, outside the
-    // harness report whose text the redaction law governs).
-    for leaked in ["sqlite::memory:"] {
+    // harness report whose text the redaction law governs). The guard
+    // matches the URL's distinctive `memdb_cli_e2e_validate` fragment:
+    // it appears nowhere in the doc-authored SQL or expectation text,
+    // so it can only surface through a db_url leak.
+    for leaked in ["memdb_cli_e2e_validate"] {
         assert!(
             !combined.contains(leaked),
             "output must not leak {leaked:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"

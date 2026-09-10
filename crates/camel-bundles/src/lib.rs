@@ -493,8 +493,12 @@ mod tests {
         datasources.insert(
             "appdb".to_string(),
             DatasourceConfig {
-                db_url: "sqlite::memory:?cache=shared".to_string(),
-                provider: None,
+                // Named shared-memory URI: no automatic datasource
+                // factory prefix matches `sqlite:file:`, so the sqlx
+                // provider is pinned explicitly.
+                db_url: "sqlite:file:memdb_bundles_catalog_probe?mode=memory&cache=shared"
+                    .to_string(),
+                provider: Some("sqlx".to_string()),
                 max_connections: None,
                 min_connections: None,
                 idle_timeout_secs: None,
@@ -521,7 +525,10 @@ mod tests {
             .datasource_catalog()
             .get_config("appdb")
             .expect("booted handle must expose the appdb datasource");
-        assert_eq!(appdb.db_url, "sqlite::memory:?cache=shared");
+        assert_eq!(
+            appdb.db_url,
+            "sqlite:file:memdb_bundles_catalog_probe?mode=memory&cache=shared"
+        );
     }
 
     #[tokio::test]

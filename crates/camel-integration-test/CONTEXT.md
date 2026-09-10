@@ -271,13 +271,23 @@ whose cleanup is the document author's clean-first prepare (ADR-0069
 section 9 mirror). The default-no-op `close`/`close_all` trait methods
 live in `camel-api`; only pool-owning providers override them, and
 close resolves factories by NAME, never by registry key (the handle
-stores `factory.name()`). Memory fixtures pin `max_connections = 1`:
-with the Any driver each pooled connection gets a private in-memory
-database, so multi-connection pools split CREATE/INSERT state. Parallel
+stores `factory.name()`). The scenario-tier convention for memory
+fixtures is the named shared-memory URI (bd rc-gcf9n):
+`sqlite:file:memdb_demo?mode=memory&cache=shared`. Every pool
+connection shares one named in-memory database, so `max_connections`
+is selected for the workload, and the pool-factory probe
+`named_shared_memory_uri_probe` pins the multi-connection sharing.
+The named form also pins `provider = "sqlx"` because `sqlite:file:`
+matches no automatic factory prefix, and the boot lint
+`sql-memory-not-shared` steers authors to it.
+The bare `sqlite::memory:?cache=shared` form is still accepted, but
+with the Any driver each pooled connection can hold a private in-memory
+database there, so that form pins `max_connections = 1`. Parallel
 document execution is a known limitation (bd rc-gcf9n): two
-concurrently booted documents sharing one memory alias could collide;
-the remedy when parallel lands is a per-boot unique memory URI
-(`file:memdb_{scenario}?mode=memory&cache=shared`).
+concurrently booted documents sharing one memory name could collide;
+the remedy when parallel lands is a per-boot unique suffix
+(`memdb_{scenario}_{boot}`). This note is informational, not a rule
+for the sequential runner.
 
 ### The scenario tier gates security offline
 

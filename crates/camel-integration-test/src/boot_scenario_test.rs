@@ -723,4 +723,91 @@ provider = "sqlx"
             .await
             .expect("shutdown B");
     }
+
+    /// The N-connection sharing contract behind the named-URI
+    /// convention (bd rc-gcf9n): with
+    /// `sqlite:file:memdb_x?mode=memory&cache=shared` every pooled
+    /// connection shares one named in-memory database, so
+    /// `max_connections` is selected for the workload instead of
+    /// pinned at 1. Proved through the real scenario boot: a row
+    /// written via one acquired connection is visible via a second,
+    /// while the freshness close seam keeps a later boot empty.
+    #[tokio::test]
+    async fn named_memory_uri_shares_across_pool_connections() {
+        // `sqlite:file:` matches no factory scheme prefix, so the
+        // provider key pins the sqlx factory explicitly.
+        const NAMED_TOML: &str = r#"
+[datasources.appdb]
+db_url = "sqlite:file:memdb_sharing_probe?mode=memory&cache=shared"
+max_connections = 3
+provider = "sqlx"
+"#;
+        let (dir, doc) = project(NAMED_TOML, Some(("routes.yaml", ROUTE)), DOC);
+
+        let mut run_a = boot_scenario(&doc, dir.path(), &empty_env())
+            .await
+            .expect("boot A");
+        let catalog_a = run_a.boot.datasource_catalog();
+        let handle_a = catalog_a.get_pool("appdb").await.expect("pool");
+        let pool_a = handle_a.downcast::<sqlx::AnyPool>().expect("any pool");
+
+        // Holding conn A forces the next acquire to hand out a
+        // distinct pooled connection. The acquire is timeout-wrapped
+        // so a broken pool fails fast instead of hanging the suite.
+        let mut conn_a = pool_a.acquire().await.expect("conn A");
+        let mut conn_b = tokio::time::timeout(std::time::Duration::from_secs(10), pool_a.acquire())
+            .await
+            .expect("conn B acquire must not hang")
+            .expect("conn B");
+
+        // Schema mirrors `seed`'s, but the writes go through conn A
+        // itself: this test targets the pool, not the prepare executor.
+        sqlx::query("CREATE TABLE IF NOT EXISTS seeded (id INTEGER PRIMARY KEY, label TEXT)")
+            .execute(&mut *conn_a)
+            .await
+            .expect("create via conn A");
+        sqlx::query("INSERT INTO seeded (label) VALUES ('a')")
+            .execute(&mut *conn_a)
+            .await
+            .expect("insert via conn A");
+
+        let row = sqlx::query("SELECT COUNT(*) FROM seeded")
+            .fetch_one(&mut *conn_b)
+            .await
+            .expect("count via conn B");
+        let count_via_b = row.try_get::<i64, usize>(0).expect("count as i64");
+        assert_eq!(
+            count_via_b, 1,
+            "the row written via conn A must be visible via conn B — \
+             the named shared-memory database must share across pool connections"
+        );
+        drop(conn_a);
+        drop(conn_b);
+
+        run_a
+            .boot
+            .shutdown(&mut run_a.ctx)
+            .await
+            .expect("shutdown A");
+        drop(run_a);
+
+        // Same document, same URI, same process: the close seam must
+        // still hold — boot A's shared database dies with its pools,
+        // so boot B counts only its own row.
+        let mut run_b = boot_scenario(&doc, dir.path(), &empty_env())
+            .await
+            .expect("boot B");
+        let catalog_b = run_b.boot.datasource_catalog();
+        seed(&catalog_b, "b").await;
+        let count_b = count(&catalog_b).await;
+        assert_eq!(
+            count_b, 1,
+            "boot B must start from an empty database — boot A's shared rows leaked across boots"
+        );
+        run_b
+            .boot
+            .shutdown(&mut run_b.ctx)
+            .await
+            .expect("shutdown B");
+    }
 }
