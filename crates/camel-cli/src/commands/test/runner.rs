@@ -41,6 +41,14 @@ const DEFAULT_QUIET: Duration = Duration::from_millis(250);
 const STARTUP_RETRY_SLEEP: Duration = Duration::from_millis(20);
 /// Startup-race retry deadline for `direct:` producer delivery.
 const STARTUP_RETRY_DEADLINE: Duration = Duration::from_secs(1);
+/// SEDA consumer-readiness wait bound. `ctx.start()` returns before
+/// Immediate-mode consumers mark themselves active (SPI contract; same
+/// race as camel-core's route_interception suite), so an input racing a
+/// consumer route's activation observes the producer-side
+/// no-active-consumers gate.
+const SEDA_READINESS_DEADLINE: Duration = Duration::from_secs(2);
+/// Sampling cadence for the SEDA consumer-readiness probe.
+const SEDA_READINESS_POLL: Duration = Duration::from_millis(5);
 
 /// Outcome of evaluating one mock endpoint.
 pub struct EndpointResult {
@@ -61,7 +69,8 @@ pub struct TestDocResult {
 
 /// Boot a lean `CamelContext` with the mock component plus the direct, timer,
 /// log, and seda defaults (mirrors camel-test's `build_context`). Returns the
-/// context and the shared mock handle used for sampling and assertions.
+/// context, the shared mock handle used for sampling and assertions, and the
+/// shared seda handle used for the consumer-readiness probe.
 /// `beans`, when present, threads a stub-bean registry into the builder so
 /// `bean:` steps resolve at route-add time. `repo_stubs`, when present,
 /// registers the declared repository stubs (cache, idempotent, claim check)
@@ -70,7 +79,7 @@ async fn boot_context(
     intercepts: Option<InterceptRules>,
     beans: Option<Arc<std::sync::Mutex<camel_bean::BeanRegistry>>>,
     repo_stubs: Option<&RepositoriesDoc>,
-) -> Result<(CamelContext, MockComponent), String> {
+) -> Result<(CamelContext, MockComponent, SedaComponent), String> {
     let mut builder = CamelContext::builder();
     if let Some(rules) = intercepts {
         builder = builder.with_intercept_rules(rules);
@@ -87,7 +96,8 @@ async fn boot_context(
     ctx.register_component(DirectComponent::new());
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
-    ctx.register_component(SedaComponent::new());
+    let seda = SedaComponent::new();
+    ctx.register_component(seda.clone());
     if let Some(stubs) = repo_stubs {
         if let Some(cache) = &stubs.cache {
             for name in cache.keys() {
@@ -117,7 +127,7 @@ async fn boot_context(
             }
         }
     }
-    Ok((ctx, mock))
+    Ok((ctx, mock, seda))
 }
 
 /// Find the nearest ancestor directory of `start` (including `start`
@@ -258,8 +268,16 @@ async fn deliver_input(
         match producer.oneshot(exchange.clone()).await {
             Ok(reply) => return Ok(reply),
             Err(e) => {
-                let is_startup_race = matches!(e, camel_api::CamelError::EndpointCreationFailed(_))
-                    || e.to_string().contains("not registered");
+                // The SEDA producer gate rejects PRE-enqueue but INSIDE the
+                // pipeline: steps before it (route-interception divert
+                // copies, earlier sends) already executed, so a retry would
+                // duplicate their side effects (rc-zjrx). The pre-input
+                // readiness probe makes this error unreachable in practice;
+                // failing fast here is the accurate outcome when it still
+                // fires.
+                let is_startup_race = !camel_component_seda::is_no_active_consumers_gate(&e)
+                    && (matches!(e, camel_api::CamelError::EndpointCreationFailed(_))
+                        || e.to_string().contains("not registered"));
                 if is_startup_race && tokio::time::Instant::now() < deadline {
                     tokio::time::sleep(STARTUP_RETRY_SLEEP).await;
                     continue;
@@ -525,15 +543,60 @@ fn stub_registry(
     Ok(Some(Arc::new(std::sync::Mutex::new(registry))))
 }
 
+/// Side-effect-free readiness probe for the SEDA startup race: poll
+/// `has_active_consumer` — the same signal the producer-side gate checks —
+/// for every endpoint a route CONSUMES from, until all report active or
+/// the `SEDA_READINESS_DEADLINE` expires. The probe-then-send discipline
+/// (camel-core route_interception, rc-xzc9) adapted without an enqueue:
+/// probing with a real exchange would pollute `expects` counts, so the
+/// harness polls the activation flag itself instead. Producer-only seda
+/// names are never waited on: an endpoint with no consumer route keeps
+/// its gate/discard semantics as the document's real outcome. On expiry,
+/// delivery proceeds and a genuinely absent consumer surfaces the gate
+/// error verbatim as a document error.
+async fn await_seda_consumers(seda: &SedaComponent, names: &[String]) {
+    if names.is_empty() {
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + SEDA_READINESS_DEADLINE;
+    loop {
+        if names.iter().all(|name| seda.has_active_consumer(name)) {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(SEDA_READINESS_POLL).await;
+    }
+}
+
 /// Run the start/deliver/settle/evaluate phases (steps c–f) of one test
 /// document against the pre-parsed route definitions. Returns the outcome;
 /// the caller is responsible for stopping the context afterwards.
 async fn run_phases(
     ctx: &Arc<Mutex<CamelContext>>,
     mock: &MockComponent,
+    seda: &SedaComponent,
     doc: &TestDocument,
     defs: Vec<camel_core::RouteDefinition>,
 ) -> TestDocResult {
+    // Seda consumer-route names for the readiness probe; collected before
+    // `defs` is consumed by registration. `SedaConfig::from_uri` strips
+    // query options so the name matches the endpoint registry key.
+    let seda_consumer_names: Vec<String> = defs
+        .iter()
+        .filter_map(|def| {
+            let uri = def.from_uri();
+            if uri.starts_with("seda:") {
+                camel_component_seda::SedaConfig::from_uri(uri)
+                    .ok()
+                    .map(|config| config.name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
     // (c) Register and start routes; anchor the settle deadline at
     // route-execution begin.
     let route_started_at = {
@@ -554,6 +617,11 @@ async fn run_phases(
         }
         Instant::now()
     };
+
+    // (c.5) SEDA consumer-readiness probe: `start()` returns before
+    // Immediate-mode consumers activate, so wait out that race BEFORE the
+    // single, non-retried input send.
+    await_seda_consumers(seda, &seda_consumer_names).await;
 
     // (d) Deliver inputs, capturing each reply exchange in input order
     // (delivery stays strictly sequential).
@@ -673,21 +741,21 @@ pub(super) async fn run_test_doc_with_defs(
         }
     };
 
-    let (ctx, mock) = match boot_context(doc.intercept_rules(), beans, doc.repository_stubs()).await
-    {
-        Ok((ctx, mock)) => (Arc::new(Mutex::new(ctx)), mock),
-        Err(e) => {
-            return (
-                TestDocResult {
-                    endpoint_results: vec![],
-                    doc_error: Some(e),
-                },
-                MockComponent::new(),
-            );
-        }
-    };
+    let (ctx, mock, seda) =
+        match boot_context(doc.intercept_rules(), beans, doc.repository_stubs()).await {
+            Ok(booted) => (Arc::new(Mutex::new(booted.0)), booted.1, booted.2),
+            Err(e) => {
+                return (
+                    TestDocResult {
+                        endpoint_results: vec![],
+                        doc_error: Some(e),
+                    },
+                    MockComponent::new(),
+                );
+            }
+        };
 
-    let result = run_phases(&ctx, &mock, doc, defs).await;
+    let result = run_phases(&ctx, &mock, &seda, doc, defs).await;
 
     // (g) Mandatory stop on every exit path after a successful boot.
     {

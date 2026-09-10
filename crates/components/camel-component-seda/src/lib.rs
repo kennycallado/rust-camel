@@ -532,8 +532,27 @@ fn spawn_queue_depth_sampler(
 // SedaComponent
 // ---------------------------------------------------------------------------
 
+/// True for the SEDA producer's startup-race rejections: the pre-enqueue
+/// gate that fires when no consumer has started yet — Single mode's "has
+/// no active consumers" and Fanout mode's "has no active subscribers" (the
+/// error variant is shared `EndpointCreationFailed`, so the wording is the
+/// discriminator; this crate owns the message text). Both reject BEFORE
+/// enqueue but INSIDE the caller's pipeline: steps that already ran (e.g.
+/// route-interception divert copies) have executed, so RETRYING the send
+/// duplicates their side effects. Senders that must not retry use this
+/// predicate to fail fast instead (rc-zjrx); readiness probing with
+/// [`SedaComponent::has_active_consumer`] avoids the error up front.
+pub fn is_no_active_consumers_gate(err: &CamelError) -> bool {
+    matches!(err, CamelError::EndpointCreationFailed(msg) if msg.contains("has no active consumers"))
+        || matches!(err, CamelError::EndpointCreationFailed(msg) if msg.contains("has no active subscribers"))
+}
+
 type SedaRegistry = Arc<Mutex<HashMap<String, Arc<SedaEndpointState>>>>;
 
+/// Cloning shares the endpoint registry, so a clone registered into a
+/// `CamelContext` and the original handle observe the same per-endpoint
+/// state (the `MockComponent` pattern).
+#[derive(Clone)]
 pub struct SedaComponent {
     endpoints: SedaRegistry,
 }
@@ -543,6 +562,21 @@ impl SedaComponent {
         Self {
             endpoints: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// True when the named endpoint has at least one consumer that has
+    /// started and not yet stopped — the same signal the producer-side
+    /// no-active-consumers gate checks, so polling this predicate is a
+    /// side-effect-free readiness probe for senders that must not retry
+    /// (a retried pipeline re-executes steps with side effects, such as
+    /// route-interception divert copies). Singular: one endpoint name,
+    /// unlike the per-endpoint-state `has_active_consumers` check.
+    /// Unknown endpoint names report `false`.
+    pub fn has_active_consumer(&self, endpoint_name: &str) -> bool {
+        let endpoints = self.endpoints.lock().unwrap_or_else(|e| e.into_inner());
+        endpoints
+            .get(endpoint_name)
+            .is_some_and(|state| state.has_active_consumers())
     }
 
     fn get_or_create_state(
@@ -2120,6 +2154,76 @@ mod consumer_producer_tests {
         assert_eq!(consumer.forwarder_count(), 1);
 
         consumer.stop().await.unwrap();
+    }
+
+    /// `is_no_active_consumers_gate` recognizes exactly both gate wordings
+    /// (Single and Fanout) and no other `EndpointCreationFailed` — other
+    /// messages must stay eligible for callers' startup-race retries.
+    #[test]
+    fn gate_predicate_matches_both_modes_only() {
+        assert!(is_no_active_consumers_gate(
+            &CamelError::EndpointCreationFailed(
+                "SEDA endpoint 'x' has no active consumers".to_string()
+            )
+        ));
+        assert!(is_no_active_consumers_gate(
+            &CamelError::EndpointCreationFailed(
+                "SEDA endpoint 'x' has no active subscribers".to_string()
+            )
+        ));
+        assert!(!is_no_active_consumers_gate(
+            &CamelError::EndpointCreationFailed(
+                "endpoint 'x' already has a registered consumer".to_string()
+            )
+        ));
+        assert!(!is_no_active_consumers_gate(&CamelError::Config(
+            "unrelated".to_string()
+        )));
+    }
+
+    /// `has_active_consumer` is the readiness-probe signal for senders that
+    /// must not retry (rc-zjrx): unknown names and known-but-consumerless
+    /// endpoints report false; a started consumer flips it true; stop flips
+    /// it back; clones share the registry.
+    #[tokio::test]
+    async fn has_active_consumer_tracks_consumer_lifecycle() {
+        let comp = create_component();
+        let _ep = comp
+            .create_endpoint("seda:probe1", &NoOpComponentContext)
+            .unwrap();
+
+        assert!(
+            !comp.has_active_consumer("probe1"),
+            "endpoint without consumer must report inactive"
+        );
+        assert!(
+            !comp.has_active_consumer("never-created"),
+            "unknown endpoint name must report inactive"
+        );
+
+        let state = comp
+            .endpoints
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("probe1")
+            .cloned()
+            .unwrap();
+        let mut consumer = SedaConsumer::new(state, next_consumer_id(), rt());
+        let (tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "seda-test-route".to_string());
+        consumer.start(ctx).await.unwrap();
+
+        let cloned = comp.clone();
+        assert!(
+            cloned.has_active_consumer("probe1"),
+            "started consumer must report active through a clone"
+        );
+
+        consumer.stop().await.unwrap();
+        assert!(
+            !comp.has_active_consumer("probe1"),
+            "stopped consumer must report inactive"
+        );
     }
 
     #[tokio::test]

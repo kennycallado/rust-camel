@@ -15,7 +15,7 @@ pub struct NewArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Profile layout: simple ([default] only) or env ([default], [development], [production])
+    /// Profile layout: simple (`default` only) or env (`default`, `development`, `production`)
     #[arg(long, value_name = "LAYOUT", default_value = "env")]
     pub profile_layout: ProfileLayout,
 }
