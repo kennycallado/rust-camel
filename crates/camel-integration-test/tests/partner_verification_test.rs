@@ -13,15 +13,16 @@
 
 #![cfg(feature = "http")]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use camel_integration_test::runner::fill_bind_vars;
 use camel_integration_test::{
-    DocumentOutcome, EndpointRef, HttpPartner, HttpRecorder, LayeredEnv, PartnerAdapter,
-    PartnerRouter, Provisioning, ScenarioAction, ScenarioDocument, ScenarioFailure, ScenarioVars,
-    ScenarioVerdict, TransportError, ambient_std, boot_scenario, parse_scenario_document,
-    partner_scripts_for, run_scenario_document,
+    HttpPartner, HttpRecorder, LayeredEnv, PartnerAdapter, PartnerRouter, ScenarioDocument,
+    ScenarioFailure, ScenarioVars, ScenarioVerdict, TransportError, ambient_std, boot_scenario,
+    parse_scenario_document, partner_scripts_for, run_scenario_document,
 };
 
 /// The endpoint URI the partner-only documents declare for their
@@ -582,77 +583,6 @@ partners:
       body: ok
 "#;
 
-/// The endpoint references a document wires, in declaration order:
-/// send targets and receive sources. Partner validate targets need no
-/// binding of their own — the cross-check requires the URI to be
-/// declared by a send/receive, which is where the partner binds.
-fn wired_refs(doc: &ScenarioDocument) -> Vec<EndpointRef> {
-    doc.scenario
-        .iter()
-        .flat_map(|action| match action {
-            ScenarioAction::Send { to, .. } => vec![to.clone()],
-            ScenarioAction::Receive { from, .. } => vec![from.clone()],
-            _ => Vec::new(),
-        })
-        .collect()
-}
-
-/// Binds one partner per harness `http` reference (scripted where the
-/// document declares a matching `partners:` entry, permissive 200
-/// otherwise) and returns the router with the per-endpoint recorders
-/// and bound authorities (`host:port` — the raw-dial path a foreign
-/// client takes).
-async fn bind_doc_partners(
-    doc: &ScenarioDocument,
-) -> (
-    PartnerRouter,
-    BTreeMap<String, HttpRecorder>,
-    BTreeMap<String, String>,
-) {
-    let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
-    let mut recorders: BTreeMap<String, HttpRecorder> = BTreeMap::new();
-    let mut authorities: BTreeMap<String, String> = BTreeMap::new();
-    for reference in wired_refs(doc) {
-        if reference.provisioning != Some(Provisioning::Harness)
-            || !reference.endpoint.starts_with("http://")
-            || adapters.contains_key(&reference.endpoint)
-        {
-            continue;
-        }
-        let partner = match partner_scripts_for(doc, &reference.endpoint) {
-            Some(scripts) => HttpPartner::start(scripts).await,
-            None => HttpPartner::start_permissive(200).await,
-        }
-        .expect("partner must bind 127.0.0.1:0");
-        authorities.insert(reference.endpoint.clone(), partner.bound_addr().to_string());
-        recorders.insert(reference.endpoint.clone(), partner.recorder());
-        adapters.insert(reference.endpoint.clone(), Box::new(partner));
-    }
-    (PartnerRouter::new(adapters), recorders, authorities)
-}
-
-/// Loads `yaml` through the crate's document path, binds the
-/// declared partners, fills the bind variables, runs the whole
-/// document, and returns the outcome with the recorders and bound
-/// authorities.
-async fn run_doc(
-    yaml: &str,
-) -> (
-    DocumentOutcome,
-    BTreeMap<String, HttpRecorder>,
-    BTreeMap<String, String>,
-) {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("case.test.yaml");
-    std::fs::write(&path, yaml).expect("write case file");
-    let doc = parse_scenario_document(&path).expect("document must load");
-    let (router, recorders, authorities) = bind_doc_partners(&doc).await;
-    let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
-    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
-    (outcome, recorders, authorities)
-}
-
 /// One raw HTTP/1.1 POST straight to the partner's bound address —
 /// the foreign-client arrival path no router lane owns.
 /// `connection: close` makes it one write and one drained read, and
@@ -715,7 +645,7 @@ async fn stage_doc(
     let path = dir.path().join("case.test.yaml");
     std::fs::write(&path, yaml).expect("write case file");
     let doc = parse_scenario_document(&path).expect("document must load");
-    let (router, recorders, authorities) = bind_doc_partners(&doc).await;
+    let (router, recorders, authorities) = common::bind_doc_partners(&doc).await;
     (doc, router, recorders, authorities)
 }
 
@@ -724,7 +654,8 @@ async fn stage_doc(
 /// exactly the three POST arrivals the count read.
 #[tokio::test]
 async fn immediate_count_assert_e2e() {
-    let (outcome, recorders, _authorities) = run_doc(IMMEDIATE_COUNT_DOC).await;
+    let (outcome, recorders, _authorities) =
+        common::run_doc_with_authorities(IMMEDIATE_COUNT_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -743,7 +674,8 @@ async fn immediate_count_assert_e2e() {
 /// count of one.
 #[tokio::test]
 async fn count_mismatch_fails_e2e() {
-    let (outcome, _recorders, _authorities) = run_doc(COUNT_MISMATCH_DOC).await;
+    let (outcome, _recorders, _authorities) =
+        common::run_doc_with_authorities(COUNT_MISMATCH_DOC).await;
     assert_eq!(outcome.verdict, None, "the count mismatch must fail");
 
     let failure = outcome
@@ -765,7 +697,8 @@ async fn count_mismatch_fails_e2e() {
 /// arrivals, and the scenario passes.
 #[tokio::test]
 async fn filters_narrow_count_e2e() {
-    let (outcome, recorders, _authorities) = run_doc(FILTERS_NARROW_DOC).await;
+    let (outcome, recorders, _authorities) =
+        common::run_doc_with_authorities(FILTERS_NARROW_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -788,7 +721,7 @@ async fn deadline_polls_until_settle_e2e() {
     let path = dir.path().join("case.test.yaml");
     std::fs::write(&path, DEADLINE_SETTLE_DOC).expect("write case file");
     let doc = parse_scenario_document(&path).expect("document must load");
-    let (router, _recorders, authorities) = bind_doc_partners(&doc).await;
+    let (router, _recorders, authorities) = common::bind_doc_partners(&doc).await;
     let authority = authorities
         .get(ORDERS)
         .expect("the orders partner must be bound")
@@ -802,7 +735,7 @@ async fn deadline_polls_until_settle_e2e() {
     });
 
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     dial.await.expect("the background dial task must join");
     assert_eq!(
@@ -817,7 +750,8 @@ async fn deadline_polls_until_settle_e2e() {
 /// mismatch names the expected three and the actual one.
 #[tokio::test]
 async fn never_settles_fails_at_deadline_e2e() {
-    let (outcome, _recorders, _authorities) = run_doc(NEVER_SETTLES_DOC).await;
+    let (outcome, _recorders, _authorities) =
+        common::run_doc_with_authorities(NEVER_SETTLES_DOC).await;
     assert_eq!(outcome.verdict, None, "the expired poll must fail");
 
     let failure = outcome
@@ -896,7 +830,7 @@ async fn route_retries_faulted_partner_then_count_e2e() {
     let router = PartnerRouter::new(adapters);
 
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     assert_eq!(
         outcome.verdict,
@@ -942,7 +876,7 @@ async fn at_least_settles_early() {
         );
     });
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
@@ -969,7 +903,8 @@ async fn at_least_settles_early() {
 /// grammar (`at least 3`) with the actual count of one.
 #[tokio::test]
 async fn at_least_fails_at_deadline_naming_actual() {
-    let (outcome, _recorders, _authorities) = run_doc(AT_LEAST_FAILS_AT_DEADLINE_DOC).await;
+    let (outcome, _recorders, _authorities) =
+        common::run_doc_with_authorities(AT_LEAST_FAILS_AT_DEADLINE_DOC).await;
     assert_eq!(outcome.verdict, None, "the expired floor must fail");
 
     let failure = outcome
@@ -991,7 +926,8 @@ async fn at_least_fails_at_deadline_naming_actual() {
 /// two passes.
 #[tokio::test]
 async fn at_most_decides_immediately_without_deadline() {
-    let (outcome, _recorders, _authorities) = run_doc(AT_MOST_IMMEDIATE_DOC).await;
+    let (outcome, _recorders, _authorities) =
+        common::run_doc_with_authorities(AT_MOST_IMMEDIATE_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -1017,7 +953,7 @@ async fn at_most_waits_full_window() {
         raw_get(&authority, "/orders").await;
     });
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
@@ -1042,7 +978,7 @@ async fn at_most_waits_full_window() {
 async fn at_most_fails_fast_above_bound() {
     let (doc, router, _recorders, _authorities) = stage_doc(AT_MOST_FAILS_FAST_DOC).await;
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
@@ -1090,7 +1026,7 @@ async fn at_most_fails_fast_when_ceiling_crossed_mid_window() {
         raw_post(&authority, "/orders").await;
     });
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
@@ -1125,7 +1061,7 @@ async fn at_most_fails_fast_when_ceiling_crossed_mid_window() {
 async fn at_most_zero_proves_absence_over_window() {
     let (doc, router, _recorders, _authorities) = stage_doc(AT_MOST_ZERO_ABSENCE_DOC).await;
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
@@ -1148,7 +1084,7 @@ async fn at_most_zero_proves_absence_over_window() {
 async fn range_fails_fast_above_max() {
     let (doc, router, _recorders, _authorities) = stage_doc(RANGE_FAILS_FAST_DOC).await;
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
@@ -1182,7 +1118,7 @@ async fn range_fails_fast_above_max() {
 async fn range_passes_on_final_snapshot() {
     let (doc, router, _recorders, _authorities) = stage_doc(RANGE_FINAL_SNAPSHOT_DOC).await;
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let started = std::time::Instant::now();
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
@@ -1217,7 +1153,7 @@ async fn path_contains_tolerates_encoding_drift_end_to_end() {
         raw_get(&authority, "/q?bbox=3.0").await;
     });
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     drift.await.expect("the drift task must join");
 
@@ -1268,7 +1204,7 @@ async fn path_matches_and_query_subset_end_to_end() {
         raw_get(&authority, "/health").await;
     });
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     arrivals.await.expect("the arrivals task must join");
 
@@ -1292,7 +1228,7 @@ async fn path_matches_and_query_subset_end_to_end() {
 #[tokio::test]
 async fn send_deadline_bounds_hung_send() {
     let started = std::time::Instant::now();
-    let (outcome, _recorders, _authorities) = run_doc(HUNG_SEND_DOC).await;
+    let (outcome, _recorders, _authorities) = common::run_doc_with_authorities(HUNG_SEND_DOC).await;
     let elapsed = started.elapsed();
 
     assert_eq!(outcome.verdict, None, "the hung send must fail");

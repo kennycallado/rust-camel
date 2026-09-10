@@ -1,13 +1,28 @@
-//! Shared helpers of the log-assertion test binaries (rc-tdgh5).
+// Each test binary compiles this module and uses only its own helper
+// family (log binaries never call the partner helpers and vice
+// versa), so cross-family items read as dead in any single binary.
+#![allow(dead_code)]
+
+//! Shared helpers of the scenario-tier test binaries (rc-tdgh5,
+//! rc-p1x2a).
 //!
-//! [`RUN_LOCK`] serializes document runs inside one test binary:
-//! capture windows are process-global, and overlapping runs would
-//! attribute events across documents. [`run_logs_document`] is the
-//! install-first run helper: the capture subscriber is ensured BEFORE
-//! `boot_scenario`, so the harness wins the process's first-wins
-//! `try_init` — unless the test binary installed a foreign subscriber
-//! first (the `log_foreign_subscriber_test` contract), in which case
-//! capture loses and the document fails with `LogCaptureUnavailable`.
+//! Two helper families, deliberately separate:
+//!
+//! - Log capture (rc-tdgh5): [`RUN_LOCK`] serializes document runs
+//!   inside one test binary — capture windows are process-global, and
+//!   overlapping runs would attribute events across documents.
+//!   [`run_logs_document`] is the install-first run helper: the
+//!   capture subscriber is ensured BEFORE [`boot_scenario`], so the
+//!   harness wins the process's first-wins `try_init` — unless the
+//!   test binary installed a foreign subscriber first (the
+//!   `log_foreign_subscriber_test` contract), in which case capture
+//!   loses and the document fails with `LogCaptureUnavailable`.
+//!   These are the ONLY capture-aware helpers: partner/test binaries
+//!   must not acquire capture-subscriber coupling.
+//! - Partner document running (rc-p1x2a): the neutral
+//!   [`wired_refs`] / [`bind_doc_partners`] / [`run_doc`] family the
+//!   partner binaries previously duplicated per file. Feature `http`
+//!   only.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -86,10 +101,18 @@ pub async fn run_logs_document(doc_yaml: &str, fixture: &str) -> DocumentOutcome
     outcome
 }
 
-/// The endpoint references a document wires (send targets, receive
-/// sources, `lastReceived` validate keys) — the same walk the CLI
-/// driver and the scripting test use for `fill_bind_vars`.
-fn wired_refs(doc: &camel_integration_test::ScenarioDocument) -> Vec<EndpointRef> {
+// ---------------------------------------------------------------------------
+// Partner document helpers (rc-p1x2a, feature `http`)
+// ---------------------------------------------------------------------------
+
+/// The endpoint references a document wires, in declaration order:
+/// send targets, receive sources, and `lastReceived` validate keys —
+/// the canonical walk the partner test binaries and the CLI driver's
+/// `fill_bind_vars` step share. Partner validate targets bind nothing
+/// of their own: the parse-time cross-check requires their URI to be
+/// declared by a send/receive, which is where the partner binds.
+#[cfg(feature = "http")]
+pub fn wired_refs(doc: &camel_integration_test::ScenarioDocument) -> Vec<EndpointRef> {
     doc.scenario
         .iter()
         .filter_map(|action| match action {
@@ -102,4 +125,85 @@ fn wired_refs(doc: &camel_integration_test::ScenarioDocument) -> Vec<EndpointRef
             _ => None,
         })
         .collect()
+}
+
+/// Binds one partner per harness `http` reference (scripted where the
+/// document declares a matching `partners:` entry, permissive 200
+/// otherwise) and returns the router with the per-endpoint recorders
+/// and bound authorities (`host:port` — the raw-dial path a foreign
+/// client takes). Deduplicates by endpoint URI.
+#[cfg(feature = "http")]
+pub async fn bind_doc_partners(
+    doc: &camel_integration_test::ScenarioDocument,
+) -> (
+    PartnerRouter,
+    BTreeMap<String, camel_integration_test::HttpRecorder>,
+    BTreeMap<String, String>,
+) {
+    use camel_integration_test::{HttpPartner, Provisioning, partner_scripts_for};
+
+    let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
+    let mut recorders: BTreeMap<String, camel_integration_test::HttpRecorder> = BTreeMap::new();
+    let mut authorities: BTreeMap<String, String> = BTreeMap::new();
+    for reference in wired_refs(doc) {
+        if reference.provisioning != Some(Provisioning::Harness)
+            || !reference.endpoint.starts_with("http://")
+            || adapters.contains_key(&reference.endpoint)
+        {
+            continue;
+        }
+        let partner = match partner_scripts_for(doc, &reference.endpoint) {
+            Some(scripts) => HttpPartner::start(scripts).await,
+            None => HttpPartner::start_permissive(200).await,
+        }
+        .expect("partner must bind 127.0.0.1:0");
+        authorities.insert(reference.endpoint.clone(), partner.bound_addr().to_string());
+        recorders.insert(reference.endpoint.clone(), partner.recorder());
+        adapters.insert(reference.endpoint.clone(), Box::new(partner));
+    }
+    (PartnerRouter::new(adapters), recorders, authorities)
+}
+
+/// Loads `yaml` through the crate's document path, binds the declared
+/// partners, fills the bind variables, runs the whole document, and
+/// returns the outcome with the per-endpoint recorders.
+#[cfg(feature = "http")]
+pub async fn run_doc(
+    yaml: &str,
+) -> (
+    DocumentOutcome,
+    BTreeMap<String, camel_integration_test::HttpRecorder>,
+) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("case.test.yaml");
+    std::fs::write(&path, yaml).expect("write case file");
+    let doc = parse_scenario_document(&path).expect("document must load");
+    let (router, recorders, _authorities) = bind_doc_partners(&doc).await;
+    let wired = wired_refs(&doc);
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired, &router, &mut vars);
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    (outcome, recorders)
+}
+
+/// [`run_doc`] plus the bound authorities: the raw-dial coordinates a
+/// foreign client needs.
+#[cfg(feature = "http")]
+pub async fn run_doc_with_authorities(
+    yaml: &str,
+) -> (
+    DocumentOutcome,
+    BTreeMap<String, camel_integration_test::HttpRecorder>,
+    BTreeMap<String, String>,
+) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("case.test.yaml");
+    std::fs::write(&path, yaml).expect("write case file");
+    let doc = parse_scenario_document(&path).expect("document must load");
+    let (router, recorders, authorities) = bind_doc_partners(&doc).await;
+    let wired = wired_refs(&doc);
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&wired, &router, &mut vars);
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    (outcome, recorders, authorities)
 }

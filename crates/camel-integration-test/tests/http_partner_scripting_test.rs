@@ -18,16 +18,17 @@
 
 #![cfg(feature = "http")]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use camel_api::Value;
 use camel_integration_test::runner::fill_bind_vars;
 use camel_integration_test::{
-    DirectStimulus, DocumentOutcome, EndpointRef, HttpPartner, HttpRecorder, LayeredEnv,
-    PartnerAdapter, PartnerRouter, Provisioning, ScenarioAction, ScenarioDocument, ScenarioFailure,
-    ScenarioTarget, ScenarioVars, ScenarioVerdict, TransportError, ambient_std, boot_scenario,
-    parse_scenario_document, partner_scripts_for, run_scenario_document,
+    DirectStimulus, DocumentOutcome, HttpPartner, HttpRecorder, LayeredEnv, PartnerAdapter,
+    PartnerRouter, ScenarioFailure, ScenarioVars, ScenarioVerdict, TransportError, ambient_std,
+    boot_scenario, parse_scenario_document, partner_scripts_for, run_scenario_document,
 };
 
 /// The endpoint URI every document here declares for its partner. The
@@ -652,64 +653,6 @@ scenario:
     body: env-tier-probe
 "#;
 
-/// The endpoint references a document wires, in declaration order:
-/// send targets, receive sources, and `lastReceived` validate keys.
-/// Shared by the helper and the boot test — `fill_bind_vars` walks
-/// exactly this list.
-fn wired_refs(doc: &ScenarioDocument) -> Vec<EndpointRef> {
-    doc.scenario
-        .iter()
-        .flat_map(|action| match action {
-            ScenarioAction::Send { to, .. } => vec![to.clone()],
-            ScenarioAction::Receive { from, .. } => vec![from.clone()],
-            ScenarioAction::Validate {
-                target: ScenarioTarget::LastReceived(endpoint),
-                ..
-            } => vec![endpoint.clone()],
-            _ => Vec::new(),
-        })
-        .collect()
-}
-
-/// Loads `yaml` through the crate's document path, binds one partner
-/// per harness `http` reference (scripted where the document declares
-/// a matching `partners:` entry, permissive 200 otherwise), fills the
-/// bind variables, runs the whole document, and returns the outcome
-/// with the per-endpoint recorders. The script-to-wire mapping is the
-/// crate's canonical [`partner_scripts_for`], the same one the CLI
-/// driver binds through.
-async fn run_doc(yaml: &str) -> (DocumentOutcome, BTreeMap<String, HttpRecorder>) {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("case.test.yaml");
-    std::fs::write(&path, yaml).expect("write case file");
-    let doc = parse_scenario_document(&path).expect("document must load");
-    let wired = wired_refs(&doc);
-
-    let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
-    let mut recorders: BTreeMap<String, HttpRecorder> = BTreeMap::new();
-    for reference in &wired {
-        if reference.provisioning != Some(Provisioning::Harness)
-            || !reference.endpoint.starts_with("http://")
-        {
-            continue;
-        }
-        let scripts = partner_scripts_for(&doc, &reference.endpoint);
-        let partner = match scripts {
-            Some(scripts) => HttpPartner::start(scripts).await,
-            None => HttpPartner::start_permissive(200).await,
-        }
-        .expect("partner must bind 127.0.0.1:0");
-        recorders.insert(reference.endpoint.clone(), partner.recorder());
-        adapters.insert(reference.endpoint.clone(), Box::new(partner));
-    }
-    let router = PartnerRouter::new(adapters);
-
-    let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired, &router, &mut vars);
-    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
-    (outcome, recorders)
-}
-
 /// The partner-direct path end to end: the send addresses the
 /// harness-declared `:0` URI, `fill_bind_vars` supplies the bound
 /// authority, and the scripted PUT is served. The recorder saw
@@ -717,7 +660,7 @@ async fn run_doc(yaml: &str) -> (DocumentOutcome, BTreeMap<String, HttpRecorder>
 /// can produce a recording.
 #[tokio::test]
 async fn partner_direct_send_reaches_bound_address() {
-    let (outcome, recorders) = run_doc(PUT_PUT_OK_DOC).await;
+    let (outcome, recorders) = common::run_doc(PUT_PUT_OK_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -734,7 +677,7 @@ async fn partner_direct_send_reaches_bound_address() {
 /// is the literal `${not_a_var}`, with no variable lookup attempted.
 #[tokio::test]
 async fn escape_reaches_wire() {
-    let (outcome, recorders) = run_doc(ESCAPE_DOC).await;
+    let (outcome, recorders) = common::run_doc(ESCAPE_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -757,7 +700,7 @@ async fn escape_reaches_wire() {
 /// detail shows the empty body.
 #[tokio::test]
 async fn unmatched_script_serves_500_empty() {
-    let (outcome, _recorders) = run_doc(DELETE_UNMATCHED_DOC).await;
+    let (outcome, _recorders) = common::run_doc(DELETE_UNMATCHED_DOC).await;
     assert_eq!(outcome.verdict, None, "the last validate must fail");
 
     assert!(
@@ -786,7 +729,7 @@ async fn unmatched_script_serves_500_empty() {
 /// shows the empty body.
 #[tokio::test]
 async fn declared_empty_partners_serves_unmatched_500() {
-    let (outcome, _recorders) = run_doc(EMPTY_PARTNERS_DOC).await;
+    let (outcome, _recorders) = common::run_doc(EMPTY_PARTNERS_DOC).await;
     assert_eq!(outcome.verdict, None, "the last validate must fail");
 
     assert!(
@@ -811,7 +754,7 @@ async fn declared_empty_partners_serves_unmatched_500() {
 /// the verdict class `VarUnresolved`, before any dial.
 #[tokio::test]
 async fn unset_variable_fails_verdict() {
-    let (outcome, _recorders) = run_doc(UNSET_VAR_DOC).await;
+    let (outcome, _recorders) = common::run_doc(UNSET_VAR_DOC).await;
     assert_eq!(outcome.verdict, None);
 
     let failure = outcome
@@ -833,7 +776,7 @@ async fn unset_variable_fails_verdict() {
 /// body, and fail the final `contains` validation.
 #[tokio::test]
 async fn crud_chain_interpolates_extracted_id() {
-    let (outcome, recorders) = run_doc(CRUD_CHAIN_DOC).await;
+    let (outcome, recorders) = common::run_doc(CRUD_CHAIN_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -857,7 +800,7 @@ async fn crud_chain_interpolates_extracted_id() {
 /// transport failure or a receive timeout, never a pass.
 #[tokio::test]
 async fn receive_endpoint_interpolates() {
-    let (outcome, _recorders) = run_doc(RECEIVE_INTERPOLATED_DOC).await;
+    let (outcome, _recorders) = common::run_doc(RECEIVE_INTERPOLATED_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -871,7 +814,7 @@ async fn receive_endpoint_interpolates() {
 /// delayed response is proven to reach the scenario's receive.
 #[tokio::test]
 async fn delay_response_serves_e2e() {
-    let (outcome, recorders) = run_doc(DELAY_RESPONSE_DOC).await;
+    let (outcome, recorders) = common::run_doc(DELAY_RESPONSE_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -890,7 +833,7 @@ async fn delay_response_serves_e2e() {
 /// expressed with `awk t>=X`.
 #[tokio::test]
 async fn waited_arrival_passes_elapsed_bound() {
-    let (outcome, _recorders) = run_doc(ELAPSED_WAITED_DOC).await;
+    let (outcome, _recorders) = common::run_doc(ELAPSED_WAITED_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -905,7 +848,7 @@ async fn waited_arrival_passes_elapsed_bound() {
 /// early, so the validate fails naming the endpoint and the bound.
 #[tokio::test]
 async fn early_arrival_fails_even_when_consumed_late() {
-    let (outcome, _recorders) = run_doc(ELAPSED_EARLY_ARRIVAL_DOC).await;
+    let (outcome, _recorders) = common::run_doc(ELAPSED_EARLY_ARRIVAL_DOC).await;
     assert_eq!(
         outcome.verdict, None,
         "the early arrival must fail the 500ms bound: {outcome:?}"
@@ -938,7 +881,7 @@ async fn early_arrival_fails_even_when_consumed_late() {
 /// endpoint, the `10s` bound, and the actual elapsed time.
 #[tokio::test]
 async fn too_early_arrival_fails_naming_actual() {
-    let (outcome, _recorders) = run_doc(ELAPSED_TOO_EARLY_DOC).await;
+    let (outcome, _recorders) = common::run_doc(ELAPSED_TOO_EARLY_DOC).await;
     assert_eq!(
         outcome.verdict, None,
         "the 10s bound must fail an immediate arrival: {outcome:?}"
@@ -973,7 +916,7 @@ async fn too_early_arrival_fails_naming_actual() {
 /// send path (`value_to_wire`).
 #[tokio::test]
 async fn plain_string_body_served_verbatim() {
-    let (outcome, _recorders) = run_doc(PLAIN_STRING_BODY_DOC).await;
+    let (outcome, _recorders) = common::run_doc(PLAIN_STRING_BODY_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -987,7 +930,7 @@ async fn plain_string_body_served_verbatim() {
 /// path (`value_to_wire`).
 #[tokio::test]
 async fn null_body_serves_empty() {
-    let (outcome, _recorders) = run_doc(NULL_BODY_DOC).await;
+    let (outcome, _recorders) = common::run_doc(NULL_BODY_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -1038,7 +981,7 @@ fn assert_receive_transport_failure(outcome: &DocumentOutcome, recorder: &HttpRe
 /// naming its own action index.
 #[tokio::test]
 async fn fault_close_fails_receive_e2e() {
-    let (outcome, recorders) = run_doc(FAULT_CLOSE_DOC).await;
+    let (outcome, recorders) = common::run_doc(FAULT_CLOSE_DOC).await;
     assert_receive_transport_failure(&outcome, &recorders[ORDERS]);
 }
 
@@ -1048,7 +991,7 @@ async fn fault_close_fails_receive_e2e() {
 /// adapter level (Task 1.2).
 #[tokio::test]
 async fn delay_before_fault_fails_receive_e2e() {
-    let (outcome, recorders) = run_doc(DELAY_BEFORE_FAULT_DOC).await;
+    let (outcome, recorders) = common::run_doc(DELAY_BEFORE_FAULT_DOC).await;
     assert_receive_transport_failure(&outcome, &recorders[ORDERS]);
 }
 
@@ -1058,7 +1001,7 @@ async fn delay_before_fault_fails_receive_e2e() {
 /// third exchange proves the times entry was spent.
 #[tokio::test]
 async fn times_two_then_fallback_e2e() {
-    let (outcome, recorders) = run_doc(TIMES_TWO_FALLBACK_DOC).await;
+    let (outcome, recorders) = common::run_doc(TIMES_TWO_FALLBACK_DOC).await;
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -1135,7 +1078,7 @@ async fn two_layer_bindvar_both_visible() {
     let router = PartnerRouter::new(adapters);
 
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     assert_eq!(
         outcome.verdict,
@@ -1279,6 +1222,13 @@ scenario:
       lastReceived: 'http://${MOCK}/orders'
     expectation:
       contains: parked-ok
+- validate:
+    target:
+      partner:
+        endpoint: http://127.0.0.1:0/orders
+        provisioning: harness
+    expectation:
+      count: 1
 partners:
   http://127.0.0.1:0/orders:
   - method: POST
@@ -1323,6 +1273,13 @@ scenario:
       lastReceived: 'http://${MOCK}/a'
     expectation:
       contains: a-ok
+- validate:
+    target:
+      partner:
+        endpoint: http://127.0.0.1:0/orders
+        provisioning: harness
+    expectation:
+      count: 2
 partners:
   http://127.0.0.1:0/orders:
   - method: POST
@@ -1451,7 +1408,7 @@ async fn run_doc_route_dialed(
     router.set_secret_query_keys(vec!["authPassword".to_string()]);
 
     let mut vars = ScenarioVars::new();
-    fill_bind_vars(&wired_refs(&doc), &router, &mut vars);
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     vars.set("MOCK", Value::String(bound));
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
 
