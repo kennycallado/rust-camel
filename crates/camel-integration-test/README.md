@@ -261,6 +261,30 @@ full action grammar, the partner adapters, and the exit contract.
 `partner-retry-route.test.yaml` pair there runs a real retrying route
 against a faulted partner and asserts the two wire attempts.
 
+## Capability matrix: what the tier can drive today
+
+The tier is black-box at the HTTP boundary only (rc-xnob). Route
+shapes and their coverage:
+
+| route shape | trigger today | effect observable today |
+|---|---|---|
+| `from:http` -> `to:http` | YES scenario client role | YES partner + `receive` (v1 flagship) |
+| `from:http` -> `to:kafka`/`to:sql` | YES scenario | NO consumer/probe exists |
+| `from:kafka` -> `to:http` | NO producer exists | YES partner (matchers + `lastReceived` already free) |
+| `from:sql` -> `to:http` | NO seeding exists | YES partner |
+
+The two gaps are independent capabilities, each unlocking half of the
+matrix: a non-HTTP trigger (partner-as-producer for kafka, or sql
+seeding) unlocks the bottom rows; a non-HTTP effect (a kafka consumer
+partner or an sql probe action) unlocks the right column. The
+extension points already exist in the contract — the `Provisioning`
+enum for partner transports and the scenario action enum for a future
+probe action (`query` -> `extract` -> `validate` reuses the existing
+variables and matchers). Open design questions for that horizon:
+partner lifecycle for long-lived transports (topics vs listeners),
+seeding ownership (harness vs app fixtures), and CI infrastructure
+(kafka container).
+
 ## Related crates
 
 - **camel-cli**: `camel test`, which parses and runs the documents

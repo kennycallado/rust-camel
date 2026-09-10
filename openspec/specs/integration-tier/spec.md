@@ -429,8 +429,10 @@ that reaches the wire SHALL be recorded before any scripting decision.
 
 - **GIVEN** a partner entry with `fault: close`
 - **WHEN** the scenario sends to the partner
-- **THEN** the send fails with a transport-class error rather than an HTTP
-  status, and the recorder still holds the request
+- **THEN** the fault surfaces at the paired client-role receive: the send
+  returns `Ok` at connect and parks the roundtrip, the receive fails with
+  a transport-class error rather than an HTTP status, and the recorder
+  still holds the request
 
 #### Scenario: times serves N matching requests then spends the entry
 
@@ -473,8 +475,9 @@ that reaches the wire SHALL be recorded before any scripting decision.
 
 - **GIVEN** a partner entry with `delay: 300ms` and `fault: close`
 - **WHEN** the scenario sends to the partner
-- **THEN** the send fails with a transport-class error no sooner than the
-  delay
+- **THEN** the fault surfaces at the paired client-role receive: the send
+  returns `Ok` at connect and parks the roundtrip, and the receive fails
+  with a transport-class error no sooner than the delay
 
 #### Scenario: plain-string body is served verbatim
 

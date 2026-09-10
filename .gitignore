@@ -8,6 +8,8 @@ docs/*
 !docs/benchmarks
 !docs/book.toml
 !docs/scripts
+!docs/testing
+!docs/testing/*.md
 !docs/AGENTS.md
 !docs/src/
 !docs/src/**
