@@ -11,6 +11,23 @@ use sqlx::any::AnyPoolOptions;
 
 use crate::config::{enrich_db_url_with_ssl_params, redact_db_url};
 
+/// True for sqlite URLs whose database lives in memory: the bare
+/// `:memory:` host forms and the named shared-cache form
+/// (`sqlite:file:memdb_x?mode=memory&cache=shared`).
+fn is_sqlite_memory_url(url: &str) -> bool {
+    let lowered = url.to_lowercase();
+    lowered.starts_with("sqlite::memory:")
+        || lowered.starts_with("sqlite://:memory:")
+        || (lowered.starts_with("sqlite:") && lowered.contains("mode=memory"))
+}
+
+/// How long `close` waits for in-flight connections to finish their
+/// async close after `pool.close()` resolved (sqlx 0.8.6 leaves them
+/// behind; bd rc-ywwz9).
+const IN_FLIGHT_DRAIN_WAIT: Duration = Duration::from_secs(10);
+/// Poll interval for that wait.
+const IN_FLIGHT_DRAIN_POLL: Duration = Duration::from_millis(5);
+
 pub struct SqlPoolFactory;
 
 impl PoolFactory for SqlPoolFactory {
@@ -21,7 +38,23 @@ impl PoolFactory for SqlPoolFactory {
             sqlx::any::install_default_drivers();
 
             let max_conn = config.max_connections.unwrap_or(5);
-            let min_conn = config.min_connections.unwrap_or(1);
+            // A `min_connections` maintainer on an in-memory sqlite pool
+            // fights the die-with-boot contract: sqlx 0.8.6's
+            // `try_min_connections` re-opens connections without checking
+            // `is_closed`, so a maintained pool can resurrect a connection
+            // after `close()` drains it and keep a named shared-cache
+            // database alive into the next boot in the same process
+            // (bd rc-ywwz9). Memory pools therefore never arm the
+            // maintainer, explicit setting included.
+            let min_conn = if is_sqlite_memory_url(&config.db_url) {
+                if config.min_connections.is_some_and(|m| m > 0) {
+                    // log-policy: outside-contract
+                    tracing::info!("datasource pool: min_connections ignored for in-memory sqlite");
+                }
+                0
+            } else {
+                config.min_connections.unwrap_or(1)
+            };
             let idle_timeout = Duration::from_secs(config.idle_timeout_secs.unwrap_or(300));
             let max_lifetime = Duration::from_secs(config.max_lifetime_secs.unwrap_or(1800));
 
@@ -86,8 +119,47 @@ impl PoolFactory for SqlPoolFactory {
                 ))
             })?;
             // sqlx `close()` is infallible: it signals closure and drains
-            // the connections; subsequent acquire calls fail closed.
+            // idle connections; subsequent acquire calls fail closed.
             pool.close().await;
+            // But `close().await` resolving does NOT mean the pool is
+            // empty (sqlx 0.8.6, verified by probe, bd rc-ywwz9): its
+            // acquire loop only blocks when every permit is held, so a
+            // connection still checked out inside a spawned
+            // `return_to_pool` task is left closing asynchronously —
+            // and it keeps a named shared-cache memory database alive
+            // into the next boot in the same process whenever the
+            // worker thread's close ack lags under load. Wait for the
+            // pool to actually reach size 0 (those tasks close their
+            // connection before returning; the min-connections clamp in
+            // `create` guarantees nothing resurrects it), bounded; a
+            // stall is an error — the pool would not be empty and the
+            // shutdown deadline still bounds the overall wait.
+            let drain_deadline = std::time::Instant::now() + IN_FLIGHT_DRAIN_WAIT;
+            while pool.size() > 0 {
+                if std::time::Instant::now() >= drain_deadline {
+                    // The convergence loop drains normal runs well inside
+                    // the bound (idle leftovers on the first extra pass,
+                    // in-flight closes within a few polls), so reaching
+                    // the cap means the pool genuinely did not drain —
+                    // report it: shutdown must not silently succeed while
+                    // a connection can keep a named shared-cache memory
+                    // database alive into the next boot (bd rc-ywwz9).
+                    return Err(CamelError::ProcessorError(format!(
+                        "datasource '{}': pool did not drain within {}s ({} connection(s) \
+                         still open) — the database may outlive its boot",
+                        handle.name,
+                        IN_FLIGHT_DRAIN_WAIT.as_secs(),
+                        pool.size()
+                    )));
+                }
+                // Yield so in-flight `return_to_pool` tasks progress, then
+                // drain again: a `close()` pass empties the idle queue
+                // (acked closes), the sleep lets checked-out connections
+                // finish their own async close. Both leftover shapes from
+                // the sqlx race converge here.
+                tokio::time::sleep(IN_FLIGHT_DRAIN_POLL).await;
+                pool.close().await;
+            }
             Ok(())
         })
     }
