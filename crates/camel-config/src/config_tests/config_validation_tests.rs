@@ -36,6 +36,7 @@ fn redb_idempotent_config_empty_path_rejected() {
     let config = CamelConfig {
         idempotent_repo: Some(IdempotentRepoConfig {
             backend: "redb".to_string(),
+            name: None,
             path: Some(String::new()),
             durability: None,
             url: None,

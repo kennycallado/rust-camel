@@ -450,6 +450,7 @@ async fn context_registers_redb_idempotent_when_configured() {
         runtime_journal: None,
         idempotent_repo: Some(IdempotentRepoConfig {
             backend: "redb".to_string(),
+            name: None,
             path: Some(redb_path.to_string_lossy().to_string()),
             durability: None,
             url: None,

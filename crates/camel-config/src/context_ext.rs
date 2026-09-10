@@ -112,6 +112,31 @@ impl HealthSource for ContextHealthSource {
 /// `CacheRepoConfig`. Re-parses the byte-size and duration fields with strict
 /// error propagation — defense in depth for the (post-`validate()`) unreachable
 /// failure paths, so a malformed value is never silently coerced.
+/// Resolve the effective cache registration name (rc-vl1l): the `name`
+/// override when set, else the backend convention (`"persistent"` for redb,
+/// `"redis"` for redis, `"memory"` for memory). The same value feeds BOTH the
+/// repository constructor (it is a keyspace segment for the redis backend)
+/// and the registry key, so the two can never disagree.
+fn cache_repo_name(ccfg: &CacheRepoConfig) -> String {
+    match ccfg.name.as_deref() {
+        Some(name) => name.to_string(),
+        None => match ccfg.backend.as_str() {
+            "redb" => "persistent".to_string(),
+            _ => ccfg.backend.clone(),
+        },
+    }
+}
+
+/// Resolve the effective idempotent registration name (rc-vl1l): the `name`
+/// override when set, else the backend convention (`"redb"`/`"redis"`).
+/// Same ctor-and-registry-key contract as [`cache_repo_name`].
+fn idempotent_repo_name(icfg: &IdempotentRepoConfig) -> String {
+    match icfg.name.as_deref() {
+        Some(name) => name.to_string(),
+        None => icfg.backend.clone(),
+    }
+}
+
 async fn build_persistent_cache_repo(
     ccfg: &CacheRepoConfig,
     shutdown_token: CancellationToken,
@@ -155,7 +180,7 @@ async fn build_persistent_cache_repo(
     let max_entries = ccfg.max_entries.unwrap_or(1_000_000);
 
     camel_core::cache::RedbCacheRepository::new(
-        "persistent",
+        &cache_repo_name(ccfg),
         path,
         stale_retention,
         Some(max_entries),
@@ -273,9 +298,14 @@ async fn build_redis_cache_repo(
     let endpoint = redis_endpoint_from_cache_repo(ccfg)?;
     let stale_retention = parse_stale_retention(ccfg)?;
     let key_prefix = ccfg.key_prefix.as_deref().unwrap_or("camel:cache");
-    RedisCacheRepository::connect("redis", &endpoint, key_prefix, stale_retention)
-        .await
-        .map_err(|e| CamelError::Config(format!("cache_repo: {e}")))
+    RedisCacheRepository::connect(
+        &cache_repo_name(ccfg),
+        &endpoint,
+        key_prefix,
+        stale_retention,
+    )
+    .await
+    .map_err(|e| CamelError::Config(format!("cache_repo: {e}")))
 }
 
 /// Parse `cache_repo.stale_retention` with the 7-day default. Shared by
@@ -344,7 +374,7 @@ async fn build_redis_idempotent_repo(
 ) -> Result<RedisIdempotentRepository, CamelError> {
     let endpoint = redis_endpoint_from_idempotent_repo(icfg)?;
     let key_prefix = icfg.key_prefix.as_deref().unwrap_or("camel:idem");
-    RedisIdempotentRepository::connect("redis", &endpoint, key_prefix)
+    RedisIdempotentRepository::connect(&idempotent_repo_name(icfg), &endpoint, key_prefix)
         .await
         .map_err(|e| CamelError::Config(format!("idempotent_repo: {e}")))
 }
@@ -483,19 +513,22 @@ impl CamelConfig {
                         Some("eventual") => camel_core::JournalDurability::Eventual,
                         _ => camel_core::JournalDurability::Immediate,
                     };
+                    let name = idempotent_repo_name(icfg);
                     let repo =
-                        camel_core::RedbIdempotentRepository::new("redb", path, durability).await?;
-                    ctx.register_idempotent_repository("redb", Arc::new(repo))
+                        camel_core::RedbIdempotentRepository::new(name.clone(), path, durability)
+                            .await?;
+                    ctx.register_idempotent_repository(&name, Arc::new(repo))
                         .map_err(|e| {
-                            CamelError::Config(format!("register idempotent 'redb': {e:?}"))
+                            CamelError::Config(format!("register idempotent '{name}': {e:?}"))
                         })?;
                 }
                 "redis" => {
+                    let name = idempotent_repo_name(icfg);
                     let repo = build_redis_idempotent_repo(icfg).await?;
-                    ctx.register_idempotent_repository("redis", Arc::new(repo))
+                    ctx.register_idempotent_repository(&name, Arc::new(repo))
                         .map_err(|e| {
                             CamelError::Config(format!(
-                                "idempotent_repo: register 'redis' idempotent repository: {e:?}"
+                                "idempotent_repo: register '{name}' idempotent repository: {e:?}"
                             ))
                         })?;
                 }
@@ -514,29 +547,29 @@ impl CamelConfig {
         if let Some(ref ccfg) = config.cache_repo {
             match ccfg.backend.as_str() {
                 "redb" => {
+                    let name = cache_repo_name(ccfg);
                     let bare = build_persistent_cache_repo(ccfg, ctx.shutdown_token()).await?;
                     let repo = wrap_disk_offload(ccfg, Arc::new(bare), ctx.shutdown_token())?;
-                    ctx.register_cache_repository("persistent", repo)
-                        .map_err(|e| {
-                            CamelError::Config(format!(
-                                "register cache repository 'persistent': {e:?}"
-                            ))
-                        })?;
+                    ctx.register_cache_repository(&name, repo).map_err(|e| {
+                        CamelError::Config(format!("register cache repository '{name}': {e:?}"))
+                    })?;
                 }
                 "redis" => {
+                    let name = cache_repo_name(ccfg);
                     let bare = build_redis_cache_repo(ccfg).await?;
                     let repo = wrap_disk_offload(ccfg, Arc::new(bare), ctx.shutdown_token())?;
-                    ctx.register_cache_repository("redis", repo).map_err(|e| {
+                    ctx.register_cache_repository(&name, repo).map_err(|e| {
                         CamelError::Config(format!(
-                            "cache_repo: register 'redis' cache repository: {e:?}"
+                            "cache_repo: register '{name}' cache repository: {e:?}"
                         ))
                     })?;
                 }
                 "memory" => {
                     if let Some(cap) = ccfg.max_capacity {
+                        let name = cache_repo_name(ccfg);
                         let repo =
-                            Arc::new(camel_core::cache::MemoryCacheRepository::new("memory", cap));
-                        ctx.replace_cache_repository("memory", repo);
+                            Arc::new(camel_core::cache::MemoryCacheRepository::new(&name, cap));
+                        ctx.replace_cache_repository(&name, repo);
                     }
                 }
                 _ => {} // unreachable: validated in CamelConfig::validate()
@@ -1980,6 +2013,7 @@ mod tests {
     ) -> CacheRepoConfig {
         CacheRepoConfig {
             backend: "redb".to_string(),
+            name: None,
             max_capacity: None,
             path: Some(path),
             cache_size: cache_size.map(str::to_string),
@@ -2000,6 +2034,44 @@ mod tests {
             db: None,
             key_prefix: None,
         }
+    }
+
+    // rc-vl1l: default names are byte-for-byte the pinned conventions
+    // (spec scenarios depend on them), and an override wins.
+    #[test]
+    fn cache_repo_name_defaults_and_override() {
+        let mut ccfg = repo_config("x.redb".into(), Some("512MiB"), None, None);
+        assert_eq!(cache_repo_name(&ccfg), "persistent", "redb cache default");
+        ccfg.backend = "redis".into();
+        assert_eq!(cache_repo_name(&ccfg), "redis", "redis cache default");
+        ccfg.backend = "memory".into();
+        assert_eq!(cache_repo_name(&ccfg), "memory", "memory cache default");
+        ccfg.name = Some("orders-cache".into());
+        assert_eq!(cache_repo_name(&ccfg), "orders-cache", "override wins");
+    }
+
+    #[test]
+    fn idempotent_repo_name_defaults_and_override() {
+        let mut icfg = IdempotentRepoConfig {
+            backend: "redb".to_string(),
+            name: None,
+            path: None,
+            durability: None,
+            url: None,
+            sentinel_nodes: None,
+            master_name: None,
+            sentinel_username: None,
+            sentinel_password: None,
+            password: None,
+            username: None,
+            db: None,
+            key_prefix: None,
+        };
+        assert_eq!(idempotent_repo_name(&icfg), "redb", "redb idem default");
+        icfg.backend = "redis".into();
+        assert_eq!(idempotent_repo_name(&icfg), "redis", "redis idem default");
+        icfg.name = Some("orders-idem".into());
+        assert_eq!(idempotent_repo_name(&icfg), "orders-idem", "override wins");
     }
 
     #[tokio::test]
@@ -2131,6 +2203,7 @@ mod tests {
     async fn factory_rejects_missing_path() {
         let cfg = CacheRepoConfig {
             backend: "redb".to_string(),
+            name: None,
             max_capacity: None,
             path: None,
             cache_size: Some("256MiB".to_string()),
@@ -2171,6 +2244,7 @@ mod tests {
     ) -> CacheRepoConfig {
         CacheRepoConfig {
             backend: "redis".to_string(),
+            name: None,
             url: url.map(str::to_string),
             sentinel_nodes: sentinel_nodes
                 .map(|nodes| nodes.into_iter().map(str::to_string).collect::<Vec<_>>()),

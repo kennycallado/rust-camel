@@ -578,6 +578,14 @@ pub struct IdempotentRepoConfig {
     #[serde(default = "default_idempotent_backend")]
     pub backend: String,
 
+    /// Registration name override (rc-vl1l). The name is both the registry
+    /// key EIP steps resolve repositories by and a keyspace segment for the
+    /// redis backend, so two differently-named repositories never share
+    /// keys. Defaults to the backend convention (`"redb"`/`"redis"`); see
+    /// the convention table in `docs/src/configuration/index.md`.
+    #[serde(default)]
+    pub name: Option<String>,
+
     /// Path to the `.redb` file. Required when `backend = "redb"`.
     /// Created if it does not exist.
     #[serde(default)]
@@ -642,6 +650,26 @@ pub struct IdempotentRepoConfig {
     /// forbidden).
     #[serde(default)]
     pub key_prefix: Option<String>,
+}
+
+/// Validate a repository registration-name override (rc-vl1l).
+///
+/// Mirrors the repository-side namespace-token rule
+/// (`camel_redis_repo::keyspace::validate_namespace_token`): non-empty,
+/// `[A-Za-z0-9:_-]` only — glob metacharacters would break the SCAN-based
+/// `clear`, and whitespace/unicode would surprise registry lookups.
+fn validate_repo_registration_name(field: &str, name: &str) -> Result<(), CamelError> {
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(CamelError::Config(format!(
+            "{field} '{name}': must be non-empty and use only [A-Za-z0-9:_-]              (glob metacharacters are forbidden)"
+        )))
+    }
 }
 
 fn default_idempotent_backend() -> String {
@@ -737,6 +765,15 @@ pub struct CacheRepoConfig {
     /// `"redis"` (persistent, shared).
     #[serde(default = "default_cache_backend")]
     pub backend: String,
+
+    /// Registration name override (rc-vl1l). The name is both the registry
+    /// key EIP steps resolve repositories by and a keyspace segment for the
+    /// redis backend, so two differently-named repositories never share
+    /// keys. Defaults to the backend convention
+    /// (`"memory"`/`"persistent"`/`"redis"`); see the convention table in
+    /// `docs/src/configuration/index.md`.
+    #[serde(default)]
+    pub name: Option<String>,
 
     /// Maximum entry count before eviction starts. Memory backend only.
     /// Default: 10_000.
@@ -1235,6 +1272,7 @@ impl Default for CacheRepoConfig {
     fn default() -> Self {
         Self {
             backend: default_cache_backend(),
+            name: None,
             max_capacity: None,
             path: None,
             cache_size: None,
@@ -1866,6 +1904,9 @@ impl CamelConfig {
                     )));
                 }
             }
+            if let Some(name) = repo.name.as_deref() {
+                validate_repo_registration_name("idempotent_repo.name", name)?;
+            }
             if repo.backend == "redb" {
                 if repo.url.is_some() {
                     return Err(CamelError::Config(
@@ -1971,6 +2012,9 @@ impl CamelConfig {
                         "cache_repo.backend must be \"memory\", \"redb\", or \"redis\", got \"{other}\""
                     )));
                 }
+            }
+            if let Some(name) = cache.name.as_deref() {
+                validate_repo_registration_name("cache_repo.name", name)?;
             }
             if cache.backend == "memory" {
                 if cache.path.is_some() {

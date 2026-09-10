@@ -1963,3 +1963,55 @@ payload_dir = "{}"
         "payload must round-trip with default offload durations"
     );
 }
+
+// ── rc-vl1l: configurable registration name ──────────────────────────────
+
+#[test]
+fn cache_repo_name_field_parses_and_validates() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://h:6379"
+name = "hot-cache"
+"#,
+    );
+    let repo = cfg.cache_repo.clone().expect("cache_repo must parse");
+    assert_eq!(repo.name.as_deref(), Some("hot-cache"));
+    cfg.validate().expect("alphanumeric name must validate");
+}
+
+#[test]
+fn cache_repo_name_rejects_invalid_tokens() {
+    for bad in ["", "a*b", "a b"] {
+        let cfg = make_cfg(&format!(
+            r#"
+[cache_repo]
+backend = "redis"
+url = "redis://h:6379"
+name = "{bad}"
+"#
+        ));
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("cache_repo.name"),
+            "name {bad:?} must be rejected with the field named, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn cache_repo_name_defaults_to_none() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://h:6379"
+"#,
+    );
+    assert_eq!(
+        cfg.cache_repo.expect("parses").name,
+        None,
+        "absent name keeps the backend convention default"
+    );
+}

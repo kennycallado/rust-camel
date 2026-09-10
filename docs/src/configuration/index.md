@@ -23,6 +23,22 @@ url = "redis://prod-redis.internal:6379"
 
 A `[<profile>.cache_repo]` table whose counterpart is absent from `[default]` inserts whole at merge time, so no redb key survives under the redis profile.
 
+## Repository registration names
+
+Both `[idempotent_repo]` and `[cache_repo]` accept an optional `name` string. The name is the registry key that EIP steps (idempotent consumer, cache) resolve repositories by, and for the redis backends it is also a keyspace segment (`camel:idem:<name>:*`, `camel:cache:<name>:*`), so two differently-named repositories never share keys. Allowed characters are `[A-Za-z0-9:_-]`; glob metacharacters are rejected because `clear` scans by prefix.
+
+When `name` is omitted, the backend convention applies. The defaults are historical and pinned by existing scenarios; the table shows the full mapping:
+
+| Section             | Backend   | Default name   |
+| ------------------- | --------- | -------------- |
+| `[idempotent_repo]` | `redb`    | `redb`         |
+| `[idempotent_repo]` | `redis`   | `redis`        |
+| `[cache_repo]`      | `memory`  | `memory`       |
+| `[cache_repo]`      | `redb`    | `persistent`   |
+| `[cache_repo]`      | `redis`   | `redis`        |
+
+The cache `redb` default is `persistent`, not `redb` — an asymmetry kept for backward compatibility. Set `name` explicitly when the distinction matters to your routes.
+
 ## Environment overrides
 
 After includes and profile merges, the loader overlays a fixed allowlist of `CAMEL_*` environment variables onto the merged tree. The loader ignores a `CAMEL_*` variable outside the allowlist and logs a warning. Two exceptions, `CAMEL_PROFILE` and `CAMEL_CONFIG_FILE`, select the profile and the config file itself. They do not override config fields and do not warn.

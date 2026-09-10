@@ -68,6 +68,7 @@ fn normalize_all_blank_sentinel_array_to_none() {
 fn mixed_blank_sentinel_array_not_normalized() {
     let mut repo = CacheRepoConfig {
         backend: "redis".to_string(),
+        name: None,
         sentinel_nodes: Some(vec!["redis-a:26379".to_string(), " ".to_string()]),
         master_name: Some("m".to_string()),
         ..CacheRepoConfig::default()
@@ -123,6 +124,7 @@ fn idempotent_repo_normalize_parity() {
     // Unit: same normalization rules as cache_repo.
     let mut repo = IdempotentRepoConfig {
         backend: "redis".to_string(),
+        name: None,
         path: None,
         durability: None,
         url: Some(String::new()),
@@ -206,6 +208,7 @@ fn invalid_key_prefix_still_rejected_by_keyspace() {
     // the glob metacharacter.
     let repo = CacheRepoConfig {
         backend: "redis".to_string(),
+        name: None,
         sentinel_nodes: Some(vec!["redis-a:26379".to_string()]),
         master_name: Some("m".to_string()),
         key_prefix: Some("bad*prefix".to_string()),

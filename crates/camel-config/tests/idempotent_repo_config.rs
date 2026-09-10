@@ -458,3 +458,58 @@ url = "redis://127.0.0.1:1/0"
         "build error must name idempotent_repo, got: {err}"
     );
 }
+
+// ── rc-vl1l: configurable registration name ──────────────────────────────
+
+#[test]
+fn idempotent_repo_name_field_parses_and_validates() {
+    let cfg = make_cfg(
+        r#"
+[idempotent_repo]
+backend = "redis"
+url = "redis://h:6379"
+name = "orders-idem"
+"#,
+    );
+    let repo = cfg
+        .idempotent_repo
+        .clone()
+        .expect("idempotent_repo must parse");
+    assert_eq!(repo.name.as_deref(), Some("orders-idem"));
+    cfg.validate().expect("alphanumeric name must validate");
+}
+
+#[test]
+fn idempotent_repo_name_rejects_invalid_tokens() {
+    for bad in ["", "a*b", "a b", "naïve", "a?b"] {
+        let cfg = make_cfg(&format!(
+            r#"
+[idempotent_repo]
+backend = "redis"
+url = "redis://h:6379"
+name = "{bad}"
+"#
+        ));
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("idempotent_repo.name"),
+            "name {bad:?} must be rejected with the field named, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn idempotent_repo_name_defaults_to_none() {
+    let cfg = make_cfg(
+        r#"
+[idempotent_repo]
+backend = "redis"
+url = "redis://h:6379"
+"#,
+    );
+    assert_eq!(
+        cfg.idempotent_repo.expect("parses").name,
+        None,
+        "absent name keeps the backend convention default"
+    );
+}
