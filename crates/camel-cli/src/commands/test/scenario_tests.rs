@@ -404,6 +404,45 @@ partners:
 
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::await_holding_lock)]
+async fn unset_variable_exits_two_as_apparatus() {
+    // rc-whof: a runtime `scenario-var-unresolved` is an authoring
+    // bug, not a product failure — the apparatus class (exit 2), so
+    // CI never reports the SUT failed because the document referenced
+    // a variable no `extract` ever set. Complement:
+    // `assertion_failure_exits_one` pins the SUT-failure class.
+    let _wasm_acks_guard = crate::commands::run::WASM_ACKS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let project = TempProject::new("unset-var-apparatus");
+    let doc_path = write_project(
+        project.root(),
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:${missing}
+"#,
+    );
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = super::super::run_tests(&[doc_path], &mut out, &mut err).await;
+    assert_eq!(
+        summary.exit_code, 2,
+        "runtime var-unresolved is apparatus class, exit 2"
+    );
+    let out = String::from_utf8(out).expect("stdout is utf-8"); // allow-unwrap
+    assert!(
+        out.contains("scenario-var-unresolved"),
+        "the report must name the failure kind: {out}"
+    );
+    assert!(
+        out.contains("missing"),
+        "the report must name the variable: {out}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::await_holding_lock)]
 async fn undeclared_partner_target_exits_two() {
     let _wasm_acks_guard = crate::commands::run::WASM_ACKS_TEST_LOCK
         .lock()

@@ -215,11 +215,14 @@ Exit 1, the scenario ran and the system under test failed it:
 
 - `receive-timeout`: nothing reached the partner before the deadline.
 - `validation-mismatch`: the message arrived and failed the validator.
-- `scenario-var-unresolved`: a referenced variable was never set. When the
-  defect is statically detectable at load, it is exit 2 instead.
+- (moved to exit 2, see below)
 
 Exit 2, the scenario never got a meaningful answer:
 
+- `scenario-var-unresolved` (moved from exit 1, rc-whof): a referenced
+  variable was never set. An unset variable is an authoring bug — the
+  scenario never got a meaningful answer, whether the defect is caught
+  statically at load or at run time.
 - `doc-validation`: mixed vocabulary, broken grammar.
 - `tier-filter-collision`: an explicitly named document did not match the
   tier filter.

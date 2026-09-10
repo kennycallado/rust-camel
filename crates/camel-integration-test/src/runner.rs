@@ -13,9 +13,10 @@
 //!
 //! - Verdict class — the scenario ran and the system under test
 //!   failed it: [`ScenarioFailure::ReceiveTimeout`],
-//!   [`ScenarioFailure::ValidationMismatch`],
-//!   [`ScenarioFailure::VarUnresolved`].
+//!   [`ScenarioFailure::ValidationMismatch`].
 //! - Apparatus class — the scenario never got a meaningful answer:
+//!   [`ScenarioFailure::VarUnresolved`] (an unset variable is an
+//!   authoring bug, bd rc-whof),
 //!   [`ScenarioFailure::ActionTransport`],
 //!   [`ScenarioFailure::PartnerStartup`],
 //!   [`ScenarioFailure::ShutdownFailure`],
@@ -254,8 +255,10 @@ pub enum ScenarioFailure {
         /// What was expected and what arrived.
         detail: String,
     },
-    /// A referenced variable was never set (verdict class,
-    /// `scenario-var-unresolved`).
+    /// A referenced variable was never set (apparatus class,
+    /// `scenario-var-unresolved`, bd rc-whof): an unset variable is an
+    /// authoring bug, not a product failure — the scenario never got a
+    /// meaningful answer.
     #[error("scenario-var-unresolved: {name}")]
     VarUnresolved {
         /// The variable name no `extract` ever set.
@@ -321,7 +324,7 @@ pub enum ScenarioFailure {
 /// `http://host:port` form (owned by the CLI driver, unchanged here).
 /// A reference with no registered adapter or no bound authority is
 /// skipped: the variable stays unset, and a later use fails with the
-/// verdict-class `VarUnresolved`.
+/// apparatus-class `VarUnresolved`.
 pub fn fill_bind_vars(wired: &[EndpointRef], router: &PartnerRouter, vars: &mut ScenarioVars) {
     for reference in wired {
         if reference.provisioning != Some(Provisioning::Harness) {
@@ -692,7 +695,7 @@ async fn run_action(
 /// The endpoint reference, the body's string leaves, and the header
 /// values are the complete interpolation surface: each resolves its
 /// `${name}` placeholders against `vars` before dispatch, and an
-/// unresolved variable fails with the verdict-class `VarUnresolved`.
+/// unresolved variable fails with the apparatus-class `VarUnresolved`.
 /// The dial target comes from the router's address math: a
 /// harness-declared `:0` reference (or a dynamic reference resolving
 /// to a partner authority) dials the partner's bound address with the

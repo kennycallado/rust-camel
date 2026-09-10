@@ -69,8 +69,11 @@ pub(super) struct ScenarioDocResult {
 /// Whether a scenario failure is apparatus class (ADR-0069 section 7):
 /// the scenario never got a meaningful answer. Classification is by
 /// variant, never by message text. Verdict-class failures
-/// (`receive-timeout`, `validation-mismatch`, runtime
-/// `scenario-var-unresolved`) return `false` and map to exit 1.
+/// (`receive-timeout`, `validation-mismatch`) return `false` and map
+/// to exit 1. Runtime `scenario-var-unresolved` is apparatus class
+/// (bd rc-whof): an unset variable is an authoring bug, not a product
+/// failure — CI must not report the SUT failed because the document
+/// referenced a variable no `extract` ever set.
 pub(super) fn is_apparatus(failure: &camel_integration_test::ScenarioFailure) -> bool {
     use camel_integration_test::ScenarioFailure as F;
     matches!(
@@ -80,6 +83,7 @@ pub(super) fn is_apparatus(failure: &camel_integration_test::ScenarioFailure) ->
             | F::ShutdownFailure { .. }
             | F::ArrivalLaneOverflow { .. }
             | F::LogCaptureUnavailable { .. }
+            | F::VarUnresolved { .. }
     )
 }
 

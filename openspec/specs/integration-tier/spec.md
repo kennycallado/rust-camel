@@ -208,7 +208,8 @@ Scenario actions SHALL execute in document order. A receive SHALL carry a mandat
   boot-time `bindVar` or earlier extraction sets `missing`
 - **WHEN** the send resolves
 - **THEN** the run reports `scenario-var-unresolved` naming `missing` and
-  exits 1
+  exits 2: an unset variable is an authoring bug (apparatus class),
+  not a product failure
 
 #### Scenario: bindVar address is interpolable as a string
 

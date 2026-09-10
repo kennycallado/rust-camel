@@ -208,10 +208,10 @@ places:
 
 Substitution is string-only. A string leaf with no placeholder stays
 as is. Raw substitution applies, with no percent-encoding. An unset
-variable at send time fails `scenario-var-unresolved`, exit 1, naming
-the variable. Exit 1 is a verdict failure, not a parse error. In CI, a
-document that fails this way is a failed test run, not a harness
-error.
+variable at send time fails `scenario-var-unresolved`, exit 2, naming
+the variable. Exit 2 is the apparatus class: an unset variable is an
+authoring bug, so CI reports a harness/document error, not a product
+failure.
 
 `$${` escapes a literal `${`. The escape applies to body leaves and
 header values too. For example, a JSON body leaf that must reach the
