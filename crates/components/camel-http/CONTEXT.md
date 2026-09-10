@@ -253,6 +253,14 @@ Excluded from the response:
 - Dynamic Connection-named headers: any header that a `Connection` field
   value names is hop-by-hop for that connection (RFC 7230 section 6.1).
 
+Scalar value stringification (both directions, rc-fcgjd / ADR-0051): an
+Exchange header whose value is a JSON `Number` or `Bool` is STRINGIFIED for
+the wire (`set_header("X-Retries", 3)` reaches the response as `"3"`;
+`true` as `"true"`). A `null`, object, or array value has no single-value
+string form: the header is dropped and its name + value KIND (not the
+value — ADR-0051) is logged at DEBUG. This applies identically to the
+reply finaliser above and the producer outbound filter below.
+
 Emitted (valid response headers, NOT excluded):
 
 - `cache-control`, `pragma`, `warning`, `via`. RFC 7231 and RFC 7234 define
@@ -260,6 +268,22 @@ Emitted (valid response headers, NOT excluded):
   through.
 
 - User-supplied `Content-Type` header on the Exchange overrides the inferred content type.
+
+### Accepted — producer outbound headers
+
+The producer's outbound filter (`select_outbound_headers`) applies the same
+header-name policy as the reply finaliser (`header_policy`, ADR-0057) plus:
+
+- `Camel`-namespace headers never leave the producer.
+- `skipRequestHeaders`-listed headers (request-derived reflections the
+  operator opted out of) are dropped, matched case-insensitively.
+- Hop-by-hop, request-only, and server-owned names are excluded per the
+  shared `excluded_outbound` policy.
+- Scalar stringification per the rule above: `Number`/`Bool` stringify;
+  `null`/object/array drop with name + kind at DEBUG (values never logged,
+  ADR-0051).
+- A header whose name or stringified value is not wire-legal is dropped
+  (never a producer panic).
 
 ### Rejected
 
