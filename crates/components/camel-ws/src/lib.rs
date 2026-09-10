@@ -1458,28 +1458,54 @@ impl WsConsumer {
         }
     }
 
+    /// Upper bound for the serve task to reach its accept loop after
+    /// spawn. The listener is already bound when the task spawns, so
+    /// reaching `listening()` is a first-poll event; anything beyond this
+    /// bound means the serve task was cancelled before its first poll
+    /// (e.g. its owning runtime was dropped — the registry keeps the
+    /// entry, but no notification will ever arrive) or is stalled, and
+    /// the gate must fail instead of parking forever (rc-oo0c).
+    fn serve_readiness_bound() -> std::time::Duration {
+        if cfg!(test) {
+            std::time::Duration::from_secs(1)
+        } else {
+            std::time::Duration::from_secs(10)
+        }
+    }
+
     /// Readiness gating shared by `start` and `start_with_listener`:
     /// both paths bind the TCP listener before delegation — plain
     /// synchronously, TLS via the pre-bound listener handed to the serve
     /// task. `listening()` therefore signals that the serve/accept loop
     /// actually started (a `None` return means serving failed — e.g. the
     /// task died at startup — so the route never marks itself ready on a
-    /// dead listener).
+    /// dead listener). The readiness await is bounded by
+    /// [`Self::serve_readiness_bound`]; a deadline means no notification
+    /// will ever arrive (cancelled or stalled serve task) and the gate
+    /// returns `Err` (rc-oo0c).
     async fn gate_ready(
         &self,
         ctx: &ConsumerContext,
         listening_handle: Option<axum_server::Handle<std::net::SocketAddr>>,
     ) -> Result<(), CamelError> {
         match listening_handle {
-            Some(handle) => match handle.listening().await {
-                Some(_addr) => {
-                    ctx.mark_ready();
-                    Ok(())
+            Some(handle) => {
+                let listened =
+                    tokio::time::timeout(Self::serve_readiness_bound(), handle.listening()).await;
+                match listened {
+                    Ok(Some(_addr)) => {
+                        ctx.mark_ready();
+                        Ok(())
+                    }
+                    Ok(None) => Err(CamelError::EndpointCreationFailed(
+                        "TLS listener bind failed".to_string(),
+                    )),
+                    Err(_elapsed) => Err(CamelError::EndpointCreationFailed(format!(
+                        "TLS listener did not become ready within {:?} (serve task cancelled or stalled)",
+                        Self::serve_readiness_bound()
+                    ))),
                 }
-                None => Err(CamelError::EndpointCreationFailed(
-                    "TLS listener bind failed".to_string(),
-                )),
-            },
+            }
             None => {
                 ctx.mark_ready();
                 Ok(())
@@ -4528,6 +4554,115 @@ mod tests {
 
         drop(blocker);
         let _ = consumer.stop().await;
+    }
+
+    // rc-oo0c regression: gate_ready must never park on a registry handle
+    // whose serve task was cancelled before its first poll.
+    //
+    // Mechanism under test: every #[tokio::test] owns a current-thread
+    // runtime. A test that spawns a TLS server via the registry and returns
+    // without awaiting readiness leaves the serve task queued, not polled;
+    // when that runtime drops, the task is dropped unpolled, so
+    // `axum_server::Handle` never stores its listening address and never
+    // notifies waiters — while the process-lifetime `ServerRegistry` keeps
+    // the entry. A later consumer that joins that entry (ephemeral port
+    // reuse under workspace load) awaits `listening()` forever, holding
+    // REGISTRY_TEST_LOCK and wedging every queued test (the rc-oo0c hang).
+    //
+    // Phase 1 reproduces the leftover entry deterministically on an owned
+    // runtime; phase 2 joins it through the production `start()` path.
+    #[tokio::test]
+    async fn wss_start_does_not_park_on_dead_registry_handle() {
+        use camel_component_api::test_support::{NoopRuntimeObservability, tls};
+
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // Phase 1 — spawn a TLS server entry whose serve task is never
+        // polled: the block_on future returns without yielding after the
+        // spawn, so the queued task is dropped unpolled when owner_rt drops.
+        let (cert_pem, key_pem) = {
+            let (_ca, c, k) = tls::gen_server_cert();
+            (c, k)
+        };
+        let cert_path = tls::write_pem_tmp("ws-deadhandle-cert.pem", &cert_pem);
+        let key_path = tls::write_pem_tmp("ws-deadhandle-key.pem", &key_pem);
+        let cert_str = cert_path.to_str().expect("cert path").to_string();
+        let key_str = key_path.to_str().expect("key path").to_string();
+        let owner_tls_cfg = WsTlsConfig {
+            cert_path: cert_str.clone(),
+            key_path: key_str.clone(),
+        };
+        // A dedicated thread owns the runtime so this test's runtime can
+        // stay active while the owner's tasks die (block_on cannot nest).
+        let port = std::thread::spawn(move || {
+            let owner_rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("owner runtime");
+            let port = owner_rt.block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("owner bind");
+                let port = listener.local_addr().unwrap().port();
+                let (_state, _addr, _handle) = ServerRegistry::global()
+                    .get_or_spawn_with_listener(
+                        listener,
+                        Some(owner_tls_cfg),
+                        test_rt(),
+                        "ws-deadhandle-owner".into(),
+                    )
+                    .await
+                    .expect("owner server entry should spawn");
+                // No await after the spawn: return while the serve task is
+                // still queued, so dropping owner_rt cancels it unpolled.
+                // Determinism depends on get_or_spawn_with_listener not
+                // yielding after its internal spawn — if it ever does, the
+                // owner runtime polls the serve task once, it may reach
+                // listening(), and phase 2 fails loudly on its is_err
+                // assert (a welcome alarm, not a silent flake).
+                port
+            });
+            // Drop the runtime BEFORE returning: the queued serve task is
+            // cancelled without ever being polled.
+            drop(owner_rt);
+            port
+        })
+        .join()
+        .expect("owner thread");
+
+        // Phase 2 — join the leftover entry via the production path (what
+        // an ephemeral-port reuse does). The gate must fail within a
+        // bound, not park on the dead handle.
+        let uri = format!("wss://127.0.0.1:{port}/secure?tlsCert={cert_str}&tlsKey={key_str}");
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WssComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .expect("endpoint");
+        let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+            std::sync::Arc::new(NoopRuntimeObservability);
+        let mut consumer = endpoint.create_consumer(rt).expect("consumer");
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-deadhandle-route".to_string(),
+        );
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), consumer.start(ctx)).await;
+        assert!(
+            outcome.is_ok(),
+            "rc-oo0c: start() parked on a dead registry handle (serve task cancelled unpolled)"
+        );
+        let result = outcome.expect("bounded start");
+        let err = result.expect_err("start() must fail on a listener whose serve task is dead");
+        assert!(
+            err.to_string().contains("did not become ready"),
+            "expected readiness-timeout error, got: {err}"
+        );
+
+        ServerRegistry::reset();
     }
 
     #[test]

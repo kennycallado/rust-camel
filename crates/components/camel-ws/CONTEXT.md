@@ -70,7 +70,10 @@ deterministic trust.
   `listening()` now signals that the serve/accept loop actually started. `WsConsumer::start`
   awaits `axum_server::Handle::listening()` before signalling readiness. On serve failure
   (`listening()` returns `None`) `start` returns `Err`, so the route
-  never marks itself ready on a dead listener. The health pin
+  never marks itself ready on a dead listener. The readiness await is bounded
+  (`serve_readiness_bound`: 10s, 1s under cfg(test)); a deadline — the serve task was
+  cancelled before its first poll (registry leftover joined via port reuse, rc-oo0c) or is
+  stalled — also returns `Err`. The health pin
   (`g:ws:bind-tls`) and the `WsConsumer::stop` error remain secondary failure
   signals for bind errors that surface after readiness. ADR-0007 requires
   such task failures to remain visible to Route supervision.
