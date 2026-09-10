@@ -130,6 +130,7 @@ integration-tests = [
     "dep:camel-component-wasm",
     "dep:camel-component-llm",
     "dep:camel-redis-repo",
+    "camel-redis-repo/tls",
 ]
 
 [lints]

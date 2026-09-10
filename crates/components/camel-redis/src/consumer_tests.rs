@@ -20,6 +20,7 @@ fn create_test_config(command: RedisCommand) -> RedisEndpointConfig {
         password: None,
         db: 0,
         ssl: Some(false),
+        tls_ca_cert: None,
         reconnect: camel_component_api::NetworkRetryPolicy::default(),
         // Short so lifecycle tests that spawn a real queue/pubsub consumer
         // (which now retries on connect failure) terminate quickly.

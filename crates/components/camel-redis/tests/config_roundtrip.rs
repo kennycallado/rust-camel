@@ -20,6 +20,7 @@ fn cfg_with(
         password: password.map(|s| s.to_string()),
         db,
         ssl: Some(ssl),
+        tls_ca_cert: None,
         reconnect: NetworkRetryPolicy::default(),
         connection_timeout_secs: 10,
         topology_kind: TopologyKind::Standalone,

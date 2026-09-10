@@ -280,11 +280,17 @@ async fn run_pubsub_consumer(
     let mut io: Box<dyn PubSubIo> = Box::new(RedisPubSubIo::new(config.connection_timeout_secs));
 
     info!("PubSub consumer started, waiting for messages");
-    ctx.mark_ready();
 
     let route_id = ctx.route_id().to_string();
     let route_id_err = route_id.clone();
     let runtime_err = Arc::clone(&runtime);
+    // Readiness fires only after the first SUBSCRIBE/PSUBSCRIBE ack comes
+    // back (pubsub_session's `on_ready`): signalling it eagerly let start()
+    // return before the server registered the subscription, and a publish
+    // landing in that window was lost — pubsub has no replay (rc-3ckqr).
+    // Same clone-per-closure pattern as `deliver` below.
+    let ready_ctx = ctx.clone();
+    let on_ready = Some(Box::new(move || ready_ctx.mark_ready()) as Box<dyn FnOnce() + Send>);
     // Per-message delivery: build the Exchange and hand it to the pipeline.
     // A clone of `ctx` per message keeps the closure `Fn` (the session may
     // call it any number of times on one connection).
@@ -316,6 +322,7 @@ async fn run_pubsub_consumer(
             &patterns,
             &config.reconnect,
             &cancel_token,
+            on_ready,
             deliver,
         ) => {
             match result {

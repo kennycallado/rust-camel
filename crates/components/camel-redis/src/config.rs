@@ -541,6 +541,10 @@ pub struct RedisEndpointConfig {
     /// After resolution, use `is_ssl_enabled()` for the effective value.
     pub ssl: Option<bool>,
 
+    /// File path to a CA certificate (PEM) for TLS verification. Filled by
+    /// `apply_defaults()` from global config; not a URI parameter.
+    pub tls_ca_cert: Option<String>,
+
     /// Reconnection policy for transient Redis errors.
     /// Filled by `apply_defaults()` from global config.
     pub reconnect: NetworkRetryPolicy,
@@ -567,6 +571,7 @@ impl std::fmt::Debug for RedisEndpointConfig {
             .field("password", &redacted_opt(&self.password))
             .field("db", &self.db)
             .field("ssl", &self.ssl)
+            .field("tls_ca_cert", &redacted_opt(&self.tls_ca_cert))
             .field("reconnect", &self.reconnect)
             .field("connection_timeout_secs", &self.connection_timeout_secs)
             .field("topology_kind", &self.topology_kind)
@@ -642,6 +647,7 @@ impl RedisEndpointConfig {
                 password,
                 db,
                 ssl,
+                tls_ca_cert: None,
                 reconnect: NetworkRetryPolicy::default(),
                 connection_timeout_secs: RedisConfig::default().connection_timeout_secs,
                 topology_kind,
@@ -793,6 +799,7 @@ impl RedisEndpointConfig {
             password,
             db,
             ssl,
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: RedisConfig::default().connection_timeout_secs,
             topology_kind: TopologyKind::Standalone,
@@ -834,6 +841,10 @@ impl RedisEndpointConfig {
                     "Redis auto-enabling TLS for non-loopback host (opt out with tls_mode=false or URI ?ssl=false)"
                 );
             }
+        }
+        // CA cert path from global config applies only when not set on the endpoint.
+        if self.tls_ca_cert.is_none() {
+            self.tls_ca_cert = defaults.tls_ca_cert.clone();
         }
         // Reconnect policy from global config (always applied — URI has no override)
         self.reconnect = defaults.reconnect.clone();
@@ -1228,6 +1239,7 @@ mod tests {
             password: Some("pass@word".to_string()),
             db: 0,
             ssl: Some(false),
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
@@ -1258,6 +1270,7 @@ mod tests {
             password: Some("pass:word".to_string()),
             db: 0,
             ssl: Some(false),
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
@@ -1283,6 +1296,7 @@ mod tests {
             password: Some("pass/word".to_string()),
             db: 0,
             ssl: Some(false),
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
@@ -1329,6 +1343,7 @@ mod tests {
             password: None,
             db: 0,
             ssl: Some(true),
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
@@ -1354,6 +1369,7 @@ mod tests {
             password: None,
             db: 0,
             ssl: Some(false),
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
@@ -1379,6 +1395,7 @@ mod tests {
             password: Some("secret".to_string()),
             db: 0,
             ssl: Some(true),
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
@@ -1405,6 +1422,7 @@ mod tests {
             password: Some("secret".to_string()),
             db: 0,
             ssl: Some(false),
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
@@ -1431,6 +1449,7 @@ mod tests {
             password: Some("supersecret".to_string()),
             db: 2,
             ssl: Some(false),
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
@@ -1463,6 +1482,7 @@ mod tests {
             password: None,
             db: 0,
             ssl: Some(true),
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
@@ -1480,6 +1500,7 @@ mod tests {
             password: None,
             db: 0,
             ssl: Some(false),
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
@@ -1670,6 +1691,73 @@ mod tests {
             config.connection_timeout_secs, 30,
             "connection_timeout_secs should propagate from global config"
         );
+    }
+
+    #[test]
+    fn apply_defaults_propagates_tls_ca_cert() {
+        let mut ep = RedisEndpointConfig::from_uri("redis://h:6379").unwrap();
+        assert!(ep.tls_ca_cert.is_none());
+
+        let cfg = RedisConfig::default().with_tls_ca_cert("/path/ca.pem");
+        ep.apply_defaults(&cfg);
+
+        assert_eq!(ep.tls_ca_cert, Some("/path/ca.pem".into()));
+    }
+
+    #[test]
+    fn apply_defaults_keeps_endpoint_ca_over_global() {
+        let mut ep = RedisEndpointConfig {
+            host: Some("h".to_string()),
+            port: Some(6379),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            username: None,
+            password: None,
+            db: 0,
+            ssl: Some(false),
+            tls_ca_cert: Some("/ep/ca.pem".to_string()),
+            reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
+        };
+
+        let cfg = RedisConfig::default().with_tls_ca_cert("/global/ca.pem");
+        ep.apply_defaults(&cfg);
+
+        assert_eq!(ep.tls_ca_cert, Some("/ep/ca.pem".to_string()));
+    }
+
+    #[test]
+    fn endpoint_config_debug_redacts_tls_ca_cert() {
+        let ep = RedisEndpointConfig {
+            host: Some("h".to_string()),
+            port: Some(6379),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            username: None,
+            password: None,
+            db: 0,
+            ssl: Some(true),
+            tls_ca_cert: Some("/secret/ca.pem".to_string()),
+            reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
+        };
+        let debug = format!("{:?}", ep);
+        assert!(
+            !debug.contains("/secret/"),
+            "tls_ca_cert path must be redacted: {debug}"
+        );
+    }
+
+    #[test]
+    fn from_uri_does_not_parse_ca_from_uri() {
+        let ep = RedisEndpointConfig::from_uri("rediss://h:6379").unwrap();
+        assert!(ep.tls_ca_cert.is_none());
     }
 
     #[test]
@@ -2094,6 +2182,7 @@ mod tests {
             password: Some("secret123".to_string()),
             db: 0,
             ssl: None,
+            tls_ca_cert: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,

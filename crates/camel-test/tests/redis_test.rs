@@ -15,9 +15,12 @@ use support::redis::shared_redis;
 use camel_api::Value;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_redis::RedisComponent;
+use camel_component_api::NetworkRetryPolicy;
+use camel_component_redis::{RedisComponent, RedisConfig};
 use camel_test::CamelTestContext;
+use futures::{FutureExt, StreamExt};
 use redis::AsyncCommands;
+use std::panic::AssertUnwindSafe;
 use support::wait::wait_until;
 
 // ===========================================================================
@@ -274,9 +277,46 @@ async fn redis_pubsub_producer() {
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
 
+    // Subscriber-side receipt proof (rc-3ckqr): a raw redis pubsub client
+    // subscribes BEFORE the route starts, then must receive the published
+    // payload. Every step is deadline-bounded.
+    let subscriber_client =
+        redis::Client::open(format!("redis://{conn_str}")).expect("valid subscriber redis url");
+    let mut subscriber = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        subscriber_client.get_async_pubsub(),
+    )
+    .await
+    .expect("subscriber pubsub connect within 5s")
+    .expect("subscriber pubsub connection");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        subscriber.subscribe("mychannel"),
+    )
+    .await
+    .expect("subscriber SUBSCRIBE within 5s")
+    .expect("subscribe to mychannel succeeded");
+
+    // redis-rs consumes the SUBSCRIBE ack inside subscribe(); the first
+    // decoded payload on the stream is the published message. The
+    // `if let Ok` guards non-UTF-8 payload conversion.
+    let (payload_tx, payload_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut messages = subscriber.on_message();
+        while let Some(msg) = messages.next().await {
+            if let Ok(text) = msg.get_payload::<String>() {
+                let _ = payload_tx.send(text);
+                break;
+            }
+        }
+    });
+
+    // PUBLISH consumes the message BODY (commands/pubsub.rs
+    // extract_publish_message) and CamelRedis.Channel selects the channel;
+    // CamelRedis.Value is only consulted by key/value commands like SET.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Channel", Value::String("mychannel".into()))
-        .set_header("CamelRedis.Value", Value::String("hello world".into()))
+        .set_body("hello world")
         .to(format!("redis://{}?command=PUBLISH", conn_str))
         .to("mock:result")
         .route_id("redis-pubsub-producer-test")
@@ -298,6 +338,13 @@ async fn redis_pubsub_producer() {
     )
     .await
     .unwrap();
+
+    // The raw subscriber must receive the exact published payload.
+    let received = tokio::time::timeout(std::time::Duration::from_secs(5), payload_rx)
+        .await
+        .expect("raw subscriber receipt within 5s")
+        .expect("subscriber task delivered a payload");
+    assert_eq!(received, "hello world");
 
     h.stop().await;
 
@@ -571,8 +618,23 @@ async fn redis_consumer_pubsub_mode() {
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
 
+    // Unique channel per invocation (uuid is not a camel-test dep): with
+    // readiness now gated on the SUBSCRIBE ack, start() returning already
+    // guarantees the subscription is registered server-side, so a publish
+    // after start() is deterministic — no server-side subscription barrier
+    // (rc-3ckqr). Uniqueness keeps a leftover subscriber from a previous
+    // run off this channel.
+    let channel = format!(
+        "pubsub-race-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_millis()
+    );
+
     let consumer_route = RouteBuilder::from(&format!(
-        "redis://{}?command=SUBSCRIBE&channels=testchannel",
+        "redis://{}?command=SUBSCRIBE&channels={channel}",
         conn_str
     ))
     .to("mock:received")
@@ -583,49 +645,22 @@ async fn redis_consumer_pubsub_mode() {
     h.add_route(consumer_route).await.unwrap();
     h.start().await;
 
-    // The pubsub consumer marks itself ready before its SUBSCRIBE registers
-    // on the server, so start() returning does not guarantee delivery
-    // eligibility — and pubsub has no replay: a publish that lands before the
-    // subscription is registered is lost forever (bd rc-8kha). Gate the
-    // publish on the server actually listing the channel subscription.
-    let barrier_client =
-        redis::Client::open(format!("redis://{conn_str}")).expect("valid barrier redis url");
-    // R1 (ADR-0069 s13): every wait carries a deadline — connect included.
-    let barrier_conn = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        barrier_client.get_multiplexed_async_connection(),
-    )
-    .await
-    .expect("barrier redis connect within 5s")
-    .expect("barrier redis connection");
-
-    wait_until(
-        "redis pubsub subscription registered on server",
-        std::time::Duration::from_secs(10),
-        std::time::Duration::from_millis(100),
-        || {
-            let mut conn = barrier_conn.clone();
-            async move {
-                let channels: Vec<String> = redis::cmd("PUBSUB")
-                    .arg("CHANNELS")
-                    .arg("testchannel")
-                    .query_async(&mut conn)
-                    .await
-                    .map_err(|e| format!("PUBSUB CHANNELS probe failed: {e}"))?;
-                Ok(channels.iter().any(|c| c == "testchannel"))
-            }
-        },
-    )
-    .await
-    .expect("subscription should register on the server before publish");
-
-    // Deterministic publish: only after the subscription is server-visible.
-    // The producer PUBLISH path keeps dedicated coverage in the
-    // redis_pubsub_producer test above.
     {
-        let mut conn = barrier_conn.clone();
+        let publish_client =
+            redis::Client::open(format!("redis://{conn_str}")).expect("valid publish redis url");
+        // R1 (ADR-0069 s13): every wait carries a deadline — connect included.
+        let mut conn = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            publish_client.get_multiplexed_async_connection(),
+        )
+        .await
+        .expect("publish redis connect within 5s")
+        .expect("publish redis connection");
+
+        // The producer PUBLISH path keeps dedicated coverage in the
+        // redis_pubsub_producer test above.
         redis::cmd("PUBLISH")
-            .arg("testchannel")
+            .arg(&channel)
             .arg("pubsub-message")
             .query_async::<i64>(&mut conn)
             .await
@@ -657,5 +692,60 @@ async fn redis_consumer_pubsub_mode() {
     assert!(
         !endpoint.get_received_exchanges().await.is_empty(),
         "Subscriber should have received the message within 5s"
+    );
+}
+
+// ===========================================================================
+// PubSub startup fail-fast test
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pubsub_startup_fails_fast_on_unreachable_broker() {
+    install_crypto_provider();
+
+    // Bounded retry budget (~200ms total): retry exhaustion, not the outer
+    // 30s deadline, must terminate the failed startup.
+    let config = RedisConfig::default().with_reconnect(NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 2,
+        initial_delay: std::time::Duration::from_millis(100),
+        multiplier: 1.0,
+        max_delay: std::time::Duration::from_millis(100),
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    });
+
+    let h = CamelTestContext::builder()
+        .with_mock()
+        .with_component(RedisComponent::with_config(config))
+        .build()
+        .await;
+
+    // SUBSCRIBE is consumer-only, so the failure exercises the consumer
+    // startup path: retry exhaustion kills the consumer task, the
+    // await_ready sender drops, and start() resolves Err. A producer-side
+    // SUBSCRIBE would be rejected for the wrong reason.
+    let consumer_route = RouteBuilder::from("redis://127.0.0.1:1?command=SUBSCRIBE&channels=dead")
+        .to("mock:never")
+        .route_id("redis-pubsub-unreachable-broker")
+        .build()
+        .unwrap();
+
+    h.add_route(consumer_route).await.unwrap();
+
+    // The harness start() .expect()s the context start result
+    // (harness.rs:271-273), so the failure surfaces as a panic escaping the
+    // start() future — catch it and assert it was observed in time.
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        AssertUnwindSafe(h.start()).catch_unwind(),
+    )
+    .await
+    .expect("unreachable-broker startup must resolve within 30s, not hang");
+
+    let payload = outcome.expect_err("start() must fail on an unreachable broker");
+    assert!(
+        payload.is::<String>() || payload.is::<&str>(),
+        "expected the harness expect() panic, got a non-panic unwind payload"
     );
 }

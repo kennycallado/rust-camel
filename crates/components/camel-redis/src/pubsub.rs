@@ -191,6 +191,13 @@ async fn connect_and_subscribe(
 /// Each stream-end reconnect cycle consumes one attempt from `policy`'s
 /// budget; on exhaustion [`retry_budget_exhausted`] builds the terminal error
 /// (classified transient, ADR-0012).
+///
+/// `on_ready` fires once, immediately after the FIRST successful
+/// `connect_and_subscribe` (every channel and pattern ack received), before
+/// any message delivery. It does not re-fire on reconnect re-subscriptions,
+/// and it is skipped when the session was cancelled mid-connect without ever
+/// subscribing.
+#[allow(clippy::too_many_arguments)] // session-driver parameter list prescribed by the task spec
 pub(crate) async fn pubsub_session<D, F>(
     topology: &dyn RedisTopology,
     io: &mut dyn PubSubIo,
@@ -198,6 +205,7 @@ pub(crate) async fn pubsub_session<D, F>(
     patterns: &[String],
     policy: &NetworkRetryPolicy,
     cancel: &CancellationToken,
+    mut on_ready: Option<Box<dyn FnOnce() + Send>>,
     mut deliver: D,
 ) -> Result<(), CamelError>
 where
@@ -220,6 +228,20 @@ where
             cancel,
         )
         .await?;
+
+        // First live, fully-subscribed connection: readiness fires only
+        // now — signalling earlier opened a window in which start()
+        // returned before the server had registered the SUBSCRIBE, so a
+        // publish landing there was lost forever (rc-3ckqr). The cancel
+        // guard skips a session that returned Ok early because it was
+        // cancelled mid-connect without ever subscribing;
+        // `Option::take` makes it fire-once across reconnect
+        // re-subscriptions.
+        if !cancel.is_cancelled()
+            && let Some(f) = on_ready.take()
+        {
+            f();
+        }
 
         // Deliver every message from this one connection until the stream
         // ends, then fall through to the reconnect above.
@@ -259,7 +281,21 @@ mod tests {
     use crate::config::{RedisEndpointConfig, is_transient_redis_error};
     use crate::topology::{FakeTopology, StandaloneTopology};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    /// Poll `cond` until it holds or `deadline` elapses (test-side
+    /// observation of progress inside a spawned session).
+    async fn eventually(deadline: Duration, cond: impl Fn() -> bool) {
+        let start = Instant::now();
+        while !cond() {
+            assert!(
+                start.elapsed() < deadline,
+                "condition not met within {deadline:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 
     /// Construct a real `redis::Msg` without a broker (redis 1.x parses a
     /// plain `["message", channel, payload]` array).
@@ -300,6 +336,11 @@ mod tests {
         subscribe_call_count: usize,
         subscribed_channels: Vec<String>,
         subscribed_patterns: Vec<String>,
+        /// Blocked-subscribe mode: when set (with `blocked_notify`),
+        /// `subscribe`/`psubscribe` record into `blocked_events` and park on
+        /// `blocked_notify` instead of returning immediately.
+        blocked_events: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+        blocked_notify: Option<Arc<tokio::sync::Notify>>,
     }
 
     impl FakePubSubIo {
@@ -314,6 +355,8 @@ mod tests {
                 subscribe_call_count: 0,
                 subscribed_channels: Vec::new(),
                 subscribed_patterns: Vec::new(),
+                blocked_events: None,
+                blocked_notify: None,
             }
         }
 
@@ -322,6 +365,21 @@ mod tests {
         fn with_messages_per_connect(mut self, batches: Vec<Vec<Msg>>) -> Self {
             self.message_batches = batches;
             self.tail = TailBehavior::Pend;
+            self
+        }
+
+        /// Blocked-subscribe mode: `subscribe(ch)` pushes `format!("ch:{ch}")`
+        /// to `events` then awaits `notify`; `psubscribe(pat)` pushes
+        /// `format!("pat:{pat}")` then awaits `notify`. The fake is owned by
+        /// the spawned session, so call observation goes through the shared
+        /// `events` sink.
+        fn with_blocked_subscribes(
+            mut self,
+            events: Arc<std::sync::Mutex<Vec<String>>>,
+            notify: Arc<tokio::sync::Notify>,
+        ) -> Self {
+            self.blocked_events = Some(events);
+            self.blocked_notify = Some(notify);
             self
         }
     }
@@ -346,12 +404,26 @@ mod tests {
         async fn subscribe(&mut self, ch: &str) -> Result<(), CamelError> {
             self.subscribe_call_count += 1;
             self.subscribed_channels.push(ch.to_string());
+            if let (Some(events), Some(notify)) = (&self.blocked_events, &self.blocked_notify) {
+                events
+                    .lock()
+                    .expect("events mutex")
+                    .push(format!("ch:{ch}"));
+                notify.notified().await;
+            }
             Ok(())
         }
 
         async fn psubscribe(&mut self, pat: &str) -> Result<(), CamelError> {
             self.subscribe_call_count += 1;
             self.subscribed_patterns.push(pat.to_string());
+            if let (Some(events), Some(notify)) = (&self.blocked_events, &self.blocked_notify) {
+                events
+                    .lock()
+                    .expect("events mutex")
+                    .push(format!("pat:{pat}"));
+                notify.notified().await;
+            }
             Ok(())
         }
 
@@ -413,6 +485,7 @@ mod tests {
             &["ev*".into()],
             &fast_policy(2),
             &cancel,
+            None,
             |_| async {},
         )
         .await;
@@ -447,6 +520,7 @@ mod tests {
             &[],
             &fast_policy(3),
             &cancel,
+            None,
             |_| async {},
         )
         .await;
@@ -471,6 +545,7 @@ mod tests {
             &[],
             &fast_policy(1),
             &cancel,
+            None,
             |_| async {},
         )
         .await;
@@ -505,6 +580,7 @@ mod tests {
             &[],
             &fast_policy(3),
             &cancel,
+            None,
             |_| async {},
         )
         .await;
@@ -558,6 +634,7 @@ mod tests {
             &[],
             &fast_policy(10),
             &cancel,
+            None,
             deliver,
         )
         .await
@@ -611,6 +688,7 @@ mod tests {
             &[],
             &fast_policy(10),
             &cancel,
+            None,
             deliver,
         )
         .await
@@ -624,6 +702,256 @@ mod tests {
         assert_eq!(
             io.subscribe_call_count, 2,
             "subscriptions replayed per session"
+        );
+    }
+
+    // Task 1.2 (rc-3ckqr): readiness must fire only after the first
+    // subscribe acknowledgement — an eager mark_ready opened a window where
+    // start() returned before the server had registered the SUBSCRIBE, and a
+    // publish landing in that window was lost forever (pubsub has no
+    // replay). The ready hook cancels the token so the session ends
+    // deterministically; the pended stream is never relied upon.
+    #[tokio::test]
+    async fn ready_fires_after_first_subscribe_ack() {
+        let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
+        let mut io = FakePubSubIo::new(vec![Ok(())])
+            .with_messages_per_connect(vec![vec![fake_msg("ch", "m1")]]);
+        let cancel = CancellationToken::new();
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let flag = ready.clone();
+        let cancel_in_ready = cancel.clone();
+        let on_ready = Some(Box::new(move || {
+            flag.store(true, Ordering::SeqCst);
+            cancel_in_ready.cancel();
+        }) as Box<dyn FnOnce() + Send>);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            pubsub_session(
+                &topology,
+                &mut io,
+                &["ch".into()],
+                &["p*".into()],
+                &fast_policy(10),
+                &cancel,
+                on_ready,
+                |_| async {},
+            ),
+        )
+        .await
+        .expect("session must terminate within 5s");
+
+        assert!(
+            result.is_ok(),
+            "session cancelled from the ready hook must end Ok: {:?}",
+            result.err()
+        );
+        assert!(
+            ready.load(Ordering::SeqCst),
+            "on_ready must fire after the first subscribe ack"
+        );
+    }
+
+    // Task 1.2 (rc-3ckqr): readiness stays Pending while ANY subscribe ack
+    // is outstanding. Blocked-subscribe mode parks each subscribe/psubscribe
+    // on a shared Notify: with the channel ack released but the pattern ack
+    // still parked, the ready flag must stay false; releasing the pattern
+    // ack is what lets readiness fire. subscribe_all does channels THEN
+    // patterns — the staged release avoids deadlock.
+    #[tokio::test]
+    async fn ready_stays_pending_until_subscribe_acks_release() {
+        let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
+        let events: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        // connect Ok, stream pends (empty batch, Pend tail).
+        let mut io = FakePubSubIo::new(vec![Ok(())]).with_messages_per_connect(vec![Vec::new()]);
+        io = io.with_blocked_subscribes(events.clone(), notify.clone());
+        let cancel = CancellationToken::new();
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let flag = ready.clone();
+        let on_ready =
+            Some(Box::new(move || flag.store(true, Ordering::SeqCst)) as Box<dyn FnOnce() + Send>);
+
+        let session_cancel = cancel.clone();
+        let session = tokio::spawn(async move {
+            pubsub_session(
+                &topology,
+                &mut io,
+                &["ch".into()],
+                &["p*".into()],
+                &fast_policy(10),
+                &session_cancel,
+                on_ready,
+                |_| async {},
+            )
+            .await
+        });
+
+        // Channel subscribe parked; pattern call cannot have happened yet.
+        eventually(Duration::from_secs(5), || {
+            events
+                .lock()
+                .expect("events mutex")
+                .iter()
+                .any(|e| e == "ch:ch")
+        })
+        .await;
+        assert!(
+            !ready.load(Ordering::SeqCst),
+            "ready must stay pending while the channel ack is outstanding"
+        );
+
+        // Release the channel ack → the pattern subscribe parks next.
+        notify.notify_one();
+        eventually(Duration::from_secs(5), || {
+            events
+                .lock()
+                .expect("events mutex")
+                .iter()
+                .any(|e| e == "pat:p*")
+        })
+        .await;
+        assert!(
+            !ready.load(Ordering::SeqCst),
+            "ready must stay pending while the pattern ack is outstanding"
+        );
+
+        // Release the pattern ack → connect_and_subscribe returns Ok →
+        // readiness fires. Wait for the flag before cancelling: cancelling
+        // earlier would race the session's post-ack cancellation guard.
+        notify.notify_one();
+        eventually(Duration::from_secs(5), || ready.load(Ordering::SeqCst)).await;
+
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(5), session)
+            .await
+            .expect("session must terminate within 5s")
+            .expect("spawned session must not panic");
+        assert!(
+            result.is_ok(),
+            "cancelled session must end Ok: {:?}",
+            result.err()
+        );
+        assert!(
+            ready.load(Ordering::SeqCst),
+            "on_ready must fire once every subscribe ack is released"
+        );
+    }
+
+    // Task 1.2 (rc-3ckqr): on_ready is fire-once. A mid-session stream end
+    // forces a reconnect plus subscription replay; the replay must NOT
+    // re-signal readiness.
+    #[tokio::test]
+    async fn ready_fires_exactly_once_across_reconnect() {
+        let topology = FakeTopology::addrs(vec!["redis://a:6379".into(), "redis://b:6379".into()]);
+        // Stream ends after batch 1 → one reconnect + re-subscribe; the
+        // second batch's delivery cancels the token.
+        let mut io = FakePubSubIo::new(vec![Ok(()), Ok(())]).with_messages_per_connect(vec![
+            vec![fake_msg("ch", "m1")],
+            vec![fake_msg("ch", "m2")],
+        ]);
+        let cancel = CancellationToken::new();
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let counter = fired.clone();
+        let on_ready = Some(Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }) as Box<dyn FnOnce() + Send>);
+
+        // Cancel only on the SECOND delivery: batch 1 must drain fully so
+        // the stream end wins the session select deterministically (if m1
+        // cancelled, the select could pick the cancel branch before the
+        // next_msg poll observes the stream end, skipping the reconnect).
+        let cancel_in_deliver = cancel.clone();
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let count = delivered.clone();
+        let deliver = move |_msg: Msg| {
+            let count = count.clone();
+            let cancel = cancel_in_deliver.clone();
+            async move {
+                if count.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                    cancel.cancel();
+                }
+            }
+        };
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            pubsub_session(
+                &topology,
+                &mut io,
+                &["ch".into()],
+                &[],
+                &fast_policy(10),
+                &cancel,
+                on_ready,
+                deliver,
+            ),
+        )
+        .await
+        .expect("session must terminate within 5s")
+        .expect("cancelled session must end Ok");
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "on_ready must fire on the first connect only, never on the re-subscribe"
+        );
+        assert_eq!(
+            io.connect_count, 2,
+            "stream end after batch 1 must force exactly one reconnect"
+        );
+        assert_eq!(
+            io.subscribe_call_count, 2,
+            "channel must be re-subscribed once after the reconnect"
+        );
+    }
+
+    // Task 1.2 (rc-3ckqr): the pubsub reconnect path's budget-exhaustion
+    // error must classify transient (ADR-0012) so the consumer Err-branch
+    // fires the transient-budget metric and supervision restarts the route
+    // (ADR-0007) — startup stays fail-fast, not fail-silent.
+    #[tokio::test]
+    async fn reconnect_budget_exhaustion_is_transient() {
+        let topology = FakeTopology::new(vec![Err(CamelError::ProcessorError(
+            "connection refused".into(),
+        ))]);
+        let mut io = FakePubSubIo::new(vec![]);
+        let cancel = CancellationToken::new();
+        let policy = NetworkRetryPolicy {
+            enabled: true,
+            max_attempts: 2,
+            initial_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            max_delay: Duration::from_millis(1),
+            jitter_factor: 0.0,
+            max_attempts_absolute: None,
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            pubsub_session(
+                &topology,
+                &mut io,
+                &["ch".into()],
+                &[],
+                &policy,
+                &cancel,
+                None,
+                |_| async {},
+            ),
+        )
+        .await
+        .expect("session must terminate within 5s");
+
+        let err = result.expect_err("budget exhaustion must return Err");
+        assert!(
+            is_transient_redis_error(&err),
+            "pubsub budget-exhaustion error must classify as transient: {}",
+            err
         );
     }
 }

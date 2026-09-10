@@ -65,6 +65,14 @@ Auto-enables TLS for non-loopback hosts when nothing explicit is set. Precedence
 
 Fail-closed TLS feature guard on the single client-building choke point (producer, PubSub consumer, queue consumer, health check, sentinel). Two TLS sources trip it: the endpoint's resolved `ssl` flag, and a `rediss://` sentinel node URL in a structured sentinel block (which encrypts at the redis-crate layer regardless of the endpoint `ssl` flag). When either requires TLS but the `tls` cargo feature is absent, `topology_from_config` returns a `Config` error at endpoint creation. The messages avoid transient-classifier words (no "connection") so `is_transient_redis_error` never retries them (ADR-0012), and embed no host or URL (ADR-0051). Before bd rc-ayy11 the PubSub path surfaced the redis crate's raw `InvalidClientConfig` feature error inside the bounded reconnect loop.
 
+### `tls_ca_cert` trust (`fn read_standalone_ca_pem`, topology.rs; `StandaloneTopology::new_with_ca` + `Client::build_with_tls`)
+
+`tls_ca_cert` is a global-config PEM file path, not a URI parameter. `apply_defaults()` copies it onto each endpoint; an endpoint-level value wins. The read gate is `fn read_standalone_ca_pem`: it returns `None` unless the endpoint is standalone AND TLS-enabled, so a plaintext endpoint ignores the setting without filesystem access. `fn build_standalone_topology`, called from the `TopologyKind::Standalone` arm of `fn topology_from_config`, hands the PEM bytes to `StandaloneTopology::new_with_ca`; `resolve()` passes them as `TlsCertificates::root_cert` to `Client::build_with_tls`, so the server is verified against this root with no insecure bypass.
+
+An unreadable file fails closed: `read_standalone_ca_pem` returns a `Config` error naming the path, before any connect. The message avoids transient-classifier words by design, but it embeds the path, so a path that itself contains a classifier word (for example `readonly`) can still be misclassified by `is_transient_redis_error` (bd rc-ezi0f).
+
+Scope is standalone-only. Sentinel endpoints ignore `tls_ca_cert`; CA trust on the sentinel surface is follow-up bd rc-hbde6.
+
 ### Sentinel node TLS propagation (`fn sentinel_node_conn_info`, topology.rs, bd rc-ayy11)
 
 `rediss-sentinel://` endpoints set `TlsMode::Secure` on `SentinelNodeConnectionInfo`, so the resolved master connections use TLS too — not only the sentinel discovery hop. `redis::TlsMode` is not feature-gated; the feature-absent case is rejected earlier by `validate_tls` at the choke point.

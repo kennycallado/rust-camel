@@ -44,28 +44,71 @@ pub trait RedisTopology: Send + Sync {
 pub struct StandaloneTopology {
     addr: redis::ConnectionAddr,
     settings: redis::RedisConnectionInfo,
+    /// PEM-encoded CA bundle trusted as root for this connection; `None`
+    /// uses the system truststore. Gated on `tls` because both the store
+    /// and the read paths are tls-only, so a feature-less build carries no
+    /// dead field.
+    #[cfg(feature = "tls")]
+    ca_pem: Option<Vec<u8>>,
 }
 
 impl StandaloneTopology {
     /// Create a new standalone topology for `config`.
     pub fn new(config: &RedisEndpointConfig) -> Self {
-        let host = config.host.clone().unwrap_or_else(|| "localhost".into());
-        let port = config.port.unwrap_or(6379);
-        let addr = if config.is_ssl_enabled() {
-            redis::ConnectionAddr::TcpTls {
-                host,
-                port,
-                insecure: false,
-                tls_params: None,
-            }
-        } else {
-            redis::ConnectionAddr::Tcp(host, port)
-        };
+        #[cfg(feature = "tls")]
+        let ca_pem = None;
+        let (addr, settings) = standalone_conn_parts(config);
         Self {
             addr,
-            settings: node_redis_connection_info(config),
+            settings,
+            #[cfg(feature = "tls")]
+            ca_pem,
         }
     }
+
+    /// Create a standalone topology that trusts `ca_pem` (PEM bytes) as the
+    /// root certificate for its TLS connections; `None` keeps the system
+    /// truststore, matching [`StandaloneTopology::new`]. Requires the `tls`
+    /// feature.
+    #[cfg(feature = "tls")]
+    pub(crate) fn new_with_ca(config: &RedisEndpointConfig, ca_pem: Option<Vec<u8>>) -> Self {
+        let (addr, settings) = standalone_conn_parts(config);
+        Self {
+            addr,
+            settings,
+            ca_pem,
+        }
+    }
+
+    /// PEM CA bundle stored as TLS root trust for this topology, if any.
+    /// Test accessor: `topology_from_config` returns `Arc<dyn RedisTopology>`,
+    /// which cannot expose it, so it is only compiled into test builds
+    /// (otherwise the non-test tls build would flag it as dead code).
+    #[cfg(all(test, feature = "tls"))]
+    pub(crate) fn ca_pem(&self) -> Option<&[u8]> {
+        self.ca_pem.as_deref()
+    }
+}
+
+/// Build the address and node settings for a standalone connection from the
+/// endpoint config. Shared by both constructors so the tls and feature-less
+/// builds stay structurally identical.
+fn standalone_conn_parts(
+    config: &RedisEndpointConfig,
+) -> (redis::ConnectionAddr, redis::RedisConnectionInfo) {
+    let host = config.host.clone().unwrap_or_else(|| "localhost".into());
+    let port = config.port.unwrap_or(6379);
+    let addr = if config.is_ssl_enabled() {
+        redis::ConnectionAddr::TcpTls {
+            host,
+            port,
+            insecure: false,
+            tls_params: None,
+        }
+    } else {
+        redis::ConnectionAddr::Tcp(host, port)
+    };
+    (addr, node_redis_connection_info(config))
 }
 
 #[async_trait]
@@ -79,6 +122,24 @@ impl RedisTopology for StandaloneTopology {
                 CamelError::ProcessorError(format!("failed to build Redis connection info: {e}"))
             })?
             .set_redis_settings(self.settings.clone());
+
+        // TLS with a configured CA: build the client with the stored PEM as
+        // root trust instead of the system truststore. `TcpTls` renders as a
+        // `rediss://` conn info, which `build_with_tls` requires.
+        // `TlsCertificates::root_cert` is already `Option<Vec<u8>>`, so the
+        // cloned field assigns directly.
+        #[cfg(feature = "tls")]
+        if matches!(self.addr, redis::ConnectionAddr::TcpTls { .. }) && self.ca_pem.is_some() {
+            return Client::build_with_tls(
+                info,
+                redis::TlsCertificates {
+                    client_tls: None,
+                    root_cert: self.ca_pem.clone(),
+                },
+            )
+            .map_err(|e| CamelError::ProcessorError(format!("failed to open Redis client: {e}")));
+        }
+
         Client::open(info)
             .map_err(|e| CamelError::ProcessorError(format!("failed to open Redis client: {e}")))
     }
@@ -338,9 +399,19 @@ pub fn topology_from_config(
     // of the redis crate's InvalidClientConfig inside a retry loop.
     config.validate_tls()?;
     match &config.topology_kind {
-        TopologyKind::Standalone => Ok(Arc::new(StandaloneTopology::new(config))),
+        TopologyKind::Standalone => {
+            // The CA file is read ONLY here and ONLY for a TLS-enabled
+            // standalone endpoint: a configured CA on a plaintext endpoint
+            // or a sentinel endpoint is ignored without any filesystem
+            // access (CA trust on the sentinel surface is follow-up bd
+            // rc-hbde6). Feature-less builds never reach the CA path —
+            // validate_tls above already rejected TLS endpoints.
+            build_standalone_topology(config)
+        }
         #[cfg(feature = "sentinel")]
         TopologyKind::Sentinel(s) => {
+            // CA trust on the sentinel surface is follow-up bd rc-hbde6; a
+            // configured tls_ca_cert is ignored for sentinel endpoints.
             let sentinel_creds = Some((s.username.clone(), s.password.clone()))
                 .filter(|(u, p)| u.is_some() || p.is_some())
                 .map(|(u, p)| (u.unwrap_or_default(), p.unwrap_or_default()));
@@ -362,6 +433,51 @@ pub fn topology_from_config(
             "cluster topology not yet implemented (REDIS-012)".into(),
         )),
     }
+}
+
+/// Build the standalone [`RedisTopology`] for `config`. With the `tls`
+/// feature the configured CA (`tls_ca_cert`) is read for TLS-enabled
+/// endpoints and handed to [`StandaloneTopology::new_with_ca`]; feature-less
+/// builds use the default constructor (no CA path is ever needed there —
+/// `validate_tls` rejects TLS endpoints first).
+#[cfg(feature = "tls")]
+fn build_standalone_topology(
+    config: &RedisEndpointConfig,
+) -> Result<Arc<dyn RedisTopology>, CamelError> {
+    let ca_pem = read_standalone_ca_pem(config)?;
+    Ok(Arc::new(StandaloneTopology::new_with_ca(config, ca_pem)))
+}
+
+#[cfg(not(feature = "tls"))]
+fn build_standalone_topology(
+    config: &RedisEndpointConfig,
+) -> Result<Arc<dyn RedisTopology>, CamelError> {
+    Ok(Arc::new(StandaloneTopology::new(config)))
+}
+
+/// Read the configured TLS CA bundle for a standalone endpoint.
+///
+/// Returns `None` unless the endpoint is TLS-enabled AND `tls_ca_cert` is
+/// set — a configured CA on a plaintext endpoint is ignored without any
+/// filesystem access (the sentinel surface is out of scope, follow-up bd
+/// rc-hbde6). An unreadable file fails closed with a `Config` error naming
+/// the path; the message never contains file contents and deliberately
+/// avoids transient-classifier words so `is_transient_redis_error` never
+/// retries it (ADR-0012).
+#[cfg(feature = "tls")]
+fn read_standalone_ca_pem(config: &RedisEndpointConfig) -> Result<Option<Vec<u8>>, CamelError> {
+    let Some(path) = config.tls_ca_cert.as_deref() else {
+        return Ok(None);
+    };
+    if !config.is_ssl_enabled() {
+        return Ok(None);
+    }
+    let pem = std::fs::read(path).map_err(|e| {
+        CamelError::Config(format!(
+            "failed to read the TLS CA certificate file '{path}': {e}"
+        ))
+    })?;
+    Ok(Some(pem))
 }
 
 /// Build the [`redis::RedisConnectionInfo`] for a Redis node (not the
@@ -400,378 +516,5 @@ fn sentinel_node_conn_info(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn standalone_topology_resolve_returns_fixed_client() {
-        let cfg = RedisEndpointConfig::from_uri("redis://127.0.0.1:6379").expect("valid uri");
-        let topology = StandaloneTopology::new(&cfg);
-
-        let r1 = topology.resolve(ServerKind::Master).await;
-        let r2 = topology.resolve(ServerKind::Master).await;
-
-        let c1 = r1.expect("first resolve should succeed");
-        let c2 = r2.expect("second resolve should succeed");
-        assert_eq!(
-            c1.get_connection_info().addr().to_string(),
-            "127.0.0.1:6379"
-        );
-        assert_eq!(
-            c2.get_connection_info().addr().to_string(),
-            "127.0.0.1:6379"
-        );
-    }
-
-    #[tokio::test]
-    async fn standalone_topology_carries_configured_db() {
-        let cfg = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&db=2")
-            .expect("valid uri");
-        let topology = StandaloneTopology::new(&cfg);
-
-        let client = topology
-            .resolve(ServerKind::Master)
-            .await
-            .expect("resolve should succeed");
-
-        assert_eq!(client.get_connection_info().redis_settings().db(), 2);
-    }
-
-    #[tokio::test]
-    async fn standalone_topology_default_db_zero() {
-        let cfg =
-            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").expect("valid uri");
-        let topology = StandaloneTopology::new(&cfg);
-
-        let client = topology
-            .resolve(ServerKind::Master)
-            .await
-            .expect("resolve should succeed");
-
-        assert_eq!(client.get_connection_info().redis_settings().db(), 0);
-    }
-
-    #[tokio::test]
-    async fn standalone_topology_tls_addr_keeps_db() {
-        let cfg = RedisEndpointConfig::from_uri("rediss://localhost:6380?command=GET&db=3")
-            .expect("valid uri");
-        let topology = StandaloneTopology::new(&cfg);
-
-        let client = topology
-            .resolve(ServerKind::Master)
-            .await
-            .expect("resolve should succeed");
-
-        let info = client.get_connection_info();
-        assert!(
-            matches!(
-                info.addr(),
-                redis::ConnectionAddr::TcpTls {
-                    insecure: false,
-                    ..
-                }
-            ),
-            "expected TcpTls with insecure=false, got {:?}",
-            info.addr()
-        );
-        assert_eq!(info.redis_settings().db(), 3);
-    }
-
-    #[tokio::test]
-    #[cfg(not(feature = "tls"))]
-    async fn topology_from_config_rejects_tls_without_feature() {
-        let mut cfg = RedisEndpointConfig::from_uri("rediss://redis-prod:6379?command=GET")
-            .expect("valid uri");
-        cfg.resolve_defaults();
-        let result = topology_from_config(&cfg);
-        assert!(
-            matches!(result, Err(CamelError::Config(_))),
-            "topology_from_config must fail closed with a Config error when the \
-             endpoint resolved to TLS but the tls cargo feature is absent"
-        );
-    }
-
-    #[tokio::test]
-    async fn topology_from_config_accepts_plaintext_without_feature() {
-        let mut cfg =
-            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").expect("valid uri");
-        cfg.resolve_defaults();
-        assert!(topology_from_config(&cfg).is_ok());
-    }
-
-    #[tokio::test]
-    async fn standalone_topology_password_raw() {
-        let cfg =
-            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&password=p@ss:word")
-                .expect("valid uri");
-        let topology = StandaloneTopology::new(&cfg);
-
-        let client = topology
-            .resolve(ServerKind::Master)
-            .await
-            .expect("resolve should succeed");
-
-        assert_eq!(
-            client.get_connection_info().redis_settings().password(),
-            Some("p@ss:word")
-        );
-    }
-
-    #[tokio::test]
-    async fn fake_topology_returns_address_sequence() {
-        let topology = FakeTopology::addrs(vec!["redis://a:6379".into(), "redis://b:6379".into()]);
-
-        let r1 = topology.resolve(ServerKind::Master).await;
-        let r2 = topology.resolve(ServerKind::Master).await;
-        let r3 = topology.resolve(ServerKind::Master).await;
-
-        let c1 = r1.expect("first resolve should succeed");
-        let c2 = r2.expect("second resolve should succeed");
-        let c3 = r3.expect("third resolve should succeed (reuse last)");
-        assert_eq!(c1.get_connection_info().addr().to_string(), "a:6379");
-        assert_eq!(c2.get_connection_info().addr().to_string(), "b:6379");
-        assert_eq!(c3.get_connection_info().addr().to_string(), "b:6379");
-        assert_eq!(topology.resolve_call_count(), 3);
-    }
-
-    #[tokio::test]
-    async fn fake_topology_returns_programmed_error() {
-        let topology = FakeTopology::new(vec![Err(CamelError::ProcessorError("no master".into()))]);
-
-        let result = topology.resolve(ServerKind::Master).await;
-
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("no master"),
-            "error should contain 'no master'"
-        );
-        assert_eq!(topology.resolve_call_count(), 1);
-    }
-
-    #[test]
-    fn embed_sentinel_creds_injects_credentials() {
-        let result = embed_sentinel_creds("redis://s-a:26379", &Some(("su".into(), "sp".into())))
-            .expect("tcp node with creds should embed");
-        assert!(
-            result.contains("su:sp"),
-            "expected credentials in URL, got: {result}"
-        );
-        assert!(
-            result.contains("s-a:26379"),
-            "expected host:port preserved, got: {result}"
-        );
-    }
-
-    #[test]
-    fn embed_sentinel_creds_preserves_node_when_no_creds() {
-        let node = "redis://s-b:26379";
-        let result =
-            embed_sentinel_creds(node, &None).expect("no creds should pass the node through");
-        assert_eq!(result, node);
-    }
-
-    // M2 fail-closed: an unparsable node with credentials configured must
-    // return Err (naming the node, redacted), NOT the node unchanged — the
-    // old silent pass-through dropped the credentials and auth failed later.
-    #[test]
-    fn embed_sentinel_creds_fails_closed_on_unparsable_node() {
-        let result = embed_sentinel_creds("", &Some(("su".into(), "sp".into())));
-        let err = result.expect_err("empty node URL must fail closed");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("cannot inject sentinel credentials"),
-            "error must name the failure: {msg}"
-        );
-    }
-
-    // M2 fail-closed: unix-socket nodes have no URL form to rewrite with
-    // credentials — fail closed instead of silently dropping them.
-    #[test]
-    fn embed_sentinel_creds_fails_closed_on_unix_socket() {
-        let result =
-            embed_sentinel_creds("unix:///tmp/redis.sock", &Some(("su".into(), "sp".into())));
-        let err = result.expect_err("unix node with creds must fail closed");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unsupported address kind"),
-            "error must name the unsupported kind: {msg}"
-        );
-        assert!(
-            !msg.contains("sp"),
-            "error must not leak the sentinel secret: {msg}"
-        );
-    }
-
-    // Redaction helper: any pre-existing userinfo is stripped for logs/errors.
-    #[test]
-    fn redact_userinfo_strips_credentials() {
-        assert_eq!(
-            redact_userinfo("redis://user:pass@host:26379"),
-            "redis://host:26379"
-        );
-        assert_eq!(redact_userinfo("redis://host:26379"), "redis://host:26379");
-    }
-
-    #[cfg(feature = "sentinel")]
-    #[test]
-    fn sentinel_node_conn_info_carries_username() {
-        use crate::sentinel_config::SentinelConfig;
-
-        let config = RedisEndpointConfig {
-            host: None,
-            port: None,
-            command: crate::config::RedisCommand::Set,
-            channels: vec![],
-            key: None,
-            timeout: 1,
-            username: Some("svc".to_string()),
-            password: Some("p".to_string()),
-            db: 2,
-            ssl: None,
-            reconnect: camel_component_api::NetworkRetryPolicy::default(),
-            connection_timeout_secs: 10,
-            topology_kind: crate::sentinel_config::TopologyKind::Sentinel(
-                SentinelConfig::default()
-                    .with_nodes(vec!["redis://s-a:26379".into()])
-                    .with_master_name("orders"),
-            ),
-        };
-
-        // sentinel_node_conn_info embeds the redis settings; redis 1.6.0 has no
-        // public getter on SentinelNodeConnectionInfo, so assert on the exact
-        // RedisConnectionInfo it embeds (via its getters) plus Some(..) on the
-        // wrapper itself.
-        assert!(sentinel_node_conn_info(&config).is_some());
-        let redis_info = node_redis_connection_info(&config);
-        assert_eq!(redis_info.username(), Some("svc"));
-        assert_eq!(redis_info.password(), Some("p"));
-        assert_eq!(redis_info.db(), 2);
-    }
-
-    #[cfg(feature = "sentinel")]
-    #[test]
-    fn sentinel_topology_rejects_empty_nodes() {
-        let result = SentinelTopology::new(vec![], "m".into(), None, None);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("sentinel requires"),
-            "error should mention sentinel requires"
-        );
-    }
-
-    #[cfg(feature = "sentinel")]
-    #[test]
-    fn sentinel_topology_rejects_empty_master_name() {
-        let result = SentinelTopology::new(vec!["redis://s:26379".into()], "".into(), None, None);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("sentinel requires"),
-            "error should mention sentinel requires"
-        );
-    }
-
-    #[test]
-    fn embed_sentinel_creds_keeps_credentials_separate() {
-        // Sentinel creds and node creds must not cross-contaminate: injecting
-        // one pair on a node must not leak the other pair.
-        let sentinel = embed_sentinel_creds("redis://s-a:26379", &Some(("su".into(), "sp".into())))
-            .expect("tcp node should embed");
-        let node = embed_sentinel_creds("redis://s-a:26379", &Some(("nu".into(), "np".into())))
-            .expect("tcp node should embed");
-        assert!(
-            sentinel.contains("su:sp"),
-            "expected sentinel creds in URL, got: {sentinel}"
-        );
-        assert!(
-            node.contains("nu:np"),
-            "expected node creds in URL, got: {node}"
-        );
-        assert!(
-            !sentinel.contains("nu:np"),
-            "sentinel URL leaked node creds: {sentinel}"
-        );
-        assert!(
-            !node.contains("su:sp"),
-            "node URL leaked sentinel creds: {node}"
-        );
-    }
-
-    // redis-rs only parses `rediss://` URLs when a TLS feature is enabled, so
-    // this test needs the `tls` feature to exercise the TLS-preserving path.
-    #[cfg(feature = "tls")]
-    #[test]
-    fn embed_sentinel_creds_preserves_tls_scheme() {
-        // rediss:// must stay TLS after cred injection.
-        let result = embed_sentinel_creds("rediss://s-a:26379", &Some(("su".into(), "sp".into())))
-            .expect("tls node should embed");
-        assert!(
-            result.starts_with("rediss://"),
-            "expected rediss scheme preserved, got: {result}"
-        );
-        assert!(
-            result.contains("su:sp"),
-            "expected creds in URL, got: {result}"
-        );
-        assert!(
-            result.contains("s-a:26379"),
-            "expected host:port preserved, got: {result}"
-        );
-    }
-
-    #[test]
-    fn embed_sentinel_creds_percent_encodes_special_chars() {
-        let result = embed_sentinel_creds(
-            "redis://s-a:26379",
-            &Some(("u".into(), "p@ss:word/evil".into())),
-        )
-        .expect("tcp node should embed");
-        // Verify percent-encoding of special characters via NON_ALPHANUMERIC
-        assert!(
-            result.contains("p%40ss"),
-            "expected @ encoded as %40, got: {result}"
-        );
-        assert!(
-            result.contains("%3Aword"),
-            "expected : encoded as %3A, got: {result}"
-        );
-        assert!(
-            result.contains("%2Fevil"),
-            "expected / encoded as %2F, got: {result}"
-        );
-        // Round-trip: parse back and verify original creds
-        let info = result
-            .into_connection_info()
-            .expect("should parse back as valid connection info");
-        assert_eq!(
-            info.redis_settings().password(),
-            Some("p@ss:word/evil"),
-            "round-trip password mismatch"
-        );
-        assert_eq!(
-            info.redis_settings().username(),
-            Some("u"),
-            "round-trip username mismatch"
-        );
-    }
-
-    #[cfg(feature = "sentinel")]
-    #[tokio::test]
-    async fn sentinel_topology_replica_resolve_errors() {
-        let topology =
-            SentinelTopology::new(vec!["redis://s:26379".into()], "m".into(), None, None)
-                .expect("construction should succeed without network");
-        let result = topology.resolve(ServerKind::Replica).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("replica reads not yet supported"),
-            "error should mention replica reads, got: {err}"
-        );
-    }
-}
+#[path = "topology_tests.rs"]
+mod tests;
