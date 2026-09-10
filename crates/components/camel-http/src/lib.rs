@@ -8596,9 +8596,16 @@ mod tests {
     ) {
         use camel_component_api::ConsumerContext;
 
+        // ADR-0070 staged-listener law: bind, KEEP the socket, and stage it
+        // in the ServerRegistry; the consumer's `get_or_spawn` consumes the
+        // staged listener, so the port never returns to the ephemeral pool
+        // between probe and serve (no bind-read-drop race).
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        ServerRegistry::global()
+            .stage_listener(listener)
+            .await
+            .expect("stage consumer test listener");
 
         let consumer_cfg = HttpServerConfig {
             scheme: "http".to_string(),
@@ -8618,7 +8625,23 @@ mod tests {
         let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
 
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Readiness without a wall-clock sleep: poll the registry entry
+        // live, then yield so the spawned `start()` runs to completion of
+        // route registration (that tail path has no pending timers — only
+        // the registry lock — so scheduler yields order it deterministically
+        // behind this loop).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while ServerRegistry::global().bound_addr("127.0.0.1", port).is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "consumer server did not become ready on port {port}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
 
         (port, rx, token)
     }
