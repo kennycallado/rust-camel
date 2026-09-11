@@ -348,7 +348,7 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
 
     async fn handle_boundary(
         &self,
-        _kind: BoundaryKind,
+        boundary_kind: BoundaryKind,
         mut exchange: Exchange,
         error: CamelError,
     ) -> Result<Exchange, CamelError> {
@@ -359,6 +359,20 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
         //   (Continued at boundary = Propagate — no next step to continue to)
         let policy = self.match_policy(&error);
         let (disposition, producer) = self.resolve_producer(policy);
+
+        // rc-fu1of: a non-matching policy with no DLC silently propagates —
+        // the operator sees "handler never ran" with no signal why. Emit a
+        // diagnostic naming the error kind so `kind:` vocabulary gaps are
+        // discoverable. debug! (not warn!): non-matching is an expected,
+        // selective-policy path, and this fires per failed exchange.
+        // (Parity with handle_step; boundary adds which gate raised the error.)
+        if policy.is_none() && producer.is_none() {
+            tracing::debug!(
+                boundary = ?boundary_kind,
+                kind = %error.variant_name(),
+                "no on_exceptions policy matched and no dead-letter channel configured; propagating error"
+            );
+        }
 
         // Run on_steps if present (shared logic with handle_step).
         // Skip on_steps for Propagate/Continued disposition to prevent double
@@ -1918,4 +1932,117 @@ mod tests {
             "DLC should still be called when disposition is Propagate"
         );
     }
+
+    #[test]
+    fn test_handle_boundary_no_match_emits_silent_propagate_diagnostic() {
+        let handler = DefaultRouteErrorHandler::new(None, vec![]);
+        let (result, captured) = capture_debugs(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(handler.handle_boundary(
+                    BoundaryKind::Security,
+                    make_exchange(),
+                    CamelError::Unauthorized("denied".into()),
+                ))
+        });
+        assert!(result.is_ok(), "boundary handler always returns Ok");
+        assert!(
+            captured.iter().any(|line| {
+                line.contains(
+                    "no on_exceptions policy matched and no dead-letter channel configured; \
+                     propagating error",
+                )
+            }),
+            "expected silent-propagate diagnostic, captured: {captured:?}"
+        );
+        assert!(
+            captured.iter().any(
+                |line| line.contains("boundary=Security") && line.contains("kind=Unauthorized")
+            ),
+            "diagnostic should name the boundary gate and error kind, captured: {captured:?}"
+        );
+    }
+
+    /// Test-only log capture: installs a minimal subscriber via
+    /// `tracing::subscriber::with_default` for the duration of one closure and
+    /// records DEBUG-level (and above) event fields. No global state — safe
+    /// under parallel test threads. (Mirror of camel-config's `log_capture`.)
+    mod log_capture {
+        use std::fmt;
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Record};
+        use tracing::{Event, Id, Level, Metadata, Subscriber};
+
+        type Sink = Arc<Mutex<Vec<String>>>;
+
+        struct Recorder {
+            events: Sink,
+            next_span_id: std::sync::atomic::AtomicU64,
+        }
+
+        struct FieldVisitor(String);
+
+        impl Visit for FieldVisitor {
+            fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+                if !self.0.is_empty() {
+                    self.0.push(' ');
+                }
+                let _ = fmt::write(&mut self.0, format_args!("{}={:?}", field.name(), value));
+            }
+        }
+
+        impl Subscriber for Recorder {
+            fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+                true
+            }
+
+            fn new_span(&self, _attrs: &Attributes<'_>) -> Id {
+                let id = self
+                    .next_span_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                Id::from_u64(id)
+            }
+
+            fn record(&self, _span: &Id, _values: &Record<'_>) {}
+            fn record_follows_from(&self, _span: &Id, _follows_from: &Id) {}
+
+            fn event(&self, event: &Event<'_>) {
+                if *event.metadata().level() >= Level::DEBUG {
+                    let mut visitor = FieldVisitor(String::new());
+                    event.record(&mut visitor);
+                    if let Ok(mut slot) = self.events.lock() {
+                        slot.push(visitor.0);
+                    }
+                }
+            }
+
+            fn enter(&self, _span: &Id) {}
+            fn exit(&self, _span: &Id) {}
+        }
+
+        /// Runs `f` with a capturing subscriber installed and returns
+        /// `(f's result, captured event field strings)` in emission order.
+        /// Rendered as `field="value"` pairs joined by spaces, with the
+        /// human-readable text under the standard `message` field.
+        pub(super) fn capture_debugs<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+            let sink: Sink = Default::default();
+            let recorder = Recorder {
+                events: Arc::clone(&sink),
+                next_span_id: Default::default(),
+            };
+            let out = tracing::subscriber::with_default(recorder, f);
+            let collected = sink
+                .lock()
+                .ok()
+                .map(|slot| slot.clone())
+                .unwrap_or_default();
+            (out, collected)
+        }
+    }
+
+    use log_capture::capture_debugs;
 }
