@@ -5,10 +5,10 @@
 rust-camel is pre-release software. Security fixes target the
 latest `main` only; there are no backports to older lines yet.
 
-| Version | Supported |
-| ------- | --------- |
-| `main` / latest release | ✅ |
-| Older releases | ❌ |
+| Version                 | Supported |
+| ----------------------- | --------- |
+| `main` / latest release | ✅        |
+| Older releases          | ❌        |
 
 ## Reporting a vulnerability
 
