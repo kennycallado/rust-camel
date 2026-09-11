@@ -415,19 +415,22 @@ executions on its single consumer thread.
 
 Wasm init placement: the JVM compiles the Xerces schema once per
 process at route start; the node counterpart forces the wasm module
-fetch + compile + first schema parse at a STARTUP SELF-TEST — one
-full validation BEFORE the marker. An invalid payload exits non-zero
-with `error: xsd validation failed: <xmllint validity error>` BEFORE
-the marker (the abort-before-marker convention of the t2-json node
-fixture's output assert), so the self-test doubles as the
-invalid-payload guard. Residual caveat: xmllint-wasm's API spawns a
-fresh worker thread per `validateXML` call (engine design, v5.3.0),
-so per-tick validation pays worker spin-up + wasm instantiation +
-schema parse every tick — measured ~42ms/tick on the dev host (first
-call ~47ms; the startup self-test absorbs the one-time module
-compile). That residual is part of this contender's honest
-per-validation cost and is NOT amortized the way Xerces' compiled
-`Schema` object is.
+compile at a STARTUP SELF-TEST — one full validation BEFORE the
+marker. An invalid payload exits non-zero with `error: xsd validation
+failed: <xmllint validity error>` BEFORE the marker (the
+abort-before-marker convention of the t2-json node fixture's output
+assert), so the self-test doubles as the invalid-payload guard.
+Fixture fix (rc-audm.1): xmllint-wasm 5.3.0's `validateXML` API
+spawns a fresh worker thread per call (engine design, v5.3.0), so
+calling it per tick paid worker boot + wasm instantiation + schema
+parse every tick — measured ~42ms/tick on the dev host (first call
+~47ms) while the validation itself is ~1ms. The fixture now owns ONE
+persistent worker: the wasm module is compiled once at the self-test
+and every tick instantiates from the cached module through the
+library's own emscripten factory and artifacts (`xmllint.wasm` /
+`xmllint-node.js` — engine behavior unchanged, no new dependency).
+Host re-run after the fix: ~1.1ms/tick p50 (shape-only, host node
+v22.23.2 — the official record is NOT re-run).
 
 Observed behavior (task 3.1 evidence, dev host, node v22.23.2):
 canonical payload → single marker
@@ -465,13 +468,17 @@ the harness build step) booted in front.
 Engine auditability: `xmllint-wasm` is libxml2 compiled to
 WebAssembly (chosen for buildability — no node-gyp — with wasm
 overhead as a documented caveat); the JVM counterparts run **Xerces-J
-2.12.2** in-process (spec §4.8 pin). Wasm init placement: the
-one-time module fetch + compile + first schema parse sits in the
-startup self-test BEFORE the marker — the node counterpart of the
-JVM's once-per-process Xerces schema compile at route start; the
-residual per-call worker spin-up is this engine's honest
-per-validation cost (see the node-native `xsd-validation-bridge.mjs`
-header for the measured numbers and the caveat).
+2.12.2** in-process (spec §4.8 pin). Wasm init placement: the wasm
+module compile sits in the startup self-test BEFORE the marker — the
+node counterpart of the JVM's once-per-process Xerces schema compile
+at route start. Fixture fix (rc-audm.1): the fixture owns ONE
+persistent worker — wasm module compiled once at the self-test, per
+tick an instantiation from the cached module through the library's
+own factory and artifacts; the library's `validateXML` API would
+instead re-boot a worker thread per tick (~42ms/tick while the
+validation itself is ~1ms — see the node-native
+`xsd-validation-bridge.mjs` header for the full extraction and the
+measured numbers).
 
 The module import, `fastify()` construction, route registration, and
 `await app.ready()` (`<scn>.mjs` — the full avvio boot, the same
