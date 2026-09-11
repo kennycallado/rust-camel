@@ -16,6 +16,14 @@
 
 mod scenarios;
 
+// bd rc-mr6u allocator axis: opt-in mimalloc global allocator, active only
+// when built with `--features alloc-mimalloc`. The default build (every
+// roster cell, every other scenario) keeps the system allocator and links
+// no allocator code at all.
+#[cfg(feature = "alloc-mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// The valid `argv[1]` values — printed on unknown/missing scenario.
 const SCENARIOS: [&str; 7] = [
     "startup-minimal",

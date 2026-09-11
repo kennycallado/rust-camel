@@ -38,6 +38,14 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 # CryptoProvider explicitly — camel-bridge / rcgen use rustls for ephemeral
 # mTLS to the bridge subprocess (same reason as those fixtures' Cargo.toml).
 rustls = { workspace = true }
+# bd rc-mr6u allocator axis: opt-in mimalloc global allocator, gated behind
+# the `alloc-mimalloc` feature. OFF by default — the default build keeps the
+# system allocator and no other cell's dependency graph changes. See
+# benchmarks/docs-investigation-strategy.md §2 rc-mr6u.
+mimalloc = { version = "0.1", optional = true }
+
+[features]
+alloc-mimalloc = ["dep:mimalloc"]
 
 # Test-only (ported from the split-aggregate fixture): drive 99 fragments
 # through the real `direct:agg-in` route for the incomplete-bucket test.
