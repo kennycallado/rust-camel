@@ -69,6 +69,19 @@ Existing evidence: camel-http's own pin
 re-pins that policy through the REST-registered consumer path and writes it
 into the spec.
 
+The requirement-level 413 claim (Content-Length over cap rejected before
+the stream opens) rests on the existing camel-http pin
+`test_413_when_content_length_exceeds_limit` (camel-http lib.rs ~7669):
+the pre-check sits on the shared axum dispatch path ahead of REST/api
+sender selection, so it covers the REST-registered consumers this change
+drives. The camel-dsl battery pins the other half of the request-cap
+contract — the chunked mid-stream cap — which had no REST-path pin.
+
+OpenAPI: no code change. L1's raw mapping (`type: string`,
+`format: binary` under the declared media keys, canon rest-dsl requirement
+"OpenAPI generation for REST bindings") already is the streaming
+representation for raw operations; this change adds no new mapping surface.
+
 ## Cancellation semantics (narrowed per pre-flight)
 
 Client disconnect is observable at two points: (a) the reply stream body is

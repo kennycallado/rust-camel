@@ -521,6 +521,10 @@ async fn chunked_request_over_cap_fails_closed() {
             err.to_string().contains("exceeds configured limit"),
             "consumption must fail with the cap error, got: {err}"
         );
+        assert!(
+            err.to_string().contains("of 12 bytes"),
+            "cap error must name the configured limit, got: {err}"
+        );
         envelope.exchange.input.body = Body::Bytes(Bytes::from_static(b"rejected"));
         envelope
             .exchange
@@ -655,7 +659,9 @@ async fn streamed_reply_over_max_response_body_succeeds() {
     let req = simple_request("GET", "/stream-cap", &[], b"");
     let (resp, _) = tokio::join!(http_roundtrip(port, req), async {
         let mut envelope = rx.recv().await.expect("envelope must arrive");
-        envelope.exchange.input.body = sized_reply_stream(32, "text/plain");
+        // Metadata content type deliberately differs from the route-supplied
+        // header so header-vs-metadata precedence stays observable.
+        envelope.exchange.input.body = sized_reply_stream(32, "application/octet-stream");
         envelope
             .exchange
             .input
@@ -664,6 +670,11 @@ async fn streamed_reply_over_max_response_body_succeeds() {
     });
 
     assert_eq!(resp.status, 200, "streamed reply must not be byte-capped");
+    assert_eq!(
+        resp.header("content-type"),
+        Some("text/plain"),
+        "route-supplied Content-Type must win over stream metadata"
+    );
     assert_eq!(resp.body.len(), 32, "every stream byte must reach the wire");
     assert!(resp.body.iter().all(|&b| b == b'x'));
     token.cancel();
@@ -772,5 +783,8 @@ async fn client_disconnect_during_streamed_reply_keeps_server_healthy() {
     assert_eq!(resp.body, Bytes::from_static(b"still-alive"));
 
     token.cancel();
-    let _ = handler.await;
+    tokio::time::timeout(Duration::from_secs(3), handler)
+        .await
+        .expect("handler task must finish after cancel")
+        .expect("handler task must not panic");
 }

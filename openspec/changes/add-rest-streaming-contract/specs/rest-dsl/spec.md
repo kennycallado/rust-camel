@@ -6,10 +6,11 @@ In binding `raw`, the request `Body::Stream` SHALL reach the first user step
 and every injected binding-independent step unconsumed: the lowered pipeline
 SHALL NOT poll, materialize, re-wrap, or cache the request stream, and SHALL
 NOT alter its `StreamMetadata`. The HTTP consumer SHALL record the request
-`Content-Type` and `Content-Length` in the `StreamMetadata` of the stream it
-installs on the exchange. A raw operation SHALL be free to reply with the
-original request stream or with a new `Body::Stream`, and both forms SHALL
-reach the wire intact under the response `Content-Type` the route supplies.
+`Content-Type` and `Content-Length`, when present, in the `StreamMetadata`
+of the stream it installs on the exchange. A raw operation SHALL be free to
+reply with the original request stream or with a new `Body::Stream`, and
+both forms SHALL reach the wire intact under the response `Content-Type`
+the route supplies.
 
 #### Scenario: pipeline never polls the request stream
 

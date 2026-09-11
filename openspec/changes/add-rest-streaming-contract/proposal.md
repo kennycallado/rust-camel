@@ -52,7 +52,8 @@ name. bd: rc-q8apn (discovered-from rc-01har).
 - No `camel-http` source changes (lease is `camel-dsl`; every pinned
   HTTP-side behavior already exists in code and is only being pinned).
 - No OpenAPI code changes — L1's binary schema mapping is already the
-  streaming representation; the new spec references it, it does not change.
+  streaming representation; design.md records the pointer to the L1
+  OpenAPI requirement that already covers raw streaming operations.
 - No `CONTEXT-MAP.md` or glossary edits (shared files outside the lease).
 - No JSON-mode changes: raw binding owns stream semantics.
 
