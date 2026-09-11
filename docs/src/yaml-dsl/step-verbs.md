@@ -871,6 +871,38 @@ Operations bind in one of two modes. The default `json` mode accepts JSON-essenc
   to: direct:ingest
 ```
 
+#### Raw binding streaming contract
+
+`raw` operations own the stream semantics of their request and reply bodies.
+The contract:
+
+- **No pipeline caching.** Lowering injects no `unmarshal`/`marshal`, so no
+  `StreamCacheService`-wrapped processor compiles ahead of the user steps.
+  The request `Body::Stream` reaches the first user step unpollied; the
+  injected `Content-Type` and default-status steps never read it.
+- **Single consumption.** The request stream is consumed at most once. A
+  second consumption attempt fails with `AlreadyConsumed` and propagates as
+  a route error — never a panic. A reply whose stream was already consumed
+  returns HTTP 500 with an empty body.
+- **Metadata preservation.** The HTTP consumer records the request
+  `Content-Type` and `Content-Length` in the stream metadata before the
+  exchange enters the route, and the pipeline never alters them.
+- **Original or new reply stream.** A route may reply with the original
+  request stream (echo) or a newly generated `Body::Stream`; both are
+  streamed to the wire under the route-supplied `Content-Type`.
+- **Request limits fail closed.** A request with `Content-Length` over
+  `max_request_body` is rejected 413 before the stream opens. A chunked
+  request over the cap fails with the limit error when consumed.
+- **Response limits cover materialized bytes only.** `max_response_body`
+  caps materialized reply bodies — an over-cap materialized reply is
+  replaced with HTTP 500 (`Response body exceeds configured limit`). A
+  streamed reply is not byte-capped: capping a stream mid-flight would
+  truncate an already-committed response, so routes that need response
+  caps must materialize the body first.
+- **Client disconnects do not fail the consumer.** If a client drops the
+  connection during a streamed reply, the server keeps serving subsequent
+  requests.
+
 ### Template declaration
 
 | Field | Type | Required | Default | Description |
