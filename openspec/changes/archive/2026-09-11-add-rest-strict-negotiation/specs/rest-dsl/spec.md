@@ -1,5 +1,9 @@
 ## RENAMED Requirements
 
+## REMOVED Requirements
+
+### Requirement: v1 byte-identity for omitted binding
+
 - FROM: `v1 byte-identity for omitted binding`
 - TO: `v1 behavioral compatibility for omitted binding`
 
@@ -76,6 +80,8 @@ binding `json`.
   leading negotiation step evaluates headers only and the lowering
   injected no unmarshal step to materialize it
 
+## ADDED Requirements
+
 ### Requirement: v1 behavioral compatibility for omitted binding
 
 A REST operation that omits `binding` SHALL lower to the same consumer
@@ -117,8 +123,6 @@ requirements (415 / 406).
 - **WHEN** they run after this change
 - **THEN** they pass, and no assertion other than the leading-step
   prefix required modification
-
-## ADDED Requirements
 
 ### Requirement: REST request media enforcement
 
