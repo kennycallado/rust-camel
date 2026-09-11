@@ -1,6 +1,10 @@
 //! RFC 7231/9110 media-type subset parsing and matching for REST content
 //! negotiation (default-strict L2): concrete media declarations, Accept
 //! media ranges with quality values, and the 415/406 gate decision.
+//!
+//! Quoted parameter values (RFC 9110 quoted-string) are not part of this
+//! subset; entries containing them are treated as malformed and degrade per
+//! the malformed-header rule.
 
 // Staged landing (task 3.1): the gate's consumers arrive with the
 // ContentNegotiationProcessor wiring in task 3.2 — drop this allow then.
@@ -77,6 +81,11 @@ pub(crate) fn parse_accept_entry(value: &str) -> Option<(MediaRange, f32)> {
         if param.trim().is_empty() {
             continue;
         }
+        // Quoted parameter values are outside this subset: any segment
+        // containing a `"` makes the whole entry malformed.
+        if param.contains('"') {
+            return None;
+        }
         let (name, raw) = param.split_once('=')?;
         if name.trim().eq_ignore_ascii_case("q") {
             quality = raw.trim().parse::<f32>().ok()?;
@@ -131,6 +140,10 @@ fn parse_media_range(base: &str, allow_wildcards: bool) -> Option<MediaRange> {
     let subtype = subtype.to_ascii_lowercase();
     let wildcard_type = type_ == "*";
     let wildcard_subtype = subtype == "*";
+    // RFC 9110: structured syntax suffixes are not allowed on wildcards.
+    if suffix.is_some() && (wildcard_type || wildcard_subtype) {
+        return None;
+    }
     if wildcard_type && (!allow_wildcards || !wildcard_subtype) {
         return None;
     }
@@ -423,6 +436,37 @@ mod tests {
         assert!(
             check_request(None, None, &contract).is_ok(),
             "absent Accept is permissive"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_suffix_on_wildcard() {
+        assert!(
+            parse_accept_entry("*/*+json").is_none(),
+            "suffix on */* must be rejected"
+        );
+        assert!(
+            parse_accept_entry("application/*+json").is_none(),
+            "suffix on type/* must be rejected"
+        );
+        let contract = parse_contract("application/json", "application/json");
+        assert!(
+            check_request(None, Some("application/*+json"), &contract).is_ok(),
+            "suffix-on-wildcard Accept entry is malformed and degrades to */*"
+        );
+    }
+
+    #[test]
+    fn parse_quoted_params_degrade_to_malformed() {
+        let raw = "application/json;foo=\"a;b\";q=0";
+        assert!(
+            parse_accept_entry(raw).is_none(),
+            "quoted param value must make the entry malformed"
+        );
+        let contract = parse_contract("application/json", "application/json");
+        assert!(
+            check_request(None, Some(raw), &contract).is_ok(),
+            "quoted-param Accept entry degrades to */*"
         );
     }
 
