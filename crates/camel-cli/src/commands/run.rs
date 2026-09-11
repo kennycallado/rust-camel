@@ -62,6 +62,22 @@ pub(crate) fn load_config_or_default(
 /// be canonicalized; a dangling `--config` parent must fail fast instead of
 /// booting on defaults with a broken root. Shared with `camel job`.
 pub(crate) fn canonical_project_root(config_path: &std::path::Path) -> std::path::PathBuf {
+    match try_canonical_project_root(config_path) {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("Error: cannot resolve project root: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Fallible core of [`canonical_project_root`]: same resolution rules, but
+/// returns the error instead of exiting. `camel job` maps the failure into
+/// its own exit-2 taxonomy (config-class failure) instead of this crate's
+/// exit-1 `camel run` convention.
+pub(crate) fn try_canonical_project_root(
+    config_path: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
     config_path
         .parent()
         .map(|p| {
@@ -73,10 +89,6 @@ pub(crate) fn canonical_project_root(config_path: &std::path::Path) -> std::path
         })
         .unwrap_or(std::path::Path::new("."))
         .canonicalize()
-        .unwrap_or_else(|e| {
-            eprintln!("Error: cannot resolve project root: {e}");
-            std::process::exit(1);
-        })
 }
 
 pub async fn run(

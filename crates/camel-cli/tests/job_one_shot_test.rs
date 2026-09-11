@@ -17,7 +17,7 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
-use common::{drain_to_buffer, spawn_camel_job};
+use common::drain_to_buffer;
 
 /// Write the fixture config: routes glob unused by the job (the job's
 /// route source is the document), logs off for a clean stdout report.
@@ -36,44 +36,7 @@ watch = false
 /// Run `camel job <doc>` in `dir` to completion and return
 /// `(exit_code, stdout, stderr)`.
 fn run_job(dir: &Path, doc: &str) -> (i32, String, String) {
-    let mut child = spawn_camel_job(dir, Path::new(doc));
-    let out_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let err_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let out_handle = std::thread::spawn({
-        let buf = std::sync::Arc::clone(&out_buf);
-        let stdout = child.stdout.take().expect("stdout piped");
-        move || drain_to_buffer(stdout, buf)
-    });
-    let err_handle = std::thread::spawn({
-        let buf = std::sync::Arc::clone(&err_buf);
-        let stderr = child.stderr.take().expect("stderr piped");
-        move || drain_to_buffer(stderr, buf)
-    });
-
-    // Generous bound: the binary boots the full bundle cascade, and a
-    // whole-workspace `cargo test` slows subprocess startup ~100x.
-    let deadline = std::time::Instant::now() + Duration::from_secs(90);
-    let exit_code = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.code().unwrap_or(-1),
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break -1;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(e) => panic!("try_wait failed: {e}"),
-        }
-    };
-    let _ = out_handle.join();
-    let _ = err_handle.join();
-    (
-        exit_code,
-        out_buf.lock().expect("stdout lock").clone(),
-        err_buf.lock().expect("stderr lock").clone(),
-    )
+    run_job_args(dir, &[doc])
 }
 
 /// The happy path: one direct: route that rewrites the body, a job send

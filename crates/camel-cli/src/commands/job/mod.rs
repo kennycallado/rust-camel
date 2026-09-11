@@ -126,10 +126,22 @@ enum SendError {
 /// The jobs directory, anchored at the Camel.toml root (never the
 /// process CWD): `canonical_project_root(--config)` joined with
 /// `[jobs].dir`. Shared by bare-name resolution and no-argument
-/// listing so the two surfaces cannot drift.
-fn jobs_root(args: &JobArgs, camel_config: &camel_config::config::CamelConfig) -> PathBuf {
-    crate::commands::run::canonical_project_root(Path::new(&args.config))
-        .join(&camel_config.jobs.dir)
+/// listing so the two surfaces cannot drift. A dangling `--config`
+/// parent is an error for the caller to map — this never inherits
+/// `camel run`'s exit-1 convention, and never silently falls back to
+/// the CWD.
+fn jobs_root(
+    args: &JobArgs,
+    camel_config: &camel_config::config::CamelConfig,
+) -> Result<PathBuf, String> {
+    crate::commands::run::try_canonical_project_root(Path::new(&args.config))
+        .map(|root| root.join(&camel_config.jobs.dir))
+        .map_err(|e| {
+            format!(
+                "cannot resolve project root from --config {}: {e}",
+                args.config
+            )
+        })
 }
 
 /// Resolve a document argument. An explicit path (any path separator,
@@ -181,16 +193,25 @@ fn probe_description(path: &Path) -> Option<Option<String>> {
 /// Exit 0 for found, empty, and absent directories alike — listing is a
 /// query, not a usage error (ls semantics). Listing output and the JSON
 /// run report never co-occur: the report path requires a document.
-fn list_jobs(args: &JobArgs, camel_config: &camel_config::config::CamelConfig) -> i32 {
-    let root = jobs_root(args, camel_config);
+fn list_jobs(
+    _args: &JobArgs,
+    camel_config: &camel_config::config::CamelConfig,
+    root: &Path,
+) -> i32 {
     let dir_label = camel_config.jobs.dir.as_str();
-    let entries = match std::fs::read_dir(&root) {
+    let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(_) => {
+        // Absent is legitimate for a fresh project (ls semantics, exit 0).
+        // Any other read failure (permissions, ...) is a real error.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!(
                 "No jobs found in {dir_label}/. Create a `<name>.job.yaml` there, or run `camel job <path>`."
             );
             return 0;
+        }
+        Err(e) => {
+            eprintln!("cannot read jobs dir `{}`: {e}", root.display());
+            return 2;
         }
     };
 
@@ -247,14 +268,22 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         }
     };
 
+    let jobs_root = match jobs_root(args, &camel_config) {
+        Ok(root) => root,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return 2;
+        }
+    };
+
     let Some(raw_document) = &args.document else {
         if args.report.is_some() {
             eprintln!("--report requires a job document");
             return 2;
         }
-        return list_jobs(args, &camel_config);
+        return list_jobs(args, &camel_config, &jobs_root);
     };
-    let resolved = match resolve_job_path(raw_document, &jobs_root(args, &camel_config)) {
+    let resolved = match resolve_job_path(raw_document, &jobs_root) {
         Ok(path) => path,
         Err(msg) => {
             eprintln!("{msg}");
