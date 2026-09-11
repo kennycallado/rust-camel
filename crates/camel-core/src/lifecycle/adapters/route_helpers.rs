@@ -17,9 +17,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use camel_api::aggregator::AggregatorConfig;
+use camel_api::metrics::MetricsCollector;
 use camel_api::{CamelError, Exchange, ResequencePolicyConfig, RuntimeCommand, RuntimeHandle};
 use camel_component_api::{ConcurrencyModel, consumer::ExchangeEnvelope};
 use camel_processor::aggregator::{AggregatorService, has_timeout_condition};
@@ -318,6 +319,68 @@ pub(super) async fn publish_runtime_failure(
             route_id = %route_id,
             error = %runtime_error,
             "failed to synchronize route crash with runtime projection"
+        );
+    }
+}
+
+// ── rc-e2r9: b′ signal emission on reply-drop ──
+
+/// Deliver a pipeline result to the waiting producer through the reply
+/// oneshot, emitting the b′ error signal when the send fails.
+///
+/// A dropped receiver means the producer abandoned the exchange (typically a
+/// `send_and_wait` timeout). The result can no longer be delivered, so the
+/// loss is made observable through `increment_errors(route_id,
+/// "b-prime:core:reply-drop")` plus a `warn!` carrying the real error and the
+/// reply site. The error is cloned BEFORE the send consumes `result`, so the
+/// signal never reports a placeholder error.
+///
+/// Contract:
+/// - `reply_tx` is `None`: fire-and-forget dispatch — no reply channel by
+///   design, nothing to observe.
+/// - Send succeeds: the receiver observes `result` verbatim, no signal.
+/// - Send fails with an `Ok` result: silent — b′ is an ERROR signal; a
+///   dropped reply for a successful exchange is not an operator-visible
+///   failure.
+/// - Send fails with `Err(ConsumerStopping)`: suppressed (graceful stop —
+///   expected shutdown, only a `debug!`). Any other `Err` emits the metric
+///   and the `warn!`.
+pub(crate) fn send_reply_or_b_prime(
+    reply_tx: Option<tokio::sync::oneshot::Sender<Result<Exchange, CamelError>>>,
+    result: Result<Exchange, CamelError>,
+    metrics: &Option<Arc<dyn MetricsCollector>>,
+    route_id: &str,
+    site: &str,
+) {
+    // Clone the real error up front: `send` consumes `result`, and the
+    // pre-fix call sites that moved the error into the send could then only
+    // report `ChannelClosed`, which also defeated ConsumerStopping
+    // suppression (rc-e2r9 review, Important 2).
+    let Some(tx) = reply_tx else {
+        // Fire-and-forget dispatch: no reply channel by design.
+        return;
+    };
+    let real_error = result.as_ref().err().cloned();
+    if tx.send(result).is_err()
+        && let Some(error) = real_error
+    {
+        // ConsumerStopping is graceful shutdown — not a failure signal.
+        if matches!(error, CamelError::ConsumerStopping) {
+            debug!(
+                route_id = %route_id,
+                site = %site,
+                "reply dropped during graceful stop (ConsumerStopping suppressed)",
+            );
+            return;
+        }
+        if let Some(m) = metrics {
+            m.increment_errors(route_id, "b-prime:core:reply-drop");
+        }
+        warn!(
+            route_id = %route_id,
+            error = %error,
+            site = %site,
+            "reply dropped — b′ signal emitted (receiver abandoned the exchange)",
         );
     }
 }

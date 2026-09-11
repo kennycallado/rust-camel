@@ -37,7 +37,7 @@ use crate::lifecycle::adapters::route_compiler_ext::{
 };
 use crate::lifecycle::adapters::route_helpers::{
     AggregateSplitInfo, CrashNotification, ManagedRoute, assert_no_mixed_top_level_splits,
-    handle_is_running, inferred_lifecycle_label, is_pending,
+    handle_is_running, inferred_lifecycle_label, is_pending, send_reply_or_b_prime,
 };
 #[cfg(test)]
 pub(super) use crate::lifecycle::adapters::route_helpers::{
@@ -1139,17 +1139,16 @@ impl DefaultRouteController {
                                 let ex = match pre_pipe.processor.clone_inner().oneshot(exchange).await {
                                     Ok(ex) => ex,
                                     Err(e) => {
-                                        if let Some(tx) = reply_tx {
-                                            let send_result = tx.send(Err(e));
-                                            if send_result.is_err() {
-                                                emit_b_prime_on_reply_drop(
-                                                    &metrics_for_reply_drop,
-                                                    &route_id_for_metrics,
-                                                    &CamelError::ChannelClosed,
-                                                    "pre-pipeline",
-                                                );
-                                            }
-                                        }
+                                        // rc-e2r9: the real error rides with the
+                                        // result so a dropped receiver still gets
+                                        // it (ConsumerStopping suppressed).
+                                        send_reply_or_b_prime(
+                                            reply_tx,
+                                            Err(e),
+                                            &metrics_for_reply_drop,
+                                            &route_id_for_metrics,
+                                            "aggregate:pre-pipeline",
+                                        );
                                         continue;
                                     }
                                 };
@@ -1164,23 +1163,38 @@ impl DefaultRouteController {
                                         if !is_pending(&ex) {
                                             let post_pipe = post_pipeline.load();
                                             let out = post_pipe.processor.clone_inner().oneshot(ex).await;
-                                            if let Some(tx) = reply_tx { let _ = tx.send(out); }
-                                        } else if let Some(tx) = reply_tx {
-                                            let _ = tx.send(Ok(ex));
+                                            // rc-e2r9 review, Important 1: this site
+                                            // previously `let _ = send`ed the
+                                            // post-pipeline result — an Err with an
+                                            // abandoned receiver vanished silently.
+                                            // The helper closes that gap.
+                                            send_reply_or_b_prime(
+                                                reply_tx,
+                                                out,
+                                                &metrics_for_reply_drop,
+                                                &route_id_for_metrics,
+                                                "aggregate:post-pipeline",
+                                            );
+                                        } else {
+                                            // Pending Ok: a dropped reply is silent —
+                                            // b′ is an ERROR signal.
+                                            send_reply_or_b_prime(
+                                                reply_tx,
+                                                Ok(ex),
+                                                &metrics_for_reply_drop,
+                                                &route_id_for_metrics,
+                                                "aggregate:pending",
+                                            );
                                         }
                                     }
                                     Err(e) => {
-                                        if let Some(tx) = reply_tx {
-                                            let send_result = tx.send(Err(e));
-                                            if send_result.is_err() {
-                                                emit_b_prime_on_reply_drop(
-                                                    &metrics_for_reply_drop,
-                                                    &route_id_for_metrics,
-                                                    &CamelError::ChannelClosed,
-                                                    "aggregate",
-                                                );
-                                            }
-                                        }
+                                        send_reply_or_b_prime(
+                                            reply_tx,
+                                            Err(e),
+                                            &metrics_for_reply_drop,
+                                            &route_id_for_metrics,
+                                            "aggregate:pipeline",
+                                        );
                                     }
                                 }
                             }
@@ -1308,36 +1322,9 @@ impl DefaultRouteController {
 }
 
 // ── rc-e2r9: b′ signal emission on reply-drop ──
-
-/// Emit the b′ error signal when a reply-drop site detects that the oneshot
-/// receiver has been dropped (e.g. direct producer timeout abandoned the
-/// enqueued exchange). ConsumerStopping is suppressed — it is expected
-/// shutdown, not an operator-visible failure.
-fn emit_b_prime_on_reply_drop(
-    metrics: &Option<Arc<dyn MetricsCollector>>,
-    route_id: &str,
-    error: &CamelError,
-    site: &str,
-) {
-    // ConsumerStopping is graceful shutdown — not a failure signal.
-    if matches!(error, CamelError::ConsumerStopping) {
-        debug!(
-            route_id = %route_id,
-            site = %site,
-            "reply dropped during graceful stop (ConsumerStopping suppressed)",
-        );
-        return;
-    }
-    if let Some(m) = metrics {
-        m.increment_errors(route_id, "b-prime:core:reply-drop");
-    }
-    warn!(
-        route_id = %route_id,
-        error = %error,
-        site = %site,
-        "reply dropped — b′ signal emitted (receiver abandoned the exchange)",
-    );
-}
+// The shared `send_reply_or_b_prime` helper lives in
+// `super::route_helpers` — it is used by both this module (aggregate drain
+// loop) and `route_controller_trait` (Concurrent/Sequential pipelines).
 
 #[cfg(test)]
 impl crate::hot_reload::ports::ReloadIntrospectionPort for DefaultRouteController {

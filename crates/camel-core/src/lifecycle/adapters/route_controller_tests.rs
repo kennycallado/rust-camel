@@ -1,6 +1,6 @@
 use super::*;
 use crate::lifecycle::adapters::pipeline_runtime::PipelineAssembly;
-use crate::lifecycle::adapters::route_helpers::runtime_failure_command;
+use crate::lifecycle::adapters::route_helpers::{runtime_failure_command, send_reply_or_b_prime};
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
 use crate::shared::components::domain::Registry;
 use arc_swap::ArcSwap;
@@ -5551,11 +5551,11 @@ impl MetricsCollector for RecordingCollector {
             .expect("calls lock")
             .push(format!("record_exchange_duration:{route_id}"));
     }
-    fn increment_errors(&self, route_id: &str, _error_type: &str) {
+    fn increment_errors(&self, route_id: &str, error_type: &str) {
         self.calls
             .lock()
             .expect("calls lock")
-            .push(format!("increment_errors:{route_id}"));
+            .push(format!("increment_errors:{route_id}:{error_type}"));
     }
     fn increment_exchanges(&self, route_id: &str) {
         self.calls
@@ -5916,12 +5916,23 @@ fn set_tracer_config_derives_gating() {
 // rc-e2r9: b′ signal on reply-drop (route controller)
 //
 // When a direct producer timeout abandons an enqueued exchange, the
-// route_controller reply-drop site must emit the b′ error signal instead of
+// route_controller reply-drop sites must emit the b′ error signal instead of
 // silently discarding it. ConsumerStopping must be suppressed from the b′
-// ERROR metric and error! log on graceful route stop.
+// ERROR metric and warn log on graceful route stop. All reply sites route
+// through the shared `send_reply_or_b_prime` helper in `route_helpers`
+// (single copy — the two duplicated helpers drifted once already).
 // ============================================================================
 
-/// Unit test: emit_b_prime_on_reply_drop emits metric for non-ConsumerStopping errors.
+/// Reply sender whose receiver was already dropped — the producer-timeout
+/// abandonment every b′ reply-drop test exercises.
+fn abandoned_reply_channel() -> tokio::sync::oneshot::Sender<Result<Exchange, CamelError>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    drop(rx); // producer timeout abandoned the exchange
+    tx
+}
+
+/// Unit test: send_reply_or_b_prime emits the b′ metric (exact label) when an
+/// Err result cannot be delivered to an abandoned receiver.
 #[test]
 fn b_prime_emit_on_reply_drop_emits_metric() {
     let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -5931,10 +5942,11 @@ fn b_prime_emit_on_reply_drop_emits_metric() {
     let metrics = Some(Arc::clone(&collector));
 
     // Non-ConsumerStopping error → must emit metric + warn
-    super::emit_b_prime_on_reply_drop(
+    send_reply_or_b_prime(
+        Some(abandoned_reply_channel()),
+        Err(CamelError::RouteError("boom".into())),
         &metrics,
         "test-route",
-        &CamelError::RouteError("boom".into()),
         "test-site",
     );
 
@@ -5942,15 +5954,21 @@ fn b_prime_emit_on_reply_drop_emits_metric() {
         .lock()
         .expect("calls lock")
         .iter()
-        .any(|c| c.starts_with("increment_errors:test-route"));
+        .any(|c| c == "increment_errors:test-route:b-prime:core:reply-drop");
     assert!(
         has_error,
-        "b′ metric must be emitted for non-ConsumerStopping errors; calls: {:?}",
+        "b′ metric with the exact label must be emitted for non-ConsumerStopping errors; calls: {:?}",
         calls.lock().expect("calls lock")
     );
 }
 
-/// Unit test: emit_b_prime_on_reply_drop suppresses ConsumerStopping.
+/// Regression (rc-e2r9 review, Important 2): ConsumerStopping with a dropped
+/// receiver at a MOVED-error site must NOT emit. The pre-fix moved-error
+/// sites (`concurrent:ready`, `sequential:ready`, the aggregate sites) moved
+/// the real error into `tx.send(Err(e))` and then reported `ChannelClosed`,
+/// so this suppression could never fire there — graceful-stop stragglers
+/// produced spurious b′ ERROR metrics. The helper clones the error BEFORE
+/// the send, so the real error reaches the suppression check at every site.
 #[test]
 fn b_prime_emit_on_reply_drop_suppresses_consumer_stopping() {
     let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -5960,11 +5978,12 @@ fn b_prime_emit_on_reply_drop_suppresses_consumer_stopping() {
     let metrics = Some(Arc::clone(&collector));
 
     // ConsumerStopping → must NOT emit metric
-    super::emit_b_prime_on_reply_drop(
+    send_reply_or_b_prime(
+        Some(abandoned_reply_channel()),
+        Err(CamelError::ConsumerStopping),
         &metrics,
         "test-route",
-        &CamelError::ConsumerStopping,
-        "test-site",
+        "concurrent:ready",
     );
 
     let has_error = calls
@@ -5979,14 +5998,223 @@ fn b_prime_emit_on_reply_drop_suppresses_consumer_stopping() {
     );
 }
 
-/// Unit test: emit_b_prime_on_reply_drop is no-op when metrics is None.
+/// Unit test: send_reply_or_b_prime is no-op when metrics is None.
 #[test]
 fn b_prime_emit_on_reply_drop_no_metrics() {
     // Should not panic even with None metrics
-    super::emit_b_prime_on_reply_drop(
+    send_reply_or_b_prime(
+        Some(abandoned_reply_channel()),
+        Err(CamelError::RouteError("boom".into())),
         &None,
         "test-route",
-        &CamelError::RouteError("boom".into()),
         "test-site",
     );
+}
+
+/// Unit test (rc-e2r9 review): an Ok result with a dropped receiver stays
+/// silent — b′ is an ERROR signal, not a delivery audit. The pending-Ok and
+/// post-pipeline-Ok aggregate sends rely on this.
+#[test]
+fn b_prime_emit_on_reply_drop_ok_result_is_silent() {
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let collector: Arc<dyn camel_api::metrics::MetricsCollector> = Arc::new(RecordingCollector {
+        calls: Arc::clone(&calls),
+    });
+    let metrics = Some(Arc::clone(&collector));
+
+    send_reply_or_b_prime(
+        Some(abandoned_reply_channel()),
+        Ok(Exchange::new(Message::new("done"))),
+        &metrics,
+        "test-route",
+        "aggregate:pending",
+    );
+
+    let has_error = calls
+        .lock()
+        .expect("calls lock")
+        .iter()
+        .any(|c| c.starts_with("increment_errors:"));
+    assert!(
+        !has_error,
+        "Ok results must never emit the b′ error signal; calls: {:?}",
+        calls.lock().expect("calls lock")
+    );
+}
+
+// ── rc-e2r9 review, Important 1: aggregate post-pipeline reply site ──
+
+/// Post-pipeline processor that always fails after counting its dispatch —
+/// drives the aggregate drain loop's combined post-pipeline reply site into
+/// its Err arm.
+#[derive(Clone)]
+struct AlwaysFailingPostPipeline {
+    seen: Arc<AtomicU64>,
+}
+
+impl tower::Service<Exchange> for AlwaysFailingPostPipeline {
+    type Response = Exchange;
+    type Error = CamelError;
+    type Future =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), CamelError>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _exchange: Exchange) -> Self::Future {
+        self.seen.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(CamelError::RouteError("post-pipeline boom".into())) })
+    }
+}
+
+/// Endpoint vending [`AlwaysFailingPostPipeline`] under the `fail` scheme.
+struct FailEndpoint {
+    seen: Arc<AtomicU64>,
+}
+
+impl Endpoint for FailEndpoint {
+    fn uri(&self) -> &str {
+        "fail:sink"
+    }
+
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Err(CamelError::ProcessorError(
+            "fail component has no consumers".into(),
+        ))
+    }
+
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
+        Ok(BoxProcessor::new(AlwaysFailingPostPipeline {
+            seen: Arc::clone(&self.seen),
+        }))
+    }
+}
+
+/// Minimal test component vending [`FailEndpoint`].
+struct FailComponent {
+    seen: Arc<AtomicU64>,
+}
+
+impl Component for FailComponent {
+    fn scheme(&self) -> &str {
+        "fail"
+    }
+
+    fn create_endpoint(
+        &self,
+        _uri: &str,
+        _ctx: &dyn ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        Ok(Box::new(FailEndpoint {
+            seen: Arc::clone(&self.seen),
+        }))
+    }
+}
+
+/// Integration test (rc-e2r9 review, Important 1): the aggregate drain loop's
+/// combined post-pipeline reply site previously `let _ = send`ed its result,
+/// so an Err produced after aggregation with an abandoned receiver vanished
+/// silently — no metric, no log. It must emit the b′ metric.
+#[tokio::test]
+async fn b_prime_emit_on_reply_drop_aggregate_post_pipeline_err() {
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let collector: Arc<dyn camel_api::metrics::MetricsCollector> = Arc::new(RecordingCollector {
+        calls: Arc::clone(&calls),
+    });
+
+    let seen = Arc::new(AtomicU64::new(0));
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    {
+        let mut guard = registry.lock().expect("registry lock");
+        guard.register(Arc::new(camel_component_direct::DirectComponent::new()));
+        guard.register(Arc::new(FailComponent {
+            seen: Arc::clone(&seen),
+        }));
+    }
+    let mut controller = DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+    // The aggregate drain loop captures `tracer_metrics` at start_route —
+    // wire the recording collector first.
+    controller.set_tracer_metrics(collector);
+
+    // Timeout in the completion policy materializes the pre/agg/post split;
+    // completion at size 1 fires as soon as the single exchange aggregates.
+    let agg_config = camel_api::AggregatorConfig::correlate_by("key")
+        .complete_on_size_or_timeout(1, Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let route = RouteDefinition::new(
+        "direct:agg-in",
+        vec![
+            BuilderStep::DeclarativeSetHeader {
+                key: "key".into(),
+                value: camel_api::ValueSourceDef::Literal(camel_api::Value::String(
+                    "order-1".into(),
+                )),
+            },
+            BuilderStep::Aggregate { config: agg_config },
+            BuilderStep::To("fail:sink".into()),
+        ],
+    )
+    .with_route_id("agg-bprime");
+    controller.add_route(route).await.unwrap();
+    controller.start_route("agg-bprime").await.unwrap();
+    // rc-jxkj: fresh controller → cohort gate closed; open for dispatch.
+    controller.cohort.open();
+
+    let sender = controller
+        .routes
+        .get("agg-bprime")
+        .and_then(|r| r.channel_sender.clone())
+        .expect("channel sender should exist after start");
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(ExchangeEnvelope {
+            exchange: Exchange::new(Message::new("abandoned")),
+            reply_tx: Some(reply_tx),
+        })
+        .await
+        .unwrap();
+    // Producer timeout: abandon the exchange before the drain loop replies.
+    drop(reply_rx);
+
+    // The failing post-pipeline step must have processed the aggregated
+    // exchange (i.e. the drain loop reached the post-pipeline Err arm).
+    for _ in 0..200 {
+        if seen.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "post-pipeline must have processed the aggregated exchange exactly once"
+    );
+
+    assert!(
+        calls
+            .lock()
+            .expect("calls lock")
+            .iter()
+            .any(|c| c == "increment_errors:agg-bprime:b-prime:core:reply-drop"),
+        "aggregate post-pipeline Err with an abandoned receiver must emit the \
+         b′ metric; calls: {:?}",
+        calls.lock().expect("calls lock")
+    );
+
+    controller.stop_route("agg-bprime").await.unwrap();
 }
