@@ -264,13 +264,14 @@ fn route_patterns(
     fn anchored(base: &Path, file: &Path) -> Result<String, CamelError> {
         let full = base.join(file);
         std::fs::metadata(&full).map_err(|e| CamelError::Io(format!("{}: {e}", full.display())))?;
-        // Same predicate as discovery's reserved-suffix gate,
+        // Same predicate as discovery's reserved-document gate,
         // but fail loud: the route file was declared, not
         // glob-expanded, so a silent skip has no excuse.
-        if camel_dsl::discovery::is_test_document(&full) {
+        if camel_dsl::discovery::is_reserved_document(&full) {
             return Err(CamelError::Config(format!(
-                "{}: test documents (*.test.yaml, *.test.yml) belong to \
-                 `camel test`, not scenario routeFiles",
+                "{}: reserved documents (*.test.yaml, *.test.yml belong to \
+                 `camel test`; *.job.yaml, *.job.yml belong to `camel job`) \
+                 are not scenario routeFiles",
                 full.display()
             )));
         }

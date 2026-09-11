@@ -66,12 +66,14 @@ fn collect(pattern: &str, out: &mut BTreeSet<PathBuf>) {
 /// top-level `type`/`properties`/`required`), not route definitions, so
 /// linting them as routes would emit spurious R-SCHEMA errors.
 ///
-/// `*.test.yaml` files are excluded too: they are `camel test` documents for
-/// the declarative mock testkit (`routeFiles`/`inputs`/`expects` keys), not
-/// route definitions — linting them as routes would emit spurious R-SCHEMA
-/// errors the same way. The exclusion uses
-/// `camel_dsl::discovery::is_test_document`, the same predicate `camel lint`
-/// and route discovery apply, so the gate cannot drift from the runtime skip.
+/// Reserved-document files (`*.test.yaml`, `*.job.yaml` and their `.yml`
+/// twins) are excluded too: test documents belong to the declarative
+/// mock testkit (`routeFiles`/`inputs`/`expects` keys) and job documents
+/// to `camel job` — neither is a route definition, and linting them as
+/// routes would emit spurious R-SCHEMA errors the same way. The
+/// exclusion uses `camel_dsl::discovery::is_reserved_document`, the same
+/// predicate `camel lint` and route discovery apply, so the gate cannot
+/// drift from the runtime skip.
 ///
 /// Paths under any `target/` directory are excluded: nested guest crates
 /// (`examples/*/guest`, `crates/**/tests/fixtures/*-guest`) are built with
@@ -108,7 +110,7 @@ fn discover_corpus() -> Vec<(String, PathBuf)> {
     found
         .into_iter()
         .filter(|p| !p.starts_with(&excluded))
-        .filter(|p| !camel_dsl::discovery::is_test_document(p))
+        .filter(|p| !camel_dsl::discovery::is_reserved_document(p))
         .filter(|p| !is_build_artifact(p))
         .map(|p| {
             let rel = p

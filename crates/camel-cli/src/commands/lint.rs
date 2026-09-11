@@ -78,18 +78,19 @@ pub fn is_stagec_exempt_path(path: &Path) -> bool {
 /// returned [`LintOutcome`] carries the exit code the CLI would emit so tests
 /// can assert on it without spawning a subprocess.
 pub async fn run_lint(path: &Path) -> LintOutcome {
-    // Test documents (`*.test.yaml`/`.test.yml`) are `camel test` inputs, not
+    // Reserved documents (`*.test.yaml`/`*.test.yml` are `camel test`
+    // inputs; `*.job.yaml`/`*.job.yml` are `camel job` inputs) are not
     // route definitions — linting them as routes would emit spurious
     // diagnostics. Skip with an info line instead. The predicate is the
     // single source of truth shared with route discovery.
-    if camel_dsl::discovery::is_test_document(path) {
+    if camel_dsl::discovery::is_reserved_document(path) {
         return LintOutcome {
             diagnostics: Vec::new(),
             source: String::new(),
             exit_code: 0,
             cli_error: None,
             cli_info: Some(format!(
-                "skipped: {} is a camel test document",
+                "skipped: {} is a reserved document (camel test or camel job)",
                 path.display()
             )),
         };
@@ -265,7 +266,7 @@ mod tests {
         );
         let info = outcome.cli_info.expect("skip must set cli_info"); // allow-unwrap
         assert!(
-            info.contains("camel test document"),
+            info.contains("reserved document"),
             "info must say why the file was skipped; got = {info}"
         );
     }

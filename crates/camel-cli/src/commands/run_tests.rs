@@ -97,7 +97,7 @@ fn literal_test_doc_path_reaches_discovery() {
         result,
         vec![p],
         "a literal test-doc path must reach discovery unfiltered; \
-             ReservedTestSuffix is discovery's job"
+             ReservedDocumentSuffix is discovery's job"
     );
 }
 

@@ -396,6 +396,36 @@ scenario:
     );
 }
 
+#[tokio::test]
+async fn boot_rejects_job_suffix_route_file() {
+    // Twin of the test-suffix case for the job family: a declared
+    // `.job.yaml` route file fails the boot with `camel job` guidance.
+    let doc = r#"
+routeFiles: [routes.job.yaml]
+scenario:
+  - sleep:
+      duration: 1s
+"#;
+    let (dir, doc) = project("# minimal\n", Some(("routes.job.yaml", ROUTE)), doc);
+    let err = expect_boot_error(
+        boot_scenario(&doc, dir.path(), &empty_env()).await,
+        "a reserved-suffix route file must fail the boot",
+    );
+    assert!(
+        matches!(err, CamelError::Config(_)),
+        "expected Config, got: {err:?}"
+    );
+    let display = err.to_string();
+    assert!(
+        display.contains("routes.job.yaml"),
+        "error must name the declared file: {display}"
+    );
+    assert!(
+        display.contains("`camel job`"),
+        "error must carry the `camel job` guidance: {display}"
+    );
+}
+
 /// A scenario document with no `sql:` action: the boot-time sqlite
 /// memory lint fires on the datasource config alone, before any action
 /// or route is considered. The declared route file need not exist — the
