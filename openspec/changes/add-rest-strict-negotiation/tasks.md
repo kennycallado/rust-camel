@@ -124,7 +124,7 @@
 - `cargo clippy -p camel-processor -- -D warnings` exits 0.
 - `git -C <worktree> diff --stat crates/camel-processor` shows only the three files above.
 
-- [ ] 2.1
+- [x] 2.1
 
 ## camel-dsl
 

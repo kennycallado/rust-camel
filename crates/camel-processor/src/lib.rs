@@ -4,6 +4,7 @@ pub mod choice;
 pub mod circuit_breaker;
 pub mod claim_check;
 pub mod content_enricher;
+pub mod content_negotiation;
 pub mod convert_body;
 pub mod data_format;
 pub mod delayer;
@@ -60,6 +61,7 @@ pub use circuit_breaker::{
 };
 pub use claim_check::{ClaimCheckOp, ClaimCheckService, KeyExpression};
 pub use content_enricher::{EnrichService, PollEnrichService};
+pub use content_negotiation::{ContentNegotiationCheck, ContentNegotiationProcessor};
 pub use convert_body::ConvertBodyTo;
 pub use data_format::{
     CAMEL_CSV_HEADER_RECORD, CsvConfig, CsvDataFormat, JsonConfig, JsonDataFormat, QuoteMode,

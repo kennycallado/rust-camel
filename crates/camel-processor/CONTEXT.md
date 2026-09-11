@@ -13,6 +13,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `circuit_breaker` | CircuitBreaker gate | fault tolerance | `src/lib.rs:3` |
 | `claim_check` | Claim Check | stateful repository stash/retrieve (ADR-0046 retro-exempt) | `src/lib.rs:4` |
 | `content_enricher` | Enrich / PollEnrich | enrichment | `src/lib.rs:5` |
+| `content_negotiation` | ContentNegotiationProcessor | header-only media negotiation gate (REST strict 415/406) | `src/lib.rs:7`: verdict injected as a `ContentNegotiationCheck` closure at compile time (keeps camel-processor free of a camel-dsl dependency); reads only `Content-Type`/`Accept` via case-insensitive header lookup — never touches the body (no polling, no materialization); on `Ok` the exchange passes through unchanged, on `Err` the negotiation error (`UnsupportedMediaType`/`NotAcceptable`) propagates. |
 | `convert_body` | ConvertBodyTo | transformation | `src/lib.rs:6` |
 | `data_format` | built-in data formats | marshal / unmarshal support | `src/lib.rs:7` |
 | `delayer` | Delay | timing | `src/lib.rs:8` (header-derived delay clamped to max_delay_ms, default 3_600_000 — Batch 1 H12) |
@@ -81,6 +82,7 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `ClaimCheckOp`, `ClaimCheckService`, `KeyExpression` | stable | `pub use claim_check::{...}` | Claim Check EIP. |
 | `CacheService`, `CacheInvalidateService`, `CachePeekStaleService`, `CacheClearService`, `CacheStatsService`, `CacheInvalidateTarget`, `CAMEL_CACHE_INVALIDATED_COUNT` | stable | `pub use cache_eip::{...}` | Cache EIP. Outcome-aware segment for lookup, invalidation, stale-serving, clear, and stats (awaited async `stats()` on the port, bd rc-22wj). |
 | `EnrichService`, `PollEnrichService` | stable | `pub use content_enricher::{...}` | Enrich / pollEnrich. |
+| `ContentNegotiationProcessor`, `ContentNegotiationCheck` | stable | `pub use content_negotiation::{...}` | Header-only media negotiation gate; verdict injected as a check closure at compile time; never touches the body (REST strict 415/406). |
 | `ConvertBodyTo` | stable | `pub use convert_body::ConvertBodyTo` | Body conversion. |
 | `CsvConfig`, `CsvDataFormat`, `QuoteMode`, `RecordSeparator`, `CAMEL_CSV_HEADER_RECORD`, `JsonConfig`, `JsonDataFormat`, `XmlConfig`, `XmlDataFormat`, `ZipConfig`, `ZipDataFormat`, `builtin_data_format`, `builtin_data_format_with_config` | stable | `pub use data_format::{...}` | Built-in data formats. CSV added per ADR-0030. Configurable DoS caps per ADR-0038. |
 | `DelayerService` | stable | `pub use delayer::DelayerService` | Delay EIP. |
