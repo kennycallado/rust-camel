@@ -125,6 +125,24 @@ contract: &MediaContract) -> Result<(), CamelError>`, where
 time. The shell in camel-processor holds no media knowledge of its
 own — only the closure and the header extraction (D1).
 
+`MediaContract` sides are `Option<MediaRange>`: a declaration that is
+not a CONCRETE type (raw-mode lowering's tchar-only check can admit
+`*/*`, which is token-valid) yields `None` for that side — meaning
+permissive, exactly the ruling's "undeclared = naturally permissive".
+This keeps `parse_contract` infallible (no unwrap under lint
+pressure) and gives degenerate declarations the only semantics they
+can honestly carry. The contract also retains the trimmed ORIGINAL
+declaration strings (`consumes_declared`/`produces_declared`) because
+the error payloads echo them and parsed ranges are lowercased and
+param-stripped.
+
+Body-lessness travels on the step: `ContentNegotiationStep` carries
+`check_content_type: bool`, set by lowering from `verb_has_body`
+(rest.rs ~456), because the compile layer sees only the step — no
+verb context (compile.rs ~990). The compiled closure maps the
+Content-Type argument to `None` when the flag is false; the
+Accept-side gate always runs.
+
 Escape hatch: adopt the `mediatype` crate ONLY if the matcher exceeds
 ~350 LoC with residual bugs; that path requires a workspace review
 (MSRV, cargo audit, q-factor matching must be exposed).
