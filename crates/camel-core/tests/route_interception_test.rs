@@ -39,6 +39,8 @@ mod common;
 mod divert;
 #[path = "route_interception/plumbing.rs"]
 mod plumbing;
+#[path = "route_interception/seda_startup_activation.rs"]
+mod seda_startup_activation;
 #[path = "route_interception/skip.rs"]
 mod skip;
 #[path = "route_interception/support.rs"]

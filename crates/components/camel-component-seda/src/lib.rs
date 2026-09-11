@@ -32,7 +32,8 @@ use camel_component_api::UriConfig;
 use camel_component_api::parse_uri;
 use camel_component_api::{
     BoxProcessor, CamelError, Component, ComponentContext, ComponentMetadata, ConcurrencyModel,
-    Consumer, ConsumerContext, Endpoint, Exchange, ExchangeEnvelope, ProducerContext,
+    Consumer, ConsumerContext, ConsumerStartupMode, Endpoint, Exchange, ExchangeEnvelope,
+    ProducerContext,
 };
 use tracing::{info, warn};
 
@@ -836,6 +837,7 @@ impl Consumer for SedaConsumer {
                 let shared_rx = Arc::new(AsyncMutex::new(Some(rx)));
                 self.shared_rx = Some(Arc::clone(&shared_rx));
                 let forwarder_rx = Arc::clone(&shared_rx);
+                let forwarder_ctx = ctx.clone();
                 let component_metrics = self.runtime.component_metrics();
                 let handle = tokio::spawn(async move {
                     loop {
@@ -858,7 +860,7 @@ impl Consumer for SedaConsumer {
                         // reserved subscriber); the claim counts it out when
                         // forwarding finishes, panics, or the task is aborted.
                         let _claim = DepthGuard::claim(&depth);
-                        forward_envelope(&ctx, &component_metrics, envelope).await;
+                        forward_envelope(&forwarder_ctx, &component_metrics, envelope).await;
                     }
                     Ok(())
                 });
@@ -878,6 +880,15 @@ impl Consumer for SedaConsumer {
         }
 
         self.started = true;
+        // Explicit startup contract (rc-dbrkr): signal readiness only now —
+        // both mode arms have published the consumer-activation state
+        // (Single: `active` stored + receiver taken + forwarders spawned;
+        // Fanout: subscriber registered + forwarder spawned), so route
+        // startup resolves only against a fully activated consumer set and
+        // a producer send after `start()` passes the pre-enqueue gate on
+        // the first attempt. The error paths above return before this point
+        // and signal nothing.
+        ctx.mark_ready();
         info!(
             name = %self.state.config.name,
             consumer_id = %self.consumer_id,
@@ -949,6 +960,14 @@ impl Consumer for SedaConsumer {
         ConcurrencyModel::Concurrent {
             max: Some(self.state.config.concurrent_consumers),
         }
+    }
+
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        // Explicit (rc-dbrkr): readiness is signalled via
+        // `ConsumerContext::mark_ready()` at the end of `start()`, after the
+        // endpoint's consumer-activation state is published, so
+        // `ctx.start()` never returns ahead of an active consumer set.
+        ConsumerStartupMode::Explicit
     }
 
     fn background_task_handle(
@@ -1671,6 +1690,197 @@ mod consumer_producer_tests {
             consumer.concurrency_model(),
             ConcurrencyModel::Concurrent { max: Some(4) }
         );
+    }
+
+    // --- Explicit startup handshake (rc-dbrkr) ---
+
+    fn started_consumer_ctx() -> (
+        ConsumerContext,
+        camel_component_api::StartupReceiver,
+        mpsc::Receiver<ExchangeEnvelope>,
+    ) {
+        let (signal, receiver) = camel_component_api::StartupSignal::pair();
+        let (tx, rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "seda-test-route".to_string())
+            .with_startup(signal);
+        (ctx, receiver, rx)
+    }
+
+    #[test]
+    fn test_seda_consumer_startup_mode_is_explicit() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint("seda:explicit", &NoOpComponentContext)
+            .unwrap();
+        let consumer = ep.create_consumer(rt()).unwrap();
+        assert_eq!(
+            consumer.startup_mode(),
+            ConsumerStartupMode::Explicit,
+            "seda consumers must gate route startup on activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_seda_start_signals_readiness_after_activation_single() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint("seda:ready", &NoOpComponentContext)
+            .unwrap();
+
+        let mut consumer = ep.create_consumer(rt()).unwrap();
+        let (ctx, receiver, _route_rx) = started_consumer_ctx();
+        consumer.start(ctx).await.unwrap();
+
+        // Readiness must be resolvable the moment start() returned Ok.
+        receiver
+            .await_ready()
+            .await
+            .expect("readiness must be signalled after activation");
+        // Behavioral activation proof: the pre-enqueue gate passes on the
+        // first attempt after start() returned Ok.
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
+        producer
+            .clone()
+            .oneshot(Exchange::new(Message::new("activated")))
+            .await
+            .expect("send after start must pass the pre-enqueue gate");
+
+        consumer.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_seda_start_signals_readiness_after_registration_fanout() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint(
+                "seda:fanready?multipleConsumers=true",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+
+        let mut consumer = ep.create_consumer(rt()).unwrap();
+        let (ctx, receiver, mut route_rx) = started_consumer_ctx();
+        consumer.start(ctx).await.unwrap();
+
+        receiver
+            .await_ready()
+            .await
+            .expect("readiness must be signalled after activation");
+        // Behavioral registration proof: the fanout producer finds the
+        // subscriber immediately after start() returned Ok.
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
+        producer
+            .oneshot(Exchange::new(Message::new("fan registered")))
+            .await
+            .expect("fanout send after start must find the registered subscriber");
+        let forwarded = tokio::time::timeout(Duration::from_millis(500), route_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            forwarded.exchange.input.body.as_text(),
+            Some("fan registered")
+        );
+
+        consumer.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_seda_start_error_does_not_signal_readiness() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint("seda:noready", &NoOpComponentContext)
+            .unwrap();
+
+        // First consumer holds the Single-mode receiver.
+        let mut first = ep.create_consumer(rt()).unwrap();
+        let (ctx, _receiver, _route_rx) = started_consumer_ctx();
+        first.start(ctx).await.unwrap();
+
+        // Second consumer's start() fails before readiness.
+        let mut second = ep.create_consumer(rt()).unwrap();
+        let (ctx, receiver, _route_rx) = started_consumer_ctx();
+        let result = second.start(ctx).await;
+        assert!(result.is_err(), "duplicate Single consumer must fail start");
+
+        // The failure surfaced as an Err without signalling readiness: the
+        // receiver must stay Pending or resolve as Err (drop semantics) —
+        // never Ok.
+        let outcome = tokio::time::timeout(Duration::from_millis(50), receiver.await_ready()).await;
+        assert!(
+            !matches!(&outcome, Ok(Ok(()))),
+            "error path must not signal readiness, got {outcome:?}"
+        );
+
+        first.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_seda_restart_signals_readiness_and_flows_buffered() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint("seda:restart", &NoOpComponentContext)
+            .unwrap();
+
+        let mut first = ep.create_consumer(rt()).unwrap();
+        let (ctx, _receiver, mut rx1) = started_consumer_ctx();
+        first.start(ctx).await.unwrap();
+
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
+        producer
+            .clone()
+            .oneshot(Exchange::new(Message::new("survivor")))
+            .await
+            .unwrap();
+
+        first.stop().await.unwrap();
+
+        // Fresh consumer instance for the same endpoint: readiness must be
+        // signalled only after the new active flag was stored, and the
+        // buffered envelope must flow without any test-side probe.
+        let mut second = ep.create_consumer(rt()).unwrap();
+        let (ctx, receiver, mut rx2) = started_consumer_ctx();
+        second.start(ctx).await.unwrap();
+        receiver
+            .await_ready()
+            .await
+            .expect("restart readiness must be signalled");
+        // Behavioral reactivation proof: the fresh consumer's activation
+        // publishes the gate again — the first send after the restart passes.
+        producer
+            .clone()
+            .oneshot(Exchange::new(Message::new("after restart")))
+            .await
+            .expect("send after restart must pass the pre-enqueue gate");
+
+        // The envelope survived the restart: it arrives on either the old
+        // consumer's route channel (already forwarded) or the new one
+        // (still queued across stop).
+        let delivered = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                tokio::select! {
+                    env = rx1.recv() => {
+                        if let Some(env) = env
+                            && env.exchange.input.body.as_text() == Some("survivor")
+                        {
+                            return true;
+                        }
+                    }
+                    env = rx2.recv() => {
+                        if let Some(env) = env
+                            && env.exchange.input.body.as_text() == Some("survivor")
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("buffered envelope must survive the restart");
+        assert!(delivered);
+
+        second.stop().await.unwrap();
     }
 
     #[tokio::test]

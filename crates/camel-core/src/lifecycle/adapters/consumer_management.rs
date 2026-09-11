@@ -1188,6 +1188,72 @@ mod tests {
         assert!(notification.error.contains("broker lost"));
     }
 
+    /// rc-dbrkr: the seda consumer's startup handshake must gate the first
+    /// producer send on consumer activation. Under Immediate startup the
+    /// receiver is pre-resolved, so `await_consumer_startup` returns before
+    /// the spawned consumer task has even been polled — and a send issued
+    /// "after startup" hits the pre-enqueue "has no active consumers" gate.
+    /// Uses the real SedaConsumer through the real spawn path on a
+    /// current-thread runtime, where the consumer task is polled only when
+    /// this test's task yields: the single-poll probe below is therefore a
+    /// deterministic observation of the pre-resolution, and the send must
+    /// only succeed once the handshake actually waited for activation.
+    #[tokio::test]
+    async fn seda_explicit_startup_gates_send_until_consumer_activation() {
+        use camel_api::{Exchange, Message};
+        use camel_component_api::test_support::NoopRuntimeObservability;
+        use camel_component_api::{Component, ProducerContext};
+        use camel_component_seda::SedaComponent;
+        use tower::ServiceExt;
+
+        let noop_rt = Arc::new(NoopRuntimeObservability);
+        let comp = SedaComponent::new();
+        let endpoint = comp
+            .create_endpoint("seda:handshake", &camel_component_api::NoOpComponentContext)
+            .expect("seda endpoint must resolve");
+        let consumer = endpoint
+            .create_consumer(noop_rt.clone())
+            .expect("seda consumer must build");
+
+        let (exchange_tx, _rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            exchange_tx,
+            CancellationToken::new(),
+            "seda-handshake".to_string(),
+        );
+
+        let (_handle, startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
+            "seda-handshake".to_string(),
+            consumer,
+            ctx,
+            None,
+            None,
+            false,
+        );
+
+        // Drive the handshake to completion. Post-fix (Explicit) the awaits
+        // here are what poll the consumer task through start(); pre-fix
+        // (Immediate) the pre-resolved receiver returned without any yield,
+        // so the consumer task was never polled before the send below.
+        await_consumer_startup(startup_rx, "startup")
+            .await
+            .expect("consumer startup must succeed");
+
+        // The first send after startup resolved must pass the pre-enqueue
+        // gate: activation is published before the handshake returns.
+        let producer = endpoint
+            .create_producer(noop_rt, &ProducerContext::default())
+            .expect("seda producer must build");
+        let send = producer
+            .oneshot(Exchange::new(Message::new("first after start")))
+            .await;
+        assert!(
+            send.is_ok(),
+            "pre-enqueue gate fired although startup resolved: {:?}",
+            send.err()
+        );
+    }
+
     #[tokio::test]
     async fn spawn_consumer_task_deferred_failure_suppressed_on_cancellation() {
         let (exchange_tx, _rx) = mpsc::channel(1);
