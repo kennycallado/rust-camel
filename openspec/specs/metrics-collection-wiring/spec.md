@@ -34,6 +34,15 @@ all subsequent emission calls.
   `ControllerComponentContext`
 - **THEN** the resolved collector is the registered collector, not `NoOp`
 
+#### Scenario: readiness-phase producer failure is observable
+
+- **GIVEN** a route whose target has no consumer and
+  `failIfNoConsumers=true` (the default)
+- **WHEN** one exchange is driven
+- **THEN** the exchanges family counts the failure and the errors family is
+  incremented, each exactly once per exchange, and the duration family
+  remains call-time only
+
 ### Requirement: Second collector registration composes
 
 The system SHALL, when a second metrics service registers, compose a
