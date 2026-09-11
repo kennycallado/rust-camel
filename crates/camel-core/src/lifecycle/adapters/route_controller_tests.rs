@@ -5908,6 +5908,85 @@ fn set_tracer_config_derives_gating() {
         !controller.tracer_gating.levers.exchange
             && !controller.tracer_gating.levers.duration
             && controller.tracer_gating.levers.components,
-        "levers snapshot verbatim"
+        "levers match config"
+    );
+}
+
+// ============================================================================
+// rc-e2r9: b′ signal on reply-drop (route controller)
+//
+// When a direct producer timeout abandons an enqueued exchange, the
+// route_controller reply-drop site must emit the b′ error signal instead of
+// silently discarding it. ConsumerStopping must be suppressed from the b′
+// ERROR metric and error! log on graceful route stop.
+// ============================================================================
+
+/// Unit test: emit_b_prime_on_reply_drop emits metric for non-ConsumerStopping errors.
+#[test]
+fn b_prime_emit_on_reply_drop_emits_metric() {
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let collector: Arc<dyn camel_api::metrics::MetricsCollector> = Arc::new(RecordingCollector {
+        calls: Arc::clone(&calls),
+    });
+    let metrics = Some(Arc::clone(&collector));
+
+    // Non-ConsumerStopping error → must emit metric + warn
+    super::emit_b_prime_on_reply_drop(
+        &metrics,
+        "test-route",
+        &CamelError::RouteError("boom".into()),
+        "test-site",
+    );
+
+    let has_error = calls
+        .lock()
+        .expect("calls lock")
+        .iter()
+        .any(|c| c.starts_with("increment_errors:test-route"));
+    assert!(
+        has_error,
+        "b′ metric must be emitted for non-ConsumerStopping errors; calls: {:?}",
+        calls.lock().expect("calls lock")
+    );
+}
+
+/// Unit test: emit_b_prime_on_reply_drop suppresses ConsumerStopping.
+#[test]
+fn b_prime_emit_on_reply_drop_suppresses_consumer_stopping() {
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let collector: Arc<dyn camel_api::metrics::MetricsCollector> = Arc::new(RecordingCollector {
+        calls: Arc::clone(&calls),
+    });
+    let metrics = Some(Arc::clone(&collector));
+
+    // ConsumerStopping → must NOT emit metric
+    super::emit_b_prime_on_reply_drop(
+        &metrics,
+        "test-route",
+        &CamelError::ConsumerStopping,
+        "test-site",
+    );
+
+    let has_error = calls
+        .lock()
+        .expect("calls lock")
+        .iter()
+        .any(|c| c.starts_with("increment_errors:"));
+    assert!(
+        !has_error,
+        "ConsumerStopping must NOT emit b′ metric; calls: {:?}",
+        calls.lock().expect("calls lock")
+    );
+}
+
+/// Unit test: emit_b_prime_on_reply_drop is no-op when metrics is None.
+#[test]
+fn b_prime_emit_on_reply_drop_no_metrics() {
+    // Should not panic even with None metrics
+    super::emit_b_prime_on_reply_drop(
+        &None,
+        "test-route",
+        &CamelError::RouteError("boom".into()),
+        "test-site",
     );
 }

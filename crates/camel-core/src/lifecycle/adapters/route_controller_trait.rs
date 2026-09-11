@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tower::Service;
 use tracing::{error, info, warn};
 
+use camel_api::metrics::MetricsCollector;
 use camel_api::security_policy::RouteSecurityPlan;
 use camel_api::{CamelError, NoOpMetrics, StepLifecycle, StepShutdownReason};
 use camel_component_api::Consumer;
@@ -419,6 +420,9 @@ impl camel_api::RouteController for DefaultRouteController {
         // the error handler can cancel it to force immediate pipeline exit.
         let pipeline_cancel_for_cleanup = pipeline_cancel.clone();
 
+        // rc-e2r9: capture metrics for b′ emission at reply-drop sites.
+        let metrics_for_reply_drop = self.tracer_metrics.clone();
+
         // rc-jxkj cohort gate: the drain loop parks each dequeued envelope
         // until the startup cohort opens the gate. Subscribed once here; the
         // spawned task owns the receiver (`wait_for` needs &mut), mirroring
@@ -431,6 +435,8 @@ impl camel_api::RouteController for DefaultRouteController {
                 // Owned for the spawned 'static task (route_id is a borrow).
                 let route_id = route_id.to_string();
                 let sem = max.map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
+                // rc-e2r9: metrics for b′ emission at reply-drop sites.
+                let metrics_for_reply_drop = metrics_for_reply_drop.clone();
                 tokio::spawn(async move {
                     loop {
                         // B2 (ADR-0044): acquire permit BEFORE dequeue.
@@ -494,6 +500,9 @@ impl camel_api::RouteController for DefaultRouteController {
                         let pipe_ref = Arc::clone(&pipeline);
                         let cancel = pipeline_cancel.clone();
                         let drain_clone = Arc::clone(&drain_in_flight);
+                        // rc-e2r9: capture for b′ emission at reply-drop.
+                        let inner_metrics = metrics_for_reply_drop.clone();
+                        let inner_route_id = route_id.clone();
                         tokio::spawn(async move {
                             // Permit owned by this task — released on completion (RAII).
                             let _permit = permit;
@@ -505,7 +514,18 @@ impl camel_api::RouteController for DefaultRouteController {
                             // Wait for service ready with circuit breaker backoff
                             if let Err(e) = ready_with_backoff(&mut pipe, &cancel).await {
                                 if let Some(tx) = reply_tx {
-                                    let _ = tx.send(Err(e));
+                                    let send_result = tx.send(Err(e));
+                                    if send_result.is_err() {
+                                        // Receiver dropped — emit b′ signal.
+                                        // We no longer have the original error (moved into send),
+                                        // so use a generic description.
+                                        emit_b_prime_on_reply_drop(
+                                            &inner_metrics,
+                                            &inner_route_id,
+                                            &CamelError::ChannelClosed,
+                                            "concurrent:ready",
+                                        );
+                                    }
                                 }
                                 return;
                             }
@@ -516,7 +536,23 @@ impl camel_api::RouteController for DefaultRouteController {
                                 .scope(cancel, async move { pipe.call(exchange).await })
                                 .await;
                             if let Some(tx) = reply_tx {
-                                let _ = tx.send(result);
+                                let is_err = result.is_err();
+                                let err_clone = if is_err {
+                                    Some(result.as_ref().unwrap_err().clone())
+                                } else {
+                                    None
+                                };
+                                let send_result = tx.send(result);
+                                if is_err && send_result.is_err()
+                                    && let Some(ref e) = err_clone
+                                {
+                                    emit_b_prime_on_reply_drop(
+                                        &inner_metrics,
+                                        &inner_route_id,
+                                        e,
+                                        "concurrent:pipeline",
+                                    );
+                                }
                             } else if let Err(ref e) = result {
                                 // log-policy: system-broken
                                 error!("Pipeline error: {e}");
@@ -533,6 +569,8 @@ impl camel_api::RouteController for DefaultRouteController {
             _ => {
                 // Owned for the spawned 'static task (route_id is a borrow).
                 let route_id = route_id.to_string();
+                // rc-e2r9: metrics for b′ emission at reply-drop sites.
+                let metrics_for_reply_drop = metrics_for_reply_drop.clone();
                 tokio::spawn(async move {
                     loop {
                         // Use select! to exit promptly on cancellation even when idle
@@ -585,7 +623,15 @@ impl camel_api::RouteController for DefaultRouteController {
 
                         if let Err(e) = ready_with_backoff(&mut pipeline, &pipeline_cancel).await {
                             if let Some(tx) = reply_tx {
-                                let _ = tx.send(Err(e));
+                                let send_result = tx.send(Err(e));
+                                if send_result.is_err() {
+                                    emit_b_prime_on_reply_drop(
+                                        &metrics_for_reply_drop,
+                                        &route_id,
+                                        &CamelError::ChannelClosed,
+                                        "sequential:ready",
+                                    );
+                                }
                             }
                             return;
                         }
@@ -601,7 +647,23 @@ impl camel_api::RouteController for DefaultRouteController {
                             .scope(cancel, async move { pipeline.call(exchange).await })
                             .await;
                         if let Some(tx) = reply_tx {
-                            let _ = tx.send(result);
+                            let is_err = result.is_err();
+                            let err_clone = if is_err {
+                                Some(result.as_ref().unwrap_err().clone())
+                            } else {
+                                None
+                            };
+                            let send_result = tx.send(result);
+                            if is_err && send_result.is_err()
+                                && let Some(ref e) = err_clone
+                            {
+                                emit_b_prime_on_reply_drop(
+                                    &metrics_for_reply_drop,
+                                    &route_id,
+                                    e,
+                                    "sequential:pipeline",
+                                );
+                            }
                         } else if let Err(ref e) = result {
                             // log-policy: system-broken
                             error!("Pipeline error: {e}");
@@ -980,6 +1042,38 @@ impl camel_api::RouteController for DefaultRouteController {
         info!("All routes stopped");
         Ok(())
     }
+}
+
+// ── rc-e2r9: b′ signal emission on reply-drop ──
+
+/// Emit the b′ error signal when a reply-drop site detects that the oneshot
+/// receiver has been dropped (e.g. direct producer timeout abandoned the
+/// enqueued exchange). ConsumerStopping is suppressed — it is expected
+/// shutdown, not an operator-visible failure.
+fn emit_b_prime_on_reply_drop(
+    metrics: &Option<Arc<dyn MetricsCollector>>,
+    route_id: &str,
+    error: &CamelError,
+    site: &str,
+) {
+    // ConsumerStopping is graceful shutdown — not a failure signal.
+    if matches!(error, CamelError::ConsumerStopping) {
+        tracing::debug!(
+            route_id = %route_id,
+            site = %site,
+            "reply dropped during graceful stop (ConsumerStopping suppressed)",
+        );
+        return;
+    }
+    if let Some(m) = metrics {
+        m.increment_errors(route_id, "b-prime:reply-drop");
+    }
+    tracing::warn!(
+        route_id = %route_id,
+        error = %error,
+        site = %site,
+        "reply dropped — b′ signal emitted (receiver abandoned the exchange)",
+    );
 }
 
 #[cfg(test)]

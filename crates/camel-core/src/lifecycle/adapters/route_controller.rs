@@ -1052,6 +1052,10 @@ impl DefaultRouteController {
         let agg = Arc::new(svc);
 
         let pipeline_cancel_for_monitor = pipeline_cancel.clone();
+        // rc-e2r9: capture route_id and metrics for b′ emission at reply-drop
+        // sites inside the spawned task.
+        let route_id_for_metrics = route_id.to_string();
+        let metrics_for_reply_drop = self.tracer_metrics.clone();
         // rc-jxkj cohort gate: owned by the forward loop — the envelope arm
         // parks dispatch until the startup cohort opens the gate.
         let mut cohort_rx = self.cohort.subscribe();
@@ -1135,7 +1139,17 @@ impl DefaultRouteController {
                                 let ex = match pre_pipe.processor.clone_inner().oneshot(exchange).await {
                                     Ok(ex) => ex,
                                     Err(e) => {
-                                        if let Some(tx) = reply_tx { let _ = tx.send(Err(e)); }
+                                        if let Some(tx) = reply_tx {
+                                            let send_result = tx.send(Err(e));
+                                            if send_result.is_err() {
+                                                emit_b_prime_on_reply_drop(
+                                                    &metrics_for_reply_drop,
+                                                    &route_id_for_metrics,
+                                                    &CamelError::ChannelClosed,
+                                                    "pre-pipeline",
+                                                );
+                                            }
+                                        }
                                         continue;
                                     }
                                 };
@@ -1156,7 +1170,17 @@ impl DefaultRouteController {
                                         }
                                     }
                                     Err(e) => {
-                                        if let Some(tx) = reply_tx { let _ = tx.send(Err(e)); }
+                                        if let Some(tx) = reply_tx {
+                                            let send_result = tx.send(Err(e));
+                                            if send_result.is_err() {
+                                                emit_b_prime_on_reply_drop(
+                                                    &metrics_for_reply_drop,
+                                                    &route_id_for_metrics,
+                                                    &CamelError::ChannelClosed,
+                                                    "aggregate",
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1281,6 +1305,38 @@ impl DefaultRouteController {
         )));
         Ok(())
     }
+}
+
+// ── rc-e2r9: b′ signal emission on reply-drop ──
+
+/// Emit the b′ error signal when a reply-drop site detects that the oneshot
+/// receiver has been dropped (e.g. direct producer timeout abandoned the
+/// enqueued exchange). ConsumerStopping is suppressed — it is expected
+/// shutdown, not an operator-visible failure.
+fn emit_b_prime_on_reply_drop(
+    metrics: &Option<Arc<dyn MetricsCollector>>,
+    route_id: &str,
+    error: &CamelError,
+    site: &str,
+) {
+    // ConsumerStopping is graceful shutdown — not a failure signal.
+    if matches!(error, CamelError::ConsumerStopping) {
+        debug!(
+            route_id = %route_id,
+            site = %site,
+            "reply dropped during graceful stop (ConsumerStopping suppressed)",
+        );
+        return;
+    }
+    if let Some(m) = metrics {
+        m.increment_errors(route_id, "b-prime:reply-drop");
+    }
+    warn!(
+        route_id = %route_id,
+        error = %error,
+        site = %site,
+        "reply dropped — b′ signal emitted (receiver abandoned the exchange)",
+    );
 }
 
 #[cfg(test)]
