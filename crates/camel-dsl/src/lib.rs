@@ -12,6 +12,7 @@ pub mod env_interpolation;
 mod input_format;
 pub mod json;
 pub mod mcp;
+pub mod media;
 pub mod model;
 pub mod openapi;
 #[cfg(test)]

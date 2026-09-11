@@ -202,7 +202,7 @@
 - `cargo clippy -p camel-dsl -- -D warnings` exits 0.
 - `media.rs` stays within ~350 LoC excluding tests (escape hatch requires the workspace review per design D3 — NOT part of this change).
 
-- [ ] 3.1
+- [x] 3.1
 
 ### Task 3.2: Step plumbing — route_ast, conversion, model, contract, compile
 

@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 
 use camel_api::CamelError;
 
+use crate::media::{is_json_media_type, is_valid_media_declaration};
 use crate::route_ast::{
     MarshalStep, RouteDslRest, RouteDslRestBinding, RouteDslRestOperation, RouteDslRoute,
     RouteDslStep, SetHeaderData, SetHeaderStep, ToStep, UnmarshalStep,
 };
-use crate::yaml::valid_header_token;
 
 /// Lower ALL REST blocks in a document into route entries, enforcing the
 /// cross-block validation rules the spec mandates (§6.3 + §7.2, review C3):
@@ -455,33 +455,6 @@ pub fn default_status_for_verb(verb: &str) -> u16 {
 
 pub fn verb_has_body(verb: &str) -> bool {
     matches!(verb, "post" | "put" | "patch")
-}
-
-/// The media type base: trimmed, parameters after the first `;` dropped.
-fn split_media_base(media: &str) -> &str {
-    media.trim().split(';').next().unwrap_or_default()
-}
-
-/// True iff `media` is a valid `type/subtype` declaration; parameters are
-/// ignored (opaque).
-fn is_valid_media_declaration(media: &str) -> bool {
-    match split_media_base(media).split_once('/') {
-        Some((ty, sub)) => valid_header_token(ty) && valid_header_token(sub),
-        None => false,
-    }
-}
-
-/// True iff `media` is a JSON media type: a valid `type/subtype` whose
-/// subtype is `json` or ends with `+json` (case-insensitive, ASCII).
-fn is_json_media_type(media: &str) -> bool {
-    let Some((ty, sub)) = split_media_base(media).split_once('/') else {
-        return false;
-    };
-    if !valid_header_token(ty) || !valid_header_token(sub) {
-        return false;
-    }
-    let sub = sub.to_ascii_lowercase();
-    sub == "json" || sub.ends_with("+json")
 }
 
 // ---------------------------------------------------------------------------
