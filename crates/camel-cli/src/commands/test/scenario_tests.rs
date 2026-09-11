@@ -647,57 +647,6 @@ fn write_tier_project(root: &Path, camel_toml: &str, routes_yaml: &str, doc_yaml
     doc_path
 }
 
-/// Deliver an exchange to a `direct:` endpoint through the booted
-/// context's own producer path — the mechanism the harness
-/// `DirectStimulus` uses and the run-side twin of
-/// `run_tests::direct_oneshot`: a fresh endpoint + producer per
-/// send through the component registry, one `oneshot` per
-/// exchange, retrying the consumer-startup race
-/// (`EndpointCreationFailed`) on a bounded deadline.
-async fn direct_oneshot(
-    ctx: &camel_core::CamelContext,
-    uri: &str,
-    exchange: camel_api::Exchange,
-) -> Result<camel_api::Exchange, camel_api::CamelError> {
-    use tower::ServiceExt;
-
-    const RETRY_SLEEP: std::time::Duration = std::time::Duration::from_millis(20);
-    const RETRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
-
-    let deadline = tokio::time::Instant::now() + RETRY_DEADLINE;
-    loop {
-        let producer_ctx = ctx.producer_context();
-        let component = ctx
-            .registry()
-            .get("direct")
-            .expect("direct component registered by the bundle cascade"); // allow-unwrap
-        let endpoint = component
-            .create_endpoint(uri, ctx)
-            .expect("direct endpoint creation must succeed"); // allow-unwrap
-        let producer = endpoint
-            .create_producer(
-                std::sync::Arc::new(camel_component_api::NoOpComponentContext),
-                &producer_ctx,
-            )
-            .expect("direct producer creation must succeed"); // allow-unwrap
-        match producer.oneshot(exchange.clone()).await {
-            Ok(reply) => return Ok(reply),
-            Err(e) => {
-                // Retry only the direct startup race; the SEDA
-                // no-active-consumers gate fails fast — retrying
-                // duplicates executed side effects (rc-tgaxf).
-                let is_startup_race = !camel_component_seda::is_no_active_consumers_gate(&e)
-                    && matches!(e, camel_api::CamelError::EndpointCreationFailed(_));
-                if is_startup_race && tokio::time::Instant::now() < deadline {
-                    tokio::time::sleep(RETRY_SLEEP).await;
-                    continue;
-                }
-                return Err(e);
-            }
-        }
-    }
-}
-
 /// The provider registry the SHARED security builder builds from
 /// the project's `Camel.toml` — the same seam `boot_scenario`
 /// uses internally. `ScenarioRun` does not expose the registry;
@@ -824,7 +773,7 @@ scenario:
         .await
         .expect("native credential must authenticate via the shared builder's registry"); // allow-unwrap
     install_carrier(&mut exchange, &principal);
-    let reply = direct_oneshot(&run.ctx, "direct:sec", exchange)
+    let reply = crate::commands::test_support::direct_oneshot(&run.ctx, "direct:sec", exchange)
         .await
         .expect("credentialed send must complete the security_policy route"); // allow-unwrap
     assert_eq!(
@@ -838,7 +787,7 @@ scenario:
 
     // Refuse case: no credential anywhere — no carrier, no header.
     let plain = Exchange::new(Message::new(Body::Text("ping".to_string())));
-    let err = direct_oneshot(&run.ctx, "direct:sec", plain)
+    let err = crate::commands::test_support::direct_oneshot(&run.ctx, "direct:sec", plain)
         .await
         .expect_err("credential-less send must be refused"); // allow-unwrap
     assert!(
@@ -1012,7 +961,7 @@ scenario:
 
     for (uri, lane) in [("direct:t1", "t1"), ("direct:t2", "t2")] {
         let exchange = Exchange::new(Message::new(Body::Text(format!("ping {lane}"))));
-        match direct_oneshot(&run.ctx, uri, exchange).await {
+        match crate::commands::test_support::direct_oneshot(&run.ctx, uri, exchange).await {
             Ok(_) => {}
             Err(e) => panic!("send to {uri} must complete the materialized route: {e}"),
         }
