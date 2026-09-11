@@ -258,7 +258,7 @@
 - `cargo clippy -p camel-dsl -- -D warnings` exits 0.
 - `cargo xtask schema --check` exits 0 (route schema unchanged — the new RouteDslStep arm is skipped by schemars like `SetHeaderIfAbsent`, and `DeclarativeStep` carries no serde/schemars derives).
 
-- [ ] 3.2
+- [x] 3.2
 
 ### Task 3.3: Lowering injection and v1 pin prefix updates
 

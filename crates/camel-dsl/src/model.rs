@@ -300,6 +300,16 @@ impl SetHeaderStepDef {
     }
 }
 
+/// REST strict content-negotiation gate step: declared `consumes`/
+/// `produces` media types plus the bodyless-mode flag that disables the
+/// `Content-Type` (415) side of the gate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContentNegotiationStepDef {
+    pub consumes: String,
+    pub produces: String,
+    pub check_content_type: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveHeaderStepDef {
     pub key: String,
@@ -717,6 +727,7 @@ pub enum DeclarativeStep {
     To(ToStepDef),
     SetHeader(SetHeaderStepDef),
     SetHeaderIfAbsent(SetHeaderStepDef),
+    ContentNegotiation(ContentNegotiationStepDef),
     RemoveHeader(RemoveHeaderStepDef),
     SetProperty(SetPropertyStepDef),
     SetBody(SetBodyStepDef),
@@ -770,6 +781,9 @@ impl DeclarativeStep {
             DeclarativeStep::SetHeader(_) => crate::contract::DeclarativeStepKind::SetHeader,
             DeclarativeStep::SetHeaderIfAbsent(_) => {
                 crate::contract::DeclarativeStepKind::SetHeaderIfAbsent
+            }
+            DeclarativeStep::ContentNegotiation(_) => {
+                crate::contract::DeclarativeStepKind::ContentNegotiation
             }
             DeclarativeStep::RemoveHeader(_) => crate::contract::DeclarativeStepKind::RemoveHeader,
             DeclarativeStep::SetProperty(_) => crate::contract::DeclarativeStepKind::SetProperty,

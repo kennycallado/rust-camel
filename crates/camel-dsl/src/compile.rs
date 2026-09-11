@@ -1024,6 +1024,18 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::SetHeaderIfAbsent(SetHeaderStepDef { key, value }) => {
             compile_set_header_if_absent_step(key, value)
         }
+        DeclarativeStep::ContentNegotiation(def) => {
+            let contract = crate::media::parse_contract(&def.consumes, &def.produces);
+            let ct_enabled = def.check_content_type;
+            let check = std::sync::Arc::new(move |ct: Option<&str>, acc: Option<&str>| {
+                crate::media::check_request(if ct_enabled { ct } else { None }, acc, &contract)
+            });
+            Ok(BuilderStep::Processor(camel_api::OpaqueProcessor(
+                camel_api::BoxProcessor::new(camel_processor::ContentNegotiationProcessor::new(
+                    check,
+                )),
+            )))
+        }
         DeclarativeStep::RemoveHeader(RemoveHeaderStepDef { key }) => {
             Ok(BuilderStep::DeclarativeRemoveHeader { key })
         }
@@ -1712,6 +1724,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Log(_) => "log",
         DeclarativeStep::SetHeader(_) => "set_header",
         DeclarativeStep::SetHeaderIfAbsent(_) => "set_header_if_absent",
+        DeclarativeStep::ContentNegotiation(_) => "content_negotiation",
         DeclarativeStep::RemoveHeader(_) => "remove_header",
         DeclarativeStep::SetProperty(_) => "set_property",
         DeclarativeStep::SetBody(_) => "set_body",
@@ -2138,7 +2151,8 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
         | DeclarativeStep::CacheStats(_)
         | DeclarativeStep::Sampling(_)
         | DeclarativeStep::Sort(_)
-        | DeclarativeStep::Resequence(_) => {}
+        | DeclarativeStep::Resequence(_)
+        | DeclarativeStep::ContentNegotiation(_) => {}
         DeclarativeStep::DoTry {
             steps,
             catch,
@@ -2200,15 +2214,16 @@ mod tests {
     use super::*;
     use crate::model::{
         AggregateStrategyDef, BeanStepDef, BodyTypeDef, CacheClearStepDef, CacheInvalidateStepDef,
-        CachePeekStaleStepDef, CacheStatsStepDef, CacheStepDef, ChoiceStepDef, DataFormatDef,
-        DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
-        DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
-        DeclarativeSecurityPolicy, DelayStepDef, DynamicRouterStepDef, FilterStepDef,
-        LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef,
-        LoopStepDef, MulticastAggregationDef, MulticastStepDef, RecipientListStepDef,
-        RoutingSlipStepDef, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
-        SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrottleStepDef,
-        ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+        CachePeekStaleStepDef, CacheStatsStepDef, CacheStepDef, ChoiceStepDef,
+        ContentNegotiationStepDef, DataFormatDef, DeclarativeCircuitBreaker,
+        DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeOnException,
+        DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeSecurityPolicy, DelayStepDef,
+        DynamicRouterStepDef, FilterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
+        LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
+        MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, SetBodyStepDef,
+        SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef,
+        SplitStepDef, StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
+        ValueSourceDef, WhenStepDef, WireTapStepDef,
     };
     use crate::test_support::test_authenticator;
     use async_trait::async_trait;
@@ -2219,6 +2234,56 @@ mod tests {
             language: "simple".into(),
             source: simple_src.into(),
         }
+    }
+
+    #[test]
+    fn compile_content_negotiation_step_emits_processor() {
+        let step = DeclarativeStep::ContentNegotiation(ContentNegotiationStepDef {
+            consumes: "application/json".into(),
+            produces: "application/json".into(),
+            check_content_type: true,
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result, Ok(BuilderStep::Processor(_))));
+    }
+
+    #[tokio::test]
+    async fn compile_negotiation_check_respects_bodyless_flag() {
+        fn def(check_content_type: bool) -> DeclarativeStep {
+            DeclarativeStep::ContentNegotiation(ContentNegotiationStepDef {
+                consumes: "application/json".into(),
+                produces: "application/json".into(),
+                check_content_type,
+            })
+        }
+
+        let BuilderStep::Processor(strict_op) = compile_declarative_step(def(true)).unwrap() else {
+            panic!("check_content_type=true must emit a processor");
+        };
+        let camel_api::OpaqueProcessor(strict) = strict_op;
+        let BuilderStep::Processor(loose_op) = compile_declarative_step(def(false)).unwrap() else {
+            panic!("check_content_type=false must emit a processor");
+        };
+        let camel_api::OpaqueProcessor(loose) = loose_op;
+
+        let mut msg = camel_api::Message::default();
+        msg.set_header("Content-Type", "text/plain");
+        msg.set_header("Accept", "application/json");
+        let exchange = camel_api::Exchange::new(msg);
+
+        use tower::ServiceExt;
+
+        let strict_result = strict.oneshot(exchange.clone()).await;
+        assert!(
+            matches!(strict_result, Err(CamelError::UnsupportedMediaType { .. })),
+            "check_content_type=true must reject Content-Type text/plain with 415"
+        );
+
+        let loose_result = loose.oneshot(exchange).await;
+        assert!(
+            loose_result.is_ok(),
+            "check_content_type=false must pass the exchange through"
+        );
     }
 
     #[test]

@@ -6,10 +6,6 @@
 //! subset; entries containing them are treated as malformed and degrade per
 //! the malformed-header rule.
 
-// Staged landing (task 3.1): the gate's consumers arrive with the
-// ContentNegotiationProcessor wiring in task 3.2 — drop this allow then.
-#![allow(dead_code)]
-
 use camel_api::CamelError;
 
 use crate::yaml::valid_header_token;

@@ -519,6 +519,10 @@ pub enum RouteDslStep {
     #[cfg_attr(feature = "schema", schemars(skip))]
     #[cfg_attr(feature = "schema", ts(skip))]
     SetHeaderIfAbsent(SetHeaderStep),
+    #[serde(skip_deserializing)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    #[cfg_attr(feature = "schema", ts(skip))]
+    ContentNegotiation(ContentNegotiationStep),
     RemoveHeader(RemoveHeaderStep),
     SetProperty(SetPropertyStep),
     SetBody(SetBodyStep),
@@ -594,6 +598,18 @@ pub struct ToStep {
 #[serde(deny_unknown_fields)]
 pub struct SetHeaderStep {
     pub set_header: SetHeaderData,
+}
+
+/// REST strict content-negotiation gate descriptor. Constructed by REST
+/// lowering only — never deserialized from authored YAML/JSON (the
+/// `RouteDslStep` arm is `skip_deserializing`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ContentNegotiationStep {
+    pub consumes: String,
+    pub produces: String,
+    pub check_content_type: bool,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

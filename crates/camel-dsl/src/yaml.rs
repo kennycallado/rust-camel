@@ -25,16 +25,17 @@ use crate::input_format::{InputFormat, annotate_format};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, CacheClearStepDef,
     CacheInvalidateStepDef, CachePeekStaleStepDef, CacheStatsStepDef, CacheStepDef, ChoiceStepDef,
-    ClaimCheckStepDef, DataFormatDef, DeclarativeCircuitBreaker, DeclarativeConcurrency,
-    DeclarativeErrorHandler, DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
-    DeclarativeSecurityPolicy, DeclarativeStep, DelayStepDef, DoTryCatchClauseDef, DoTryFinallyDef,
-    DynamicRouterStepDef, EnrichStepDef, IdempotentConsumerStepDef, LanguageExpressionDef,
-    LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
-    MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RemoveHeaderStepDef,
-    ResequenceModeDef, ResequenceStepDef, RoutingSlipStepDef, SamplingStepDef, ScriptStepDef,
-    SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef, SortStepDef,
-    SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrottleStepDef,
-    ThrottleStrategyDef, ToStepDef, ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    ClaimCheckStepDef, ContentNegotiationStepDef, DataFormatDef, DeclarativeCircuitBreaker,
+    DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeOnException,
+    DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeSecurityPolicy, DeclarativeStep,
+    DelayStepDef, DoTryCatchClauseDef, DoTryFinallyDef, DynamicRouterStepDef, EnrichStepDef,
+    IdempotentConsumerStepDef, LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef,
+    LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef, MulticastStepDef,
+    RecipientListStepDef, RemoveHeaderStepDef, ResequenceModeDef, ResequenceStepDef,
+    RoutingSlipStepDef, SamplingStepDef, ScriptStepDef, SecurityCompileContext, SetBodyStepDef,
+    SetHeaderStepDef, SetPropertyStepDef, SortStepDef, SplitAggregationDef, SplitExpressionDef,
+    SplitStepDef, StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
+    ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::route_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, CacheBody, CacheClearBody,
@@ -1745,6 +1746,13 @@ pub(crate) fn route_step_to_declarative_step(
                 value,
             }))
         }
+        RouteDslStep::ContentNegotiation(step) => Ok(DeclarativeStep::ContentNegotiation(
+            ContentNegotiationStepDef {
+                consumes: step.consumes.trim().to_string(),
+                produces: step.produces.trim().to_string(),
+                check_content_type: step.check_content_type,
+            },
+        )),
         RouteDslStep::DoTry(DoTryStep { do_try: data }) => {
             // Spec §7.2 Rule 4: try steps must be non-empty.
             if data.steps.is_empty() {
@@ -5902,6 +5910,63 @@ routes:
         assert!(
             result.is_err(),
             "set_header_if_absent YAML key must be rejected at deserialization"
+        );
+    }
+
+    #[test]
+    fn authoring_path_produces_negotiation_declarative_step() {
+        use crate::route_ast::ContentNegotiationStep;
+
+        let route = RouteDslRoute {
+            id: "negotiation-route".into(),
+            from: "direct:start".into(),
+            parameters: BTreeMap::new(),
+            steps: vec![RouteDslStep::ContentNegotiation(ContentNegotiationStep {
+                consumes: " application/json ".into(),
+                produces: "application/json".into(),
+                check_content_type: true,
+            })],
+            auto_startup: true,
+            startup_order: 0,
+            sequential: false,
+            concurrent: None,
+            error_handler: None,
+            circuit_breaker: None,
+            security_policy: None,
+            on_complete: None,
+            on_failure: None,
+        };
+        let declarative = route_dsl_to_declarative_route(route).unwrap();
+        match &declarative.steps[0] {
+            DeclarativeStep::ContentNegotiation(def) => {
+                assert_eq!(def.consumes, "application/json");
+                assert_eq!(def.produces, "application/json");
+                assert!(def.check_content_type);
+            }
+            other => panic!("expected ContentNegotiation step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn authoring_cannot_spell_negotiation_step() {
+        // A YAML input using the literal key `content_negotiation` must
+        // fail — the variant is skip_deserializing on an untagged enum, so
+        // no candidate matches this shape. Regression pin only: expected
+        // to pass before and after the step lands.
+        let yaml = r#"
+routes:
+  - id: negotiation-guard
+    from: "direct:start"
+    steps:
+      - content_negotiation:
+          consumes: application/json
+          produces: application/json
+          check_content_type: true
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(
+            result.is_err(),
+            "content_negotiation YAML key must be rejected at deserialization"
         );
     }
 

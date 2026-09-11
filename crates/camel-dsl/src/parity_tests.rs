@@ -50,6 +50,9 @@ fn _assert_all_variants_covered(step: &RouteDslStep) {
         RouteDslStep::To(_) => (),
         RouteDslStep::SetHeader(_) => (),
         RouteDslStep::SetHeaderIfAbsent(_) => (),
+        // Skip-deserializing variant (like SetHeaderIfAbsent): no parity
+        // case possible — it never round-trips through YAML/JSON.
+        RouteDslStep::ContentNegotiation(_) => (),
         RouteDslStep::RemoveHeader(_) => (),
         RouteDslStep::SetProperty(_) => (),
         RouteDslStep::SetBody(_) => (),
