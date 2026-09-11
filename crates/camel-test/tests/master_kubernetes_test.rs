@@ -122,6 +122,7 @@ async fn master_component_processes_after_kubernetes_leadership() {
         renew_deadline: Duration::from_secs(8),
         retry_period: Duration::from_secs(1),
         jitter_factor: 0.2,
+        jobs: Default::default(),
     };
 
     let identity = PlatformIdentity::local("test-pod");

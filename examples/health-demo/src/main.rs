@@ -45,6 +45,7 @@ async fn main() -> Result<(), CamelError> {
         languages: Default::default(),
         cache_repo: None,
         binds: Default::default(),
+        jobs: Default::default(),
         _extra: Default::default(),
     };
 

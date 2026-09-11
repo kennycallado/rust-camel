@@ -109,6 +109,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
         binds: Default::default(),
         datasources: Default::default(),
         _extra: HashMap::new(),
+        jobs: Default::default(),
     };
 
     // configure_context should propagate the file-open error
