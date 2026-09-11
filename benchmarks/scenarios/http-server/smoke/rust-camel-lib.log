@@ -1,7 +1,8 @@
-2026-07-19T16:56:53.893526Z  INFO Starting CamelContext
-2026-07-19T16:56:53.893605Z  INFO Starting route route_id=bench-http
-2026-07-19T16:56:53.894548Z  INFO Route started route_id=bench-http
-2026-07-19T16:56:53.894566Z  INFO CamelContext started
-BENCH_ROUTE_READY 1784480213894
-2026-07-19T16:56:54.008127Z  INFO BENCH_HTTP_REQUEST received exchange_id=14a5b674-f665-4a55-aa4a-c019c7ff43ff
-2026-07-19T16:56:54.008153Z  INFO BENCH_HTTP_REQUEST id=1
+[2m2026-09-11T14:10:17.442376Z[0m [32m INFO[0m Starting CamelContext
+[2m2026-09-11T14:10:17.442497Z[0m [32m INFO[0m Starting route [3mroute_id[0m[2m=[0mbench-http
+[2m2026-09-11T14:10:17.442509Z[0m [33m WARN[0m public (unauthenticated) routes exposed on non-loopback bind per operator acknowledgement [3mbind[0m[2m=[0m0.0.0.0:8080 [3mpublic_routes[0m[2m=[0m1
+[2m2026-09-11T14:10:17.442627Z[0m [32m INFO[0m Route started [3mroute_id[0m[2m=[0mbench-http
+[2m2026-09-11T14:10:17.442642Z[0m [32m INFO[0m CamelContext started
+BENCH_ROUTE_READY 1789135817442
+[2m2026-09-11T14:10:17.553946Z[0m [32m INFO[0m BENCH_HTTP_REQUEST received [3mexchange_id[0m[2m=[0m95de7c6f-7ac8-4324-b971-52d98c5b78ff
+[2m2026-09-11T14:10:17.553965Z[0m [32m INFO[0m BENCH_HTTP_REQUEST id=1
