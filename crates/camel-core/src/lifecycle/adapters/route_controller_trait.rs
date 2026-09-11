@@ -543,7 +543,8 @@ impl camel_api::RouteController for DefaultRouteController {
                                     None
                                 };
                                 let send_result = tx.send(result);
-                                if is_err && send_result.is_err()
+                                if is_err
+                                    && send_result.is_err()
                                     && let Some(ref e) = err_clone
                                 {
                                     emit_b_prime_on_reply_drop(
@@ -654,7 +655,8 @@ impl camel_api::RouteController for DefaultRouteController {
                                 None
                             };
                             let send_result = tx.send(result);
-                            if is_err && send_result.is_err()
+                            if is_err
+                                && send_result.is_err()
                                 && let Some(ref e) = err_clone
                             {
                                 emit_b_prime_on_reply_drop(

@@ -408,4 +408,106 @@ mod start_context_gate {
         assert_eq!(*levels.lock().expect("levels lock"), vec![false, false]);
         assert!(gate.is_open(), "gate must be open after the second boot");
     }
+
+    /// S4: Context path unchanged.
+    ///
+    /// Spec: openspec/specs/consumer-activation/spec.md
+    /// Requirement: "Bare-controller activation of the cohort barrier"
+    /// Scenario: "Context path unchanged"
+    ///
+    /// GIVEN a CamelContext boot with its startup cohort completing normally;
+    /// WHEN the context lifecycle activates the barrier through the actor handle;
+    /// THEN the barrier opens, parked dispatch proceeds, and any additional
+    /// activation call has no effect and requires no ordering relative to the
+    /// context's act.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s4_context_path_activation_unchanged() {
+        use crate::route::BuilderStep;
+        use camel_api::{Exchange, Message};
+        use camel_component_direct::DirectComponent;
+        use camel_component_mock::MockComponent;
+        use tower::ServiceExt;
+
+        let mock = MockComponent::new();
+        let mut ctx = CamelContext::builder()
+            .build()
+            .await
+            .expect("build context");
+        ctx.register_component(mock.clone());
+        ctx.register_component(DirectComponent::new());
+
+        let gate = gate_of(&ctx);
+        assert!(!gate.is_open(), "fresh context gate must start closed");
+
+        ctx.add_route_definition(
+            RouteDefinition::new(
+                "direct:s4-in",
+                vec![BuilderStep::To("mock:s4-arrival".into())],
+            )
+            .with_route_id("s4-route"),
+        )
+        .await
+        .expect("add route");
+
+        ctx.start().await.expect("context start must succeed");
+
+        // The boot must have opened the gate.
+        assert!(gate.is_open(), "successful boot must open the gate");
+
+        // Send an exchange through the route — the gate is open so the
+        // dispatch proceeds normally and the exchange arrives at the mock.
+        let direct = ctx
+            .registry()
+            .get("direct")
+            .expect("direct component registered");
+        let endpoint = direct
+            .create_endpoint("direct:s4-in", &camel_component_api::NoOpComponentContext)
+            .expect("create direct endpoint");
+        let producer = endpoint
+            .create_producer(
+                Arc::new(camel_component_api::NoOpComponentContext),
+                &ctx.producer_context(),
+            )
+            .expect("create direct producer");
+        producer
+            .oneshot(Exchange::new(Message::new("s4-exchange")))
+            .await
+            .expect("direct send must succeed after boot");
+
+        let arrival = mock
+            .get_endpoint("s4-arrival")
+            .expect("mock endpoint 's4-arrival' must exist");
+        arrival.assert_exchange_count(1).await;
+
+        // Additional activation call after the context has already opened the
+        // gate must be a no-op: no re-arm, no reset, no crash.
+        let exec = ctx.runtime_execution_handle();
+        let pre_level = gate.is_open();
+        exec.controller.cohort.open();
+        assert!(
+            gate.is_open(),
+            "gate must remain open after the redundant activation call"
+        );
+        assert_eq!(
+            gate.is_open(),
+            pre_level,
+            "redundant activation must not change the gate level"
+        );
+
+        // A second exchange after the redundant activation must also succeed
+        // — proving the gate was not re-closed or re-armed.
+        let producer2 = endpoint
+            .create_producer(
+                Arc::new(camel_component_api::NoOpComponentContext),
+                &ctx.producer_context(),
+            )
+            .expect("create direct producer");
+        producer2
+            .oneshot(Exchange::new(Message::new("s4-exchange-2")))
+            .await
+            .expect("second direct send must also succeed");
+        arrival.assert_exchange_count(2).await;
+
+        ctx.stop().await.expect("context stop");
+    }
 }

@@ -25,10 +25,14 @@
 //! `swap_pipeline`) keeps applying the frozen rule set.
 //!
 //! The suite is split into submodules under `tests/route_interception/`:
-//! `plumbing` (freeze contract), `skip` (SkipTo substitution + hot-reload
-//! rule consistency), `divert` (DivertCopyTo composition), with shared
-//! helpers in `common` and divert stubs in `support`.
+//! `bare_controller_cohort` (rc-2ue5: bare-controller S2/S4 cohort-barrier
+//! regression per `consumer-activation` spec), `plumbing` (freeze contract),
+//! `skip` (SkipTo substitution + hot-reload rule consistency), `divert`
+//! (DivertCopyTo composition), with shared helpers in `common` and divert
+//! stubs in `support`.
 
+#[path = "route_interception/bare_controller_cohort.rs"]
+mod bare_controller_cohort;
 #[path = "route_interception/common.rs"]
 mod common;
 #[path = "route_interception/divert.rs"]
