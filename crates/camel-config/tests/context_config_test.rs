@@ -82,6 +82,7 @@ routes:
 #[tokio::test]
 async fn test_configure_context_with_supervision() {
     let config = CamelConfig {
+        jobs: camel_config::JobsCamelConfig::default(),
         routes: vec![],
         watch: false,
         runtime_journal: None,
@@ -119,6 +120,7 @@ async fn test_configure_context_with_supervision() {
 #[tokio::test]
 async fn test_configure_context_sets_shutdown_timeout() {
     let config = CamelConfig {
+        jobs: camel_config::JobsCamelConfig::default(),
         routes: vec![],
         watch: false,
         runtime_journal: None,
@@ -155,6 +157,7 @@ async fn test_configure_context_sets_shutdown_timeout() {
 #[tokio::test]
 async fn test_configure_context_with_valid_log_level() {
     let config = CamelConfig {
+        jobs: camel_config::JobsCamelConfig::default(),
         routes: vec![],
         watch: false,
         runtime_journal: None,
@@ -187,6 +190,7 @@ async fn test_configure_context_with_valid_log_level() {
 #[tokio::test]
 async fn test_configure_context_with_invalid_log_level() {
     let config = CamelConfig {
+        jobs: camel_config::JobsCamelConfig::default(),
         routes: vec![],
         watch: false,
         runtime_journal: None,
@@ -233,6 +237,7 @@ async fn test_configure_context_with_invalid_log_level() {
 #[tokio::test]
 async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
     let config = CamelConfig {
+        jobs: camel_config::JobsCamelConfig::default(),
         routes: vec![],
         watch: false,
         runtime_journal: None,
@@ -279,6 +284,7 @@ async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
 #[tokio::test]
 async fn test_configure_context_without_otel_no_lifecycle() {
     let config = CamelConfig {
+        jobs: camel_config::JobsCamelConfig::default(),
         routes: vec![],
         watch: false,
         runtime_journal: None,
@@ -319,6 +325,7 @@ async fn test_configure_context_uses_runtime_journal_from_config() {
     let dir = tempdir().unwrap();
     let journal_path = dir.path().join("config-runtime-events.db");
     let config = CamelConfig {
+        jobs: camel_config::JobsCamelConfig::default(),
         routes: vec![],
         watch: false,
         runtime_journal: Some(JournalConfig {
@@ -445,6 +452,7 @@ async fn context_registers_redb_idempotent_when_configured() {
     let dir = tempdir().unwrap();
     let redb_path = dir.path().join("idempotent.redb");
     let config = CamelConfig {
+        jobs: camel_config::JobsCamelConfig::default(),
         routes: vec![],
         watch: false,
         runtime_journal: None,
@@ -502,6 +510,7 @@ async fn context_registers_redb_idempotent_when_configured() {
 #[tokio::test]
 async fn context_redb_absent_when_not_configured_memory_remains_default() {
     let config = CamelConfig {
+        jobs: camel_config::JobsCamelConfig::default(),
         routes: vec![],
         watch: false,
         runtime_journal: None,

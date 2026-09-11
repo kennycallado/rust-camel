@@ -90,6 +90,11 @@ pub struct CamelConfig {
     #[serde(default)]
     pub datasources: HashMap<String, DatasourceConfig>,
 
+    /// Jobs directory for `camel job` discovery (`[jobs]` in Camel.toml).
+    /// Resolved against the Camel.toml root, never the process CWD.
+    #[serde(default)]
+    pub jobs: JobsCamelConfig,
+
     /// Catch-all for extra keys injected by config sources (e.g. CAMEL_* env vars)
     /// or unknown fields in TOML. Nested structs use `deny_unknown_fields` to
     /// catch typos in sections like `[observability.health]`.
@@ -127,6 +132,7 @@ impl fmt::Debug for CamelConfig {
             .field("security", &self.security)
             .field("binds", &self.binds)
             .field("datasources", &self.datasources)
+            .field("jobs", &self.jobs)
             .field(
                 "_extra",
                 &format_args!("<{} keys redacted>", self._extra.len()),
@@ -143,11 +149,17 @@ pub struct CamelConfigBuilder {
     pub timeout_ms: Option<u64>,
     pub drain_timeout_ms: Option<u64>,
     pub watch_debounce_ms: Option<u64>,
+    pub jobs: Option<JobsCamelConfig>,
 }
 
 impl CamelConfigBuilder {
     pub fn routes(mut self, v: Vec<String>) -> Self {
         self.routes = Some(v);
+        self
+    }
+
+    pub fn jobs(mut self, v: JobsCamelConfig) -> Self {
+        self.jobs = Some(v);
         self
     }
 
@@ -198,6 +210,7 @@ impl CamelConfigBuilder {
             security: defaults.security,
             binds: defaults.binds,
             datasources: defaults.datasources,
+            jobs: self.jobs.unwrap_or(defaults.jobs),
             _extra: defaults._extra,
         }
     }
@@ -225,9 +238,36 @@ impl Default for CamelConfig {
             security: SecurityConfig::default(),
             binds: HashMap::new(),
             datasources: HashMap::new(),
+            jobs: JobsCamelConfig::default(),
             _extra: HashMap::new(),
         }
     }
+}
+
+/// Jobs configuration for `[jobs]` in Camel.toml.
+///
+/// `dir` is the `camel job` discovery directory (bare-name resolution
+/// and no-argument listing), resolved against the Camel.toml root.
+/// A job document's route source stays explicit — this table never
+/// feeds route discovery.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct JobsCamelConfig {
+    /// Directory holding `*.job.yaml` documents. Default: `"jobs"`.
+    #[serde(default = "default_jobs_dir")]
+    pub dir: String,
+}
+
+impl Default for JobsCamelConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_jobs_dir(),
+        }
+    }
+}
+
+fn default_jobs_dir() -> String {
+    "jobs".to_string()
 }
 
 /// Platform selection for leader election, readiness, and identity.
@@ -1263,6 +1303,10 @@ mod oversized_file_tests;
 #[cfg(test)]
 #[path = "config_tests/config_ergonomics_tests.rs"]
 mod config_ergonomics_tests;
+
+#[cfg(test)]
+#[path = "config_tests/jobs_config_tests.rs"]
+mod jobs_config_tests;
 
 /// FR1 of deployment-resolvable-cache-repo-topology: empty redis topology
 /// values (`""`, whitespace-only, all-blank sentinel arrays — typically from
@@ -2818,6 +2862,7 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "security",
     "binds",
     "datasources",
+    "jobs",
 ];
 
 /// Core config builder. Accepts a pre-parsed (and `include`-stripped) `toml::Value`

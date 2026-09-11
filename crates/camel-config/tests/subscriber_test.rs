@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> CamelConfig {
     CamelConfig {
+        jobs: camel_config::JobsCamelConfig::default(),
         routes: vec![],
         watch: false,
         runtime_journal: None,

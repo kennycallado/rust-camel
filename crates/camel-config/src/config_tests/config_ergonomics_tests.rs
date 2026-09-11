@@ -104,6 +104,8 @@ threshold = 64
 [security]
 
 [languages]
+
+[jobs]
 "#;
     let cfg: CamelConfig = toml::from_str(composite)
         .expect("every KNOWN_TOP_LEVEL_KEYS entry must deserialize as a real field");

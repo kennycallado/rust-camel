@@ -19,8 +19,8 @@ pub use camel_language_api::{
 };
 pub use camel_template::ExternalTemplateLimitsConfig;
 pub use config::{
-    CamelConfig, ComponentsConfig, HealthCamelConfig, JournalConfig, JournalDurability,
-    KeycloakIntrospectionConfig, KeycloakJwksConfig, KeycloakSecurityConfig,
+    CamelConfig, ComponentsConfig, HealthCamelConfig, JobsCamelConfig, JournalConfig,
+    JournalDurability, KeycloakIntrospectionConfig, KeycloakJwksConfig, KeycloakSecurityConfig,
     KeycloakValidationConfig, ObservabilityConfig, OtelCamelConfig, SecurityConfig,
     StreamCachingConfig, SupervisionCamelConfig,
 };
