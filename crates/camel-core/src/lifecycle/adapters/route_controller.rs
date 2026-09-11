@@ -1329,7 +1329,7 @@ fn emit_b_prime_on_reply_drop(
         return;
     }
     if let Some(m) = metrics {
-        m.increment_errors(route_id, "b-prime:reply-drop");
+        m.increment_errors(route_id, "b-prime:core:reply-drop");
     }
     warn!(
         route_id = %route_id,
