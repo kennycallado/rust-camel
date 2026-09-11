@@ -218,4 +218,4 @@
 - ADR-0062 carries the amendment section and the `Amended` status; CONTEXT-MAP index entry matches.
 - Sweep gate grep clean for job-related mentions.
 
-- [ ] 1.7
+- [x] 1.7
