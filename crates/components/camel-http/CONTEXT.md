@@ -291,6 +291,8 @@ header-name policy as the reply finaliser (`header_policy`, ADR-0057) plus:
 - Pipeline returns `Err(CamelError::Unauthenticated(msg))` → `401 Unauthorized` + `WWW-Authenticate: Bearer` + body "Unauthorized".
 - Pipeline returns `Err(CamelError::Unauthorized(msg))` → `403 Forbidden` + body "Forbidden".
 - Pipeline returns `Err(CamelError::ConsumerStopping)` → `503 Service Unavailable` + body "Service Unavailable". Fires only when an exchange is aborted past the drain grace window (ADR-0043 amend).
+- Pipeline returns `Err(CamelError::UnsupportedMediaType { consumed, declared })` → `415 Unsupported Media Type` + JSON body `{"error":"unsupported_media_type","message":"consumed {consumed}, declared {declared}"}`. Originates in the media negotiation step injected by REST lowering (header-only gate; registry stays media-blind).
+- Pipeline returns `Err(CamelError::NotAcceptable { accept, produced })` → `406 Not Acceptable` + JSON body `{"error":"not_acceptable","message":"accept {accept}, produced {produced}"}`. Same origin as above: the REST-lowering negotiation step, header-only.
 - Pipeline returns `Err(_)` (any other error) → `500 Internal Server Error` + body "Internal Server Error".
 
 ### Silent behaviour forbidden

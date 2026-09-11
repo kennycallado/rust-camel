@@ -335,7 +335,7 @@
 - `cargo clippy -p camel-component-http --all-targets -- -D warnings` exits 0.
 - `git -C <worktree> diff --stat crates/components/camel-http` shows only `src/lib.rs` and `CONTEXT.md` — registry.rs, rest_match.rs, and all other files untouched.
 
-- [ ] 4.1
+- [x] 4.1
 
 ## camel-dsl (end-to-end)
 

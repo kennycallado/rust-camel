@@ -3327,9 +3327,11 @@ pub(crate) static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::
 /// Map a pipeline error to an HTTP reply.
 ///
 /// Extracted from the inline `match` in `dispatch_handler` for unit
-/// testability (rc-1dk4). `TypeConversionFailed` (e.g. malformed JSON
-/// body) maps to `400 Bad Request` with a structured JSON error body;
-/// `Unauthenticated`/`Unauthorized` keep their existing `401`/`403`
+/// testability (rc-1dk4). Client-fault errors map to their 4xx codes
+/// with a structured JSON error body: `TypeConversionFailed`/
+/// `ValidationError` → 400, `UnsupportedMediaType` → 415 (media
+/// negotiation gate, REST lowering), `NotAcceptable` → 406 (same
+/// gate); `Unauthenticated`/`Unauthorized` keep their `401`/`403`
 /// mappings; all other errors map to `500 Internal Server Error`.
 fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
     match e {
@@ -3381,6 +3383,32 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
                 status: 503,
                 headers: vec![],
                 body: HttpReplyBody::Bytes(bytes::Bytes::from("Service Unavailable")),
+            }
+        }
+        CamelError::UnsupportedMediaType { consumed, declared } => {
+            tracing::warn!(error = %consumed, declared = %declared, path = %path, "Unsupported media type (bad request)");
+            let body = serde_json::to_string(&serde_json::json!({
+                "error": "unsupported_media_type",
+                "message": format!("consumed {consumed}, declared {declared}"),
+            }))
+            .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
+            HttpReply {
+                status: 415,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
+            }
+        }
+        CamelError::NotAcceptable { accept, produced } => {
+            tracing::warn!(error = %accept, produced = %produced, path = %path, "Not acceptable (bad request)");
+            let body = serde_json::to_string(&serde_json::json!({
+                "error": "not_acceptable",
+                "message": format!("accept {accept}, produced {produced}"),
+            }))
+            .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
+            HttpReply {
+                status: 406,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
             }
         }
         e => {
@@ -10188,6 +10216,70 @@ mod tests {
         assert!(body.contains("\"error\""));
         assert!(body.contains("validation_error"));
         assert!(body.contains("body does not match schema"));
+    }
+
+    // -----------------------------------------------------------------------
+    // rc-hlb1q: media negotiation errors → 415 / 406
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn finalizer_maps_unsupported_media_type() {
+        let reply = pipeline_error_to_reply(
+            CamelError::UnsupportedMediaType {
+                consumed: "text/plain".to_string(),
+                declared: "application/json".to_string(),
+            },
+            "/x",
+        );
+        assert_eq!(reply.status, 415);
+        let ct = reply
+            .headers
+            .iter()
+            .find(|(k, _)| k == "Content-Type")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(ct, Some("application/json"));
+        let body = match &reply.body {
+            HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            _ => panic!("expected bytes body"),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("body must be valid JSON");
+        assert_eq!(parsed["error"], "unsupported_media_type");
+        let message = parsed["message"]
+            .as_str()
+            .expect("message must be a string");
+        assert!(message.contains("text/plain"));
+        assert!(message.contains("application/json"));
+    }
+
+    #[test]
+    fn finalizer_maps_not_acceptable() {
+        let reply = pipeline_error_to_reply(
+            CamelError::NotAcceptable {
+                accept: "application/xml".to_string(),
+                produced: "application/json".to_string(),
+            },
+            "/x",
+        );
+        assert_eq!(reply.status, 406);
+        let ct = reply
+            .headers
+            .iter()
+            .find(|(k, _)| k == "Content-Type")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(ct, Some("application/json"));
+        let body = match &reply.body {
+            HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            _ => panic!("expected bytes body"),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("body must be valid JSON");
+        assert_eq!(parsed["error"], "not_acceptable");
+        let message = parsed["message"]
+            .as_str()
+            .expect("message must be a string");
+        assert!(message.contains("application/xml"));
+        assert!(message.contains("application/json"));
     }
 
     #[test]
