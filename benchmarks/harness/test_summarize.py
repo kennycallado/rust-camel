@@ -933,6 +933,147 @@ class SummarizeTest(unittest.TestCase):
         for latency in ("round_values", "median", "unit"):
             self.assertNotIn(latency, cell)
 
+    def test_m2_native_status_preferred_over_derivation(self):
+        # bd rc-audm.7: run.sh writes the attempted status NATIVELY
+        # into m2-summary.json at measurement time. When that field is
+        # present it wins — even over evidence artifacts that would
+        # classify differently (here: unconverged sentinel vs native
+        # attempted-timeout, a combination the derivation rules treat
+        # as a conflict and fail closed on).
+        run = self.root / "20260906T021000Z"
+        for contender in ("rust-camel-lib", "camel-standalone-dsl"):
+            cell = run / f"t2-json_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "samples.txt").write_text(
+                "startup-ms rss-kb\n12 900\n14 950\n", encoding="utf-8"
+            )
+        for rnd in ("0", "1"):
+            d = run / f"m2-round-{rnd}" / "t2-json" / "rust-camel-lib"
+            d.mkdir(parents=True)
+            # Native field: written by run.sh on the probe-timeout path.
+            (d / "m2-summary.json").write_text(
+                json.dumps({
+                    "status": "attempted-timeout",
+                    "reason": "# probe reason: no BENCH_LATENCY"
+                              " within 30s timeout",
+                }),
+                encoding="utf-8",
+            )
+            # Conflicting artifact evidence (would derive
+            # `unconverged`): must be ignored when the native field
+            # exists.
+            (d / "protocol-a-summary.txt").write_text(
+                UNCONVERGED_EVIDENCE, encoding="utf-8"
+            )
+        err = io.StringIO()
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            with contextlib.redirect_stderr(err):
+                record = summarize.build_record(
+                    run, dict(META, scenarios="t2-json",
+                              run_id="20260906T021000Z")
+                )
+        cell = next(
+            c for c in record["cells"]
+            if c["metric"] == "m2" and c["contender"] == "rust-camel-lib"
+        )
+        self.assertEqual(cell["status"], "attempted-timeout")
+        self.assertIn("30s timeout", cell["reason"])
+        self.assertEqual(cell["rounds"], 2)
+        # Native preference means no derivation ran: no
+        # conflicting-evidence warning for this cell.
+        self.assertNotIn(
+            "conflicting attempt evidence", err.getvalue()
+        )
+
+    def test_m2_native_unconverged_status_in_flat_protocol_a_dir(self):
+        # bd rc-audm.7: protocol-A (flat layout) cells carry the
+        # native status in m2-round-<r>/<scenario>_<contender>/
+        # m2-summary.json when warmup unconverges. The truncated
+        # sentinel proves the verdict came from the native field, not
+        # artifact derivation (which would fail closed on it).
+        run = self.root / "20260906T022000Z"
+        for contender in ("rust-camel-lib", "camel-standalone-dsl"):
+            cell = run / f"http-server_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "samples.txt").write_text(
+                "startup-ms rss-kb\n12 900\n14 950\n", encoding="utf-8"
+            )
+        for rnd in ("0", "1"):
+            d = (
+                run / f"m2-round-{rnd}"
+                / "http-server_camel-standalone-dsl"
+            )
+            d.mkdir(parents=True)
+            (d / "m2-summary.json").write_text(
+                json.dumps({
+                    "status": "unconverged",
+                    "reason": "status=failed reason=measure-a-error",
+                }),
+                encoding="utf-8",
+            )
+            (d / "protocol-a-summary.txt").write_text(
+                UNCONVERGED_MALFORMED_EVIDENCE, encoding="utf-8"
+            )
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(
+                run, dict(META, scenarios="http-server",
+                          run_id="20260906T022000Z")
+            )
+        cell = next(
+            c for c in record["cells"]
+            if c["metric"] == "m2"
+            and c["contender"] == "camel-standalone-dsl"
+        )
+        self.assertEqual(cell["status"], "unconverged")
+        self.assertEqual(
+            cell["reason"], "status=failed reason=measure-a-error"
+        )
+        self.assertEqual(cell["rounds"], 2)
+
+    def test_native_m2_attempt_status_helper(self):
+        # Helper contract: accept exactly a JSON object with a known
+        # attempted status and a nonempty string reason; everything
+        # else (missing file, unparseable, unknown status, missing or
+        # empty reason, non-object) falls back to None.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+
+        def write(body):
+            p = base / "m2-summary.json"
+            p.write_text(body, encoding="utf-8")
+            return p
+
+        ok = write('{"status": "attempted-timeout", "reason": "r"}')
+        self.assertEqual(
+            summarize._native_m2_attempt_status(ok),
+            {"status": "attempted-timeout", "reason": "r"},
+        )
+        # Unknown status and measured-looking summaries: not native
+        # attempts.
+        self.assertIsNone(summarize._native_m2_attempt_status(
+            write('{"status": "failed", "reason": "r"}')
+        ))
+        self.assertIsNone(summarize._native_m2_attempt_status(
+            write('{"round_p99s_ns": [1], "is_invalidated": false}')
+        ))
+        # Empty / non-string reason: fail closed to the fallback.
+        self.assertIsNone(summarize._native_m2_attempt_status(
+            write('{"status": "unconverged", "reason": ""}')
+        ))
+        self.assertIsNone(summarize._native_m2_attempt_status(
+            write('{"status": "unconverged"}')
+        ))
+        # Unparseable JSON and a missing file: None.
+        self.assertIsNone(summarize._native_m2_attempt_status(
+            write('{"status": "unconverged", "reason": "r"')
+        ))
+        self.assertIsNone(
+            summarize._native_m2_attempt_status(base / "nope.json")
+        )
+
     def test_m2_measured_wins_over_evidence(self):
         # One valid m2-summary.json (round 1) beats the unconverged
         # sentinel left in round 0: the cell is MEASURED, no status

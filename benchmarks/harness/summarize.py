@@ -132,9 +132,11 @@ WARM_APPLICABLE = {
 }
 
 # Publishable ATTEMPTED m2 cell statuses (run.json schema_version 2,
-# additive one-way extension of the v1 measured shape). Status is
-# granted ONLY for exact harness-written evidence — see
-# `classify_m2_attempt`; the publisher re-validates the derived shape.
+# additive one-way extension of the v1 measured shape). Status comes
+# from the NATIVE run.sh-written m2-summary.json field when present
+# (bd rc-audm.7) and ONLY otherwise from exact harness-written
+# evidence — see `classify_m2_attempt`; the publisher re-validates
+# either shape.
 ATTEMPT_STATUSES = ("unconverged", "attempted-timeout")
 
 # Attempt-evidence sentinels, verbatim harness-written lines (the
@@ -617,8 +619,35 @@ def classify_m2_attempt(cell_round_dirs, identity):
     return None
 
 
+def _native_m2_attempt_status(path):
+    """Native ATTEMPTED status from a run.sh-written m2-summary.json
+    (bd rc-audm.7). run.sh emits `{"status": <attempted-status>,
+    "reason": <...>}` at measurement time when warmup unconverges
+    (protocol A) or the first-success probe times out (protocol B);
+    the summarizer PREFERs this field over deriving the same verdict
+    from evidence artifacts. Returns `{"status", "reason"}` only for a
+    parseable JSON object whose status is in ATTEMPT_STATUSES with a
+    nonempty string reason — anything else (missing file, unparseable,
+    unknown status, empty reason) returns None and the caller falls
+    back to artifact derivation, keeping pre-native run dirs working.
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    status = data.get("status")
+    reason = data.get("reason")
+    if status not in ATTEMPT_STATUSES:
+        return None
+    if not isinstance(reason, str) or not reason:
+        return None
+    return {"status": status, "reason": reason}
+
+
 def _load_m2_round_cells(run_dir, digest_cache, scenarios):
-    """(m2 cells, attempted identities) from the REAL per-round m2
+    r"""(m2 cells, attempted identities) from the REAL per-round m2
     layout run.sh writes for BOTH protocols:
 
         <run>/m2-round-<r>/<scenario>/<contender>/m2-summary.json
@@ -643,10 +672,13 @@ def _load_m2_round_cells(run_dir, digest_cache, scenarios):
 
     Returns (measured m2 cells, LEGACY attempted identities,
     ATTEMPTED m2 cells). Every warm-applicable identity with at least
-    one round dir in either layout but zero parsed summaries has its
-    on-disk evidence classified (`classify_m2_attempt`); a non-None
-    verdict appends an attempted cell `{scenario, contender,
-    metric: "m2", status, reason, rounds}` — NO latency fields.
+    one round dir in either layout but zero parsed summaries gets an
+    attempted verdict: a native `status` field in the round's
+    m2-summary.json (run.sh rc-audm.7) wins; otherwise the on-disk
+    evidence is classified (`classify_m2_attempt`, the fallback for
+    run dirs that predate the native field). A non-None verdict
+    appends an attempted cell `{scenario, contender, metric: "m2",
+    status, reason, rounds}` — NO latency fields.
     Measured identities keep today's shape; attempt evidence is
     ignored for them.
     """
@@ -660,6 +692,7 @@ def _load_m2_round_cells(run_dir, digest_cache, scenarios):
     values = {}  # identity -> merged round p99s
     attempted = set()
     round_dirs = {}  # identity -> [round dir Paths, walk order]
+    native_attempts = {}  # identity -> {"status", "reason"}; first wins
     for _, rdir in rounds:
         sdirs = sorted(p for p in rdir.iterdir() if p.is_dir())
         for sdir in sdirs:
@@ -680,6 +713,11 @@ def _load_m2_round_cells(run_dir, digest_cache, scenarios):
                     continue
                 identity = f"{scenario}/{contender}"
                 round_dirs.setdefault(identity, []).append(sdir)
+                native = _native_m2_attempt_status(
+                    sdir / "m2-summary.json"
+                )
+                if native is not None:
+                    native_attempts.setdefault(identity, native)
                 vals = _protocol_a_round_p99s(
                     sdir / "protocol-a-summary.txt", identity
                 )
@@ -701,7 +739,13 @@ def _load_m2_round_cells(run_dir, digest_cache, scenarios):
                             f"{cdir.relative_to(run_dir)}/m2-summary.json:"
                             " unparseable summary; skipping"
                         )
-                if isinstance(data, dict):
+                native = _native_m2_attempt_status(jpath)
+                if native is not None:
+                    # Native attempted status (run.sh rc-audm.7):
+                    # preferred over the generic status checks and the
+                    # artifact derivation below.
+                    native_attempts.setdefault(identity, native)
+                elif isinstance(data, dict):
                     if data.get("status", "ok") != "ok":
                         _warn(f"cell {identity}/m2: status "
                               f"{data.get('status')!r}; skipping round")
@@ -742,15 +786,20 @@ def _load_m2_round_cells(run_dir, digest_cache, scenarios):
             ),
         })
     # Attempted cells: warm-applicable identities with round dirs but
-    # zero parsed summaries get their evidence classified. Measured
-    # identities (in `values`) keep today's shape — evidence ignored.
+    # zero parsed summaries get their status from the native
+    # m2-summary.json field when present (run.sh rc-audm.7), else from
+    # the evidence artifacts (`classify_m2_attempt` — fallback for run
+    # dirs that predate the native field). Measured identities (in
+    # `values`) keep today's shape — either source is ignored.
     attempt_cells = []
     for identity, rdirs in sorted(round_dirs.items()):
         if identity in values:
             continue
         if identity.partition("/")[0] not in WARM_APPLICABLE:
             continue
-        verdict = classify_m2_attempt(rdirs, identity)
+        verdict = native_attempts.get(identity)
+        if verdict is None:
+            verdict = classify_m2_attempt(rdirs, identity)
         if verdict is None:
             continue
         scenario, _, contender = identity.partition("/")
