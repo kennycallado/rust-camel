@@ -159,10 +159,13 @@ its bootstrap confidence interval.
 
 CI SHALL run a fast criterion subset (`bench-smoke` job: camel-bench
 `pipeline` and `body_coercion` benches in quick mode) on ubuntu with
-`timeout-minutes: 10`, and SHALL smoke the restructured suite
+`timeout-minutes: 15`, and SHALL smoke the restructured suite
 entrypoint by invoking `bench run --dry-run` (no JDK required) in
 the same job, keeping the bench entrypoints green without the
-container matrix.
+container matrix. The budget is 15 (not 10) so a cold cache after a
+~6-weekly rust-cache invalidation compiles the criterion targets from
+scratch on a 4-vCPU runner without brushing the timeout; warm runs stay
+near 3 minutes.
 
 #### Scenario: bench-smoke job
 
@@ -171,7 +174,7 @@ container matrix.
 - **THEN** both criterion benches execute in quick mode and
   `bench run --scenarios=t2-json,split-aggregate --dry-run` exits 0
   through the restructured paths
-- **AND** the job completes within its 10-minute timeout without
+- **AND** the job completes within its 15-minute timeout without
   container services
 
 ### Requirement: Zone contract

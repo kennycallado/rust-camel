@@ -321,7 +321,11 @@ jobs:
     # full-matrix stays manual: benchmarks/bench run-all.
     name: Bench Smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 15 not 10: cold cache after a ~6-weekly rust-cache invalidation
+    # (toolchain bump) compiles the criterion targets from scratch on a
+    # 4-vCPU runner, which brushes the old 10 min pin (rc-p2vm). Warm
+    # runs stay ~3 min; the wider budget only absorbs cold-start noise.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
