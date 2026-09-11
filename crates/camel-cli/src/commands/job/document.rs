@@ -89,8 +89,8 @@ pub(crate) enum JobBody {
 /// Parse and validation errors for job documents.
 #[derive(Debug)]
 pub(crate) enum JobDocError {
-    /// The path lacks the reserved test-document suffix.
-    NotTestSuffix { path: String },
+    /// The path lacks the reserved job-document suffix.
+    NotJobSuffix { path: String },
     /// Malformed YAML or a type mismatch at the serde layer.
     Yaml(String),
     /// `deny_unknown_fields` rejection.
@@ -100,6 +100,9 @@ pub(crate) enum JobDocError {
     /// The document declares both `execute:` and `scenario:`.
     ExclusiveWithScenario,
     /// The document mixes `execute:` with unit-tier test sections.
+    /// Belt-and-suspenders after the suffix split: the families are
+    /// suffix-separated now, so this catches a copy-paste author who
+    /// renamed a test to `.job.yaml` but left test vocabulary inside.
     MixedVocabulary { sections: Vec<&'static str> },
     /// The `execute:` section declares no `mode`.
     MissingMode,
@@ -122,9 +125,9 @@ pub(crate) enum JobDocError {
 impl std::fmt::Display for JobDocError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotTestSuffix { path } => write!(
+            Self::NotJobSuffix { path } => write!(
                 f,
-                "job document {path} must use the reserved .test.yaml/.test.yml suffix"
+                "job document {path} must use the reserved .job.yaml/.job.yml suffix (rename it — .test.yaml names a camel test document)"
             ),
             Self::Yaml(raw) => write!(f, "invalid job document: {raw}"),
             Self::UnknownField(raw) => write!(f, "unknown field in job document: {raw}"),
@@ -199,6 +202,10 @@ struct JobSendActionDoc {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct JobDocumentDoc {
     execute: ExecuteSectionDoc,
+    /// Optional one-line description shown by `camel job` listing
+    /// (read via the listing probe; the full grammar only accepts it).
+    #[serde(default)]
+    description: Option<String>,
     route_files: Option<Vec<String>>,
     route_files_from_root: Option<Vec<String>>,
     routes: Option<serde_yaml::Value>,
@@ -229,6 +236,8 @@ where
 }
 
 /// Unit-tier test sections that must not appear next to `execute:`.
+/// Test vocabulary does not belong in a job document; the families are
+/// suffix-separated and these guards are belt-and-suspenders.
 const TEST_VOCABULARY_KEYS: [&str; 8] = [
     "inputs",
     "expects",
@@ -244,8 +253,8 @@ const TEST_VOCABULARY_KEYS: [&str; 8] = [
 /// shape, and v1 grammar rules (`mode: one-shot`, mandatory `timeout`,
 /// one `direct:`/`seda:` send, exactly one route source).
 pub(crate) fn parse_job_document(path: &Path, text: &str) -> Result<JobDocument, JobDocError> {
-    if !camel_dsl::discovery::is_test_document(path) {
-        return Err(JobDocError::NotTestSuffix {
+    if !camel_dsl::discovery::is_job_document(path) {
+        return Err(JobDocError::NotJobSuffix {
             path: path.display().to_string(),
         });
     }

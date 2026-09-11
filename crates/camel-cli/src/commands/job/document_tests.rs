@@ -6,10 +6,10 @@ use crate::commands::test::document::TestDocError;
 
 use super::document::{self, JobDocError};
 
-/// A `.test.yaml` path inside a tempdir-free constant (the parser only
+/// A `.job.yaml` path inside a tempdir-free constant (the parser only
 /// inspects the suffix).
 fn doc_path() -> std::path::PathBuf {
-    Path::new("fixtures/job.test.yaml").to_path_buf()
+    Path::new("fixtures/job.job.yaml").to_path_buf()
 }
 
 const VALID_ONE_SHOT: &str = r#"
@@ -130,12 +130,68 @@ fn unit_tier_sections_are_exclusive() {
 }
 
 #[test]
-fn non_test_suffix_is_rejected() {
+fn non_job_suffix_is_rejected() {
     let err =
         document::parse_job_document(Path::new("fixtures/job.yaml"), VALID_ONE_SHOT).unwrap_err();
     assert!(
-        matches!(err, JobDocError::NotTestSuffix { .. }),
+        matches!(err, JobDocError::NotJobSuffix { .. }),
         "got {err:?}"
+    );
+}
+
+#[test]
+fn test_suffix_document_is_rejected_with_rename_guidance() {
+    // A `.test.yaml` declaring `execute:` is a load error pointing at the
+    // rename: the test suffix names a camel test document.
+    let err = document::parse_job_document(Path::new("fixtures/job.test.yaml"), VALID_ONE_SHOT)
+        .unwrap_err();
+    match err {
+        JobDocError::NotJobSuffix { ref path } => {
+            assert!(path.ends_with("job.test.yaml"), "path was: {path}");
+        }
+        other => panic!("expected NotJobSuffix, got {other:?}"),
+    }
+    let msg = err.to_string();
+    assert!(
+        msg.contains("must use the reserved .job.yaml"),
+        "display was: {msg}"
+    );
+}
+
+#[test]
+fn description_is_optional_and_accepted() {
+    let text = "
+description: create a user via direct:in
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routeFiles:
+  - routes/job-route.yaml
+";
+    let doc = document::parse_job_document(&doc_path(), text).expect("description parses");
+    let _ = doc;
+}
+
+#[test]
+fn description_non_string_is_rejected() {
+    let text = "
+description:
+  a: 1
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routeFiles:
+  - routes/job-route.yaml
+";
+    let err = document::parse_job_document(&doc_path(), text).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("description"),
+        "non-string description must name the field; got: {msg}"
     );
 }
 

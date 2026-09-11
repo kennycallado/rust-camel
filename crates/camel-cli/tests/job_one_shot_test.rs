@@ -96,7 +96,7 @@ fn one_shot_direct_transform_completes_with_reply() {
     )
     .expect("write route");
     std::fs::write(
-        dir.path().join("job.test.yaml"),
+        dir.path().join("job.job.yaml"),
         r#"execute:
   mode: one-shot
   timeout: 60s
@@ -112,7 +112,7 @@ routeFiles:
     )
     .expect("write job doc");
 
-    let (code, stdout, stderr) = run_job(dir.path(), "job.test.yaml");
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
     assert_eq!(
         code, 0,
         "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -144,7 +144,7 @@ fn one_shot_log_sink_route_completes() {
     )
     .expect("write route");
     std::fs::write(
-        dir.path().join("job.test.yaml"),
+        dir.path().join("job.job.yaml"),
         r#"execute:
   mode: one-shot
   timeout: 60s
@@ -157,7 +157,7 @@ routeFiles:
     )
     .expect("write job doc");
 
-    let (code, stdout, stderr) = run_job(dir.path(), "job.test.yaml");
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
     assert_eq!(
         code, 0,
         "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -187,7 +187,7 @@ fn one_shot_pipeline_failure_exits_one() {
     )
     .expect("write route");
     std::fs::write(
-        dir.path().join("job.test.yaml"),
+        dir.path().join("job.job.yaml"),
         r#"execute:
   mode: one-shot
   timeout: 60s
@@ -199,7 +199,7 @@ routeFiles:
     )
     .expect("write job doc");
 
-    let (code, stdout, stderr) = run_job(dir.path(), "job.test.yaml");
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
     assert_eq!(
         code, 1,
         "expected exit 1 (pipeline failure);\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -220,7 +220,7 @@ fn batch_mode_is_rejected_at_load() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_config(dir.path());
     std::fs::write(
-        dir.path().join("job.test.yaml"),
+        dir.path().join("job.job.yaml"),
         r#"execute:
   mode: batch
   timeout: 30s
@@ -233,7 +233,7 @@ routes:
     )
     .expect("write job doc");
 
-    let (code, stdout, stderr) = run_job(dir.path(), "job.test.yaml");
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
     assert_eq!(
         code, 2,
         "expected exit 2 (batch reserved);\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -265,7 +265,7 @@ fn one_shot_seda_failing_route_reports_failed() {
     )
     .expect("write route");
     std::fs::write(
-        dir.path().join("job.test.yaml"),
+        dir.path().join("job.job.yaml"),
         r#"execute:
   mode: one-shot
   timeout: 60s
@@ -277,7 +277,7 @@ routeFiles:
     )
     .expect("write job doc");
 
-    let (code, stdout, stderr) = run_job(dir.path(), "job.test.yaml");
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
     assert_eq!(
         code, 1,
         "expected exit 1 (seda pipeline failure must not be fire-and-forget);\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -312,7 +312,7 @@ fn one_shot_timeout_expires_with_timeout_outcome() {
     )
     .expect("write route");
     std::fs::write(
-        dir.path().join("job.test.yaml"),
+        dir.path().join("job.job.yaml"),
         r#"execute:
   mode: one-shot
   timeout: 1s
@@ -325,7 +325,7 @@ routeFiles:
     .expect("write job doc");
 
     let started = std::time::Instant::now();
-    let (code, stdout, stderr) = run_job(dir.path(), "job.test.yaml");
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
     let elapsed = started.elapsed();
     assert_eq!(
         code, 2,
