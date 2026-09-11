@@ -144,6 +144,27 @@ fn route_state_gauge_removal_drops_series() {
 }
 
 #[test]
+/// rc-02dx: the leadership state gauge exports as
+/// `camel_master_is_leader{lock}` — 1 on the acquire edge, 0 on the
+/// lose edge, same series flipped in place.
+fn master_is_leader_gauge_edges() {
+    let metrics = PrometheusMetrics::new();
+    metrics.set_master_leadership("my-lock", true);
+    let body = metrics.gather();
+    assert!(
+        body.contains("camel_master_is_leader{lock=\"my-lock\"} 1"),
+        "held leadership must render as 1: {body}"
+    );
+
+    metrics.set_master_leadership("my-lock", false);
+    let body = metrics.gather();
+    assert!(
+        body.contains("camel_master_is_leader{lock=\"my-lock\"} 0"),
+        "lost leadership must flip the same series to 0: {body}"
+    );
+}
+
+#[test]
 fn build_info_and_uptime_rendered() {
     let metrics = PrometheusMetrics::new();
     metrics.record_build_info("1.2.3", "abc1234");
@@ -623,6 +644,32 @@ mod helper_tests {
     #[test]
     fn normalize_prom_name_numeric_name_gets_camel_prefix() {
         assert_eq!(normalize_prom_name("123foo"), "camel_123foo");
+    }
+
+    #[test]
+    fn normalize_prom_name_dotted_camel_prefix_not_doubled() {
+        // dotted built-ins (e.g. camel.cache.misses from the cache EIP) must
+        // normalize to a single camel_ prefix after dot sanitization
+        assert_eq!(
+            normalize_prom_name("camel.cache.misses"),
+            "camel_cache_misses"
+        );
+    }
+
+    #[test]
+    fn normalize_prom_name_underscore_camel_prefix_unchanged() {
+        assert_eq!(
+            normalize_prom_name("camel_exchanges_total"),
+            "camel_exchanges_total"
+        );
+    }
+
+    #[test]
+    fn normalize_prom_name_foreign_name_prefixed_once() {
+        assert_eq!(
+            normalize_prom_name("exec_successes_total"),
+            "camel_exec_successes_total"
+        );
     }
 
     #[test]

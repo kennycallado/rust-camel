@@ -98,9 +98,15 @@ camel-component-exec = { workspace = true, optional = true }
 # "stats" re-enables jemalloc's own default statistics (--enable-stats) so
 # the release verify gate can dump allocator config via MALLOC_CONF=
 # stats_print:true; negligible cost, and rc-vnm8 soak observability wants it.
-tikv-jemallocator = { version = "0.7", optional = true, default-features = false, features = ["stats"] }
+# "profiling" compiles heap-profiling support in (--enable-prof), but it is
+# OFF unless MALLOC_CONF=prof:true at process start — a startup opt-in
+# (pod restart), NOT a mid-flight toggle; runtime prof.active switching
+# would need extra machinery. When active, dumps go via jemalloc ctl
+# `prof.dump`. Verification of musl/aarch64 + the k8s dump path is PARKED
+# to the human-dispatched musl-jemalloc-verify workflow (bd rc-i9f9).
+tikv-jemallocator = { version = "0.7", optional = true, default-features = false, features = ["stats", "profiling"] }
 # must stay in lockstep with tikv-jemallocator 0.7
-tikv-jemalloc-ctl = { version = "0.7", optional = true, default-features = false, features = ["use_std", "stats"] }
+tikv-jemalloc-ctl = { version = "0.7", optional = true, default-features = false, features = ["use_std", "stats", "profiling"] }
 mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]

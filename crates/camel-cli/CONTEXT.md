@@ -86,6 +86,19 @@ samples allocated/resident/active/mapped every 5 s and emits
 `tikv-jemalloc-ctl` must stay in lockstep with `tikv-jemallocator`. Processor-crate
 instrumentation is tracked separately.
 
+## Heap profiling
+
+The `jemalloc` feature also compiles in heap profiling (jemallocator
+`profiling` feature). Profiling stays off by default. Enable it at process
+start with `prof:true` through the allocator envvar; the tikv symbol prefix
+makes that envvar `_RJEM_MALLOC_CONF` (the musl-jemalloc-verify workflow
+sets both spellings). This is a startup opt-in: a pod restart enables or
+disables it, and runtime switching through `prof.active` would need extra
+machinery. While profiling runs, the jemalloc ctl option `prof.dump` writes
+a heap dump. musl/aarch64 profiling and the k8s dump path are not verified
+yet; the human-dispatched musl-jemalloc-verify workflow owns that check
+(bd rc-i9f9).
+
 ## camel test failure modes
 
 `camel test` runs each `*.test.yaml` document in-process and reports one `PASS`/`FAIL` line per endpoint or asserted reply (unit tier) or per scenario action (full tier), preceded by one `[lean]`/`[full]` tier annotation line per executed document, then a final `N passed, M failed` summary. The tier is content-derived (`camel-integration-test::derive_tier`; a `scenario:` section forces full). Exit-code precedence is `2 > 1 > 0`: any parse-error, misuse, or apparatus class forces 2, else any verdict failure forces 1, else 0. A document-level error is reported to stderr and execution continues with the next document. Directory arguments expand recursively to `*.test.yaml`/`*.test.yml` documents (sorted, with `target`/`.git`/`node_modules` skipped). Documents declaring `scenario:` dispatch to the scenario parser (`parse_scenario_document`); when the CLI is built with `integration-http` and every wired endpoint scheme is `direct`, `http`, or `fake`, the document runs through the embedded FULL-tier boot (one harness `HttpPartner` per `http` endpoint bound on `127.0.0.1:0`, each `bindVar` folded into the layered environment, the real composition root, whole-document run, then teardown — ADR-0069 sections 4-5, 10). A `fake:`-only document keeps the no-boot smoke path in any build; any other scheme (or `http`/`direct` without the feature) reports `infra-unavailable` naming the adapter.

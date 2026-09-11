@@ -99,6 +99,10 @@ pub(crate) fn emit_leadership_transition(
         1.0,
         &[("lock", lock), ("route_id", route_id), ("event", event)],
     );
+    // The state gauge rides the same observed edge (rc-02dx): 1 on
+    // acquire, 0 on loss — steady-state readability ("who leads lock X
+    // now") without changing the counters' transition-only semantics.
+    metrics.set_master_leadership(lock, event == "acquired");
 }
 
 /// Emit a delegate lifecycle counter observation. All lifecycle

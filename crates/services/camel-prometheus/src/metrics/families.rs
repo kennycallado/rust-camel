@@ -87,6 +87,7 @@ pub(super) struct StaticFamilies {
     pub(super) allocator_memory_bytes: GaugeVec,
     pub(super) circuit_breaker_state: GaugeVec,
     pub(super) route_state: RouteStateGauge,
+    pub(super) master_is_leader: IntGaugeVec,
     pub(super) retry_attempts_total: IntCounterVec,
     pub(super) circuit_breaker_rejections_total: IntCounterVec,
     pub(super) component_operations_total: IntCounterVec,
@@ -238,6 +239,24 @@ pub(super) fn register_static_families(registry: &Registry) -> StaticFamilies {
     // last-state map zeroes the previous series on each move)
     let route_state = RouteStateGauge::new(registry);
 
+    // Create and register master_is_leader gauge. The label is `lock`
+    // (spec: `camel_master_is_leader{lock}`) — the same lock label the
+    // master leadership counters use. Value is 1 while leadership is
+    // held and 0 after it is lost; the gauge appears on the first
+    // observed edge (no startup initialization).
+    let master_is_leader = IntGaugeVec::new(
+        Opts::new(
+            "master_is_leader",
+            "Master leadership state per lock (1 = leader, 0 = not leader)",
+        )
+        .namespace("camel"),
+        &["lock"],
+    )
+    .expect("Failed to create master_is_leader gauge"); // allow-unwrap
+    registry
+        .register(Box::new(master_is_leader.clone()))
+        .expect("Failed to register master_is_leader gauge"); // allow-unwrap
+
     // Create and register retry_attempts_total counter
     let retry_attempts_total = IntCounterVec::new(
         Opts::new(
@@ -323,6 +342,7 @@ pub(super) fn register_static_families(registry: &Registry) -> StaticFamilies {
         allocator_memory_bytes,
         circuit_breaker_state,
         route_state,
+        master_is_leader,
         retry_attempts_total,
         circuit_breaker_rejections_total,
         component_operations_total,

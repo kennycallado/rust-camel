@@ -771,9 +771,10 @@ impl MetricsCollector for RecordingMetrics {
 /// Production wiring for a no-error-handler route: the tracer wraps the
 /// breaker-wrapped pipeline. The trip exchange runs through an UNTRACED
 /// service (same layer → shared breaker state) so the only traced exchange
-/// is the fast-failed one; readiness-time rejections bypass the tracer's
-/// call path entirely, so the tracer must record neither errors nor
-/// exchanges for it — the breaker alone records the rejection.
+/// is the fast-failed one; since rc-mn8n the tracer's `poll_ready` Err arm
+/// records the exchange/duration families for that readiness failure, but
+/// its CIRCUIT_OPEN skip keeps the error family silent — the breaker alone
+/// records the rejection.
 #[tokio::test]
 async fn rejection_counted_not_errored() {
     let collector = Arc::new(RecordingMetrics {
@@ -890,6 +891,78 @@ async fn circuit_open_skip_branch_not_errored() {
             .count(),
         0,
         "circuit-open must skip increment_errors in the tracer, got {calls:?}"
+    );
+}
+
+/// Local double whose `poll_ready` always fails with a processor error —
+/// the `DirectProducer` + `failIfNoConsumers=true` mirror: the readiness
+/// error surfaces before any traced call can run.
+#[derive(Clone)]
+struct ReadinessErrProcessor;
+
+impl Service<Exchange> for ReadinessErrProcessor {
+    type Response = Exchange;
+    type Error = CamelError;
+    type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Err(CamelError::ProcessorError("no consumer".into())))
+    }
+
+    fn call(&mut self, exchange: Exchange) -> Self::Future {
+        Box::pin(async { Ok(exchange) })
+    }
+}
+
+// ── Readiness-phase failure observability (rc-mn8n) ─────────────────────
+
+/// A readiness-phase producer failure is observable: the tracer adapter's
+/// `poll_ready` Err arm records the exchange and the error class
+/// (`ProcessorError` → `processor`) with the same labels as the call-time
+/// Err arm. Duration is NOT recorded: the
+/// `camel_exchange_duration_seconds` population stays call-time only
+/// (ADR-0066 population contracts).
+#[tokio::test]
+async fn readiness_err_records_families() {
+    let collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut proc = TracingProcessor::new(
+        BoxProcessor::new(ReadinessErrProcessor),
+        "r".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
+        SpanKindHint::Internal,
+    );
+
+    let outcome = proc.ready().await;
+    assert!(
+        outcome.is_err(),
+        "readiness failure must propagate to the caller"
+    );
+
+    let calls = collector.snapshot();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_exchanges"))
+            .count(),
+        1,
+        "readiness failure must count the exchange, got {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c == "increment_errors:r:processor"),
+        "readiness failure must increment the error family with the call-time label, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("record_exchange_duration"))
+            .count(),
+        0,
+        "readiness failure must not sample the call-time duration population, got {calls:?}"
     );
 }
 

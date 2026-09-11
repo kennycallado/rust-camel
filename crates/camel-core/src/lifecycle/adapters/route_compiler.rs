@@ -373,6 +373,17 @@ impl Service<Exchange> for SequentialPipeline {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // rc-mn8n review: with a handler, readiness errors are swallowed
+        // here anyway and every invoke re-polls the first step
+        // (`RetryableStep::invoke` calls `ready()` before the step's
+        // `call`), so a pre-invoke first-step poll only duplicates the
+        // tracer adapter's `poll_ready` Err-arm recording. Skip it —
+        // Pending backpressure is preserved at the invoke re-poll.
+        // Non-handler routes keep this poll: its Err is their only
+        // readiness signal (the call never runs on failure).
+        if self.handler.is_some() {
+            return Poll::Ready(Ok(()));
+        }
         match self.steps.0.first() {
             Some(CompiledStep::Process { processor, .. }) => {
                 let mut proc = processor.clone();
@@ -427,6 +438,17 @@ impl Service<Exchange> for TracedPipeline {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // rc-mn8n review: with a handler, readiness errors are swallowed
+        // here anyway and every invoke re-polls the first step
+        // (`RetryableStep::invoke` calls `ready()` before the step's
+        // `call`), so a pre-invoke first-step poll only duplicates the
+        // tracer adapter's `poll_ready` Err-arm recording. Skip it —
+        // Pending backpressure is preserved at the invoke re-poll.
+        // Non-handler routes keep this poll: its Err is their only
+        // readiness signal (the call never runs on failure).
+        if self.handler.is_some() {
+            return Poll::Ready(Ok(()));
+        }
         match self.steps.0.first() {
             Some(CompiledStep::Process { processor, .. }) => {
                 let mut proc = processor.clone();
@@ -870,11 +892,12 @@ impl Service<Exchange> for RouteChannelService {
                 Poll::Ready(Err(_)) | Poll::Ready(Ok(())) => {}
             }
         }
-        // Pipeline readiness — swallow errors when handler present
-        match self.pipeline.clone().poll_ready(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(_)) | Poll::Ready(Ok(())) => {}
-        }
+        // rc-mn8n review: do NOT poll the pipeline here. Every handler
+        // route re-polls at invoke time (`RetryableStep::invoke` calls
+        // `ready()` before the step's `call`), so this pre-call poll only
+        // duplicated the tracer adapter's `poll_ready` Err-arm recording —
+        // one readiness failure counted more than once. Pending
+        // backpressure is preserved at the invoke re-poll.
         Poll::Ready(Ok(()))
     }
 

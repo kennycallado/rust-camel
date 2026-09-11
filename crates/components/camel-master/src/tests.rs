@@ -897,12 +897,18 @@ async fn delegate_transient_error_retries_and_eventually_succeeds() {
 const METRICS_TEST_LOCK: &str = "lock-err";
 const METRICS_TEST_ROUTE: &str = "master-test-route";
 
+/// Exported family name of the leadership state gauge. The recording
+/// collector logs gauge edges into the shared observation log under this
+/// name so gauge and counter emissions share one global insertion order.
+const LEADERSHIP_GAUGE_METRIC: &str = "camel_master_is_leader";
+
 /// One recorded counter observation: (metric name, value, owned labels).
 type RecordedCounter = (String, f64, Vec<(String, String)>);
 
 /// Metrics collector that records every `record_counter` observation as an
-/// owned `(name, value, labels)` tuple. The five classic methods are no-ops:
-/// the master component only emits counters today.
+/// owned `(name, value, labels)` tuple. The five classic methods are no-ops;
+/// the master component emits counters plus the `camel_master_is_leader`
+/// state gauge, whose edges are logged into the same observation log.
 struct RecordingMetricsCollector {
     events: Mutex<Vec<RecordedCounter>>,
 }
@@ -933,6 +939,22 @@ impl RecordingMetricsCollector {
             .nth(n)
             .map(|(idx, _)| idx)
     }
+
+    /// Last observed value of the leadership state gauge for `lock`
+    /// (gauge semantics: the most recent edge wins). `None` before the
+    /// first edge.
+    fn leadership_gauge(&self, lock: &str) -> Option<f64> {
+        self.events
+            .lock()
+            .expect("mutex poisoned: recording metrics collector")
+            .iter()
+            .rev()
+            .find(|(recorded, _, labels)| {
+                recorded == LEADERSHIP_GAUGE_METRIC
+                    && labels.iter().any(|(k, v)| k == "lock" && v == lock)
+            })
+            .map(|(_, value, _)| *value)
+    }
 }
 
 impl MetricsCollector for RecordingMetricsCollector {
@@ -952,6 +974,17 @@ impl MetricsCollector for RecordingMetricsCollector {
                     .iter()
                     .map(|(key, label_value)| (key.to_string(), label_value.to_string()))
                     .collect(),
+            ));
+    }
+
+    fn set_master_leadership(&self, lock: &str, leader: bool) {
+        self.events
+            .lock()
+            .expect("mutex poisoned: recording metrics collector")
+            .push((
+                LEADERSHIP_GAUGE_METRIC.to_string(),
+                if leader { 1.0 } else { 0.0 },
+                vec![("lock".to_string(), lock.to_string())],
             ));
     }
 }
@@ -1045,6 +1078,23 @@ async fn await_counter_observations(
     timeout(Duration::from_secs(5), async {
         loop {
             if metrics.counters_named(name).len() >= count {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// Poll the recording collector until the leadership state gauge for the
+/// metrics-test lock reads `leader` (1.0 held / 0.0 lost). Same 5 ms poll
+/// pattern and 5 s bound as [`await_counter_observations`].
+async fn await_leadership_gauge(metrics: &RecordingMetricsCollector, leader: bool) -> bool {
+    let expected = if leader { 1.0 } else { 0.0 };
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if metrics.leadership_gauge(METRICS_TEST_LOCK) == Some(expected) {
                 break;
             }
             sleep(Duration::from_millis(5)).await;
@@ -1992,6 +2042,131 @@ async fn transition_lost_on_leading_edge() {
         lost_idx < stopped_idx,
         "lost transition (global index {lost_idx}) must precede the stopped \
          lifecycle observation (global index {stopped_idx})"
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+// ── rc-02dx leadership state gauge tests ────────────────────────────
+
+/// The `camel_master_is_leader` gauge reads 1 for the lock while
+/// leadership is held. Steady-state readability is the gauge's purpose:
+/// unlike the transition counters, it must NOT read 0 while steady.
+#[tokio::test]
+async fn is_leader_gauge_is_one_while_leadership_held() {
+    // ARRANGE: leadership acquired for a named lock (same harness as
+    // transition_acquired_on_initial_snapshot).
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    assert!(
+        await_counter_observations(&metrics, "master_leadership_transitions_total", 1).await,
+        "initial-snapshot acquisition should be recorded within 5s"
+    );
+
+    // ACT/ASSERT: the gauge reads 1 for the lock while leadership is held.
+    assert!(
+        await_leadership_gauge(&metrics, true).await,
+        "leadership gauge should read 1 within 5s of the acquire edge"
+    );
+    assert_eq!(
+        metrics.leadership_gauge(METRICS_TEST_LOCK),
+        Some(1.0),
+        "gauge must read 1 for the held lock"
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+/// The `camel_master_is_leader` gauge reads 0 for the lock after
+/// leadership is lost.
+#[tokio::test]
+async fn is_leader_gauge_is_zero_after_leadership_lost() {
+    // ARRANGE: acquired, then lost (same harness as
+    // transition_lost_on_leading_edge).
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    assert!(
+        await_counter_observations(&metrics, "master_leadership_transitions_total", 1).await,
+        "initial acquisition should be recorded within 5s"
+    );
+
+    leadership.emit(LeadershipEvent::StoppedLeading).await;
+    assert!(
+        await_counter_observations(&metrics, "master_leadership_transitions_total", 2).await,
+        "lost transition should be recorded within 5s of the StoppedLeading delivery"
+    );
+
+    // ACT/ASSERT: the gauge reads 0 after the lose edge.
+    assert!(
+        await_leadership_gauge(&metrics, false).await,
+        "leadership gauge should read 0 within 5s of the lose edge"
+    );
+    assert_eq!(
+        metrics.leadership_gauge(METRICS_TEST_LOCK),
+        Some(0.0),
+        "gauge must read 0 after leadership is lost"
     );
 
     cancel.cancel();

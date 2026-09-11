@@ -29,9 +29,10 @@
 //! bound server). The prometheus port is pre-allocated with a
 //! bind/read/drop `std::net::TcpListener` because the service is
 //! constructed inside `configure_context`, leaving the ephemeral port
-//! undiscoverable otherwise. The error leg carries
-//! `failIfNoConsumers=false` so the failure lands inside the traced step
-//! call (readiness-time failures bypass the tracer adapter entirely — see
+//! undiscoverable otherwise. The error leg uses the default
+//! `failIfNoConsumers=true`: the readiness-phase failure inside the traced
+//! step is recorded by the tracer adapter's `poll_ready` Err arm (rc-mn8n)
+//! — same families, same labels as the call-time path (see
 //! `add_failing_route`).
 
 use std::net::TcpListener;
@@ -39,6 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{CamelError, Exchange, Lifecycle, Message, MetricsCollector, RuntimeCommand};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::{NoOpComponentContext, RuntimeObservability};
@@ -159,25 +161,54 @@ async fn context_from_toml(toml: &str) -> CamelContext {
     ctx
 }
 
-/// `direct:entry → to:direct:missing` — the proven error path. The
-/// `failIfNoConsumers=false` URI param is REQUIRED for pipeline-metrics
-/// coverage: with the default `true`, `DirectProducer::poll_ready` fails
-/// fast ("direct endpoint 'missing' not registered") and the exchange
-/// errors at readiness — BEFORE the traced step call, so the tracer
-/// adapter records nothing. With `false`, the failure moves to call time
-/// ("no consumer registered for direct:missing", camel-direct lib.rs:465)
-/// INSIDE the traced wrapper: the pipeline path records
-/// duration/exchanges/errors, and the direct consumer still reports the
-/// b-prime increment on the failed `send_and_wait`.
+/// `direct:entry → to:direct:missing` — the proven error path, driven on
+/// the readiness path (default `failIfNoConsumers=true`):
+/// `DirectProducer::poll_ready` fails fast ("direct endpoint 'missing' not
+/// registered") BEFORE the traced step call. Since rc-mn8n the tracer
+/// adapter's `poll_ready` Err arm records the same duration/exchanges/
+/// errors families with the same labels as the call-time Err arm, so the
+/// pipeline path is observable without opting out of the readiness check,
+/// and the direct consumer still reports the b-prime increment on the
+/// failed `send_and_wait`.
 async fn add_failing_route(ctx: &CamelContext) {
     let route = RouteBuilder::from("direct:entry")
         .route_id("entry")
-        .to("direct:missing?failIfNoConsumers=false")
+        .to("direct:missing")
         .build()
         .expect("failing route builds");
     ctx.add_route_definition(route)
         .await
         .expect("failing route registers");
+}
+
+/// A passing route (`direct:ok`): one successful exchange through it gives
+/// the tests a CALL-TIME attempt, so the duration family — call-time only
+/// per the ADR-0066 population contract — has an observation even when the
+/// failing leg fails on the readiness path (which records exchanges and
+/// errors but never duration).
+async fn add_working_route(ctx: &CamelContext) {
+    let route = RouteBuilder::from("direct:ok")
+        .route_id("ok")
+        .process(|ex| async move { Ok(ex) })
+        .build()
+        .expect("working route builds");
+    ctx.add_route_definition(route)
+        .await
+        .expect("working route registers");
+}
+
+/// Drive one successful exchange through `direct:ok`.
+async fn run_one_working_exchange(ctx: &CamelContext) {
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_exchange_to(ctx, "direct:ok", Duration::from_secs(1)),
+    )
+    .await
+    .expect("exchange through working route completes within 5s");
+    assert!(
+        outcome.is_ok(),
+        "direct:ok must complete the exchange, got {outcome:?}"
+    );
 }
 
 async fn route_started(ctx: &CamelContext, route_id: &str) -> bool {
@@ -268,7 +299,7 @@ async fn run_one_failing_exchange(ctx: &CamelContext) {
     .expect("exchange through failing route completes within 5s");
     assert!(
         outcome.is_err(),
-        "to:direct:missing must fail the exchange (no consumer registered)"
+        "to:direct:missing must fail the exchange (target has no consumer)"
     );
 }
 
@@ -291,10 +322,11 @@ async fn wait_for_calls(collector: &RecordingCollector, prefixes: &[&str]) {
     }
 }
 
-/// Poll `GET /metrics` until the exchange-disposition family appears — a
-/// non-empty body alone can precede our first exchange (process-level
-/// families render immediately), so the poll waits for evidence the
-/// exchange actually landed.
+/// Poll `GET /metrics` until the exchange-disposition family has an
+/// observed sample — a non-empty body alone can precede our first exchange
+/// (process-level families render immediately), and a HELP/TYPE header can
+/// precede any observation, so the poll waits for the `{` of a labeled
+/// sample line: evidence the exchange actually landed.
 async fn poll_metrics_body(port: u16) -> String {
     let url = format!("http://127.0.0.1:{port}/metrics");
     let client = reqwest::Client::new();
@@ -303,13 +335,13 @@ async fn poll_metrics_body(port: u16) -> String {
         if let Ok(resp) = client.get(&url).send().await
             && resp.status().is_success()
             && let Ok(body) = resp.text().await
-            && body.contains("camel_exchanges_total")
+            && body.contains("camel_exchanges_total{")
         {
             return body;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "prometheus /metrics never exposed camel_exchanges_total at {url}"
+            "prometheus /metrics never exposed a camel_exchanges_total sample at {url}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -332,23 +364,28 @@ port = {port}
 
     let mut ctx = context_from_toml(&toml_cfg).await;
     add_failing_route(&ctx).await;
+    add_working_route(&ctx).await;
     ctx.start().await.expect("context starts");
-    wait_for_started(&ctx, &["entry"]).await;
+    wait_for_started(&ctx, &["entry", "ok"]).await;
 
+    // The failed leg records exchanges+errors on the readiness path
+    // (duration stays call-time only); the working leg provides the
+    // call-time duration observation.
     run_one_failing_exchange(&ctx).await;
+    run_one_working_exchange(&ctx).await;
 
     let body = poll_metrics_body(port).await;
     assert!(
-        body.contains("camel_exchanges_total"),
-        "pipeline exchange-disposition family missing from /metrics:\n{body}"
+        body.contains("camel_exchanges_total{"),
+        "pipeline exchange-disposition family must have a sample in /metrics:\n{body}"
     );
     assert!(
         body.contains("camel_exchange_duration_seconds"),
         "pipeline duration family missing from /metrics:\n{body}"
     );
     assert!(
-        body.contains("camel_errors_total"),
-        "component error family missing from /metrics:\n{body}"
+        body.contains("camel_errors_total{"),
+        "error family must have a sample in /metrics:\n{body}"
     );
 
     ctx.stop().await.expect("context stops");
@@ -370,10 +407,14 @@ enabled = true
         collector: Arc::clone(&collector),
     });
     add_failing_route(&ctx).await;
+    add_working_route(&ctx).await;
     ctx.start().await.expect("context starts");
-    wait_for_started(&ctx, &["entry"]).await;
+    wait_for_started(&ctx, &["entry", "ok"]).await;
 
+    // The failed leg records exchanges+errors on the readiness path; the
+    // working leg provides the call-time duration observation.
     run_one_failing_exchange(&ctx).await;
+    run_one_working_exchange(&ctx).await;
 
     wait_for_calls(
         &collector,
@@ -407,10 +448,14 @@ port = {port}
         collector: Arc::clone(&collector),
     });
     add_failing_route(&ctx).await;
+    add_working_route(&ctx).await;
     ctx.start().await.expect("context starts");
-    wait_for_started(&ctx, &["entry"]).await;
+    wait_for_started(&ctx, &["entry", "ok"]).await;
 
+    // The failed leg records exchanges+errors on the readiness path; the
+    // working leg provides the call-time duration observation.
     run_one_failing_exchange(&ctx).await;
+    run_one_working_exchange(&ctx).await;
 
     // Composition is order-agnostic (the handle composes whichever
     // registration arrives second); this test deliberately registers the
@@ -441,9 +486,22 @@ port = {port}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn late_registration_after_routes_observed() {
     // No observability at all: routes go in first, the recording lifecycle
-    // is registered on the BUILT context afterwards.
+    // is registered on the BUILT context afterwards. This leg stays on the
+    // CALL-TIME failure path (`failIfNoConsumers=false`): with the pipeline
+    // disabled there is no traced readiness recording (rc-mn8n fixes the
+    // TRACED readiness path only), and the test-driven `direct:entry`
+    // producer carries the harness's NoOp runtime — so the observable
+    // emission is the compiled `direct:missing` producer's call-time lookup
+    // failure through its controller-threaded handle.
     let mut ctx = context_from_toml("").await;
-    add_failing_route(&ctx).await;
+    let route = RouteBuilder::from("direct:entry")
+        .route_id("entry")
+        .to("direct:missing?failIfNoConsumers=false")
+        .build()
+        .expect("failing route builds");
+    ctx.add_route_definition(route)
+        .await
+        .expect("failing route registers");
     let collector = RecordingCollector::new();
     ctx = ctx.with_lifecycle(RecordingLifecycle {
         collector: Arc::clone(&collector),
@@ -748,6 +806,144 @@ async fn direct_wired_route_no_double_count() {
         calls.iter().any(|c| c.starts_with("increment_errors:")
             && c.as_str() != "increment_errors:direct:missing3"),
         "the traced wrapper's own recording must be present as additive telemetry; got {calls:?}"
+    );
+
+    ctx.stop().await.expect("context stops");
+}
+
+// ---------------------------------------------------------------------------
+// Readiness-failure count contract (rc-mn8n review): one failed exchange on
+// a route must increment `camel_exchanges_total` for that route label
+// EXACTLY once — the tracer adapter's `poll_ready` Err arm is the only
+// recording site that fires for a readiness-phase failure, so both the
+// handler path (RouteChannelService; the pipeline gate poll must not add a
+// second increment before the invoke re-poll) and the non-handler path
+// (Err propagates, call never runs) count one.
+// ---------------------------------------------------------------------------
+
+/// Count `method:route` observations for an exact route label.
+fn count_calls(calls: &[String], method: &str, route_id: &str) -> usize {
+    calls
+        .iter()
+        .filter(|c| c.as_str() == format!("{method}:{route_id}"))
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handler_route_readiness_failure_records_exchange_once() {
+    let (mut ctx, collector) =
+        unwired_context_with_collector("[observability.otel]\nenabled = true\n").await;
+    let route = RouteBuilder::from("direct:entry7")
+        .route_id("entry7")
+        .error_handler(ErrorHandlerConfig::log_only())
+        .to("direct:missing4")
+        .build()
+        .expect("handler failing route builds");
+    ctx.add_route_definition(route)
+        .await
+        .expect("handler failing route registers");
+    ctx.start().await.expect("context starts");
+    wait_for_started(&ctx, &["entry7"]).await;
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_exchange_to(&ctx, "direct:entry7", Duration::ZERO),
+    )
+    .await
+    .expect("single-shot exchange completes within 5s");
+    // The readiness failure may be absorbed by the log-only handler; the
+    // count contract below holds regardless of the final disposition.
+    let _ = outcome;
+
+    let calls = collector.snapshot();
+    let exchanges = count_calls(&calls, "increment_exchanges", "entry7");
+    assert_eq!(
+        exchanges, 1,
+        "one failed exchange must record camel_exchanges_total for entry7 exactly once; got {calls:?}"
+    );
+
+    ctx.stop().await.expect("context stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_handler_route_readiness_failure_records_exchange_once() {
+    let (mut ctx, collector) =
+        unwired_context_with_collector("[observability.otel]\nenabled = true\n").await;
+    // No error handler configured → the readiness Err propagates out of the
+    // gate poll, the call never runs, and the readiness Err arm is the sole
+    // recording site.
+    let route = RouteBuilder::from("direct:entry8")
+        .route_id("entry8")
+        .to("direct:missing5")
+        .build()
+        .expect("non-handler failing route builds");
+    ctx.add_route_definition(route)
+        .await
+        .expect("non-handler failing route registers");
+    ctx.start().await.expect("context starts");
+    wait_for_started(&ctx, &["entry8"]).await;
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_exchange_to(&ctx, "direct:entry8", Duration::ZERO),
+    )
+    .await
+    .expect("single-shot exchange completes within 5s");
+    assert!(
+        outcome.is_err(),
+        "readiness failure must propagate without a handler, got {outcome:?}"
+    );
+
+    let calls = collector.snapshot();
+    let exchanges = count_calls(&calls, "increment_exchanges", "entry8");
+    assert_eq!(
+        exchanges, 1,
+        "one failed exchange must record camel_exchanges_total for entry8 exactly once; got {calls:?}"
+    );
+
+    ctx.stop().await.expect("context stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prom_only_handler_route_readiness_failure_records_exchange_once() {
+    // Prom-only leg with tracer spans explicitly disabled: this is the one
+    // reachable gating that compiles the route to a plain SequentialPipeline
+    // over metrics-emitting step wrappers (plain prom-only implies spans via
+    // `effective_tracer_config`, which selects the already-guarded
+    // TracedPipeline). The handler count contract must hold there too — one
+    // readiness failure on the route records `camel_exchanges_total` for the
+    // route exactly once.
+    let (mut ctx, collector) = unwired_context_with_collector(
+        "[observability.prometheus]\nenabled = true\n[observability.tracer]\nenabled = false\n",
+    )
+    .await;
+    let route = RouteBuilder::from("direct:entry9")
+        .route_id("entry9")
+        .error_handler(ErrorHandlerConfig::log_only())
+        .to("direct:missing6")
+        .build()
+        .expect("prom-only handler failing route builds");
+    ctx.add_route_definition(route)
+        .await
+        .expect("prom-only handler failing route registers");
+    ctx.start().await.expect("context starts");
+    wait_for_started(&ctx, &["entry9"]).await;
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_exchange_to(&ctx, "direct:entry9", Duration::ZERO),
+    )
+    .await
+    .expect("single-shot exchange completes within 5s");
+    // The readiness failure may be absorbed by the log-only handler; the
+    // count contract below holds regardless of the final disposition.
+    let _ = outcome;
+
+    let calls = collector.snapshot();
+    let exchanges = count_calls(&calls, "increment_exchanges", "entry9");
+    assert_eq!(
+        exchanges, 1,
+        "one failed exchange must record camel_exchanges_total for entry9 exactly once; got {calls:?}"
     );
 
     ctx.stop().await.expect("context stops");

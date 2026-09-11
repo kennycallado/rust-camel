@@ -131,6 +131,14 @@ pub trait MetricsCollector: Send + Sync {
     /// is a closed [`AllocatorStat`] variant; the sampler refreshes the
     /// current value periodically. Default: no-op (backward-compatible).
     fn set_allocator_memory(&self, _stat: AllocatorStat, _bytes: u64) {}
+
+    /// Publish the leadership state for a master lock
+    /// (`camel_master_is_leader{lock}`, gauge): 1 while leadership is
+    /// held, 0 after it is lost. Emitted on the same observed state edges
+    /// as the `master_leadership_transitions_total` counter; the gauge
+    /// exists for steady-state readability ("who leads lock X now"), not
+    /// transition counting. Default: no-op (backward-compatible).
+    fn set_master_leadership(&self, _lock: &str, _leader: bool) {}
 }
 
 /// No-op metrics collector for default behavior
@@ -313,6 +321,10 @@ impl MetricsCollector for MetricsHandle {
     fn set_allocator_memory(&self, stat: AllocatorStat, bytes: u64) {
         self.inner.load().0.set_allocator_memory(stat, bytes)
     }
+
+    fn set_master_leadership(&self, lock: &str, leader: bool) {
+        self.inner.load().0.set_master_leadership(lock, leader)
+    }
 }
 
 /// A [`MetricsCollector`] that fans every observation out to a list of collectors,
@@ -453,6 +465,12 @@ impl MetricsCollector for CompositeMetricsCollector {
             collector.set_allocator_memory(stat, bytes);
         }
     }
+
+    fn set_master_leadership(&self, lock: &str, leader: bool) {
+        for collector in &self.collectors {
+            collector.set_master_leadership(lock, leader);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -469,6 +487,7 @@ mod tests {
         rejections: Mutex<Vec<String>>,
         pinned: Mutex<Vec<(&'static str, String, u64)>>,
         allocator: Mutex<Vec<(AllocatorStat, u64)>>,
+        leadership: Mutex<Vec<(String, bool)>>,
     }
 
     impl RecordingMetrics {
@@ -481,6 +500,7 @@ mod tests {
                 rejections: Mutex::new(Vec::new()),
                 pinned: Mutex::new(Vec::new()),
                 allocator: Mutex::new(Vec::new()),
+                leadership: Mutex::new(Vec::new()),
             }
         }
     }
@@ -555,6 +575,13 @@ mod tests {
                 .expect("allocator lock")
                 .push((stat, bytes));
         }
+
+        fn set_master_leadership(&self, lock: &str, leader: bool) {
+            self.leadership
+                .lock()
+                .expect("leadership lock")
+                .push((lock.to_string(), leader));
+        }
     }
 
     /// Test double that tags every trait-method call by name, for
@@ -618,6 +645,10 @@ mod tests {
         }
         fn record_component_operation(&self, _component: &str, _operation: &str, _outcome: &str) {
             self.tag("record_component_operation");
+        }
+
+        fn set_master_leadership(&self, _lock: &str, _leader: bool) {
+            self.tag("set_master_leadership");
         }
     }
 
@@ -795,6 +826,7 @@ mod tests {
         composite.record_build_info("1.2.3", "abc1234");
         composite.record_uptime(0.5);
         composite.record_component_operation("redis", "command", "success");
+        composite.set_master_leadership("lock-a", true);
 
         let expected = vec![
             "record_exchange_duration",
@@ -811,6 +843,7 @@ mod tests {
             "record_build_info",
             "record_uptime",
             "record_component_operation",
+            "set_master_leadership",
         ];
         for member in [&a, &b] {
             let calls = member.calls.lock().expect("calls lock").clone();
@@ -949,6 +982,59 @@ mod tests {
                 .allocator
                 .lock()
                 .expect("allocator lock")
+                .is_empty(),
+            "unwired-handle emissions are dropped, not replayed"
+        );
+    }
+
+    /// `set_master_leadership` forwards through a wired `MetricsHandle` and
+    /// a `CompositeMetricsCollector` (exactly one capture each); an
+    /// unwired handle neither panics nor records into a later-registered
+    /// double.
+    #[test]
+    fn handle_and_composite_forward_set_master_leadership() {
+        let expected = vec![("lock-a".to_string(), true), ("lock-a".to_string(), false)];
+
+        let handle_collector = Arc::new(RecordingMetrics::new());
+        let handle = MetricsHandle::new();
+        handle.register(handle_collector.clone());
+        handle.set_master_leadership("lock-a", true);
+        handle.set_master_leadership("lock-a", false);
+        assert_eq!(
+            handle_collector
+                .leadership
+                .lock()
+                .expect("leadership lock")
+                .clone(),
+            expected,
+            "wired handle must forward every leadership edge"
+        );
+
+        let composite_collector = Arc::new(RecordingMetrics::new());
+        let composite = CompositeMetricsCollector::new(vec![
+            composite_collector.clone() as Arc<dyn MetricsCollector>
+        ]);
+        composite.set_master_leadership("lock-a", true);
+        composite.set_master_leadership("lock-a", false);
+        assert_eq!(
+            composite_collector
+                .leadership
+                .lock()
+                .expect("leadership lock")
+                .clone(),
+            expected,
+            "composite must forward every leadership edge"
+        );
+
+        let bystander = Arc::new(RecordingMetrics::new());
+        let unwired = MetricsHandle::new();
+        unwired.set_master_leadership("lock-a", true);
+        unwired.register(bystander.clone());
+        assert!(
+            bystander
+                .leadership
+                .lock()
+                .expect("leadership lock")
                 .is_empty(),
             "unwired-handle emissions are dropped, not replayed"
         );

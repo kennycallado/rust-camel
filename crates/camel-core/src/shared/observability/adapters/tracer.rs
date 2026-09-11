@@ -135,6 +135,7 @@ impl TracingProcessor {
                 &levers,
                 start.elapsed(),
                 &result,
+                true,
             );
             result
         })
@@ -142,19 +143,26 @@ impl TracingProcessor {
 }
 
 /// Emits the step metric families per the levers: `record_exchange_duration`
-/// only when the duration family is enabled, `increment_exchanges` only when
-/// the exchange family is enabled, and `increment_errors` NEVER gated
+/// only when the duration family is enabled AND the attempt is a call-time
+/// attempt (`include_duration`), `increment_exchanges` only when the exchange
+/// family is enabled, and `increment_errors` NEVER gated
 /// (metrics-configuration Req 2). Circuit-open rejections are excluded here
 /// as well (dashboard-observability D2): the breaker counts them.
+///
+/// Readiness-phase attempts pass `include_duration = false`: the duration
+/// histogram population is call-time only (ADR-0066 population contracts),
+/// while the exchange count and error increment are required on the
+/// readiness path too (rc-mn8n).
 fn record_step_metrics(
     metrics: Option<&Arc<dyn MetricsCollector>>,
     route_id: &str,
     levers: &MetricsLeversConfig,
     duration: std::time::Duration,
     result: &Result<Exchange, CamelError>,
+    include_duration: bool,
 ) {
     let Some(metrics) = metrics else { return };
-    if levers.durations_enabled() {
+    if include_duration && levers.durations_enabled() {
         metrics.record_exchange_duration(route_id, duration);
     }
     if levers.exchanges_enabled() {
@@ -175,7 +183,31 @@ impl Service<Exchange> for TracingProcessor {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
+        let start = Instant::now();
+        match self.inner.poll_ready(cx) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => {
+                // rc-mn8n: readiness-phase producer failures (e.g.
+                // DirectProducer with the default failIfNoConsumers=true)
+                // surface here, BEFORE the traced call — so the call-time
+                // Err arm never runs for them. Record the exchange count
+                // and the error class with the same labels (CIRCUIT_OPEN
+                // still excluded — the breaker counts its own rejections).
+                // Duration is NOT recorded here: the
+                // camel_exchange_duration_seconds population stays
+                // call-time only (ADR-0066 population contracts).
+                record_step_metrics(
+                    self.metrics.as_ref(),
+                    &self.route_id,
+                    &self.metric_levers,
+                    start.elapsed(),
+                    &Err(e.clone()),
+                    false,
+                );
+                Poll::Ready(Err(e))
+            }
+        }
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
@@ -300,7 +332,14 @@ impl Service<Exchange> for TracingProcessor {
                 tracing::Span::current().record("duration_ms", duration_ms);
 
                 // Record metric families per the levers (errors never gated).
-                record_step_metrics(metrics.as_ref(), &route_id, &levers, duration, &result);
+                record_step_metrics(
+                    metrics.as_ref(),
+                    &route_id,
+                    &levers,
+                    duration,
+                    &result,
+                    true,
+                );
 
                 match result {
                     Ok(mut ex) => {

@@ -11,7 +11,9 @@ use families::StaticFamilies;
 /// replace invalid chars with `_`, prefix `_` if it starts with a digit.
 /// Prometheus names must match `^[a-zA-Z_:][a-zA-Z0-9_:]*$`.
 fn normalize_prom_name(name: &str) -> String {
-    let prefixed = if name.starts_with("camel_") {
+    let prefixed = if name.starts_with("camel_") || name.starts_with("camel.") {
+        // already carrying the camel prefix (underscore or dot form); sanitize
+        // the dot along with the rest
         name.to_string()
     } else {
         format!("camel_{name}")
@@ -197,6 +199,13 @@ impl MetricsCollector for PrometheusMetrics {
             .allocator_memory_bytes
             .with_label_values(&[stat.as_str()])
             .set(bytes as f64);
+    }
+
+    fn set_master_leadership(&self, lock: &str, leader: bool) {
+        self.families
+            .master_is_leader
+            .with_label_values(&[lock])
+            .set(if leader { 1 } else { 0 });
     }
 
     fn record_circuit_breaker_change(&self, route_id: &str, _from: &str, to: &str) {
