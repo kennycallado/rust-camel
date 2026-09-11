@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Duration;
 
 use camel_api::{
-    BoxProcessor, BoxProcessorExt, CamelError, Message, RouteController, RuntimeCommand, Value,
+    BatchCompletion, BoxProcessor, BoxProcessorExt, CamelError, FilterPredicate, Message,
+    MulticastConfig, ResequenceMode, ResequencePolicyConfig, RouteController, RuntimeCommand,
+    SplitterConfig, Value, split_body_lines,
 };
 use camel_component_api::{
     Component, ComponentContext, ConcurrencyModel, ConsumerContext, Endpoint, NoOpComponentContext,
@@ -24,7 +26,7 @@ use crate::lifecycle::adapters::pipeline_runtime::{
 };
 use crate::lifecycle::adapters::route_controller::DefaultRouteController;
 use crate::lifecycle::adapters::route_registry::DEFAULT_SHUTDOWN_TIMEOUT;
-use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
+use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition, WhenStep};
 use crate::lifecycle::cohort_activation::CohortActivationGate;
 use crate::shared::components::domain::Registry;
 use camel_component_api::InlineRouteDispatcher;
@@ -1177,4 +1179,144 @@ async fn inline_stopped_consumer_keeps_no_consumer_semantics() {
         std::mem::discriminant(&ghost_err),
         "stopped consumer keeps the no-consumer semantics (identical variant)"
     );
+}
+
+// ------------------------------------------------------------------
+// rc-bgzq canary: published dispatcher ⇒ non-identity pipeline
+// ------------------------------------------------------------------
+
+/// Startable topology fixtures for the rc-bgzq canary. Aggregate-split
+/// is deliberately absent: it must never publish the capability at all
+/// (rc-2sba — covered by `aggregate_route_never_publishes_capability`
+/// and the resume twin), so it cannot violate the invariant.
+#[derive(Clone, Copy)]
+enum CanaryTopology {
+    Plain,
+    Multicast,
+    Split,
+    Choice,
+    Resequence,
+}
+
+impl CanaryTopology {
+    fn name(self) -> &'static str {
+        match self {
+            CanaryTopology::Plain => "plain",
+            CanaryTopology::Multicast => "multicast",
+            CanaryTopology::Split => "split",
+            CanaryTopology::Choice => "choice",
+            CanaryTopology::Resequence => "resequencer",
+        }
+    }
+
+    /// Topology-specific steps appended after the canary probe. Each
+    /// shape is the minimal startable route carrying that EIP top-level,
+    /// so the compiler builds the real topology (resequencer split
+    /// included: pre = [probe], post = []).
+    fn steps(self) -> Vec<BuilderStep> {
+        match self {
+            CanaryTopology::Plain => vec![],
+            CanaryTopology::Multicast => vec![BuilderStep::Multicast {
+                steps: vec![BuilderStep::To("probe:sink".into())],
+                config: MulticastConfig::new(),
+            }],
+            CanaryTopology::Split => vec![BuilderStep::Split {
+                config: SplitterConfig::new(split_body_lines()),
+                steps: vec![],
+            }],
+            CanaryTopology::Choice => vec![BuilderStep::Choice {
+                whens: vec![WhenStep {
+                    predicate: FilterPredicate::new(|_| true),
+                    steps: vec![BuilderStep::To("probe:sink".into())],
+                }],
+                otherwise: None,
+            }],
+            CanaryTopology::Resequence => vec![BuilderStep::Resequence {
+                policy_config: ResequencePolicyConfig {
+                    mode: ResequenceMode::Batch {
+                        correlation: "${header.id}".into(),
+                        sort: "${header.id}".into(),
+                        completion: BatchCompletion::Size(1),
+                    },
+                },
+            }],
+        }
+    }
+}
+
+/// rc-bgzq canary for the rc-2sba invariant: every topology for which
+/// the controller publishes an [`InlineRouteDispatcher`] must expose a
+/// REAL composed pipeline over that dispatcher — never the identity
+/// shell `compose_pipeline(vec![])`. rc-2sba was exactly that
+/// violation: direct-entry aggregate routes published a dispatcher over
+/// an empty pipeline, so inline dispatch silently returned unprocessed
+/// exchanges.
+///
+/// `BoxProcessor` is a type-erased `BoxCloneSyncService` with no
+/// downcast, so the identity shell cannot be asserted structurally
+/// (not even from this in-crate test). The probe is therefore
+/// behavioral: a marker exchange dispatched through the PUBLISHED
+/// dispatcher must reach a real pipeline step — the probe processor
+/// records its entry. An identity shell completes the dispatch without
+/// ever running a step, so the entries assertion fails. The resequencer
+/// row relies on the side-channel entry record deliberately: the
+/// resequencer step answers the dispatch with an ack exchange, so the
+/// response carries no probe trace, while the pre-step execution does.
+#[tokio::test]
+async fn published_dispatcher_implies_non_identity_pipeline() {
+    for topo in [
+        CanaryTopology::Plain,
+        CanaryTopology::Multicast,
+        CanaryTopology::Split,
+        CanaryTopology::Choice,
+        CanaryTopology::Resequence,
+    ] {
+        let route_id = format!("rt-canary-{}", topo.name());
+        let captured: CapturedCtxs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut controller = probe_controller(Arc::clone(&captured));
+        // The resequencer split compiles its correlation/sort expressions
+        // with the `simple` language (route_compiler_ext) — register it
+        // exactly as route_controller_tests does.
+        controller.languages.lock().expect("languages lock").insert(
+            "simple".into(),
+            Arc::new(camel_language_simple::SimpleLanguage::new()),
+        );
+
+        let (processor, parts) = probe_processor(ProbeMode::Tag("canary"));
+        let mut steps = vec![BuilderStep::Processor(camel_api::OpaqueProcessor(
+            processor,
+        ))];
+        steps.extend(topo.steps());
+        let route = RouteDefinition::new("probe:src", steps).with_route_id(route_id.clone());
+        controller.add_route(route).await.unwrap();
+        controller.start_route(&route_id).await.unwrap();
+        controller.activate_cohort();
+
+        // Premise: this topology publishes the capability.
+        let ctx = await_captured(&captured).await;
+        let dispatcher = ctx
+            .inline_dispatcher()
+            .unwrap_or_else(|| panic!("{}: must publish the inline dispatcher", topo.name()));
+
+        // Invariant under test: dispatching through the published
+        // dispatcher must execute a REAL pipeline step. Identity shell ⇒
+        // zero probe entries ⇒ canary red.
+        let mut marker = test_exchange("canary");
+        marker.input.set_header("id", "canary-1");
+        if let Err(e) = timeout(Duration::from_secs(2), dispatcher.dispatch(marker))
+            .await
+            .expect("dispatch resolves within 2s")
+        {
+            panic!("{}: inline dispatch must succeed, got {e:?}", topo.name());
+        }
+        assert_eq!(
+            parts.entries(),
+            vec!["canary".to_string()],
+            "{}: published dispatcher must drive the composed pipeline, \
+             not the identity shell",
+            topo.name()
+        );
+
+        controller.stop_route(&route_id).await.unwrap();
+    }
 }
