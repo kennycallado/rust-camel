@@ -46,7 +46,7 @@
 - `cargo test -p camel-api --lib` exits 0 (including the pre-existing `variant_name_tests`).
 - `cargo clippy -p camel-api -- -D warnings` exits 0.
 
-- [ ] 1.1
+- [x] 1.1
 
 ## camel-processor
 

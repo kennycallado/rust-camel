@@ -164,6 +164,16 @@ pub enum CamelError {
     /// variant so operators can discriminate programmatically.
     #[error("Endpoint URI error: {0}")]
     EndpointUri(EndpointUriError),
+
+    /// The request body media type does not match the declared/consumed type
+    /// (REST DSL default-strict content negotiation, HTTP 415).
+    #[error("Unsupported media type: consumed {consumed}, declared {declared}")]
+    UnsupportedMediaType { consumed: String, declared: String },
+
+    /// The response representation cannot satisfy the client's Accept header
+    /// (REST DSL default-strict content negotiation, HTTP 406).
+    #[error("Not acceptable: accept {accept}, produced {produced}")]
+    NotAcceptable { accept: String, produced: String },
 }
 
 /// Classification marker for `CamelError::CircuitOpen`.
@@ -198,6 +208,8 @@ impl CamelError {
             Self::Unauthorized(_) => "unauthorized",
             Self::ValidationError(_) => "validation",
             Self::TemplateReload(_) => "template",
+            Self::UnsupportedMediaType { .. } => "unsupported_media_type",
+            Self::NotAcceptable { .. } => "not_acceptable",
             _ => "unknown",
         }
     }
@@ -236,6 +248,8 @@ impl CamelError {
             Self::ValidationError(_) => "ValidationError",
             Self::TemplateReload(_) => "TemplateReload",
             Self::EndpointUri(_) => "EndpointUri",
+            Self::UnsupportedMediaType { .. } => "UnsupportedMediaType",
+            Self::NotAcceptable { .. } => "NotAcceptable",
         }
     }
 }
@@ -302,6 +316,14 @@ mod tests {
             CamelError::ValidationError("body does not match schema".to_string()),
             CamelError::TemplateReload("reload failed".to_string()),
             CamelError::EndpointUri(EndpointUriError::MissingScheme),
+            CamelError::UnsupportedMediaType {
+                consumed: "text/plain".to_string(),
+                declared: "application/json".to_string(),
+            },
+            CamelError::NotAcceptable {
+                accept: "application/xml".to_string(),
+                produced: "application/json".to_string(),
+            },
         ]
     }
 
@@ -401,7 +423,8 @@ mod tests {
         for error in all_error_samples() {
             let class = error.classify();
             assert!(class.is_ascii());
-            assert!(class.len() <= 15, "class too long: {class}");
+            // "unsupported_media_type" (REST negotiation, L2) sets the floor at 22
+            assert!(class.len() <= 22, "class too long: {class}");
         }
     }
 
@@ -470,6 +493,52 @@ mod tests {
             "display should start with 'Auth provider unavailable', got: {msg}"
         );
     }
+
+    #[test]
+    fn classify_negotiation_errors() {
+        let unsupported = CamelError::UnsupportedMediaType {
+            consumed: "text/plain".into(),
+            declared: "application/json".into(),
+        };
+        let not_acceptable = CamelError::NotAcceptable {
+            accept: "application/xml".into(),
+            produced: "application/json".into(),
+        };
+        assert_eq!(unsupported.classify(), "unsupported_media_type");
+        assert_eq!(not_acceptable.classify(), "not_acceptable");
+    }
+
+    #[test]
+    fn variant_names_negotiation_errors() {
+        let unsupported = CamelError::UnsupportedMediaType {
+            consumed: "text/plain".into(),
+            declared: "application/json".into(),
+        };
+        let not_acceptable = CamelError::NotAcceptable {
+            accept: "application/xml".into(),
+            produced: "application/json".into(),
+        };
+        assert_eq!(unsupported.variant_name(), "UnsupportedMediaType");
+        assert_eq!(not_acceptable.variant_name(), "NotAcceptable");
+    }
+
+    #[test]
+    fn display_negotiation_errors() {
+        let unsupported = CamelError::UnsupportedMediaType {
+            consumed: "text/plain".into(),
+            declared: "application/json".into(),
+        };
+        let not_acceptable = CamelError::NotAcceptable {
+            accept: "application/xml".into(),
+            produced: "application/json".into(),
+        };
+        let unsupported_msg = unsupported.to_string();
+        assert!(unsupported_msg.contains("text/plain"));
+        assert!(unsupported_msg.contains("application/json"));
+        let not_acceptable_msg = not_acceptable.to_string();
+        assert!(not_acceptable_msg.contains("application/xml"));
+        assert!(not_acceptable_msg.contains("application/json"));
+    }
 }
 
 #[cfg(test)]
@@ -537,6 +606,20 @@ mod variant_name_tests {
             (
                 CamelError::EndpointUri(EndpointUriError::MissingScheme),
                 "EndpointUri",
+            ),
+            (
+                CamelError::UnsupportedMediaType {
+                    consumed: "text/plain".into(),
+                    declared: "application/json".into(),
+                },
+                "UnsupportedMediaType",
+            ),
+            (
+                CamelError::NotAcceptable {
+                    accept: "application/xml".into(),
+                    produced: "application/json".into(),
+                },
+                "NotAcceptable",
             ),
             (
                 CamelError::AuthProviderUnavailable("x".into()),
