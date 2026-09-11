@@ -484,9 +484,13 @@ pub async fn run(
             {
                 sigint.recv().await
             }
+            // No entry-registered SIGINT stream off unix: the portable
+            // ctrl_c() listener IS the first-signal handler there. A
+            // pending() here would leave non-unix with no shutdown
+            // trigger at all (the SIGTERM arm is unix-only).
             #[cfg(not(unix))]
             {
-                std::future::pending::<()>().await
+                tokio::signal::ctrl_c().await.ok()
             }
         } => tracing::info!("Received Ctrl+C"),
         // The stream was registered before boot (step 0); awaiting here

@@ -121,7 +121,9 @@ pipeline result regardless of exchange pattern.
 `camel job` SHALL exit 0 when the pipeline completes, 1 when the
 pipeline fails, and 2 for load, validation, boot, drain-timeout,
 shutdown, and report-write errors; when classes mix, exit 2 SHALL
-outrank exit 1. For outcomes that reach the send (verdict or timeout)
+outrank exit 1. These codes govern command completion only; termination
+by OS signal remains platform-defined. For outcomes that reach the send
+(verdict or timeout)
 and for shutdown failures after a recorded verdict, the command SHALL
 emit a JSON report
 (`{document, mode, outcome, terminated_early, duration_ms, reply?,

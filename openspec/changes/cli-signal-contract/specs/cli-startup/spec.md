@@ -4,9 +4,12 @@
 
 The `camel run` command SHALL treat the first SIGINT or SIGTERM as a graceful
 shutdown at any time, including during boot, and SHALL force-exit with code 1
-when a second SIGINT or SIGTERM arrives after the first was consumed. The
-signal streams SHALL be armed before boot starts so an early signal is
-buffered, not default-killed.
+when a subsequent SIGINT or SIGTERM arrives after the first was consumed and
+graceful shutdown has begun. The signal streams SHALL be armed before boot
+starts so an early signal is buffered, not default-killed. Identical signal
+bursts may coalesce before delivery, so strict signal counting is not
+guaranteed. On platforms without SIGTERM, the portable Ctrl+C listener is
+the first-signal handler and a second Ctrl+C force-exits.
 
 #### Scenario: stop signal during boot shuts down gracefully
 

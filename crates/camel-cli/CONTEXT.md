@@ -51,10 +51,15 @@ The first SIGINT or SIGTERM, at any time, starts a graceful shutdown: the
 file watcher is cancelled, the context stops, and the component pools tear
 down. The exit code is 0.
 
-A second SIGINT or SIGTERM, after the first was consumed, force-exits the
-process with code 1 (rc-kz85m). This is the escape hatch for a hung
-teardown. Systemd and `docker stop` resend the stop signal after their grace
-period, so the escape hatch must accept both signals.
+A subsequent SIGINT or SIGTERM, after the first was consumed and graceful
+shutdown has begun, force-exits the process with code 1 (rc-kz85m). This is
+the escape hatch for a hung teardown. Systemd and `docker stop` resend the
+stop signal after their grace period, so the escape hatch must accept both
+signals. Identical signal bursts may coalesce before delivery (tokio
+semantics), so strict signal counting is not guaranteed.
+
+On non-unix platforms there is no SIGTERM stream; the portable Ctrl+C
+listener is the first-signal handler, and a second Ctrl+C force-exits.
 
 ## camel job failure modes
 
