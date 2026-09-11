@@ -253,8 +253,10 @@ document plus a final `N passed, M failed` summary.
 ### Non-interference with `camel run`
 
 `camel test` does not change route files or `camel run` behavior. Route
-discovery (initial load and watch reload) skips `*.test.yaml` and `*.test.yml`
-camel test documents on every pattern path: the default glob, `Camel.toml`
+discovery (initial load and watch reload) skips the reserved document
+suffixes — `*.test.yaml` and `*.test.yml` camel test documents, and
+`*.job.yaml` and `*.job.yml` camel job documents — on every pattern
+path: the default glob, `Camel.toml`
 `routes`, and `--routes`. Naming a test document literally, with no wildcards,
 fails with a reserved-suffix error pointing at `camel test`. Wildcard matches
 are skipped, so a glob matching only test documents yields no routes.

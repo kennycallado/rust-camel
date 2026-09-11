@@ -1,7 +1,7 @@
 # ADR-0062: Reserved Test Suffix and Placement Contract
 
 **Date:** 2026-08-22
-**Status:** Accepted
+**Status:** Accepted (Amended 2026-09-11 — two reserved suffixes; see "Amendment")
 **Origin:** OpenSpec change `test-placement-contract` (bd rc-6760)
 
 ## Context
@@ -109,3 +109,31 @@ A file suffix carries none of these collisions.
   collides with an existing idiom (Rule 4).
 - Reserve `.test.json` as well. Not chosen. Test documents are YAML only in
   this change, and a second format would double the parser surface.
+
+## Amendment (2026-09-11): Two reserved suffixes
+
+Origin: OpenSpec change `job-ux-reshape` (bd rc-10d50). Jobs left the
+test family: a job is an operator tool, not a test, and the job runner
+no longer consumes `*.test.yaml`.
+
+- `.job.yaml` / `.job.yml` names a `camel job` document. The suffix is
+  reserved under the same contract as the test suffix.
+- The discovery rule generalises to a reserved-document contract:
+  `is_test_document` (test family) and `is_job_document` (job family)
+  join under `is_reserved_document`, which is the single gate for the
+  wildcard skip and the literal-name error. `ReservedTestSuffix` is
+  renamed `ReservedDocumentSuffix`; the error names both families and
+  their runners.
+- A `*.test.yaml` document that declares `execute:` fails to load under
+  `camel job` with an error that directs the author to rename the file.
+  There is no alias and no compatibility shim (zero adoption at the
+  time of the rename; accepted breaking change, pre-1.0).
+- Job documents live under `[jobs].dir` in `Camel.toml` (default
+  `jobs`), resolved against the `Camel.toml` root. This table governs
+  where job documents live, never where a job's routes come from: the
+  explicit route source stays mandatory.
+- Test placement rules (colocation, `routeFilesFromRoot` anchoring) are
+  unchanged and apply to the test family only.
+- ADR-0069 Decision 6 (the section classifies the document) is
+  untouched: section classification still holds within a suffix; the
+  suffix is now the first discriminator between the two families.

@@ -1,5 +1,6 @@
 //! Document model for `camel job`: the `execute:` section of the
-//! `*.test.yaml` family.
+//! `*.job.yaml` family (a `*.test.yaml` declaring `execute:` is a load
+//! error with rename guidance).
 //!
 //! The grammar parent is the camel-integration-test scenario action
 //! model (a `send` with uri/body/headers), but the types are job-local:

@@ -37,7 +37,7 @@
 - `cargo clippy -p camel-dsl --all-targets -- -D warnings` exits 0.
 - `grep -n 'ReservedTestSuffix' crates/camel-dsl/src/discovery.rs` → no hits.
 
-- [ ] 1.1
+- [x] 1.1
 
 ## camel-config
 
@@ -65,7 +65,7 @@
 - `cargo clippy -p camel-config -- -D warnings` exits 0.
 - `cargo xtask schema --check` exits 0 (config is not a ts-rs/schemars export — verify no drift; if it regenerates, commit the regenerated schema).
 
-- [ ] 1.2
+- [x] 1.2
 
 ## camel-cli job document
 
@@ -98,7 +98,7 @@
 - `cargo clippy -p camel-cli -- -D warnings` exits 0 (new public-enum variant: `lint-non-exhaustive` also green).
 - `grep -rn 'NotTestSuffix' crates/camel-cli/` → no hits.
 
-- [ ] 1.3
+- [x] 1.3
 
 ## camel-cli callers
 
@@ -128,7 +128,7 @@
 - `cargo test -p camel-cli --test lint_corpus --test lint_test_doc_skip` passes.
 - `grep -rn 'is_test_document' crates/camel-cli/src/commands/lint.rs crates/camel-cli/tests/lint_corpus.rs crates/camel-cli/tests/lint_test_doc_skip.rs crates/camel-integration-test/src/boot_scenario.rs` → no hits.
 
-- [ ] 1.4
+- [x] 1.4
 
 ## camel-cli job command
 
@@ -158,7 +158,7 @@
 - `cargo test -p camel-cli --test job_one_shot_test` passes with the new cases.
 - `cargo clippy -p camel-cli -- -D warnings` exits 0.
 
-- [ ] 1.5
+- [x] 1.5
 
 ### Task 1.6: No-argument listing of the jobs directory
 
@@ -188,7 +188,7 @@
 - `cargo test -p camel-cli --test job_one_shot_test` passes with the new cases.
 - `cargo clippy -p camel-cli -- -D warnings` exits 0; `cargo fmt --check` clean.
 
-- [ ] 1.6
+- [x] 1.6
 
 ## repo docs
 
