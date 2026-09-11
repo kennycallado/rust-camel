@@ -2264,6 +2264,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "camel-api",
+ "camel-builder",
  "camel-bundles",
  "camel-component-api",
  "camel-component-http",

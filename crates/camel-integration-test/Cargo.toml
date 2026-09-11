@@ -71,6 +71,10 @@ tracing-subscriber.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
 toml.workspace = true
+# Cross-surface byte-identity test (rc-l4wf): compares the camel-dsl YAML
+# lowering against the camel-builder `.parameters()` merge. Test-only, so the
+# authoring crates stay decoupled (no camel-builder dep inside camel-dsl).
+camel-builder.workspace = true
 
 [features]
 # Shared security composition root (scenario-shared-boot task 3.1):
