@@ -1934,6 +1934,40 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_step_no_match_emits_silent_propagate_diagnostic() {
+        // rc-xtiem sweep item [1]: parity with the handle_boundary
+        // diagnostic test — proves the ORIGINAL rc-fu1of site still fires.
+        let handler = DefaultRouteErrorHandler::new(None, vec![]);
+        let (result, captured) = capture_debugs(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(handler.handle_step(
+                    None,
+                    make_exchange(),
+                    CamelError::Unauthorized("denied".into()),
+                ))
+        });
+        assert!(result.is_ok(), "step handler always returns Ok");
+        assert!(
+            captured.iter().any(|line| {
+                line.contains(
+                    "no on_exceptions policy matched and no dead-letter channel configured; \
+                     propagating error",
+                )
+            }),
+            "expected silent-propagate diagnostic, captured: {captured:?}"
+        );
+        assert!(
+            captured
+                .iter()
+                .any(|line| line.contains("kind=Unauthorized")),
+            "diagnostic should name the error kind, captured: {captured:?}"
+        );
+    }
+
+    #[test]
     fn test_handle_boundary_no_match_emits_silent_propagate_diagnostic() {
         let handler = DefaultRouteErrorHandler::new(None, vec![]);
         let (result, captured) = capture_debugs(|| {
