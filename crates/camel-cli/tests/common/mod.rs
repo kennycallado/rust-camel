@@ -78,6 +78,9 @@ impl DerefMut for KillOnDrop {
 /// hundreds of peer processes and subprocess startup slows ~100x. The poll
 /// short-circuits the moment the marker is seen, so the generous ceiling
 /// only buys headroom under load; it never slows the fast path.
+// Not every test binary that includes `common` calls it (each compilation
+// unit gets its own copy of the module); mirror `spawn_camel_run`.
+#[allow(dead_code)]
 pub fn wait_for_marker(
     child: &mut Child,
     buffers: &[SharedBuf],
@@ -108,6 +111,9 @@ pub fn wait_for_marker(
 /// Send exactly ONE SIGTERM to the child. The CLI's `tokio::select!` arm
 /// handles SIGTERM as a graceful shutdown that exits 0; a second signal
 /// would force `exit(1)`, so callers must not double-tap.
+// Not every test binary that includes `common` calls it (each compilation
+// unit gets its own copy of the module); mirror `spawn_camel_run`.
+#[allow(dead_code)]
 pub fn send_term(child: &Child) {
     let status = Command::new("kill")
         .arg("-TERM")
@@ -117,6 +123,25 @@ pub fn send_term(child: &Child) {
     assert!(
         status.success(),
         "`kill -TERM` returned non-zero: {status:?}"
+    );
+}
+
+/// Send exactly one signal to the child, named in `kill` syntax
+/// (e.g. `-INT`, `-TERM`). Like `send_term`, one delivery is a graceful
+/// shutdown; a second is the force-exit escape hatch (rc-kz85m).
+// Shared by the run signal tests; the test binaries that include `common`
+// without calling it would otherwise warn dead_code (each compilation unit
+// gets its own copy of the module).
+#[allow(dead_code)]
+pub fn send_signal(child: &Child, signal: &str) {
+    let status = Command::new("kill")
+        .arg(signal)
+        .arg(child.id().to_string())
+        .status()
+        .expect("failed to spawn `kill`");
+    assert!(
+        status.success(),
+        "`kill {signal}` returned non-zero: {status:?}"
     );
 }
 

@@ -99,6 +99,14 @@ pub async fn run(
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("Failed to install SIGTERM handler"); // allow-unwrap
+    // rc-ukwlt (SIGINT twin of rc-z5zch): tokio::signal::ctrl_c() is only
+    // armed at the shutdown select below, so an INT arriving mid-boot would
+    // hit the default disposition and kill the process. This entry-registered
+    // stream buffers the pending interrupt the same way; the select consumes
+    // it as soon as it awaits.
+    #[cfg(unix)]
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .expect("Failed to install SIGINT handler"); // allow-unwrap
 
     // 1. Load config (fall back to empty config with serde defaults if Camel.toml not found)
     let mut camel_config: camel_config::config::CamelConfig = load_config_or_default(&config_path)?;
@@ -467,7 +475,19 @@ pub async fn run(
     }
 
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => tracing::info!("Received Ctrl+C"),
+        // The stream was registered before boot (step 0); awaiting here
+        // consumes an interrupt that arrived during boot (rc-ukwlt, the
+        // SIGINT twin of rc-z5zch).
+        _ = async {
+            #[cfg(unix)]
+            {
+                sigint.recv().await
+            }
+            #[cfg(not(unix))]
+            {
+                std::future::pending::<()>().await
+            }
+        } => tracing::info!("Received Ctrl+C"),
         // The stream was registered before boot (step 0); awaiting here
         // consumes a TERM that arrived during boot (rc-z5zch).
         _ = async {
