@@ -415,4 +415,4 @@ arms; without them the typed errors hit the catch-all and surface as
 - `cargo test -p camel-dsl --test rest_raw_e2e --test rest_schema_e2e --test rest_stream_contract_e2e` exits 0 (L1/L3 pins green through the same rig).
 - `cargo clippy -p camel-dsl --all-targets -- -D warnings` exits 0.
 
-- [ ] 5.1
+- [x] 5.1

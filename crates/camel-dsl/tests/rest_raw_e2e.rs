@@ -22,22 +22,23 @@
 //! explicit Content-Type header, and the default status is injected
 //! SetHeaderIfAbsent-style as the last step.
 
+mod common;
+
 use std::sync::Arc;
 
 use bytes::Bytes;
-use camel_api::{
-    Body, CamelError, Exchange, IdentityProcessor, Message, StreamBody, StreamMetadata,
-};
+use camel_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
 use camel_core::route::BuilderStep;
 use camel_dsl::model::ContentNegotiationStepDef;
 use camel_dsl::{
     DeclarativeStep, SetHeaderStepDef, ToStepDef, ValueSourceDef, parse_json_to_declarative,
     parse_yaml, parse_yaml_to_declarative,
 };
-use camel_processor::{SetHeader, SetHeaderIfAbsent};
 use futures::stream;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+use common::compile_header_step;
 
 const RAW_POST_YAML: &str = r#"
 rest:
@@ -146,33 +147,6 @@ fn one_chunk_stream_body(chunk: &'static str) -> Body {
         stream: Arc::new(Mutex::new(Some(Box::pin(s)))),
         metadata: StreamMetadata::default(),
     })
-}
-
-/// Compile a declarative header `BuilderStep` into the exact Tower service
-/// the runtime's step compiler wires for it (camel-core
-/// `step_compilers/core.rs`): `SetHeader::new(IdentityProcessor, key, value)`
-/// for set_header and the `SetHeaderIfAbsent` twin for the default-status
-/// injection. This drives the REAL production processors, not test doubles.
-fn compile_header_step(step: &BuilderStep) -> camel_api::BoxProcessor {
-    match step {
-        BuilderStep::DeclarativeSetHeader { key, value } => match value {
-            ValueSourceDef::Literal(v) => camel_api::BoxProcessor::new(SetHeader::new(
-                IdentityProcessor,
-                key.clone(),
-                v.clone(),
-            )),
-            other => panic!("expected literal set_header value, got {other:?}"),
-        },
-        BuilderStep::DeclarativeSetHeaderIfAbsent { key, value } => match value {
-            ValueSourceDef::Literal(v) => camel_api::BoxProcessor::new(SetHeaderIfAbsent::new(
-                IdentityProcessor,
-                key.clone(),
-                v.clone(),
-            )),
-            other => panic!("expected literal set_header_if_absent value, got {other:?}"),
-        },
-        other => panic!("expected declarative header step, got: {other:?}"),
-    }
 }
 
 #[test]

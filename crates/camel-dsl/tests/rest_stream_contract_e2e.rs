@@ -24,29 +24,31 @@
 //!    client-disconnect survival.
 //!
 //! Rig notes: the process-global HTTP `ServerRegistry` is shared by every
-//! test in this binary, so server tests serialize on `SERVER_MUTEX` and
-//! use unique paths plus the bind-drop free-port idiom. Readiness uses a
-//! connect-retry loop, never a fixed sleep.
+//! test in this binary, so server tests serialize on `SERVER_MUTEX` on a
+//! fresh bind-drop port; paths are shared across tests and registry
+//! registration is last-write-wins (see `tests/common/mod.rs`).
+//! Readiness uses a connect-retry loop, never a fixed sleep.
+
+mod common;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use camel_api::{
-    Body, CamelError, Exchange, IdentityProcessor, Message, StreamBody, StreamMetadata,
-};
-use camel_component_api::{Consumer, ConsumerContext, ExchangeEnvelope, NoopRuntimeObservability};
-use camel_component_http::{HttpConsumer, HttpServerConfig};
+use camel_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
 use camel_core::route::BuilderStep;
-use camel_dsl::{ValueSourceDef, parse_yaml};
-use camel_processor::{SetHeader, SetHeaderIfAbsent};
+use camel_dsl::parse_yaml;
 use futures::StreamExt;
 use futures::stream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex, mpsc};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+use common::{
+    SERVER_MUTEX, ServerHandle, chunked_request, compile_header_step, counting_stream_body,
+    http_roundtrip, reply_ok, simple_request,
+};
 
 // ===========================================================================
 // Part 1 — DSL-boundary pins (compiled raw pipeline over a raw route)
@@ -68,51 +70,6 @@ rest:
               key: X-Trace
               value: t1
 "#;
-
-/// Compile a declarative header `BuilderStep` into the Tower service the
-/// runtime wires for it (same idiom as `rest_raw_e2e.rs`).
-fn compile_header_step(step: &BuilderStep) -> camel_api::BoxProcessor {
-    match step {
-        BuilderStep::DeclarativeSetHeader { key, value } => match value {
-            ValueSourceDef::Literal(v) => camel_api::BoxProcessor::new(SetHeader::new(
-                IdentityProcessor,
-                key.clone(),
-                v.clone(),
-            )),
-            other => panic!("expected literal set_header value, got {other:?}"),
-        },
-        BuilderStep::DeclarativeSetHeaderIfAbsent { key, value } => match value {
-            ValueSourceDef::Literal(v) => camel_api::BoxProcessor::new(SetHeaderIfAbsent::new(
-                IdentityProcessor,
-                key.clone(),
-                v.clone(),
-            )),
-            other => panic!("expected literal set_header_if_absent value, got {other:?}"),
-        },
-        other => panic!("expected declarative header step, got: {other:?}"),
-    }
-}
-
-/// A one-chunk stream body that counts every poll of its underlying
-/// future, carrying the given metadata. Zero polls after the pipeline
-/// proves the pipeline never touched the stream.
-fn counting_stream_body(
-    chunk: &'static str,
-    polls: Arc<AtomicUsize>,
-    metadata: StreamMetadata,
-) -> Body {
-    let s = stream::once({
-        let polls = polls.clone();
-        async move {
-            polls.fetch_add(1, Ordering::SeqCst);
-            Ok::<Bytes, CamelError>(Bytes::from_static(chunk.as_bytes()))
-        }
-    });
-    Body::Stream(StreamBody {
-        stream: Arc::new(Mutex::new(Some(Box::pin(s)))),
-        metadata,
-    })
-}
 
 fn default_meta() -> StreamMetadata {
     StreamMetadata::default()
@@ -262,189 +219,16 @@ async fn raw_pipeline_preserves_stream_metadata() {
 // Part 2 — HTTP-boundary pins (real camel-component-http consumer)
 // ===========================================================================
 
-/// Server tests share the process-global HTTP ServerRegistry: serialize
-/// them within this binary (same discipline as camel-http's in-crate
-/// REGISTRY_TEST_MUTEX).
-static SERVER_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-struct ServerHandle {
-    port: u16,
-    rx: mpsc::Receiver<ExchangeEnvelope>,
-    token: CancellationToken,
-}
-
-/// Boot a real REST-registered HttpConsumer on a free port. The channel
-/// receiver replaces the downstream pipeline: each test fulfills received
-/// envelopes by hand, exactly like camel-http's in-crate rig.
+/// Server rig shared with the sibling REST e2e binaries lives in
+/// `tests/common`; this suite parameterizes the body caps to pin
+/// rejection at both limits, under its own diagnostic label.
 async fn spawn_raw_server(
     path: &str,
     method: &str,
     max_req: usize,
     max_resp: usize,
 ) -> ServerHandle {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind probe");
-    let port = listener.local_addr().expect("port").port();
-    drop(listener);
-
-    let cfg = HttpServerConfig {
-        scheme: "http".to_string(),
-        host: "127.0.0.1".to_string(),
-        port,
-        path: path.to_string(),
-        max_request_body: max_req,
-        max_response_body: max_resp,
-        max_inflight_requests: 64,
-        method: Some(method.to_string()),
-        tls_config: None,
-    };
-    let mut consumer = HttpConsumer::new(cfg, Arc::new(NoopRuntimeObservability));
-    let (tx, rx) = mpsc::channel::<ExchangeEnvelope>(16);
-    let token = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, token.clone(), "l3-stream-contract-test".to_string());
-    tokio::spawn(async move {
-        consumer.start(ctx).await.expect("consumer must start");
-    });
-    wait_listening(port).await;
-
-    ServerHandle { port, rx, token }
-}
-
-/// Retry-connect until the axum listener accepts — no fixed sleeps.
-async fn wait_listening(port: u16) {
-    for _ in 0..150 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("server on port {port} did not accept connections within 3s");
-}
-
-struct RawResponse {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: Bytes,
-}
-
-impl RawResponse {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
-    }
-}
-
-/// Minimal HTTP/1.1 round trip: write the request, read the response to
-/// EOF (`Connection: close`). Tolerates a connection reset after the
-/// server wrote the response but before a clean FIN (possible when the
-/// request body was not fully drained server-side).
-async fn http_roundtrip(port: u16, request: String) -> RawResponse {
-    let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("connect to test server");
-    sock.write_all(request.as_bytes())
-        .await
-        .expect("write request");
-    let mut buf = Vec::new();
-    loop {
-        let mut chunk = [0u8; 4096];
-        match sock.read(&mut chunk).await {
-            Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
-            Err(e) => panic!("read response: {e}"),
-        }
-    }
-    parse_response(&buf)
-}
-
-fn parse_response(raw: &[u8]) -> RawResponse {
-    let header_end = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .expect("response must contain a header terminator");
-    let head = String::from_utf8_lossy(&raw[..header_end]);
-    let mut lines = head.split("\r\n");
-    let status_line = lines.next().expect("status line");
-    let status: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .expect("numeric status");
-    let headers: Vec<(String, String)> = lines
-        .filter_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            Some((k.trim().to_string(), v.trim().to_string()))
-        })
-        .collect();
-    let mut body = Bytes::copy_from_slice(&raw[header_end + 4..]);
-    let chunked = headers
-        .iter()
-        .any(|(k, v)| k.eq_ignore_ascii_case("transfer-encoding") && v.contains("chunked"));
-    if chunked {
-        body = dechunk(&body);
-    }
-    RawResponse {
-        status,
-        headers,
-        body,
-    }
-}
-
-/// Decode HTTP/1.1 chunked framing.
-fn dechunk(mut input: &[u8]) -> Bytes {
-    let mut out = Vec::new();
-    while let Some(line_end) = input.windows(2).position(|w| w == b"\r\n") {
-        let size_str = String::from_utf8_lossy(&input[..line_end]);
-        let size_str = size_str.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_str, 16).expect("chunk size hex");
-        input = &input[line_end + 2..];
-        if size == 0 {
-            break;
-        }
-        assert!(
-            input.len() >= size,
-            "truncated chunk body in test response ({size} declared)"
-        );
-        out.extend_from_slice(&input[..size]);
-        input = &input[size..];
-        assert!(input.starts_with(b"\r\n"), "chunk must end with CRLF");
-        input = &input[2..];
-    }
-    Bytes::from(out)
-}
-
-fn simple_request(method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> String {
-    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: l3-test\r\n");
-    for (k, v) in headers {
-        req.push_str(&format!("{k}: {v}\r\n"));
-    }
-    if !body.is_empty() || method == "POST" {
-        req.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    req.push_str("Connection: close\r\n\r\n");
-    // All test bodies are ASCII; writing them inline keeps the helper a
-    // single String.
-    req.push_str(&String::from_utf8_lossy(body));
-    req
-}
-
-fn chunked_request(method: &str, path: &str, chunks: &[&[u8]]) -> String {
-    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: l3-test\r\n");
-    req.push_str("Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
-    for chunk in chunks {
-        req.push_str(&format!("{:x}\r\n", chunk.len()));
-        req.push_str(&String::from_utf8_lossy(chunk));
-        req.push_str("\r\n");
-    }
-    req.push_str("0\r\n\r\n");
-    req
+    common::spawn_test_server("l3-stream-contract-test", path, method, max_req, max_resp).await
 }
 
 /// A reply stream carrying `n` identical bytes in one chunk.
@@ -458,12 +242,6 @@ fn sized_reply_stream(n: usize, content_type: &str) -> Body {
             origin: None,
         },
     })
-}
-
-fn reply_ok(mut envelope: ExchangeEnvelope) {
-    if let Some(reply_tx) = envelope.reply_tx.take() {
-        let _ = reply_tx.send(Ok(envelope.exchange));
-    }
 }
 
 #[tokio::test]
@@ -516,7 +294,7 @@ async fn chunked_request_over_cap_fails_closed() {
         token,
     } = spawn_raw_server("/chunked-cap", "POST", 12, 1024 * 1024).await;
 
-    let req = chunked_request("POST", "/chunked-cap", &[b"AAAAAAAA", b"BBBBBBBB"]);
+    let req = chunked_request("POST", "/chunked-cap", &[], &[b"AAAAAAAA", b"BBBBBBBB"]);
     let (resp, _) = tokio::join!(http_roundtrip(port, req), async {
         let mut envelope = rx.recv().await.expect("envelope must arrive");
         let err = match envelope.exchange.input.body.into_bytes(64 * 1024).await {
