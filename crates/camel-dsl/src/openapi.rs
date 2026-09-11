@@ -10,7 +10,7 @@ use crate::rest::{
     build_full_path, default_status_for_verb, extract_param_names, parse_path_template,
     verb_has_body,
 };
-use crate::route_ast::{RouteDslRest, RouteDslRestOperation};
+use crate::route_ast::{RouteDslRest, RouteDslRestBinding, RouteDslRestOperation};
 use std::collections::HashSet;
 
 /// OpenAPI 3.0.3 HTTP verbs — anything else is logged as a warning.
@@ -163,6 +163,8 @@ fn build_operation(
         .success_status
         .unwrap_or_else(|| default_status_for_verb(verb));
     let op_label = op.operation_id.as_deref().unwrap_or(verb);
+    // Raw binding emits binary schemas instead of authored/weak-stub JSON schemas
+    let raw = op.binding.unwrap_or(RouteDslRestBinding::Json) == RouteDslRestBinding::Raw;
     let response_desc = op
         .response
         .as_ref()
@@ -186,6 +188,29 @@ fn build_operation(
         resp204.insert("description".to_string(), json!(response_desc));
         insert_response_headers(&mut resp204, op);
         responses.insert("204".to_string(), Value::Object(resp204));
+    } else if raw {
+        // Raw binding: authored response.schema is rejected at route load; the
+        // emitted schema is binary regardless, so no weak-stub warning applies.
+        if op
+            .response
+            .as_ref()
+            .and_then(|r| r.schema.clone())
+            .is_some()
+        {
+            warnings.push(format!(
+                "operation '{op_label}' — binding 'raw' rejects 'response.schema' at route load; emitting binary schema"
+            ));
+        }
+        let mut resp_obj = Map::new();
+        resp_obj.insert("description".to_string(), json!(response_desc));
+        resp_obj.insert(
+            "content".to_string(),
+            json!({
+                op.produces.trim(): { "schema": binary_schema() }
+            }),
+        );
+        insert_response_headers(&mut resp_obj, op);
+        responses.insert(success_code.to_string(), Value::Object(resp_obj));
     } else {
         let response_schema = op
             .response
@@ -203,7 +228,7 @@ fn build_operation(
         resp_obj.insert(
             "content".to_string(),
             json!({
-                op.produces.as_str(): { "schema": response_schema }
+                op.produces.trim(): { "schema": response_schema }
             }),
         );
         insert_response_headers(&mut resp_obj, op);
@@ -213,18 +238,29 @@ fn build_operation(
 
     // --- Request body (body verbs only) ---
     if verb_has_body(verb) {
-        let schema = op.request_schema.clone().unwrap_or_else(|| {
-            let label = op.operation_id.as_deref().unwrap_or(verb);
-            warnings.push(format!(
-                "operation '{label}' ({verb} {full_path}) — body verb has no request_schema, using weak stub (type: object)"
-            ));
-            json!({ "type": "object" })
-        });
+        let schema = if raw {
+            // Raw binding: authored request_schema is rejected at route load;
+            // the emitted schema is binary regardless, so no weak-stub warning applies.
+            if op.request_schema.is_some() {
+                warnings.push(format!(
+                    "operation '{op_label}' — binding 'raw' rejects 'request_schema' at route load; emitting binary schema"
+                ));
+            }
+            binary_schema()
+        } else {
+            op.request_schema.clone().unwrap_or_else(|| {
+                let label = op.operation_id.as_deref().unwrap_or(verb);
+                warnings.push(format!(
+                    "operation '{label}' ({verb} {full_path}) — body verb has no request_schema, using weak stub (type: object)"
+                ));
+                json!({ "type": "object" })
+            })
+        };
         operation.insert(
             "requestBody".to_string(),
             json!({
                 "content": {
-                    op.consumes.as_str(): { "schema": schema }
+                    op.consumes.trim(): { "schema": schema }
                 }
             }),
         );
@@ -244,6 +280,11 @@ fn default_response_description(code: u16) -> &'static str {
         500 => "Internal Server Error",
         _ => "Response",
     }
+}
+
+/// OpenAPI schema for raw-bound payload bytes.
+fn binary_schema() -> Value {
+    json!({ "type": "string", "format": "binary" })
 }
 
 /// M3: insert declared response headers into a response object map when present.
@@ -294,6 +335,7 @@ mod tests {
             response: None,
             description: None,
             parameters: BTreeMap::new(),
+            binding: None,
         }
     }
 
@@ -727,5 +769,132 @@ mod tests {
             "expected duplicate-operation warning, got: {:?}",
             result.warnings
         );
+    }
+
+    // ── Raw binding (add-rest-raw-binding Task 1.6) ──
+
+    #[test]
+    fn raw_response_binary_schema() {
+        let mut op = make_op("fetchBlob");
+        op.binding = Some(crate::route_ast::RouteDslRestBinding::Raw);
+        op.produces = "application/octet-stream".to_string();
+        let rest = make_rest("/api/files", &[("get", op)]);
+        let result = generate_openapi(&[rest], "API", "1.0.0");
+        let resp = &result.document["paths"]["/api/files"]["get"]["responses"]["200"];
+        assert_eq!(
+            resp["content"]["application/octet-stream"]["schema"],
+            json!({ "type": "string", "format": "binary" })
+        );
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("fetchBlob")),
+            "raw op must not produce a weak-stub warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn raw_request_body_binary_schema() {
+        let mut op = make_op("uploadText");
+        op.binding = Some(crate::route_ast::RouteDslRestBinding::Raw);
+        op.consumes = "text/plain".to_string();
+        // Authored request_schema is rejected at route load: the emitted
+        // requestBody schema stays binary and the ignored field is flagged.
+        op.request_schema = Some(json!({ "type": "object" }));
+        let rest = make_rest("/api/files", &[("post", op)]);
+        let result = generate_openapi(&[rest], "API", "1.0.0");
+        let post = &result.document["paths"]["/api/files"]["post"];
+        assert_eq!(
+            post["requestBody"]["content"]["text/plain"]["schema"],
+            json!({ "type": "string", "format": "binary" })
+        );
+        assert!(
+            result.warnings.iter().any(|w| w == "operation 'uploadText' — binding 'raw' rejects 'request_schema' at route load; emitting binary schema"),
+            "expected raw-rejects-request_schema warning naming the op, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn raw_with_response_schema_warns() {
+        let mut op = make_op("fetchBlob");
+        op.binding = Some(crate::route_ast::RouteDslRestBinding::Raw);
+        op.produces = "application/octet-stream".to_string();
+        op.response = Some(crate::route_ast::RouteDslRestResponse {
+            description: None,
+            schema: Some(json!({ "type": "object" })),
+            headers: BTreeMap::new(),
+        });
+        let rest = make_rest("/api/files", &[("get", op)]);
+        let result = generate_openapi(&[rest], "API", "1.0.0");
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w == "operation 'fetchBlob' — binding 'raw' rejects 'response.schema' at route load; emitting binary schema"),
+            "expected raw-rejects-response.schema warning, got: {:?}",
+            result.warnings
+        );
+        let resp = &result.document["paths"]["/api/files"]["get"]["responses"]["200"];
+        assert_eq!(
+            resp["content"]["application/octet-stream"]["schema"],
+            json!({ "type": "string", "format": "binary" })
+        );
+    }
+
+    #[test]
+    fn raw_204_stays_contentless() {
+        let mut op = make_op("deleteBlob");
+        op.binding = Some(crate::route_ast::RouteDslRestBinding::Raw);
+        op.success_status = Some(204);
+        op.produces = "application/octet-stream".to_string();
+        let rest = make_rest("/api/files", &[("delete", op)]);
+        let result = generate_openapi(&[rest], "API", "1.0.0");
+        let resp = &result.document["paths"]["/api/files"]["delete"]["responses"]["204"];
+        assert!(resp.get("content").is_none());
+    }
+
+    #[test]
+    fn raw_204_with_schema_keeps_single_warning() {
+        let mut op = make_op("deleteBlob");
+        op.binding = Some(crate::route_ast::RouteDslRestBinding::Raw);
+        op.success_status = Some(204);
+        op.response = Some(crate::route_ast::RouteDslRestResponse {
+            description: None,
+            schema: Some(json!({ "type": "object" })),
+            headers: BTreeMap::new(),
+        });
+        let rest = make_rest("/api/files", &[("delete", op)]);
+        let result = generate_openapi(&[rest], "API", "1.0.0");
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w == "operation 'deleteBlob' — success_status 204 ignores response.schema (No Content)"),
+            "expected 204-ignores-response.schema warning, got: {:?}",
+            result.warnings
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("binding 'raw' rejects")),
+            "204 branch must not stack raw-rejects warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn raw_openapi_keys_trim_media() {
+        let mut op = make_op("fetchImage");
+        op.binding = Some(crate::route_ast::RouteDslRestBinding::Raw);
+        op.produces = " image/png ".to_string();
+        let rest = make_rest("/api/images", &[("get", op)]);
+        let result = generate_openapi(&[rest], "API", "1.0.0");
+        let resp = &result.document["paths"]["/api/images"]["get"]["responses"]["200"];
+        assert_eq!(
+            resp["content"]["image/png"]["schema"],
+            json!({ "type": "string", "format": "binary" })
+        );
+        assert!(resp["content"].get(" image/png ").is_none());
     }
 }

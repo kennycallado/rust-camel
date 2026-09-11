@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use camel_api::CamelError;
 
 use crate::route_ast::{
-    MarshalStep, RouteDslRest, RouteDslRestOperation, RouteDslRoute, RouteDslStep, SetHeaderData,
-    SetHeaderStep, ToStep, UnmarshalStep,
+    MarshalStep, RouteDslRest, RouteDslRestBinding, RouteDslRestOperation, RouteDslRoute,
+    RouteDslStep, SetHeaderData, SetHeaderStep, ToStep, UnmarshalStep,
 };
+use crate::yaml::valid_header_token;
 
 /// Lower ALL REST blocks in a document into route entries, enforcing the
 /// cross-block validation rules the spec mandates (§6.3 + §7.2, review C3):
@@ -220,20 +221,73 @@ fn lower_operation(
         )));
     }
 
-    // Validate: JSON only in v1
-    if op.consumes != "application/json" {
-        return Err(CamelError::RouteError(format!(
-            "rest operation '{}': v1 supports only consumes=application/json (got '{}')",
-            op.operation_id.as_deref().unwrap_or(verb),
-            op.consumes
-        )));
-    }
-    if op.produces != "application/json" {
-        return Err(CamelError::RouteError(format!(
-            "rest operation '{}': v1 supports only produces=application/json (got '{}')",
-            op.operation_id.as_deref().unwrap_or(verb),
-            op.produces
-        )));
+    // Validate media declarations and schema usage against the operation's
+    // binding mode (Tasks 1.3/1.4). JSON binding — explicit or the implicit
+    // default — requires JSON media types for both directions; the error
+    // names the `binding: raw` escape hatch so the fix is one declaration
+    // away. Raw binding accepts any valid media declaration but forbids the
+    // JSON-schema hooks (`request_schema` / `response.schema`): the raw
+    // pipeline emits no data-format steps, so there is nothing to attach
+    // validation to. Schema checks precede media checks so the more specific
+    // "raw cannot carry schemas" diagnosis wins when both are wrong.
+    let binding = op.binding.unwrap_or(RouteDslRestBinding::Json);
+    let op_label = op.operation_id.as_deref().unwrap_or(verb);
+    match binding {
+        RouteDslRestBinding::Json => {
+            if !is_json_media_type(&op.consumes) {
+                return Err(CamelError::RouteError(format!(
+                    "rest operation '{}': binding 'json' requires a JSON media type \
+                     for 'consumes' (got '{}') — declare 'binding: raw' to use \
+                     non-JSON media",
+                    op_label,
+                    op.consumes.trim()
+                )));
+            }
+            if !is_json_media_type(&op.produces) {
+                return Err(CamelError::RouteError(format!(
+                    "rest operation '{}': binding 'json' requires a JSON media type \
+                     for 'produces' (got '{}') — declare 'binding: raw' to use \
+                     non-JSON media",
+                    op_label,
+                    op.produces.trim()
+                )));
+            }
+        }
+        RouteDslRestBinding::Raw => {
+            if op.request_schema.is_some() {
+                return Err(CamelError::RouteError(format!(
+                    "rest operation '{op_label}': 'binding: raw' does not support \
+                     'request_schema' — schema validation requires binding 'json'"
+                )));
+            }
+            if op
+                .response
+                .as_ref()
+                .and_then(|r| r.schema.as_ref())
+                .is_some()
+            {
+                return Err(CamelError::RouteError(format!(
+                    "rest operation '{op_label}': 'binding: raw' does not support \
+                     'response.schema' — schema validation requires binding 'json'"
+                )));
+            }
+            if !is_valid_media_declaration(&op.consumes) {
+                return Err(CamelError::RouteError(format!(
+                    "rest operation '{op_label}': binding 'raw' requires a valid media \
+                     declaration for 'consumes' (got '{}') — expected 'type/subtype' \
+                     built from RFC 9110 tchar characters",
+                    op.consumes.trim()
+                )));
+            }
+            if !is_valid_media_declaration(&op.produces) {
+                return Err(CamelError::RouteError(format!(
+                    "rest operation '{op_label}': binding 'raw' requires a valid media \
+                     declaration for 'produces' (got '{}') — expected 'type/subtype' \
+                     built from RFC 9110 tchar characters",
+                    op.produces.trim()
+                )));
+            }
+        }
     }
 
     let route_id = op.operation_id.clone().unwrap_or_else(|| {
@@ -274,8 +328,16 @@ fn lower_operation(
 
     let mut steps: Vec<RouteDslStep> = Vec::new();
 
-    // 1. Request binding: unmarshal JSON body (only if verb has a body)
-    if verb_has_body(&verb_lc) {
+    // Raw binding emits NO automatic data-format steps: the request body
+    // stays Body::Stream end-to-end and the handler's reply body goes to the
+    // wire untouched (rest-dsl spec: Raw binding mode pipeline). Only the
+    // Content-Type declaration and the default-if-absent status remain
+    // binding-independent.
+    let raw_binding = binding == RouteDslRestBinding::Raw;
+
+    // 1. Request binding: unmarshal JSON body (only if verb has a body).
+    //    Skipped entirely under raw binding — the body is consumed as-is.
+    if !raw_binding && verb_has_body(&verb_lc) {
         steps.push(RouteDslStep::Unmarshal(UnmarshalStep {
             unmarshal: "json".to_string(),
             // When `request_schema` is set, the step compiler wraps the
@@ -298,22 +360,32 @@ fn lower_operation(
     }
 
     // 3. Response binding: marshal JSON. The JSON data format serialises the
-    // body to Body::Text (the JSON wire form); the HTTP reply finaliser would
-    // infer that as text/plain, so we set Content-Type explicitly below.
-    steps.push(RouteDslStep::Marshal(MarshalStep {
-        marshal: "json".to_string(),
-        config: None,
-    }));
+    //    body to Body::Text (the JSON wire form); the HTTP reply finaliser
+    //    would infer that as text/plain, so we set Content-Type explicitly
+    //    below. Skipped under raw binding — the handler's body is already in
+    //    its declared wire form and must not be re-encoded.
+    if !raw_binding {
+        steps.push(RouteDslStep::Marshal(MarshalStep {
+            marshal: "json".to_string(),
+            config: None,
+        }));
+    }
 
     // 4. Response Content-Type: the finaliser prioritises a user-supplied
     // Content-Type header over its body-type inference (Body::Text →
-    // text/plain). REST JSON responses must be application/json, so set it
-    // here as the last step (spec §8.1). An earlier user step that set a
-    // different Content-Type is intentionally overridden — v1 is JSON-only.
+    // text/plain). The declared `produces` is used verbatim after trim, so
+    // parameterized media (e.g. `application/json; charset=utf-8` or
+    // `text/plain; charset=utf-8`) survive onto the wire; for v1-loadable
+    // json-mode routes this is identical to the previous hardcoded
+    // `application/json` because the json-mode gate only admits JSON media
+    // and those routes declared exactly that. Under raw binding this is what
+    // advertises the declared media for the un-typed raw body. An earlier
+    // user step that set a different Content-Type is intentionally
+    // overridden — the declared `produces` wins.
     steps.push(RouteDslStep::SetHeader(SetHeaderStep {
         set_header: SetHeaderData {
             key: "Content-Type".to_string(),
-            value: Some(serde_json::Value::String("application/json".to_string())),
+            value: Some(serde_json::Value::String(op.produces.trim().to_string())),
             language: None,
             source: None,
             simple: None,
@@ -385,6 +457,33 @@ pub fn verb_has_body(verb: &str) -> bool {
     matches!(verb, "post" | "put" | "patch")
 }
 
+/// The media type base: trimmed, parameters after the first `;` dropped.
+fn split_media_base(media: &str) -> &str {
+    media.trim().split(';').next().unwrap_or_default()
+}
+
+/// True iff `media` is a valid `type/subtype` declaration; parameters are
+/// ignored (opaque).
+fn is_valid_media_declaration(media: &str) -> bool {
+    match split_media_base(media).split_once('/') {
+        Some((ty, sub)) => valid_header_token(ty) && valid_header_token(sub),
+        None => false,
+    }
+}
+
+/// True iff `media` is a JSON media type: a valid `type/subtype` whose
+/// subtype is `json` or ends with `+json` (case-insensitive, ASCII).
+fn is_json_media_type(media: &str) -> bool {
+    let Some((ty, sub)) = split_media_base(media).split_once('/') else {
+        return false;
+    };
+    if !valid_header_token(ty) || !valid_header_token(sub) {
+        return false;
+    }
+    let sub = sub.to_ascii_lowercase();
+    sub == "json" || sub.ends_with("+json")
+}
+
 // ---------------------------------------------------------------------------
 // Path template parser (Task 4)
 // ---------------------------------------------------------------------------
@@ -436,6 +535,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::route_ast::RouteDslRestResponse;
 
     fn make_rest(op_id: &str, verb: &str, path: &str, to: &str) -> RouteDslRest {
         let operations = vec![RouteDslRestOperation {
@@ -451,6 +551,7 @@ mod tests {
             response: None,
             description: None,
             parameters: BTreeMap::new(),
+            binding: None,
         }];
         RouteDslRest {
             host: "0.0.0.0".to_string(),
@@ -475,6 +576,7 @@ mod tests {
             response: None,
             description: None,
             parameters: BTreeMap::new(),
+            binding: None,
         }
     }
 
@@ -611,6 +713,7 @@ mod tests {
                 response: None,
                 description: None,
                 parameters: BTreeMap::new(),
+                binding: None,
             }],
         };
         let routes = lower_all_rest_to_routes(&[rest]).unwrap();
@@ -714,6 +817,7 @@ mod tests {
             response: None,
             description: None,
             parameters: BTreeMap::new(),
+            binding: None,
         }];
         RouteDslRest {
             host: "0.0.0.0".to_string(),
@@ -1238,5 +1342,441 @@ rest:
         assert_eq!(defs.len(), 1);
         assert!(defs[0].security_policy_config().is_none());
         assert!(defs[0].security_provider().is_none());
+    }
+
+    #[test]
+    fn media_helpers_accept_json_forms() {
+        for media in [
+            "application/json",
+            "Application/JSON",
+            "application/json; charset=utf-8",
+            "application/problem+json",
+            "text/json",
+            " application/json ",
+        ] {
+            assert!(is_json_media_type(media), "expected JSON media: {media:?}");
+        }
+        for media in [
+            "application/xml",
+            "json",
+            "application/jsonx",
+            "",
+            "png",
+            "application/jsoné",
+        ] {
+            assert!(
+                !is_json_media_type(media),
+                "expected non-JSON media: {media:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn media_helpers_accept_valid_declarations() {
+        for media in [
+            "image/png",
+            "text/plain; charset=utf-8",
+            "application/octet-stream",
+            " image/png ",
+        ] {
+            assert!(
+                is_valid_media_declaration(media),
+                "expected valid media declaration: {media:?}"
+            );
+        }
+        for media in [
+            "png",
+            "/png",
+            "png/",
+            "image / png",
+            "im age/png",
+            "image/é",
+            "",
+            "   ",
+        ] {
+            assert!(
+                !is_valid_media_declaration(media),
+                "expected invalid media declaration: {media:?}"
+            );
+        }
+    }
+
+    // ── Task 1.3: binding-aware json-mode gate + trimmed produces CT ──
+
+    /// Step variant names in declaration order — used to pin the exact step
+    /// sequence the lowering produces (byte-identity regression pins).
+    ///
+    /// Derived from `Debug` instead of a hand-written match: the variant name
+    /// is everything before the first `(` in the rendered output
+    /// (e.g. `To(ToStep { .. })` → `"To"`).
+    fn step_kind_names(steps: &[RouteDslStep]) -> Vec<String> {
+        steps
+            .iter()
+            .map(|s| {
+                format!("{s:?}")
+                    .split('(')
+                    .next()
+                    .unwrap_or("<unknown>")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn json_mode_accepts_parameterized_json_media() {
+        let mut rest = make_rest("createUser", "post", "/", "bean:create");
+        rest.operations[0].consumes = "application/json; charset=utf-8".to_string();
+        rest.operations[0].produces = "application/json; charset=utf-8".to_string();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        let ct = routes[0]
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                RouteDslStep::SetHeader(h) if h.set_header.key == "Content-Type" => {
+                    Some(h.set_header.value.clone())
+                }
+                _ => None,
+            })
+            .expect("Content-Type step present");
+        assert_eq!(
+            ct,
+            Some(serde_json::json!("application/json; charset=utf-8")),
+            "Content-Type must carry the declared produces after trim"
+        );
+    }
+
+    #[test]
+    fn json_mode_accepts_problem_plus_json() {
+        let mut rest = make_rest("getUser", "get", "/{id}", "bean:svc");
+        rest.operations[0].produces = "application/problem+json".to_string();
+        assert!(lower_all_rest_to_routes(&[rest]).is_ok());
+    }
+
+    #[test]
+    fn json_mode_rejects_xml_with_precise_error() {
+        let mut rest = make_rest("getUser", "get", "/{id}", "bean:svc");
+        rest.operations[0].consumes = "application/xml".to_string();
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("xml consumes with json binding must be rejected");
+        let msg = err.to_string();
+        for needle in ["getUser", "consumes", "application/xml", "raw"] {
+            assert!(
+                msg.contains(needle),
+                "message must contain {needle:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn json_mode_rejects_non_json_produces() {
+        let mut rest = make_rest("getUser", "get", "/{id}", "bean:svc");
+        rest.operations[0].produces = "text/plain".to_string();
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("text/plain produces with json binding must be rejected");
+        let msg = err.to_string();
+        for needle in ["produces", "text/plain"] {
+            assert!(
+                msg.contains(needle),
+                "message must contain {needle:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn v1_route_step_sequence_is_byte_identical() {
+        let rest = make_rest("getUser", "get", "/{id}", "bean:svc");
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0].from,
+            "http://0.0.0.0:8080/users/{id}?httpMethod=GET"
+        );
+        assert_eq!(routes[0].id, "getUser");
+        assert_eq!(
+            step_kind_names(&routes[0].steps),
+            vec!["To", "Marshal", "SetHeader", "SetHeaderIfAbsent"]
+        );
+        // Positional: Content-Type injection is step idx 2 (marshal follows
+        // the user To step; v1 pushes Marshal UNCONDITIONALLY — only the
+        // unmarshal is verb-guarded).
+        match &routes[0].steps[2] {
+            RouteDslStep::SetHeader(h) => {
+                assert_eq!(h.set_header.key, "Content-Type");
+                assert_eq!(
+                    h.set_header.value,
+                    Some(serde_json::json!("application/json"))
+                );
+            }
+            other => panic!("expected SetHeader at idx 2, got {other:?}"),
+        }
+        match &routes[0].steps[3] {
+            RouteDslStep::SetHeaderIfAbsent(h) => {
+                assert_eq!(h.set_header.key, "CamelHttpResponseCode");
+                assert_eq!(h.set_header.value, Some(serde_json::json!(200)));
+            }
+            other => panic!("expected SetHeaderIfAbsent at idx 3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v1_post_step_sequence_pinned() {
+        let mut rest = make_rest("createUser", "post", "/", "bean:create");
+        let schema = serde_json::json!({ "type": "object" });
+        rest.operations[0].request_schema = Some(schema.clone());
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        assert_eq!(
+            step_kind_names(&routes[0].steps),
+            vec![
+                "Unmarshal",
+                "To",
+                "Marshal",
+                "SetHeader",
+                "SetHeaderIfAbsent"
+            ]
+        );
+        match &routes[0].steps[0] {
+            RouteDslStep::Unmarshal(u) => assert_eq!(u.schema, Some(schema)),
+            other => panic!("expected Unmarshal at idx 0, got {other:?}"),
+        }
+        match &routes[0].steps[3] {
+            RouteDslStep::SetHeader(h) => {
+                assert_eq!(h.set_header.key, "Content-Type");
+                assert_eq!(
+                    h.set_header.value,
+                    Some(serde_json::json!("application/json"))
+                );
+            }
+            other => panic!("expected SetHeader at idx 3, got {other:?}"),
+        }
+        match routes[0].steps.last().unwrap() {
+            RouteDslStep::SetHeaderIfAbsent(h) => {
+                assert_eq!(h.set_header.value, Some(serde_json::json!(201)));
+            }
+            other => panic!("expected SetHeaderIfAbsent last, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_mode_get_with_schema_has_no_unmarshal() {
+        let mut rest = make_rest("getUser", "get", "/{id}", "bean:svc");
+        rest.operations[0].request_schema = Some(serde_json::json!({ "type": "object" }));
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        assert!(
+            !step_kind_names(&routes[0].steps)
+                .iter()
+                .any(|name| name == "Unmarshal"),
+            "GET must not emit unmarshal even with a request schema"
+        );
+    }
+
+    // ── Task 1.4: raw-mode lowering ──
+
+    #[test]
+    fn raw_mode_step_sequence_exact() {
+        let mut rest = make_rest("getPhoto", "get", "/{id}", "bean:svc");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        rest.operations[0].produces = "image/png".to_string();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            step_kind_names(&routes[0].steps),
+            vec!["To", "SetHeader", "SetHeaderIfAbsent"],
+            "raw mode must not emit Unmarshal/Marshal binding steps"
+        );
+        // Positional: Content-Type injection follows the user To step.
+        match &routes[0].steps[1] {
+            RouteDslStep::SetHeader(h) => {
+                assert_eq!(h.set_header.key, "Content-Type");
+                assert_eq!(h.set_header.value, Some(serde_json::json!("image/png")));
+            }
+            other => panic!("expected SetHeader at idx 1, got {other:?}"),
+        }
+        match &routes[0].steps[2] {
+            RouteDslStep::SetHeaderIfAbsent(h) => {
+                assert_eq!(h.set_header.key, "CamelHttpResponseCode");
+                assert_eq!(h.set_header.value, Some(serde_json::json!(200)));
+            }
+            other => panic!("expected SetHeaderIfAbsent at idx 2, got {other:?}"),
+        }
+        let names = step_kind_names(&routes[0].steps);
+        assert!(
+            !names.iter().any(|name| name == "Unmarshal"),
+            "raw mode forbids Unmarshal"
+        );
+        assert!(
+            !names.iter().any(|name| name == "Marshal"),
+            "raw mode forbids Marshal"
+        );
+    }
+
+    #[test]
+    fn raw_mode_post_still_defaults_201_and_has_no_unmarshal() {
+        let mut rest = make_rest("createDoc", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        let names = step_kind_names(&routes[0].steps);
+        assert!(
+            !names.iter().any(|name| name == "Unmarshal"),
+            "raw POST must not unmarshal"
+        );
+        assert!(
+            !names.iter().any(|name| name == "Marshal"),
+            "raw POST must not marshal"
+        );
+        match routes[0].steps.last().unwrap() {
+            RouteDslStep::SetHeaderIfAbsent(h) => {
+                assert_eq!(h.set_header.key, "CamelHttpResponseCode");
+                assert_eq!(
+                    h.set_header.value,
+                    Some(serde_json::json!(201)),
+                    "default-if-absent status is binding-independent"
+                );
+            }
+            other => panic!("expected SetHeaderIfAbsent last, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_mode_rejects_request_schema() {
+        let mut rest = make_rest("createDoc", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        rest.operations[0].request_schema = Some(serde_json::json!({ "type": "object" }));
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("raw binding with request_schema must be rejected");
+        let msg = err.to_string();
+        for needle in ["createDoc", "request_schema"] {
+            assert!(
+                msg.contains(needle),
+                "message must contain {needle:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_mode_rejects_response_schema() {
+        let mut rest = make_rest("getUser", "get", "/{id}", "bean:svc");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        rest.operations[0].response = Some(RouteDslRestResponse {
+            description: None,
+            schema: Some(serde_json::json!({ "type": "object" })),
+            headers: BTreeMap::new(),
+        });
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("raw binding with response.schema must be rejected");
+        let msg = err.to_string();
+        for needle in ["getUser", "response.schema"] {
+            assert!(
+                msg.contains(needle),
+                "message must contain {needle:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_mode_accepts_header_only_response() {
+        let mut rest = make_rest("getUser", "get", "/{id}", "bean:svc");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "X-Rate-Limit".to_string(),
+            serde_json::json!({"type":"integer"}),
+        );
+        rest.operations[0].response = Some(RouteDslRestResponse {
+            description: None,
+            schema: None,
+            headers,
+        });
+        assert!(lower_all_rest_to_routes(&[rest]).is_ok());
+    }
+
+    #[test]
+    fn raw_mode_rejects_missing_separator() {
+        let mut rest = make_rest("getPhoto", "get", "/{id}", "bean:svc");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        rest.operations[0].produces = "png".to_string();
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("'png' has no type/subtype separator and must be rejected");
+        assert!(
+            err.to_string().contains("png"),
+            "message must name the offending value: {err}"
+        );
+    }
+
+    #[test]
+    fn raw_mode_rejects_empty_subtype() {
+        let mut rest = make_rest("getPhoto", "get", "/{id}", "bean:svc");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        rest.operations[0].produces = "/png".to_string();
+        assert!(
+            lower_all_rest_to_routes(&[rest]).is_err(),
+            "'/png' has an empty subtype and must be rejected"
+        );
+    }
+
+    #[test]
+    fn raw_mode_rejects_whitespace_inside_base() {
+        let mut rest = make_rest("getPhoto", "get", "/{id}", "bean:svc");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        rest.operations[0].produces = "image / png".to_string();
+        assert!(
+            lower_all_rest_to_routes(&[rest]).is_err(),
+            "'image / png' contains whitespace inside the type/subtype base and must be rejected"
+        );
+    }
+
+    #[test]
+    fn raw_mode_trims_outer_whitespace() {
+        let mut rest = make_rest("getPhoto", "get", "/{id}", "bean:svc");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        rest.operations[0].produces = " image/png ".to_string();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        let ct = routes[0]
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                RouteDslStep::SetHeader(h) if h.set_header.key == "Content-Type" => {
+                    Some(h.set_header.value.clone())
+                }
+                _ => None,
+            })
+            .expect("Content-Type step present");
+        assert_eq!(ct, Some(serde_json::json!("image/png")));
+    }
+
+    #[test]
+    fn raw_mode_accepts_parameterized_media() {
+        let mut rest = make_rest("getReport", "get", "/{id}", "bean:svc");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        rest.operations[0].produces = "text/plain; charset=utf-8".to_string();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        let ct = routes[0]
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                RouteDslStep::SetHeader(h) if h.set_header.key == "Content-Type" => {
+                    Some(h.set_header.value.clone())
+                }
+                _ => None,
+            })
+            .expect("Content-Type step present");
+        assert_eq!(
+            ct,
+            Some(serde_json::json!("text/plain; charset=utf-8")),
+            "raw mode carries the full trimmed declaration, parameters included"
+        );
+    }
+
+    #[test]
+    fn raw_mode_accepts_non_json_media() {
+        let mut rest = make_rest("uploadBlob", "post", "/", "bean:svc");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        rest.operations[0].consumes = "application/octet-stream".to_string();
+        rest.operations[0].produces = "image/png".to_string();
+        assert!(lower_all_rest_to_routes(&[rest]).is_ok());
     }
 }

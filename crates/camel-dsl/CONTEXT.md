@@ -201,7 +201,7 @@ Route-level resilience configuration that opens after repeated failures and temp
 _Avoid_: breaker, failure gate, DeclarativeCircuitBreaker
 
 **REST DSL**:
-Declarative `rest:` blocks that lower to `http:` consumer routes with JSON binding, path templates, and optional schema validation. REST v1 supports only `application/json` for both `consumes` and `produces`; any other value fails route load. For binary, streaming, or non-JSON proxy APIs, use `http:` (which supports `Body::Stream`) instead of `rest:`. A future v2 may lift the restriction.
+Declarative `rest:` blocks that lower to `http:` consumer routes with JSON binding, path templates, and optional schema validation. Binding defaults to `json`: requests unmarshal and responses marshal automatically, JSON Schema validation runs when schemas are declared, and JSON-essence media types are accepted (bare `application/json`, parameterized forms like `application/json; charset=utf-8`, and `+json` structured-syntax suffixes like `application/problem+json`). Explicit `binding: raw` accepts any RFC 9110 type/subtype media type, performs no automatic unmarshal/marshal, leaves the request as `Body::Stream`, and sends the trimmed `produces` value as the response Content-Type. `request_schema` and `response.schema` are rejected in raw mode.
 _Avoid_: REST API, REST endpoint (use REST DSL for the authoring form)
 
 **SecurityPolicy**:

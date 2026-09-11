@@ -1503,6 +1503,18 @@ pub struct RouteDslRest {
     pub operations: Vec<RouteDslRestOperation>,
 }
 
+/// Binding mode for a REST operation: automatic JSON data-format binding
+/// (default) or raw passthrough with no automatic binding steps.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RouteDslRestBinding {
+    /// Automatic JSON unmarshal/marshal pipeline (v1 behavior; default).
+    Json,
+    /// No automatic binding steps; declared media used verbatim.
+    Raw,
+}
+
 /// A single REST operation (identified by its `method` field).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
@@ -1529,6 +1541,9 @@ pub struct RouteDslRestOperation {
     /// Default content-type produced by this operation.
     #[serde(default = "default_produces")]
     pub produces: String,
+    /// Optional binding mode: `json` (default) or `raw`. Never inferred from media type.
+    #[serde(default)]
+    pub binding: Option<RouteDslRestBinding>,
     /// Expected success HTTP status code (e.g. 200, 201).
     #[serde(default)]
     pub success_status: Option<u16>,
@@ -2031,6 +2046,68 @@ rest:
         assert!(op.success_status.is_none());
         assert!(op.response.is_none());
         assert!(op.steps.is_empty());
+    }
+
+    #[test]
+    fn parse_rest_binding_default_is_none() {
+        let yaml = r#"
+rest:
+  - path: /api
+    operations:
+      - method: GET
+        to: direct:handler
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        let op = &parsed.rest[0].operations[0];
+        assert!(op.binding.is_none());
+    }
+
+    #[test]
+    fn parse_rest_binding_explicit_raw() {
+        let yaml = r#"
+rest:
+  - path: /api
+    operations:
+      - method: GET
+        to: direct:handler
+        binding: raw
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        let op = &parsed.rest[0].operations[0];
+        assert_eq!(op.binding, Some(RouteDslRestBinding::Raw));
+    }
+
+    #[test]
+    fn parse_rest_binding_explicit_json() {
+        let yaml = r#"
+rest:
+  - path: /api
+    operations:
+      - method: GET
+        to: direct:handler
+        binding: json
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        let op = &parsed.rest[0].operations[0];
+        assert_eq!(op.binding, Some(RouteDslRestBinding::Json));
+    }
+
+    #[test]
+    fn parse_rest_binding_invalid_value_fails() {
+        let yaml = r#"
+rest:
+  - path: /api
+    operations:
+      - method: GET
+        to: direct:handler
+        binding: yaml
+"#;
+        let result = serde_yml::from_str::<RouteDslRoutes>(yaml);
+        let err = result.err().expect("invalid binding value must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown variant"), "got: {msg}");
+        assert!(msg.contains("json"), "got: {msg}");
+        assert!(msg.contains("raw"), "got: {msg}");
     }
 
     #[test]

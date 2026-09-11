@@ -108,8 +108,11 @@ the decision or crate that defines it.
   [Components](../components/index.md),
   [ADR-0020](../adr/0020-llm-component-provider-adapter-boundary.md).
 - **REST DSL** — declarative `rest:` YAML/JSON blocks that lower to `http:`
-  consumer routes with JSON binding, path templates, and optional schema
-  validation. [YAML DSL](../yaml-dsl/index.md).
+  consumer routes with path templates. The default JSON binding auto unmarshals
+  requests and marshals responses, with JSON Schema validation. Explicit
+  `binding: raw` accepts non-JSON media, injects no automatic data-format
+  steps, sets the declared `produces` as the response Content-Type, and leaves
+  the request as `Body::Stream`. [YAML DSL](../yaml-dsl/index.md).
 - **RetryableStep** — object-safe trait that unifies `BoxProcessor` and
   `OutcomeSegment` for `RouteErrorHandler::retry_step`. One retry path serves
   both Tower processors and outcome-aware segments. [Error handling](error-handling.md),

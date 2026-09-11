@@ -37,7 +37,9 @@ schema = ["dep:schemars", "dep:ts-rs", "ts-rs/serde-json-impl", "camel-api/schem
 
 [dev-dependencies]
 async-trait.workspace = true
+bytes.workspace = true
 criterion.workspace = true
+futures.workspace = true
 jsonschema = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -109,3 +109,48 @@ fn openapi_document_is_serializable() {
     assert!(json.contains("\"openapi\": \"3.0.3\""));
     assert!(json.contains("\"operationId\""));
 }
+
+/// REST_CRUD-style fixture extended with a raw-bound GET operation.
+const REST_CRUD_RAW_YAML: &str = r#"
+rest:
+  - host: 0.0.0.0
+    port: 9090
+    path: /api/users
+    operations:
+      - method: GET
+        operation_id: listUsers
+        to: direct:listUsers
+        produces: application/json
+      - method: POST
+        operation_id: createUser
+        consumes: application/json
+        produces: application/json
+        success_status: 201
+        to: direct:createUser
+      - method: GET
+        path: /{id}/export
+        operation_id: exportUser
+        binding: raw
+        produces: application/octet-stream
+        to: direct:exportUser
+"#;
+
+#[test]
+fn raw_operation_generates_binary_content() {
+    let rest_blocks = extract_rest_blocks(REST_CRUD_RAW_YAML).expect("YAML should parse");
+    assert_eq!(rest_blocks.len(), 1);
+
+    let result = generate_openapi(&rest_blocks, "Users API", "1.0.0");
+    let doc = &result.document;
+
+    // Document still has the top-level keys
+    assert!(doc.get("info").is_some());
+    assert!(doc.get("paths").is_some());
+
+    let get_export = &doc["paths"]["/api/users/{id}/export"]["get"];
+    assert_eq!(get_export["operationId"], "exportUser");
+    assert_eq!(
+        get_export["responses"]["200"]["content"]["application/octet-stream"]["schema"],
+        serde_json::json!({ "type": "string", "format": "binary" })
+    );
+}

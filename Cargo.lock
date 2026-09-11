@@ -2164,6 +2164,7 @@ name = "camel-dsl"
 version = "0.44.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "camel-api",
  "camel-auth",
  "camel-component-api",
@@ -2173,6 +2174,7 @@ dependencies = [
  "camel-processor",
  "camel-proto-compiler",
  "criterion",
+ "futures",
  "glob",
  "jsonschema",
  "noyalib",

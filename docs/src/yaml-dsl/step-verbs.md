@@ -853,13 +853,23 @@ REST operation:
 | `steps` | list | no | `[]` | Child steps |
 | `consumes` | string | no | `application/json` | Request content type |
 | `produces` | string | no | `application/json` | Response content type |
+| `binding` | string | no | `json` | Binding mode: `json` or `raw` |
 | `success_status` | integer | no | — | Success HTTP status |
 | `request_schema` | object | no | — | Request body schema |
 | `response` | object | no | — | Response definition |
 | `description` | string | no | — | Operation description |
 | `parameters` | map | no | `{}` | Additional parameters |
 
-REST v1 supports only `application/json` for both `consumes` and `produces`. Any other value fails route load. For binary, streaming, or non-JSON proxy APIs, use `http:` instead of `rest:`. The `http:` component supports `Body::Stream`. A future v2 may lift the JSON-only restriction.
+Operations bind in one of two modes. The default `json` mode accepts JSON-essence media types for `consumes` and `produces`: bare `application/json`, parameterized forms such as `application/json; charset=utf-8`, and `+json` suffixes such as `application/problem+json`. It unmarshals requests, marshals responses, and validates declared schemas automatically. Any other media type in `json` mode fails route load. The `raw` mode accepts any RFC 9110 type/subtype media type, leaves the request as `Body::Stream` with no automatic unmarshal or marshal, and sends the trimmed `produces` value as the response Content-Type. `request_schema` and `response.schema` are rejected in `raw` mode. The default success status is injected in both modes; a `raw` POST returns `201` with the declared `produces` type.
+
+```yaml
+- method: post
+  path: /ingest
+  binding: raw
+  consumes: application/octet-stream
+  produces: text/plain
+  to: direct:ingest
+```
 
 ### Template declaration
 

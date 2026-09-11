@@ -373,7 +373,7 @@ fn yaml_source_to_value_source(
 /// Whether `name` is a valid HTTP field token per RFC 9110 §5.6.2 `tchar`:
 /// alphanumerics plus `!#$%&'*+-.^_`|~`, at least one char, no whitespace,
 /// no colons, no separators.
-fn valid_header_token(name: &str) -> bool {
+pub(crate) fn valid_header_token(name: &str) -> bool {
     !name.is_empty()
         && name.chars().all(|c| {
             c.is_ascii_alphanumeric()
