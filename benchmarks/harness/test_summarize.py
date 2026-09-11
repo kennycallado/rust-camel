@@ -1396,6 +1396,36 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(err.getvalue(), "")
 
+    def test_m2_presence_state_verdicts(self):
+        # bd rc-u047: the shared identity→measured|attempted|None
+        # helper behind completeness_gaps and _m2_presence_counts.
+        # Invalid shapes never count; measured wins over every attempt
+        # signal; the legacy list alone still counts as attempted.
+        measured = {"scenario": "t2-json", "contender": "x",
+                    "metric": "m2", "round_values": [1.0],
+                    "median": 1.0, "unit": "ns"}
+        attempted = {"scenario": "t2-json", "contender": "x",
+                     "metric": "m2", "status": "unconverged",
+                     "reason": "r", "rounds": 1}
+        invalid = {"scenario": "t2-json", "contender": "x",
+                   "metric": "m2", "status": "bogus", "reason": "r",
+                   "rounds": 1}
+        state = summarize._m2_presence_state
+        self.assertEqual(state("t2-json/x", [measured], set()),
+                         "measured")
+        self.assertEqual(state("t2-json/x", [attempted], set()),
+                         "attempted")
+        self.assertEqual(state("t2-json/x", [], {"t2-json/x"}),
+                         "attempted")
+        # Measured wins over attempt evidence AND the legacy list.
+        self.assertEqual(
+            state("t2-json/x", [measured, attempted], {"t2-json/x"}),
+            "measured",
+        )
+        # Invalid shapes are skipped, never counted.
+        self.assertIsNone(state("t2-json/x", [invalid], set()))
+        self.assertIsNone(state("t2-json/x", [], set()))
+
     def test_zero_cells_is_loud(self):
         run = self.root / "20260905T170000Z"
         (run / "http-server_some-contender").mkdir(parents=True)  # empty

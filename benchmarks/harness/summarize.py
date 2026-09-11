@@ -1249,6 +1249,29 @@ def m2_cell_present(cell: dict) -> bool:
     )
 
 
+def _m2_presence_state(identity, m2_cells, legacy_attempted):
+    """m2 presence verdict for one roster identity:
+    `"measured"` | `"attempted"` | `None`.
+
+    measured — a valid MEASURED m2 cell exists (measured wins; attempt
+    evidence and the legacy list are ignored). attempted — no measured
+    cell, but a valid ATTEMPTED m2 cell exists or the identity is in
+    the LEGACY `m2_attempted_cells` list. None — no present m2
+    evidence at all (a completeness gap for warm-applicable
+    scenarios). Invalid cell shapes are skipped by [`m2_cell_present`],
+    never counted. Shared by `completeness_gaps` and
+    `_m2_presence_counts` (bd rc-u047) so the two walks cannot drift.
+    """
+    present = [
+        cell for cell in m2_cells if m2_cell_present(cell)
+    ]
+    if any("status" not in cell for cell in present):
+        return "measured"
+    if present or identity in legacy_attempted:
+        return "attempted"
+    return None
+
+
 def completeness_gaps(record):
     """Missing `<scenario>/<contender>/<metric>` names vs the roster.
 
@@ -1284,13 +1307,12 @@ def completeness_gaps(record):
         metrics = observed.get(identity, {})
         if "m1" not in metrics:
             gaps.append(f"{identity}/m1")
-        m2_present = any(
-            m2_cell_present(cell) for cell in metrics.get("m2", [])
-        )
         if (
             scenario in WARM_APPLICABLE
-            and not m2_present
-            and identity not in attempted
+            and _m2_presence_state(
+                identity, metrics.get("m2", []), attempted
+            )
+            is None
         ):
             gaps.append(f"{identity}/m2")
     return gaps
@@ -1320,13 +1342,12 @@ def _m2_presence_counts(record):
         if str(identity).partition("/")[0] not in WARM_APPLICABLE:
             continue
         total += 1
-        present = [
-            cell for cell in m2_by_identity.get(identity, [])
-            if m2_cell_present(cell)
-        ]
-        if any("status" not in cell for cell in present):
+        state = _m2_presence_state(
+            identity, m2_by_identity.get(identity, []), legacy
+        )
+        if state == "measured":
             measured += 1
-        elif present or identity in legacy:
+        elif state == "attempted":
             attempted += 1
     return total, measured, attempted
 
