@@ -580,3 +580,192 @@ fn report_without_document_is_usage_error() {
         "no listing, no report on stdout; got:\n{stdout}"
     );
 }
+
+// ── No-argument listing (job-ux-reshape) ───────────────────────────────
+
+#[test]
+fn listing_shows_names_and_descriptions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_bare_name_fixture(dir.path());
+    std::fs::write(
+        dir.path().join("jobs/reindex.job.yaml"),
+        "execute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:transform\nrouteFilesFromRoot:\n  - routes/job-route.yaml\n",
+    )
+    .expect("write reindex job (no description)");
+    // Give the first job a description.
+    std::fs::write(
+        dir.path().join("jobs/job.job.yaml"),
+        "description: create things via direct:in\nexecute:\n  mode: one-shot\n  timeout: 60s\n  send:\n    to: direct:transform\n    body: ping\nrouteFilesFromRoot:\n  - routes/job-route.yaml\n",
+    )
+    .expect("rewrite job with description");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines[0], "Jobs in jobs/:",
+        "header names the dir; got:\n{stdout}"
+    );
+    let job_line = lines
+        .iter()
+        .find(|l| l.starts_with("  job "))
+        .expect("job row listed");
+    assert!(
+        job_line.contains("create things via direct:in"),
+        "job row carries its description; got:\n{stdout}"
+    );
+    let reindex = lines
+        .iter()
+        .find(|l| l.starts_with("  reindex "))
+        .expect("reindex listed");
+    assert!(
+        reindex.contains("(no description)"),
+        "reindex has no description; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn listing_empty_dir_exit_0() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir_all(dir.path().join("jobs")).expect("mkdir jobs");
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "empty dir is exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("No jobs found in jobs/") && stdout.contains("<name>.job.yaml"),
+        "friendly hint on stdout; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn listing_absent_dir_exit_0() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "absent dir is exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("No jobs found in jobs/"),
+        "friendly hint on stdout; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn listing_unparseable_sibling() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_bare_name_fixture(dir.path());
+    std::fs::write(dir.path().join("jobs/broken.job.yaml"), "{not yaml").expect("write broken");
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "unparseable sibling keeps listing at exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("broken") && stdout.contains("(unparseable)"),
+        "broken sibling shows as unparseable; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("job"),
+        "valid job still listed; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn listing_job_yml_not_bare_resolvable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir_all(dir.path().join("jobs")).expect("mkdir jobs");
+    std::fs::write(
+        dir.path().join("jobs/legacy.job.yml"),
+        "execute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:transform\n",
+    )
+    .expect("write legacy job.yml");
+
+    let (code, stdout, _stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(code, 0, "listing exits 0; got:\n{stdout}");
+    assert!(
+        stdout.contains("legacy"),
+        "the .job.yml is listed by its stripped name; got:\n{stdout}"
+    );
+
+    let (code, _out, stderr) = run_job(dir.path(), "legacy");
+    assert_eq!(
+        code, 2,
+        "bare token does not resolve .job.yml; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no job `legacy`") && stderr.contains("legacy.job.yaml"),
+        "miss error names the probed .job.yaml; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn listing_multiline_description_one_line() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir_all(dir.path().join("jobs")).expect("mkdir jobs");
+    std::fs::write(
+        dir.path().join("jobs/multi.job.yaml"),
+        "description: |\n  first line\n  second line\nexecute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:transform\n",
+    )
+    .expect("write multi job");
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let multi_line = stdout
+        .lines()
+        .find(|l| l.contains("multi"))
+        .expect("multi listed");
+    assert!(
+        multi_line.contains("first line") && multi_line.contains("second line"),
+        "both parts on the listing row; got:\n{stdout}"
+    );
+    assert!(
+        multi_line.matches("multi").count() == 1,
+        "single row for the job; got:\n{stdout}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|l| l.contains("first line") || l.contains("second line"))
+            .count(),
+        1,
+        "description renders on ONE line; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn listing_anchored_at_config_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_bare_name_fixture(dir.path());
+    let nested = dir.path().join("nested/deeper");
+    std::fs::create_dir_all(&nested).expect("mkdir nested");
+    // A decoy ./jobs under the CWD must NOT be what gets listed.
+    std::fs::create_dir_all(nested.join("jobs")).expect("mkdir decoy jobs");
+    std::fs::write(
+        nested.join("jobs/decoy.job.yaml"),
+        "description: wrong dir\nexecute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:transform\n",
+    )
+    .expect("write decoy");
+    let config = dir.path().join("Camel.toml");
+    let config_arg = config.to_str().expect("path is valid utf-8");
+    let (code, stdout, stderr) = run_job_args(&nested, &["--config", config_arg]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("job") && !stdout.contains("decoy"),
+        "ROOT jobs/ is listed, not ./jobs/ relative to CWD; got:\n{stdout}"
+    );
+}

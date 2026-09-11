@@ -32,7 +32,8 @@ use std::time::{Duration, Instant};
 use camel_api::{Body, CamelError, Exchange, Message};
 use camel_component_api::NoOpComponentContext;
 use clap::Args;
-use serde::Serialize;
+use noyalib::compat::serde_yaml;
+use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 
 use document::{JobBody, JobDocument, JobRouteSource};
@@ -158,6 +159,79 @@ fn resolve_job_path(raw: &Path, jobs_root: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// Cheap listing probe: reads only the optional `description` key.
+/// NEVER the full document grammar — a malformed sibling must not abort
+/// the listing. No `deny_unknown_fields`: every other key is ignored.
+#[derive(Deserialize)]
+struct JobListProbe {
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// Probe one job document for its description. Outer `None` = unreadable
+/// or unparseable (row renders `(unparseable)`); `Some(None)` = parseable
+/// without `description:`; `Some(Some(d))` = the description string.
+fn probe_description(path: &Path) -> Option<Option<String>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let probe: JobListProbe = serde_yaml::from_str(&text).ok()?;
+    Some(probe.description)
+}
+
+/// List the jobs directory (`camel job` with no document argument).
+/// Exit 0 for found, empty, and absent directories alike — listing is a
+/// query, not a usage error (ls semantics). Listing output and the JSON
+/// run report never co-occur: the report path requires a document.
+fn list_jobs(args: &JobArgs, camel_config: &camel_config::config::CamelConfig) -> i32 {
+    let root = jobs_root(args, camel_config);
+    let dir_label = camel_config.jobs.dir.as_str();
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(_) => {
+            println!(
+                "No jobs found in {dir_label}/. Create a `<name>.job.yaml` there, or run `camel job <path>`."
+            );
+            return 0;
+        }
+    };
+
+    let mut jobs: Vec<(String, Option<Option<String>>)> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && camel_dsl::discovery::is_job_document(path))
+        .map(|path| {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let display = name
+                .strip_suffix(".job.yaml")
+                .or_else(|| name.strip_suffix(".job.yml"))
+                .unwrap_or(&name)
+                .to_string();
+            (display, probe_description(&path))
+        })
+        .collect();
+    jobs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if jobs.is_empty() {
+        println!(
+            "No jobs found in {dir_label}/. Create a `<name>.job.yaml` there, or run `camel job <path>`."
+        );
+        return 0;
+    }
+
+    println!("Jobs in {dir_label}/:");
+    for (name, description) in &jobs {
+        let rendered = match description {
+            None => "(unparseable)".to_string(),
+            Some(None) => "(no description)".to_string(),
+            Some(Some(d)) => d.replace(['\n', '\r'], " "),
+        };
+        println!("  {name}      {rendered}");
+    }
+    0
+}
+
 /// Run one job document; returns the process exit code (`main.rs`
 /// applies it). Every failure path prints to stderr; the JSON report
 /// goes to stdout (default) or `--report`.
@@ -178,8 +252,7 @@ pub async fn run_job(args: &JobArgs) -> i32 {
             eprintln!("--report requires a job document");
             return 2;
         }
-        eprintln!("no job document given");
-        return 2;
+        return list_jobs(args, &camel_config);
     };
     let resolved = match resolve_job_path(raw_document, &jobs_root(args, &camel_config)) {
         Ok(path) => path,
