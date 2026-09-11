@@ -972,3 +972,34 @@ expects:
         Some(BodyMatcher::Equals(Body::Json(ref v))) if v.get("status") == Some(&serde_json::json!("ok"))
     ));
 }
+
+/// The `execute:` section is the third classified vocabulary: a job
+/// document must be refused by `camel test` with a pointer to
+/// `camel job` (exit-2 parse-error class at dispatch).
+#[test]
+fn execute_section_is_refused_with_job_pointer() {
+    let text = r#"
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: "job-route"
+    from: "direct:transform"
+    steps:
+      - set_body:
+          value: "x"
+"#;
+    let err = match parse_document(
+        std::path::Path::new("fixtures/execute-dispatch.test.yaml"),
+        text,
+    ) {
+        Ok(_) => panic!("execute: documents must not parse as test documents"),
+        Err(err) => err,
+    };
+    assert!(
+        err.contains("camel job"),
+        "refusal must name `camel job`; got: {err}"
+    );
+}

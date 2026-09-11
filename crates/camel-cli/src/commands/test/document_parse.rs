@@ -17,6 +17,16 @@ pub(crate) enum ParsedDocument {
     Scenario(Box<ScenarioDocument>),
 }
 
+/// Whether the text declares a top-level `execute:` section (the
+/// `camel job` vocabulary). A third classified section, mutually
+/// exclusive with both test vocabularies.
+fn declares_execute(text: &str) -> bool {
+    serde_yaml::from_str::<serde_yaml::Value>(text)
+        .ok()
+        .and_then(|value| value.get("execute").map(|_| true))
+        .unwrap_or(false)
+}
+
 /// Whether the text declares a top-level `scenario:` section. Text that
 /// does not deserialize at all carries no scenario section; the
 /// unit-tier parser then produces the document error.
@@ -30,11 +40,18 @@ fn declares_scenario(text: &str) -> bool {
 /// Parses one test document in whichever vocabulary it declares: a
 /// `scenario:` section routes to the scenario parser (which re-reads
 /// the file from `path` and enforces the suffix and mixing rules);
-/// anything else routes to the unit-tier parser. Errors are rendered
-/// `Display` strings — every parse failure of both parsers is a
-/// load-time, exit-2 class.
+/// anything else routes to the unit-tier parser. An `execute:` section
+/// is the third classified vocabulary — a job document, rejected with
+/// a pointer to `camel job`. Errors are rendered `Display` strings —
+/// every parse failure of all parsers is a load-time, exit-2 class.
 pub(crate) fn parse_document(path: &Path, text: &str) -> Result<ParsedDocument, String> {
-    if declares_scenario(text) {
+    if declares_execute(text) {
+        Err(format!(
+            "{}: document declares an execute: section (the `camel job` vocabulary); \
+              camel test does not run job documents",
+            path.display()
+        ))
+    } else if declares_scenario(text) {
         camel_integration_test::parse_scenario_document(path)
             .map(|scenario| ParsedDocument::Scenario(Box::new(scenario)))
             .map_err(|e| e.to_string())

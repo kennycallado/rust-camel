@@ -169,6 +169,28 @@ pub fn spawn_camel_run(dir: &Path) -> KillOnDrop {
     KillOnDrop(child)
 }
 
+/// Build the `Command` that runs one job document through the `camel`
+/// binary: `camel job <doc>` inside `dir` (whose `Camel.toml` feeds the
+/// real boot composition), with both stdout and stderr piped. The child
+/// is wrapped in a kill-on-drop guard so a failed assertion mid-test
+/// cannot leak the process.
+// Shared by job_one_shot_test.rs; the test binaries that include `common`
+// without calling it would otherwise warn dead_code (each compilation unit
+// gets its own copy of the module).
+#[allow(dead_code)]
+pub fn spawn_camel_job(dir: &Path, doc: &Path) -> KillOnDrop {
+    let child = Command::new(env!("CARGO_BIN_EXE_camel"))
+        .arg("job")
+        .arg(doc)
+        .current_dir(dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("failed to spawn `camel` binary"); // allow-unwrap
+    KillOnDrop(child)
+}
+
 /// Wait for the child to exit, but at most `timeout`. If it is still alive
 /// at the deadline, force-kill and reap, returning `false`.
 #[allow(dead_code)]

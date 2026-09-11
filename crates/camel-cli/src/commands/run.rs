@@ -18,7 +18,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Load the Camel.toml at `config_path`, falling back to serde defaults
-/// ONLY when the main file does not exist.
+/// ONLY when the main file does not exist. Shared with `camel job`
+/// (same real-boot config seam).
 ///
 /// The not-found decision is made on the main path alone, before loading:
 /// a missing INCLUDE also surfaces as file-not-found inside `ConfigError`
@@ -27,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 /// error of an existing file — parse failure, broken include, unresolved
 /// `${env:...}` placeholder — propagates as `CamelError::Config` so
 /// `camel run` fails fast instead of booting on silent defaults.
-fn load_config_or_default(
+pub(crate) fn load_config_or_default(
     config_path: &str,
 ) -> Result<camel_config::config::CamelConfig, camel_api::CamelError> {
     match std::path::Path::new(config_path).try_exists() {
@@ -59,8 +60,8 @@ fn load_config_or_default(
 /// the current directory. Both wasm consumers use it: the bean loader and
 /// the camel-bundles wasm base dir. Exits with code 1 when the parent cannot
 /// be canonicalized; a dangling `--config` parent must fail fast instead of
-/// booting on defaults with a broken root.
-fn canonical_project_root(config_path: &std::path::Path) -> std::path::PathBuf {
+/// booting on defaults with a broken root. Shared with `camel job`.
+pub(crate) fn canonical_project_root(config_path: &std::path::Path) -> std::path::PathBuf {
     config_path
         .parent()
         .map(|p| {

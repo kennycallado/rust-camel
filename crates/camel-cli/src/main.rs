@@ -101,6 +101,13 @@ enum Commands {
     /// the current working directory. Only run from a trusted directory.
     Test(commands::test::TestArgs),
 
+    /// Run one job from a *.test.yaml document with an `execute:` section.
+    ///
+    /// Trust model: `camel job` executes route scripts, WASM modules, and
+    /// beans resolved from the current working directory, like `camel run`.
+    /// Only run from a trusted directory.
+    Job(commands::job::JobArgs),
+
     /// Start Language Server Protocol server over stdio.
     Lsp,
 }
@@ -193,6 +200,12 @@ async fn main() {
             let mut err = std::io::stderr();
             let summary = commands::test::run_tests_full(&config, &mut out, &mut err).await;
             std::process::exit(summary.exit_code);
+        }
+        Commands::Job(args) => {
+            // The job runner returns the exit code; the process exit is
+            // applied only here, mirroring the test-driver pattern.
+            let code = commands::job::run_job(&args).await;
+            std::process::exit(code);
         }
     }
 }

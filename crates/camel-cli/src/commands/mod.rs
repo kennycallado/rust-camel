@@ -1,5 +1,6 @@
 pub mod bench_instrument;
 pub mod errors;
+pub mod job;
 pub mod journal;
 pub mod lint;
 pub mod lsp;
