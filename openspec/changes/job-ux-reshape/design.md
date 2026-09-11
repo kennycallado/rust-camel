@@ -41,7 +41,7 @@ a CLI convenience. One field for v1:
 dir = "jobs"     # default when [jobs] absent
 ```
 
-`JobsConfig { dir }` with `deny_unknown_fields` (family rule). Wired
+`JobsCamelConfig { dir }` with `deny_unknown_fields` (family rule). Wired
 through all three merge sites in `config.rs`: the resolved `CamelConfig`
 (~15), the optional overlay (~140) with `unwrap_or` in the layer merge
 (~182), and `Default` (~206). Round-trip test: absent `[jobs]` defaults
