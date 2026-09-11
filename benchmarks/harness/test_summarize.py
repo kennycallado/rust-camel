@@ -1216,14 +1216,30 @@ class SummarizeTest(unittest.TestCase):
         )
 
     def test_roster_mirror_no_drift(self):
-        # Task 2.7.1: summarize's roster tuples are a hand-maintained
-        # mirror of run.sh's bash registration — if the two drift, the
-        # expected-cell roster silently lies and the publish gate gaps
-        # the wrong cells. Grep the run.sh SOURCE (never executes it)
-        # and assert equality.
-        run_sh = (Path(__file__).resolve().parent / "run.sh").read_text(
-            encoding="utf-8"
-        )
+        # bd rc-2k33 (harness/CONTEXT.md §2 "Roster authored in three
+        # places"): the 52-cell roster arithmetic is INTENTIONALLY
+        # hand-maintained in exactly THREE sources, each a different
+        # projection of the same roster. This test is the guard: it
+        # fails on any drift among them. The three sources:
+        #
+        #   1. run.sh — SCENARIO_ARTIFACT_SET (bridge asymmetry),
+        #      PAIR_A/PAIR_B_CONTENDERS (affinity pairing),
+        #      SCENARIO_M2_PROTOCOL (warm applicability),
+        #      FAMILY_COMPLETENESS + the bridge resolver's add_cell
+        #      registrations (contender sets);
+        #   2. summarize.py — BRIDGE_SCENARIOS, FULL_CONTENDERS,
+        #      BRIDGE_CONTENDERS, WARM_APPLICABLE;
+        #   3. checks/warm-24.py — TICK_SCENARIOS, FULL_CONTENDERS.
+        #
+        # The run.sh SOURCE is grepped (never executed) and asserted
+        # equal to the python projections.
+        harness_dir = Path(__file__).resolve().parent
+        run_sh_path = harness_dir / "run.sh"
+        warm_24_path = harness_dir / "checks" / "warm-24.py"
+        self.assertTrue(run_sh_path.is_file(), "roster source 1: run.sh")
+        self.assertTrue(warm_24_path.is_file(),
+                        "roster source 3: checks/warm-24.py")
+        run_sh = run_sh_path.read_text(encoding="utf-8")
 
         def declare_block(name):
             match = re.search(
@@ -1313,6 +1329,25 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(bridge_cells - full,
                          set(summarize.BRIDGE_CONTENDERS)
                          - set(summarize.FULL_CONTENDERS))
+
+        # The 52-cell arithmetic itself: the SCENARIO_M2_PROTOCOL keys
+        # enumerate the 7 registered scenarios (5 full-set + 2 bridge,
+        # per SCENARIO_ARTIFACT_SET); 5 × 8 + 2 × 6 = 52 expected
+        # identities, and summarize.expected_roster reproduces exactly
+        # that count from the same projections.
+        all_scenarios = set(entries)
+        self.assertEqual(len(all_scenarios), 7)
+        self.assertEqual(all_scenarios - bridge_keys,
+                         {"startup-minimal", "t2-json", "split-aggregate",
+                          "t2-realistic-eip", "http-server"})
+        self.assertEqual(
+            5 * len(summarize.FULL_CONTENDERS)
+            + 2 * len(summarize.BRIDGE_CONTENDERS),
+            52,
+        )
+        self.assertEqual(
+            len(summarize.expected_roster(sorted(all_scenarios))), 52
+        )
 
     def test_full_roster_zero_gaps_with_flat_protocol_a_m2(self):
         # Task 2.7.1 acceptance: the canonical 52-cell roster (5 full
