@@ -404,53 +404,117 @@ impl BuilderStep {
 
     /// Span kind hint for this step's step span (span-kind-hint, task 1.2).
     ///
-    /// `To` classifies the AUTHORED URI scheme — the text before the first
-    /// `:`, compared with `eq_ignore_ascii_case`, no endpoint resolution —
-    /// so a `SkipTo` interception never rewrites the kind. Messaging broker
+    /// Endpoint-bearing variants (`To`, `Enrich`, `PollEnrich`, `WireTap`)
+    /// classify the AUTHORED URI scheme — the text before the first `:`,
+    /// compared with `eq_ignore_ascii_case`, no endpoint resolution — so a
+    /// `SkipTo` interception never rewrites the kind. Messaging broker
     /// schemes map to `Producer` (async, one-way send) and synchronous
-    /// outbound protocols to `Client`; every other scheme, scheme-less URIs,
-    /// and every non-`To` variant stay `Internal` route processing. The
-    /// catch-all sits after the `To` arm so it can never swallow it.
+    /// outbound protocols to `Client`; every other scheme and scheme-less
+    /// URIs stay `Internal` route processing.
+    ///
+    /// Every non-endpoint variant is internal route processing. The match is
+    /// exhaustive by design (no `_` wildcard): adding a `BuilderStep` variant
+    /// without an explicit span-kind decision here is a compile error
+    /// (rc-4mz7). `BuilderStep` is defined in this crate and carries no
+    /// `#[non_exhaustive]`, so same-crate exhaustiveness holds.
     pub(crate) fn span_kind_hint(&self) -> SpanKindHint {
-        /// Broker-style destinations: an async, one-way send.
-        const PRODUCER_SCHEMES: [&str; 5] = ["kafka", "jms", "activemq", "artemis", "mqtt"];
-        /// Synchronous outbound request/response protocols.
-        const CLIENT_SCHEMES: [&str; 12] = [
-            "http",
-            "https",
-            "grpc",
-            "grpcs",
-            "ws",
-            "redis",
-            "opensearch",
-            "sql",
-            "surrealdb",
-            "cxf",
-            "llm",
-            "mcp",
-        ];
-
         match self {
-            Self::To(uri) => {
-                // Scheme of the authored URI. Scheme-less URIs match no
-                // known scheme and stay Internal — the kind is never guessed.
-                let scheme = uri.split(':').next().unwrap_or_default();
-                if PRODUCER_SCHEMES
-                    .iter()
-                    .any(|s| s.eq_ignore_ascii_case(scheme))
-                {
-                    SpanKindHint::Producer
-                } else if CLIENT_SCHEMES
-                    .iter()
-                    .any(|s| s.eq_ignore_ascii_case(scheme))
-                {
-                    SpanKindHint::Client
-                } else {
-                    SpanKindHint::Internal
-                }
-            }
-            _ => SpanKindHint::Internal,
+            // Endpoint-bearing variants: classify by the authored scheme.
+            Self::To(uri)
+            | Self::Enrich { uri, .. }
+            | Self::PollEnrich { uri, .. }
+            | Self::WireTap { uri, .. } => uri_span_kind(uri),
+
+            // rc-4mz7: every remaining variant is named explicitly — no
+            // wildcard. A new BuilderStep variant fails to compile until it
+            // is classified here.
+            Self::Processor(..)
+            | Self::Stop
+            | Self::Log { .. }
+            | Self::DeclarativeSetHeader { .. }
+            | Self::DeclarativeSetHeaderIfAbsent { .. }
+            | Self::DeclarativeRemoveHeader { .. }
+            | Self::DeclarativeSetProperty { .. }
+            | Self::DeclarativeSetBody { .. }
+            | Self::DeclarativeFilter { .. }
+            | Self::DeclarativeChoice { .. }
+            | Self::DeclarativeScript { .. }
+            | Self::DeclarativeFunction { .. }
+            | Self::DeclarativeSplit { .. }
+            | Self::DeclarativeStreamSplit { .. }
+            | Self::DeclarativeDynamicRouter { .. }
+            | Self::DeclarativeRoutingSlip { .. }
+            | Self::Split { .. }
+            | Self::Aggregate { .. }
+            | Self::Filter { .. }
+            | Self::Choice { .. }
+            | Self::Multicast { .. }
+            | Self::DeclarativeLog { .. }
+            | Self::Bean { .. }
+            | Self::Script { .. }
+            | Self::Throttle { .. }
+            | Self::LoadBalance { .. }
+            | Self::DynamicRouter { .. }
+            | Self::RoutingSlip { .. }
+            | Self::RecipientList { .. }
+            | Self::DeclarativeRecipientList { .. }
+            | Self::Delay { .. }
+            | Self::Loop { .. }
+            | Self::DeclarativeLoop { .. }
+            | Self::Validate { .. }
+            | Self::ClaimCheck { .. }
+            | Self::Sampling { .. }
+            | Self::Sort { .. }
+            | Self::IdempotentConsumer { .. }
+            | Self::Cache { .. }
+            | Self::CacheInvalidate { .. }
+            | Self::CacheClear { .. }
+            | Self::CacheStats { .. }
+            | Self::CachePeekStale { .. }
+            | Self::DeclarativeDoTry { .. }
+            | Self::Resequence { .. } => SpanKindHint::Internal,
         }
+    }
+}
+
+/// Classify an AUTHORED endpoint URI by its scheme — the text before the
+/// first `:`, compared with `eq_ignore_ascii_case`, no endpoint resolution.
+///
+/// Messaging broker schemes map to `Producer` (async, one-way send) and
+/// synchronous outbound protocols to `Client`; every other scheme and
+/// scheme-less URIs stay `Internal` — the kind is never guessed.
+fn uri_span_kind(uri: &str) -> SpanKindHint {
+    /// Broker-style destinations: an async, one-way send.
+    const PRODUCER_SCHEMES: [&str; 5] = ["kafka", "jms", "activemq", "artemis", "mqtt"];
+    /// Synchronous outbound request/response protocols.
+    const CLIENT_SCHEMES: [&str; 12] = [
+        "http",
+        "https",
+        "grpc",
+        "grpcs",
+        "ws",
+        "redis",
+        "opensearch",
+        "sql",
+        "surrealdb",
+        "cxf",
+        "llm",
+        "mcp",
+    ];
+
+    let scheme = uri.split(':').next().unwrap_or_default();
+    if PRODUCER_SCHEMES
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(scheme))
+    {
+        SpanKindHint::Producer
+    } else if CLIENT_SCHEMES
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(scheme))
+    {
+        SpanKindHint::Client
+    } else {
+        SpanKindHint::Internal
     }
 }
 
@@ -837,11 +901,15 @@ mod tests {
 
     /// Task 1.2 (span-kind-hint): `BuilderStep::span_kind_hint` mapping.
     ///
-    /// `To` classifies the AUTHORED URI scheme (text before the first `:`,
+    /// Endpoint-bearing variants (`To`, `Enrich`, `PollEnrich`, `WireTap`)
+    /// classify the AUTHORED URI scheme (text before the first `:`,
     /// compared case-insensitively, no endpoint resolution): messaging
     /// brokers map to `Producer`, synchronous outbound protocols to
-    /// `Client`. Every other scheme, scheme-less URIs, and every non-`To`
-    /// variant stay `Internal` route processing.
+    /// `Client`. Every other scheme, scheme-less URIs, and every
+    /// non-endpoint variant stay `Internal` route processing. The
+    /// exhaustive match (no wildcard) in `span_kind_hint` is the rc-4mz7
+    /// contract: a new `BuilderStep` variant cannot compile without a
+    /// classification here.
     #[test]
     fn builder_step_span_kind_hint_mapping() {
         use camel_api::splitter::split_body_lines;
@@ -901,6 +969,52 @@ mod tests {
                 steps: vec![BuilderStep::Stop],
             }
             .span_kind_hint(),
+            SpanKindHint::Internal
+        );
+
+        // rc-2heu: endpoint-bearing EIP steps share the `To` scheme
+        // classification. Each covers a Client scheme, a Producer scheme,
+        // and an Internal (in-process) scheme.
+        let enrich = |uri: &str| BuilderStep::Enrich {
+            uri: uri.into(),
+            strategy: None,
+            timeout_ms: None,
+        };
+        let poll_enrich = |uri: &str| BuilderStep::PollEnrich {
+            uri: uri.into(),
+            strategy: None,
+            timeout_ms: None,
+        };
+        let wire_tap = |uri: &str| BuilderStep::WireTap { uri: uri.into() };
+
+        // Client scheme.
+        assert_eq!(enrich("http://x").span_kind_hint(), SpanKindHint::Client);
+        assert_eq!(
+            poll_enrich("http://x").span_kind_hint(),
+            SpanKindHint::Client
+        );
+        assert_eq!(wire_tap("http://x").span_kind_hint(), SpanKindHint::Client);
+        // Producer scheme.
+        assert_eq!(
+            enrich("kafka:orders").span_kind_hint(),
+            SpanKindHint::Producer
+        );
+        assert_eq!(
+            poll_enrich("kafka:orders").span_kind_hint(),
+            SpanKindHint::Producer
+        );
+        assert_eq!(
+            wire_tap("kafka:orders").span_kind_hint(),
+            SpanKindHint::Producer
+        );
+        // Internal (in-process) scheme.
+        assert_eq!(enrich("direct:y").span_kind_hint(), SpanKindHint::Internal);
+        assert_eq!(
+            poll_enrich("seda:q").span_kind_hint(),
+            SpanKindHint::Internal
+        );
+        assert_eq!(
+            wire_tap("direct:y").span_kind_hint(),
             SpanKindHint::Internal
         );
     }
