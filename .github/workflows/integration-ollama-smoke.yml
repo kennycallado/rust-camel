@@ -1,0 +1,65 @@
+name: Integration Ollama Smoke
+
+# CI wiring-rot smoke for the Ollama LLM integration (bd rc-gfum, ADR-0054
+# amendment 2026-09-11). This is NOT the inference-quality tier — that runs
+# weekly on the developer host via the camel-ollama-live.timer systemd unit.
+#
+# This job pulls ONLY the 621 MB embeddinggemma model and runs ONLY the
+# ollama_embed test. It proves the siumai adapter still constructs, opens a
+# socket to Ollama, and round-trips one request in a clean CI environment. It
+# deliberately avoids the 3.4 GB qwen3.5:4b chat model and all generative
+# tests: CPU-only 4B inference on a 2-4 vCPU runner is slow, the chat cache
+# would eat a third of the 10 GB repo quota, and ollama_cache_hit's timing
+# assertion is flaky on a contended runner.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1" # Mondays 05:00 UTC — folds into the weekly cadence
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  ollama-embed-smoke:
+    name: Ollama wiring smoke (embed only, ubuntu-latest)
+    runs-on: ubuntu-latest
+    # 621 MB pull on a cold runner + sub-minute inference. 15 min is generous
+    # headroom; approaching it means the CI environment itself has degraded.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Cache Ollama models (embeddinggemma only, ~621 MB)
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama/models
+          # Bump the -vN suffix to invalidate if the pinned model changes.
+          key: ollama-embeddinggemma-621mb-v1
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+      - name: Start Ollama server
+        run: |
+          ollama serve >/tmp/ollama.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1; then
+              echo "ollama up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "ollama did not become ready"; cat /tmp/ollama.log; exit 1
+      - name: Pull embedding model (skipped if cache hit populated the dir)
+        run: ollama pull embeddinggemma
+      - name: Run embed wiring smoke (single ignored test)
+        run: >
+          cargo test -p camel-component-llm --test ollama_live
+          --features ollama -- --ignored ollama_embed

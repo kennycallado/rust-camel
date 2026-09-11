@@ -174,3 +174,38 @@ testcontainers pattern is the canonical answer for external-service tests, and
 the self-grill record grounds the Ollama exception in a specific artifact
 (gigabyte-scale model weights) that testcontainers cannot provision.
 **Self-grill mode:** self-grill-proposals skill
+
+## Amendment 2026-09-11: Ollama execution tier (resolves bd rc-gfum)
+
+Self-grill question 5 deferred the decision on where and when to run the 8
+Ollama `slow test:` cases. bd rc-gfum resolved it. The `slow test:`
+classification does not change. The amendment adds only the execution tier.
+
+**Ruling: hybrid.** Two tiers run the suite:
+
+1. **Primary verification (local, weekly).** A `systemd --user` timer on the
+   developer host runs the full 8-test suite against the real `qwen3.5:4b`
+   (3.4 GB) and `embeddinggemma` (621 MB) models, which are already present.
+   The timer is `Persistent=true`, so it fires after a boot if the host was
+   off. Results append one JSON line per run to `.opencode/fleet/events.log`,
+   which the agent fleet already monitors. A failure files a P1 bd bug linked
+   `discovered-from:rc-gfum` to raise human attention.
+2. **CI wiring smoke (GitHub Actions, weekly + manual).** One job pulls only
+   the 621 MB `embeddinggemma` model and runs only `ollama_embed` with
+   `--ignored`. It catches CI-environment rot (adapter construction, socket
+   transport, config round-trip) without paying for CPU-only 4B inference.
+   The model cache key holds 621 MB, which is 6% of the 10 GB repository
+   quota. Job timeout is 15 minutes.
+
+**Why not a nightly 4B job on GitHub runners.** A 4B model on a 2-4 vCPU,
+no-GPU runner generates roughly 2-8 tokens per second. Seven of the eight
+tests generate text; two carry tool-schema and multi-turn context that forces
+tens of seconds of CPU prompt ingestion before the first token. The realistic
+job envelope is 20-40 minutes, the model cache consumes one third of the
+shared quota, and `ollama_cache_hit` asserts a timing ratio
+(`elapsed2 < elapsed1/2`) that is flaky on a contended CPU runner. The local
+tier already provides inference-quality coverage green, so the nightly job
+would buy noise.
+
+The bd closes once this note lands and the first local timer run appends a
+`pass` line to `events.log`.
