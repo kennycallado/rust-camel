@@ -203,8 +203,10 @@ struct JobSendActionDoc {
 struct JobDocumentDoc {
     execute: ExecuteSectionDoc,
     /// Optional one-line description shown by `camel job` listing
-    /// (read via the listing probe; the full grammar only accepts it).
+    /// (read via the listing probe; the full grammar only admits the
+    /// key — its value is intentionally dropped here).
     #[serde(default)]
+    #[expect(dead_code, reason = "admit-only under deny_unknown_fields")]
     description: Option<String>,
     route_files: Option<Vec<String>>,
     route_files_from_root: Option<Vec<String>>,
