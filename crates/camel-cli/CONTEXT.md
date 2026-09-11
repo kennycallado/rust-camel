@@ -33,6 +33,24 @@ See `crates/camel-bundles/CONTEXT.md`.
 | `BootHandle::shutdown_with_deadline` | `crates/camel-bundles/src/lib.rs:111` | (d) system-broken | moved to camel-bundles (boot cascade): JMS pool shutdown failed. See `crates/camel-bundles/CONTEXT.md` |
 | `BootHandle::shutdown_with_deadline` | `crates/camel-bundles/src/lib.rs:123` | (d) system-broken | moved to camel-bundles (boot cascade): CXF pool shutdown failed. See `crates/camel-bundles/CONTEXT.md` |
 
+## Signal handling contract
+
+`camel run` treats SIGINT and SIGTERM with the same rules.
+
+The signal streams are armed at the start of `run`, before boot. A signal
+that arrives during boot (config load, component boot, route discovery,
+context start) is buffered, not default-killed. The run finishes boot and
+then shuts down gracefully (rc-z5zch TERM, rc-ukwlt INT).
+
+The first SIGINT or SIGTERM, at any time, starts a graceful shutdown: the
+file watcher is cancelled, the context stops, and the component pools tear
+down. The exit code is 0.
+
+A second SIGINT or SIGTERM, after the first was consumed, force-exits the
+process with code 1 (rc-kz85m). This is the escape hatch for a hung
+teardown. Systemd and `docker stop` resend the stop signal after their grace
+period, so the escape hatch must accept both signals.
+
 ## Metrics
 
 Metrics instrumentation for CLI commands is limited to the jemalloc memory

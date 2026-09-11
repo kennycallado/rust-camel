@@ -200,3 +200,93 @@ fn sigint_during_boot_shuts_down_gracefully() {
          (missing `Received Ctrl+C`);\n{output}\n--- end ---"
     );
 }
+
+/// rc-kz85m: a second stop signal must force-exit the run with code 1.
+///
+/// The test sends an INT and a TERM pair while boot is still in flight,
+/// after the step-0 handlers are armed. Each signal type buffers in its own
+/// stream permit slot (tokio coalesces repeats of the SAME signal, so a
+/// same-signal double-tap would deliver once and be lost): the shutdown
+/// select consumes whichever buffered signal resolves first, and the
+/// leftover permit in the other stream makes the teardown force-exit select
+/// ready on its first poll, so the process exits 1 via `std::process::exit`
+/// (a default-disposition kill would surface as -1, a missing force-exit
+/// arm as the graceful 0). Which of the pair the shutdown select consumes is
+/// tokio's random pick among ready arms, so the test asserts the exit code
+/// and the `forcing exit` WARN, not which signal logged it.
+///
+/// Honesty note: this exercises the second-signal WINDOW (the force-exit
+/// select is armed and a second signal is consumable during teardown), not
+/// a deterministically HUNG teardown — the harness has no hook to stall
+/// `BootHandle::shutdown`.
+#[test]
+fn second_sigterm_during_teardown_force_exits() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_fixture(dir.path());
+
+    let mut child = spawn_camel_run(dir.path());
+    let drained = spawn_drained(&mut child);
+
+    // Same mid-boot marker as the rc-ukwlt test: handlers armed, boot in
+    // flight. Sending here means both signals buffer before the shutdown
+    // select arms, so one is consumed as the graceful first signal and the
+    // other is the consumable second signal during teardown.
+    let booting = wait_for_marker_tight(
+        &mut child,
+        &[Arc::clone(&drained.out_buf), Arc::clone(&drained.err_buf)],
+        "trusts the current working directory",
+        Duration::from_secs(30),
+    );
+    assert!(
+        booting,
+        "camel run never reached mid-boot;\n{}",
+        drained.captured()
+    );
+
+    // The escape-hatch pair: systemd / docker stop resend the stop signal
+    // after the grace period — modeled by the TERM; the INT is the paired
+    // second signal that survives coalescing. One `sh -c` sends both so the
+    // pair lands well before the shutdown select arms (`kill` is a shell
+    // builtin; two separate spawn(2)s would leave a multi-ms exec gap that
+    // can push the second signal past teardown under load).
+    let pair = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "kill -INT {pid}; kill -TERM {pid}",
+            pid = child.id()
+        ))
+        .status()
+        .expect("failed to spawn signal pair");
+    assert!(pair.success(), "signal pair returned non-zero: {pair:?}");
+
+    let exit_code = wait_exit_code_bounded(&mut child, Duration::from_secs(30));
+    let Drained {
+        out_handle,
+        err_handle,
+        out_buf,
+        err_buf,
+    } = drained;
+    let _ = out_handle.join();
+    let _ = err_handle.join();
+    let output = format!(
+        "stdout:\n{}\nstderr:\n{}",
+        out_buf.lock().expect("stdout buffer lock poisoned"),
+        err_buf.lock().expect("stderr buffer lock poisoned")
+    );
+
+    assert_eq!(
+        exit_code, 1,
+        "expected the second stop signal to force-exit with code 1; exit 0 \
+         means the force-exit arm never fired, -1 means a \
+         default-disposition kill;\n{output}\n--- end ---"
+    );
+    assert!(
+        output.contains("forcing exit"),
+        "expected a `Second ... — forcing exit` WARN;\n{output}\n--- end ---"
+    );
+    assert!(
+        output.contains("Received Ctrl+C") || output.contains("Received SIGTERM"),
+        "expected the graceful first-signal log before the force exit;\
+         \n{output}\n--- end ---"
+    );
+}

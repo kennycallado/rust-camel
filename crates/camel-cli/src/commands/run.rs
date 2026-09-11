@@ -502,7 +502,28 @@ pub async fn run(
         } => tracing::info!("Received SIGTERM"),
     }
 
-    // Second Ctrl+C = force exit
+    // Second stop signal = force exit (rc-kz85m). Orchestrators (systemd,
+    // docker stop) resend the stop signal after their grace period, so the
+    // escape hatch must accept the signal they actually send: a second
+    // Ctrl+C OR a second TERM. The entry-registered streams are moved here
+    // now that the shutdown select above consumed the first signal; polling
+    // them (instead of a fresh ctrl_c()) keeps boot-time buffered signals
+    // force-exit-eligible and avoids a duplicate SIGINT listener. The task
+    // only lives across teardown — it is aborted once shutdown completes —
+    // so a signal during normal running still just shuts down gracefully.
+    #[cfg(unix)]
+    let force_exit = tokio::spawn(async move {
+        tokio::select! {
+            _ = sigint.recv() => {
+                tracing::warn!("Second Ctrl+C — forcing exit");
+            }
+            _ = sigterm.recv() => {
+                tracing::warn!("Second SIGTERM — forcing exit");
+            }
+        }
+        std::process::exit(1);
+    });
+    #[cfg(not(unix))]
     let force_exit = tokio::spawn(async {
         tokio::signal::ctrl_c().await.ok();
         tracing::warn!("Second Ctrl+C — forcing exit");
