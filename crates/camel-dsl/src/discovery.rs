@@ -56,12 +56,13 @@ pub enum DiscoveryError {
     )]
     JsonRequiresExplicitPattern { path: String, pattern: String },
 
-    /// Route file matched by a literal pattern uses the reserved '.test.yaml'
-    /// suffix, which names a camel test document, not a route.
+    /// Route file matched by a literal pattern uses a reserved document
+    /// suffix (`.test.yaml`/`.test.yml` names a camel test document;
+    /// `.job.yaml`/`.job.yml` names a camel job document) — not a route.
     #[error(
-        "Route file {path} uses the reserved '.test.yaml' suffix, which names a camel test document, not a route. Run it with 'camel test {path}', or rename it if it is a route."
+        "Route file {path} uses a reserved document suffix ('.test.yaml'/'.test.yml' names a camel test document; '.job.yaml'/'.job.yml' names a camel job document). Run it with 'camel test {path}' or 'camel job {path}', or rename it if it is a route."
     )]
-    ReservedTestSuffix { path: String },
+    ReservedDocumentSuffix { path: String },
 
     /// A route id was produced more than once across regular + materialized routes.
     #[error("Duplicate route id '{route_id}' in {path}")]
@@ -159,12 +160,32 @@ fn pattern_targets_json(pattern: &str) -> bool {
 }
 
 /// Returns true if the file name ends with the reserved `.test.yaml` or
-/// `.test.yml` suffix. Such files name camel test documents, not routes.
+/// `.test.yml` suffix. Such files name camel test documents (the
+/// `camel test` family), not routes.
 pub fn is_test_document(path: &Path) -> bool {
     path.file_name().is_some_and(|name| {
         let name = name.to_string_lossy();
         name.ends_with(".test.yaml") || name.ends_with(".test.yml")
     })
+}
+
+/// Returns true if the file name ends with the reserved `.job.yaml` or
+/// `.job.yml` suffix. Such files name camel job documents (the
+/// `camel job` family), not routes.
+pub fn is_job_document(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy();
+        name.ends_with(".job.yaml") || name.ends_with(".job.yml")
+    })
+}
+
+/// Returns true if the file name ends with any reserved document suffix:
+/// `.test.yaml`/`.test.yml` (owned by `camel test`) or
+/// `.job.yaml`/`.job.yml` (owned by `camel job`). Such files are never
+/// routes; route discovery skips them under wildcard globs and errors on
+/// literal naming.
+pub fn is_reserved_document(path: &Path) -> bool {
+    is_test_document(path) || is_job_document(path)
 }
 
 /// Returns true if the glob pattern contains no metacharacters (`* ? [ ] { }`),
@@ -320,13 +341,15 @@ fn discover_routes_inner(
             })?;
             let path_str = path.to_string_lossy().to_string();
 
-            // Reserved test-document gate: `.test.yaml` / `.test.yml` files
-            // belong to `camel test`, not route discovery. A literal pattern
-            // naming one is a user error — fail with guidance. Under a
-            // wildcard, test docs are simply skipped (never read).
-            if is_test_document(&path) {
+            // Reserved-document gate: `.test.yaml` / `.test.yml` files
+            // belong to `camel test` and `.job.yaml` / `.job.yml` files
+            // belong to `camel job` — neither is a route. A literal
+            // pattern naming one is a user error — fail with guidance.
+            // Under a wildcard, reserved documents are simply skipped
+            // (never read).
+            if is_reserved_document(&path) {
                 if pattern_is_literal(pattern) {
-                    return Err(DiscoveryError::ReservedTestSuffix { path: path_str });
+                    return Err(DiscoveryError::ReservedDocumentSuffix { path: path_str });
                 }
                 continue;
             }
@@ -1543,7 +1566,7 @@ templated_routes:
         }
     }
 
-    // ── Reserved test-document suffix (.test.yaml / .test.yml) ──────
+    // ── Reserved document suffixes (.test.yaml / .job.yaml families) ──
 
     #[test]
     fn test_doc_skipped_under_wildcard_pattern() {
@@ -1582,14 +1605,14 @@ routes:
             .to_string_lossy()
             .to_string();
         let err = match discover_routes(std::slice::from_ref(&pattern)) {
-            Ok(_) => panic!("expected ReservedTestSuffix error"),
+            Ok(_) => panic!("expected ReservedDocumentSuffix error"),
             Err(e) => e,
         };
         match &err {
-            DiscoveryError::ReservedTestSuffix { path } => {
+            DiscoveryError::ReservedDocumentSuffix { path } => {
                 assert_eq!(path, &pattern);
             }
-            other => panic!("expected ReservedTestSuffix, got: {other:?}"),
+            other => panic!("expected ReservedDocumentSuffix, got: {other:?}"),
         }
         let msg = err.to_string();
         assert!(msg.contains("camel test"), "display was: {msg}");
@@ -1680,6 +1703,75 @@ routes:
         assert!(!is_test_document(Path::new("atest.yaml")));
         assert!(!is_test_document(Path::new("a.yaml")));
         assert!(!is_test_document(Path::new("x.test.json")));
+    }
+
+    #[test]
+    fn is_job_document_predicate() {
+        assert!(is_job_document(Path::new("a.job.yaml")));
+        assert!(is_job_document(Path::new("a.job.yml")));
+        assert!(!is_job_document(Path::new("ajob.yaml")));
+        assert!(!is_job_document(Path::new("a.yaml")));
+        assert!(!is_job_document(Path::new("x.job.json")));
+    }
+
+    #[test]
+    fn is_reserved_document_predicate() {
+        assert!(is_reserved_document(Path::new("a.test.yaml")));
+        assert!(is_reserved_document(Path::new("a.test.yml")));
+        assert!(is_reserved_document(Path::new("a.job.yaml")));
+        assert!(is_reserved_document(Path::new("a.job.yml")));
+        assert!(!is_reserved_document(Path::new("a.yaml")));
+        assert!(!is_reserved_document(Path::new("a.test.json")));
+    }
+
+    #[test]
+    fn job_doc_skipped_under_wildcard_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("demo.yaml"),
+            r#"
+routes:
+  - id: "demo-route"
+    from: "timer:tick"
+    steps:
+      - to: "log:info"
+"#,
+        )
+        .unwrap();
+        // Any bytes — a job doc must never be read by route discovery.
+        fs::write(routes_dir.join("demo.job.yaml"), "not: [a route document").unwrap();
+
+        let pattern = routes_dir.join("*.yaml").to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id(), "demo-route");
+    }
+
+    #[test]
+    fn job_doc_literal_pattern_hard_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(routes_dir.join("demo.job.yaml"), "not: [a route document").unwrap();
+
+        let pattern = routes_dir
+            .join("demo.job.yaml")
+            .to_string_lossy()
+            .to_string();
+        let err = match discover_routes(std::slice::from_ref(&pattern)) {
+            Ok(_) => panic!("expected ReservedDocumentSuffix error"),
+            Err(e) => e,
+        };
+        match &err {
+            DiscoveryError::ReservedDocumentSuffix { path } => {
+                assert_eq!(path, &pattern);
+            }
+            other => panic!("expected ReservedDocumentSuffix, got: {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("camel job"), "display was: {msg}");
     }
 
     // ── Env-lookup-injected discovery entry ──────────────────────────
