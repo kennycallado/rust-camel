@@ -557,7 +557,14 @@ fn resolve_route_patterns(
 /// Serializes tests that write or read the process-global
 /// `WasmSourceBindAcks` singleton: `set()` replaces the whole map, so
 /// parallel test writers would clobber each other's installs.
-#[cfg(test)]
+///
+/// Gated to the union of its users' feature gates: the `run` tests
+/// behind `wasm`/`security` and the scenario tests behind
+/// `integration-http`.
+#[cfg(all(
+    test,
+    any(feature = "security", feature = "wasm", feature = "integration-http")
+))]
 pub(crate) static WASM_ACKS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
