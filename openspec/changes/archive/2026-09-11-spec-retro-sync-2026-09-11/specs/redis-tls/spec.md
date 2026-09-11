@@ -1,8 +1,5 @@
-# redis-tls Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change redis-live-tls-and-ready-race. Update Purpose after archive.
-## Requirements
 ### Requirement: Standalone TLS connections trust the configured CA
 
 When a standalone Redis endpoint resolves to TLS and a CA certificate
@@ -54,68 +51,7 @@ a19d9cb4, bd rc-hbde6).
   `validate_tls` choke point, with a message that avoids
   transient-classifier words and embeds no host or URL
 
-### Requirement: camel-test integration feature enables the repo TLS client
-
-The `camel-test` crate's `integration-tests` feature SHALL enable the
-TLS client feature of `camel-redis-repo` (transitively
-`camel-component-redis/tls`), so the repo connection path can build
-TLS clients under integration tests.
-
-#### Scenario: Repo path builds TLS clients under integration-tests
-
-- **GIVEN** `camel-test` built with `--features integration-tests`
-- **WHEN** a `rediss://` endpoint is resolved through the repo
-  connection path
-- **THEN** the build has the redis TLS client feature enabled and the
-  connection attempt proceeds to a TLS handshake (no feature-absent
-  `Config` error)
-
-### Requirement: rediss:// live coverage through the repository connection path
-
-The camel-test workspace SHALL provide a live TLS Redis topology
-(self-signed CA generated at test time, container with the plaintext
-port disabled) and an integration test that drives `rediss://`
-end-to-end through the camel-redis-repo connection path, gated behind
-the `integration-tests` feature and never `#[ignore]`d (ADR-0054).
-
-#### Scenario: Round-trip through rediss:// with a self-signed CA
-
-- **GIVEN** a TLS-enabled Redis container whose certificate chains to
-  a test-generated CA, and a repo built from a `rediss://` endpoint
-  configured with that CA via `tls_ca_cert`
-- **WHEN** the test puts, gets, and deletes a key through the repo
-- **THEN** every operation succeeds and the get returns the put value,
-  proving TLS handshake plus full command path
-
-#### Scenario: Plaintext against the TLS port fails
-
-- **GIVEN** the same TLS-only Redis container (plaintext port
-  disabled)
-- **WHEN** a plaintext `redis://` client connects to the TLS port
-- **THEN** the connection fails with a TLS/protocol error rather than
-  succeeding
-
-#### Scenario: rediss:// against a plaintext port fails
-
-- **GIVEN** a standard plaintext-only Redis container (the existing
-  shared fixture)
-- **WHEN** a `rediss://` client connects to its plaintext port
-- **THEN** the connection fails rather than succeeding
-
-#### Scenario: Wrong CA is rejected
-
-- **GIVEN** the TLS-enabled Redis container and a client configured
-  with `tls_ca_cert` pointing to a DIFFERENT test-generated CA
-- **WHEN** the client connects
-- **THEN** the TLS handshake is rejected (certificate verification
-  failure), proving the CA actually verifies the server certificate
-
-#### Scenario: Live TLS coverage is discoverable
-
-- **GIVEN** the merged change
-- **WHEN** searching the workspace for `rediss://`
-- **THEN** live test surfaces (not only config/unit surfaces) contain
-  the scheme
+## ADDED Requirements
 
 ### Requirement: Sentinel CA trust installs per plane and fails closed on mixed schemes
 
@@ -206,4 +142,3 @@ Gated behind the `integration-tests` feature and never `#[ignore]`d
   port
 - **THEN** the connection fails with a TLS/protocol error rather than
   succeeding
-

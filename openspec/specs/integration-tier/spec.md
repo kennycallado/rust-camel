@@ -1180,10 +1180,20 @@ with the `sql-memory-not-shared` error class naming the datasource. The
 check SHALL run ungated: with or without the `sql` Cargo feature, and for
 documents with or without `sql:` actions.
 
+The scenario-tier in-memory convention SHALL be the named shared-cache
+memory URI — `sqlite:file:<name>?mode=memory&cache=shared`, with
+`provider = "sqlx"` pinned because `sqlite:file:` matches no automatic
+datasource prefix: one named database shared by every pool connection,
+with pool size an author choice rather than a correctness constraint. The
+bare `sqlite::memory:?cache=shared` form remains accepted, but
+cross-connection sharing is not guaranteed there. The
+`sql-memory-not-shared` failure SHALL name the datasource and steer
+authors to the named form. (Convention landed in 7cc0cb23, bd rc-gcf9n.)
+
 Rationale: SQLite `:memory:` databases are per-connection and the pool
 default is more than one connection — INSERT and SELECT on different pool
-connections hit different databases, a silent green lie. `cache=shared` is
-the mandated remedy.
+connections hit different databases, a silent green lie. The named
+shared-cache URI is the mandated remedy.
 
 #### Scenario: bare memory sqlite fails boot
 
@@ -1211,6 +1221,25 @@ the mandated remedy.
   document with no `sql:` action, and a bare `sqlite::memory:` datasource
 - **WHEN** the scenario boots
 - **THEN** the boot still fails `sql-memory-not-shared`
+
+#### Scenario: named shared-cache URI shares across pool connections
+
+- **GIVEN** a datasource with
+  `db_url = "sqlite:file:memdb_probe?mode=memory&cache=shared"` and a pool
+  of more than one connection
+- **WHEN** one pool connection INSERTs a row and another connection
+  SELECTs the count
+- **THEN** the reading connection sees the inserted row — one named
+  database backs the whole pool
+
+#### Scenario: lint steers bare memory to the named form
+
+- **GIVEN** a Camel.toml declaring `[datasources.appdb] db_url =
+  "sqlite::memory:"`
+- **WHEN** the scenario boots
+- **THEN** the `sql-memory-not-shared` error names `appdb` and presents
+  the named shared-memory URI (with the `sqlx` provider pin) as the
+  remedy
 
 ### Requirement: SQL state assertion
 
@@ -1428,9 +1457,11 @@ table-recreating statement as the first `sql:` prepare statement),
 mirroring ADR-0069 §9 — user-provided durable infrastructure is never
 the harness's hermeticity contract.
 
-Non-normative note (bd rc-gcf9n): concurrent boots sharing one
-in-memory alias are outside the v1 contract; a per-boot unique memory
-URI (`file:memdb_<scenario>?mode=memory&cache=shared`) is the planned
+Non-normative note (bd rc-gcf9n, landed in 7cc0cb23): the named
+shared-cache memory URI is the adopted scenario-tier convention for
+sequential boots. Concurrent boots sharing one in-memory alias remain
+outside the v1 contract; a per-boot unique memory URI
+(`file:memdb_<scenario>?mode=memory&cache=shared`) is the planned
 remedy when parallel document execution lands.
 
 #### Scenario: a second boot over the same memory alias starts empty
@@ -1465,7 +1496,6 @@ remedy when parallel document execution lands.
 - **THEN** the second boot observes the first boot's rows, and the second
   document's prepare is responsible for cleaning them (clean-first idiom)
 
-
 ### Requirement: Circuit-breaker route-level fallback
 
 The scenario tier SHALL drive the route-level `circuit_breaker` YAML
@@ -1495,3 +1525,4 @@ call itself always observes the failure, never the fallback.
 - **THEN** the `cache_peek_stale` MISS Stops the fallback branch —
   the send completes without a transport failure, no error
   propagates, and the consumer document passes
+

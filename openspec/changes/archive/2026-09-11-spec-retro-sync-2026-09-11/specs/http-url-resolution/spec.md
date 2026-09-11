@@ -1,8 +1,5 @@
-# http-url-resolution Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change http-contract-surface. Update Purpose after archive.
-## Requirements
 ### Requirement: Outbound query composition
 
 When the exchange carries a `CamelHttpQuery` header, the producer SHALL
@@ -84,47 +81,6 @@ rc-nmupb and rc-wsx2y.)
 - **THEN** all three headers are ignored and the endpoint base URL plus its
   own query is sent, exactly as before this change
 
-### Requirement: Override URI query merge
-
-When a `CamelHttpUri` override carries its own query and the exchange also
-carries `CamelHttpQuery`, the producer SHALL merge them at pair level:
-override-URI pairs first (winning collisions), header pairs appending for
-absent keys — instead of concatenating a second `?` marker.
-
-#### Scenario: override URI with query plus header query
-
-- **GIVEN** an exchange carrying `CamelHttpUri=http://host/api?a=1` and
-  `CamelHttpQuery=a=2&b=3`
-- **WHEN** the producer resolves the outbound URL
-- **THEN** the outbound URL is `http://host/api?a=1&b=3` — one `?` marker,
-  `a` from the override URI, `b` from the header
-
-#### Scenario: path applies before query composition
-
-- **GIVEN** an exchange carrying `CamelHttpUri=http://host/api?a=1`,
-  `CamelHttpPath=/extra`, and `CamelHttpQuery=b=2`
-- **WHEN** the producer resolves the outbound URL
-- **THEN** the outbound URL is `http://host/api/extra?a=1&b=2`
-
-### Requirement: Default inbound reflection
-
-The producer SHALL consume `CamelHttpPath` and `CamelHttpQuery` exchange
-headers by default (inbound reflection), including headers set
-automatically by the HTTP consumer from the inbound wire request; the
-`CamelHttpQuery` header composes with the endpoint query under the
-composition rule above.
-
-#### Scenario: plain proxy keeps working
-
-- **GIVEN** a route `from: http://0.0.0.0:8080/in` to
-  `to: http://upstream/api?apiKey=secret` and an inbound request
-  `GET /in/extra?page=2`
-- **WHEN** the consumer sets `CamelHttpPath=/in/extra` and
-  `CamelHttpQuery=page=2` from the wire and the producer resolves
-- **THEN** the outbound URL is
-  `http://upstream/api/in/extra?apiKey=secret&page=2` — the operator pair is
-  not replaced
-
 ### Requirement: CamelHttpUri host fence
 
 The endpoint URI SHALL accept an `allowedUriHosts` option: comma-separated
@@ -193,4 +149,3 @@ rc-uwaj.)
   `http://api.internal:8443/next`
 - **WHEN** the producer follows redirects
 - **THEN** the hop is followed and the exchange completes
-
