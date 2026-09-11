@@ -300,7 +300,7 @@
 - Diff of updated pin files shows ONLY: leading-entry additions to sequence assertions, step-count updates, and selection-index/helper adjustments that skip the negotiation step — no behavioral assertion edits.
 - `cargo clippy -p camel-dsl -- -D warnings` exits 0.
 
-- [ ] 3.3
+- [x] 3.3
 
 ## camel-http
 

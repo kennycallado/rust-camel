@@ -29,6 +29,7 @@ use camel_api::{
     Body, CamelError, Exchange, IdentityProcessor, Message, StreamBody, StreamMetadata,
 };
 use camel_core::route::BuilderStep;
+use camel_dsl::model::ContentNegotiationStepDef;
 use camel_dsl::{
     DeclarativeStep, SetHeaderStepDef, ToStepDef, ValueSourceDef, parse_json_to_declarative,
     parse_yaml, parse_yaml_to_declarative,
@@ -106,12 +107,18 @@ rest:
           type: object
 "#;
 
-/// The exact declarative lowering expected for the raw POST: the user `to`
-/// step followed by ONLY the two binding-independent injections — the
-/// declared `produces` (trimmed) as Content-Type and the POST default
-/// status 201 as SetHeaderIfAbsent. No Unmarshal/Marshal anywhere.
+/// The exact declarative lowering expected for the raw POST: the
+/// content-negotiation gate FIRST, then the user `to` step followed by ONLY
+/// the two binding-independent injections — the declared `produces` (trimmed)
+/// as Content-Type and the POST default status 201 as SetHeaderIfAbsent. No
+/// Unmarshal/Marshal anywhere.
 fn expected_raw_post_declarative_steps() -> Vec<DeclarativeStep> {
     vec![
+        DeclarativeStep::ContentNegotiation(ContentNegotiationStepDef {
+            consumes: "application/octet-stream".to_string(),
+            produces: "application/octet-stream".to_string(),
+            check_content_type: true,
+        }),
         DeclarativeStep::To(ToStepDef {
             uri: "direct:rawSink".to_string(),
         }),
@@ -169,16 +176,16 @@ fn compile_header_step(step: &BuilderStep) -> camel_api::BoxProcessor {
 }
 
 #[test]
-fn raw_post_compiles_to_exactly_three_steps() {
+fn raw_post_compiles_to_exactly_four_steps() {
     // Compile path: the full YAML → RouteDefinition lowering must produce
-    // exactly three steps (user `to` + Content-Type + default status) —
-    // raw binding adds no Unmarshal/Marshal around them.
+    // exactly four steps (negotiation gate + user `to` + Content-Type +
+    // default status) — raw binding adds no Unmarshal/Marshal around them.
     let routes = parse_yaml(RAW_POST_YAML).expect("raw REST YAML must parse + compile");
     assert_eq!(routes.len(), 1, "one POST op must lower to one route");
     assert_eq!(
         routes[0].steps().len(),
-        3,
-        "raw POST must compile to exactly [To, SetHeader, SetHeaderIfAbsent], got: {:?}",
+        4,
+        "raw POST must compile to exactly [ContentNegotiation, To, SetHeader, SetHeaderIfAbsent], got: {:?}",
         routes[0].steps()
     );
 
@@ -192,7 +199,7 @@ fn raw_post_compiles_to_exactly_three_steps() {
 
 #[tokio::test]
 async fn raw_pipeline_preserves_stream_body() {
-    // Compile the raw-stream route and drive its three steps in order with
+    // Compile the raw-stream route and drive its four steps in order with
     // a Body::Stream exchange. The raw contract: the stream body must come
     // out untouched (no unmarshal/marshal ever touches it), the declared
     // produces must land as Content-Type, and the POST default 201 must be
@@ -202,13 +209,19 @@ async fn raw_pipeline_preserves_stream_body() {
     let steps = routes[0].steps();
     assert_eq!(
         steps.len(),
-        3,
-        "raw route must have exactly 3 compiled steps, got: {steps:?}"
+        4,
+        "raw route must have exactly 4 compiled steps, got: {steps:?}"
     );
 
     let mut ex = Exchange::new(Message::new(one_chunk_stream_body("binary-payload")));
 
     for (idx, step) in steps.iter().enumerate() {
+        // The content-negotiation gate compiles to BuilderStep::Processor —
+        // it is not a header step; skip it (this helper drives the header
+        // injections only, mirroring the compile_header_step contract).
+        if matches!(step, BuilderStep::Processor(_)) {
+            continue;
+        }
         let processor = compile_header_step(step);
         let result = processor.oneshot(ex).await;
         assert!(

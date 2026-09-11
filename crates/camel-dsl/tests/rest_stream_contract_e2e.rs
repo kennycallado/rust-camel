@@ -118,17 +118,23 @@ fn default_meta() -> StreamMetadata {
     StreamMetadata::default()
 }
 
-/// Drive every compiled step of the raw route over the exchange, in order.
+/// Drive every compiled header step of the raw route over the exchange, in
+/// order. The content-negotiation gate (compiled to `BuilderStep::Processor`)
+/// is skipped — this helper drives the header injections only.
 async fn drive_raw_pipeline(mut ex: Exchange) -> Exchange {
     let routes = parse_yaml(RAW_STREAM_YAML).expect("raw stream YAML must parse + compile");
     assert_eq!(routes.len(), 1, "one operation must lower to one route");
     let steps = routes[0].steps();
     assert_eq!(
         steps.len(),
-        3,
-        "raw route must compile to exactly 3 steps, got {steps:?}"
+        4,
+        "raw route must compile to exactly 4 steps, got {steps:?}"
     );
     for step in steps.iter() {
+        // The negotiation gate is a Processor, not a header step — skip it.
+        if matches!(step, BuilderStep::Processor(_)) {
+            continue;
+        }
         let processor = compile_header_step(step);
         ex = processor
             .oneshot(ex)

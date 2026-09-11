@@ -59,19 +59,22 @@ rest:
 
 /// Extract the compiled `BuilderStep::Processor` (i.e. the actual Tower
 /// service) for the `unmarshal` step from the POST route. REST DSL lowering
-/// injects unmarshal as the FIRST step; the default-status SetHeaderIfAbsent
-/// is appended as the LAST step (spec §6.2/§7.1/§9 if-absent semantics).
+/// injects the content-negotiation gate as the FIRST step and unmarshal as
+/// the second; the default-status SetHeaderIfAbsent is appended as the LAST
+/// step (spec §6.2/§7.1/§9 if-absent semantics).
 fn compiled_unmarshal_processor() -> camel_api::BoxProcessor {
     let routes = parse_yaml(REST_YAML).expect("REST YAML must parse + compile");
     // Two routes? No — just one operation (POST), so one route.
     assert_eq!(routes.len(), 1, "expected exactly one route from POST");
     let steps = routes[0].steps();
-    // Layout per rest.rs lowering: [Unmarshal(json+schema), To, Marshal, SetHeader(Content-Type), SetHeaderIfAbsent(201)]
+    // Layout per rest.rs lowering: [ContentNegotiation, Unmarshal(json+schema), To,
+    // Marshal, SetHeader(Content-Type), SetHeaderIfAbsent(201)]
     assert!(
-        !steps.is_empty(),
-        "route must have at least one step (unmarshal), got: 0",
+        steps.len() >= 2,
+        "route must have the negotiation gate + unmarshal steps, got: {}",
+        steps.len(),
     );
-    match &steps[0] {
+    match &steps[1] {
         BuilderStep::Processor(op) => op.0.clone(),
         other => panic!("expected BuilderStep::Processor for unmarshal, got: {other:?}"),
     }

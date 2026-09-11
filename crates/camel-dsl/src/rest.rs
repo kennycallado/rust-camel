@@ -4,8 +4,8 @@ use camel_api::CamelError;
 
 use crate::media::{is_json_media_type, is_valid_media_declaration};
 use crate::route_ast::{
-    MarshalStep, RouteDslRest, RouteDslRestBinding, RouteDslRestOperation, RouteDslRoute,
-    RouteDslStep, SetHeaderData, SetHeaderStep, ToStep, UnmarshalStep,
+    ContentNegotiationStep, MarshalStep, RouteDslRest, RouteDslRestBinding, RouteDslRestOperation,
+    RouteDslRoute, RouteDslStep, SetHeaderData, SetHeaderStep, ToStep, UnmarshalStep,
 };
 
 /// Lower ALL REST blocks in a document into route entries, enforcing the
@@ -334,6 +334,17 @@ fn lower_operation(
     // Content-Type declaration and the default-if-absent status remain
     // binding-independent.
     let raw_binding = binding == RouteDslRestBinding::Raw;
+
+    // 0. Content-negotiation gate (change add-rest-strict-negotiation):
+    //    pushed FIRST for BOTH bindings and ALL verbs — the declared
+    //    `consumes`/`produces` (trimmed) drive the 406 Accept gate, and the
+    //    415 Content-Type side of the check runs only for verbs that carry
+    //    a request body.
+    steps.push(RouteDslStep::ContentNegotiation(ContentNegotiationStep {
+        consumes: op.consumes.trim().to_string(),
+        produces: op.produces.trim().to_string(),
+        check_content_type: verb_has_body(&verb_lc),
+    }));
 
     // 1. Request binding: unmarshal JSON body (only if verb has a body).
     //    Skipped entirely under raw binding — the body is consumed as-is.
@@ -1458,7 +1469,7 @@ rest:
     }
 
     #[test]
-    fn v1_route_step_sequence_is_byte_identical() {
+    fn v1_route_lowers_with_negotiation_prefix() {
         let rest = make_rest("getUser", "get", "/{id}", "bean:svc");
         let routes = lower_all_rest_to_routes(&[rest]).unwrap();
         assert_eq!(routes.len(), 1);
@@ -1469,12 +1480,18 @@ rest:
         assert_eq!(routes[0].id, "getUser");
         assert_eq!(
             step_kind_names(&routes[0].steps),
-            vec!["To", "Marshal", "SetHeader", "SetHeaderIfAbsent"]
+            vec![
+                "ContentNegotiation",
+                "To",
+                "Marshal",
+                "SetHeader",
+                "SetHeaderIfAbsent"
+            ]
         );
-        // Positional: Content-Type injection is step idx 2 (marshal follows
-        // the user To step; v1 pushes Marshal UNCONDITIONALLY — only the
-        // unmarshal is verb-guarded).
-        match &routes[0].steps[2] {
+        // Positional: Content-Type injection is step idx 3 (negotiation gate
+        // first, then the user To step and marshal; v1 pushes Marshal
+        // UNCONDITIONALLY — only the unmarshal is verb-guarded).
+        match &routes[0].steps[3] {
             RouteDslStep::SetHeader(h) => {
                 assert_eq!(h.set_header.key, "Content-Type");
                 assert_eq!(
@@ -1482,14 +1499,14 @@ rest:
                     Some(serde_json::json!("application/json"))
                 );
             }
-            other => panic!("expected SetHeader at idx 2, got {other:?}"),
+            other => panic!("expected SetHeader at idx 3, got {other:?}"),
         }
-        match &routes[0].steps[3] {
+        match &routes[0].steps[4] {
             RouteDslStep::SetHeaderIfAbsent(h) => {
                 assert_eq!(h.set_header.key, "CamelHttpResponseCode");
                 assert_eq!(h.set_header.value, Some(serde_json::json!(200)));
             }
-            other => panic!("expected SetHeaderIfAbsent at idx 3, got {other:?}"),
+            other => panic!("expected SetHeaderIfAbsent at idx 4, got {other:?}"),
         }
     }
 
@@ -1502,6 +1519,7 @@ rest:
         assert_eq!(
             step_kind_names(&routes[0].steps),
             vec![
+                "ContentNegotiation",
                 "Unmarshal",
                 "To",
                 "Marshal",
@@ -1510,10 +1528,18 @@ rest:
             ]
         );
         match &routes[0].steps[0] {
-            RouteDslStep::Unmarshal(u) => assert_eq!(u.schema, Some(schema)),
-            other => panic!("expected Unmarshal at idx 0, got {other:?}"),
+            RouteDslStep::ContentNegotiation(n) => {
+                assert_eq!(n.consumes, "application/json");
+                assert_eq!(n.produces, "application/json");
+                assert!(n.check_content_type);
+            }
+            other => panic!("expected ContentNegotiation at idx 0, got {other:?}"),
         }
-        match &routes[0].steps[3] {
+        match &routes[0].steps[1] {
+            RouteDslStep::Unmarshal(u) => assert_eq!(u.schema, Some(schema)),
+            other => panic!("expected Unmarshal at idx 1, got {other:?}"),
+        }
+        match &routes[0].steps[4] {
             RouteDslStep::SetHeader(h) => {
                 assert_eq!(h.set_header.key, "Content-Type");
                 assert_eq!(
@@ -1521,7 +1547,7 @@ rest:
                     Some(serde_json::json!("application/json"))
                 );
             }
-            other => panic!("expected SetHeader at idx 3, got {other:?}"),
+            other => panic!("expected SetHeader at idx 4, got {other:?}"),
         }
         match routes[0].steps.last().unwrap() {
             RouteDslStep::SetHeaderIfAbsent(h) => {
@@ -1555,23 +1581,24 @@ rest:
         assert_eq!(routes.len(), 1);
         assert_eq!(
             step_kind_names(&routes[0].steps),
-            vec!["To", "SetHeader", "SetHeaderIfAbsent"],
+            vec!["ContentNegotiation", "To", "SetHeader", "SetHeaderIfAbsent"],
             "raw mode must not emit Unmarshal/Marshal binding steps"
         );
-        // Positional: Content-Type injection follows the user To step.
-        match &routes[0].steps[1] {
+        // Positional: Content-Type injection follows the negotiation gate
+        // and the user To step.
+        match &routes[0].steps[2] {
             RouteDslStep::SetHeader(h) => {
                 assert_eq!(h.set_header.key, "Content-Type");
                 assert_eq!(h.set_header.value, Some(serde_json::json!("image/png")));
             }
-            other => panic!("expected SetHeader at idx 1, got {other:?}"),
+            other => panic!("expected SetHeader at idx 2, got {other:?}"),
         }
-        match &routes[0].steps[2] {
+        match &routes[0].steps[3] {
             RouteDslStep::SetHeaderIfAbsent(h) => {
                 assert_eq!(h.set_header.key, "CamelHttpResponseCode");
                 assert_eq!(h.set_header.value, Some(serde_json::json!(200)));
             }
-            other => panic!("expected SetHeaderIfAbsent at idx 2, got {other:?}"),
+            other => panic!("expected SetHeaderIfAbsent at idx 3, got {other:?}"),
         }
         let names = step_kind_names(&routes[0].steps);
         assert!(
@@ -1751,5 +1778,144 @@ rest:
         rest.operations[0].consumes = "application/octet-stream".to_string();
         rest.operations[0].produces = "image/png".to_string();
         assert!(lower_all_rest_to_routes(&[rest]).is_ok());
+    }
+
+    // ── Task 3.3: strict content-negotiation lowering ──
+
+    #[test]
+    fn lower_json_post_sequence_has_negotiation_first() {
+        let rest = make_rest("op1", "post", "/x", "direct:t");
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            step_kind_names(&routes[0].steps),
+            vec![
+                "ContentNegotiation",
+                "Unmarshal",
+                "To",
+                "Marshal",
+                "SetHeader",
+                "SetHeaderIfAbsent"
+            ]
+        );
+        match &routes[0].steps[0] {
+            RouteDslStep::ContentNegotiation(n) => {
+                assert_eq!(n.consumes, "application/json");
+                assert_eq!(n.produces, "application/json");
+                assert!(
+                    n.check_content_type,
+                    "POST carries a body: the Content-Type (415) gate must be on"
+                );
+            }
+            other => panic!("expected ContentNegotiation at idx 0, got {other:?}"),
+        }
+        match &routes[0].steps[1] {
+            RouteDslStep::Unmarshal(u) => {
+                assert_eq!(u.unmarshal, "json");
+                assert!(u.schema.is_none());
+            }
+            other => panic!("expected Unmarshal(json) at idx 1, got {other:?}"),
+        }
+        match &routes[0].steps[2] {
+            RouteDslStep::To(t) => assert_eq!(t.to, "direct:t"),
+            other => panic!("expected To(direct:t) at idx 2, got {other:?}"),
+        }
+        match &routes[0].steps[3] {
+            RouteDslStep::Marshal(m) => assert_eq!(m.marshal, "json"),
+            other => panic!("expected Marshal(json) at idx 3, got {other:?}"),
+        }
+        match &routes[0].steps[4] {
+            RouteDslStep::SetHeader(h) => {
+                assert_eq!(h.set_header.key, "Content-Type");
+                assert_eq!(
+                    h.set_header.value,
+                    Some(serde_json::json!("application/json"))
+                );
+            }
+            other => panic!("expected SetHeader(Content-Type) at idx 4, got {other:?}"),
+        }
+        match routes[0].steps.last().unwrap() {
+            RouteDslStep::SetHeaderIfAbsent(h) => {
+                assert_eq!(h.set_header.key, "CamelHttpResponseCode");
+                assert_eq!(h.set_header.value, Some(serde_json::json!(201)));
+            }
+            other => panic!("expected SetHeaderIfAbsent(201) last, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_raw_sequence_has_negotiation_first() {
+        let mut rest = make_rest("op1", "post", "/x", "direct:t");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Raw);
+        rest.operations[0].consumes = "application/octet-stream".to_string();
+        rest.operations[0].produces = "image/png".to_string();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            step_kind_names(&routes[0].steps),
+            vec!["ContentNegotiation", "To", "SetHeader", "SetHeaderIfAbsent"],
+            "raw mode: negotiation gate first, no Unmarshal/Marshal"
+        );
+        match &routes[0].steps[0] {
+            RouteDslStep::ContentNegotiation(n) => {
+                assert_eq!(n.consumes, "application/octet-stream");
+                assert_eq!(n.produces, "image/png");
+                assert!(
+                    n.check_content_type,
+                    "POST carries a body: the Content-Type (415) gate must be on"
+                );
+            }
+            other => panic!("expected ContentNegotiation at idx 0, got {other:?}"),
+        }
+        match &routes[0].steps[1] {
+            RouteDslStep::To(t) => assert_eq!(t.to, "direct:t"),
+            other => panic!("expected To(direct:t) at idx 1, got {other:?}"),
+        }
+        match &routes[0].steps[2] {
+            RouteDslStep::SetHeader(h) => {
+                assert_eq!(h.set_header.key, "Content-Type");
+                assert_eq!(h.set_header.value, Some(serde_json::json!("image/png")));
+            }
+            other => panic!("expected SetHeader(Content-Type: image/png) at idx 2, got {other:?}"),
+        }
+        match routes[0].steps.last().unwrap() {
+            RouteDslStep::SetHeaderIfAbsent(h) => {
+                assert_eq!(h.set_header.key, "CamelHttpResponseCode");
+                assert_eq!(
+                    h.set_header.value,
+                    Some(serde_json::json!(201)),
+                    "POST default status is binding-independent"
+                );
+            }
+            other => panic!("expected SetHeaderIfAbsent last, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_bodyless_verbs_carry_flag_false() {
+        for (verb, op_id) in [("get", "opGet"), ("delete", "opDelete")] {
+            let rest = make_rest(op_id, verb, "/x", "direct:t");
+            let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+            assert_eq!(routes.len(), 1);
+            match &routes[0].steps[0] {
+                RouteDslStep::ContentNegotiation(n) => {
+                    assert!(
+                        !n.check_content_type,
+                        "{verb} carries no body: the Content-Type (415) gate must be off"
+                    );
+                    assert_eq!(n.consumes, "application/json");
+                    assert_eq!(n.produces, "application/json");
+                }
+                other => {
+                    panic!("expected ContentNegotiation first for {verb}, got {other:?}")
+                }
+            }
+            assert!(
+                !step_kind_names(&routes[0].steps)
+                    .iter()
+                    .any(|name| name == "Unmarshal"),
+                "{verb} must not emit Unmarshal"
+            );
+        }
     }
 }
