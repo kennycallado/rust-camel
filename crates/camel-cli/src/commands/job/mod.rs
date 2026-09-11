@@ -1,5 +1,7 @@
-//! `camel job <FILE>` — one-shot route execution from a `*.test.yaml`
-//! document declaring a top-level `execute:` section.
+//! `camel job <FILE>` — one-shot route execution from a `*.job.yaml`
+//! document declaring a top-level `execute:` section. A bare name
+//! resolves `{jobs.dir}/<name>.job.yaml`; no argument lists the jobs
+//! directory.
 //!
 //! The job boots the REAL composition root (the same seams `camel run`
 //! uses: config load, security compile context, bind-exposure acks, the
@@ -52,9 +54,11 @@ const MIN_SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 /// CLI args for `camel job`.
 #[derive(Args, Debug)]
 pub struct JobArgs {
-    /// Path to the job document (`*.test.yaml` with an `execute:` section).
+    /// Path to the job document (`*.job.yaml` with an `execute:`
+    /// section). A bare name (no separator, no suffix) resolves
+    /// `{jobs.dir}/<name>.job.yaml`; omitted lists the jobs directory.
     #[arg(value_name = "FILE")]
-    pub document: PathBuf,
+    pub document: Option<PathBuf>,
     /// Write the JSON report to this path instead of stdout.
     #[arg(long, value_name = "FILE")]
     pub report: Option<PathBuf>,
@@ -118,17 +122,78 @@ enum SendError {
     Transport(String),
 }
 
+/// The jobs directory, anchored at the Camel.toml root (never the
+/// process CWD): `canonical_project_root(--config)` joined with
+/// `[jobs].dir`. Shared by bare-name resolution and no-argument
+/// listing so the two surfaces cannot drift.
+fn jobs_root(args: &JobArgs, camel_config: &camel_config::config::CamelConfig) -> PathBuf {
+    crate::commands::run::canonical_project_root(Path::new(&args.config))
+        .join(&camel_config.jobs.dir)
+}
+
+/// Resolve a document argument. An explicit path (any path separator,
+/// or a `.yaml`/`.yml`/`.json` suffix) is used as-is — including an
+/// explicit `.job.yml`. A bare name probes exactly
+/// `{jobs_root}/<name>.job.yaml` (one deterministic spelling, no
+/// alternate-suffix probing) and a miss fails with one error naming
+/// the probed file.
+fn resolve_job_path(raw: &Path, jobs_root: &Path) -> Result<PathBuf, String> {
+    let name = raw.to_string_lossy();
+    let lower = name.to_lowercase();
+    let explicit = raw.components().count() > 1
+        || lower.ends_with(".yaml")
+        || lower.ends_with(".yml")
+        || lower.ends_with(".json");
+    if explicit {
+        return Ok(raw.to_path_buf());
+    }
+    let probe = jobs_root.join(format!("{name}.job.yaml"));
+    if probe.exists() {
+        Ok(probe)
+    } else {
+        Err(format!(
+            "no job `{name}` in `{}` (looked for {name}.job.yaml)",
+            jobs_root.display()
+        ))
+    }
+}
+
 /// Run one job document; returns the process exit code (`main.rs`
 /// applies it). Every failure path prints to stderr; the JSON report
 /// goes to stdout (default) or `--report`.
 pub async fn run_job(args: &JobArgs) -> i32 {
     let started = Instant::now();
 
+    // Config first: bare-name resolution needs `[jobs].dir`.
+    let camel_config = match crate::commands::run::load_config_or_default(&args.config) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("camel-cli job failed: {e}");
+            return 2;
+        }
+    };
+
+    let Some(raw_document) = &args.document else {
+        if args.report.is_some() {
+            eprintln!("--report requires a job document");
+            return 2;
+        }
+        eprintln!("no job document given");
+        return 2;
+    };
+    let resolved = match resolve_job_path(raw_document, &jobs_root(args, &camel_config)) {
+        Ok(path) => path,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return 2;
+        }
+    };
+
     // ---- Load-time validation (exit 2 class) --------------------------
-    let document_path = match std::fs::canonicalize(&args.document) {
+    let document_path = match std::fs::canonicalize(&resolved) {
         Ok(path) => path,
         Err(e) => {
-            eprintln!("{}: {e}", args.document.display());
+            eprintln!("{}: {e}", resolved.display());
             return 2;
         }
     };
@@ -152,14 +217,6 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         .unwrap_or_else(|| PathBuf::from("."));
 
     // ---- Boot composition: mirrors `camel run` steps 1-5 ---------------
-    let camel_config = match crate::commands::run::load_config_or_default(&args.config) {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("camel-cli job failed: {e}");
-            return 2;
-        }
-    };
-
     let beans_registry = {
         let bean_reg = std::sync::Arc::new(std::sync::Mutex::new(camel_bean::BeanRegistry::new()));
         if camel_config.beans.is_empty() {

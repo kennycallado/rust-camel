@@ -343,3 +343,240 @@ routeFiles:
         "report: {report}"
     );
 }
+
+// ── Bare-name resolution + optional document (job-ux-reshape) ──────────
+
+/// Run `camel job <args...>` in `dir` with arbitrary args (no Path
+/// coercion) and return `(exit_code, stdout, stderr)`.
+fn run_job_args(dir: &Path, args: &[&str]) -> (i32, String, String) {
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_camel"))
+        .arg("job")
+        .args(args)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn camel job");
+    let out_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let err_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let out_handle = std::thread::spawn({
+        let buf = std::sync::Arc::clone(&out_buf);
+        let stdout = child.stdout.take().expect("stdout piped");
+        move || drain_to_buffer(stdout, buf)
+    });
+    let err_handle = std::thread::spawn({
+        let buf = std::sync::Arc::clone(&err_buf);
+        let stderr = child.stderr.take().expect("stderr piped");
+        move || drain_to_buffer(stderr, buf)
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    let exit_code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code().unwrap_or(-1),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break -1;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => panic!("try_wait failed: {e}"),
+        }
+    };
+    let _ = out_handle.join();
+    let _ = err_handle.join();
+    (
+        exit_code,
+        out_buf.lock().expect("stdout lock").clone(),
+        err_buf.lock().expect("stderr lock").clone(),
+    )
+}
+
+/// The canonical bare-name fixture: `jobs/` dir + `routeFilesFromRoot`
+/// (the blessed mechanism for a separate jobs dir, ADR-0062 Rule 3).
+fn write_bare_name_fixture(dir: &Path) {
+    write_config(dir);
+    std::fs::create_dir_all(dir.join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-transform"
+    from: "direct:transform"
+    steps:
+      - set_body:
+          value: "job-done"
+"#,
+    )
+    .expect("write route");
+    std::fs::create_dir_all(dir.join("jobs")).expect("mkdir jobs");
+    std::fs::write(
+        dir.join("jobs/job.job.yaml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: "ping"
+routeFilesFromRoot:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+}
+
+#[test]
+fn bare_name_resolves_from_jobs_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_bare_name_fixture(dir.path());
+    let (code, stdout, stderr) = run_job(dir.path(), "job");
+    assert_eq!(
+        code, 0,
+        "bare name must resolve jobs/job.job.yaml;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+}
+
+#[test]
+fn bare_name_miss_single_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_bare_name_fixture(dir.path());
+    let (code, stdout, stderr) = run_job(dir.path(), "nope");
+    assert_eq!(
+        code, 2,
+        "bare miss is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no job `nope`"),
+        "stderr must carry the miss error; got:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("nope.job.yaml").count(),
+        1,
+        "exactly one mention of the probed file; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "no report on a miss; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn explicit_path_wins_over_jobs_resolution() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir_all(dir.path().join("ops")).expect("mkdir ops");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-transform"
+    from: "direct:transform"
+    steps:
+      - set_body:
+          value: "job-done"
+"#,
+    )
+    .expect("write route");
+    // Explicit .job.yml spelling in a non-jobs dir; no jobs/ dir exists at
+    // all — resolution must not probe it.
+    std::fs::write(
+        dir.path().join("ops/x.job.yml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: direct:transform
+    body: "ping"
+routeFilesFromRoot:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "ops/x.job.yml");
+    assert_eq!(
+        code, 0,
+        "explicit path is used as-is;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+}
+
+#[test]
+fn route_source_still_mandatory_no_routes_fallback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A routes/ dir with a REAL route exists and Camel.toml's routes glob
+    // covers it — the missing route source must still fail, never fall
+    // back to routes/ discovery.
+    write_bare_name_fixture(dir.path());
+    std::fs::write(
+        dir.path().join("jobs/nosrc.job.yaml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: direct:transform
+    body: "ping"
+"#,
+    )
+    .expect("write job doc without a route source");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "nosrc");
+    assert_eq!(
+        code, 2,
+        "missing route source is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("exactly one route source"),
+        "stderr must carry the route-source error; got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("routes/*.yaml"),
+        "no routes/ glob fallback may occur; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn jobs_dir_anchored_at_config_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_bare_name_fixture(dir.path());
+    let nested = dir.path().join("nested/deeper");
+    std::fs::create_dir_all(&nested).expect("mkdir nested");
+    // From a nested CWD, --config pointing at the root Camel.toml: the
+    // bare name must resolve the ROOT jobs/ dir, not ./jobs/ under CWD.
+    let config = dir.path().join("Camel.toml");
+    let config_arg = config.to_str().expect("path is valid utf-8");
+    let (code, stdout, stderr) = run_job_args(&nested, &["--config", config_arg, "job"]);
+    assert_eq!(
+        code, 0,
+        "bare name anchors at the Camel.toml root;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+}
+
+#[test]
+fn report_without_document_is_usage_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_bare_name_fixture(dir.path());
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["--report", "out.json"]);
+    assert_eq!(
+        code, 2,
+        "--report without a document is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--report requires a job document"),
+        "stderr must name the usage error; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "no listing, no report on stdout; got:\n{stdout}"
+    );
+}

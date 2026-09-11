@@ -101,7 +101,7 @@ enum Commands {
     /// the current working directory. Only run from a trusted directory.
     Test(commands::test::TestArgs),
 
-    /// Run one job from a *.test.yaml document with an `execute:` section.
+    /// Run one job from a *.job.yaml document with an `execute:` section.
     ///
     /// Trust model: `camel job` executes route scripts, WASM modules, and
     /// beans resolved from the current working directory, like `camel run`.
