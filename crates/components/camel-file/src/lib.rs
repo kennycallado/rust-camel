@@ -1202,66 +1202,81 @@ fn validate_path_is_within_base(
     base_dir: &std::path::Path,
     target_path: &std::path::Path,
 ) -> Result<(), CamelError> {
-    // If both base and target exist, use strict canonicalize comparison.
-    // Otherwise, do lexical traversal check (sufficient since config-time
-    // validation already rejects '..' in fileName).
+    // If the base exists, enforce strict containment: canonicalize the base,
+    // reject any symlinked component below the ORIGINAL (non-canonicalized)
+    // base, and require the nearest existing ancestor of the target to stay
+    // within the canonicalized base.
     if base_dir.exists() {
         let canonical_base = base_dir.canonicalize().map_err(|e| {
             CamelError::ProcessorError(format!("Cannot canonicalize base directory: {}", e))
         })?;
 
-        let canonical_target = if target_path.exists() {
-            target_path.canonicalize().map_err(|e| {
-                CamelError::ProcessorError(format!("Cannot canonicalize target path: {}", e))
-            })?
-        } else if let Some(parent) = target_path.parent() {
-            if parent.exists() {
-                let canonical_parent = parent.canonicalize().map_err(|e| {
-                    CamelError::ProcessorError(format!(
-                        "Cannot canonicalize parent directory: {}",
-                        e
-                    ))
-                })?;
-                if let Some(filename) = target_path.file_name() {
-                    canonical_parent.join(filename)
-                } else {
-                    return Err(CamelError::ProcessorError(
-                        "Invalid target path: no filename".to_string(),
-                    ));
-                }
-            } else {
-                // Neither target nor its parent exist — use lexical traversal check.
-                let rel = target_path.strip_prefix(base_dir).map_err(|_| {
-                    CamelError::ProcessorError(format!(
-                        "Path '{}' is not under base '{}'",
-                        target_path.display(),
-                        base_dir.display()
-                    ))
-                })?;
-                if path_contains_traversal(&rel.to_string_lossy()) {
-                    return Err(CamelError::ProcessorError(format!(
-                        "Path '{}' contains directory traversal",
-                        target_path.display()
-                    )));
-                }
-                return Ok(());
-            }
-        } else {
-            return Err(CamelError::ProcessorError(
-                "Invalid target path: no parent directory".to_string(),
-            ));
-        };
+        // Relative components against the original (non-canonicalized) base.
+        let rel = target_path.strip_prefix(base_dir).map_err(|_| {
+            CamelError::ProcessorError(format!(
+                "Path '{}' is not under base '{}'",
+                target_path.display(),
+                base_dir.display()
+            ))
+        })?;
+        if path_contains_traversal(&rel.to_string_lossy()) {
+            return Err(CamelError::ProcessorError(format!(
+                "Path '{}' contains directory traversal",
+                target_path.display()
+            )));
+        }
 
-        if !canonical_target.starts_with(&canonical_base) {
+        // Symlink-chain rejection: every cumulative component below the base
+        // must be symlink-free at validation time, including symlinks that
+        // resolve inside the canonicalized base (they are mutable
+        // retargeting points). The base itself may be a symlink
+        // (canonicalized above, per the operator contract).
+        let mut cumulative = base_dir.to_path_buf();
+        for component in rel.components() {
+            cumulative.push(component);
+            if std::fs::symlink_metadata(&cumulative).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err(CamelError::ProcessorError(format!(
+                    "Path '{}' traverses symlinked component '{}' below base '{}'",
+                    target_path.display(),
+                    cumulative.display(),
+                    base_dir.display()
+                )));
+            }
+        }
+
+        // Nearest-existing-ancestor containment: walk up to the closest
+        // existing ancestor, canonicalize it, and require it to stay within
+        // the canonicalized base. Since the base exists and lexically
+        // prefixes the target, the walk terminates at the base at the
+        // latest; the parent-less fallback degenerates to base containment.
+        let mut ancestor = target_path;
+        while std::fs::symlink_metadata(ancestor).is_err() {
+            match ancestor.parent() {
+                Some(parent) => ancestor = parent,
+                None => {
+                    ancestor = base_dir;
+                    break;
+                }
+            }
+        }
+        let canonical_ancestor = ancestor.canonicalize().map_err(|e| {
+            CamelError::ProcessorError(format!(
+                "Cannot canonicalize existing ancestor '{}': {}",
+                ancestor.display(),
+                e
+            ))
+        })?;
+        if !canonical_ancestor.starts_with(&canonical_base) {
             return Err(CamelError::ProcessorError(format!(
                 "Path '{}' is outside base directory '{}'",
-                canonical_target.display(),
+                canonical_ancestor.display(),
                 canonical_base.display()
             )));
         }
     } else {
-        // Base dir doesn't exist yet (auto_create case).
-        // Lexical check: ensure no traversal in the relative portion.
+        // Base dir doesn't exist yet (auto_create case): nothing below it
+        // can be a pre-existing symlink, so a lexical traversal check
+        // suffices.
         let rel = target_path.strip_prefix(base_dir).map_err(|_| {
             CamelError::ProcessorError(format!(
                 "Path '{}' is not under base '{}'",
@@ -1369,6 +1384,13 @@ impl Service<Exchange> for FileProducer {
                     .map_err(|_| CamelError::ProcessorError("Timeout creating directories".into()))?
                     .map_err(CamelError::from)?;
             }
+
+            // 2b. Post-create re-verification: a symlink followed during
+            // directory creation yields an outside-base canonical parent and
+            // the write is refused before any open/rename. It cannot undo
+            // directories created during a concurrent race — documented
+            // residual (see CONTEXT.md).
+            validate_path_is_within_base(dir_path, &target_path)?;
 
             // 3. Handle file-exist strategy
             match config.file_exist {
@@ -4212,6 +4234,344 @@ mod tests {
         assert!(validate_relative_filename("a\0b", "fileName").is_err());
         assert!(validate_relative_filename("", "fileName").is_err());
         assert!(validate_relative_filename("ok/nested.txt", "fileName").is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // validate_path_is_within_base: symlinked-component confinement
+    // (file-ancestor-confinement, Task 1.1)
+    // -------------------------------------------------------------------------
+
+    /// A symlinked intermediate component below base must be rejected even
+    /// when nothing below it exists yet.
+    #[cfg(unix)]
+    #[test]
+    fn validator_rejects_symlinked_ancestor() {
+        let base = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), base.path().join("link")).unwrap();
+
+        let target = base.path().join("link").join("new").join("f.txt");
+        let err = validate_path_is_within_base(base.path(), &target)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("symlinked component"),
+            "error must name the symlinked component, got: {err}"
+        );
+        assert!(
+            err.contains(&base.path().join("link").display().to_string()),
+            "error must name the symlinked component 'link', got: {err}"
+        );
+    }
+
+    /// An in-base symlink alias (`base/alias -> base/real`) is a component
+    /// below the configured base and must be rejected even though it
+    /// resolves inside the canonicalized base.
+    #[cfg(unix)]
+    #[test]
+    fn validator_rejects_in_base_alias() {
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir(base.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(base.path().join("real"), base.path().join("alias")).unwrap();
+
+        let target = base.path().join("alias").join("new").join("f.txt");
+        let err = validate_path_is_within_base(base.path(), &target)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("symlinked component"),
+            "in-base alias must be rejected, got: {err}"
+        );
+        assert!(
+            err.contains(&base.path().join("alias").display().to_string()),
+            "error must name the symlinked component 'alias', got: {err}"
+        );
+    }
+
+    /// A deep not-yet-existing path with no symlinks stays accepted: the
+    /// nearest-existing-ancestor containment degenerates to the base itself.
+    #[test]
+    fn validator_accepts_missing_deep_path() {
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("a").join("b").join("c.txt");
+        validate_path_is_within_base(base.path(), &target).unwrap();
+    }
+
+    /// The base directory itself may be a symlink; only components below
+    /// the configured base are subject to symlink rejection.
+    #[cfg(unix)]
+    #[test]
+    fn validator_accepts_symlinked_base() {
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::create_dir(parent.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(parent.path().join("real"), parent.path().join("base")).unwrap();
+
+        let base = parent.path().join("base");
+        let target = base.join("x.txt");
+        validate_path_is_within_base(&base, &target).unwrap();
+    }
+
+    /// Regression guard: an existing target reached through
+    /// `base/link -> outside` must be rejected by the symlink-chain scan
+    /// (which fires before the ancestor-containment check).
+    #[cfg(unix)]
+    #[test]
+    fn validator_rejects_existing_outside_target() {
+        let base = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("existing.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), base.path().join("link")).unwrap();
+
+        let target = base.path().join("link").join("existing.txt");
+        let err = validate_path_is_within_base(base.path(), &target)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("symlinked component"),
+            "chain scan must fire before containment, got: {err}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Producer regression tests: symlinked-ancestor confinement end-to-end
+    // (file-ancestor-confinement, Task 1.2)
+    // -------------------------------------------------------------------------
+
+    /// Producer-level regression tests for symlink confinement. Each test
+    /// drives `FileProducer::call` end-to-end through the component harness
+    /// and asserts that a symlinked component below the configured base is
+    /// rejected before any filesystem artifact is produced outside it, while
+    /// legitimate nested creation and a symlinked base itself stay accepted.
+    #[cfg(unix)]
+    mod producer_symlink_confinement {
+        use super::*;
+        use tower::ServiceExt;
+
+        /// Shared arrange: `base/` and `outside/` tempdirs on the same
+        /// filesystem, with `base/link -> outside` planted (unless
+        /// [`SymlinkFixture::new_without_link`]).
+        struct SymlinkFixture {
+            base: tempfile::TempDir,
+            outside: tempfile::TempDir,
+        }
+
+        impl SymlinkFixture {
+            fn new() -> Self {
+                Self::build(true)
+            }
+
+            /// Variant without the planted symlink, for the plain
+            /// no-symlinks success case.
+            fn new_without_link() -> Self {
+                Self::build(false)
+            }
+
+            fn build(with_link: bool) -> Self {
+                let base = tempfile::tempdir().unwrap();
+                let outside = tempfile::tempdir().unwrap();
+                if with_link {
+                    std::os::unix::fs::symlink(outside.path(), base.path().join("link")).unwrap();
+                }
+                Self { base, outside }
+            }
+
+            fn base(&self) -> &std::path::Path {
+                self.base.path()
+            }
+
+            fn outside(&self) -> &std::path::Path {
+                self.outside.path()
+            }
+
+            /// Config builder matching the existing producer-test shape:
+            /// endpoint on this fixture's base with the given URI query.
+            fn producer(&self, query: &str) -> BoxProcessor {
+                make_producer(self.base(), query)
+            }
+
+            /// `outside/` must contain no artifacts at all.
+            fn assert_outside_untouched(&self) {
+                let entries: Vec<_> = std::fs::read_dir(self.outside())
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                assert!(
+                    entries.is_empty(),
+                    "outside/ must contain no artifacts, got: {:?}",
+                    entries.iter().map(|e| e.path()).collect::<Vec<_>>()
+                );
+            }
+        }
+
+        /// Build a producer on `dir_path` the same way the existing producer
+        /// tests do: `FileComponent` -> endpoint URI -> `create_producer`.
+        fn make_producer(dir_path: &std::path::Path, query: &str) -> BoxProcessor {
+            let component = FileComponent::new();
+            let ctx = NoOpComponentContext;
+            let endpoint = component
+                .create_endpoint(&format!("file:{}{query}", dir_path.display()), &ctx)
+                .unwrap();
+            let ctx = test_producer_ctx();
+            endpoint.create_producer(rt(), &ctx).unwrap()
+        }
+
+        /// Drive `FileProducer::call` with a text body and a `CamelFileName`
+        /// header via `oneshot`.
+        async fn call(
+            producer: BoxProcessor,
+            file_name: &str,
+            body: &str,
+        ) -> Result<Exchange, CamelError> {
+            let mut exchange = Exchange::new(Message::new(body));
+            exchange
+                .input
+                .set_header("CamelFileName", serde_json::Value::String(file_name.into()));
+            producer.oneshot(exchange).await
+        }
+
+        /// For EVERY fileExist strategy, a fileName whose intermediate
+        /// component is a symlink below the base must be rejected with the
+        /// confinement violation, and the symlink target must stay empty.
+        #[tokio::test]
+        async fn producer_rejects_symlinked_ancestor_all_strategies() {
+            for strategy in ["Fail", "Append", "Override", "TryRename"] {
+                let fixture = SymlinkFixture::new();
+                let query = if strategy == "TryRename" {
+                    format!("?fileExist={strategy}&tempPrefix=tmp-")
+                } else {
+                    format!("?fileExist={strategy}")
+                };
+                let producer = fixture.producer(&query);
+
+                let Err(err) = call(producer, "link/new/file.txt", "payload").await else {
+                    panic!("fileExist={strategy}: symlinked ancestor must be rejected");
+                };
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("symlinked component"),
+                    "fileExist={strategy}: error must mention the confinement violation, got: {msg}"
+                );
+                assert!(
+                    !fixture.outside().join("new").exists(),
+                    "fileExist={strategy}: outside/new/ must not exist"
+                );
+                fixture.assert_outside_untouched();
+            }
+        }
+
+        /// A safe body fileName plus an independently symlinked doneFileName
+        /// ancestor must fail the exchange without creating the done file in
+        /// the symlink target.
+        #[tokio::test]
+        async fn producer_done_file_rejects_symlinked_ancestor() {
+            let fixture = SymlinkFixture::new();
+            let producer = fixture.producer("?doneFileName=link/done-marker");
+
+            let Err(err) = call(producer, "body.txt", "payload").await else {
+                panic!("symlinked doneFileName ancestor must be rejected");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("symlinked component"),
+                "error must mention the confinement violation, got: {msg}"
+            );
+            // The body write precedes done-file validation, so it must have
+            // landed before the rejection (pins error provenance to the
+            // done-file path, not the write path).
+            assert!(
+                fixture.base().join("body.txt").exists(),
+                "base/body.txt must exist: body write precedes done-file validation"
+            );
+            assert!(
+                !fixture.outside().join("done-marker").exists(),
+                "outside/done-marker must not exist"
+            );
+            fixture.assert_outside_untouched();
+        }
+
+        /// fileExist=Ignore must NOT degrade to the early no-op success when
+        /// the existing target is reached through a symlinked ancestor; the
+        /// probe must be rejected and the target file left unchanged.
+        #[tokio::test]
+        async fn producer_ignore_probe_rejects_symlinked_ancestor() {
+            let fixture = SymlinkFixture::new();
+            std::fs::write(fixture.outside().join("existing.txt"), b"original").unwrap();
+
+            let producer = fixture.producer("?fileExist=Ignore");
+            let Err(err) = call(producer, "link/existing.txt", "probe").await else {
+                panic!("Ignore probe via symlinked ancestor must be rejected");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("symlinked component"),
+                "error must mention the confinement violation, got: {msg}"
+            );
+
+            let content = std::fs::read(fixture.outside().join("existing.txt")).unwrap();
+            assert_eq!(
+                content, b"original",
+                "outside/existing.txt content must be unchanged"
+            );
+        }
+
+        /// An in-base symlink alias (`base/alias -> base/real`) is a
+        /// symlinked component below the base and must be rejected even
+        /// though it resolves inside the base.
+        #[tokio::test]
+        async fn producer_in_base_alias_rejected() {
+            let fixture = SymlinkFixture::new();
+            std::fs::create_dir(fixture.base().join("real")).unwrap();
+            std::os::unix::fs::symlink(fixture.base().join("real"), fixture.base().join("alias"))
+                .unwrap();
+
+            let producer = fixture.producer(""); // default Override
+            let Err(err) = call(producer, "alias/f.txt", "payload").await else {
+                panic!("in-base alias must be rejected");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("symlinked component") && msg.contains("alias"),
+                "error must name the symlinked component 'alias', got: {msg}"
+            );
+        }
+
+        /// No over-blocking: plain nested directory auto-creation with no
+        /// symlinks anywhere must still succeed.
+        #[tokio::test]
+        async fn producer_nested_new_dirs_still_succeed() {
+            let fixture = SymlinkFixture::new_without_link();
+            let producer = fixture.producer("?autoCreate=true");
+
+            call(producer, "a/b/c.txt", "nested body")
+                .await
+                .expect("nested auto-created directories must succeed");
+
+            let content = std::fs::read_to_string(fixture.base().join("a/b/c.txt")).unwrap();
+            assert_eq!(content, "nested body");
+        }
+
+        /// No over-blocking: the base directory ITSELF may be a symlink
+        /// (operator contract); writes through it must be accepted and land
+        /// in the real directory.
+        #[tokio::test]
+        async fn producer_symlinked_base_still_accepted() {
+            let parent = tempfile::tempdir().unwrap();
+            std::fs::create_dir(parent.path().join("real")).unwrap();
+            std::os::unix::fs::symlink(parent.path().join("real"), parent.path().join("base"))
+                .unwrap();
+
+            let producer = make_producer(&parent.path().join("base"), "");
+            call(producer, "x.txt", "payload")
+                .await
+                .expect("a symlinked base directory must be accepted");
+
+            let content =
+                std::fs::read_to_string(parent.path().join("real").join("x.txt")).unwrap();
+            assert_eq!(
+                content, "payload",
+                "file must be written under the real dir"
+            );
+        }
     }
 
     #[test]

@@ -24,9 +24,16 @@ Spec reference: `docs/superpowers/specs/2026-06-20-rc-o6o-framework-contract-bug
   Unknown values raise `CamelError::InvalidUri` at config time. On Unix, the `Fail`,
   `Append`, and done-file opens use `O_NOFOLLOW` (`open_options_no_follow`, `src/lib.rs`):
   a SYMLINK LEAF fails the open, closing the check/open race for the final path
-  component. Ancestor-directory replacement remains a residual TOCTOU surface
-  (confinement is re-verified on the canonicalized path; `O_NOFOLLOW` cannot protect
-  intermediate components).
+  component. Any symlinked component below the configured base is rejected at
+  validation time — leaf or intermediate, in-base or escaping — via a cumulative
+  `symlink_metadata` chain scan; containment is verified against the nearest
+  existing ancestor (canonicalized), and `FileProducer::call` re-verifies
+  containment after `autoCreate`-created directories, before the first open or
+  rename. The deterministic symlinked-ancestor escape is closed; the documented
+  residual is now a concurrently planted symlink between validation and
+  mkdir/open (post-create re-verification blocks the write but cannot undo
+  directories created during the race). The base itself may be a symlink
+  (canonicalized normally).
 - **`tempPrefix` URI param**: a plain filename prefix (no path separators, no absolute paths,
   no null bytes). Validated by `is_valid_temp_prefix` (`src/lib.rs`). Required when
   `fileExist=TryRename`. The generated temp name carries an additional unpredictable
@@ -57,8 +64,10 @@ Spec reference: `docs/superpowers/specs/2026-06-20-rc-o6o-framework-contract-bug
 - **`durable=maybe` (or any non-boolean)**: rejected with `CamelError::InvalidUri` by
   `parse_bool_param`.
 - **Symlink leafs on producer opens (Unix)**: `Fail`, `Append`, and done-file opens carry
-  `O_NOFOLLOW`; a symlink FINAL component fails the open with `ELOOP`. Intermediate
-  components are not symlink-protected (residual TOCTOU; see Accepted names / values).
+  `O_NOFOLLOW`; a symlink FINAL component fails the open with `ELOOP`. Any symlinked
+  component below the configured base is rejected at validation time — leaf or
+  intermediate, in-base or escaping; the residual is narrowed to a concurrently
+  planted symlink between validation and mkdir/open (see Accepted names / values).
 - **Body larger than `maxWriteBytes`** (when > 0): rejected with
   `CamelError::ProcessorError` naming the limit.
 - **Cross-filesystem rename (EXDEV)**: if the OS rejects the rename with EXDEV (errno 18),
