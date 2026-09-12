@@ -402,6 +402,74 @@ impl BuilderStep {
         }
     }
 
+    /// Declared send URI retained on the compiled step for step-latency
+    /// attribution (steplatency task 1.1). Only `To` carries one: the RAW
+    /// AUTHORED URI, extracted as a pure string copy with no endpoint
+    /// resolution, so a `SkipTo` interception never rewrites it — the
+    /// compiled step keeps the URI the route author wrote, not the
+    /// intercept target. Stored as shared immutable text (`Arc<str>`).
+    /// Every other variant yields `None`.
+    ///
+    /// The match is exhaustive by design (no catch-all) so a future
+    /// variant forces a declared-URI decision here.
+    pub(crate) fn to_uri_metadata(&self) -> Option<Arc<str>> {
+        match self {
+            Self::To(uri) => Some(Arc::from(uri.as_str())),
+
+            // rc-4mz7: every remaining variant is named explicitly — no
+            // wildcard. A new BuilderStep variant fails to compile until it
+            // is classified here.
+            Self::Processor(..)
+            | Self::Stop
+            | Self::Log { .. }
+            | Self::DeclarativeSetHeader { .. }
+            | Self::DeclarativeSetHeaderIfAbsent { .. }
+            | Self::DeclarativeRemoveHeader { .. }
+            | Self::DeclarativeSetProperty { .. }
+            | Self::DeclarativeSetBody { .. }
+            | Self::DeclarativeFilter { .. }
+            | Self::DeclarativeChoice { .. }
+            | Self::DeclarativeScript { .. }
+            | Self::DeclarativeFunction { .. }
+            | Self::DeclarativeSplit { .. }
+            | Self::DeclarativeStreamSplit { .. }
+            | Self::DeclarativeDynamicRouter { .. }
+            | Self::DeclarativeRoutingSlip { .. }
+            | Self::Split { .. }
+            | Self::Aggregate { .. }
+            | Self::Filter { .. }
+            | Self::Choice { .. }
+            | Self::Multicast { .. }
+            | Self::DeclarativeLog { .. }
+            | Self::Bean { .. }
+            | Self::Script { .. }
+            | Self::Throttle { .. }
+            | Self::LoadBalance { .. }
+            | Self::DynamicRouter { .. }
+            | Self::RoutingSlip { .. }
+            | Self::RecipientList { .. }
+            | Self::DeclarativeRecipientList { .. }
+            | Self::Delay { .. }
+            | Self::Loop { .. }
+            | Self::DeclarativeLoop { .. }
+            | Self::Enrich { .. }
+            | Self::PollEnrich { .. }
+            | Self::WireTap { .. }
+            | Self::Validate { .. }
+            | Self::ClaimCheck { .. }
+            | Self::Sampling { .. }
+            | Self::Sort { .. }
+            | Self::IdempotentConsumer { .. }
+            | Self::Cache { .. }
+            | Self::CacheInvalidate { .. }
+            | Self::CacheClear { .. }
+            | Self::CacheStats { .. }
+            | Self::CachePeekStale { .. }
+            | Self::DeclarativeDoTry { .. }
+            | Self::Resequence { .. } => None,
+        }
+    }
+
     /// Span kind hint for this step's step span (span-kind-hint, task 1.2).
     ///
     /// Endpoint-bearing variants (`To`, `Enrich`, `PollEnrich`, `WireTap`)

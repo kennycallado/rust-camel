@@ -643,6 +643,7 @@ impl RouteCompilerExt<'_> {
                 body_contract: None,
                 lifecycle: Some(resequencer_lifecycle),
                 label: None,
+                to_uri: None,
             });
 
             return Ok((None, all_steps));

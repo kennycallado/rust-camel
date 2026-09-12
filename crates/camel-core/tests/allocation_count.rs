@@ -60,6 +60,7 @@ fn build_three_step_pipeline() -> camel_api::BoxProcessor {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         })
         .collect();
 

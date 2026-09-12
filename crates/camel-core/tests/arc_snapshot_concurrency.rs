@@ -25,6 +25,7 @@ fn pass_through() -> CompiledStep {
         body_contract: None,
         lifecycle: None,
         label: None,
+        to_uri: None,
     }
 }
 
@@ -47,6 +48,7 @@ async fn concurrent_swap_and_call_no_invalid_state() {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         })
         .chain((0..4).map(|_| pass_through()))
         .collect(),
@@ -64,6 +66,7 @@ async fn concurrent_swap_and_call_no_invalid_state() {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         })
         .chain((0..19).map(|_| pass_through()))
         .collect(),
@@ -186,6 +189,7 @@ async fn in_flight_call_completes_on_old_snapshot_after_swap() {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         }],
         PipelineRuntimeCtx::compile_time(),
     );
@@ -203,6 +207,7 @@ async fn in_flight_call_completes_on_old_snapshot_after_swap() {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         }],
         PipelineRuntimeCtx::compile_time(),
     );

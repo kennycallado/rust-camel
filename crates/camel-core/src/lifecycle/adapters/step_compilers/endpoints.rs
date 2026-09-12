@@ -45,6 +45,7 @@ fn compile_to(
             body_contract: resolved.body_contract,
             lifecycle: resolved.lifecycle,
             label: None,
+            to_uri: None,
         })),
     }
 }
@@ -97,6 +98,7 @@ fn compile_divert(
         body_contract: real.body_contract,
         lifecycle,
         label: None,
+        to_uri: None,
     }))
 }
 
@@ -154,6 +156,7 @@ impl StepCompiler for EndpointsCompiler {
                     body_contract: None,
                     lifecycle,
                     label: None,
+                    to_uri: None,
                 }))
             }
 

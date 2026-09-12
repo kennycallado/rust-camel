@@ -64,6 +64,7 @@ async fn step_span_has_no_duration_ms_attribute() {
         DetailLevel::Minimal,
         None,
         None,
+        None,
         SpanKindHint::Internal,
     );
     let outcome = proc
@@ -117,6 +118,7 @@ async fn tracing_processor_labeled_span_name() {
         DetailLevel::Minimal,
         None,
         Some("log".into()),
+        None,
         SpanKindHint::Internal,
     );
     let outcome = proc
@@ -146,6 +148,7 @@ async fn tracing_processor_fallback_span_name() {
         "r".to_string(),
         0,
         DetailLevel::Minimal,
+        None,
         None,
         None,
         SpanKindHint::Internal,
@@ -183,6 +186,7 @@ async fn tracing_processor_kind_client() {
         DetailLevel::Minimal,
         None,
         None,
+        None,
         SpanKindHint::Client,
     );
     let outcome = proc
@@ -215,6 +219,7 @@ async fn tracing_processor_kind_producer() {
         DetailLevel::Minimal,
         None,
         None,
+        None,
         SpanKindHint::Producer,
     );
     let outcome = proc
@@ -245,6 +250,7 @@ async fn tracing_processor_kind_default_internal() {
         "r".to_string(),
         0,
         DetailLevel::Minimal,
+        None,
         None,
         None,
         SpanKindHint::default(),
@@ -283,6 +289,7 @@ async fn step_restores_parent_context_after_call() {
         DetailLevel::Minimal,
         None,
         None,
+        None,
         SpanKindHint::Internal,
     );
     let outcome = proc
@@ -315,6 +322,7 @@ async fn step_error_emits_exception_event() {
         "r".to_string(),
         0,
         DetailLevel::Minimal,
+        None,
         None,
         None,
         SpanKindHint::Internal,
@@ -369,6 +377,7 @@ async fn test_tracing_processor_minimal() {
         DetailLevel::Minimal,
         None,
         None,
+        None,
         SpanKindHint::Internal,
     );
 
@@ -389,6 +398,7 @@ async fn test_tracing_processor_medium_detail() {
         DetailLevel::Medium,
         None,
         None,
+        None,
         SpanKindHint::Internal,
     );
 
@@ -407,6 +417,7 @@ async fn test_tracing_processor_full_detail() {
         "test-route".to_string(),
         0,
         DetailLevel::Full,
+        None,
         None,
         None,
         SpanKindHint::Internal,
@@ -434,6 +445,7 @@ async fn test_tracing_processor_clone() {
         DetailLevel::Minimal,
         None,
         None,
+        None,
         SpanKindHint::Internal,
     );
 
@@ -452,6 +464,7 @@ async fn test_tracing_processor_propagates_otel_context() {
         "test-route".to_string(),
         0,
         DetailLevel::Minimal,
+        None,
         None,
         None,
         SpanKindHint::Internal,
@@ -485,6 +498,7 @@ async fn test_tracing_processor_with_parent_context() {
         "test-route".to_string(),
         0,
         DetailLevel::Minimal,
+        None,
         None,
         None,
         SpanKindHint::Internal,
@@ -527,6 +541,7 @@ async fn test_tracing_processor_records_error() {
         DetailLevel::Minimal,
         None,
         None,
+        None,
         SpanKindHint::Internal,
     );
 
@@ -552,6 +567,7 @@ async fn test_tracing_processor_span_name_format() {
         DetailLevel::Minimal,
         None,
         None,
+        None,
         SpanKindHint::Internal,
     );
 
@@ -570,6 +586,7 @@ async fn test_tracing_processor_chained_propagation() {
         DetailLevel::Minimal,
         None,
         None,
+        None,
         SpanKindHint::Internal,
     );
 
@@ -579,6 +596,7 @@ async fn test_tracing_processor_chained_propagation() {
         "route2".to_string(),
         1,
         DetailLevel::Minimal,
+        None,
         None,
         None,
         SpanKindHint::Internal,
@@ -684,6 +702,7 @@ async fn tracing_processor_does_not_re_ready_clone() {
         DetailLevel::Minimal,
         None,
         None,
+        None,
         SpanKindHint::Internal,
     );
 
@@ -706,6 +725,7 @@ async fn tracing_processor_reusable_across_sequential_cycles() {
         "r".to_string(),
         0,
         DetailLevel::Minimal,
+        None,
         None,
         None,
         SpanKindHint::Internal,
@@ -763,6 +783,13 @@ impl MetricsCollector for RecordingMetrics {
     fn increment_circuit_breaker_rejection(&self, route: &str) {
         self.push("increment_circuit_breaker_rejection", route);
     }
+    fn record_histogram(&self, name: &str, _value: f64, labels: &[(&str, &str)]) {
+        let mut key = String::from(name);
+        for (k, v) in labels {
+            key.push_str(&format!(":{k}={v}"));
+        }
+        self.push("record_histogram", &key);
+    }
 }
 
 /// An open-breaker fast-fail observed through the tracer adapter counts as
@@ -813,6 +840,7 @@ async fn rejection_counted_not_errored() {
         DetailLevel::Minimal,
         Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
         None,
+        None,
         SpanKindHint::Internal,
     );
     let outcome = traced.ready().await.err();
@@ -862,6 +890,7 @@ async fn circuit_open_skip_branch_not_errored() {
         0,
         DetailLevel::Minimal,
         Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
         None,
         SpanKindHint::Internal,
     );
@@ -934,6 +963,7 @@ async fn readiness_err_records_families() {
         DetailLevel::Minimal,
         Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
         None,
+        None,
         SpanKindHint::Internal,
     );
 
@@ -987,6 +1017,7 @@ async fn metrics_on_tracer_off() {
         DetailLevel::Minimal,
         Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
         None,
+        None,
         SpanKindHint::Internal,
     )
     .with_spans_enabled(false);
@@ -1039,6 +1070,7 @@ async fn metrics_off_tracer_on() {
         0,
         DetailLevel::Minimal,
         Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
         None,
         SpanKindHint::Internal,
     )
@@ -1109,6 +1141,7 @@ async fn duration_family_disabled_but_errors_survive() {
         DetailLevel::Minimal,
         Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
         None,
+        None,
         SpanKindHint::Internal,
     )
     .with_metric_levers(levers.clone());
@@ -1126,6 +1159,7 @@ async fn duration_family_disabled_but_errors_survive() {
         0,
         DetailLevel::Minimal,
         Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
         None,
         SpanKindHint::Internal,
     )
@@ -1162,5 +1196,228 @@ async fn duration_family_disabled_but_errors_survive() {
             .count(),
         2,
         "one exchange per call (lever on), got {calls:?}"
+    );
+}
+
+// ── Per-To step duration histogram (steplatency 2.1) ─────────────────────
+
+/// `step_duration_secs` histogram entries recorded by [`RecordingMetrics`],
+/// serialized as `record_histogram:step_duration_secs:route=<r>:to_uri=<u>`.
+fn step_duration_entries(calls: &[String]) -> Vec<String> {
+    calls
+        .iter()
+        .filter(|c| c.starts_with("record_histogram:step_duration_secs"))
+        .cloned()
+        .collect()
+}
+
+/// A failed call-time attempt on a To step still samples the per-step
+/// duration population (steplatency 2.1): exactly one `step_duration_secs`
+/// observation labeled with the route id and the declared URI.
+#[tokio::test]
+async fn records_step_duration_for_failed_call() {
+    let _spans = test_spans().await;
+    let collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut proc = TracingProcessor::new(
+        BoxProcessor::new(ErrProcessor),
+        "orders".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
+        Some(Arc::from("direct:orders")),
+        SpanKindHint::Internal,
+    );
+
+    let outcome = proc
+        .ready()
+        .await
+        .expect("service ready")
+        .call(Exchange::new(Message::default()))
+        .await;
+    assert!(outcome.is_err(), "injected failure must surface");
+
+    let calls = collector.snapshot();
+    let histograms = step_duration_entries(&calls);
+    assert_eq!(
+        histograms.len(),
+        1,
+        "a failed call-time To attempt must record exactly one step_duration_secs observation, got {calls:?}"
+    );
+    assert_eq!(
+        histograms[0], "record_histogram:step_duration_secs:route=orders:to_uri=direct:orders",
+        "histogram must carry route + declared to_uri labels, got {calls:?}"
+    );
+}
+
+/// The `include_duration` gate keeps the per-To histogram call-time only:
+/// a readiness-phase attempt (`poll_ready` Err arm) on a To step records
+/// zero `step_duration_secs` observations while the exchange/error
+/// families keep their readiness behavior unchanged (rc-mn8n).
+#[tokio::test]
+async fn does_not_record_step_duration_when_include_duration_is_false() {
+    let _spans = test_spans().await;
+    let collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut proc = TracingProcessor::new(
+        BoxProcessor::new(ReadinessErrProcessor),
+        "orders".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
+        Some(Arc::from("direct:orders")),
+        SpanKindHint::Internal,
+    );
+
+    let outcome = proc.ready().await;
+    assert!(outcome.is_err(), "readiness failure must propagate");
+
+    let calls = collector.snapshot();
+    assert_eq!(
+        step_duration_entries(&calls).len(),
+        0,
+        "readiness attempts pass include_duration=false: zero step_duration_secs, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_exchanges"))
+            .count(),
+        1,
+        "exchange family unchanged on the readiness path, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_errors"))
+            .count(),
+        1,
+        "error family unchanged on the readiness path, got {calls:?}"
+    );
+}
+
+/// The duration lever gates the per-To histogram like the rest of the
+/// duration family: with `duration = false` a call-time To attempt records
+/// zero `step_duration_secs` observations and the exchange/error families
+/// are unchanged (errors never gated, exchange per the default-on lever).
+#[tokio::test]
+async fn does_not_record_step_duration_when_duration_lever_is_disabled() {
+    let _spans = test_spans().await;
+    let collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut proc = TracingProcessor::new(
+        BoxProcessor::new(IdentityProcessor),
+        "orders".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
+        Some(Arc::from("direct:orders")),
+        SpanKindHint::Internal,
+    )
+    .with_metric_levers(MetricsLeversConfig {
+        duration: false,
+        ..Default::default()
+    });
+
+    let outcome = proc
+        .ready()
+        .await
+        .expect("service ready")
+        .call(Exchange::new(Message::default()))
+        .await;
+    outcome.expect("step call succeeds");
+
+    let calls = collector.snapshot();
+    assert_eq!(
+        step_duration_entries(&calls).len(),
+        0,
+        "duration lever off must suppress step_duration_secs, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("record_exchange_duration"))
+            .count(),
+        0,
+        "duration lever off suppresses the whole duration family, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_exchanges"))
+            .count(),
+        1,
+        "exchange family unchanged, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_errors"))
+            .count(),
+        0,
+        "no errors on a successful call, got {calls:?}"
+    );
+}
+
+/// A producer readiness failure on a To step records zero
+/// `step_duration_secs` observations — the histogram population stays
+/// call-time only — while the existing readiness contract (rc-mn8n)
+/// holds: the exchange is counted and the error class is recorded.
+#[tokio::test]
+async fn readiness_failure_does_not_record_step_duration() {
+    let _spans = test_spans().await;
+    let collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut proc = TracingProcessor::new(
+        BoxProcessor::new(ReadinessErrProcessor),
+        "orders".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn MetricsCollector>),
+        None,
+        Some(Arc::from("direct:orders")),
+        SpanKindHint::Internal,
+    );
+
+    let outcome = proc.ready().await;
+    assert!(
+        outcome.is_err(),
+        "producer readiness failure must propagate"
+    );
+
+    let calls = collector.snapshot();
+    assert_eq!(
+        step_duration_entries(&calls).len(),
+        0,
+        "step_duration_secs is call-time only: zero observations on readiness failure, got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("increment_exchanges"))
+            .count(),
+        1,
+        "existing readiness contract: exchange counted (rc-mn8n), got {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c == "increment_errors:orders:processor"),
+        "existing readiness contract: error class recorded (rc-mn8n), got {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("record_exchange_duration"))
+            .count(),
+        0,
+        "camel_exchange_duration_seconds stays call-time only, got {calls:?}"
     );
 }

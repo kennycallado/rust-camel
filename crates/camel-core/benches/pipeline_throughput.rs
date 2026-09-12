@@ -11,6 +11,7 @@ fn pass_through() -> CompiledStep {
         body_contract: None,
         lifecycle: None,
         label: None,
+        to_uri: None,
     }
 }
 

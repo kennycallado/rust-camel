@@ -39,6 +39,7 @@ impl StepCompiler for TransformsCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -69,6 +70,7 @@ impl StepCompiler for TransformsCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 

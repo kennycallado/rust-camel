@@ -62,6 +62,14 @@ pub enum CompiledStep {
         /// outside the registry. Read by `compose_traced_pipeline` in
         /// route_compiler.rs.
         kind_hint: SpanKindHint,
+        /// Declared send URI for `To` steps — the raw authored text,
+        /// stamped by `StepCompilerRegistry::compile_step` from
+        /// `BuilderStep::to_uri_metadata` BEFORE endpoint resolution and
+        /// interception (a `SkipTo` substitution or `DivertCopyTo`
+        /// diversion never rewrites it). `None` for every non-To step.
+        /// Stored as shared immutable text; read by the tracing
+        /// pipeline (steplatency task 2.1) in route_compiler.rs.
+        to_uri: Option<Arc<str>>,
     },
     /// Stop EIP marker. `run_steps` produces `PipelineOutcome::Stopped(ex)`
     /// without invoking a Tower service. Replaces `StopService` (Task 7).
@@ -105,6 +113,16 @@ impl CompiledStep {
             CompiledStep::Process {
                 kind_hint: slot, ..
             } => *slot = hint,
+            CompiledStep::Stop | CompiledStep::Segment { .. } => {}
+        }
+    }
+
+    /// Overwrite the declared send URI of a `Process` step; no-op on `Stop`
+    /// and `Segment` (neither is a send step, so neither carries declared
+    /// URI metadata).
+    pub(crate) fn set_to_uri(&mut self, to_uri: Option<Arc<str>>) {
+        match self {
+            CompiledStep::Process { to_uri: slot, .. } => *slot = to_uri,
             CompiledStep::Stop | CompiledStep::Segment { .. } => {}
         }
     }
@@ -205,6 +223,7 @@ impl<'a> CompilationContext<'a> {
                     lifecycle,
                     label: _,
                     kind_hint: _,
+                    to_uri: _,
                 } => {
                     if let Some(lc) = lifecycle {
                         lifecycle_handles.push(lc);
@@ -270,16 +289,20 @@ impl StepCompilerRegistry {
         step_index: usize,
         ctx: &CompilationContext,
     ) -> Result<Option<CompiledStep>, CamelError> {
-        // Capture the span label and kind hint BEFORE the dispatch loop
-        // moves the step.
+        // Capture the span label, kind hint, and declared To URI BEFORE the
+        // dispatch loop moves the step. The URI is the authored text, so a
+        // `SkipTo`/`DivertCopyTo` interception inside a compiler never
+        // rewrites the retained metadata.
         let label = step.span_label();
         let kind_hint = step.span_kind_hint();
+        let to_uri = step.to_uri_metadata();
         let mut step = step;
         for compiler in &self.compilers {
             match compiler.compile(step, step_index, ctx, self)? {
                 CompileOutcome::Matched(mut s) => {
                     s.set_label(label);
                     s.set_kind_hint(kind_hint);
+                    s.set_to_uri(to_uri);
                     return Ok(Some(s));
                 }
                 CompileOutcome::NotHandled(s) => step = s,
@@ -524,6 +547,7 @@ mod segment_tests {
                     lifecycle: Some(self.handle.clone()),
                     label: None,
                     kind_hint: SpanKindHint::Internal,
+                    to_uri: None,
                 })),
                 other => Ok(CompileOutcome::NotHandled(other)),
             }
@@ -933,6 +957,7 @@ mod dispatch_tests {
                     lifecycle: None,
                     label: None,
                     kind_hint: SpanKindHint::Internal,
+                    to_uri: None,
                 })),
                 other => Ok(CompileOutcome::NotHandled(other)),
             }
@@ -1172,6 +1197,99 @@ mod dispatch_tests {
             } => {
                 assert_eq!(kind_hint, SpanKindHint::Producer);
                 assert_eq!(label.as_deref(), Some("to:kafka"));
+            }
+            other => panic!("expected Process, got {other:?}"),
+        }
+    }
+
+    /// Task 1.1 (steplatency): `compile_step` retains the declared To URI —
+    /// the raw authored text, captured before endpoint resolution and
+    /// interception — as shared immutable string metadata on the compiled
+    /// `Process` step.
+    #[test]
+    fn compiled_to_step_retains_declared_uri() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let context = ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(ToProcessCompiler));
+
+        let result = reg
+            .compile_step(BuilderStep::To("direct:orders".into()), 0, &context)
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        match result {
+            CompiledStep::Process { to_uri, .. } => {
+                assert_eq!(to_uri, Some(Arc::from("direct:orders")));
+            }
+            other => panic!("expected Process, got {other:?}"),
+        }
+    }
+
+    /// Task 1.1 (steplatency): a non-To process step carries no declared URI.
+    #[test]
+    fn compiled_processor_step_has_no_declared_uri() {
+        use camel_api::OpaqueProcessor;
+
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let context = ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::core::CoreCompiler));
+
+        let result = reg
+            .compile_step(
+                BuilderStep::Processor(OpaqueProcessor(BoxProcessor::from_fn(|ex| {
+                    Box::pin(async move { Ok(ex) })
+                }))),
+                0,
+                &context,
+            )
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        match result {
+            CompiledStep::Process { to_uri, .. } => {
+                assert_eq!(to_uri, None);
             }
             other => panic!("expected Process, got {other:?}"),
         }

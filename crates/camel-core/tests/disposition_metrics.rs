@@ -91,6 +91,7 @@ fn failing_step() -> CompiledStep {
         body_contract: None,
         lifecycle: None,
         label: None,
+        to_uri: None,
     }
 }
 
@@ -101,6 +102,7 @@ fn pass_through_step() -> CompiledStep {
         body_contract: None,
         lifecycle: None,
         label: None,
+        to_uri: None,
     }
 }
 

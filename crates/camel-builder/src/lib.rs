@@ -2075,6 +2075,7 @@ mod tests {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -2088,6 +2089,7 @@ mod tests {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
         ];
 
@@ -2498,6 +2500,7 @@ mod tests {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 })
                 .collect(),
             PipelineRuntimeCtx::compile_time(),
@@ -2533,6 +2536,7 @@ mod tests {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 })
                 .collect(),
             PipelineRuntimeCtx::compile_time(),
@@ -2572,6 +2576,7 @@ mod tests {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 })
                 .collect(),
             PipelineRuntimeCtx::compile_time(),

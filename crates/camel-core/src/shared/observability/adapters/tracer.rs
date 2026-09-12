@@ -41,6 +41,12 @@ pub struct TracingProcessor {
     step_index: usize,
     detail_level: DetailLevel,
     metrics: Option<Arc<dyn MetricsCollector>>,
+    /// Declared (authored) endpoint URI for `To` steps; `None` for every
+    /// other step kind. Labels the per-step `step_duration_secs` histogram
+    /// (steplatency 2.1) — the operator-authored URI, not a
+    /// runtime/resolved value, so label cardinality is bounded by the
+    /// route configuration.
+    to_uri: Option<Arc<str>>,
     /// OTel span kind precomputed from `SpanKindHint` at construction.
     span_kind: SpanKind,
     /// Whether step spans are created. Gates SPANS only — metric families
@@ -63,7 +69,10 @@ impl TracingProcessor {
     /// `label` names the span after the DSL step it wraps (e.g. `log`,
     /// `to:direct`); when `None` the span falls back to the positional
     /// `step-{index}` id. `kind_hint` selects the OTel span kind for the
-    /// step span and is converted once here.
+    /// step span and is converted once here. `to_uri` carries the declared
+    /// endpoint URI for `To` steps (steplatency 2.1) and labels the
+    /// call-time `step_duration_secs` histogram; `None` for non-To steps.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         inner: BoxProcessor,
         route_id: String,
@@ -71,6 +80,7 @@ impl TracingProcessor {
         detail_level: DetailLevel,
         metrics: Option<Arc<dyn MetricsCollector>>,
         label: Option<Arc<str>>,
+        to_uri: Option<Arc<str>>,
         kind_hint: SpanKindHint,
     ) -> Self {
         let step_id = step_id_for(step_index);
@@ -93,6 +103,7 @@ impl TracingProcessor {
             step_index,
             detail_level,
             metrics,
+            to_uri,
             span_kind,
             // Defaults preserve the fully-traced behavior for direct
             // constructors; the pipeline composer overrides per the
@@ -126,12 +137,14 @@ impl TracingProcessor {
         let mut inner = std::mem::replace(&mut self.inner, fresh);
         let metrics = self.metrics.clone();
         let route_id = self.route_id.clone();
+        let to_uri = self.to_uri.clone();
         let levers = self.metric_levers.clone();
         Box::pin(async move {
             let result = inner.call(exchange).await;
             record_step_metrics(
                 metrics.as_ref(),
                 &route_id,
+                to_uri.as_deref(),
                 &levers,
                 start.elapsed(),
                 &result,
@@ -143,11 +156,17 @@ impl TracingProcessor {
 }
 
 /// Emits the step metric families per the levers: `record_exchange_duration`
-/// only when the duration family is enabled AND the attempt is a call-time
-/// attempt (`include_duration`), `increment_exchanges` only when the exchange
+/// and the per-To `step_duration_secs` histogram only when the duration
+/// family is enabled AND the attempt is a call-time attempt
+/// (`include_duration`), `increment_exchanges` only when the exchange
 /// family is enabled, and `increment_errors` NEVER gated
 /// (metrics-configuration Req 2). Circuit-open rejections are excluded here
 /// as well (dashboard-observability D2): the breaker counts them.
+///
+/// The `step_duration_secs` histogram is emitted only for `To` steps
+/// (`to_uri` is `Some`), labeled with the route id and the DECLARED
+/// (operator-authored) endpoint URI — never a resolved or
+/// exchange-derived value (steplatency 2.1, ADR-0074).
 ///
 /// Readiness-phase attempts pass `include_duration = false`: the duration
 /// histogram population is call-time only (ADR-0066 population contracts),
@@ -156,6 +175,7 @@ impl TracingProcessor {
 fn record_step_metrics(
     metrics: Option<&Arc<dyn MetricsCollector>>,
     route_id: &str,
+    to_uri: Option<&str>,
     levers: &MetricsLeversConfig,
     duration: std::time::Duration,
     result: &Result<Exchange, CamelError>,
@@ -164,6 +184,14 @@ fn record_step_metrics(
     let Some(metrics) = metrics else { return };
     if include_duration && levers.durations_enabled() {
         metrics.record_exchange_duration(route_id, duration);
+        if let Some(uri) = to_uri {
+            // allow-open-label rc-cd7o (declared To URI: operator-authored route config, bounded by route steps)
+            metrics.record_histogram(
+                "step_duration_secs",
+                duration.as_secs_f64(),
+                &[("route", route_id), ("to_uri", uri)],
+            );
+        }
     }
     if levers.exchanges_enabled() {
         metrics.increment_exchanges(route_id);
@@ -200,6 +228,7 @@ impl Service<Exchange> for TracingProcessor {
                 record_step_metrics(
                     self.metrics.as_ref(),
                     &self.route_id,
+                    self.to_uri.as_deref(),
                     &self.metric_levers,
                     start.elapsed(),
                     &Err(e.clone()),
@@ -314,6 +343,7 @@ impl Service<Exchange> for TracingProcessor {
         let detail_level = self.detail_level.clone();
         let metrics = self.metrics.clone();
         let route_id = self.route_id.clone();
+        let to_uri = self.to_uri.clone();
         let levers = self.metric_levers.clone();
 
         Box::pin(
@@ -335,6 +365,7 @@ impl Service<Exchange> for TracingProcessor {
                 record_step_metrics(
                     metrics.as_ref(),
                     &route_id,
+                    to_uri.as_deref(),
                     &levers,
                     duration,
                     &result,
@@ -385,6 +416,7 @@ impl Clone for TracingProcessor {
             step_index: self.step_index,
             detail_level: self.detail_level.clone(),
             metrics: self.metrics.clone(),
+            to_uri: self.to_uri.clone(),
             span_kind: self.span_kind.clone(),
             spans_enabled: self.spans_enabled,
             metric_levers: self.metric_levers.clone(),

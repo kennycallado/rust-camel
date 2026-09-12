@@ -844,6 +844,7 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
                                 body_contract: None,
                                 lifecycle: None,
                                 label: None,
+                                to_uri: None,
                             })
                             .collect(),
                         PipelineRuntimeCtx::compile_time(),

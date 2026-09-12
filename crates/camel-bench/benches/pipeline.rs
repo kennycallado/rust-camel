@@ -58,6 +58,7 @@ fn build_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -65,6 +66,7 @@ fn build_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -72,6 +74,7 @@ fn build_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -79,6 +82,7 @@ fn build_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
         ],
         PipelineRuntimeCtx::compile_time(),

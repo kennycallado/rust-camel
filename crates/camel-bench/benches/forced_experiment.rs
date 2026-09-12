@@ -33,6 +33,7 @@ fn pure_closure_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -44,6 +45,7 @@ fn pure_closure_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -58,6 +60,7 @@ fn pure_closure_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
         ],
         PipelineRuntimeCtx::compile_time(),
@@ -93,6 +96,7 @@ fn concrete_processor_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -100,6 +104,7 @@ fn concrete_processor_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -107,6 +112,7 @@ fn concrete_processor_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
         ],
         PipelineRuntimeCtx::compile_time(),
@@ -140,6 +146,7 @@ fn identity_wrapped_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -147,6 +154,7 @@ fn identity_wrapped_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -154,6 +162,7 @@ fn identity_wrapped_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
         ],
         PipelineRuntimeCtx::compile_time(),
@@ -189,6 +198,7 @@ fn deep_pipeline() -> BoxProcessor {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         });
     }
 
@@ -222,6 +232,7 @@ fn expression_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -229,6 +240,7 @@ fn expression_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -236,6 +248,7 @@ fn expression_pipeline() -> BoxProcessor {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
         ],
         PipelineRuntimeCtx::compile_time(),

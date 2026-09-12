@@ -47,6 +47,7 @@ impl StepCompiler for CoreCompiler {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             })),
 
             // ── Stop ──
@@ -66,6 +67,7 @@ impl StepCompiler for CoreCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -83,6 +85,7 @@ impl StepCompiler for CoreCompiler {
                     body_contract: None,
                     lifecycle: None, // Validate is stateless
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -301,6 +304,7 @@ impl StepCompiler for CoreCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -332,6 +336,7 @@ impl StepCompiler for CoreCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -345,6 +350,7 @@ impl StepCompiler for CoreCompiler {
                         body_contract: None,
                         lifecycle: None,
                         label: None,
+                        to_uri: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
@@ -360,6 +366,7 @@ impl StepCompiler for CoreCompiler {
                         body_contract: None,
                         lifecycle: None,
                         label: None,
+                        to_uri: None,
                     }))
                 }
                 _ => Err(CamelError::Config("unsupported value source".into())),
@@ -374,6 +381,7 @@ impl StepCompiler for CoreCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -388,6 +396,7 @@ impl StepCompiler for CoreCompiler {
                         body_contract: None,
                         lifecycle: None,
                         label: None,
+                        to_uri: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
@@ -403,6 +412,7 @@ impl StepCompiler for CoreCompiler {
                         body_contract: None,
                         lifecycle: None,
                         label: None,
+                        to_uri: None,
                     }))
                 }
                 _ => Err(CamelError::Config("unsupported value source".into())),
@@ -418,6 +428,7 @@ impl StepCompiler for CoreCompiler {
                         body_contract: None,
                         lifecycle: None,
                         label: None,
+                        to_uri: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
@@ -433,6 +444,7 @@ impl StepCompiler for CoreCompiler {
                         body_contract: None,
                         lifecycle: None,
                         label: None,
+                        to_uri: None,
                     }))
                 }
                 _ => Err(CamelError::Config("unsupported value source".into())),
@@ -452,6 +464,7 @@ impl StepCompiler for CoreCompiler {
                         body_contract: None,
                         lifecycle: None,
                         label: None,
+                        to_uri: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
@@ -469,6 +482,7 @@ impl StepCompiler for CoreCompiler {
                         body_contract: None,
                         lifecycle: None,
                         label: None,
+                        to_uri: None,
                     }))
                 }
                 _ => Err(CamelError::Config("unsupported value source".into())),
@@ -484,6 +498,7 @@ impl StepCompiler for CoreCompiler {
                         body_contract: None,
                         lifecycle: None,
                         label: None,
+                        to_uri: None,
                     })),
                     Err(LanguageError::NotSupported { .. }) => {
                         // Graceful degradation: fall back to read-only Expression → SetBody
@@ -501,6 +516,7 @@ impl StepCompiler for CoreCompiler {
                             body_contract: None,
                             lifecycle: None,
                             label: None,
+                            to_uri: None,
                         }))
                     }
                     Err(e) => Err(CamelError::RouteError(format!(
@@ -536,6 +552,7 @@ impl StepCompiler for CoreCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -568,6 +585,7 @@ impl StepCompiler for CoreCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -581,6 +599,7 @@ impl StepCompiler for CoreCompiler {
                         body_contract: None,
                         lifecycle: None,
                         label: None,
+                        to_uri: None,
                     })),
                     Err(LanguageError::NotSupported {
                         feature,
@@ -642,6 +661,7 @@ impl StepCompiler for CoreCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -654,6 +674,7 @@ impl StepCompiler for CoreCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -670,6 +691,7 @@ impl StepCompiler for CoreCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 

@@ -53,7 +53,10 @@ use tower::ServiceExt;
 // Recording collector + lifecycle stand-in
 // ---------------------------------------------------------------------------
 
-/// Collects every `MetricsCollector` observation as `method:route` strings.
+/// Collects every `MetricsCollector` observation as `method:key` strings.
+/// Histogram keys render as `name|k=v,k=v` so the label set of a family
+/// is assertable (steplatency 3.1 asserts the `step_duration_secs`
+/// contract labels this way).
 struct RecordingCollector {
     calls: Arc<Mutex<Vec<String>>>,
 }
@@ -98,8 +101,13 @@ impl MetricsCollector for RecordingCollector {
         self.push("record_circuit_breaker_change", route_id);
     }
 
-    fn record_histogram(&self, name: &str, _value: f64, _labels: &[(&str, &str)]) {
-        self.push("record_histogram", name);
+    fn record_histogram(&self, name: &str, _value: f64, labels: &[(&str, &str)]) {
+        let rendered = labels
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.push("record_histogram", &format!("{name}|{rendered}"));
     }
 
     fn record_counter(&self, name: &str, _value: f64, _labels: &[(&str, &str)]) {
@@ -944,6 +952,116 @@ async fn prom_only_handler_route_readiness_failure_records_exchange_once() {
     assert_eq!(
         exchanges, 1,
         "one failed exchange must record camel_exchanges_total for entry9 exactly once; got {calls:?}"
+    );
+
+    ctx.stop().await.expect("context stops");
+}
+
+// ---------------------------------------------------------------------------
+// steplatency 3.1 (ADR-0074): the per-To `step_duration_secs` family through
+// the wired OTEL stand-in path. camel-test builds camel-config without its
+// `otel` feature, so the recording lifecycle remains the faithful stand-in
+// for the real OtelService, and "exported" means the collector the traced
+// pipeline records into observed the family. A route holding a `To` step
+// must expose `step_duration_secs` labeled with the route id and the
+// DECLARED to_uri; a processor-only route must expose no data points for
+// the family at all.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn otel_metrics_expose_step_duration_family() {
+    let (mut ctx, collector) =
+        unwired_context_with_collector("[observability.otel]\nenabled = true\n").await;
+    let entry = RouteBuilder::from("direct:step-entry")
+        .route_id("step-entry")
+        .to("direct:orders")
+        .build()
+        .expect("To route builds");
+    ctx.add_route_definition(entry)
+        .await
+        .expect("To route registers");
+    let orders = RouteBuilder::from("direct:orders")
+        .route_id("orders")
+        .process(|ex| async move { Ok(ex) })
+        .build()
+        .expect("orders consumer route builds");
+    ctx.add_route_definition(orders)
+        .await
+        .expect("orders consumer route registers");
+    ctx.start().await.expect("context starts");
+    wait_for_started(&ctx, &["step-entry", "orders"]).await;
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_exchange_to(&ctx, "direct:step-entry", Duration::from_secs(1)),
+    )
+    .await
+    .expect("exchange through the To route completes within 5s");
+    assert!(
+        outcome.is_ok(),
+        "the direct:orders consumer must complete the exchange, got {outcome:?}"
+    );
+
+    // The traced To step on `step-entry` records the family with the
+    // contract label set: the route id of the route holding the step plus
+    // the declared (operator-authored) URI, never a resolved target.
+    wait_for_calls(
+        &collector,
+        &["record_histogram:step_duration_secs|route=step-entry"],
+    )
+    .await;
+    let calls = collector.snapshot();
+    let sample = calls
+        .iter()
+        .find(|c| c.starts_with("record_histogram:step_duration_secs|"))
+        .expect("step_duration_secs family exported for the To route");
+    assert!(
+        sample.contains("to_uri=direct:orders"),
+        "step_duration_secs sample must carry the declared to_uri label; got {sample}"
+    );
+
+    ctx.stop().await.expect("context stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn otel_metrics_omit_step_duration_for_processor_route() {
+    let (mut ctx, collector) =
+        unwired_context_with_collector("[observability.otel]\nenabled = true\n").await;
+    let solo = RouteBuilder::from("direct:solo")
+        .route_id("solo")
+        .process(|ex| async move { Ok(ex) })
+        .build()
+        .expect("processor-only route builds");
+    ctx.add_route_definition(solo)
+        .await
+        .expect("processor-only route registers");
+    ctx.start().await.expect("context starts");
+    wait_for_started(&ctx, &["solo"]).await;
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        drive_exchange_to(&ctx, "direct:solo", Duration::from_secs(1)),
+    )
+    .await
+    .expect("exchange through the processor-only route completes within 5s");
+    assert!(
+        outcome.is_ok(),
+        "the direct:solo route must complete the exchange, got {outcome:?}"
+    );
+
+    // Positive control: the traced pipeline DID record the call-time
+    // attempt for this route, so the negative assertion below observes a
+    // genuinely wired pipeline and not a dead one.
+    wait_for_calls(&collector, &["record_exchange_duration:solo"]).await;
+
+    // To-only contract: processor steps carry no declared URI, so the
+    // family must have zero data points anywhere in the export.
+    let calls = collector.snapshot();
+    assert!(
+        calls
+            .iter()
+            .all(|c| !c.starts_with("record_histogram:step_duration_secs")),
+        "processor-only route must emit no step_duration_secs data points; got {calls:?}"
     );
 
     ctx.stop().await.expect("context stops");

@@ -350,6 +350,7 @@ impl StepCompiler for SplittingCompiler {
                     body_contract: None,
                     lifecycle: Some(lifecycle),
                     label: None,
+                    to_uri: None,
                 }))
             }
 

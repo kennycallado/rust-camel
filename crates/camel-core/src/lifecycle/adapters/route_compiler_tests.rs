@@ -141,6 +141,7 @@ fn test_pipeline_poll_ready_delegates_to_first_step() {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         }])),
         handler: None,
         ctx: PipelineRuntimeCtx::compile_time(),
@@ -181,6 +182,7 @@ async fn test_pipeline_stop_returns_ok_with_exchange() {
         body_contract: None,
         lifecycle: None,
         label: None,
+        to_uri: None,
     };
 
     let mut pipeline = SequentialPipeline {
@@ -212,6 +214,7 @@ async fn test_run_steps_stop_produces_pipeline_outcome_stopped() {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         },
     ];
     let ex = Exchange::new(camel_api::Message::new("payload"));
@@ -331,6 +334,7 @@ async fn test_compose_traced_pipeline_enabled() {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         }],
         "test-route",
         true,
@@ -371,6 +375,7 @@ async fn test_compose_pipeline_with_contracts_coerces_before_inner_processor() {
             body_contract: Some(camel_api::BodyType::Text),
             lifecycle: None,
             label: None,
+            to_uri: None,
         }],
         None,
         PipelineRuntimeCtx::compile_time(),
@@ -394,6 +399,7 @@ async fn test_run_steps_continued_skips_failed_step() {
         body_contract: None,
         lifecycle: None,
         label: None,
+        to_uri: None,
     };
     let step2 = CompiledStep::Process {
         kind_hint: SpanKindHint::Internal,
@@ -403,6 +409,7 @@ async fn test_run_steps_continued_skips_failed_step() {
         body_contract: None,
         lifecycle: None,
         label: None,
+        to_uri: None,
     };
     let step3_hit = Arc::new(AtomicBool::new(false));
     let hit = step3_hit.clone();
@@ -418,6 +425,7 @@ async fn test_run_steps_continued_skips_failed_step() {
         body_contract: None,
         lifecycle: None,
         label: None,
+        to_uri: None,
     };
 
     let handler: Arc<dyn RouteErrorHandler> = Arc::new(ContinuedHandler);
@@ -453,6 +461,7 @@ async fn test_run_steps_failed_without_handler_returns_failed() {
         body_contract: None,
         lifecycle: None,
         label: None,
+        to_uri: None,
     }];
     let ex = Exchange::new(camel_api::Message::new("payload"));
     let outcome = run_steps(
@@ -494,6 +503,7 @@ async fn test_route_channel_pipeline_propagate_returns_err() {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         }],
         Some(handler.clone()),
         PipelineRuntimeCtx::compile_time(),
@@ -706,6 +716,7 @@ async fn test_use_original_message_stash_survives_full_route_channel() {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -713,6 +724,7 @@ async fn test_use_original_message_stash_survives_full_route_channel() {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
         ],
         Some(handler.clone()),
@@ -786,6 +798,7 @@ async fn test_use_original_message_wholesale_exchange_replacement() {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -793,6 +806,7 @@ async fn test_use_original_message_wholesale_exchange_replacement() {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
         ],
         Some(handler.clone()),
@@ -855,6 +869,7 @@ async fn test_sampling_drop_stops_following_process_step() {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         },
         CompiledStep::Process {
             kind_hint: SpanKindHint::Internal,
@@ -869,6 +884,7 @@ async fn test_sampling_drop_stops_following_process_step() {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         },
     ];
 
@@ -1302,6 +1318,7 @@ mod cancellation_tests {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         }
     }
 
@@ -1342,6 +1359,7 @@ mod cancellation_tests {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         };
 
         let mut pipeline = compose_pipeline(

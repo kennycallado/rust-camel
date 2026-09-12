@@ -43,6 +43,7 @@ impl StepCompiler for RoutingCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -84,6 +85,7 @@ impl StepCompiler for RoutingCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -101,6 +103,7 @@ impl StepCompiler for RoutingCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -139,6 +142,7 @@ impl StepCompiler for RoutingCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -157,6 +161,7 @@ impl StepCompiler for RoutingCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 
@@ -203,6 +208,7 @@ impl StepCompiler for RoutingCompiler {
                     body_contract: None,
                     lifecycle: None,
                     label: None,
+                    to_uri: None,
                 }))
             }
 

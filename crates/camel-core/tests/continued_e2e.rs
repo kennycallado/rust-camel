@@ -63,6 +63,7 @@ async fn continued_e2e_step3_executes_after_step2_failure() {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -70,6 +71,7 @@ async fn continued_e2e_step3_executes_after_step2_failure() {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -77,6 +79,7 @@ async fn continued_e2e_step3_executes_after_step2_failure() {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
         ],
         Some(handler),
@@ -178,6 +181,7 @@ async fn continued_e2e_route_channel_service_with_cb_gate() {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -185,6 +189,7 @@ async fn continued_e2e_route_channel_service_with_cb_gate() {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
@@ -192,6 +197,7 @@ async fn continued_e2e_route_channel_service_with_cb_gate() {
                 body_contract: None,
                 lifecycle: None,
                 label: None,
+                to_uri: None,
             },
         ],
         Some(handler.clone()),

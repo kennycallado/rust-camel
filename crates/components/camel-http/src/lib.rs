@@ -9906,6 +9906,7 @@ mod tests {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         };
         let set_status_step = CompiledStep::Process {
             kind_hint: camel_api::SpanKindHint::Internal,
@@ -9919,6 +9920,7 @@ mod tests {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         };
         let pipeline = compose_pipeline_with_handler(
             vec![set_body_step, set_status_step, CompiledStep::Stop],

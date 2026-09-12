@@ -17,6 +17,7 @@ fn identity_step() -> CompiledStep {
         body_contract: None,
         lifecycle: None,
         label: None,
+        to_uri: None,
     }
 }
 
@@ -117,6 +118,7 @@ async fn compose_threads_label_to_span_name() {
             body_contract: None,
             lifecycle: None,
             label: label.map(Arc::from),
+            to_uri: None,
         }],
         "rt",
         true,
@@ -299,6 +301,7 @@ async fn traced_pipeline_failed_root_records_exception() {
             body_contract: None,
             lifecycle: None,
             label: None,
+            to_uri: None,
         }],
         "rt",
         true,
@@ -978,5 +981,83 @@ async fn spans_off_composition_records_metrics_without_spans() {
         2,
         "exchange metrics must still flow through the per-step wrappers \
          (one per step, matching the traced pipeline's wrapper semantics)"
+    );
+}
+
+// ── Per-To step duration histogram threading (steplatency 2.1) ──
+
+/// Minimal local double: records `record_histogram` observations as
+/// `record_histogram:<name>:<k>=<v>...`.
+struct HistogramRecorder(std::sync::Mutex<Vec<String>>);
+
+impl HistogramRecorder {
+    fn snapshot(&self) -> Vec<String> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+impl camel_api::MetricsCollector for HistogramRecorder {
+    fn record_histogram(&self, name: &str, _value: f64, labels: &[(&str, &str)]) {
+        let mut key = String::from(name);
+        for (k, v) in labels {
+            key.push_str(&format!(":{k}={v}"));
+        }
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(format!("record_histogram:{key}"));
+    }
+    fn increment_exchanges(&self, _route_id: &str) {}
+    fn increment_errors(&self, _route_id: &str, _error_type: &str) {}
+    fn record_exchange_duration(&self, _route_id: &str, _seconds: std::time::Duration) {}
+    fn set_queue_depth(&self, _queue: &str, _depth: usize) {}
+    fn record_circuit_breaker_change(&self, _route: &str, _from: &str, _to: &str) {}
+}
+
+/// Steplatency 2.1: `compose_traced_pipeline` threads the compiled To
+/// step's declared URI into the tracing wrapper, so a call-time attempt
+/// records exactly one `step_duration_secs` histogram labeled with the
+/// route id and the operator-authored URI (`direct:orders`).
+#[tokio::test]
+async fn records_step_duration_with_route_and_uri_labels() {
+    let _spans = test_spans().await;
+    let collector = Arc::new(HistogramRecorder(std::sync::Mutex::new(Vec::new())));
+    let mut pipeline = compose_traced_pipeline(
+        vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
+            processor: BoxProcessor::new(IdentityProcessor),
+            body_contract: None,
+            lifecycle: None,
+            label: None,
+            to_uri: Some(Arc::from("direct:orders")),
+        }],
+        "orders",
+        true,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&collector) as Arc<dyn camel_api::MetricsCollector>),
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+    pipeline
+        .ready()
+        .await
+        .expect("pipeline ready")
+        .call(Exchange::new(Message::default()))
+        .await
+        .expect("pipeline call succeeds");
+
+    let entries: Vec<_> = collector
+        .snapshot()
+        .into_iter()
+        .filter(|e| e.starts_with("record_histogram:step_duration_secs"))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one step_duration_secs observation for the To step, got {entries:?}"
+    );
+    assert_eq!(
+        entries[0], "record_histogram:step_duration_secs:route=orders:to_uri=direct:orders",
+        "histogram must carry the route label and the declared to_uri"
     );
 }
