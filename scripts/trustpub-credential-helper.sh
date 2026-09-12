@@ -98,4 +98,7 @@ token="$(printf '%s' "$exchange_json" | jq -r '.token // empty')"
 # 5. Emit the credential response for cargo — stdout ONLY, via stdin
 #    (not argv). operation_independent:false + cache:"never" => cargo
 #    must request a fresh token for every publish operation.
-printf '%s' "$token" | jq -Rs '{Ok: {kind: "get", token: ., operation_independent: false, cache: "never"}}'
+#    jq -c is LOAD-BEARING: without it jq pretty-prints multi-line and
+#    cargo's single read_line gets a bare `{` — "failed to deserialize
+#    response". Verified against cargo 1.98.1 credential/process.rs.
+printf '%s' "$token" | jq -cRs '{Ok: {kind: "get", token: ., operation_independent: false, cache: "never"}}'
