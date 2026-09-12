@@ -64,6 +64,10 @@ resolves these locations and the completeness guard enforces them.
   member so Pair A/B share the same `Cargo.lock`).
 - **node runtime** — one dir at `benchmarks/contenders/node/`:
   `node-native/` + `node-fastify/` share a single `node_modules`.
+- **axum-bare** — one crate at `benchmarks/contenders/axum-bare/`:
+  the rc-u034 reference contender, registered as a single
+  http-server-only reference cell (the 53rd roster identity; not a
+  Pair A/B member, not a warm-24 tick contender).
 
 Consolidation changes build topology only — the contender×pairing
 matrix and report rows are unchanged. Per-scenario DATA (shared

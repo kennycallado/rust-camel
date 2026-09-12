@@ -1,0 +1,11 @@
+Task 1.1 baseline check evidence (captured before any roster edit)
+==================================================================
+
+Command: python3 benchmarks/harness/summarize.py --check benchmarks/records
+Exit code: 0
+Final output:
+check: 1 summaries match their run.json
+
+Command: git diff --exit-code -- benchmarks/records
+Exit code: 0
+Result: records tree is clean in git (no uncommitted changes).

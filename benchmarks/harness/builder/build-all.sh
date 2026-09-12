@@ -4,7 +4,7 @@
 #
 # Builds:
 #   - Rust: rust-camel-lib (consolidated fixture, one crate) + camel-cli
-#     + loadgen + bridge
+#     + loadgen + bridge + axum-bare (reference contender)
 #   - Node: shared node_modules at benchmarks/contenders/node (one
 #     package.json serves all 14 node cells)
 #   - Maven: camel-standalone-{dsl,yaml} jars per scenario
@@ -27,6 +27,14 @@ echo "=== Building Rust artifacts ==="
 echo "  → rust-camel-lib-fixture (consolidated)"
 (cd "$REPO_ROOT"/benchmarks/contenders/rust-camel-lib \
     && env -u CARGO_TARGET_DIR cargo build --release -p rust-camel-lib-fixture 2>&1 | tail -3)
+
+# axum-bare: standalone reference contender (change bench-axum-bare,
+# rc-u034 — http-server-only reference cell). Same fixture-local
+# target-dir pin as rust-camel-lib: build from inside the crate dir
+# (cargo config discovery is cwd-based) with CARGO_TARGET_DIR unset.
+echo "  → axum-bare-fixture (reference)"
+(cd "$REPO_ROOT"/benchmarks/contenders/axum-bare \
+    && env -u CARGO_TARGET_DIR cargo build --release -p axum-bare-fixture 2>&1 | tail -3)
 
 # Shared rust-camel-cli binary (used by all scenarios via route YAML).
 echo "  → camel-cli (shared)"

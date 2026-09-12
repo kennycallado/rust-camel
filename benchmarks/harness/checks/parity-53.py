@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Phase A exit gate (bench-consol-tick task 1.7): smoke parity of all 52 cells.
+"""Phase A exit gate (bench-consol-tick task 1.7): smoke parity of all 53 cells.
 
-Usage: parity-52.py <run_dir> <oracle_json>
+Usage: parity-53.py <run_dir> <oracle_json>
 
 <run_dir> is a harness run output directory as produced by
 `bash benchmarks/bench run-all` (benchmarks/harness/out/<ts>/):
@@ -17,7 +17,7 @@ Usage: parity-52.py <run_dir> <oracle_json>
 Asserts (ALL failures are collected and listed, then exit 1; exit 0
 prints a one-line summary per check group):
 
-  cells    exactly 52 sample dirs (dirs with a samples.txt under the run
+  cells    exactly 53 sample dirs (dirs with a samples.txt under the run
            dir), each samples.txt non-empty with >=3 samples
   markers  every scratch .out evidence file of every cell contains the
            scenario's DISTINCTIVE marker string exactly once. The bare
@@ -46,7 +46,7 @@ import re
 import sys
 from pathlib import Path
 
-EXPECTED_CELLS = 52  # 5 full scenarios x 8 + 2 bridge scenarios x 6 (run.sh guard)
+EXPECTED_CELLS = 53  # 5 full scenarios x 8 + 2 bridge x 6 + 1 http-server reference (run.sh guard)
 MIN_SAMPLES = 3  # acceptance: n=3 smoke, >=3 samples per cell
 
 DIGEST_RE = re.compile(r"BENCH_INPUT_SHA256=([0-9a-f]{64})(?![0-9a-f])")
@@ -254,13 +254,13 @@ def main() -> int:
 
     # ---- verdict -------------------------------------------------------
     if failures:
-        print(f"parity-52: {len(failures)} failure(s):")
+        print(f"parity-53: {len(failures)} failure(s):")
         for f in failures:
             print(f"FAIL: {f}")
         return 1
 
     min_samples = min(sample_counts.values()) if sample_counts else 0
-    print("parity-52: PASS")
+    print("parity-53: PASS")
     print(f"  cells: {len(cells)}/{EXPECTED_CELLS} sample dirs")
     print(f"  samples: min {min_samples} per cell (required >={MIN_SAMPLES})")
     print(f"  markers: 1 distinct {len(markers)}-scenario marker per evidence file, all cells")

@@ -19,6 +19,9 @@ members = [
     # crate dispatching argv[1] to per-scenario route builders, replacing
     # the seven per-scenario lib fixtures.
     "benchmarks/contenders/rust-camel-lib",
+    # rc-u034 reference contender: bare axum+tokio HTTP server, zero camel
+    # deps; isolates HTTP-stack tax from camel-tax.
+    "benchmarks/contenders/axum-bare",
     # M2 harness load generator (spec §4.5). Workspace member so it shares
     # the workspace Cargo.lock with the rust-camel fixtures it measures
     # against (dep-version parity); excluded from default-members below.

@@ -327,6 +327,17 @@ Cross-suspect information flow:
 > run measures both natively at the same point. Not a fixture defect, not a
 > real-cost finding.
 
+> **SUPERSEDED (2026-09-11, outcome per §8 burst):** inspection proved the
+> bracket map — the manual cli ~1.7 ms is an in-route route-mode marker
+> covering the whole tick (`bench_instrument.rs:193-259`); the record's lib
+> 3.0 ms bracket covers only the `.to(xslt)` dispatch
+> (`xslt-bridge.rs:150-173`). The cli bracket strictly CONTAINS the lib
+> bracket, so bracket asymmetry cannot yield cli < lib — the hypothesized
+> same-point-collapse note above is REFUTED (anti-directional). Residual
+> ~1.3 ms is run-condition-associated. Adjudicator: the next canonical run
+> (measures both natively, same point). Probe-cost correction NOT needed —
+> emit I/O sits outside the brackets on both sides.
+
 **rc-audm.2 (negative m4 RSS) — PARK (no java on host):**
 > Narrowed hypothesis: quarkus-native negative RSS deltas are a
 > malloc-arena/trim artifact — the native image trims arenas after startup so

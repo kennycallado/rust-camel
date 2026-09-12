@@ -1,0 +1,81 @@
+# Gate sweep — OpenSpec change bench-axum-bare, Task 6.1
+# Worktree: /home/shared/rust-camel-worktrees/benchfollowup (branch feature/bench-era2-followup)
+# Date: 2026-09-12
+# Format: "<exit-code>  <command>" per gate, then verbatim failure excerpt if any.
+# Gates are builds/checks, NOT measurements (no load-gating per conductor dispatch).
+
+0  cargo fmt --check --all
+
+0  cargo clippy --workspace --all-features --exclude camel-cli --exclude camel-component-kafka --exclude security-keycloak --exclude security-wasm-policy -- -D warnings
+   (note: ts-rs "failed to parse serde attribute" warnings from deps; exit 0)
+
+0  cargo clippy -p axum-bare-fixture --all-targets -- -D warnings
+
+0  cargo xtask lint-unwrap
+
+0  cargo xtask lint-secrets
+
+0  cargo xtask lint-non-exhaustive
+
+0  cargo xtask lint-log-levels
+
+0  cargo xtask lint-ignore
+
+0  cargo xtask lint-publish-cycles
+
+0  cargo xtask lint-component-deps
+
+0  cargo xtask lint-gate-forwarding
+
+0  cargo xtask lint-context-citations
+
+0  cargo xtask lint-metric-labels
+
+0  cargo xtask schema --check
+
+0  RUSTDOCFLAGS="-D warnings" cargo doc -p camel-api -p camel-core -p camel-builder -p camel-dsl -p camel-endpoint -p axum-bare-fixture --no-deps
+
+0  cargo check -p axum-bare-fixture
+
+0  env -u CARGO_TARGET_DIR cargo test -p axum-bare-fixture   [run from benchmarks/contenders/axum-bare]
+   (2 passed: marker_then_two_keepalive_requests_succeed, bind_failure_exits_nonzero)
+
+0  python3 -m unittest discover -s benchmarks/harness -p 'test_*.py'
+   ("Ran 79 tests in 0.662s / OK" — matches expected 79; stderr lines are
+   test-exercised warning paths, not failures)
+
+0  python3 benchmarks/harness/summarize.py --check benchmarks/records
+   (output: "check: 1 summaries match their run.json")
+
+0  find benchmarks/records -type f \( -name 'run.json' -o -name 'summary.md' -o -name 'index.json' \) | sort | xargs sha256sum | diff - openspec/changes/bench-axum-bare/baseline-records.sha256
+   RESULT: EMPTY diff — published-record regeneration is byte-identical to
+   the Task 1.1 baseline (SCHEMA.md excluded by design).
+
+0  cargo audit
+   (exit 0 — 5 ALLOWED warnings, zero vulnerabilities; pre-existing, none
+   introduced by this change — Cargo.lock gained only the axum-bare-fixture
+   package entry. Advisory IDs, verbatim:
+     RUSTSEC-2023-0089  atomic-polyfill 1.0.3    — unmaintained
+     RUSTSEC-2025-0012  backoff 0.4.0          — unmaintained
+     RUSTSEC-2024-0384  instant 0.1.13         — unmaintained
+     RUSTSEC-2024-0436  paste 1.0.15           — unmaintained
+     RUSTSEC-2025-0134  rustls-pemfile 2.2.0   — unmaintained)
+
+## DELIBERATE OMISSIONS (with reasons)
+
+- OMITTED: cargo clippy -p camel-component-kafka --all-targets -- -D warnings
+  REASON: benchmarks-only change; crate untouched by this change.
+- OMITTED: cargo clippy -p camel-cli -- -D warnings
+  REASON: benchmarks-only change; crate untouched by this change.
+- OMITTED: cargo xtask lint-commits
+  REASON: conductor policy — requires remote fetch (git fetch origin main),
+  remote op; CI owns lint-commits.
+- OMITTED: cargo test --workspace
+  REASON: Docker-dependent (testcontainers), conductor policy.
+
+## SUMMARY
+
+21 gates attempted: 21 recorded, ALL exit 0. Zero failures.
+Byte-identity final proof: EMPTY diff vs baseline-records.sha256 (PASS).
+cargo audit: 0 vulnerabilities; 5 allowed pre-existing unmaintained-dep
+warnings recorded above for conductor adjudication.

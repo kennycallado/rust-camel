@@ -5,7 +5,10 @@
 # bring-up smoke that verifies the marker + 200/pong
 # contract end-to-end for each fixture.
 #
-# Usage: bash benchmarks/scenarios/http-server/smoke/run.sh
+# Usage: bash benchmarks/scenarios/http-server/smoke/run.sh [artifact]
+#   [artifact]  optional filter — run ONLY the matching artifact's
+#               case (e.g. axum-bare); with no argument the full
+#               artifact set runs exactly as before.
 # Exit code 0 on full pass; 1 on any failure.
 
 set -uo pipefail
@@ -25,6 +28,15 @@ SCENARIO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # http-server/smoke -> http-server -> scenarios -> benchmarks -> <WORKTREE>
 WORKTREE="$(cd "$SCENARIO_DIR/../../.." && pwd)"
 
+# Optional first-arg artifact filter (change bench-axum-bare task 4.1):
+# when set, only the matching artifact case runs; with no argument
+# every case runs as before (the dispatch below is wrapped, not
+# replaced).
+ARTIFACT_FILTER="${1:-}"
+filter_allows() {
+    [[ -z "$ARTIFACT_FILTER" || "$1" == "$ARTIFACT_FILTER" ]]
+}
+
 # Toolchain: assumes the same env as the v1 / T2 harness
 # (JAVA_HOME=/tmp/rc-f3g9-jdk21, GRADLE in ~/.gradle/wrapper).
 JAVA_HOME="${JAVA_HOME:-/tmp/rc-f3g9-jdk21}"
@@ -33,6 +45,9 @@ M2_CACHE="${M2_CACHE:-/tmp/m2-cache}"
 DOCKER_MVN_IMAGE="${DOCKER_MVN_IMAGE:-maven:3.9-eclipse-temurin-21}"
 CAMEL_BIN="${CAMEL_BIN:-$WORKTREE/target/release/camel}"
 RUST_LIB_BIN="$WORKTREE/benchmarks/contenders/rust-camel-lib/target/release/rust-camel-lib-fixture"
+# axum-bare reference contender (change bench-axum-bare task 4.1):
+# fixture-local target pin, resolved relative to the worktree root.
+AXUM_BARE_BIN="$WORKTREE/benchmarks/contenders/axum-bare/target/release/axum-bare-fixture"
 # Node binary: same resolution chain as the harness (bench-node task
 # 1.1/1.2) — NODE_BIN env override, runner install path, PATH.
 if [[ -n "${NODE_BIN:-}" ]]; then
@@ -56,6 +71,9 @@ QY_NATIVE="$SCENARIO_DIR/camel-quarkus/camel-quarkus-yaml-native/build/camel-qua
 PASS=0
 FAIL=0
 FAILED_ARTIFACTS=()
+# Raw response of the last post_smoke_port call (axum-bare case);
+# the case body assembles its transcript from it.
+LAST_SMOKE_RESPONSE=""
 
 # Pre-flight: free port 8080. Kill any existing process and
 # wait until the port is actually released (TIME_WAIT can
@@ -72,6 +90,21 @@ free_port_8080() {
     return 1
 }
 free_port_8080
+
+# Pick a free TCP port (axum-bare case): random high port with no
+# listener, same ss idiom as free_port_8080. The fixture's bind is
+# the real arbiter — if the picked port is sniped in the race
+# window the fixture exits 1 and the marker wait fails loud.
+pick_free_port() {
+    local port
+    while :; do
+        port=$(( (RANDOM % 20000) + 30000 ))
+        if ! ss -tln 2>/dev/null | grep -q ":${port} "; then
+            printf '%s\n' "$port"
+            return 0
+        fi
+    done
+}
 
 post_smoke() {
     local artifact="$1"
@@ -91,6 +124,43 @@ post_smoke() {
         | tail -1)
     if [[ "$resp" != "pong" ]]; then
         echo "  FAIL: $artifact POST /bench returned '$resp' (expected 'pong')"
+        kill -9 "$pid" 2>/dev/null
+        FAIL=$((FAIL+1))
+        FAILED_ARTIFACTS+=("$artifact")
+        return 1
+    fi
+    echo "  PASS: $artifact POST /bench → 200/pong"
+    return 0
+}
+
+# Port-parameterized post_smoke variant (axum-bare reference case,
+# change bench-axum-bare task 4.1): the fixture binds a picked free
+# port instead of the fixed 8080, so the POST target is a parameter.
+# post_smoke() and its call sites stay untouched. The raw response is
+# kept in LAST_SMOKE_RESPONSE for the caller, which assembles the
+# axum-bare.log transcript.
+post_smoke_port() {
+    local artifact="$1"
+    local pid="$2"
+    local port="$3"
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "  FAIL: $artifact exited unexpectedly"
+        FAIL=$((FAIL+1))
+        FAILED_ARTIFACTS+=("$artifact")
+        return 1
+    fi
+
+    # POST /bench body=ping
+    local resp
+    resp=$(printf 'POST /bench HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nContent-Length: 4\r\nConnection: close\r\n\r\nping' "$port" \
+        | timeout 2 nc 127.0.0.1 "$port" 2>/dev/null)
+    LAST_SMOKE_RESPONSE="$resp"
+    local status_line body_line
+    status_line="$(head -n1 <<<"$resp")"
+    body_line="$(tail -n1 <<<"$resp")"
+    if [[ "$status_line" != *"200"* || "$body_line" != *"pong"* ]]; then
+        echo "  FAIL: $artifact POST /bench on port $port returned '$status_line'/'$body_line' (expected 200/pong)"
         kill -9 "$pid" 2>/dev/null
         FAIL=$((FAIL+1))
         FAILED_ARTIFACTS+=("$artifact")
@@ -279,78 +349,186 @@ smoke_artifact() {
     return 0
 }
 
+# axum-bare reference-contender case (change bench-axum-bare task 4.1).
+# Self-contained: the fixture binds a picked free port (not 8080), the
+# POST goes through post_smoke_port, and the transcript assembles here
+# (fixture stdout + the POST response status line and body). Liveness
+# evidence only — the log carries markers, never timing-like numbers.
+smoke_axum_bare() {
+    local log="$SCRIPT_DIR/axum-bare.log"
+    local port pid
+
+    port="$(pick_free_port)"
+    BENCH_AXUM_BARE_PORT="$port" "$AXUM_BARE_BIN" > "$log" 2>&1 &
+    pid=$!
+
+    # Wait for BENCH_ROUTE_READY (up to 30s) — same wait-loop idiom
+    # as smoke_artifact.
+    for _ in $(seq 1 300); do
+        if grep -qF "BENCH_ROUTE_READY" "$log" 2>/dev/null; then
+            break
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "  FAIL: axum-bare process died before emitting marker"
+            tail -20 "$log"
+            FAIL=$((FAIL+1))
+            FAILED_ARTIFACTS+=("axum-bare")
+            return 1
+        fi
+        sleep 0.1
+    done
+
+    if ! grep -qF "BENCH_ROUTE_READY" "$log" 2>/dev/null; then
+        echo "  FAIL: axum-bare did not emit BENCH_ROUTE_READY within 30s"
+        kill -9 "$pid" 2>/dev/null
+        FAIL=$((FAIL+1))
+        FAILED_ARTIFACTS+=("axum-bare")
+        return 1
+    fi
+    echo "  PASS: axum-bare BENCH_ROUTE_READY marker"
+
+    if post_smoke_port axum-bare "$pid" "$port"; then
+        PASS=$((PASS+1))
+    fi
+
+    # Per-request stdout markers (Task 3 Important finding; the shared
+    # path gets this via verify_request_id — asserted inline here
+    # because the axum-bare case bypasses post_smoke).
+    if grep -qF "BENCH_HTTP_REQUEST received" "$log" \
+        && grep -qE "BENCH_HTTP_REQUEST id=1\$" "$log"; then
+        echo "  PASS: axum-bare emitted 'BENCH_HTTP_REQUEST received' + 'id=1'"
+    else
+        echo "  FAIL: axum-bare stdout missing 'BENCH_HTTP_REQUEST received'/'id=1'"
+        FAIL=$((FAIL+1))
+        FAILED_ARTIFACTS+=("axum-bare:marker-missing")
+    fi
+
+    kill -9 "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    # Transcript: append the POST response status line + body. Full
+    # headers are dropped (the Date stamp is a time-shaped value the
+    # liveness log must not carry).
+    {
+        head -n1 <<<"${LAST_SMOKE_RESPONSE:-}"
+        tail -n1 <<<"${LAST_SMOKE_RESPONSE:-}"
+    } >> "$log"
+    return 0
+}
+
 echo "=== T3 HTTP server smoke test ==="
 echo "Scenario dir: $SCENARIO_DIR"
 echo
 
 if [[ -x "$RUST_LIB_BIN" ]]; then
-    echo "--- rust-camel-lib ---"
-    smoke_artifact rust-camel-lib
+    if filter_allows rust-camel-lib; then
+        echo "--- rust-camel-lib ---"
+        smoke_artifact rust-camel-lib
+    fi
 else
     echo "SKIP: rust-camel-lib binary not found at $RUST_LIB_BIN"
 fi
 
 if [[ -x "$CAMEL_BIN" && -x "$RUST_CLI_WRAPPER" && -f "$SCENARIO_DIR/rust-camel-cli/Camel.toml" ]]; then
-    echo "--- rust-camel-cli (via wrapper) ---"
-    smoke_artifact rust-camel-cli
+    if filter_allows rust-camel-cli; then
+        echo "--- rust-camel-cli (via wrapper) ---"
+        smoke_artifact rust-camel-cli
+    fi
 else
     echo "SKIP: rust-camel-cli prerequisites not present"
 fi
 
 if [[ -f "$STAND_DSL_JAR" ]]; then
-    echo "--- camel-standalone-dsl ---"
-    smoke_artifact camel-standalone-dsl
+    if filter_allows camel-standalone-dsl; then
+        echo "--- camel-standalone-dsl ---"
+        smoke_artifact camel-standalone-dsl
+    fi
 else
     echo "SKIP: $STAND_DSL_JAR not built"
 fi
 
 if [[ -f "$STAND_YAML_JAR" ]]; then
-    echo "--- camel-standalone-yaml ---"
-    smoke_artifact camel-standalone-yaml
+    if filter_allows camel-standalone-yaml; then
+        echo "--- camel-standalone-yaml ---"
+        smoke_artifact camel-standalone-yaml
+    fi
 else
     echo "SKIP: $STAND_YAML_JAR not built"
 fi
 
 if [[ -f "$QD_JAR" ]]; then
-    echo "--- camel-quarkus-dsl ---"
-    smoke_artifact camel-quarkus-dsl
+    if filter_allows camel-quarkus-dsl; then
+        echo "--- camel-quarkus-dsl ---"
+        smoke_artifact camel-quarkus-dsl
+    fi
 else
     echo "SKIP: $QD_JAR not built"
 fi
 
 if [[ -f "$QY_JAR" ]]; then
-    echo "--- camel-quarkus-yaml ---"
-    smoke_artifact camel-quarkus-yaml
+    if filter_allows camel-quarkus-yaml; then
+        echo "--- camel-quarkus-yaml ---"
+        smoke_artifact camel-quarkus-yaml
+    fi
 else
     echo "SKIP: $QY_JAR not built"
 fi
 
 if [[ -x "$QD_NATIVE" ]]; then
-    echo "--- camel-quarkus-dsl-native ---"
-    smoke_artifact camel-quarkus-dsl-native
+    if filter_allows camel-quarkus-dsl-native; then
+        echo "--- camel-quarkus-dsl-native ---"
+        smoke_artifact camel-quarkus-dsl-native
+    fi
 else
     echo "SKIP: $QD_NATIVE not built"
 fi
 
 if [[ -x "$QY_NATIVE" ]]; then
-    echo "--- camel-quarkus-yaml-native ---"
-    smoke_artifact camel-quarkus-yaml-native
+    if filter_allows camel-quarkus-yaml-native; then
+        echo "--- camel-quarkus-yaml-native ---"
+        smoke_artifact camel-quarkus-yaml-native
+    fi
 else
     echo "SKIP: $QY_NATIVE not built"
 fi
 
 if [[ -x "$NODE_BIN" && -f "$NODE_CONTENDER_DIR/node-native/http-server.mjs" ]]; then
-    echo "--- node-native ---"
-    smoke_artifact node-native
+    if filter_allows node-native; then
+        echo "--- node-native ---"
+        smoke_artifact node-native
+    fi
 else
     echo "SKIP: node binary or node-native fixture not present ($NODE_BIN)"
 fi
 
 if [[ -x "$NODE_BIN" && -f "$NODE_CONTENDER_DIR/node-fastify/http-server.mjs" && -d "$NODE_CONTENDER_DIR/node_modules" ]]; then
-    echo "--- node-fastify ---"
-    smoke_artifact node-fastify
+    if filter_allows node-fastify; then
+        echo "--- node-fastify ---"
+        smoke_artifact node-fastify
+    fi
 else
     echo "SKIP: node-fastify prerequisites not present (need node + npm ci)"
+fi
+
+if [[ -x "$AXUM_BARE_BIN" ]]; then
+    if filter_allows axum-bare; then
+        echo "--- axum-bare ---"
+        smoke_axum_bare
+    fi
+else
+    echo "SKIP: axum-bare binary not found at $AXUM_BARE_BIN"
+fi
+
+# Guard against a typo'd filter arg matching no case: a nonempty
+# filter with zero PASS/FAIL would otherwise exit 0 vacuously.
+if [[ -n "$ARTIFACT_FILTER" && "$PASS" -eq 0 && "$FAIL" -eq 0 ]]; then
+    echo "error: no case matched filter '$ARTIFACT_FILTER'" >&2
+    exit 1
 fi
 
 echo

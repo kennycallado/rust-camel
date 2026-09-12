@@ -1,0 +1,26 @@
+[package]
+name = "axum-bare-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Workspace axum 0.8 carries no extra features (default features only).
+axum.workspace = true
+# DIRECT tokio dep, NOT tokio.workspace: the root workspace tokio carries
+# `features = ["full"]`, which would inflate this fixture's dep graph. The
+# bare server needs only the multi-thread runtime, the attribute macro, and
+# TcpListener (net).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+
+# Workspace member of the parent rust-camel workspace (see root Cargo.toml
+# `members`), but excluded from `default-members` so `cargo build` at root
+# does not pick it up. Build with
+# `env -u CARGO_TARGET_DIR cargo build --release -p axum-bare-fixture`.
+# Sharing the workspace Cargo.lock pins transitive dep versions; sharing the
+# [profile.release] settings keeps the measurement comparable with the other
+# contenders. Zero camel-* dependencies by design (bd rc-u034).
+
+[[bin]]
+name = "axum-bare-fixture"
+path = "src/main.rs"

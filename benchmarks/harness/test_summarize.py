@@ -1217,7 +1217,8 @@ class SummarizeTest(unittest.TestCase):
 
     def test_roster_mirror_no_drift(self):
         # bd rc-2k33 (harness/CONTEXT.md §2 "Roster authored in three
-        # places"): the 52-cell roster arithmetic is INTENTIONALLY
+        # places"): the 53-cell roster arithmetic (5×8 + 2×6 + 1
+        # http-server/axum-bare reference cell) is INTENTIONALLY
         # hand-maintained in exactly THREE sources, each a different
         # projection of the same roster. This test is the guard: it
         # fails on any drift among them. The three sources:
@@ -1226,9 +1227,11 @@ class SummarizeTest(unittest.TestCase):
         #      PAIR_A/PAIR_B_CONTENDERS (affinity pairing),
         #      SCENARIO_M2_PROTOCOL (warm applicability),
         #      FAMILY_COMPLETENESS + the bridge resolver's add_cell
-        #      registrations (contender sets);
+        #      registrations (contender sets), REFERENCE_CONTENDERS
+        #      (rc-u034 reference projection);
         #   2. summarize.py — BRIDGE_SCENARIOS, FULL_CONTENDERS,
-        #      BRIDGE_CONTENDERS, WARM_APPLICABLE;
+        #      BRIDGE_CONTENDERS, WARM_APPLICABLE,
+        #      HTTP_REFERENCE_CONTENDERS;
         #   3. checks/warm-24.py — TICK_SCENARIOS, FULL_CONTENDERS.
         #
         # The run.sh SOURCE is grepped (never executed) and asserted
@@ -1330,11 +1333,29 @@ class SummarizeTest(unittest.TestCase):
                          set(summarize.BRIDGE_CONTENDERS)
                          - set(summarize.FULL_CONTENDERS))
 
-        # The 52-cell arithmetic itself: the SCENARIO_M2_PROTOCOL keys
+        # Reference contender (rc-u034): the REFERENCE_CONTENDERS
+        # entries in run.sh must mirror summarize.HTTP_REFERENCE_
+        # CONTENDERS exactly. Both sides are derived independently
+        # (run.sh source grep vs python literal) — a single dict
+        # equality guards both directions of the projection.
+        reference = {}
+        for scenario, member in re.findall(
+            r'\["([^"]+)"\]="([^"]+)"',
+            declare_block("REFERENCE_CONTENDERS"),
+        ):
+            reference.setdefault(scenario, set()).add(member)
+        self.assertEqual(
+            reference,
+            {k: set(v) for k, v in
+             summarize.HTTP_REFERENCE_CONTENDERS.items()},
+        )
+
+        # The 53-cell arithmetic itself: the SCENARIO_M2_PROTOCOL keys
         # enumerate the 7 registered scenarios (5 full-set + 2 bridge,
         # per SCENARIO_ARTIFACT_SET); 5 × 8 + 2 × 6 = 52 expected
-        # identities, and summarize.expected_roster reproduces exactly
-        # that count from the same projections.
+        # identities plus 1 reference cell (http-server/axum-bare, per
+        # REFERENCE_CONTENDERS) = 53, and summarize.expected_roster
+        # reproduces exactly that count from the same projections.
         all_scenarios = set(entries)
         self.assertEqual(len(all_scenarios), 7)
         self.assertEqual(all_scenarios - bridge_keys,
@@ -1342,24 +1363,80 @@ class SummarizeTest(unittest.TestCase):
                           "t2-realistic-eip", "http-server"})
         self.assertEqual(
             5 * len(summarize.FULL_CONTENDERS)
-            + 2 * len(summarize.BRIDGE_CONTENDERS),
-            52,
+            + 2 * len(summarize.BRIDGE_CONTENDERS)
+            + 1,  # the http-server/axum-bare reference cell
+            53,
         )
         self.assertEqual(
-            len(summarize.expected_roster(sorted(all_scenarios))), 52
+            len(summarize.expected_roster(sorted(all_scenarios))), 53
+        )
+
+    def test_reference_contender_http_only(self):
+        # rc-u034: the reference contender is http-server-only —
+        # expected_roster carries http-server/axum-bare for no other
+        # active scenario, and run.sh never lists axum-bare inside the
+        # Pair A/B rosters (it is an out-of-roster reference cell).
+        scenarios = (
+            "http-server", "t2-json", "split-aggregate",
+            "t2-realistic-eip", "startup-minimal",
+            "xsd-validation-bridge", "xslt-bridge",
+        )
+        for scenario in scenarios:
+            roster = summarize.expected_roster([scenario])
+            self.assertEqual(
+                "http-server/axum-bare" in roster,
+                scenario == "http-server",
+                f"unexpected reference-cell membership for {scenario}",
+            )
+        run_sh = (Path(__file__).resolve().parent / "run.sh").read_text(
+            encoding="utf-8"
+        )
+        for pair in ("PAIR_A_CONTENDERS", "PAIR_B_CONTENDERS"):
+            match = re.search(rf"declare -a {pair}=\(([^)]*)\)", run_sh)
+            self.assertIsNotNone(match, f"run.sh: {pair} not found")
+            self.assertNotIn("axum-bare", match.group(1))
+
+    def test_reference_registration_site_pinned(self):
+        # rc-u034 registration site: REFERENCE_CONTENDERS is consumed
+        # ONLY inside resolve_all_cells (>=1 reference in its body) —
+        # resolve_bridge_scenario_cells has no reference keys by
+        # contract (0 matches in its body). Same source-grep technique
+        # as the bridge-set guard above.
+        run_sh = (Path(__file__).resolve().parent / "run.sh").read_text(
+            encoding="utf-8"
+        )
+        all_cells = re.search(
+            r"resolve_all_cells\(\) \{(.*?)\n\}", run_sh, re.DOTALL
+        )
+        self.assertIsNotNone(all_cells, "run.sh: resolve_all_cells not found")
+        self.assertGreaterEqual(
+            len(re.findall("REFERENCE_CONTENDERS", all_cells.group(1))), 1
+        )
+        resolver = re.search(
+            r"resolve_bridge_scenario_cells\(\) \{(.*?)\n\}",
+            run_sh, re.DOTALL,
+        )
+        self.assertIsNotNone(resolver, "run.sh: bridge resolver not found")
+        self.assertEqual(
+            re.findall("REFERENCE_CONTENDERS", resolver.group(1)), []
         )
 
     def test_full_roster_zero_gaps_with_flat_protocol_a_m2(self):
-        # Task 2.7.1 acceptance: the canonical 52-cell roster (5 full
-        # scenarios + 2 bridge scenarios) with http-server m2 in the
-        # REAL flat protocol-A layout and every other warm cell nested
+        # Task 2.7.1 acceptance: the canonical 53-cell roster (5 full
+        # scenarios + 2 bridge scenarios + the http-server/axum-bare
+        # reference cell) with http-server m2 in the REAL flat
+        # protocol-A layout and every other warm cell nested
         # protocol-B — completeness reports ZERO gaps and --publish
         # exits 0 (before the fix http-server's 8 flat dirs were
         # silently skipped → 8 permanent m2 gaps).
         full = summarize.FULL_CONTENDERS
         bridge = summarize.BRIDGE_CONTENDERS
+        # rc-u034: http-server carries one reference contender outside
+        # the Pair A/B roster — its cell is part of the 53-cell roster,
+        # so the fixtures below must emit it alongside the full set.
+        http_full = full + summarize.HTTP_REFERENCE_CONTENDERS["http-server"]
         scenarios = (
-            ("http-server", full),
+            ("http-server", http_full),
             ("t2-json", full),
             ("split-aggregate", full),
             ("t2-realistic-eip", full),
@@ -1376,9 +1453,10 @@ class SummarizeTest(unittest.TestCase):
                     "startup-ms rss-kb\n12 900\n14 950\n",
                     encoding="utf-8",
                 )
-        # m2: http-server flat protocol-A; every other warm cell
-        # nested protocol-B. startup-minimal is cold-only (no m2).
-        for contender in full:
+        # m2: http-server flat protocol-A (including its reference
+        # cell); every other warm cell nested protocol-B.
+        # startup-minimal is cold-only (no m2).
+        for contender in http_full:
             flat = run / "m2-round-0" / f"http-server_{contender}"
             flat.mkdir(parents=True)
             (flat / "protocol-a-summary.txt").write_text(
@@ -1408,7 +1486,7 @@ class SummarizeTest(unittest.TestCase):
         env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
         with mock.patch.dict(os.environ, env):
             record = summarize.build_record(run, meta)
-        self.assertEqual(len(record["expected_cells"]), 52)
+        self.assertEqual(len(record["expected_cells"]), 53)
         self.assertEqual(summarize.completeness_gaps(record), [])
         # End-to-end: the completed record publishes clean (exit 0).
         records = self.root / "records"

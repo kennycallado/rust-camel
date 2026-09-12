@@ -173,6 +173,15 @@ BRIDGE_CONTENDERS = (
     "rust-camel-lib",
 )
 
+# rc-u034 reference contender (http-server only): one extra axum-bare
+# cell per reference scenario, registered OUTSIDE the Pair A/B roster
+# (run.sh resolves it in resolve_all_cells, never in
+# resolve_bridge_scenario_cells, which has no reference keys). Contract
+# (rc-2k33 three-file note): run.sh REFERENCE_CONTENDERS is the bash
+# projection of this mapping; test_roster_mirror_no_drift guards
+# equality between them.
+HTTP_REFERENCE_CONTENDERS = {"http-server": ("axum-bare",)}
+
 # run.sh m2_measure_protocol_b writes one dir per round:
 # <run>/m2-round-<r>/<scenario>/<contender>/{m2-summary.json,.txt}
 _M2_ROUND_DIR = re.compile(r"m2-round-(\d+)")
@@ -838,9 +847,11 @@ def expected_roster(scenarios):
 
     Mirrors the harness asymmetry (run.sh SCENARIO_ARTIFACT_SET): full
     scenarios expect FULL_CONTENDERS (8), bridge scenarios expect
-    BRIDGE_CONTENDERS (6: core 4 + node 2). Identities — not a count —
-    so the publisher can name a missing cell even when every cell of a
-    scenario is absent.
+    BRIDGE_CONTENDERS (6: core 4 + node 2); reference scenarios
+    additionally expect their HTTP_REFERENCE_CONTENDERS cell (currently
+    only http-server → axum-bare): 5×8 + 2×6 + 1 reference = 53.
+    Identities — not a count — so the publisher can name a missing cell
+    even when every cell of a scenario is absent.
     """
     identities = []
     for scenario in scenarios:
@@ -849,6 +860,7 @@ def expected_roster(scenarios):
             if scenario in BRIDGE_SCENARIOS
             else FULL_CONTENDERS
         )
+        contenders += HTTP_REFERENCE_CONTENDERS.get(scenario, ())
         identities.extend(f"{scenario}/{c}" for c in contenders)
     return sorted(identities)
 

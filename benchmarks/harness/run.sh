@@ -189,6 +189,15 @@ declare -A SCENARIO_ARTIFACT_SET=(
     ["xsd-validation-bridge"]="bridge"
 )
 
+# Reference contender cells (rc-u034 contract): http-server-only, NOT a
+# Pair A/B member, NOT FAMILY_COMPLETENESS-declared — per-scenario
+# opt-in via this map is the documented mechanism. Registered only in
+# resolve_all_cells (never in resolve_bridge_scenario_cells, which has
+# no reference keys).
+declare -A REFERENCE_CONTENDERS=(
+    ["http-server"]="axum-bare"
+)
+
 # Protocol A URL for T3 http-server fixtures (Task 3 / spec §4.5).
 # Client-side URL uses 127.0.0.1 (the server binds 0.0.0.0); the
 # harness drives bench-loadgen against this URL for calibration +
@@ -243,6 +252,10 @@ declare -a PROTOCOL_A_CELLS=()
 # a cold checkout (a cold release build of camel-cli exceeds the job
 # budget). Measurement runs never defer: the binary check hard-fails.
 RUST_CLI_BIN_DEFERRED=false
+# Same deferral state for the axum-bare reference contender (rc-u034):
+# set at registration, consulted by the expected-cell map, so the two
+# stay complements by construction.
+AXUM_BARE_DEFERRED=false
 
 # =====================================================================
 # Argument parsing (flag-based, v1 positional form REMOVED — v1 is
@@ -1787,6 +1800,20 @@ resolve_all_cells() {
                 esac
             fi
         fi
+        # rc-u034 reference contender (http-server-only, outside the
+        # Pair A/B roster). DRY_RUN holds the strings false/true (not
+        # empty/nonempty), so the deferral test below must be an
+        # equality — `-n "$DRY_RUN"` would always be true.
+        if [[ -n "${REFERENCE_CONTENDERS[$scenario]:-}" ]]; then
+            local axum_bin
+            axum_bin="$(resolve_axum_bare_bin)"
+            if [[ "$DRY_RUN" == "true" && ! -x "$axum_bin" ]]; then
+                AXUM_BARE_DEFERRED=true
+                echo "dry-run: cell $scenario/${REFERENCE_CONTENDERS[$scenario]} deferred (release binary not built: $axum_bin)"
+            else
+                add_cell "$scenario" "${REFERENCE_CONTENDERS[$scenario]}" "$axum_bin" "BENCH_ROUTE_READY"
+            fi
+        fi
     done
 
     # After cell registration: populate Protocol A URL + cell list for
@@ -2064,6 +2091,28 @@ resolve_devnull_bin() {
     if [[ ! -x "$bin" ]]; then
         echo "error: bench-devnull binary not found at $bin" >&2
         echo "       run: env -u CARGO_TARGET_DIR cargo build --release -p bench-loadgen" >&2
+        exit 1
+    fi
+    echo "$bin"
+}
+
+# Resolve the axum-bare reference fixture binary (rc-u034). The fixture
+# pins a fixture-local target dir (benchmarks/contenders/axum-bare/target),
+# so the path is static relative to the worktree root — NOT devnull's
+# shared-root-target idiom via resolve_cargo_target_dir, which points at
+# the shared root target this fixture-local pin keeps empty.
+resolve_axum_bare_bin() {
+    local bin="$REPO_ROOT/benchmarks/contenders/axum-bare/target/release/axum-bare-fixture"
+    if [[ ! -x "$bin" ]]; then
+        # Dry-run tolerance: mirror the rust-camel-lib placeholder so a
+        # pre-build dry-run still resolves the full cell list. Real runs
+        # still hard-fail below.
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "<would-build:axum-bare-fixture>"
+            return 0
+        fi
+        echo "error: axum-bare-fixture binary not found or not executable: $bin" >&2
+        echo "       (build with: env -u CARGO_TARGET_DIR cargo build --release -p axum-bare-fixture)" >&2
         exit 1
     fi
     echo "$bin"
@@ -3265,7 +3314,8 @@ done
 # family's wiring died entirely, expected would shrink along with
 # registered and the check would go dark (design.md §Guard
 # re-keying). Full 7-scenario matrix: 5 full × (6 core + 2 node) +
-# 2 bridge × (4 core + 2 node) = 52.
+# 2 bridge × (4 core + 2 node) + 1 reference (rc-u034, http-server
+# only) = 53 (5×8 + 2×6 + 1 reference).
 declare -A _expected_cell_map=()
 for _s in "${SCENARIOS[@]}"; do
     _core_members="camel-standalone-dsl camel-quarkus-dsl-native rust-camel-lib"
@@ -3290,6 +3340,15 @@ for _s in "${SCENARIOS[@]}"; do
             _expected_cell_map["$_s/$_cm"]=1
         done
     done
+    # rc-u034 reference contender (http-server-only): mirrors the
+    # resolve_all_cells registration deferral — AXUM_BARE_DEFERRED is
+    # set exactly when registration skipped the cell, so inclusion and
+    # deferral are complements by construction (no re-resolution).
+    if [[ -n "${REFERENCE_CONTENDERS[$_s]:-}" ]]; then
+        if [[ "$AXUM_BARE_DEFERRED" != "true" ]]; then
+            _expected_cell_map["$_s/${REFERENCE_CONTENDERS[$_s]}"]=1
+        fi
+    fi
 done
 expected_cells=${#_expected_cell_map[@]}
 echo "resolved cells: ${#CELLS[@]} (expected: $expected_cells)"
@@ -3551,6 +3610,19 @@ for scenario in "${SCENARIOS[@]}"; do
             echo "  $contender: no data"
         fi
     done
+    # rc-u034 reference contender (http-server-only) — kept outside
+    # the Pair tables, same scratch-file idiom.
+    if [[ -n "${REFERENCE_CONTENDERS[$scenario]:-}" ]]; then
+        contender="${REFERENCE_CONTENDERS[$scenario]}"
+        cell="$scenario/$contender"
+        local_safe="${cell//\//_}"
+        if [[ -s "$SCRATCH_DIR/$local_safe.txt" ]]; then
+            echo -n "  $contender time: "; summarize 1 "$SCRATCH_DIR/$local_safe.txt"
+            echo -n "  $contender rss:  "; summarize 2 "$SCRATCH_DIR/$local_safe.txt"
+        else
+            echo "  $contender: no data"
+        fi
+    fi
 done
 
 echo ""
