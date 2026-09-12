@@ -3021,9 +3021,18 @@ impl Service<Exchange> for HttpProducer {
 
                 if let Some(user_agent) = &config.user_agent
                     && !config.bridge_endpoint
-                    && let Ok(val) = reqwest::header::HeaderValue::from_str(user_agent)
                 {
-                    collected_headers.push((reqwest::header::USER_AGENT, val));
+                    match constructed_header("user-agent", user_agent) {
+                        Ok((_, val)) => {
+                            collected_headers.push((reqwest::header::USER_AGENT, val));
+                        }
+                        Err(drop) => debug!(
+                            correlation_id = %exchange.correlation_id(),
+                            header = %drop.name,
+                            "outbound header dropped: {}",
+                            drop.reason
+                        ),
+                    }
                 }
 
                 // Inject W3C TraceContext headers for distributed tracing (opt-in via "otel" feature)
@@ -3034,11 +3043,14 @@ impl Service<Exchange> for HttpProducer {
                     let mut otel_headers = HashMap::new();
                     camel_otel::inject_from_exchange(&exchange, &mut otel_headers);
                     for (k, v) in otel_headers {
-                        if let (Ok(name), Ok(val)) = (
-                            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-                            reqwest::header::HeaderValue::from_str(&v),
-                        ) {
-                            collected_headers.push((name, val));
+                        match constructed_header(&k, &v) {
+                            Ok((name, val)) => collected_headers.push((name, val)),
+                            Err(drop) => debug!(
+                                correlation_id = %exchange.correlation_id(),
+                                header = %drop.name,
+                                "outbound header dropped: {}",
+                                drop.reason
+                            ),
                         }
                     }
                 }
@@ -3087,25 +3099,42 @@ impl Service<Exchange> for HttpProducer {
                             let credentials = format!("{username}:{password}");
                             let encoded =
                                 base64::engine::general_purpose::STANDARD.encode(credentials);
-                            if let Ok(val) =
-                                reqwest::header::HeaderValue::from_str(&format!("Basic {encoded}"))
-                            {
-                                collected_headers.push((reqwest::header::AUTHORIZATION, val));
+                            // Base64 output is always header-safe; the guard is kept
+                            // for uniformity with Bearer.
+                            match constructed_header("authorization", &format!("Basic {encoded}")) {
+                                Ok((_, val)) => {
+                                    collected_headers.push((reqwest::header::AUTHORIZATION, val));
+                                }
+                                Err(drop) => debug!(
+                                    correlation_id = %exchange.correlation_id(),
+                                    header = %drop.name,
+                                    "outbound header dropped: {}",
+                                    drop.reason
+                                ),
                             }
                         }
                         HttpAuth::Bearer { token } => {
                             // allow-secret: Bearer token in Authorization header
                             let bearer = format!("Bearer {token}");
-                            if let Ok(val) = reqwest::header::HeaderValue::from_str(&bearer) {
-                                collected_headers.push((reqwest::header::AUTHORIZATION, val));
+                            match constructed_header("authorization", &bearer) {
+                                Ok((_, val)) => {
+                                    collected_headers.push((reqwest::header::AUTHORIZATION, val));
+                                }
+                                Err(drop) => debug!(
+                                    correlation_id = %exchange.correlation_id(),
+                                    header = %drop.name,
+                                    "outbound header dropped: {}",
+                                    drop.reason
+                                ),
                             }
                         }
                     }
 
-                    if config.connection_close
-                        && let Ok(val) = reqwest::header::HeaderValue::from_str("close")
-                    {
-                        collected_headers.push((reqwest::header::CONNECTION, val));
+                    if config.connection_close {
+                        collected_headers.push((
+                            reqwest::header::CONNECTION,
+                            reqwest::header::HeaderValue::from_static("close"),
+                        ));
                     }
                 }
 
@@ -3574,27 +3603,43 @@ fn select_outbound_headers<'a>(
             });
             continue;
         };
-        let name = match reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
-            Ok(name) => name,
-            Err(_) => {
-                drops.push(OutboundHeaderDrop {
-                    name: key,
-                    reason: "invalid header name",
-                    value_kind: None,
-                });
-                continue;
-            }
-        };
-        match reqwest::header::HeaderValue::from_str(&val_str) {
-            Ok(val) => accepted.push((name, val)),
-            Err(_) => drops.push(OutboundHeaderDrop {
-                name: key,
-                reason: "invalid header value",
-                value_kind: None,
-            }),
+        match constructed_header(key, &val_str) {
+            Ok((name, val)) => accepted.push((name, val)),
+            Err(drop) => drops.push(drop),
         }
     }
     OutboundHeaderSelection { accepted, drops }
+}
+
+/// Construct a wire-ready `(HeaderName, HeaderValue)` pair for one outbound
+/// header, or a drop record when the name or value fails construction
+/// (rc-jbs1v). Drop records carry name and reason only, never values
+/// (ADR-0051).
+fn constructed_header<'a>(
+    name: &'a str,
+    value: &str,
+) -> Result<(reqwest::header::HeaderName, reqwest::header::HeaderValue), OutboundHeaderDrop<'a>> {
+    let header_name = match reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
+        Ok(header_name) => header_name,
+        Err(_) => {
+            return Err(OutboundHeaderDrop {
+                name,
+                reason: "invalid header name",
+                value_kind: None,
+            });
+        }
+    };
+    let header_value = match reqwest::header::HeaderValue::from_str(value) {
+        Ok(header_value) => header_value,
+        Err(_) => {
+            return Err(OutboundHeaderDrop {
+                name,
+                reason: "invalid header value",
+                value_kind: None,
+            });
+        }
+    };
+    Ok((header_name, header_value))
 }
 
 #[cfg(test)]
@@ -4166,6 +4211,173 @@ mod tests {
             lower.contains("user-agent: myclient/1.0"),
             "request-only User-Agent header must be forwarded\n{request}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Configured-header construction failures are surfaced, never silent
+    // (rc-jbs1v)
+    // -----------------------------------------------------------------------
+
+    /// Build an endpoint whose URI parses normally but whose `user_agent`
+    /// and `auth` are then overridden programmatically, so CRLF-bearing
+    /// test values never pass through URI parsing.
+    fn endpoint_with_config_overrides(
+        base_url: &str,
+        user_agent: Option<String>,
+        auth: HttpAuth,
+    ) -> HttpEndpoint {
+        let uri = format!("{base_url}/api/test?allowInternal=true");
+        let mut config =
+            HttpEndpointConfig::from_uri(&uri).expect("producer endpoint config parses");
+        config.user_agent = user_agent;
+        config.auth = auth;
+        HttpEndpoint {
+            uri: uri.clone(),
+            config,
+            server_config: HttpServerConfig::from_uri(&uri).expect("server config parses"),
+            client: reqwest::Client::new(),
+            pinned_cache: Arc::new(PinnedClientCache::new(
+                PINNED_CLIENT_TTL,
+                PINNED_CLIENT_MAX_ENTRIES,
+            )),
+            http_config: HttpConfig::default(),
+        }
+    }
+
+    /// A configured user-agent / bearer token that fails `HeaderValue`
+    /// construction must be dropped with a DEBUG record (name + reason
+    /// only, never the value — ADR-0051) and reach the wire absent, while
+    /// a valid config passes through unchanged.
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn producer_invalid_configured_headers_surfaced() {
+        use tower::ServiceExt;
+
+        let (bad_url, bad_captured, _bad_handle) = start_request_capturing_server().await;
+        let (ok_url, ok_captured, _ok_handle) = start_request_capturing_server().await;
+        let ctx = test_producer_ctx();
+
+        let bad_producer = endpoint_with_config_overrides(
+            &bad_url,
+            Some("bad\r\nua".to_string()),
+            HttpAuth::Bearer {
+                token: "tok\r\nen".to_string(),
+            },
+        )
+        .create_producer(rt(), &ctx)
+        .unwrap();
+        let ok_producer = endpoint_with_config_overrides(
+            &ok_url,
+            Some("httpsweep-ok/1".to_string()),
+            HttpAuth::Bearer {
+                token: "valid-token".to_string(),
+            },
+        )
+        .create_producer(rt(), &ctx)
+        .unwrap();
+
+        let bad_exchange = Exchange::new(Message::default());
+        let ok_exchange = Exchange::new(Message::default());
+        let bad_cid = bad_exchange.correlation_id().to_string();
+        let ok_cid = ok_exchange.correlation_id().to_string();
+
+        let bad_result = bad_producer.oneshot(bad_exchange).await;
+        assert!(
+            bad_result.is_ok(),
+            "invalid-config producer call failed: {bad_result:?}"
+        );
+        let ok_result = ok_producer.oneshot(ok_exchange).await;
+        assert!(
+            ok_result.is_ok(),
+            "valid-config producer call failed: {ok_result:?}"
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let bad_request = bad_captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("no outbound request captured");
+        let ok_request = ok_captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("no outbound request captured");
+
+        // Invalid config: neither header reaches the wire. Value-absence,
+        // not "any UA" — reqwest may inject a default user-agent.
+        let bad_lower = bad_request.to_ascii_lowercase();
+        assert!(
+            !bad_lower.lines().any(|l| l.starts_with("authorization:")),
+            "invalid Bearer token must not reach the wire\n{bad_request}"
+        );
+        assert!(
+            !bad_request.contains("bad\r\nua"),
+            "invalid configured user-agent must not reach the wire\n{bad_request}"
+        );
+
+        logs_assert(|lines: &[&str]| {
+            let drops: Vec<&&str> = lines
+                .iter()
+                .filter(|l| {
+                    l.contains("outbound header dropped")
+                        && l.contains(&format!("correlation_id={bad_cid}"))
+                })
+                .collect();
+            if drops.len() != 2 {
+                return Err(format!(
+                    "expected exactly 2 drop records for {bad_cid}, found {}",
+                    drops.len()
+                ));
+            }
+            let has_ua = drops.iter().any(|l| l.contains("header=user-agent"));
+            let has_auth = drops.iter().any(|l| l.contains("header=authorization"));
+            let reason_ok = drops
+                .iter()
+                .all(|l| l.contains("outbound header dropped: invalid header value"));
+            match (has_ua, has_auth, reason_ok) {
+                (true, true, true) => Ok(()),
+                _ => Err(format!(
+                    "drop records mismatched: user-agent={has_ua} \
+                     authorization={has_auth} reason-ok={reason_ok}"
+                )),
+            }
+        });
+        logs_assert(|lines: &[&str]| {
+            if lines
+                .iter()
+                .any(|l| l.contains("bad\r\nua") || l.contains("tok\r\nen"))
+            {
+                Err("sentinel CRLF values leaked into logs".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        // Valid config: both headers reach the wire exactly as configured,
+        // with zero drop records.
+        let ok_lower = ok_request.to_ascii_lowercase();
+        assert!(
+            ok_lower.contains("user-agent: httpsweep-ok/1"),
+            "valid configured user-agent must reach the wire\n{ok_request}"
+        );
+        assert!(
+            ok_lower.contains("authorization: bearer valid-token"),
+            "valid Bearer token must reach the wire\n{ok_request}"
+        );
+        logs_assert(|lines: &[&str]| {
+            let hits = lines
+                .iter()
+                .filter(|l| {
+                    l.contains("outbound header dropped")
+                        && l.contains(&format!("correlation_id={ok_cid}"))
+                })
+                .count();
+            match hits {
+                0 => Ok(()),
+                n => Err(format!("expected no drop records for {ok_cid}, found {n}")),
+            }
+        });
     }
 
     #[tokio::test]
@@ -10800,6 +11012,50 @@ mod tests {
         assert_eq!(reason("X-Control-Value"), Some("invalid header value"));
         assert_eq!(reason("X-Secret"), Some("skip_request_headers"));
         assert_eq!(reason("CamelHttpQuery"), Some("Camel namespace"));
+    }
+
+    #[test]
+    fn constructed_header_invalid_value_returns_drop_record() {
+        let result = constructed_header("user-agent", "bad\r\ns3nt1nel");
+        let Err(record) = result else {
+            panic!("invalid value must produce a drop record");
+        };
+        assert_eq!(record.reason, "invalid header value");
+        assert_eq!(record.name, "user-agent");
+        assert!(record.value_kind.is_none());
+        let debug = format!("{record:?}");
+        assert!(
+            !debug.contains("bad\r\n") && !debug.contains("s3nt1nel"),
+            "drop record debug must not leak the value"
+        );
+    }
+
+    #[test]
+    fn constructed_header_invalid_name_returns_drop_record() {
+        let result = constructed_header("bad name", "ok");
+        let Err(record) = result else {
+            panic!("invalid name must produce a drop record");
+        };
+        assert_eq!(record.reason, "invalid header name");
+        assert_eq!(record.name, "bad name");
+        let debug = format!("{record:?}");
+        assert!(
+            !debug.contains("ok"),
+            "drop record debug must not leak the value"
+        );
+    }
+
+    #[test]
+    fn constructed_header_valid_pair_roundtrip() {
+        let result = constructed_header("authorization", "Bearer abc123");
+        let Ok((name, val)) = result else {
+            panic!("valid pair must construct");
+        };
+        assert_eq!(name.as_str(), "authorization");
+        let Ok(roundtrip) = val.to_str() else {
+            panic!("valid value must roundtrip to str");
+        };
+        assert_eq!(roundtrip, "Bearer abc123");
     }
 
     // -----------------------------------------------------------------------

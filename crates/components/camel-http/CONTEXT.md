@@ -284,6 +284,11 @@ header-name policy as the reply finaliser (`header_policy`, ADR-0057) plus:
   ADR-0051).
 - A header whose name or stringified value is not wire-legal is dropped
   (never a producer panic).
+- Producer-injected headers (userAgent config, Basic/Bearer auth,
+  trace-context) whose HeaderName/HeaderValue construction fails are
+  omitted with a DEBUG drop record (name + reason, never values —
+  ADR-0051, bd rc-jbs1v); the connection-close literal uses `from_static`
+  and cannot fail.
 
 ### Rejected
 
