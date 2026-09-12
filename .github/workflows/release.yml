@@ -220,7 +220,14 @@ jobs:
           mkdir -p "$(dirname "$cfg")"
           # Append-only on a fresh runner; the guard keeps re-runs idempotent
           # (a duplicate [registry] table would break every later cargo call).
-          if ! grep -q '^credential-provider' "$cfg" 2>/dev/null; then
+          # A pre-existing [registry] table WITHOUT our key would collide on
+          # append — fail loudly instead of corrupting the config.
+          if grep -q '^credential-provider' "$cfg" 2>/dev/null; then
+            :
+          elif grep -q '^\[registry\]' "$cfg" 2>/dev/null; then
+            echo "::error::$cfg already has a [registry] table without credential-provider — refusing to append a duplicate table"
+            exit 1
+          else
             {
               printf '[registry]\n'
               printf 'credential-provider = "%s"\n' "$helper"

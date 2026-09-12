@@ -25,9 +25,11 @@ repository secret is kept ONLY as this documented one-shot fallback.
 2. Re-running is ALWAYS safe: `cargo xtask publish` (the publish job's
    engine) skips crates whose version already exists on crates.io
    (`scripts/xtask/src/main.rs`, `crate_exists_on_crates_io`). A
-   half-published release resumes where it stopped. To re-run: delete the
-   remote tag and push it again (see the re-tag recipe below) — the
-   workflow re-triggers on the tag push.
+   half-published release resumes where it stopped. First re-run
+   mechanism: the Actions UI "Re-run failed jobs" button on the publish
+   job (transient failures — no tag moves). If the failure is persistent
+   or the tree must change, delete the remote tag and push it again (see
+   the re-tag recipe below) — the workflow re-triggers on the tag push.
 
 ## The fallback: revert-commit path (token publish)
 
@@ -76,7 +78,9 @@ git push origin main                    # human pushes; never automate
 
 ## Reference
 
-- Trusted publishing registration checklist (all 66 crates):
-  `.opencode/fleet/inbox/oidc-registration-checklist.md`
+- Registration tuple (identical for every crate): owner `kennycallado`,
+  repository `rust-camel`, workflow `release.yml`, environment `crates-io`.
+  The machine-generated per-crate list regenerates with
+  `cargo xtask publish-order`.
 - Wire format and protocol evidence: mission `oidc-prep` (bd rc-bpyz),
   CI runs 34630411072 / 34631907359.
