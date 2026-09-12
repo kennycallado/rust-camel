@@ -131,138 +131,96 @@ appear in any record or canonical run configuration.
 
 ### Requirement: Fail-closed complete-record publish
 
-A record is COMPLETE iff every cell of the EXPECTED registered roster
-for the run's `meta.json.scenarios` is PRESENT: m1 data for every
-expected cell AND m2 data for every expected cell whose scenario's
-warm concept applies. An m2 warm-applicable cell is PRESENT when its
-shape is valid AND it is either MEASURED (an `m2-summary.json` was
-produced in at least one round — attempt evidence is then ignored) or
-ATTEMPTED, where the SUMMARIZER derives the status from
-harness-written evidence in the cell's round directories and the
-PUBLISHER re-validates the derived shape:
+A record SHALL be COMPLETE only when every cell of the EXPECTED registered
+roster for `meta.json.scenarios` is PRESENT: m1 data for every expected cell
+and m2 data for every warm-applicable cell. A warm-applicable m2 cell is
+PRESENT when shape is valid and it is MEASURED (an `m2-summary.json` exists in
+at least one round; attempt evidence is ignored) or ATTEMPTED. The SUMMARIZER
+derives status from harness evidence and the PUBLISHER re-validates the shape.
 
-- `unconverged`: a `protocol-a-summary.txt` contains BOTH
-  `warmup failed-stability: MessageBoundUnconverged` AND
-  `status=failed reason=measure-a-error`.
-- `attempted-timeout`: an `exit-codes.txt` contains
+- `unconverged`: `protocol-a-summary.txt` contains a `warmup failed-stability:`
+  line with reason `MessageBoundUnconverged`, `TimeBoundUnconverged`, or
+  `InsufficientSamples`, and `status=failed reason=measure-a-error`.
+- `attempted-timeout`: `exit-codes.txt` contains
   `# probe reason: no BENCH_LATENCY within 30s timeout`.
 
-All other evidence — malformed sentinel files, unrecognized content,
-or the two statuses conflicting across rounds — leaves the cell
-MISSING with a loud warning naming cell and artifact; no publishable
-"unknown" status exists. Warm applicability is declared scenario
-vocabulary: `startup-minimal` = cold-only (`warm: n/a` — absence is
-not a gap); `http-server` = applicable (Protocol A loadgen); t2-json,
-split-aggregate, t2-realistic-eip, xsd-validation-bridge,
-xslt-bridge = applicable (Protocol B ticks). The expected roster
-follows the harness asymmetry (five full scenarios × 8 contenders +
-two bridge scenarios × 6, plus the `axum-bare` reference contender for
-`http-server` — 53 cells for runs whose harness registers the
-reference cell; 52 for records published before it joined) and SHALL
-be persisted in the record or recomputed deterministically by the
-publisher; completeness validates against the record's own persisted
-or run-derived roster, never against harness constants that postdate
-the record; a wholly absent cell (no directory, no JSON, no evidence)
-counts as MISSING.
-`bench publish` SHALL fail closed on incomplete records: nonzero exit
-and a list of every missing cell (scenario/contender/metric).
+All malformed, unrecognized, incomplete, or conflicting evidence SHALL leave
+the cell MISSING with a loud warning naming cell and artifact. No publishable
+`unknown` status exists. `startup-minimal` remains warm `n/a`; `http-server`
+is applicable, as are t2-json, split-aggregate, t2-realistic-eip,
+xsd-validation-bridge, and xslt-bridge; the expected roster is five full
+scenarios times eight contenders plus two bridge scenarios times six, with
+axum-bare making http-server 53 cells versus 52 before it joined. The roster
+SHALL be persisted in the record or recomputed deterministically, and validation
+SHALL use that record-wide roster rather than postdating harness constants;
+wholly absent cells are MISSING. `bench publish`
+SHALL fail closed with nonzero exit and every missing cell. Measured data SHALL
+override attempt evidence. Historical schema-version 1 records SHALL remain
+valid beside additive status fields in schema-version 2, and mixed index rebuild
+SHALL preserve `index_schema_version: 1`.
 
 #### Scenario: complete record publishes clean
-
-- **Given** a record whose full expected roster has m1 data and whose
-  warm-applicable cells all have m2 data
-- **When** `bench publish` executes
-- **Then** it succeeds with no completeness complaint
+- **GIVEN** every expected m1 and warm-applicable m2 cell is present
+- **WHEN** `bench publish` executes
+- **THEN** it succeeds without a completeness complaint
 
 #### Scenario: pre-reference records stay complete
-
-- **Given** a record published when the expected roster carried 52
-  cells (before the `axum-bare` reference contender joined)
-- **When** `bench publish` or `summarize.py --check` validates it
-  after the reference cell joins the harness roster
-- **Then** completeness and summary regeneration hold unchanged —
-  validation uses the record's persisted `expected_cells`, not the
-  current harness constants
+- **GIVEN** a record persists its 52-cell roster before `axum-bare`
+- **WHEN** validation runs after that contender joins
+- **THEN** validation uses persisted `expected_cells` and remains unchanged
 
 #### Scenario: missing metric rejects publish
-
-- **Given** a record where one warm-applicable cell has m1 but no m2
-  data, no summary, and no recognizable evidence
-- **When** `bench publish` executes
-- **Then** it exits nonzero listing that cell (scenario, contender,
-  metric m2)
+- **GIVEN** a warm-applicable cell has m1 but no m2, summary, or evidence
+- **WHEN** `bench publish` executes
+- **THEN** it exits nonzero and lists the cell
 
 #### Scenario: wholly missing cell rejects publish
-
-- **Given** a record where one expected cell produced no directory
-  and no per-cell JSON at all
-- **When** `bench publish` executes
-- **Then** it exits nonzero listing that cell — validation is against
-  the EXPECTED roster, not the observed cells
+- **GIVEN** an expected cell has no directory, JSON, or evidence
+- **WHEN** `bench publish` executes
+- **THEN** it exits nonzero and lists the cell
 
 #### Scenario: n/a warm is not a gap
-
-- **Given** a record where `startup-minimal` cells have m1 data and no
-  m2 data
-- **When** `bench publish` executes
-- **Then** no completeness complaint is raised for those cells
-  (`startup-minimal` warm is `n/a` by design)
+- **GIVEN** `startup-minimal` has m1 but no m2
+- **WHEN** `bench publish` executes
+- **THEN** no completeness complaint is raised
 
 #### Scenario: unconverged warmup counts as present with status
+- **GIVEN** a warm-applicable cell has a historical `MessageBoundUnconverged`
+  line plus the required failure status and no m2 summary
+- **WHEN** it is summarized and published
+- **THEN** it has status `unconverged`, no latency fields, and counts present
 
-- **Given** a warm-applicable m2 cell whose round directories contain
-  `protocol-a-summary.txt` with both the `MessageBoundUnconverged`
-  line and `status=failed reason=measure-a-error`, and no
-  `m2-summary.json` in any round
-- **When** the run is summarized and then published (publish consumes
-  the summarized `run.json`)
-- **Then** the cell appears in `run.json` with
-  `status: "unconverged"`, a nonempty `reason`, and no latency
-  fields, and the publish gate counts it present (completeness is
-  not blocked)
+#### Scenario: trailing-window warmup failure counts as present
+- **GIVEN** a warm-applicable cell has `TimeBoundUnconverged` or
+  `InsufficientSamples` plus the required failure status
+- **WHEN** it is summarized and published
+- **THEN** it has status `unconverged`, no latency fields, and counts present
 
 #### Scenario: probe timeout counts as present with status
-
-- **Given** a warm-applicable m2 cell whose round directory contains
-  an `exit-codes.txt` with
-  `# probe reason: no BENCH_LATENCY within 30s timeout` and no
-  `m2-summary.json` in any round
-- **When** the run is summarized and then published
-- **Then** the cell appears with `status: "attempted-timeout"` and
-  the gate counts it present
+- **GIVEN** a cell has the required probe-timeout sentinel and no m2 summary
+- **WHEN** it is summarized and published
+- **THEN** it has status `attempted-timeout` and counts present
 
 #### Scenario: measured wins over attempt evidence
-
-- **Given** a warm-applicable m2 cell with a valid `m2-summary.json`
-  in round 2 and an unconverged sentinel in round 0
-- **When** the run is summarized
-- **Then** the cell is MEASURED from round 2 (no status field) and
-  the attempt evidence is ignored
+- **GIVEN** a later round has valid m2 data and an earlier round has an
+  unconverged sentinel
+- **WHEN** the run is summarized
+- **THEN** measured data wins and status is absent
 
 #### Scenario: conflicting statuses stay missing
-
-- **Given** a warm-applicable m2 cell with an `unconverged` sentinel
-  in one round dir and an `attempted-timeout` sentinel in another,
-  and no `m2-summary.json` anywhere
-- **When** the run is summarized
-- **Then** a loud warning names the cell and the conflicting
-  artifacts, and the cell remains MISSING
+- **GIVEN** rounds contain unconverged and attempted-timeout evidence without
+  m2 data
+- **WHEN** the run is summarized
+- **THEN** a loud warning is emitted and the cell remains MISSING
 
 #### Scenario: malformed evidence stays missing
-
-- **Given** a warm-applicable m2 cell whose round dir contains
-  sentinel files with truncated or unrecognized content and no
-  `m2-summary.json`
-- **When** the run is summarized
-- **Then** a loud warning names the cell and artifact, and the cell
-  remains MISSING — no publishable unknown status exists
+- **GIVEN** a round has truncated or unrecognized sentinel content and no m2
+  summary
+- **WHEN** the run is summarized
+- **THEN** a loud warning is emitted and the cell remains MISSING
 
 #### Scenario: status schema is additive and one-way
-
-- **Given** records published under schema_version 1 (no status
-  fields) alongside a new schema_version 2 record
-- **When** the publisher validates the v1 record and the index is
-  rebuilt over the mixed v1/v2 set
-- **Then** the v1 record validates unchanged, the mixed rebuild
-  succeeds, and `index_schema_version` remains 1
+- **GIVEN** schema-version 1 and schema-version 2 records coexist
+- **WHEN** validation and index rebuild run
+- **THEN** v1 remains valid and additive v2 statuses do not rewrite v1
 
