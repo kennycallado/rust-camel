@@ -14,17 +14,24 @@
 //!
 //! Exit codes mirror the `camel test` taxonomy (`2 > 1 > 0`): 0 the
 //! pipeline completed; 1 the pipeline failed; 2 any load, validation,
-//! boot, drain-timeout, shutdown, or report-write error. The process
-//! exit is applied only at the `main.rs` boundary; this module returns
-//! the code.
+//! boot, interruption, drain-timeout, shutdown, or report-write
+//! error. A first SIGINT or SIGTERM cancels the in-flight send or
+//! batch drain, runs bounded teardown, and reports outcome
+//! `Interrupted` (exit 2); a second signal during that teardown
+//! force-exits 1. The process exit is applied only at the `main.rs`
+//! boundary; this module returns the code.
 //!
 //! Spec: openspec/changes/cli-jobs.
 
 mod batch;
 mod document;
+mod signal;
 
 #[cfg(test)]
 mod document_tests;
+
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -38,6 +45,7 @@ use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 
 use document::{JobBody, JobDocument, JobRouteSource};
+use signal::{JobSignals, JobWaitOutcome, await_job_operation_or_signal};
 
 /// Startup-race retry sleep for the send's producer delivery.
 const SEND_RETRY_SLEEP: Duration = Duration::from_millis(20);
@@ -104,7 +112,7 @@ struct JobReport {
     /// Execution mode (`one-shot` or `batch`).
     mode: String,
     /// Outcome: `Completed` (or `Stopped`, see `terminated_early`),
-    /// `Failed`, or `Timeout`.
+    /// `Failed`, `Timeout`, or `Interrupted` (first SIGINT/SIGTERM).
     outcome: &'static str,
     /// `true` when the pipeline ended through a `Stop` step. Always
     /// `false` in v1: the producer reply seam deliberately erases the
@@ -280,6 +288,30 @@ fn list_jobs(
 /// applies it). Every failure path prints to stderr; the JSON report
 /// goes to stdout (default) or `--report`.
 pub async fn run_job(args: &JobArgs) -> i32 {
+    // 0. Register the SIGINT/SIGTERM streams BEFORE config load, but
+    //    only when a document run follows: a signal arriving during
+    //    boot is buffered by the runtime and consumed by the send
+    //    race below, instead of hitting the default disposition and
+    //    killing the process (spec: signal during boot is buffered).
+    //    Both streams stay preserved until the first signal is
+    //    consumed; ownership then moves to the force-exit guard. The
+    //    no-document listing path never installs the streams: handlers
+    //    whose streams are never consumed would swallow SIGINT/SIGTERM
+    //    during listing instead of letting the default disposition
+    //    terminate the process.
+    let signals = args.document.is_some().then(JobSignals::arm);
+    // Flush the `signal streams armed` marker for subprocess
+    // synchronization: stderr is unbuffered and flushed here, while
+    // the tracing subscriber installs only inside
+    // `configure_context_with_beans` below (a tracing event at this
+    // point would go nowhere). Document runs only — the streams (and
+    // the marker that synchronizes on them) exist only on the
+    // document path; the listing path has no signal-sensitive
+    // stretch.
+    if signals.is_some() {
+        eprintln!("camel job: signal streams armed");
+    }
+
     let started = Instant::now();
 
     // Config first: bare-name resolution needs `[jobs].dir`.
@@ -299,7 +331,10 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         }
     };
 
-    let Some(raw_document) = &args.document else {
+    // The tuple pairs the document with its entry-armed streams; both
+    // arms key off the same predicate, so the else branch is exactly
+    // the no-document listing path (streams never installed there).
+    let (Some(raw_document), Some(mut signals)) = (&args.document, signals) else {
         if args.report.is_some() {
             eprintln!("--report requires a job document");
             return 2;
@@ -575,65 +610,127 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         )),
         shutdown_error: None,
     };
-    let mut report = match tokio::time::timeout_at(tokio_deadline, send).await {
-        Err(_) => timeout_report(),
-        Ok(Err(SendError::Transport(detail))) => {
-            // log-policy: system-broken
-            tracing::error!("Job send apparatus failure: {detail}");
-            eprintln!("{detail}");
-            // The context is booted; run the shutdown path before exiting.
-            // Batch keeps the no-floor rule: teardown cannot run past the
-            // overall deadline (same branch as the post-verdict budget).
-            let transport_budget = shutdown_budget(doc.execute.mode, deadline);
-            if let Err(shutdown_detail) = shutdown(&mut ctx, &boot_handle, transport_budget).await {
-                eprintln!("{shutdown_detail}");
+    // Shared shape for the first-signal interruption: the in-flight
+    // send or batch drain was cancelled; the verdict is the signal.
+    let interrupted_report = || JobReport {
+        document: document_path.display().to_string(),
+        mode: doc.execute.mode.as_str().to_string(),
+        outcome: "Interrupted",
+        terminated_early: false,
+        duration_ms: started.elapsed().as_millis(),
+        reply: None,
+        error: Some("interrupted by signal (SIGINT/SIGTERM)".to_string()),
+        shutdown_error: None,
+    };
+    let mut interrupted = false;
+    let mut report = {
+        // Signal-first race: a signal ready at the same poll point as
+        // send completion or deadline expiry wins; dropping the
+        // operation future on a signal win cancels the in-flight send.
+        let operation = tokio::time::timeout_at(tokio_deadline, send);
+        match await_job_operation_or_signal(signals.next(), operation).await {
+            JobWaitOutcome::Signaled => {
+                interrupted = true;
+                interrupted_report()
             }
-            return 2;
-        }
-        Ok(Err(SendError::Pipeline(e))) => JobReport {
-            document: document_path.display().to_string(),
-            mode: doc.execute.mode.as_str().to_string(),
-            outcome: "Failed",
-            terminated_early: false,
-            duration_ms: started.elapsed().as_millis(),
-            reply: None,
-            error: Some(e.to_string()),
-            shutdown_error: None,
-        },
-        Ok(Ok(reply)) => {
-            // Batch drain: the trigger send's seda hops are
-            // fire-and-forget, so wait until every expected queue has
-            // ten consecutive zero-depth samples (a 2.5 s quiescence
-            // window) — see the `batch` module docs — before the
-            // verdict; pre-send zero samples were reset away. One-shot
-            // skips the drain.
-            let drained = match &batch_probe {
-                Some(probe) => {
-                    probe.reset();
-                    batch::drain_until_empty(probe, tokio_deadline).await
+            JobWaitOutcome::Completed(Err(_)) => timeout_report(),
+            JobWaitOutcome::Completed(Ok(Err(SendError::Transport(detail)))) => {
+                // log-policy: system-broken
+                tracing::error!("Job send apparatus failure: {detail}");
+                eprintln!("{detail}");
+                // The context is booted; run the shutdown path before exiting.
+                // Batch keeps the no-floor rule: teardown cannot run past the
+                // overall deadline (same branch as the post-verdict budget).
+                let transport_budget = shutdown_budget(doc.execute.mode, deadline);
+                if let Err(shutdown_detail) =
+                    shutdown(&mut ctx, &boot_handle, transport_budget).await
+                {
+                    eprintln!("{shutdown_detail}");
                 }
-                None => true,
-            };
-            if !drained {
-                timeout_report()
-            } else {
-                JobReport {
-                    document: document_path.display().to_string(),
-                    mode: doc.execute.mode.as_str().to_string(),
-                    outcome: "Completed",
-                    terminated_early: false,
-                    duration_ms: started.elapsed().as_millis(),
-                    reply: doc
-                        .execute
-                        .capture_reply
-                        .then(|| reply_report(&reply))
-                        .map(|(body, headers)| ReplyReport { body, headers }),
-                    error: None,
-                    shutdown_error: None,
+                return 2;
+            }
+            JobWaitOutcome::Completed(Ok(Err(SendError::Pipeline(e)))) => JobReport {
+                document: document_path.display().to_string(),
+                mode: doc.execute.mode.as_str().to_string(),
+                outcome: "Failed",
+                terminated_early: false,
+                duration_ms: started.elapsed().as_millis(),
+                reply: None,
+                error: Some(e.to_string()),
+                shutdown_error: None,
+            },
+            JobWaitOutcome::Completed(Ok(Ok(reply))) => {
+                // Batch drain: the trigger send's seda hops are
+                // fire-and-forget, so wait until every expected queue has
+                // ten consecutive zero-depth samples (a 2.5 s quiescence
+                // window) — see the `batch` module docs — before the
+                // verdict; pre-send zero samples were reset away. The
+                // drain waits on the same registered signal streams, so
+                // an interruption during drain follows the same path as
+                // one during send. One-shot skips the drain.
+                let drained = match &batch_probe {
+                    Some(probe) => {
+                        probe.reset();
+                        match await_job_operation_or_signal(
+                            signals.next(),
+                            batch::drain_until_empty(probe, tokio_deadline),
+                        )
+                        .await
+                        {
+                            JobWaitOutcome::Completed(drained) => drained,
+                            JobWaitOutcome::Signaled => {
+                                interrupted = true;
+                                false
+                            }
+                        }
+                    }
+                    None => true,
+                };
+                if interrupted {
+                    interrupted_report()
+                } else if !drained {
+                    timeout_report()
+                } else {
+                    JobReport {
+                        document: document_path.display().to_string(),
+                        mode: doc.execute.mode.as_str().to_string(),
+                        outcome: "Completed",
+                        terminated_early: false,
+                        duration_ms: started.elapsed().as_millis(),
+                        reply: doc
+                            .execute
+                            .capture_reply
+                            .then(|| reply_report(&reply))
+                            .map(|(body, headers)| ReplyReport { body, headers }),
+                        error: None,
+                        shutdown_error: None,
+                    }
                 }
             }
         }
     };
+
+    // ---- First-signal interruption: bounded teardown + report --------
+    if interrupted {
+        // The force-exit guard owns the streams from now: a second
+        // SIGINT/SIGTERM during teardown exits 1 immediately without
+        // waiting for the bounded shutdown. The first signal was
+        // consumed by the race above, so the guard only sees later
+        // signals; it is aborted once teardown completes so the normal
+        // exit path stays untouched.
+        let force_exit = tokio::spawn(signals.force_exit());
+        let budget = shutdown_budget(doc.execute.mode, deadline);
+        let shutdown_result = shutdown(&mut ctx, &boot_handle, budget).await;
+        force_exit.abort();
+        if let Err(detail) = shutdown_result {
+            eprintln!("{detail}");
+            record_shutdown_failure(&mut report, detail, budget);
+        }
+        if !write_report(args, &report) {
+            return 2;
+        }
+        return exit_code_for(report.outcome);
+    }
 
     // ---- Drain + teardown under the remaining budget --------------------
     // Batch: teardown cannot run past the overall deadline (no floor).
@@ -645,20 +742,13 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         // deadline has already fired, so a 0-budget shutdown call is a
         // foregone timeout artifact. Keep the stderr line, but the
         // report carries only the Timeout verdict.
-        if budget > Duration::ZERO {
-            report.shutdown_error = Some(detail);
-        }
+        record_shutdown_failure(&mut report, detail, budget);
         // Apparatus class outranks the verdict (2 > 1 > 0).
         write_report(args, &report);
         return 2;
     }
 
-    let code = match report.outcome {
-        "Completed" => 0,
-        "Failed" => 1,
-        // Timeout: the mandatory overall budget expired.
-        _ => 2,
-    };
+    let code = exit_code_for(report.outcome);
     if !write_report(args, &report) {
         return 2;
     }
@@ -824,6 +914,28 @@ fn shutdown_budget(mode: document::JobMode, deadline: Instant) -> Duration {
     }
 }
 
+/// Map a report outcome to the process exit code (`2 > 1 > 0`):
+/// `Completed` 0, `Failed` 1, and the apparatus class — `Timeout`
+/// (mandatory overall budget expired) and `Interrupted` (first
+/// SIGINT/SIGTERM) — 2.
+fn exit_code_for(outcome: &str) -> i32 {
+    match outcome {
+        "Completed" => 0,
+        "Failed" => 1,
+        _ => 2,
+    }
+}
+
+/// Record a teardown failure on a verdict-carrying report:
+/// `shutdown_error` carries the detail ONLY when teardown had a
+/// non-zero budget. A zero-budget failure is the timeout path's
+/// foregone artifact (stderr-only; the verdict keeps the report).
+fn record_shutdown_failure(report: &mut JobReport, detail: String, budget: Duration) {
+    if budget > Duration::ZERO {
+        report.shutdown_error = Some(detail);
+    }
+}
+
 /// Tear the context down through the BootHandle with a bounded budget;
 /// the deadline-wrapped pool teardown mirrors `camel run`. Returns the
 /// first failure as a display string (apparatus class, exit 2).
@@ -839,105 +951,6 @@ async fn shutdown(
             "drain timeout: job teardown exceeded {}",
             humantime::format_duration(budget)
         )),
-    }
-}
-
-#[cfg(test)]
-mod report_tests {
-    use super::JobReport;
-
-    /// A shutdown failure after a recorded verdict serializes alongside
-    /// the verdict error: `error` keeps the pipeline/timeout detail and
-    /// `shutdown_error` carries the teardown detail.
-    #[test]
-    fn shutdown_error_serializes_alongside_error() {
-        let report = JobReport {
-            document: "doc".to_string(),
-            mode: "one-shot".to_string(),
-            outcome: "Failed",
-            terminated_early: false,
-            duration_ms: 1,
-            reply: None,
-            error: Some("pipeline failed".to_string()),
-            shutdown_error: Some("shutdown failure: x".to_string()),
-        };
-        let json = serde_json::to_string(&report).expect("report must serialize");
-        assert!(
-            json.contains("pipeline failed"),
-            "verdict error must serialize: {json}"
-        );
-        assert!(
-            json.contains("shutdown failure: x"),
-            "shutdown detail must serialize: {json}"
-        );
-    }
-
-    /// Without a shutdown failure the `shutdown_error` key is omitted
-    /// from the JSON report.
-    #[test]
-    fn shutdown_error_omitted_when_absent() {
-        let report = JobReport {
-            document: "doc".to_string(),
-            mode: "one-shot".to_string(),
-            outcome: "Failed",
-            terminated_early: false,
-            duration_ms: 1,
-            reply: None,
-            error: Some("pipeline failed".to_string()),
-            shutdown_error: None,
-        };
-        let json = serde_json::to_string(&report).expect("report must serialize");
-        assert!(
-            !json.contains("shutdown_error"),
-            "absent shutdown_error must be omitted: {json}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod shutdown_budget_tests {
-    use super::{MIN_SHUTDOWN_BUDGET, shutdown_budget};
-    use crate::commands::job::document::JobMode;
-    use std::time::{Duration, Instant};
-
-    /// Batch: the budget is the remaining wall clock, uncapped below.
-    #[test]
-    fn shutdown_budget_batch_is_remaining() {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let budget = shutdown_budget(JobMode::Batch, deadline);
-        assert!(
-            budget <= Duration::from_secs(3) && budget > Duration::from_secs(2),
-            "expected ~3s remaining, got {budget:?}"
-        );
-    }
-
-    /// Batch with a spent deadline: zero budget, no floor.
-    #[test]
-    fn shutdown_budget_batch_zero_when_past() {
-        let deadline = Instant::now() - Duration::from_secs(1);
-        assert_eq!(shutdown_budget(JobMode::Batch, deadline), Duration::ZERO);
-    }
-
-    /// One-shot with a spent deadline: floored to MIN_SHUTDOWN_BUDGET.
-    #[test]
-    fn shutdown_budget_one_shot_floored() {
-        let deadline = Instant::now() - Duration::from_secs(1);
-        assert_eq!(
-            shutdown_budget(JobMode::OneShot, deadline),
-            MIN_SHUTDOWN_BUDGET
-        );
-    }
-
-    /// One-shot with ample remaining time: the remaining clock wins over
-    /// the floor.
-    #[test]
-    fn shutdown_budget_one_shot_is_remaining_when_large() {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let budget = shutdown_budget(JobMode::OneShot, deadline);
-        assert!(
-            budget <= Duration::from_secs(10) && budget > MIN_SHUTDOWN_BUDGET,
-            "expected ~10s remaining, got {budget:?}"
-        );
     }
 }
 

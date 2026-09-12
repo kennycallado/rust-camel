@@ -27,11 +27,11 @@ See `crates/camel-bundles/CONTEXT.md`.
 | `async fn run` | `commands/run.rs:415` | (d) system-broken | `CamelContext` start failed |
 | `async fn run` | `commands/run.rs:469` | (d) system-broken | file watcher failed |
 | `async fn run` | `commands/run.rs:513` | (d) system-broken | `BootHandle` teardown failed (log-and-continue, exit code unchanged) |
-| `async fn run_job` | `commands/job/mod.rs:233` | (d) system-broken | `camel job`: component cascade boot failed |
-| `async fn run_job` | `commands/job/mod.rs:245` | (d) system-broken | `camel job`: route loading failed |
-| `async fn run_job` | `commands/job/mod.rs:317` | (d) system-broken | `camel job`: failed to add route definition |
-| `async fn run_job` | `commands/job/mod.rs:325` | (d) system-broken | `camel job`: `CamelContext` start failed |
-| `async fn run_job` | `commands/job/mod.rs:349` | (d) system-broken | `camel job`: send apparatus failure (producer/endpoint, not a pipeline verdict) |
+| `async fn run_job` | `commands/job/mod.rs:450` | (d) system-broken | `camel job`: component cascade boot failed |
+| `async fn run_job` | `commands/job/mod.rs:462` | (d) system-broken | `camel job`: route loading failed |
+| `async fn run_job` | `commands/job/mod.rs:558` | (d) system-broken | `camel job`: failed to add route definition |
+| `async fn run_job` | `commands/job/mod.rs:578` | (d) system-broken | `camel job`: `CamelContext` start failed |
+| `async fn run_job` | `commands/job/mod.rs:639` | (d) system-broken | `camel job`: send apparatus failure (producer/endpoint, not a pipeline verdict) |
 | `fn boot` | `crates/camel-bundles/src/lib.rs:306` | (d) system-broken | moved to camel-bundles (boot cascade): failed to initialize SQL bundle. See `crates/camel-bundles/CONTEXT.md` |
 | `fn boot` | `crates/camel-bundles/src/lib.rs:329` | (d) system-broken | moved to camel-bundles (boot cascade): failed to initialize SurrealDB bundle. See `crates/camel-bundles/CONTEXT.md` |
 | `BootHandle::shutdown_with_deadline` | `crates/camel-bundles/src/lib.rs:103` | (d) system-broken | moved to camel-bundles (boot cascade): shutdown error from `ctx.stop`. See `crates/camel-bundles/CONTEXT.md` |
@@ -61,9 +61,50 @@ semantics), so strict signal counting is not guaranteed.
 On non-unix platforms there is no SIGTERM stream; the portable Ctrl+C
 listener is the first-signal handler, and a second Ctrl+C force-exits.
 
+## camel job signal handling
+
+`camel job` arms its signal streams at the first lines of `run_job`,
+before config loading, so a signal arriving during boot (config load,
+bundle cascade, route discovery, context start) is buffered by the runtime
+and consumed by the send/drain race instead of hitting the default
+disposition and killing the process (spec: signal during boot is buffered;
+mirrors `camel run` entry registration). Arming is document-runs only: the
+no-argument listing path never installs the streams, because handlers
+whose streams are never consumed would swallow SIGINT/SIGTERM during
+listing instead of letting the default disposition terminate the process.
+The first SIGINT or SIGTERM cancels the
+in-flight send or batch drain, runs bounded teardown, and reports outcome
+`Interrupted` with exit code 2. The teardown budget is mode-dependent:
+one-shot floors the wall-clock remaining to the overall deadline at
+`MIN_SHUTDOWN_BUDGET` (5 s), while batch keeps the no-floor rule —
+teardown cannot run past the overall deadline, so a spent deadline
+computes a zero budget there. A `shutdown_error` is recorded only when
+teardown had a non-zero budget; a zero-budget failure — whether on the
+interrupted-batch path or the timeout path — is a foregone artifact
+(stderr-only, the verdict keeps the report).
+
+After the first signal is consumed, a force-exit guard owns the streams: a
+second SIGINT or SIGTERM during teardown exits 1 immediately without
+waiting for the bounded shutdown (rc-kz85m — orchestrators resend the stop
+signal after their grace period). Identical signal bursts may coalesce
+before delivery (tokio semantics), so strict signal counting is not
+guaranteed. The wait race is signal-first: a `biased` select polls the
+signal arm before the operation, so a signal ready at the same poll point
+as send completion or deadline expiry wins deterministically (spec:
+signal-first tie).
+
+On Unix the SIGINT and SIGTERM streams are registered at entry, so the
+buffered-during-boot guarantee holds for the whole boot stretch. On
+non-Unix platforms there is no SIGTERM stream; the portable Ctrl+C
+listener is awaited inside the wait race, which first runs at the
+send/drain race — tokio installs the console handler only when the first
+`ctrl_c()` future is polled, so a Ctrl+C during boot hits the default
+disposition and terminates the process outright (no `Interrupted` report,
+no exit 2). The covered stretch on non-Unix starts at the send/drain race.
+
 ## camel job failure modes
 
-`camel job <doc>` runs one `*.job.yaml` document declaring a top-level `execute:` section (mode `one-shot`/`batch`, one `direct:`/`seda:` send, mandatory `timeout`, one family route source, optional `description:` for listing). A bare name resolves `{jobs.dir}/<name>.job.yaml` only (`[jobs].dir` in `Camel.toml`, default `jobs`, anchored at the Camel.toml root); an explicit path always wins. `camel job` with no argument lists the jobs directory — name plus description via a cheap probe parse, `(unparseable)` siblings tolerated, empty/absent dir exits 0. It boots the REAL composition root (the `camel run` seams: config, security context, bind acks, the `camel_bundles` cascade, ambient `${env:}` discovery), starts every document route and relies on the load-time consumer allowlist for side-effect safety, with the send target as the sole entry point, sends one exchange, tears down through `BootHandle::shutdown_with_deadline`, and emits a JSON report to stdout (or `--report`) for outcomes that reach the send plus shutdown failures after a verdict; early exit-2 classes are stderr-only. Seda targets are rewritten to `waitForTaskToComplete=Always` so the send is synchronous (verdict fidelity). Exit precedence mirrors `camel test`: `2 > 1 > 0`. Route side-effect safety is fail-closed: documents whose routes consume (`from:`) from any scheme outside `{direct, seda, log, mock}` are rejected at load; `to:` URIs are unrestricted. `mode` accepts `one-shot` and `batch`; other values are rejected at load. The general tracing layer writes to stdout, so a machine-parseable stdout report needs `log_level = "off"` or `--report`.
+`camel job <doc>` runs one `*.job.yaml` document declaring a top-level `execute:` section (mode `one-shot`/`batch`, one `direct:`/`seda:` send, mandatory `timeout`, one family route source, optional `description:` for listing). A bare name resolves `{jobs.dir}/<name>.job.yaml` only (`[jobs].dir` in `Camel.toml`, default `jobs`, anchored at the Camel.toml root); an explicit path always wins. `camel job` with no argument lists the jobs directory — name plus description via a cheap probe parse, `(unparseable)` siblings tolerated, empty/absent dir exits 0. It boots the REAL composition root (the `camel run` seams: config, security context, bind acks, the `camel_bundles` cascade, ambient `${env:}` discovery), starts every document route and relies on the load-time consumer allowlist for side-effect safety, with the send target as the sole entry point, sends one exchange, tears down through `BootHandle::shutdown_with_deadline`, and emits a JSON report to stdout (or `--report`) for outcomes that reach the send (verdict, interruption, or timeout) plus shutdown failures after a verdict; early exit-2 classes are stderr-only. Seda targets are rewritten to `waitForTaskToComplete=Always` so the send is synchronous (verdict fidelity). Exit precedence mirrors `camel test`: `2 > 1 > 0`. Route side-effect safety is fail-closed: documents whose routes consume (`from:`) from any scheme outside `{direct, seda, log, mock}` are rejected at load; `to:` URIs are unrestricted. `mode` accepts `one-shot` and `batch`; other values are rejected at load. The general tracing layer writes to stdout, so a machine-parseable stdout report needs `log_level = "off"` or `--report`.
 
 | Failure mode | Trigger | Exit code |
 |--------------|---------|-----------|
@@ -72,6 +113,7 @@ listener is the first-signal handler, and a second Ctrl+C force-exits.
 | Boot failure | config load, context configure, security compile context, `camel_bundles::boot`, route discovery/parse, route registration, `ctx.start()` | 2 |
 | Pipeline failure | the send's route pipeline failed (`PipelineOutcome::Failed` through the producer reply seam) | 1 |
 | Overall timeout | the mandatory `timeout` expired before send+drain+teardown completed (report outcome `Timeout`) | 2 |
+| Signal interruption | first SIGINT/SIGTERM cancelled the in-flight send or batch drain (report outcome `Interrupted`; teardown runs under the one-shot `MIN_SHUTDOWN_BUDGET` floor or the batch no-floor deadline) | 2 |
 | Send apparatus failure | producer/endpoint creation failed past the 3 s startup-race window (not a pipeline verdict) | 2 |
 | Shutdown failure | teardown failed or exceeded its budget after a recorded verdict (report `shutdown_error` carries the detail; `error` keeps the verdict) | 2 |
 | Report write failure | `--report` path unwritable, or report serialization failed | 2 |

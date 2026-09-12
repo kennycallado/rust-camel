@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use common::{drain_to_buffer, send_signal, spawn_camel_run};
+use common::{send_signal, spawn_camel_run, spawn_drained, wait_exit_code_bounded};
 
 /// Write the zero-routes fixture: a `Camel.toml` whose glob matches nothing
 /// (no `routes/` directory is created) so boot keeps running past discovery
@@ -40,76 +40,6 @@ watch = false
 "#,
     )
     .expect("write Camel.toml");
-}
-
-/// Pipe-drained capture for the child's output streams.
-struct Drained {
-    out_handle: thread::JoinHandle<()>,
-    err_handle: thread::JoinHandle<()>,
-    out_buf: Arc<Mutex<String>>,
-    err_buf: Arc<Mutex<String>>,
-}
-
-impl Drained {
-    /// Both captured streams, labeled, for failure messages.
-    fn captured(&self) -> String {
-        format!(
-            "stdout:\n{}\nstderr:\n{}",
-            self.out_buf.lock().expect("stdout buffer lock poisoned"),
-            self.err_buf.lock().expect("stderr buffer lock poisoned")
-        )
-    }
-}
-
-/// Take the child's piped stdout/stderr and spawn a drain thread per stream
-/// so the OS pipe buffer (64 KiB) never fills and deadlocks the child.
-fn spawn_drained(child: &mut Child) -> Drained {
-    let out_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-    let err_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-    let stdout = child
-        .stdout
-        .take()
-        .expect("child stdout was configured as piped");
-    let stderr = child
-        .stderr
-        .take()
-        .expect("child stderr was configured as piped");
-    let out_handle = thread::spawn({
-        let buf = Arc::clone(&out_buf);
-        move || drain_to_buffer(stdout, buf)
-    });
-    let err_handle = thread::spawn({
-        let buf = Arc::clone(&err_buf);
-        move || drain_to_buffer(stderr, buf)
-    });
-    Drained {
-        out_handle,
-        err_handle,
-        out_buf,
-        err_buf,
-    }
-}
-
-/// Wait for the child to exit, at most `timeout`. If it is still alive at
-/// the deadline, force-kill and reap, returning `-1` (same sentinel as
-/// `run_exec_guard_test.rs`).
-fn wait_exit_code_bounded(child: &mut Child, timeout: Duration) -> i32 {
-    let start = Instant::now();
-    let step = Duration::from_millis(25);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.code().unwrap_or(-1),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return -1;
-                }
-                thread::sleep(step);
-            }
-            Err(e) => panic!("try_wait failed: {e}"),
-        }
-    }
 }
 
 /// Poll `buffers` until `marker` appears on any of them, the child dies on
@@ -161,7 +91,7 @@ fn sigint_during_boot_shuts_down_gracefully() {
     // stretch rather than past it.
     let booting = wait_for_marker_tight(
         &mut child,
-        &[Arc::clone(&drained.out_buf), Arc::clone(&drained.err_buf)],
+        &drained.markers(),
         "trusts the current working directory",
         Duration::from_secs(30),
     );
@@ -175,19 +105,7 @@ fn sigint_during_boot_shuts_down_gracefully() {
     send_signal(&child, "-INT");
 
     let exit_code = wait_exit_code_bounded(&mut child, Duration::from_secs(30));
-    let Drained {
-        out_handle,
-        err_handle,
-        out_buf,
-        err_buf,
-    } = drained;
-    let _ = out_handle.join();
-    let _ = err_handle.join();
-    let output = format!(
-        "stdout:\n{}\nstderr:\n{}",
-        out_buf.lock().expect("stdout buffer lock poisoned"),
-        err_buf.lock().expect("stderr buffer lock poisoned")
-    );
+    let output = drained.finish();
 
     assert_eq!(
         exit_code, 0,
@@ -233,7 +151,7 @@ fn second_sigterm_during_teardown_force_exits() {
     // other is the consumable second signal during teardown.
     let booting = wait_for_marker_tight(
         &mut child,
-        &[Arc::clone(&drained.out_buf), Arc::clone(&drained.err_buf)],
+        &drained.markers(),
         "trusts the current working directory",
         Duration::from_secs(30),
     );
@@ -260,19 +178,7 @@ fn second_sigterm_during_teardown_force_exits() {
     assert!(pair.success(), "signal pair returned non-zero: {pair:?}");
 
     let exit_code = wait_exit_code_bounded(&mut child, Duration::from_secs(30));
-    let Drained {
-        out_handle,
-        err_handle,
-        out_buf,
-        err_buf,
-    } = drained;
-    let _ = out_handle.join();
-    let _ = err_handle.join();
-    let output = format!(
-        "stdout:\n{}\nstderr:\n{}",
-        out_buf.lock().expect("stdout buffer lock poisoned"),
-        err_buf.lock().expect("stderr buffer lock poisoned")
-    );
+    let output = drained.finish();
 
     assert_eq!(
         exit_code, 1,
