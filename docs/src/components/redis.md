@@ -148,9 +148,11 @@ The component redacts passwords in `Debug` output. Passwords with special charac
 
 `tls_ca_cert` names a PEM file that holds the CA certificate. The field lives in the global `[components.redis]` block; it is not a URI parameter. `apply_defaults()` copies the global value onto each endpoint, and an endpoint-level value wins over the global one.
 
-The component reads the file at endpoint creation, and only for a standalone endpoint that resolved to TLS. A plaintext endpoint and a sentinel endpoint ignore the setting without any filesystem access. Sentinel CA trust is follow-up work (bd rc-hbde6).
+The component reads the file at endpoint creation for any endpoint that resolves to TLS, including standalone and Sentinel endpoints. Plaintext endpoints skip the read without filesystem access. Sentinel endpoints install the configured CA for TLS trust on both Sentinel and resolved Redis links.
 
 The component trusts the PEM as the root for the connection. It passes the bundle to the CA-trusting client constructor, so the server certificate is verified against this root. There is no insecure bypass.
+
+Redis TLS provides server authentication only in v1. Client-certificate authentication (mTLS) is intentionally unsupported; the client certificate slot remains unset. Revisit this decision when a deployment requires Redis `--tls-auth-clients yes`.
 
 An unreadable file fails closed. Endpoint creation returns a `Config` error that names the path, before any connect attempt. One caveat: the error message contains the path, so a path that itself contains transient-classifier words (for example `readonly`) can be misclassified by the retry heuristic (bd rc-ezi0f).
 
