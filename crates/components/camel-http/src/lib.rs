@@ -3382,29 +3382,11 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
         }
         CamelError::TypeConversionFailed(msg) => {
             tracing::warn!(error = %msg, path = %path, "Type conversion failed (bad request)");
-            let body = serde_json::to_string(&serde_json::json!({
-                "error": "bad_request",
-                "message": msg,
-            }))
-            .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
-            HttpReply {
-                status: 400,
-                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
-                body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
-            }
+            json_error_reply(400, "bad_request", msg)
         }
         CamelError::ValidationError(msg) => {
             tracing::warn!(error = %msg, path = %path, "Schema validation failed (bad request)");
-            let body = serde_json::to_string(&serde_json::json!({
-                "error": "validation_error",
-                "message": msg,
-            }))
-            .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
-            HttpReply {
-                status: 400,
-                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
-                body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
-            }
+            json_error_reply(400, "validation_error", msg)
         }
         CamelError::ConsumerStopping => {
             tracing::debug!(path = %path, "Pipeline aborted during route shutdown");
@@ -3416,29 +3398,19 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
         }
         CamelError::UnsupportedMediaType { consumed, declared } => {
             tracing::warn!(error = %consumed, declared = %declared, path = %path, "Unsupported media type (bad request)");
-            let body = serde_json::to_string(&serde_json::json!({
-                "error": "unsupported_media_type",
-                "message": format!("consumed {consumed}, declared {declared}"),
-            }))
-            .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
-            HttpReply {
-                status: 415,
-                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
-                body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
-            }
+            json_error_reply(
+                415,
+                "unsupported_media_type",
+                format!("consumed {consumed}, declared {declared}"),
+            )
         }
         CamelError::NotAcceptable { accept, produced } => {
             tracing::warn!(error = %accept, produced = %produced, path = %path, "Not acceptable (bad request)");
-            let body = serde_json::to_string(&serde_json::json!({
-                "error": "not_acceptable",
-                "message": format!("accept {accept}, produced {produced}"),
-            }))
-            .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
-            HttpReply {
-                status: 406,
-                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
-                body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
-            }
+            json_error_reply(
+                406,
+                "not_acceptable",
+                format!("accept {accept}, produced {produced}"),
+            )
         }
         e => {
             // log-policy: handler-owned
@@ -3449,6 +3421,26 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
                 body: HttpReplyBody::Bytes(bytes::Bytes::from("Internal Server Error")),
             }
         }
+    }
+}
+
+/// Build a JSON error reply with the given status, error code, and message.
+///
+/// Shared by the `TypeConversionFailed`/`ValidationError` (400),
+/// `UnsupportedMediaType` (415), and `NotAcceptable` (406) arms of
+/// `pipeline_error_to_reply` so the four replies cannot drift apart. The
+/// `unwrap_or_else(|_| "{}".to_string())` fallback keeps the reply valid
+/// JSON even if serialization fails.
+fn json_error_reply(status: u16, code: &str, message: String) -> HttpReply {
+    let body = serde_json::to_string(&serde_json::json!({
+        "error": code,
+        "message": message,
+    }))
+    .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
+    HttpReply {
+        status,
+        headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+        body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
     }
 }
 
@@ -10414,21 +10406,22 @@ mod tests {
             "/api/users",
         );
         assert_eq!(reply.status, 400);
-        // Content-Type must be application/json
-        let ct = reply
+        // Exactly one Content-Type header, application/json
+        let json_ct = reply
             .headers
             .iter()
-            .find(|(k, _)| k == "Content-Type")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(ct, Some("application/json"));
-        // Body must contain structured error JSON
+            .filter(|(k, v)| k == "Content-Type" && v == "application/json")
+            .count();
+        assert_eq!(json_ct, 1);
+        // Body must be structured error JSON with the expected fields
         let body = match &reply.body {
             HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             _ => panic!("expected bytes body"),
         };
-        assert!(body.contains("\"error\""));
-        assert!(body.contains("bad_request"));
-        assert!(body.contains("invalid JSON at line 1"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("body must be valid JSON");
+        assert_eq!(parsed["error"], "bad_request");
+        assert_eq!(parsed["message"], "invalid JSON at line 1");
     }
 
     #[test]
@@ -10463,19 +10456,20 @@ mod tests {
             "/api/users",
         );
         assert_eq!(reply.status, 400);
-        let ct = reply
+        let json_ct = reply
             .headers
             .iter()
-            .find(|(k, _)| k == "Content-Type")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(ct, Some("application/json"));
+            .filter(|(k, v)| k == "Content-Type" && v == "application/json")
+            .count();
+        assert_eq!(json_ct, 1);
         let body = match &reply.body {
             HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             _ => panic!("expected bytes body"),
         };
-        assert!(body.contains("\"error\""));
-        assert!(body.contains("validation_error"));
-        assert!(body.contains("body does not match schema"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("body must be valid JSON");
+        assert_eq!(parsed["error"], "validation_error");
+        assert_eq!(parsed["message"], "body does not match schema");
     }
 
     // -----------------------------------------------------------------------
@@ -10492,12 +10486,12 @@ mod tests {
             "/x",
         );
         assert_eq!(reply.status, 415);
-        let ct = reply
+        let json_ct = reply
             .headers
             .iter()
-            .find(|(k, _)| k == "Content-Type")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(ct, Some("application/json"));
+            .filter(|(k, v)| k == "Content-Type" && v == "application/json")
+            .count();
+        assert_eq!(json_ct, 1);
         let body = match &reply.body {
             HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             _ => panic!("expected bytes body"),
@@ -10505,11 +10499,10 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&body).expect("body must be valid JSON");
         assert_eq!(parsed["error"], "unsupported_media_type");
-        let message = parsed["message"]
-            .as_str()
-            .expect("message must be a string");
-        assert!(message.contains("text/plain"));
-        assert!(message.contains("application/json"));
+        assert_eq!(
+            parsed["message"],
+            "consumed text/plain, declared application/json"
+        );
     }
 
     #[test]
@@ -10522,12 +10515,12 @@ mod tests {
             "/x",
         );
         assert_eq!(reply.status, 406);
-        let ct = reply
+        let json_ct = reply
             .headers
             .iter()
-            .find(|(k, _)| k == "Content-Type")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(ct, Some("application/json"));
+            .filter(|(k, v)| k == "Content-Type" && v == "application/json")
+            .count();
+        assert_eq!(json_ct, 1);
         let body = match &reply.body {
             HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             _ => panic!("expected bytes body"),
@@ -10535,11 +10528,30 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&body).expect("body must be valid JSON");
         assert_eq!(parsed["error"], "not_acceptable");
-        let message = parsed["message"]
-            .as_str()
-            .expect("message must be a string");
-        assert!(message.contains("application/xml"));
-        assert!(message.contains("application/json"));
+        assert_eq!(
+            parsed["message"],
+            "accept application/xml, produced application/json"
+        );
+    }
+
+    #[test]
+    fn json_error_reply_preserves_empty_message() {
+        let reply = json_error_reply(400, "bad_request", "".to_string());
+        assert_eq!(reply.status, 400);
+        let json_ct = reply
+            .headers
+            .iter()
+            .filter(|(k, v)| k == "Content-Type" && v == "application/json")
+            .count();
+        assert_eq!(json_ct, 1);
+        let body = match &reply.body {
+            HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            _ => panic!("expected bytes body"),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("body must be valid JSON");
+        assert_eq!(parsed["error"], "bad_request");
+        assert_eq!(parsed["message"], "");
     }
 
     #[test]
