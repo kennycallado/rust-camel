@@ -29,7 +29,7 @@ impl JsExchange {
 }
 
 /// The result of evaluating a JS expression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct JsEvalResult {
     /// The return value of the expression (last evaluated value).
     pub return_value: Value,

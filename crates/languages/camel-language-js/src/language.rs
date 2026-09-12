@@ -36,8 +36,19 @@ use crate::{
 ///
 /// # Thread Safety
 ///
-/// `JsLanguage` is `Clone + Send + Sync`. Each evaluation creates a fresh Boa
-/// `Context` (via `BoaEngine`), so no shared mutable state exists across evaluations.
+/// `JsLanguage` is `Clone + Send + Sync`. Evaluations run on one dedicated
+/// worker thread per engine limits-configuration (clones share it).
+///
+/// Isolation contract: each evaluation receives fresh `camel` and `console`
+/// bindings and a fresh declarative environment for lexical declarations.
+/// Configurable global additions are removed, and named intrinsic roots are
+/// verified between evaluations. JavaScript evaluations do not receive
+/// realm isolation: global properties, intrinsic state outside the named
+/// integrity set, heap state, and engine-internal state may survive across
+/// exchanges and routes until realm recycling or process termination.
+/// Route reload and route restart do not reset this state. Script source
+/// must be trusted operator configuration; untrusted or mutually
+/// distrustful code must use the out-of-process `function:` path (ADR-0005).
 ///
 /// # Example
 ///

@@ -236,7 +236,7 @@ fn is_truthy(v: &Value) -> bool {
 mod tests {
     use std::{sync::Arc, time::Instant};
 
-    use camel_language_api::Message;
+    use camel_language_api::{Language, Message};
     use serde_json::json;
 
     use super::*;
@@ -586,5 +586,27 @@ mod tests {
         let result = expr.evaluate(&ex).await.unwrap();
         assert!(result.is_boolean());
         assert!(result.as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn concurrent_expressions_no_cross_talk() {
+        // Two stateful scripts on the one shared worker, evaluated
+        // concurrently via `tokio::join!`: each must observe only its own
+        // exchange data (worker-thread confinement, fresh camel per eval).
+        let lang = crate::language::JsLanguage::new();
+        let expr_a = lang
+            .create_expression("camel.headers.set('a', '1'); camel.headers.get('a')")
+            .unwrap();
+        let expr_b = lang
+            .create_expression("camel.headers.set('b', '2'); camel.headers.get('b')")
+            .unwrap();
+
+        let ex_a = Exchange::new(Message::default());
+        let ex_b = Exchange::new(Message::default());
+
+        let (ra, rb) = tokio::join!(expr_a.evaluate(&ex_a), expr_b.evaluate(&ex_b));
+
+        assert_eq!(ra.unwrap().as_str().unwrap(), "1");
+        assert_eq!(rb.unwrap().as_str().unwrap(), "2");
     }
 }

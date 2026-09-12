@@ -35,11 +35,17 @@ macro_rules! make_console_fn {
     }};
 }
 
-/// Replaces the default `console` with a tracing-backed version.
+/// Replaces the default `console` with a tracing-backed version and
+/// returns the installed console object.
 ///
 /// NOTE: `Context::default()` already registers a built-in `console`,
 /// so we overwrite via `global_object().set()` instead of `register_global_property`.
-pub fn register_console(ctx: &mut Context) {
+///
+/// The global set uses `throw = true`: a rejected set (for example a
+/// spoofed non-writable `console` binding) surfaces as an error instead of
+/// a silently ignored `Ok(false)` — callers treat it as realm poison and
+/// recycle.
+pub fn register_console(ctx: &mut Context) -> boa_engine::JsResult<JsObject> {
     let console = JsObject::with_null_proto();
 
     let log_js = make_console_fn!(info, ctx);
@@ -55,9 +61,13 @@ pub fn register_console(ctx: &mut Context) {
     let debug_js = make_console_fn!(debug, ctx);
     let _ = console.set(js_string!("debug"), JsValue::from(debug_js), false, ctx);
 
-    let _ = ctx
-        .global_object()
-        .set(js_string!("console"), JsValue::from(console), false, ctx);
+    ctx.global_object().set(
+        js_string!("console"),
+        JsValue::from(console.clone()),
+        true,
+        ctx,
+    )?;
+    Ok(console)
 }
 
 /// Build the `camel` global object with `headers`, `properties`, and `body`.

@@ -1,6 +1,28 @@
 //! [`BoaEngine`] — JS engine backed by [Boa](https://boajs.dev).
 //!
-//! Each call to [`eval`](BoaEngine::eval) creates a fresh `Context`.
+//! Evaluation and validation run on a dedicated `camel-js-worker` OS thread
+//! (one worker per limits-configuration; `BoaEngine` clones share the worker
+//! through an `Arc<OnceLock<..>>`). Calls enqueue a job over a bounded
+//! channel and block on a per-call reply channel.
+//!
+//! Per-eval realm strategy: evals run on the worker's ONE stable realm
+//! through an `eval(...)` wrapper with a bounded compiled-wrapper cache.
+//! Each evaluation receives fresh `camel` and `console` bindings and a
+//! fresh declarative environment; configurable global additions are
+//! removed, and a named integrity set (the `globalThis` own keys, the
+//! `eval` function, and the `Object`/`Array`/`Function` prototypes) is
+//! verified between evaluations, with the whole realm recycled on drift
+//! (see `worker.rs` and `integrity.rs`). JavaScript evaluations do
+//! NOT receive realm isolation: global properties, intrinsic state outside
+//! the named integrity set, heap state, and engine-internal state may
+//! survive across exchanges and routes until realm recycling or process
+//! termination — see the crate `CONTEXT.md` "Sandbox posture" section for
+//! the full contract.
+//!
+//! If the worker thread dies, the stale handle surfaces as
+//! `"JS worker unavailable"`; recreating the `JsLanguage` is the recovery
+//! path.
+//!
 //! If [`JsLimitsConfig`](camel_language_api::JsLimitsConfig) fields are `None`, the rust-camel runtime defaults apply:
 //!
 //! | Limit | Default |
@@ -23,28 +45,64 @@
 /// loop/recursion/stack/timeout limits neutralize CPU-bombs.
 const MAX_SOURCE_BYTES: usize = 1024 * 1024; // 1 MiB
 
-use boa_engine::{Context, JsValue, Source, js_string};
+/// Default wall-clock execution budget (mirrors the `JsLanguage` default) used
+/// as the worker's queuing-deadline backstop for `Eval` jobs.
+const DEFAULT_EXECUTION_TIMEOUT_MS: u64 = 5_000;
+
+use std::sync::mpsc;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use crate::{
-    bindings,
     engine::{JsEngine, JsEvalResult, JsExchange},
     error::JsLanguageError,
-    value::js_to_value,
 };
 
-/// A [`JsEngine`] implementation backed by Boa.
+use super::worker::{JsJob, JsWorkerHandle, worker_unavailable};
+
+/// A [`JsEngine`] implementation backed by Boa, executing on a dedicated
+/// worker thread.
 ///
-/// Each call to [`eval`](BoaEngine::eval) creates a fresh `Context`.
-/// This is intentional: it prevents state leaks between independent expressions.
+/// All jobs for one limits-configuration run on a single `camel-js-worker`
+/// thread; clones of `BoaEngine` share that worker. Each evaluation
+/// receives fresh `camel`/`console` bindings and a fresh declarative
+/// environment through the worker's stable realm; configurable global
+/// additions are removed and a named integrity set is verified between
+/// evaluations, with the realm recycled on drift. Evaluations do not
+/// receive realm isolation — see the crate `CONTEXT.md` "Sandbox posture"
+/// section.
 #[derive(Debug, Clone)]
 pub struct BoaEngine {
     limits: camel_language_api::JsLimitsConfig,
+    worker: Arc<OnceLock<JsWorkerHandle>>,
 }
 
 impl BoaEngine {
     #[must_use]
     pub fn new(limits: camel_language_api::JsLimitsConfig) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            worker: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Lazily spawn (or reuse) the single worker for this limits-configuration.
+    ///
+    /// `get_or_init` guarantees one worker even under concurrent first calls;
+    /// clones share the same `OnceLock` through the `Arc`.
+    fn worker(&self) -> &JsWorkerHandle {
+        self.worker
+            .get_or_init(|| JsWorkerHandle::spawn(self.limits.clone()))
+    }
+
+    /// Send a job and block on its reply. `Err` means the worker is gone.
+    fn dispatch<T>(
+        &self,
+        make_job: impl FnOnce(mpsc::SyncSender<Result<T, JsLanguageError>>) -> JsJob,
+    ) -> Result<T, JsLanguageError> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.worker().send(make_job(reply_tx))?;
+        reply_rx.recv().map_err(|_| worker_unavailable())?
     }
 }
 
@@ -54,7 +112,7 @@ impl Default for BoaEngine {
     }
 }
 
-// ── Private resolver ──────────────────────────────────────────────────────────
+// ── Resolver (shared with the worker thread) ──────────────────────────────────
 
 /// Resolved (concrete) JS limits after folding `Option` → `T` with rust-camel
 /// runtime defaults. Produced by [`resolve_js_limits`].
@@ -66,15 +124,16 @@ impl Default for BoaEngine {
 /// Note: `execution_timeout_ms` is NOT in this struct — it is applied at the
 /// [`Language`](camel_language_api::Language) level via `eval_async` tokio
 /// timeout in `expression.rs`, not through Boa's `RuntimeLimits`.
-struct ResolvedJsLimits {
-    max_loop_iterations: u64,
-    max_recursion_depth: usize,
-    max_stack_size: usize,
+#[derive(Clone)]
+pub(super) struct ResolvedJsLimits {
+    pub(super) max_loop_iterations: u64,
+    pub(super) max_recursion_depth: usize,
+    pub(super) max_stack_size: usize,
 }
 
 /// Resolve a `JsLimitsConfig` (all-`Option`) into concrete values, applying
 /// rust-camel runtime defaults where the user did not specify a value.
-fn resolve_js_limits(limits: &camel_language_api::JsLimitsConfig) -> ResolvedJsLimits {
+pub(super) fn resolve_js_limits(limits: &camel_language_api::JsLimitsConfig) -> ResolvedJsLimits {
     ResolvedJsLimits {
         // Boa upstream default for loop is u64::MAX — unacceptable for buggy scripts.
         max_loop_iterations: limits.max_loop_iterations.unwrap_or(100_000),
@@ -86,6 +145,7 @@ fn resolve_js_limits(limits: &camel_language_api::JsLimitsConfig) -> ResolvedJsL
 impl JsEngine for BoaEngine {
     fn eval(&self, source: &str, exchange: JsExchange) -> Result<JsEvalResult, JsLanguageError> {
         // M-L1: pre-eval source-size cap (Boa 0.21 has no heap cap; see const doc).
+        // Stays on the caller side, before the job is sent.
         if source.len() > MAX_SOURCE_BYTES {
             return Err(JsLanguageError::Execution {
                 message: format!(
@@ -97,69 +157,26 @@ impl JsEngine for BoaEngine {
             });
         }
 
-        let mut ctx = Context::default();
-
-        // Apply resource limits before executing any script
-        let resolved = resolve_js_limits(&self.limits);
-        {
-            let runtime_limits = ctx.runtime_limits_mut();
-            runtime_limits.set_loop_iteration_limit(resolved.max_loop_iterations);
-            runtime_limits.set_recursion_limit(resolved.max_recursion_depth);
-            runtime_limits.set_stack_size_limit(resolved.max_stack_size);
-        }
-
-        // Set up console -> tracing
-        bindings::register_console(&mut ctx);
-
-        // Set up `camel` global
-        let camel_obj = bindings::build_camel_global(&exchange, &mut ctx).map_err(|e| {
-            JsLanguageError::Execution {
-                message: e.to_string(),
-            }
-        })?;
-
-        ctx.global_object()
-            .set(
-                js_string!("camel"),
-                JsValue::from(camel_obj),
-                false,
-                &mut ctx,
-            )
-            .map_err(|e| JsLanguageError::Execution {
-                message: format!("camel global set: {e}"),
-            })?;
-
-        // Execute
-        let result = ctx
-            .eval(Source::from_bytes(source.as_bytes()))
-            .map_err(|e| JsLanguageError::Execution {
-                message: e.to_string(),
-            })?;
-
-        let return_value = js_to_value(&result, &mut ctx)?;
-
-        // Extract modified exchange state
-        let modified = bindings::extract_camel_state(&mut ctx)?;
-
-        Ok(JsEvalResult {
-            return_value,
-            headers: modified.headers,
-            body: modified.body,
-            properties: modified.properties,
+        self.dispatch(|reply| JsJob::Eval {
+            source: Arc::from(source),
+            exchange,
+            // Queuing-deadline backstop: a job that sits in the queue past its
+            // budget is skipped. The wall-clock execution timeout itself is
+            // still applied at the Language level via `eval_async`.
+            timeout_ms: self
+                .limits
+                .execution_timeout_ms
+                .unwrap_or(DEFAULT_EXECUTION_TIMEOUT_MS),
+            enqueued: Instant::now(),
+            reply,
         })
     }
 
     fn validate(&self, source: &str) -> Result<(), JsLanguageError> {
-        // TODO(perf): Context::default() initializes full JS runtime. For high-throughput
-        // validation, consider a cached or pooled context.
-        let mut ctx = Context::default();
-        let _script =
-            boa_engine::Script::parse(Source::from_bytes(source.as_bytes()), None, &mut ctx)
-                .map_err(|e| JsLanguageError::Parse {
-                    message: e.to_string(),
-                })?;
-
-        Ok(())
+        self.dispatch(|reply| JsJob::Validate {
+            source: Arc::from(source),
+            reply,
+        })
     }
 }
 

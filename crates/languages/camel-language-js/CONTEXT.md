@@ -15,10 +15,36 @@ Boa-backed JavaScript implementation of the Language SPI. It implements
 
 ## Sandbox posture
 
-Each evaluation creates a fresh Boa `Context`. This prevents state from leaking
-between evaluations. Boa receives no filesystem, network, environment, stdio, or
-WASI capability. The only host bindings are the exchange snapshot under `camel`
+Boa receives no filesystem, network, environment, stdio, or WASI
+capability. The only host bindings are the exchange snapshot under `camel`
 and a tracing-backed `console`.
+
+Isolation contract per evaluation:
+
+- Each evaluation receives fresh `camel` and `console` bindings and a fresh
+  declarative environment for lexical declarations.
+- Configurable global additions are removed, and named intrinsic roots are
+  verified between evaluations.
+- JavaScript evaluations do not receive realm isolation: global properties,
+  intrinsic state outside the named integrity set, heap state, and
+  engine-internal state may survive across exchanges and routes until realm
+  recycling or process termination.
+- Route reload and route restart do not reset this state.
+- Script source must be trusted operator configuration; untrusted or
+  mutually distrustful code must use `function:` per ADR-0005.
+
+The named integrity set is the `globalThis` baseline own keys, the `eval`
+function, and the prototypes of `Object`, `Array`, and `Function`, verified
+after every evaluation on the worker thread. The `String`/`Number`/`Boolean`
+prototype trio was the declared shrink reserve and has been dropped after
+measurement: the full-set detector cost ~47 µs per check in the release
+profile, 1.9× the entire 25 µs per-eval budget. The per-eval reinstalled
+bindings `camel` and `console` are excluded from value-identity comparison
+(their object identity changes each eval by design); their presence and
+value identity against the freshly installed bindings are enforced by
+install verification. On any drift the worker recycles the whole realm — a
+fresh realm, a fresh baseline, and a dropped wrapper cache. The worker never
+attempts restoration of drifted state.
 
 All host-created JavaScript objects in `bindings.rs` use
 `JsObject::with_null_proto()`. This includes `camel`, `console`, map wrappers,
@@ -62,9 +88,11 @@ untrusted JavaScript in-process.
 
 ## Boa boundary
 
-Direct Boa use is confined to three implementation files:
+Direct Boa use is confined to five implementation files:
 
 - `src/engines/boa.rs`
+- `src/engines/worker.rs`
+- `src/engines/integrity.rs`
 - `src/bindings.rs`
 - `src/value.rs`
 
