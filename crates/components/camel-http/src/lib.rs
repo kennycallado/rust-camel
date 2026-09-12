@@ -2893,7 +2893,7 @@ pub(crate) fn redact_url_for_diagnostics(raw: &str) -> String {
     const MAX_URL_LOG_LEN: usize = 256;
     match url::Url::parse(raw) {
         Ok(mut u) => {
-            if !u.username().is_empty() {
+            if !u.username().is_empty() || u.password().is_some() {
                 let _ = u.set_username("***");
                 let _ = u.set_password(None);
             }
@@ -3700,6 +3700,23 @@ mod tests {
     fn redact_url_keeps_clean_urls_visible() {
         let redacted = redact_url_for_diagnostics("https://api.example.com/v1/items");
         assert_eq!(redacted, "https://api.example.com/v1/items");
+    }
+
+    #[test]
+    fn redact_url_masks_password_only_userinfo() {
+        let redacted = redact_url_for_diagnostics("http://:pwsecret@host.example/");
+        assert!(
+            !redacted.contains("pwsecret"),
+            "password-only userinfo leaked: {redacted}"
+        );
+        assert_eq!(redacted, "http://***@host.example/");
+
+        let redacted = redact_url_for_diagnostics("http://user:pw2@host.example/api");
+        assert!(!redacted.contains("pw2"), "password leaked: {redacted}");
+        assert_eq!(redacted, "http://***@host.example/api");
+
+        let redacted = redact_url_for_diagnostics("http://host.example/api");
+        assert_eq!(redacted, "http://host.example/api");
     }
 
     #[test]
@@ -8755,6 +8772,35 @@ mod tests {
         let message = err.to_string();
         assert!(!message.contains("pass"), "userinfo leaked: {message}");
         assert!(!message.contains("s3cret"), "query leaked: {message}");
+    }
+
+    #[test]
+    fn armed_fence_rejects_password_only_userinfo_redacted() {
+        let cfg = HttpEndpointConfig::from_uri(
+            "http://x?allowedUriHosts=api.internal:8443,cdn.example.com",
+        )
+        .unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String(
+                "http://:passwordonly@evil.example.com/x?token=querysecret".to_string(),
+            ),
+        );
+
+        let err = HttpProducer::resolve_url(&exchange, &cfg)
+            .expect_err("password-only override outside the fence must fail resolution");
+
+        let message = err.to_string();
+        assert!(
+            !message.contains("passwordonly"),
+            "password-only userinfo leaked: {message}"
+        );
+        assert!(!message.contains("querysecret"), "query leaked: {message}");
+        assert!(
+            message.contains("http://***@evil.example.com/x?[redacted]"),
+            "masked shape missing: {message}"
+        );
     }
 
     #[test]
