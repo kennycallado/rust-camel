@@ -156,9 +156,14 @@ not a gap); `http-server` = applicable (Protocol A loadgen); t2-json,
 split-aggregate, t2-realistic-eip, xsd-validation-bridge,
 xslt-bridge = applicable (Protocol B ticks). The expected roster
 follows the harness asymmetry (five full scenarios × 8 contenders +
-two bridge scenarios × 6 = 52 cells) and SHALL be persisted in the
-record or recomputed deterministically by the publisher; a wholly
-absent cell (no directory, no JSON, no evidence) counts as MISSING.
+two bridge scenarios × 6, plus the `axum-bare` reference contender for
+`http-server` — 53 cells for runs whose harness registers the
+reference cell; 52 for records published before it joined) and SHALL
+be persisted in the record or recomputed deterministically by the
+publisher; completeness validates against the record's own persisted
+or run-derived roster, never against harness constants that postdate
+the record; a wholly absent cell (no directory, no JSON, no evidence)
+counts as MISSING.
 `bench publish` SHALL fail closed on incomplete records: nonzero exit
 and a list of every missing cell (scenario/contender/metric).
 
@@ -168,6 +173,16 @@ and a list of every missing cell (scenario/contender/metric).
   warm-applicable cells all have m2 data
 - **When** `bench publish` executes
 - **Then** it succeeds with no completeness complaint
+
+#### Scenario: pre-reference records stay complete
+
+- **Given** a record published when the expected roster carried 52
+  cells (before the `axum-bare` reference contender joined)
+- **When** `bench publish` or `summarize.py --check` validates it
+  after the reference cell joins the harness roster
+- **Then** completeness and summary regeneration hold unchanged —
+  validation uses the record's persisted `expected_cells`, not the
+  current harness constants
 
 #### Scenario: missing metric rejects publish
 
