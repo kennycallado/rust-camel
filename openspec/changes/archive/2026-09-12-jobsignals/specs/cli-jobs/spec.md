@@ -114,3 +114,18 @@ polled; the boot-buffer guarantee applies to Unix SIGINT/SIGTERM streams.
 - **WHEN** the report is emitted
 - **THEN** it contains mode `batch`, outcome `Completed`, and the process
   exits 0
+
+#### Scenario: shutdown failure after a verdict forces exit 2
+
+- **GIVEN** a job whose pipeline completed but whose teardown fails or
+  exceeds its budget
+- **WHEN** the report is emitted
+- **THEN** the report carries the shutdown detail in `shutdown_error` and
+  the process exits 2
+
+#### Scenario: failed verdict plus shutdown failure keeps both details
+
+- **GIVEN** a job whose pipeline failed and whose teardown also fails
+- **WHEN** the report is emitted
+- **THEN** `error` holds the pipeline failure, `shutdown_error` holds the
+  teardown detail, and the process exits 2
