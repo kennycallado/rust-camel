@@ -138,6 +138,20 @@ UNCONVERGED_MALFORMED_EVIDENCE = (
     "measure-a: error: warmup failed-stability: "
     "MessageBoundUnconverged\n"
 )
+# Future benchwarmup Protocol A reasons (same artifact contract, new
+# reason diagnostics — run.sh rc-audm.7 native field or these
+# fallback sentinels). Every reason is a warmup failure and must
+# classify unconverged/attempted.
+TIME_BOUND_UNCONVERGED_EVIDENCE = (
+    "measure-a: error: warmup failed-stability: "
+    "TimeBoundUnconverged\n"
+    "status=failed reason=measure-a-error\n"
+)
+INSUFFICIENT_SAMPLES_EVIDENCE = (
+    "measure-a: error: warmup failed-stability: "
+    "InsufficientSamples\n"
+    "status=failed reason=measure-a-error\n"
+)
 PROBE_TIMEOUT_EVIDENCE = (
     "# probe reason: no BENCH_LATENCY within 30s timeout\n"
 )
@@ -929,6 +943,82 @@ class SummarizeTest(unittest.TestCase):
             cell["reason"],
             "# probe reason: no BENCH_LATENCY within 30s timeout",
         )
+        self.assertEqual(cell["rounds"], 2)
+        for latency in ("round_values", "median", "unit"):
+            self.assertNotIn(latency, cell)
+
+    def test_classify_m2_accepts_all_warmup_failure_reasons(self):
+        # Classifier contract: historical MessageBoundUnconverged AND
+        # future benchwarmup reasons (TimeBoundUnconverged,
+        # InsufficientSamples) all classify unconverged with the exact
+        # status=failed line as reason — each is a warmup failure.
+        # A future reason WITHOUT the status line stays fail-closed
+        # (None), same as the historical malformed shape.
+        verdict = {
+            "status": "unconverged",
+            "reason": "status=failed reason=measure-a-error",
+        }
+        cases = (
+            (UNCONVERGED_EVIDENCE, verdict),
+            (TIME_BOUND_UNCONVERGED_EVIDENCE, verdict),
+            (INSUFFICIENT_SAMPLES_EVIDENCE, verdict),
+            (
+                # Marker alone: no status invented (fail-closed).
+                TIME_BOUND_UNCONVERGED_EVIDENCE.replace(
+                    "status=failed reason=measure-a-error\n", ""
+                ),
+                None,
+            ),
+        )
+        for i, (evidence, expected) in enumerate(cases):
+            rdir = self.root / f"classify-{i}"
+            rdir.mkdir()
+            (rdir / "protocol-a-summary.txt").write_text(
+                evidence, encoding="utf-8"
+            )
+            self.assertEqual(
+                summarize.classify_m2_attempt([str(rdir)], "t2-json/x"),
+                expected,
+                f"round {i} misclassified",
+            )
+
+    def test_m2_future_reason_cells_emit_status(self):
+        # Future benchwarmup Protocol A diagnostics: TimeBoundUnconverged
+        # (round 0) and InsufficientSamples (round 1) both classify the
+        # cell attempted (unconverged), not MISSING. InsufficientSamples
+        # policy (rc-audm.8): an incomplete-window warmup failure is
+        # attempted — never a measured cell, never a plain gap.
+        run = self.root / "20260906T022000Z"
+        for contender in ("rust-camel-lib", "camel-standalone-dsl"):
+            cell = run / f"t2-json_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "samples.txt").write_text(
+                "startup-ms rss-kb\n12 900\n14 950\n", encoding="utf-8"
+            )
+        r0 = run / "m2-round-0" / "t2-json" / "camel-standalone-dsl"
+        r0.mkdir(parents=True)
+        (r0 / "protocol-a-summary.txt").write_text(
+            TIME_BOUND_UNCONVERGED_EVIDENCE, encoding="utf-8"
+        )
+        r1 = run / "m2-round-1" / "t2-json" / "camel-standalone-dsl"
+        r1.mkdir(parents=True)
+        (r1 / "protocol-a-summary.txt").write_text(
+            INSUFFICIENT_SAMPLES_EVIDENCE, encoding="utf-8"
+        )
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(
+                run, dict(META, scenarios="t2-json",
+                          run_id="20260906T022000Z")
+            )
+        cell = next(
+            c for c in record["cells"]
+            if c["metric"] == "m2"
+            and c["scenario"] == "t2-json"
+            and c["contender"] == "camel-standalone-dsl"
+        )
+        self.assertEqual(cell["status"], "unconverged")
+        self.assertIn("measure-a-error", cell["reason"])
         self.assertEqual(cell["rounds"], 2)
         for latency in ("round_values", "median", "unit"):
             self.assertNotIn(latency, cell)

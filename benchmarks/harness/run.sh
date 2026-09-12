@@ -2773,13 +2773,16 @@ m2_measure_protocol_a() {
         > "$out_file" 2>&1; then
         echo "status=failed reason=measure-a-error" >> "$out_file"
         # Native attempted status (bd rc-audm.7): a warmup that ended
-        # MessageBoundUnconverged is exactly the evidence classify
-        # rules accept, so write the status into the summary JSON at
+        # failed-stability is exactly the evidence classify rules
+        # accept, so write the status into the summary JSON at
         # measurement time — summarize.py prefers this native field
         # over deriving from protocol-a-summary.txt (which stays the
         # fallback for pre-native run dirs). Any OTHER measure-a
         # failure keeps the plain status line: no status is invented.
-        if grep -q 'warmup failed-stability: MessageBoundUnconverged' "$out_file"; then
+        # Reasons: MessageBoundUnconverged (historical Protocol A),
+        # TimeBoundUnconverged / InsufficientSamples (future
+        # benchwarmup trailing-window runs) — all warmup failures.
+        if grep -Eq 'warmup failed-stability: (MessageBoundUnconverged|TimeBoundUnconverged|InsufficientSamples)' "$out_file"; then
             printf '{"status": "unconverged", "reason": "status=failed reason=measure-a-error"}\n' \
                 > "$samples_dir/m2-summary.json"
         fi

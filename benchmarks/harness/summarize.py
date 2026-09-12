@@ -141,11 +141,24 @@ ATTEMPT_STATUSES = ("unconverged", "attempted-timeout")
 
 # Attempt-evidence sentinels, verbatim harness-written lines (the
 # artifact format is the contract):
-# - protocol-a-summary.txt: warmup failed-stability + the failed
-#   status line (BOTH must appear — unconverged warmup).
+# - protocol-a-summary.txt: a `warmup failed-stability: <reason>`
+#   diagnostic + the failed status line (BOTH must appear — unconverged
+#   warmup). EVERY reason classifies `unconverged` because each is a
+#   warmup failure: the cell attempted m2 and produced no measurement.
+#   Historical runs emit `MessageBoundUnconverged` (pre-benchwarmup
+#   Protocol A); future benchwarmup runs emit `TimeBoundUnconverged`
+#   (trailing window drifted at the wall-clock deadline) or
+#   `InsufficientSamples` (deadline expired before one complete
+#   comparison window). Policy (rc-audm.8): InsufficientSamples is an
+#   incomplete-window warmup failure, so it classifies unconverged/
+#   attempted — never a measured cell, never a plain gap.
 # - exit-codes.txt: the probe timed out before any BENCH_LATENCY
 #   record (attempted-timeout).
-_UNCONVERGED_MARKER = "warmup failed-stability: MessageBoundUnconverged"
+_UNCONVERGED_MARKERS = (
+    "warmup failed-stability: MessageBoundUnconverged",
+    "warmup failed-stability: TimeBoundUnconverged",
+    "warmup failed-stability: InsufficientSamples",
+)
 _UNCONVERGED_STATUS = "status=failed reason=measure-a-error"
 _ATTEMPT_TIMEOUT_MARKER = "# probe reason: no BENCH_LATENCY within 30s timeout"
 
@@ -556,7 +569,10 @@ def classify_m2_attempt(cell_round_dirs, identity):
     substrings, never guesses:
 
     - `unconverged`: some round dir's protocol-a-summary.txt contains
-      BOTH `warmup failed-stability: MessageBoundUnconverged` AND
+      BOTH a `warmup failed-stability: <reason>` line (reason is
+      `MessageBoundUnconverged` on historical runs, or
+      `TimeBoundUnconverged` / `InsufficientSamples` on future
+      benchwarmup runs — every reason is a warmup failure) AND
       `status=failed reason=measure-a-error`; reason is the exact
       status=failed line.
     - `attempted-timeout`: some round dir's exit-codes.txt contains
@@ -583,8 +599,8 @@ def classify_m2_attempt(cell_round_dirs, identity):
                 text = ""
             if (
                 "unconverged" not in found
-                and _UNCONVERGED_MARKER in text
                 and _UNCONVERGED_STATUS in text
+                and any(m in text for m in _UNCONVERGED_MARKERS)
             ):
                 found["unconverged"] = (
                     _attempt_reason_line(text, _UNCONVERGED_STATUS),

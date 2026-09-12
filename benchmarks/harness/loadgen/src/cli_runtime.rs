@@ -309,7 +309,15 @@ async fn measure_a_async(
 
     // --- Warmup ---
     let warmup_start = Instant::now();
-    let warmup_samples = warmup_drive(&client, url, rate_per_sec, &warmup_cfg, &body).await?;
+    let warmup_samples = warmup_drive(
+        &client,
+        url,
+        rate_per_sec,
+        &warmup_cfg,
+        &body,
+        Duration::from_secs(u64::from(warmup_cfg.max_time_seconds)),
+    )
+    .await?;
     let warmup_elapsed = warmup_start.elapsed().as_nanos() as u64;
     let warmup_outcome = check_warmup_stability(&warmup_samples, warmup_elapsed, &warmup_cfg);
     match warmup_outcome {
@@ -439,31 +447,60 @@ fn format_result_line(
     )
 }
 
+/// Drive warmup request collection until the wall-clock deadline.
+///
+/// `cfg.max_messages` is the trailing comparison-window size, NOT a
+/// termination cap (spec §4.3 trailing-window policy): collection stops
+/// only when `max_time` elapses. Deadline guards apply at three points:
+///
+/// - BEFORE each request: new work never starts once the budget is
+///   spent.
+/// - AROUND response receipt + body drain: each in-flight request runs
+///   under a `tokio::time::timeout` for the remaining budget, so a
+///   request that cannot finish before the deadline is cancelled and
+///   its late sample is discarded.
+///
+/// Requests that complete inside the window contribute their RTT;
+/// late or failed work is dropped and never extends warmup.
 async fn warmup_drive(
     client: &reqwest::Client,
     url: &str,
     rate_per_sec: u32,
     cfg: &WarmupConfig,
     body: &RunBody,
+    max_time: Duration,
 ) -> Result<Vec<u64>, RuntimeError> {
     let mut samples: Vec<u64> = Vec::with_capacity(cfg.max_messages as usize);
     let period_ns: u64 = 1_000_000_000 / (rate_per_sec.max(1) as u64);
     let start = Instant::now();
-    let deadline = Duration::from_secs(cfg.max_time_seconds as u64);
-    for i in 0..cfg.max_messages {
-        if start.elapsed() >= deadline {
+    let mut i: u64 = 0;
+    loop {
+        // Guard BEFORE request start: never begin work past the deadline.
+        let remaining = max_time.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
             break;
         }
         let tick = Instant::now();
-        if let Ok(resp) = body.attach(client.post(url)).send().await {
-            let _ = resp.bytes().await;
+        let request = async {
+            let resp = body.attach(client.post(url)).send().await?;
+            resp.bytes().await
+        };
+        // Guard AROUND response receipt + body drain: in-flight work
+        // that cannot finish before the deadline is cancelled; the
+        // late sample is discarded.
+        if let Ok(Ok(_)) = tokio::time::timeout(remaining, request).await {
             let rtt_ns = tick.elapsed().as_nanos() as u64;
             samples.push(rtt_ns);
         }
-        let target = start + Duration::from_nanos(period_ns * (i as u64 + 1));
+        i = i.saturating_add(1);
+        // Pace toward the target rate, capped at the remaining budget
+        // so pacing cannot push warmup past its wall-clock deadline.
+        let target = start + Duration::from_nanos(period_ns.saturating_mul(i));
         let now = Instant::now();
-        if target > now {
-            tokio::time::sleep(target - now).await;
+        let remaining = max_time.saturating_sub(start.elapsed());
+        let sleep_for = target.saturating_duration_since(now).min(remaining);
+        if !sleep_for.is_zero() {
+            tokio::time::sleep(sleep_for).await;
         }
     }
     Ok(samples)
@@ -703,5 +740,121 @@ mod tests {
             line,
             "measure-a: round 2 n=0 p50=0ns p95=0ns p99=0ns bca_lo=0ns bca_hi=0ns"
         );
+    }
+
+    /// Warmup must never start a new request after its wall-clock
+    /// deadline: the counter captured at return must not move afterwards,
+    /// and blocked (late) work must not become a sample.
+    #[tokio::test]
+    async fn warmup_drive_request_deadline_stops_new_requests() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // Server: counts each request, then responds only after 500ms —
+        // deterministic paused response, well past the 50ms deadline.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let server_counter = counter.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let counter = server_counter.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(500)).await; // allow-test-sleep: deterministic paused response
+                    let resp = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
+                    let _ = sock.write_all(resp).await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let body = RunBody::new(None, "ping");
+        let cfg = WarmupConfig::default();
+        let samples = warmup_drive(
+            &client,
+            &format!("http://{addr}"),
+            1000,
+            &cfg,
+            &body,
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+
+        // The paused response cannot complete inside the window, so the
+        // returned samples exclude blocked work.
+        assert!(samples.is_empty());
+        let n_at_return = counter.load(Ordering::SeqCst);
+        assert!(n_at_return >= 1, "server must have seen a request");
+
+        // No new request may be started after the deadline.
+        tokio::time::sleep(Duration::from_millis(100)).await; // allow-test-sleep: task-mandated 100ms post-deadline observation
+        assert_eq!(counter.load(Ordering::SeqCst), n_at_return);
+    }
+
+    /// A request whose body drain would block past the deadline must be
+    /// cancelled: warmup completes bounded well under 250ms and the
+    /// blocked sample is discarded.
+    #[tokio::test]
+    async fn warmup_drive_body_deadline_stops_inflight_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // Server: sends headers promising a body, then never sends it —
+        // the client's body drain blocks indefinitely.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let server_counter = counter.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let counter = server_counter.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let _ = sock
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\n")
+                        .await;
+                    // Body never arrives; hang until the client drops us.
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let body = RunBody::new(None, "ping");
+        let cfg = WarmupConfig::default();
+        let start = Instant::now();
+        let samples = warmup_drive(
+            &client,
+            &format!("http://{addr}"),
+            1000,
+            &cfg,
+            &body,
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+        let elapsed = start.elapsed();
+
+        // A blocked drain must not extend warmup beyond the deadline.
+        assert!(elapsed < Duration::from_millis(250), "elapsed: {elapsed:?}");
+        // The request did reach the server, but its sample is discarded.
+        assert!(counter.load(Ordering::SeqCst) >= 1);
+        assert!(samples.is_empty());
     }
 }
