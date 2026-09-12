@@ -58,3 +58,5 @@ benchmarks/harness/out/
 .bless.json
 .review.json
 benchmarks/runner/DIGEST
+
+.opencode/fleet/
