@@ -108,6 +108,7 @@
   - [Kubernetes](platforms/kubernetes.md)
 - [Operations](operations/index.md)
   - [Health](operations/health.md)
+  - [OIDC publish fallback](operations/oidc-publish-fallback.md)
 - [Testing](testing/index.md)
 - [Extending rust-camel](extending/index.md)
   - [Custom component](extending/custom-component.md)
