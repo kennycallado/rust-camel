@@ -118,6 +118,53 @@ no exit 2). The covered stretch on non-Unix starts at the send/drain race.
 | Shutdown failure | teardown failed or exceeded its budget after a recorded verdict (report `shutdown_error` carries the detail; `error` keeps the verdict) | 2 |
 | Report write failure | `--report` path unwritable, or report serialization failed | 2 |
 
+## Compiled artifacts (`camel compile`)
+
+`camel compile <document> -o <artifact>` produces a self-contained native
+Linux preview artifact: a copy of the current executable with a fixed 68-byte
+EOF trailer appended (normalized pre-interpolation document payload +
+operational manifest + BLAKE3 footer; ADR-0075). The payload is captured
+before `${env:}` interpolation, so `${env:NAME}` expressions resolve from the
+deployment environment at artifact runtime, never from the compile
+environment. V1 supports one route document or one job document;
+cross-compilation, AST/AOT serialization, compiled tests, multi-entry jobs,
+compression, signing, and long-running route-server artifacts are deferred.
+
+Compilation fails closed (exit 2, no output) for non-native targets and for
+every unsupported compile-time asset: route-source fields (`routeFiles`,
+`routeFilesFromRoot`, glob patterns), configuration fields (`Camel.toml`,
+profiles, `includes`, `CAMEL_*` compile overrides), and asset-bearing
+endpoint fields (certificates, private keys, CA files, WASM/plugin files,
+XSLT/XSD, SQL files, static directories, literal secret files, dynamic
+placeholders in those fields). Asset-bearing endpoint URI schemes (`wasm:`,
+`xslt:`, `validator:`) are rejected in every URI-bearing field (`from`, `to`,
+`wire_tap`, `poll_enrich`, `enrich`, `dead_letter_channel`,
+`scatter_gather.endpoints`). Runtime endpoint URI paths (e.g. `file:`,
+`kafka:`, `log:`), runtime `${env:}` expressions outside forbidden fields,
+and deploy-side network/file I/O remain permitted.
+
+The binary self-detects its trailer before Clap parsing (`fn
+self_detect_artifact`): a trailer-free image keeps the normal CLI; marked
+corruption exits 2 with an integrity diagnostic; a valid artifact accepts
+only `--report <path>`, `--help`, `--version`, and `--manifest` (anything
+else exits 2 naming the argument). `--manifest` prints the operational
+manifest and exits 0 without boot. Route artifacts run the embedded document
+through the existing `camel run` lifecycle with the default in-memory config,
+virtual source identity `compiled://<source_name>`, and watch disabled; job
+artifacts use the existing single-document job lifecycle with the embedded
+document as their sole route source. No temporary extraction occurs, so
+artifacts run from a read-only root; the only write is an explicitly
+requested report.
+
+Route `--report <path>` writes the exact JSON object
+`{"kind":"route","status":"completed"|"failed","error":string|null}` after
+boot/runtime completion or failure, with exit 0 for graceful completion and
+2 for boot/discovery/report-write failure (1 stays reserved for job pipeline
+failures). Job artifacts keep the existing job outcome report and exit
+precedence (`2 > 1 > 0`). Boot still performs parse, interpolation, lowering,
+component boot, and context start, so no boot-speed claim is made before P0
+measurement.
+
 ## Metrics
 
 Metrics instrumentation for CLI commands is limited to the jemalloc memory

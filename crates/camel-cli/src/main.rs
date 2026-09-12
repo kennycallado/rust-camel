@@ -110,6 +110,14 @@ enum Commands {
 
     /// Start Language Server Protocol server over stdio.
     Lsp,
+
+    /// Compile a single route/job document into a self-contained
+    /// executable artifact (native Linux preview).
+    ///
+    /// Trust model: the artifact is a copy of this Camel executable plus
+    /// embedded authoring text; it runs with the deployment's process
+    /// capabilities. Unsupported compile-time assets fail closed.
+    Compile(commands::compile::CompileArgs),
 }
 
 #[derive(Subcommand)]
@@ -124,6 +132,15 @@ async fn main() {
     // The dep graph enables both ring and aws-lc-rs, so explicit selection
     // is required to avoid a runtime panic.
     let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // Self-detect a compiled artifact BEFORE Clap parses anything
+    // (openspec cli-compile, Task 2.3): a trailer-free image returns
+    // `None` and falls through to the normal CLI unchanged; marked
+    // corruption fails closed; a valid artifact consumes the process
+    // argv itself and exits with the artifact contract codes.
+    if let Some(code) = camel_cli::compile::runtime::self_detect_artifact().await {
+        std::process::exit(code);
+    }
 
     let cli = Cli::parse();
 
@@ -205,6 +222,12 @@ async fn main() {
             // The job runner returns the exit code; the process exit is
             // applied only here, mirroring the test-driver pattern.
             let code = commands::job::run_job(&args).await;
+            std::process::exit(code);
+        }
+        Commands::Compile(args) => {
+            // The compiler returns the exit code (0 success, 2 named
+            // rejection with its diagnostic already on stderr).
+            let code = commands::compile::run_compile(&args);
             std::process::exit(code);
         }
     }

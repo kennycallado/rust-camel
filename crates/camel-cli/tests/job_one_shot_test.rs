@@ -17,8 +17,6 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
-use common::drain_to_buffer;
-
 /// Write the fixture config: routes glob unused by the job (the job's
 /// route source is the document), logs off for a clean stdout report.
 fn write_config(dir: &Path) {
@@ -662,51 +660,13 @@ routeFiles:
 // ── Bare-name resolution + optional document (job-ux-reshape) ──────────
 
 /// Run `camel job <args...>` in `dir` with arbitrary args (no Path
-/// coercion) and return `(exit_code, stdout, stderr)`.
+/// coercion) and return `(exit_code, stdout, stderr)`. Delegates to the
+/// shared [`common::run_binary`] runner, which these job tests keep
+/// covered end to end.
 fn run_job_args(dir: &Path, args: &[&str]) -> (i32, String, String) {
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_camel"))
-        .arg("job")
-        .args(args)
-        .current_dir(dir)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn camel job");
-    let out_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let err_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let out_handle = std::thread::spawn({
-        let buf = std::sync::Arc::clone(&out_buf);
-        let stdout = child.stdout.take().expect("stdout piped");
-        move || drain_to_buffer(stdout, buf)
-    });
-    let err_handle = std::thread::spawn({
-        let buf = std::sync::Arc::clone(&err_buf);
-        let stderr = child.stderr.take().expect("stderr piped");
-        move || drain_to_buffer(stderr, buf)
-    });
-    let deadline = std::time::Instant::now() + Duration::from_secs(90);
-    let exit_code = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.code().unwrap_or(-1),
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break -1;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(e) => panic!("try_wait failed: {e}"),
-        }
-    };
-    let _ = out_handle.join();
-    let _ = err_handle.join();
-    (
-        exit_code,
-        out_buf.lock().expect("stdout lock").clone(),
-        err_buf.lock().expect("stderr lock").clone(),
-    )
+    let mut full: Vec<&str> = vec!["job"];
+    full.extend(args.iter().copied());
+    common::run_binary(dir, Path::new(env!("CARGO_BIN_EXE_camel")), &full, &[])
 }
 
 /// The canonical bare-name fixture: `jobs/` dir + `routeFilesFromRoot`

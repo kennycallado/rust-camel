@@ -1,5 +1,6 @@
 mod allocator_metrics;
 pub mod commands;
+pub mod compile;
 pub mod template;
 
 use std::sync::Arc;

@@ -275,6 +275,100 @@ pub fn discover_routes_with_threshold_security_and_env(
     )
 }
 
+/// Explicit document kind carried by an embedded document (cli-compile).
+///
+/// The compiler records the kind in the artifact trailer and the runtime
+/// passes it back so the discovery seam knows which document family the
+/// text belongs to. Route and job documents share the same route-DSL parse
+/// pipeline; the kind steers reserved-document validation and the caller's
+/// lifecycle choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddedDocumentKind {
+    /// A route document (`camel run` artifact).
+    Route,
+    /// A job document (`camel job` artifact).
+    Job,
+}
+
+/// Discovers routes from one embedded document without touching the
+/// filesystem (cli-compile).
+///
+/// This is the discovery seam for self-contained compiled artifacts: `text`
+/// is the normalized document payload, `source_name` is the logical source
+/// name recorded in the artifact manifest, and the virtual identity
+/// `compiled://<source_name>` is used for the source-hash context and every
+/// diagnostic. `${env:NAME}` placeholders resolve exclusively through
+/// `env_lookup` — the process environment is never consulted, and no
+/// config file, glob, external route file, or temporary file is read or
+/// written.
+///
+/// The pipeline is the shared discovery path: interpolation (with YAML
+/// provenance), typed env probing, template parsing and materialization,
+/// provenance-preserving lowering, and reserved-document validation. The
+/// parse format follows the extension of `source_name` exactly like
+/// filesystem discovery (`.yaml`/`.yml`/`.json`); an extensionless or
+/// unsupported source name is rejected with `UnsupportedExtension` before
+/// parsing, never reaching the shared parse pass.
+pub fn discover_embedded_text(
+    text: &str,
+    source_name: &str,
+    kind: EmbeddedDocumentKind,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<RouteDefinition>, DiscoveryError> {
+    let path_str = format!("compiled://{source_name}");
+
+    // Reserved-document gate (route kind only): `.test.yaml`/`.job.yaml`
+    // names belong to `camel test`/`camel job`, never to route discovery —
+    // the same fail-closed rule as a literal filesystem pattern. The job
+    // kind keeps the suffix contract of the CLI job-document parser, which
+    // runs upstream of this seam.
+    if matches!(kind, EmbeddedDocumentKind::Route) && is_reserved_document(Path::new(source_name)) {
+        return Err(DiscoveryError::ReservedDocumentSuffix { path: path_str });
+    }
+
+    // Extension gate BEFORE parsing — the same fail-closed rule as
+    // filesystem discovery: the shared parse pass only handles
+    // yaml/yml/json and its fallback arm is unreachable, so an
+    // extensionless or unsupported source name must fail with
+    // `UnsupportedExtension` (naming the virtual `compiled://` identity),
+    // never panic. The embedded seam has no glob pattern, so the JSON
+    // explicit-pattern gate does not apply — a `.json` source name is
+    // explicitly named in the artifact manifest.
+    let ext = file_extension(Path::new(source_name));
+    match ext.as_deref() {
+        Some("yaml") | Some("yml") | Some("json") => {}
+        Some(other) => {
+            return Err(DiscoveryError::UnsupportedExtension {
+                path: path_str,
+                extension: other.to_string(),
+            });
+        }
+        None => {
+            return Err(DiscoveryError::UnsupportedExtension {
+                path: path_str,
+                extension: String::new(),
+            });
+        }
+    }
+
+    let mut routes = Vec::new();
+    let mut templates: HashMap<String, RouteTemplateSpec> = HashMap::new();
+    let mut templated_specs: Vec<(String, TemplatedRouteSpec)> = Vec::new();
+    parse_document_routes(
+        text,
+        &path_str,
+        ext.as_deref(),
+        None,
+        None,
+        env_lookup,
+        &mut routes,
+        &mut templates,
+        &mut templated_specs,
+    )?;
+    materialize_templated_routes(&mut routes, &templates, &templated_specs, None, None)?;
+    Ok(routes)
+}
+
 /// Parse a `TemplateError::InvalidParameter` Display string
 /// (`parameter '<name>' declared type <ty> but value '<value>' is not
 /// coercible`) back into its fields, preserving the error class through
@@ -330,6 +424,10 @@ fn discover_routes_inner(
     // (path_str, templated_spec) — materialized after all files scanned
     let mut templated_specs: Vec<(String, TemplatedRouteSpec)> = Vec::new();
 
+    // With an injected lookup the process environment is never read.
+    let fallback_lookup: EnvLookup<'_> = &process_env_lookup;
+    let lookup = env_lookup.unwrap_or(fallback_lookup);
+
     for pattern in patterns {
         let is_json_pattern = pattern_targets_json(pattern);
         let entries = glob(pattern)?;
@@ -384,150 +482,203 @@ fn discover_routes_inner(
             // Read file content (only reached for accepted extensions)
             let raw_content = read_file_capped(&path)?;
 
-            // Source hash is based on raw content before env interpolation
-            let mut hasher = DefaultHasher::new();
-            raw_content.hash(&mut hasher);
-            let source_hash = hasher.finish();
-
-            // Env interpolation happens before parsing for both YAML and JSON.
-            // With an injected lookup the process environment is never read.
-            let fallback_lookup: EnvLookup<'_> = &process_env_lookup;
-            let lookup = env_lookup.unwrap_or(fallback_lookup);
-            let (content, provenance) = interpolate_for_parse(&raw_content, ext.as_deref(), lookup)
-                .map_err(|var_name| DiscoveryError::Env {
-                    path: path_str.clone(),
-                    var_name,
-                })?;
-
-            // Parse based on extension — collect templates, templated specs, and regular routes
-            match ext.as_deref() {
-                Some("yaml") | Some("yml") => {
-                    // Typed probe over interpolation provenance
-                    // (env-int-placeholder-typing): pass 1 parses through a
-                    // QUIET twin of the threshold/security parser
-                    // (speculative probe attempts must not log); on final
-                    // failure the original text re-runs through the LOGGING
-                    // parser exactly once (today's error log and error
-                    // text), then maps through the existing error path.
-                    let threshold = stream_cache_threshold
-                        .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD);
-                    let quiet_probe_parse = |text: &str| {
-                        crate::yaml::parse_yaml_with_threshold_and_security_quiet(
-                            text,
-                            threshold,
-                            security_ctx.clone().unwrap_or_default(),
-                        )
-                    };
-                    let file_routes = crate::env_int_probe::parse_with_probe(
-                        &content,
-                        provenance.as_deref(),
-                        quiet_probe_parse,
-                    )
-                    .or_else(|_| {
-                        parse_yaml_with_threshold_and_security(
-                            &content,
-                            threshold,
-                            security_ctx.clone().unwrap_or_default(),
-                        )
-                    })
-                    .map_err(|e| DiscoveryError::Yaml {
-                        path: path_str.clone(),
-                        error: e.to_string(),
-                    })?;
-                    for route in file_routes {
-                        routes.push(route.with_source_hash(source_hash));
-                    }
-
-                    // Parse templates
-                    let tpls =
-                        crate::template::yaml::parse_yaml_templates(&content).map_err(|e| {
-                            DiscoveryError::MaterializationFailed {
-                                path: path_str.clone(),
-                                source: e,
-                            }
-                        })?;
-                    for tpl in tpls {
-                        if templates.contains_key(&tpl.id) {
-                            return Err(DiscoveryError::TemplateSpec {
-                                path: path_str.clone(),
-                                error: format!("duplicate template id '{}'", tpl.id),
-                            });
-                        }
-                        templates.insert(tpl.id.clone(), tpl);
-                    }
-
-                    // Parse templated route specs for later materialization
-                    let specs = crate::template::yaml::parse_yaml_templated_routes(&content)
-                        .map_err(|e| DiscoveryError::MaterializationFailed {
-                            path: path_str.clone(),
-                            source: e,
-                        })?;
-                    for spec in specs {
-                        templated_specs.push((path_str.clone(), spec));
-                    }
-                }
-                Some("json") => {
-                    // Parse regular routes
-                    let file_routes = parse_json_with_threshold_and_security(
-                        &content,
-                        stream_cache_threshold
-                            .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD),
-                        security_ctx.clone().unwrap_or_default(),
-                    )
-                    .map_err(|e| DiscoveryError::Json {
-                        path: path_str.clone(),
-                        error: e.to_string(),
-                    })?;
-                    for route in file_routes {
-                        routes.push(route.with_source_hash(source_hash));
-                    }
-
-                    // Parse templates
-                    let tpls =
-                        crate::template::json::parse_json_templates(&content).map_err(|e| {
-                            DiscoveryError::MaterializationFailed {
-                                path: path_str.clone(),
-                                source: e,
-                            }
-                        })?;
-                    for tpl in tpls {
-                        if templates.contains_key(&tpl.id) {
-                            return Err(DiscoveryError::TemplateSpec {
-                                path: path_str.clone(),
-                                error: format!("duplicate template id '{}'", tpl.id),
-                            });
-                        }
-                        templates.insert(tpl.id.clone(), tpl);
-                    }
-
-                    // Parse templated route specs for later materialization
-                    let specs = crate::template::json::parse_json_templated_routes(&content)
-                        .map_err(|e| DiscoveryError::MaterializationFailed {
-                            path: path_str.clone(),
-                            source: e,
-                        })?;
-                    for spec in specs {
-                        templated_specs.push((path_str.clone(), spec));
-                    }
-                }
-                // SAFETY: Unreachable. The validation block above returns early for
-                // any extension that is not yaml, yml, or json.
-                _ => unreachable!(
-                    "validated extension should be yaml/yml/json but was: {:?}",
-                    ext
-                ),
-            }
+            parse_document_routes(
+                &raw_content,
+                &path_str,
+                ext.as_deref(),
+                stream_cache_threshold,
+                security_ctx.as_ref(),
+                lookup,
+                &mut routes,
+                &mut templates,
+                &mut templated_specs,
+            )?;
         }
     }
 
-    // Pass 2: materialize all templated specs using the collected templates.
-    // Failures are aggregated — every spec is attempted so the caller sees
-    // the full set of broken templates, not just the first one.
+    materialize_templated_routes(
+        &mut routes,
+        &templates,
+        &templated_specs,
+        stream_cache_threshold,
+        security_ctx.as_ref(),
+    )?;
+
+    Ok(routes)
+}
+
+/// Shared per-document parse pass (filesystem discovery and the embedded
+/// text seam): hash the raw content, interpolate `${env:NAME}` through
+/// `lookup` (with YAML provenance for the typed probe), then parse routes,
+/// templates, and templated route specs into the caller's accumulators so
+/// both entry points keep identical discovery semantics.
+#[allow(clippy::too_many_arguments)]
+fn parse_document_routes(
+    raw_content: &str,
+    path_str: &str,
+    ext: Option<&str>,
+    stream_cache_threshold: Option<usize>,
+    security_ctx: Option<&SecurityCompileContext>,
+    lookup: EnvLookup<'_>,
+    routes: &mut Vec<RouteDefinition>,
+    templates: &mut HashMap<String, RouteTemplateSpec>,
+    templated_specs: &mut Vec<(String, TemplatedRouteSpec)>,
+) -> Result<(), DiscoveryError> {
+    // Source hash is based on raw content before env interpolation
+    let mut hasher = DefaultHasher::new();
+    raw_content.hash(&mut hasher);
+    let source_hash = hasher.finish();
+
+    // Env interpolation happens before parsing for both YAML and JSON.
+    let (content, provenance) =
+        interpolate_for_parse(raw_content, ext, lookup).map_err(|var_name| {
+            DiscoveryError::Env {
+                path: path_str.to_string(),
+                var_name,
+            }
+        })?;
+
+    // Parse based on extension — collect templates, templated specs, and regular routes
+    match ext {
+        Some("yaml") | Some("yml") => {
+            // Typed probe over interpolation provenance
+            // (env-int-placeholder-typing): pass 1 parses through a
+            // QUIET twin of the threshold/security parser
+            // (speculative probe attempts must not log); on final
+            // failure the original text re-runs through the LOGGING
+            // parser exactly once (today's error log and error
+            // text), then maps through the existing error path.
+            let threshold = stream_cache_threshold
+                .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD);
+            let quiet_probe_parse = |text: &str| {
+                crate::yaml::parse_yaml_with_threshold_and_security_quiet(
+                    text,
+                    threshold,
+                    security_ctx.cloned().unwrap_or_default(),
+                )
+            };
+            let file_routes = crate::env_int_probe::parse_with_probe(
+                &content,
+                provenance.as_deref(),
+                quiet_probe_parse,
+            )
+            .or_else(|_| {
+                parse_yaml_with_threshold_and_security(
+                    &content,
+                    threshold,
+                    security_ctx.cloned().unwrap_or_default(),
+                )
+            })
+            .map_err(|e| DiscoveryError::Yaml {
+                path: path_str.to_string(),
+                error: e.to_string(),
+            })?;
+            for route in file_routes {
+                routes.push(route.with_source_hash(source_hash));
+            }
+
+            // Parse templates
+            let tpls = crate::template::yaml::parse_yaml_templates(&content).map_err(|e| {
+                DiscoveryError::MaterializationFailed {
+                    path: path_str.to_string(),
+                    source: e,
+                }
+            })?;
+            for tpl in tpls {
+                if templates.contains_key(&tpl.id) {
+                    return Err(DiscoveryError::TemplateSpec {
+                        path: path_str.to_string(),
+                        error: format!("duplicate template id '{}'", tpl.id),
+                    });
+                }
+                templates.insert(tpl.id.clone(), tpl);
+            }
+
+            // Parse templated route specs for later materialization
+            let specs =
+                crate::template::yaml::parse_yaml_templated_routes(&content).map_err(|e| {
+                    DiscoveryError::MaterializationFailed {
+                        path: path_str.to_string(),
+                        source: e,
+                    }
+                })?;
+            for spec in specs {
+                templated_specs.push((path_str.to_string(), spec));
+            }
+        }
+        Some("json") => {
+            // Parse regular routes
+            let file_routes = parse_json_with_threshold_and_security(
+                &content,
+                stream_cache_threshold
+                    .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD),
+                security_ctx.cloned().unwrap_or_default(),
+            )
+            .map_err(|e| DiscoveryError::Json {
+                path: path_str.to_string(),
+                error: e.to_string(),
+            })?;
+            for route in file_routes {
+                routes.push(route.with_source_hash(source_hash));
+            }
+
+            // Parse templates
+            let tpls = crate::template::json::parse_json_templates(&content).map_err(|e| {
+                DiscoveryError::MaterializationFailed {
+                    path: path_str.to_string(),
+                    source: e,
+                }
+            })?;
+            for tpl in tpls {
+                if templates.contains_key(&tpl.id) {
+                    return Err(DiscoveryError::TemplateSpec {
+                        path: path_str.to_string(),
+                        error: format!("duplicate template id '{}'", tpl.id),
+                    });
+                }
+                templates.insert(tpl.id.clone(), tpl);
+            }
+
+            // Parse templated route specs for later materialization
+            let specs =
+                crate::template::json::parse_json_templated_routes(&content).map_err(|e| {
+                    DiscoveryError::MaterializationFailed {
+                        path: path_str.to_string(),
+                        source: e,
+                    }
+                })?;
+            for spec in specs {
+                templated_specs.push((path_str.to_string(), spec));
+            }
+        }
+        // SAFETY: Unreachable. The validation block above returns early for
+        // any extension that is not yaml, yml, or json.
+        _ => unreachable!(
+            "validated extension should be yaml/yml/json but was: {:?}",
+            ext
+        ),
+    }
+
+    Ok(())
+}
+
+/// Shared materialization pass (filesystem discovery and the embedded text
+/// seam): compile every collected templated route spec against the parsed
+/// templates, deduplicate route ids, and attach source hashes. Failures are
+/// aggregated — every spec is attempted so the caller sees the full set of
+/// broken templates, not just the first one.
+fn materialize_templated_routes(
+    routes: &mut Vec<RouteDefinition>,
+    templates: &HashMap<String, RouteTemplateSpec>,
+    templated_specs: &[(String, TemplatedRouteSpec)],
+    stream_cache_threshold: Option<usize>,
+    security_ctx: Option<&SecurityCompileContext>,
+) -> Result<(), DiscoveryError> {
     let mut seen_route_ids: HashSet<String> =
         routes.iter().map(|r| r.route_id().to_string()).collect();
     let mut failures: Vec<MaterializationFailure> = Vec::new();
 
-    for (path_str, spec) in &templated_specs {
+    for (path_str, spec) in templated_specs {
         let Some(template) = templates.get(&spec.route_template_ref) else {
             failures.push(MaterializationFailure {
                 path: path_str.clone(),
@@ -543,7 +694,7 @@ fn discover_routes_inner(
             spec,
             stream_cache_threshold
                 .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD),
-            security_ctx.clone().unwrap_or_default(),
+            security_ctx.cloned().unwrap_or_default(),
         ) {
             Ok(compiled) => compiled,
             Err(e) => {
@@ -608,7 +759,7 @@ fn discover_routes_inner(
         return Err(DiscoveryError::MaterializationFailures { failures });
     }
 
-    Ok(routes)
+    Ok(())
 }
 
 #[cfg(test)]

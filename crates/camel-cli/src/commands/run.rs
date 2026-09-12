@@ -10,12 +10,32 @@
 //! calls `camel_bundles::boot`, and drives the returned `BootHandle` at
 //! shutdown. The handle logs teardown failures; the exit code never
 //! changes.
+//!
+//! The lifecycle core ([`drive_lifecycle`]) is shared with compiled
+//! artifacts (openspec change `cli-compile`): `run()` contributes config
+//! loading, CLI overrides, and filesystem discovery; an embedded artifact
+//! contributes the default in-memory config, the embedded discovery seam,
+//! and `watch = false`. Boot, route registration, context start, signals,
+//! and shutdown are shared verbatim.
 
 #[cfg(feature = "wasm")]
 use camel_bean::BeanProcessor;
 #[cfg(feature = "wasm")]
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+/// Build the default in-memory `CamelConfig` (serde defaults only): no
+/// file read, no `CAMEL_*` environment overrides. Shared by the
+/// `Camel.toml`-absent fallback of [`load_config_or_default`] and the
+/// compiled-artifact runtime (a compiled document is self-contained by
+/// construction — config/profile dependencies are compile-rejected).
+pub(crate) fn in_memory_default_config()
+-> Result<camel_config::config::CamelConfig, camel_api::CamelError> {
+    config::Config::builder()
+        .build()
+        .and_then(|c| c.try_deserialize())
+        .map_err(|e| camel_api::CamelError::Config(format!("Failed to build default config: {e}")))
+}
 
 /// Load the Camel.toml at `config_path`, falling back to serde defaults
 /// ONLY when the main file does not exist. Shared with `camel job`
@@ -32,15 +52,7 @@ pub(crate) fn load_config_or_default(
     config_path: &str,
 ) -> Result<camel_config::config::CamelConfig, camel_api::CamelError> {
     match std::path::Path::new(config_path).try_exists() {
-        Ok(false) => {
-            // Build an empty config so serde defaults apply.
-            config::Config::builder()
-                .build()
-                .and_then(|c| c.try_deserialize())
-                .map_err(|e| {
-                    camel_api::CamelError::Config(format!("Failed to build default config: {e}"))
-                })
-        }
+        Ok(false) => in_memory_default_config(),
         Err(e) => Err(camel_api::CamelError::Config(format!(
             "failed to check config path {config_path}: {e}"
         ))),
@@ -91,15 +103,87 @@ pub(crate) fn try_canonical_project_root(
         .canonicalize()
 }
 
-pub async fn run(
-    routes_override: Option<String>,
-    config_path: String,
-    cli_watch: Option<bool>,
-    otel: bool,
-    otel_endpoint: Option<String>,
-    service_name: Option<String>,
-    health_port: Option<u16>,
-) -> Result<(), camel_api::CamelError> {
+// ---------------------------------------------------------------------------
+// Shared runtime lifecycle (camel run + compiled artifacts)
+// ---------------------------------------------------------------------------
+
+/// How [`drive_lifecycle`] obtains route definitions.
+#[derive(Debug, Clone)]
+pub(crate) enum Discover {
+    /// `camel run`'s filesystem discovery: glob patterns through the
+    /// real-boot discovery seam (ambient `${env:}`, stream-caching
+    /// threshold, security compile context built inside the lifecycle).
+    Patterns {
+        /// Route patterns verbatim (unexpanded globs; discovery owns
+        /// expansion, the test-suffix skip, and errors).
+        patterns: Vec<String>,
+    },
+    /// A compiled artifact's embedded document: the normalized payload
+    /// through `camel_dsl::discover_embedded_text` with the virtual
+    /// identity `compiled://<source_name>` and the ambient (deployment)
+    /// environment as the `${env:}` lookup. No config, glob, external
+    /// route file, or temporary file is ever touched.
+    Embedded {
+        /// Normalized document text (pre-interpolation authoring text).
+        text: String,
+        /// Logical source name from the artifact manifest.
+        source_name: String,
+        /// Route/job document kind recorded in the trailer.
+        kind: camel_dsl::EmbeddedDocumentKind,
+    },
+}
+
+/// Watcher ingredients for [`LifecycleSpec`] (camel run only; compiled
+/// artifacts never watch).
+#[derive(Debug, Clone)]
+pub(crate) struct WatchSpec {
+    /// Initial route patterns (for watch-directory derivation and the
+    /// watching log line).
+    pub patterns: Vec<String>,
+    /// `--routes` override, re-applied on every reload pass.
+    pub routes_override: Option<String>,
+    /// Camel.toml routes entries, re-applied on every reload pass.
+    pub config_routes: Option<Vec<String>>,
+}
+
+/// Lifecycle inputs shared by `camel run` and compiled artifacts.
+pub(crate) struct LifecycleSpec {
+    /// Boot configuration (already CLI-overridden for `camel run`;
+    /// default in-memory for a compiled artifact).
+    pub config: camel_config::config::CamelConfig,
+    /// camel-bundles base dir (wasm bean/plugin resolution root).
+    pub project_root: std::path::PathBuf,
+    /// Route source (filesystem discovery or embedded document).
+    pub discover: Discover,
+    /// `Some` enables the reload watcher; `None` disables it
+    /// unconditionally (compiled artifacts always pass `None`).
+    pub watch: Option<WatchSpec>,
+    /// Emit the `camel run` CWD-trust WARN after context configure.
+    /// Compiled artifacts skip it: their documents cannot reference
+    /// scripts/WASM (compile-time asset policy).
+    pub trust_note: bool,
+    /// Idle log line emitted when the watcher is disabled.
+    pub idle_note: &'static str,
+}
+
+/// Lifecycle failure classes; the caller owns rendering and exit codes
+/// (`camel run` logs and exits 1, an artifact writes its report and exits
+/// 2).
+pub(crate) enum LifecycleFailure {
+    /// Route discovery failed. `camel run` renders the
+    /// `MaterializationFailures` detail lines itself.
+    Discovery(camel_dsl::DiscoveryError),
+    /// Config/context/bootstrap/start class failure.
+    Boot(camel_api::CamelError),
+}
+
+/// Drive the full runtime lifecycle: arm stop signals, build the context,
+/// run the shared boot cascade, load and register routes, start the
+/// context, optionally watch, wait for the first stop signal, and tear
+/// down gracefully. A second stop signal force-exits 1 (rc-kz85m). Boot
+/// failures return [`LifecycleFailure`]; teardown failures are logged and
+/// never change the outcome (ADR-0069 section 10).
+pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), LifecycleFailure> {
     // 0. Register the SIGTERM stream BEFORE boot: a TERM arriving while
     //    config load, the bundle cascade, discovery, or ctx.start() still
     //    run would otherwise hit the default disposition and kill the
@@ -121,39 +205,7 @@ pub async fn run(
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         .expect("Failed to install SIGINT handler"); // allow-unwrap
 
-    // 1. Load config (fall back to empty config with serde defaults if Camel.toml not found)
-    let mut camel_config: camel_config::config::CamelConfig = load_config_or_default(&config_path)?;
-
-    // 1b. Apply OTel CLI overrides (--otel-endpoint and --service-name imply --otel)
-    let otel_enabled = otel || otel_endpoint.is_some() || service_name.is_some();
-    if otel_enabled {
-        let otel_cfg =
-            camel_config
-                .observability
-                .otel
-                .get_or_insert(camel_config::OtelCamelConfig {
-                    enabled: true,
-                    endpoint: "http://localhost:4317".to_string(),
-                    service_name: "rust-camel".to_string(),
-                    ..Default::default()
-                });
-        otel_cfg.enabled = true;
-        if let Some(ep) = otel_endpoint {
-            otel_cfg.endpoint = ep;
-        }
-        if let Some(name) = service_name {
-            otel_cfg.service_name = name;
-        }
-    }
-
-    if let Some(port) = health_port {
-        let health_cfg = camel_config
-            .observability
-            .health
-            .get_or_insert(camel_config::config::HealthCamelConfig::default());
-        health_cfg.enabled = true;
-        health_cfg.port = port;
-    }
+    let camel_config = spec.config;
 
     // 2. Build context with beans registry (also initialises tracing subscriber)
     let beans_registry = {
@@ -170,17 +222,19 @@ pub async fn run(
         beans_registry.clone(),
     )
     .await
-    .unwrap_or_else(|e| {
-        crate::commands::errors::report_cli_failure_and_exit("run", &e);
-    });
+    .map_err(LifecycleFailure::Boot)?;
 
     // R4-L4: CWD trust model — camel run executes route scripts/WASM/beans
     // from the current working directory (dev-tool model, like cargo run).
-    tracing::warn!(
-        "camel run trusts the current working directory and will execute route \
-         scripts, WASM modules, and beans resolved from it; only run from a \
-         trusted directory"
-    );
+    // Compiled artifacts never execute CWD-resolved assets (the compile
+    // asset policy rejects them), so the note is camel-run-only.
+    if spec.trust_note {
+        tracing::warn!(
+            "camel run trusts the current working directory and will execute route \
+             scripts, WASM modules, and beans resolved from it; only run from a \
+             trusted directory"
+        );
+    }
 
     match camel_function::FunctionRuntimeService::with_default_container_provider(
         camel_function::FunctionConfig::default(),
@@ -200,7 +254,7 @@ pub async fn run(
             .and_then(|v| v.get("plugins_dir"))
             .and_then(|v| v.as_str())
             .unwrap_or("plugins");
-        let camel_root = canonical_project_root(std::path::Path::new(&config_path));
+        let camel_root = spec.project_root.clone();
         crate::commands::plugin::validate_plugins_dir(&camel_root, plugins_dir_raw).unwrap_or_else(
             |e| {
                 eprintln!("Error: invalid plugins_dir: {e}");
@@ -273,19 +327,6 @@ pub async fn run(
         }
     }
 
-    // 3. Determine route patterns. Every path (default glob, `--routes`
-    //    override, Camel.toml `routes` entries) returns patterns verbatim;
-    //    discovery (camel-dsl) owns the reserved test-suffix skip and error.
-    //    The unexpanded globs also feed watch-directory derivation so an
-    //    initially-empty routes dir still yields a watched root.
-    let config_routes = Some(camel_config.routes.clone());
-    let patterns: Vec<String> = resolve_route_patterns(&routes_override, &config_routes);
-
-    // Log the patterns: globs are returned unexpanded, so the glob itself
-    // stays visible even when no `routes/` dir exists (bd rc-1110 operator
-    // diagnosis).
-    tracing::info!("camel-cli: loading routes from patterns: {:?}", patterns);
-
     // Security compile context (scenario-shared-boot task 2.3): the
     // builder moved to camel-bundles' security_boot module behind the
     // `security` feature (default-on). Without the feature, any
@@ -297,9 +338,11 @@ pub async fn run(
             &camel_config,
             ctx.registry_arc(),
         )
-        .await?;
+        .await
+        .map_err(LifecycleFailure::Boot)?;
     #[cfg(not(feature = "security"))]
-    camel_bundles::security_boot::ensure_security_supported(&camel_config)?;
+    camel_bundles::security_boot::ensure_security_supported(&camel_config)
+        .map_err(LifecycleFailure::Boot)?;
     #[cfg(not(feature = "security"))]
     let security_compile_context = camel_dsl::SecurityCompileContext::default();
 
@@ -319,103 +362,103 @@ pub async fn run(
     //    ctx.start() stay with the CLI.
     //
     //    project_root feeds the wasm bundle base dir; resolution is shared
-    //    with the wasm bean loader through `canonical_project_root`.
-    let project_root = canonical_project_root(std::path::Path::new(&config_path));
-    let boot_handle = camel_bundles::boot(&mut ctx, &camel_config, &project_root).await?;
+    //    with the wasm bean loader (the caller supplies it).
+    let boot_handle = camel_bundles::boot(&mut ctx, &camel_config, &spec.project_root)
+        .await
+        .map_err(LifecycleFailure::Boot)?;
 
     // 5. Discover and load initial routes
-    match camel_dsl::discover_routes_with_threshold_and_security(
-        &patterns,
-        camel_config.stream_caching.threshold,
-        security_compile_context.clone(),
-    ) {
-        Ok(defs) => {
-            if defs.is_empty() {
-                // Name the patterns: discovery matched no files, which would
-                // otherwise hide the glob the operator needs to diagnose
-                // (bd rc-1110).
-                tracing::warn!(
-                    "route discovery matched zero route files for patterns {:?}; \
-                     starting with no routes",
-                    patterns
-                );
-            }
-            // Conditionally register ExecBundle: only when a discovered route
-            // references `exec:` or the operator declared `[components.exec]`.
-            // CLI-owned (route-content-conditional), so it stays outside the
-            // camel-bundles boot cascade (ADR-0069 section 10) and goes
-            // through the single-bundle seam instead.
-            #[cfg(feature = "exec")]
-            {
-                let exec_used = camel_core::startup_validation::route_definitions_reference_scheme(
-                    &defs, "exec",
-                );
-                let exec_configured = camel_config.components.raw.contains_key("exec");
-                if exec_used || exec_configured {
-                    camel_bundles::register_bundle::<camel_component_exec::ExecBundle>(
-                        &mut ctx,
-                        &camel_config,
-                    )?;
+    let defs = match spec.discover {
+        Discover::Patterns { patterns } => {
+            // Log the patterns: globs are returned unexpanded, so the glob
+            // itself stays visible even when no `routes/` dir exists
+            // (bd rc-1110 operator diagnosis).
+            tracing::info!("camel-cli: loading routes from patterns: {:?}", patterns);
+            match camel_dsl::discover_routes_with_threshold_and_security(
+                &patterns,
+                camel_config.stream_caching.threshold,
+                security_compile_context.clone(),
+            ) {
+                Ok(defs) => {
+                    if defs.is_empty() {
+                        // Name the patterns: discovery matched no files,
+                        // which would otherwise hide the glob the operator
+                        // needs to diagnose (bd rc-1110).
+                        tracing::warn!(
+                            "route discovery matched zero route files for patterns {:?}; \
+                             starting with no routes",
+                            patterns
+                        );
+                    }
+                    // Benchmark instrumentation: when BENCH_LATENCY_FILE is
+                    // set, wrap every top-level `To` step with timing
+                    // processors (default), or bracket each whole route when
+                    // BENCH_LATENCY_MODE=route (bench_instrument module).
+                    crate::commands::bench_instrument::maybe_instrument_routes(defs)
                 }
-            }
-
-            // ADR-0033: register fail-closed ConfigChecks derived from the
-            // discovered routes (e.g. SqlDynamicQueryCheck for every `sql:`
-            // endpoint). The checks run synchronously at the head of
-            // `CamelContext::start()` before any route consumer is started
-            // (task 2.3: shared installer in camel-bundles).
-            camel_bundles::security_boot::install_sql_startup_checks(&mut ctx, &defs);
-            // Benchmark instrumentation: when BENCH_LATENCY_FILE is set,
-            // wrap every top-level `To` step with timing processors
-            // (default), or bracket each whole route when
-            // BENCH_LATENCY_MODE=route (bench_instrument module).
-            let defs = crate::commands::bench_instrument::maybe_instrument_routes(defs);
-            for def in defs {
-                let id = def.route_id().to_string();
-                if let Err(e) = ctx.add_route_definition(def).await {
-                    // log-policy: system-broken
-                    tracing::error!("Failed to add route '{}': {}", id, e);
-                }
+                Err(e) => return Err(LifecycleFailure::Discovery(e)),
             }
         }
-        Err(e) => {
-            match &e {
-                camel_dsl::DiscoveryError::MaterializationFailures { failures } => {
-                    // log-policy: system-broken
-                    tracing::error!("Failed to discover routes: template materialization failed:");
-                    for failure in failures {
-                        match &failure.route_id {
-                            Some(route_id) => {
-                                // log-policy: system-broken
-                                tracing::error!(
-                                    "  {} (template '{}', route '{}'): {}",
-                                    failure.path,
-                                    failure.template_ref,
-                                    route_id,
-                                    failure.error
-                                );
-                            }
-                            None => {
-                                // log-policy: system-broken
-                                tracing::error!(
-                                    "  {} (template '{}'): {}",
-                                    failure.path,
-                                    failure.template_ref,
-                                    failure.error
-                                );
-                            }
-                        }
+        Discover::Embedded {
+            text,
+            source_name,
+            kind,
+        } => {
+            // Embedded seam: the normalized payload parses through the
+            // shared discovery pipeline with the virtual identity
+            // `compiled://<source_name>` and the ambient (deployment)
+            // environment as the `${env:}` lookup — no filesystem access.
+            tracing::info!("camel-cli: loading routes from compiled://{source_name}");
+            let ambient = &|name: &str| std::env::var(name).ok();
+            match camel_dsl::discover_embedded_text(&text, &source_name, kind, ambient) {
+                Ok(defs) => {
+                    if defs.is_empty() {
+                        tracing::warn!(
+                            "embedded document compiled://{source_name} declared zero \
+                             routes; starting with no routes"
+                        );
                     }
+                    defs
                 }
-                _ => {
-                    // log-policy: system-broken
-                    tracing::error!("Failed to discover routes: {}", e);
-                }
+                Err(e) => return Err(LifecycleFailure::Discovery(e)),
             }
-            crate::commands::errors::report_cli_failure_and_exit(
-                "run",
-                &camel_api::CamelError::RouteError(e.to_string()),
-            );
+        }
+    };
+
+    let defs = {
+        // Conditionally register ExecBundle: only when a discovered route
+        // references `exec:` or the operator declared `[components.exec]`.
+        // CLI-owned (route-content-conditional), so it stays outside the
+        // camel-bundles boot cascade (ADR-0069 section 10) and goes
+        // through the single-bundle seam instead.
+        #[cfg(feature = "exec")]
+        {
+            let exec_used =
+                camel_core::startup_validation::route_definitions_reference_scheme(&defs, "exec");
+            let exec_configured = camel_config.components.raw.contains_key("exec");
+            if exec_used || exec_configured {
+                camel_bundles::register_bundle::<camel_component_exec::ExecBundle>(
+                    &mut ctx,
+                    &camel_config,
+                )
+                .map_err(LifecycleFailure::Boot)?;
+            }
+        }
+
+        // ADR-0033: register fail-closed ConfigChecks derived from the
+        // discovered routes (e.g. SqlDynamicQueryCheck for every `sql:`
+        // endpoint). The checks run synchronously at the head of
+        // `CamelContext::start()` before any route consumer is started
+        // (task 2.3: shared installer in camel-bundles).
+        camel_bundles::security_boot::install_sql_startup_checks(&mut ctx, &defs);
+        defs
+    };
+
+    for def in defs {
+        let id = def.route_id().to_string();
+        if let Err(e) = ctx.add_route_definition(def).await {
+            // log-policy: system-broken
+            tracing::error!("Failed to add route '{}': {}", id, e);
         }
     }
 
@@ -423,7 +466,7 @@ pub async fn run(
     if let Err(e) = ctx.start().await {
         // log-policy: system-broken
         tracing::error!("Failed to start CamelContext: {}", e);
-        crate::commands::errors::report_cli_failure_and_exit("run", &e);
+        return Err(LifecycleFailure::Boot(e));
     }
 
     tracing::info!("camel-cli: context started");
@@ -433,17 +476,14 @@ pub async fn run(
     #[cfg(feature = "jemalloc")]
     crate::allocator_metrics::spawn_allocator_sampler(ctx.metrics());
 
-    // 7. Resolve whether to enable the file watcher:
-    //    CLI flag takes precedence; falls back to Camel.toml `watch` field (default: false).
-    let watch_enabled = cli_watch.unwrap_or(camel_config.watch);
-
-    // 8. Optionally start file watcher in background
+    // 7/8. Optionally start the reload watcher in background (camel run
+    //     only; compiled artifacts disable it unconditionally).
     let watcher_shutdown = CancellationToken::new();
-    if watch_enabled {
+    if let Some(watch) = spec.watch {
         let ctrl = ctx.runtime_execution_handle();
-        let watch_routes_override = routes_override.clone();
-        let watch_config_routes = config_routes.clone();
-        let watch_patterns = patterns.clone();
+        let watch_routes_override = watch.routes_override.clone();
+        let watch_config_routes = watch.config_routes.clone();
+        let watch_patterns = watch.patterns.clone();
         let watch_security_compile_context = security_compile_context.clone();
         let drain_timeout = std::time::Duration::from_millis(camel_config.drain_timeout_ms);
         let debounce = std::time::Duration::from_millis(camel_config.watch_debounce_ms);
@@ -481,10 +521,10 @@ pub async fn run(
         });
         tracing::info!(
             "camel-cli: hot-reload watching {:?}. Press Ctrl+C to stop.",
-            patterns
+            watch.patterns
         );
     } else {
-        tracing::info!("camel-cli: running (hot-reload disabled). Press Ctrl+C to stop.");
+        tracing::info!("{}", spec.idle_note);
     }
 
     tokio::select! {
@@ -561,6 +601,126 @@ pub async fn run(
 
     tracing::info!("camel-cli: stopped");
     Ok(())
+}
+
+pub async fn run(
+    routes_override: Option<String>,
+    config_path: String,
+    cli_watch: Option<bool>,
+    otel: bool,
+    otel_endpoint: Option<String>,
+    service_name: Option<String>,
+    health_port: Option<u16>,
+) -> Result<(), camel_api::CamelError> {
+    // 1. Load config (fall back to empty config with serde defaults if Camel.toml not found)
+    let mut camel_config: camel_config::config::CamelConfig = load_config_or_default(&config_path)?;
+
+    // 1b. Apply OTel CLI overrides (--otel-endpoint and --service-name imply --otel)
+    let otel_enabled = otel || otel_endpoint.is_some() || service_name.is_some();
+    if otel_enabled {
+        let otel_cfg =
+            camel_config
+                .observability
+                .otel
+                .get_or_insert(camel_config::OtelCamelConfig {
+                    enabled: true,
+                    endpoint: "http://localhost:4317".to_string(),
+                    service_name: "rust-camel".to_string(),
+                    ..Default::default()
+                });
+        otel_cfg.enabled = true;
+        if let Some(ep) = otel_endpoint {
+            otel_cfg.endpoint = ep;
+        }
+        if let Some(name) = service_name {
+            otel_cfg.service_name = name;
+        }
+    }
+
+    if let Some(port) = health_port {
+        let health_cfg = camel_config
+            .observability
+            .health
+            .get_or_insert(camel_config::config::HealthCamelConfig::default());
+        health_cfg.enabled = true;
+        health_cfg.port = port;
+    }
+
+    // 3. Determine route patterns (before the lifecycle: pure config
+    //    resolution). Every path (default glob, `--routes` override,
+    //    Camel.toml `routes` entries) returns patterns verbatim;
+    //    discovery (camel-dsl) owns the reserved test-suffix skip and
+    //    error. The unexpanded globs also feed watch-directory derivation
+    //    so an initially-empty routes dir still yields a watched root.
+    let config_routes = Some(camel_config.routes.clone());
+    let patterns: Vec<String> = resolve_route_patterns(&routes_override, &config_routes);
+
+    // 7. Resolve whether to enable the file watcher:
+    //    CLI flag takes precedence; falls back to Camel.toml `watch` field
+    //    (default: false).
+    let watch_enabled = cli_watch.unwrap_or(camel_config.watch);
+    let watch = watch_enabled.then(|| WatchSpec {
+        patterns: patterns.clone(),
+        routes_override: routes_override.clone(),
+        config_routes: config_routes.clone(),
+    });
+
+    // project_root feeds the wasm bundle base dir; resolution is shared
+    // with the wasm bean loader through `canonical_project_root`.
+    let project_root = canonical_project_root(std::path::Path::new(&config_path));
+
+    let spec = LifecycleSpec {
+        config: camel_config,
+        project_root,
+        discover: Discover::Patterns { patterns },
+        watch,
+        trust_note: true,
+        idle_note: "camel-cli: running (hot-reload disabled). Press Ctrl+C to stop.",
+    };
+
+    match drive_lifecycle(spec).await {
+        Ok(()) => Ok(()),
+        Err(LifecycleFailure::Boot(e)) => Err(e),
+        Err(LifecycleFailure::Discovery(e)) => {
+            match &e {
+                camel_dsl::DiscoveryError::MaterializationFailures { failures } => {
+                    // log-policy: system-broken
+                    tracing::error!("Failed to discover routes: template materialization failed:");
+                    for failure in failures {
+                        match &failure.route_id {
+                            Some(route_id) => {
+                                // log-policy: system-broken
+                                tracing::error!(
+                                    "  {} (template '{}', route '{}'): {}",
+                                    failure.path,
+                                    failure.template_ref,
+                                    route_id,
+                                    failure.error
+                                );
+                            }
+                            None => {
+                                // log-policy: system-broken
+                                tracing::error!(
+                                    "  {} (template '{}'): {}",
+                                    failure.path,
+                                    failure.template_ref,
+                                    failure.error
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // log-policy: system-broken
+                    tracing::error!("Failed to discover routes: {}", e);
+                }
+            }
+            crate::commands::errors::report_cli_failure_and_exit(
+                "run",
+                &camel_api::CamelError::RouteError(e.to_string()),
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 pub mod bench_instrument;
+pub mod compile;
 pub mod errors;
 pub mod job;
 pub mod journal;

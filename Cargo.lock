@@ -1354,6 +1354,7 @@ version = "0.45.2"
 dependencies = [
  "ariadne",
  "async-trait",
+ "blake3",
  "camel-api",
  "camel-auth",
  "camel-bean",

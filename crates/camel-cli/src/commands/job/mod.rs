@@ -34,6 +34,7 @@ mod document_tests;
 mod tests;
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -334,7 +335,7 @@ pub async fn run_job(args: &JobArgs) -> i32 {
     // The tuple pairs the document with its entry-armed streams; both
     // arms key off the same predicate, so the else branch is exactly
     // the no-document listing path (streams never installed there).
-    let (Some(raw_document), Some(mut signals)) = (&args.document, signals) else {
+    let (Some(raw_document), Some(signals)) = (&args.document, signals) else {
         if args.report.is_some() {
             eprintln!("--report requires a job document");
             return 2;
@@ -375,6 +376,157 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
+    let route_load = match document::resolve_route_source(&doc, &doc_dir) {
+        Ok(JobRouteSource::Patterns(patterns)) => RouteLoad::Discovery(patterns),
+        Ok(JobRouteSource::Inline(text)) => RouteLoad::Inline(text),
+        Err(e) => {
+            eprintln!("{}: {e}", document_path.display());
+            return 2;
+        }
+    };
+
+    let run = JobRun {
+        label: document_path.display().to_string(),
+        started,
+        route_load,
+        project_root: crate::commands::run::canonical_project_root(Path::new(&args.config)),
+        report_path: args.report.clone(),
+        cli_args: args.args.clone(),
+    };
+    execute_job(doc, run, camel_config, Some(signals)).await
+}
+
+/// How a job run loads its route definitions.
+enum RouteLoad {
+    /// Filesystem discovery patterns (the CLI file forms): the real-boot
+    /// discovery seam with ambient `${env:}`.
+    Discovery(Vec<String>),
+    /// Inline `routes:` text through `parse_routes_with_env` with the
+    /// AMBIENT environment (the CLI inline form; the hermetic
+    /// document-env closure is test-family machinery and is deliberately
+    /// not used here).
+    Inline(String),
+    /// Embedded inline text through the camel-dsl embedded seam (compiled
+    /// artifacts): virtual identity `compiled://<source_name>`, ambient
+    /// (deployment) environment as the `${env:}` lookup.
+    Embedded { text: String, source_name: String },
+}
+
+/// Everything one job execution needs beyond the parsed document.
+struct JobRun {
+    /// Display path of the job document (diagnostics and the report's
+    /// `document` field).
+    label: String,
+    /// Deadline anchor: process start, so the overall timeout covers
+    /// boot, send, drain, and teardown.
+    started: Instant,
+    /// Route loading strategy.
+    route_load: RouteLoad,
+    /// camel-bundles base dir (wasm resolution root).
+    project_root: PathBuf,
+    /// `--report` path; `None` writes the report to stdout.
+    report_path: Option<PathBuf>,
+    /// CLI `--arg NAME=VALUE` header pairs (empty for embedded runs).
+    cli_args: Vec<(String, String)>,
+}
+
+/// Run one embedded job document (compiled artifact; openspec change
+/// `cli-compile`, Task 2.2). The embedded text is the document's sole
+/// route source: file-form route sources are compile-time assets and are
+/// rejected here (fail closed, defense in depth behind the compile-time
+/// policy), and the inline form loads through the camel-dsl embedded seam
+/// with the virtual identity `compiled://<source_name>`. Configuration is
+/// the default in-memory config (no Camel.toml, no `CAMEL_*` overrides);
+/// the report/outcome lifecycle and exit codes are exactly the existing
+/// `camel job` taxonomy.
+pub(crate) async fn run_embedded_job(
+    source_name: &str,
+    text: &str,
+    report: Option<PathBuf>,
+) -> i32 {
+    let started = Instant::now();
+    let camel_config = match crate::commands::run::in_memory_default_config() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("camel-cli job failed: {e}");
+            return 2;
+        }
+    };
+    let doc = match document::parse_job_document(Path::new(source_name), text) {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!("compiled://{source_name}: {e}");
+            return 2;
+        }
+    };
+    // Sole-source rule: only the inline `routes:` form is compilable; a
+    // file form is a compile-time asset and is rejected at runtime.
+    // `doc_dir` is never consulted on the inline path.
+    let route_load = match document::resolve_route_source(&doc, Path::new(".")) {
+        Ok(JobRouteSource::Inline(text)) => RouteLoad::Embedded {
+            text,
+            source_name: source_name.to_string(),
+        },
+        Ok(JobRouteSource::Patterns(_)) => {
+            eprintln!(
+                "compiled://{source_name}: embedded job document declares file route \
+                 sources; compiled artifacts reject compile-time route-file assets at \
+                 runtime"
+            );
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("compiled://{source_name}: {e}");
+            return 2;
+        }
+    };
+    let run = JobRun {
+        label: format!("compiled://{source_name}"),
+        started,
+        route_load,
+        project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        report_path: report,
+        cli_args: Vec::new(),
+    };
+    execute_job(doc, run, camel_config, None).await
+}
+
+/// Await one job wait operation (the send under its overall deadline, or
+/// the batch drain) through the registered signal streams when they are
+/// armed — [`await_job_operation_or_signal`] semantics, signal-first —
+/// or directly when they are not: embedded runs carry no signal streams,
+/// so the plain await preserves the timeout-only semantics verbatim.
+async fn await_job_operation<T>(
+    signals: Option<&mut JobSignals>,
+    operation: impl Future<Output = T>,
+) -> JobWaitOutcome<T> {
+    match signals {
+        Some(signals) => await_job_operation_or_signal(signals.next(), operation).await,
+        None => JobWaitOutcome::Completed(operation.await),
+    }
+}
+
+/// The single-document job execution/report lifecycle, shared by the
+/// CLI argv path and embedded artifacts: boot composition (mirrors
+/// `camel run` steps 1-5), route loading, the consumer gate, the
+/// one-shot/batch send, the outcome report, and teardown. Returns the
+/// process exit code. `signals` carries the argv path's registered
+/// SIGINT/SIGTERM streams (first-signal interruption); embedded runs
+/// pass `None`.
+async fn execute_job(
+    doc: JobDocument,
+    run: JobRun,
+    camel_config: camel_config::config::CamelConfig,
+    mut signals: Option<JobSignals>,
+) -> i32 {
+    let JobRun {
+        label: document_label,
+        started,
+        route_load,
+        project_root,
+        report_path,
+        cli_args,
+    } = run;
 
     // ---- Boot composition: mirrors `camel run` steps 1-5 ---------------
     let beans_registry = {
@@ -442,7 +594,6 @@ pub async fn run_job(args: &JobArgs) -> i32 {
 
     camel_bundles::security_boot::install_bind_exposure_acks(&mut ctx, &camel_config).await;
 
-    let project_root = crate::commands::run::canonical_project_root(Path::new(&args.config));
     let boot_handle = match camel_bundles::boot(&mut ctx, &camel_config, &project_root).await {
         Ok(handle) => handle,
         Err(e) => {
@@ -454,21 +605,17 @@ pub async fn run_job(args: &JobArgs) -> i32 {
     };
 
     // ---- Route loading (real-boot seam: ambient ${env:}) ---------------
-    let defs =
-        match load_route_definitions(&doc, &doc_dir, &camel_config, &security_compile_context) {
-            Ok(defs) => defs,
-            Err(e) => {
-                // log-policy: system-broken
-                tracing::error!("Failed to load job routes: {e}");
-                eprintln!("{e}");
-                return 2;
-            }
-        };
+    let defs = match load_route_definitions(&route_load, &camel_config, &security_compile_context) {
+        Ok(defs) => defs,
+        Err(e) => {
+            // log-policy: system-broken
+            tracing::error!("Failed to load job routes: {e}");
+            eprintln!("{e}");
+            return 2;
+        }
+    };
     if defs.is_empty() {
-        eprintln!(
-            "{}: job route source resolved zero route definitions",
-            document_path.display()
-        );
+        eprintln!("{document_label}: job route source resolved zero route definitions");
         return 2;
     }
 
@@ -476,11 +623,7 @@ pub async fn run_job(args: &JobArgs) -> i32 {
     // consume; producers/sinks as to: URIs are unrestricted.
     for def in &defs {
         if let Err(e) = document::validate_consumer_uri(def.from_uri()) {
-            eprintln!(
-                "{}: route `{}` rejected: {e}",
-                document_path.display(),
-                def.route_id()
-            );
+            eprintln!("{document_label}: route `{}` rejected: {e}", def.route_id());
             return 2;
         }
     }
@@ -506,8 +649,7 @@ pub async fn run_job(args: &JobArgs) -> i32 {
     match target_ids.len() {
         0 => {
             eprintln!(
-                "{}: send target `{}` has no matching consumer route",
-                document_path.display(),
+                "{document_label}: send target `{}` has no matching consumer route",
                 doc.execute.send.to
             );
             return 2;
@@ -515,8 +657,7 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         1 => {}
         count => {
             eprintln!(
-                "{}: send target `{}` is ambiguous: {} consumer routes share its base: {}",
-                document_path.display(),
+                "{document_label}: send target `{}` is ambiguous: {} consumer routes share its base: {}",
                 doc.execute.send.to,
                 count,
                 target_ids.join(", ")
@@ -594,11 +735,11 @@ pub async fn run_job(args: &JobArgs) -> i32 {
     } else {
         doc.execute.send.to.clone()
     };
-    let send = send_with_startup_retry(&ctx, &doc.execute.send, &send_to, &args.args);
+    let send = send_with_startup_retry(&ctx, &doc.execute.send, &send_to, &cli_args);
     // Shared shape for every overall-deadline expiry: the send-timeout
     // arm and the batch drain-timeout path report identically.
     let timeout_report = || JobReport {
-        document: document_path.display().to_string(),
+        document: document_label.clone(),
         mode: doc.execute.mode.as_str().to_string(),
         outcome: "Timeout",
         terminated_early: false,
@@ -613,7 +754,7 @@ pub async fn run_job(args: &JobArgs) -> i32 {
     // Shared shape for the first-signal interruption: the in-flight
     // send or batch drain was cancelled; the verdict is the signal.
     let interrupted_report = || JobReport {
-        document: document_path.display().to_string(),
+        document: document_label.clone(),
         mode: doc.execute.mode.as_str().to_string(),
         outcome: "Interrupted",
         terminated_early: false,
@@ -627,8 +768,10 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         // Signal-first race: a signal ready at the same poll point as
         // send completion or deadline expiry wins; dropping the
         // operation future on a signal win cancels the in-flight send.
+        // Without streams (embedded runs) the race degrades to the
+        // plain timeout await.
         let operation = tokio::time::timeout_at(tokio_deadline, send);
-        match await_job_operation_or_signal(signals.next(), operation).await {
+        match await_job_operation(signals.as_mut(), operation).await {
             JobWaitOutcome::Signaled => {
                 interrupted = true;
                 interrupted_report()
@@ -650,7 +793,7 @@ pub async fn run_job(args: &JobArgs) -> i32 {
                 return 2;
             }
             JobWaitOutcome::Completed(Ok(Err(SendError::Pipeline(e)))) => JobReport {
-                document: document_path.display().to_string(),
+                document: document_label.clone(),
                 mode: doc.execute.mode.as_str().to_string(),
                 outcome: "Failed",
                 terminated_early: false,
@@ -671,8 +814,8 @@ pub async fn run_job(args: &JobArgs) -> i32 {
                 let drained = match &batch_probe {
                     Some(probe) => {
                         probe.reset();
-                        match await_job_operation_or_signal(
-                            signals.next(),
+                        match await_job_operation(
+                            signals.as_mut(),
                             batch::drain_until_empty(probe, tokio_deadline),
                         )
                         .await
@@ -692,7 +835,7 @@ pub async fn run_job(args: &JobArgs) -> i32 {
                     timeout_report()
                 } else {
                     JobReport {
-                        document: document_path.display().to_string(),
+                        document: document_label.clone(),
                         mode: doc.execute.mode.as_str().to_string(),
                         outcome: "Completed",
                         terminated_early: false,
@@ -717,16 +860,22 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         // waiting for the bounded shutdown. The first signal was
         // consumed by the race above, so the guard only sees later
         // signals; it is aborted once teardown completes so the normal
-        // exit path stays untouched.
-        let force_exit = tokio::spawn(signals.force_exit());
+        // exit path stays untouched. Embedded runs never reach this
+        // path (no streams → no interruption), so the guard is spawned
+        // exactly when streams exist.
         let budget = shutdown_budget(doc.execute.mode, deadline);
+        let guard = signals
+            .take()
+            .map(|signals| tokio::spawn(signals.force_exit()));
         let shutdown_result = shutdown(&mut ctx, &boot_handle, budget).await;
-        force_exit.abort();
+        if let Some(guard) = guard {
+            guard.abort();
+        }
         if let Err(detail) = shutdown_result {
             eprintln!("{detail}");
             record_shutdown_failure(&mut report, detail, budget);
         }
-        if !write_report(args, &report) {
+        if !write_report(report_path.as_deref(), &report) {
             return 2;
         }
         return exit_code_for(report.outcome);
@@ -744,49 +893,51 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         // report carries only the Timeout verdict.
         record_shutdown_failure(&mut report, detail, budget);
         // Apparatus class outranks the verdict (2 > 1 > 0).
-        write_report(args, &report);
+        write_report(report_path.as_deref(), &report);
         return 2;
     }
 
     let code = exit_code_for(report.outcome);
-    if !write_report(args, &report) {
+    if !write_report(report_path.as_deref(), &report) {
         return 2;
     }
     code
 }
 
-/// Load the document's route definitions through the real-boot seams:
-/// the file forms feed the resolved paths as discovery patterns (ambient
-/// `${env:}`, stream-caching threshold, security compile context — the
-/// same loader `camel run` uses); the inline form goes through
-/// `parse_routes_with_env` with the AMBIENT environment as lookup (the
-/// hermetic document-env closure is test-family machinery and is
-/// deliberately not used here).
+/// Load the run's route definitions through the real-boot seams:
+/// the filesystem and embedded forms feed their inputs to the shared
+/// discovery pipeline (ambient `${env:}`, stream-caching threshold,
+/// security compile context — the same loader `camel run` uses); the
+/// CLI inline form goes through `parse_routes_with_env` with the
+/// AMBIENT environment as lookup (the hermetic document-env closure is
+/// test-family machinery and is deliberately not used here).
 fn load_route_definitions(
-    doc: &JobDocument,
-    doc_dir: &Path,
+    load: &RouteLoad,
     camel_config: &camel_config::config::CamelConfig,
     security_compile_context: &camel_dsl::SecurityCompileContext,
 ) -> Result<Vec<camel_core::RouteDefinition>, String> {
-    match document::resolve_route_source(doc, doc_dir).map_err(|e| e.to_string())? {
-        JobRouteSource::Patterns(patterns) => {
-            camel_dsl::discover_routes_with_threshold_and_security(
-                &patterns,
-                camel_config.stream_caching.threshold,
-                security_compile_context.clone(),
-            )
-            .map_err(|e| e.to_string())
-        }
-        JobRouteSource::Inline(text) => {
-            let ambient = &|name: &str| std::env::var(name).ok();
-            match camel_dsl::parse_routes_with_env(&text, ambient) {
-                Ok(defs) => Ok(defs),
-                Err(camel_dsl::RoutesEnvError::Unresolved(var)) => Err(format!(
-                    "Environment variable '{var}' not set (required by inline routes)"
-                )),
-                Err(camel_dsl::RoutesEnvError::Parse(e)) => Err(format!("inline routes: {e}")),
-            }
-        }
+    let ambient = &|name: &str| std::env::var(name).ok();
+    match load {
+        RouteLoad::Discovery(patterns) => camel_dsl::discover_routes_with_threshold_and_security(
+            patterns,
+            camel_config.stream_caching.threshold,
+            security_compile_context.clone(),
+        )
+        .map_err(|e| e.to_string()),
+        RouteLoad::Inline(text) => match camel_dsl::parse_routes_with_env(text, ambient) {
+            Ok(defs) => Ok(defs),
+            Err(camel_dsl::RoutesEnvError::Unresolved(var)) => Err(format!(
+                "Environment variable '{var}' not set (required by inline routes)"
+            )),
+            Err(camel_dsl::RoutesEnvError::Parse(e)) => Err(format!("inline routes: {e}")),
+        },
+        RouteLoad::Embedded { text, source_name } => camel_dsl::discover_embedded_text(
+            text,
+            source_name,
+            camel_dsl::EmbeddedDocumentKind::Job,
+            ambient,
+        )
+        .map_err(|e| e.to_string()),
     }
 }
 
@@ -954,8 +1105,8 @@ async fn shutdown(
     }
 }
 
-/// Write the JSON report to `--report` or stdout. Returns success.
-fn write_report(args: &JobArgs, report: &JobReport) -> bool {
+/// Write the JSON report to the report path or stdout. Returns success.
+fn write_report(report_path: Option<&Path>, report: &JobReport) -> bool {
     let rendered = match serde_json::to_string_pretty(report) {
         Ok(text) => text,
         Err(e) => {
@@ -963,7 +1114,7 @@ fn write_report(args: &JobArgs, report: &JobReport) -> bool {
             return false;
         }
     };
-    match &args.report {
+    match report_path {
         Some(path) => match std::fs::write(path, format!("{rendered}\n")) {
             Ok(()) => true,
             Err(e) => {

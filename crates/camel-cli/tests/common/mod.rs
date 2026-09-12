@@ -161,7 +161,7 @@ impl DerefMut for KillOnDrop {
 /// deadline hit; callers assert and print the captured output.
 ///
 /// Observation deadlines are 30 s, not a tight value: these tests spawn the
-/// full ~466 MB `camel` binary, which initializes ~15 always-on component
+/// full ~283 MB `camel` binary, which initializes ~15 always-on component
 /// bundles. Under a whole-workspace `cargo test` run the OS is saturated by
 /// hundreds of peer processes and subprocess startup slows ~100x. The poll
 /// short-circuits the moment the marker is seen, so the generous ceiling
@@ -339,4 +339,65 @@ pub fn wait_exit_bounded(child: &mut Child, timeout: Duration) -> bool {
 #[allow(dead_code)]
 pub fn wait_exit_code_bounded(child: &mut Child, timeout: Duration) -> i32 {
     wait_exit_core(child, timeout).unwrap_or(-1)
+}
+
+/// Run `program` with `args` inside `dir` to completion and return
+/// `(exit_code, stdout, stderr)` with both pipes drained concurrently (a
+/// pipe buffer can otherwise deadlock a chatty child). The environment is
+/// inherited plus `envs`. The 90 s deadline follows the generous-deadline
+/// note at the module head; a child still alive there is force-killed and
+/// reported as exit `-1`.
+// Shared by job_one_shot_test.rs and compiled_artifact_test.rs; the test
+// binaries that include `common` without calling it would otherwise warn
+// dead_code (each compilation unit gets its own copy of the module).
+#[allow(dead_code)]
+pub fn run_binary(
+    dir: &Path,
+    program: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> (i32, String, String) {
+    let mut child = Command::new(program)
+        .args(args)
+        .envs(envs.iter().copied())
+        .current_dir(dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn child process");
+    let out_buf = SharedBuf::default();
+    let err_buf = SharedBuf::default();
+    let out_handle = thread::spawn({
+        let buf = Arc::clone(&out_buf);
+        let stdout = child.stdout.take().expect("stdout piped");
+        move || drain_to_buffer(stdout, buf)
+    });
+    let err_handle = thread::spawn({
+        let buf = Arc::clone(&err_buf);
+        let stderr = child.stderr.take().expect("stderr piped");
+        move || drain_to_buffer(stderr, buf)
+    });
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let exit_code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code().unwrap_or(-1),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break -1;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => panic!("try_wait failed: {e}"),
+        }
+    };
+    let _ = out_handle.join();
+    let _ = err_handle.join();
+    (
+        exit_code,
+        out_buf.lock().expect("stdout lock").clone(),
+        err_buf.lock().expect("stderr lock").clone(),
+    )
 }
