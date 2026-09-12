@@ -1,0 +1,11 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:a0cd080ae9751488ffce1da721ecd74274ced2d8a542eee9853de2c9fdee45fc",
+  "hash_recipe": "scripts/bless-hash.sh <change-dir> (repo-canonical)",
+  "expert": "e_glm",
+  "expert_session": "ses_f6aa9f350ffeKwbWRvSeHFJXoU",
+  "substitution_note": "e_gpt plan-bless dispatch quota-exhausted on first attempt (verbatim: 'The usage limit has been reached', ses_f6aad1cdbffe3i4dKbonifgHmj); per PATTERN-V2 quota guardrail switched oracle ONCE to e_glm. Spec blessing (stage 1) was performed by e_gpt.",
+  "prior_review": "r_glm findings applied before blessing (ses_f6ac61e05ffeWG3YG06Ww2NuhL pre-flight; plan review session separate)",
+  "date": "2026-09-12"
+}

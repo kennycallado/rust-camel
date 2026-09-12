@@ -508,6 +508,189 @@ mod tests {
         assert_eq!(principal.subject, "user-123");
     }
 
+    // ---- RemoteJwksProvider-backed validator harness (jwks-refresh-guard) ----
+
+    use std::time::Duration;
+
+    use crate::jwks::RemoteJwksProvider;
+
+    /// JWKS document carrying the test public PEM in `n` (PEM-in-`n` convention
+    /// accepted by `jwk_to_decoding_key`).
+    fn jwks_body(kid: &str) -> String {
+        let pem = std::str::from_utf8(TEST_RSA_PUBLIC_PEM).unwrap();
+        serde_json::json!({
+            "keys": [{
+                "kid": kid,
+                "kty": "RSA",
+                "alg": "RS256",
+                "n": pem,
+                "e": "AQAB",
+            }]
+        })
+        .to_string()
+    }
+
+    /// Validator backed by a real `RemoteJwksProvider` against a wiremock URI,
+    /// with a 100ms forced-refresh cooldown. The second handle is kept for
+    /// priming the provider cache.
+    fn remote_validator(server_uri: String) -> (LocalJwtValidator, Arc<RemoteJwksProvider>) {
+        remote_validator_with_cooldown(server_uri, Duration::from_millis(100))
+    }
+
+    /// Like `remote_validator`, but with an explicit forced-refresh cooldown so
+    /// individual tests can widen the margin against CI scheduling stalls.
+    fn remote_validator_with_cooldown(
+        server_uri: String,
+        cooldown: Duration,
+    ) -> (LocalJwtValidator, Arc<RemoteJwksProvider>) {
+        let provider = Arc::new(RemoteJwksProvider::new_for_test_with_cooldown(
+            server_uri, cooldown,
+        ));
+        let validator = LocalJwtValidator::new(
+            vec!["my-api".into()],
+            "http://localhost:8080/realms/test".into(),
+            provider.clone(),
+            multi_role_mapper(vec!["/groups".into()]),
+        );
+        (validator, provider)
+    }
+
+    #[tokio::test]
+    async fn validate_signature_concurrent_unknown_kids_bounded() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(jwks_body("test-key"), "application/json")
+                    .insert_header("cache-control", "max-age=3600")
+                    .set_delay(Duration::from_millis(300)),
+            )
+            .mount(&server)
+            .await;
+
+        let (validator, provider) =
+            remote_validator_with_cooldown(server.uri(), Duration::from_millis(500));
+
+        // Prime GET: populates the cache (fetched_at = now, TTL 3600s).
+        provider.get_signing_keys().await.unwrap();
+
+        // The cache is private to `jwks`, so backdating `fetched_at` directly
+        // is impossible from this module; sleeping past the cooldown leaves
+        // the cache TTL-fresh yet outside the forced-refresh interval. The
+        // 500ms cooldown also dominates the 300ms response delay: a task
+        // queued on the mutex during the forced fetch that stalls before its
+        // post-lock re-check still sees `forced_start.elapsed()` < 500ms, so
+        // the cooldown suppresses any further GET. The 750ms aging sleep must
+        // exceed the 500ms cooldown so the single forced attempt is eligible.
+        tokio::time::sleep(Duration::from_millis(750)).await;
+
+        // 32 concurrent unknown-kid tokens; signatures are never reached on
+        // kid-miss, so this models unknown-kid attack traffic exactly.
+        let claims = claims_with_defaults();
+        let tokens: Vec<String> = (1..=32)
+            .map(|i| make_token(&format!("atk-{i}"), &claims))
+            .collect();
+
+        let validator = Arc::new(validator);
+        let handles: Vec<_> = tokens
+            .iter()
+            .map(|token| {
+                let validator = validator.clone();
+                let token = token.clone();
+                tokio::spawn(async move { validator.validate_signature(&token).await })
+            })
+            .collect();
+        for (i, handle) in handles.into_iter().enumerate() {
+            let result = handle.await.unwrap();
+            assert!(
+                matches!(result, Err(AuthError::TokenInvalid(_))),
+                "kid atk-{} must be rejected as TokenInvalid, got {result:?}",
+                i + 1
+            );
+        }
+
+        let gets = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method.as_str() == "GET")
+            .count();
+        assert_eq!(
+            gets, 2,
+            "prime + exactly one forced fetch: 32 unknown kids must not amplify fetches"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotated_key_recovery_after_cooldown() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(jwks_body("test-key"), "application/json")
+                    .insert_header("cache-control", "max-age=3600"),
+            )
+            // Same-matcher mocks are matched first-mounted-first in wiremock,
+            // so the pre-rotation mock must retire after the prime GET and
+            // the consumed forced attempt for the rotated mock to serve.
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+
+        let (validator, provider) = remote_validator(server.uri());
+
+        // Prime GET.
+        provider.get_signing_keys().await.unwrap();
+
+        // Sleep past the 100ms cooldown so a forced attempt is eligible.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Consume one forced attempt: unknown kid → forced fetch (GET #2),
+        // kid still missing → TokenInvalid.
+        let unknown = make_token("atk-1", &claims_with_defaults());
+        assert!(matches!(
+            validator.validate_signature(&unknown).await,
+            Err(AuthError::TokenInvalid(_))
+        ));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+
+        // Rotation: the endpoint now serves the rotated key set.
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(jwks_body("rotated-key"), "application/json")
+                    .insert_header("cache-control", "max-age=3600"),
+            )
+            .mount(&server)
+            .await;
+
+        // Cooldown elapsed since the first forced attempt.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let rotated = make_token("rotated-key", &claims_with_defaults());
+        let principal = validator
+            .validate_signature(&rotated)
+            .await
+            .expect("rotated key must validate after the cooldown elapsed");
+        assert_eq!(principal.subject, "user-123");
+
+        let gets = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method.as_str() == "GET")
+            .count();
+        assert_eq!(gets, 3, "prime + consumed attempt + rotation fetch");
+    }
+
     #[tokio::test]
     async fn extracts_generic_groups_roles() {
         // Test with generic /groups claim path

@@ -37,11 +37,26 @@ pub struct RemoteJwksProvider {
     cache: RwLock<Option<CachedKeys>>,
     in_flight: Mutex<()>,
     default_ttl: Duration,
+    /// Cooldown window bounding forced refreshes (test seam; the
+    /// production value is [`FORCED_REFRESH_COOLDOWN`]).
+    cooldown: Duration,
+    /// START of the last forced-refresh attempt. Guarded by `in_flight`:
+    /// read/written only in short critical sections, never held across
+    /// network I/O.
+    forced_refresh: std::sync::Mutex<Option<Instant>>,
 }
 
 const MAX_JWKS_BODY_BYTES: u64 = 1024 * 1024; // 1 MiB
 const MIN_JWKS_TTL_SECS: u64 = 60;
 const MAX_JWKS_TTL_SECS: u64 = 3600;
+
+/// Bound on forced (unknown-kid-triggered) JWKS refreshes: at most one
+/// outbound forced fetch STARTS per provider per interval; success,
+/// failure, and cancellation each consume the interval. After the
+/// interval elapses the next unknown-kid request is refresh-ELIGIBLE
+/// (total rotation recovery also depends on request arrival and fetch
+/// latency).
+pub(crate) const FORCED_REFRESH_COOLDOWN: Duration = Duration::from_secs(5);
 
 impl RemoteJwksProvider {
     /// Creates a production provider with HTTPS enforcement, DNS-rebinding
@@ -70,6 +85,16 @@ impl RemoteJwksProvider {
         Self::with_client(jwks_uri, reqwest::Client::new())
     }
 
+    /// Creates a provider with a custom forced-refresh cooldown, bypassing
+    /// URL validation. **For testing only.**
+    #[cfg(test)]
+    pub fn new_for_test_with_cooldown(jwks_uri: String, cooldown: Duration) -> Self {
+        Self {
+            cooldown,
+            ..Self::with_client(jwks_uri, reqwest::Client::new())
+        }
+    }
+
     fn with_client(jwks_uri: String, http: reqwest::Client) -> Self {
         Self {
             jwks_uri,
@@ -77,6 +102,8 @@ impl RemoteJwksProvider {
             cache: RwLock::new(None),
             in_flight: Mutex::new(()),
             default_ttl: Duration::from_secs(300),
+            cooldown: FORCED_REFRESH_COOLDOWN,
+            forced_refresh: std::sync::Mutex::new(None),
         }
     }
 
@@ -188,6 +215,47 @@ impl JwksProvider for RemoteJwksProvider {
     }
 
     async fn refresh(&self) -> Result<(), AuthError> {
+        // Same single-flight lock as the `get_signing_keys` slow path:
+        // concurrent forced misses coalesce here too.
+        let _guard = self.in_flight.lock().await;
+
+        // Post-lock re-check: the cache was refreshed within the cooldown
+        // window (by the TTL slow path or a prior forced attempt), so a new
+        // forced fetch cannot add information.
+        {
+            let cache = self.cache.read().await;
+            if cache
+                .as_ref()
+                .is_some_and(|c| c.fetched_at.elapsed() < self.cooldown)
+            {
+                // Contract: `refresh()` means "ensure a refresh attempt has
+                // started recently", not "fetch succeeded" — callers re-read
+                // the cache and report the kid-miss as `TokenInvalid`.
+                return Ok(());
+            }
+        }
+
+        // Cooldown check and attempt-START recording in one short critical
+        // section; the guard is never held across network I/O. A dropped
+        // future (cancellation) still consumes the interval, so
+        // cancellation cannot drive fetch amplification.
+        {
+            let mut forced = self
+                .forced_refresh
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(start) = *forced
+                && start.elapsed() < self.cooldown
+            {
+                // Cooldown skip: a forced attempt already started within the
+                // interval (success, failure, or cancellation consumed it).
+                return Ok(());
+            }
+            *forced = Some(Instant::now());
+        }
+
+        // Fetch under the `in_flight` guard (pre-existing slow-path
+        // behavior); `fetch_and_store` errors still propagate.
         self.fetch_and_store().await.map(|_| ())
     }
 }
@@ -551,5 +619,195 @@ mod tests {
         let keys = provider.get_signing_keys().await.unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].kid, "key-1");
+    }
+
+    /// Seeds the provider cache with a single key (`k1`) fetched at
+    /// `fetched_at` with the given TTL (existing cache-seeding pattern).
+    async fn seed_cache(provider: &RemoteJwksProvider, fetched_at: Instant, ttl: Duration) {
+        *provider.cache.write().await = Some(CachedKeys {
+            keys: vec![Jwk {
+                kid: "k1".into(),
+                kty: "RSA".into(),
+                alg: Some("RS256".into()),
+                r#use: None,
+                n: "n".into(),
+                e: "AQAB".into(),
+            }],
+            fetched_at,
+            ttl,
+        });
+    }
+
+    #[tokio::test]
+    async fn forced_refresh_skips_when_cache_recently_fetched() {
+        use wiremock::MockServer;
+
+        // No mock mounted: any outbound request would fail the test
+        // (zero requests expected).
+        let server = MockServer::start().await;
+
+        let provider = RemoteJwksProvider::new_for_test_with_cooldown(
+            server.uri(),
+            Duration::from_millis(100),
+        );
+        seed_cache(&provider, Instant::now(), Duration::from_secs(3600)).await;
+
+        provider
+            .refresh()
+            .await
+            .expect("cache fetched within the cooldown must skip the forced fetch");
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(
+            received.len(),
+            0,
+            "no outbound JWKS request may start when the cache was fetched within the cooldown"
+        );
+
+        let keys = provider.get_signing_keys().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].kid, "k1");
+    }
+
+    #[tokio::test]
+    async fn forced_refresh_cooldown_bounds_attempts() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let provider = RemoteJwksProvider::new_for_test_with_cooldown(
+            server.uri(),
+            Duration::from_millis(500),
+        );
+        // Backdated past the 500ms cooldown, still TTL-fresh. The wide
+        // margin keeps the cooldown clock from elapsing during the
+        // first attempt's HTTP round-trip on slow CI runners.
+        seed_cache(
+            &provider,
+            Instant::now() - Duration::from_millis(600),
+            Duration::from_secs(3600),
+        )
+        .await;
+
+        let first = provider.refresh().await;
+        assert!(
+            matches!(first, Err(AuthError::ProviderUnavailable(_))),
+            "first forced attempt must propagate the 500, got {first:?}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+        // Second attempt immediately after: cooldown skip, no new request.
+        provider
+            .refresh()
+            .await
+            .expect("a failed attempt consumes the cooldown; the follow-up must skip");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "cooldown must bound outbound attempts to one per interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_forced_refresh_consumes_cooldown() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = r#"{"keys":[{"kid":"k2","kty":"RSA","n":"AA","e":"AQAB"}]}"#;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(body, "application/json")
+                    .set_delay(Duration::from_millis(400)),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = std::sync::Arc::new(RemoteJwksProvider::new_for_test_with_cooldown(
+            server.uri(),
+            Duration::from_millis(500),
+        ));
+        // Backdated past the 500ms cooldown, still TTL-fresh.
+        seed_cache(
+            &provider,
+            Instant::now() - Duration::from_millis(600),
+            Duration::from_secs(3600),
+        )
+        .await;
+
+        let handle = {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.refresh().await })
+        };
+        // Give the forced attempt time to start and reach the in-flight
+        // HTTP request (well before the 400ms delayed response).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        handle.abort(); // drops the future mid-flight
+
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "the cancelled attempt must have reached the endpoint"
+        );
+
+        // Follow-up attempt within the cooldown must not start a new request.
+        provider
+            .refresh()
+            .await
+            .expect("a cancelled attempt consumes the cooldown; the follow-up must skip");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "cancellation must not drive fetch amplification within the interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn ttl_expiry_coalesces_concurrent_fetches() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = r#"{"keys":[{"kid":"k2","kty":"RSA","n":"AA","e":"AQAB"}]}"#;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(body, "application/json")
+                    .set_delay(Duration::from_millis(300)),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = std::sync::Arc::new(RemoteJwksProvider::new_for_test(server.uri()));
+        // Backdated PAST the ttl so the fresh-cache fast path misses.
+        seed_cache(
+            &provider,
+            Instant::now() - Duration::from_secs(120),
+            Duration::from_secs(60),
+        )
+        .await;
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let provider = provider.clone();
+                tokio::spawn(async move { provider.get_signing_keys().await })
+            })
+            .collect();
+        for handle in handles {
+            let keys = handle.await.unwrap().unwrap();
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0].kid, "k2");
+        }
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "single-flight must coalesce concurrent TTL-driven fetches"
+        );
     }
 }
