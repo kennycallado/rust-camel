@@ -52,11 +52,31 @@ pub(crate) struct JobDocument {
     pub(crate) routes: Option<serde_yaml::Value>,
 }
 
+/// The execution mode of a job document's `execute:` section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JobMode {
+    /// Run the single send action immediately against the booted routes.
+    OneShot,
+    /// Batch mode: runs the same send path as one-shot and then drains
+    /// until every seda queue is empty (see `commands::job::batch`).
+    Batch,
+}
+
+impl JobMode {
+    /// The document spelling of the mode (the `execute.mode` value).
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::OneShot => "one-shot",
+            Self::Batch => "batch",
+        }
+    }
+}
+
 /// The top-level `execute:` section.
 #[derive(Debug)]
 pub(crate) struct ExecuteSection {
-    /// Execution mode; v1 accepts only `one-shot` (`batch` is reserved).
-    pub(crate) mode: String,
+    /// Execution mode; accepted values are `one-shot` and `batch`.
+    pub(crate) mode: JobMode,
     /// The single send action.
     pub(crate) send: JobSendAction,
     /// Whether the JSON report carries the reply exchange body/headers.
@@ -107,8 +127,6 @@ pub(crate) enum JobDocError {
     MixedVocabulary { sections: Vec<&'static str> },
     /// The `execute:` section declares no `mode`.
     MissingMode,
-    /// `mode: batch` is reserved for a future release.
-    BatchReserved,
     /// `mode` holds an unrecognized value.
     UnsupportedMode(String),
     /// The `execute:` section declares no `timeout`.
@@ -148,13 +166,9 @@ impl std::fmt::Display for JobDocError {
                     .join(", ")
             ),
             Self::MissingMode => write!(f, "execute.mode is required"),
-            Self::BatchReserved => write!(
-                f,
-                "execute.mode `batch` is not available yet; only `one-shot` is supported"
-            ),
             Self::UnsupportedMode(mode) => write!(
                 f,
-                "unsupported execute.mode `{mode}`: expected `one-shot` (`batch` is reserved)"
+                "unsupported execute.mode `{mode}`: expected `one-shot` or `batch`"
             ),
             Self::MissingTimeout => write!(f, "execute.timeout is required"),
             Self::InvalidTimeout(raw) => write!(
@@ -253,8 +267,8 @@ const TEST_VOCABULARY_KEYS: [&str; 8] = [
 ];
 
 /// Parse one job document: suffix contract, section exclusivity, serde
-/// shape, and v1 grammar rules (`mode: one-shot`, mandatory `timeout`,
-/// one `direct:`/`seda:` send, exactly one route source).
+/// shape, and v1 grammar rules (`mode: one-shot`/`batch`, mandatory
+/// `timeout`, one `direct:`/`seda:` send, exactly one route source).
 pub(crate) fn parse_job_document(path: &Path, text: &str) -> Result<JobDocument, JobDocError> {
     if !camel_dsl::discovery::is_job_document(path) {
         return Err(JobDocError::NotJobSuffix {
@@ -300,12 +314,11 @@ pub(crate) fn parse_job_document(path: &Path, text: &str) -> Result<JobDocument,
 
     // Grammar rules with per-rule errors.
     let execute = raw.execute;
-    let mode = execute.mode.ok_or(JobDocError::MissingMode)?;
-    match mode.as_str() {
-        "one-shot" => {}
-        "batch" => return Err(JobDocError::BatchReserved),
+    let mode = match execute.mode.ok_or(JobDocError::MissingMode)?.as_str() {
+        "one-shot" => JobMode::OneShot,
+        "batch" => JobMode::Batch,
         other => return Err(JobDocError::UnsupportedMode(other.to_string())),
-    }
+    };
     let timeout_raw = execute.timeout.ok_or(JobDocError::MissingTimeout)?;
     let timeout = humantime::parse_duration(&timeout_raw)
         .ok()
@@ -450,8 +463,9 @@ pub(crate) fn seda_send_uri(to: &str) -> String {
 
 /// Route IDs of every route whose consumer (`from:`) base matches the
 /// send target base. The runner accepts exactly one match: zero is a
-/// missing-target error, more than one an ambiguous-target error (both
-/// routes would be auto-started and either could consume the send).
+/// missing-target error, more than one an ambiguous-target error —
+/// with all routes started, duplicate consumer bases would round-robin
+/// the send and any `to:` hops, so exactly one match stays mandatory.
 pub(crate) fn target_route_ids(
     defs: &[camel_core::RouteDefinition],
     target_base: &str,

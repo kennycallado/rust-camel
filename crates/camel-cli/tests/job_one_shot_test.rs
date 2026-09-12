@@ -176,34 +176,318 @@ routeFiles:
     );
 }
 
-/// Load-time validation: `mode: batch` is parsed then rejected with the
-/// reserved-mode error and exit 2 (no boot).
+/// Batch mode with NO seda consumer routes: the drain's expected queue
+/// set is empty, so the drain completes immediately and the run keeps
+/// the one-shot shape — exit 0, `Completed`, mode `batch`, and the
+/// direct-transform reply intact.
 #[test]
-fn batch_mode_is_rejected_at_load() {
+fn batch_no_seda_routes_completes_immediately() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-transform"
+    from: "direct:transform"
+    steps:
+      - set_body:
+          value: "job-done"
+"#,
+    )
+    .expect("write route");
     std::fs::write(
         dir.path().join("job.job.yaml"),
         r#"execute:
   mode: batch
-  timeout: 30s
+  timeout: 60s
+  capture-reply: true
   send:
     to: direct:transform
-routes:
-  - id: r
-    from: direct:transform
+    body: "ping"
+    headers:
+      X-Job: cli
+routeFiles:
+  - routes/job-route.yaml
 "#,
     )
     .expect("write job doc");
 
     let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
     assert_eq!(
+        code, 0,
+        "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(report["mode"], "batch");
+    assert_eq!(report["reply"]["body"], "job-done", "report: {report}");
+}
+
+/// Read `name` under `dir`, retrying until it exists (up to 2 s) —
+/// the process has already exited, so the retry only smooths FS
+/// visibility, not progress.
+fn read_eventually(dir: &Path, name: &str) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(dir.join(name)) {
+            return text;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("{name} missing under {} after 2 s", dir.display());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// The batch drain: a direct target fans out to three seda workers,
+/// each writing a file. The fire-and-forget seda sends return before
+/// the workers run; the batch mode must wait for every seda queue to
+/// drain (two consecutive zero-depth samples per queue) before
+/// teardown, so all three files exist after exit 0.
+#[test]
+fn batch_drains_fanout_until_empty_exits_0() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    let routes = format!(
+        r#"routes:
+  - id: "fan"
+    from: "direct:fan"
+    steps:
+      - to: "seda:w1"
+      - to: "seda:w2"
+      - to: "seda:w3"
+  - id: "w1"
+    from: "seda:w1"
+    steps:
+      - to: "file:{base}?fileName=w1.txt"
+  - id: "w2"
+    from: "seda:w2"
+    steps:
+      - to: "file:{base}?fileName=w2.txt"
+  - id: "w3"
+    from: "seda:w3"
+    steps:
+      - to: "file:{base}?fileName=w3.txt"
+"#,
+        base = dir.path().display()
+    );
+    std::fs::write(dir.path().join("routes/job-route.yaml"), routes).expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"execute:
+  mode: batch
+  timeout: 60s
+  send:
+    to: direct:fan
+    body: "m"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
+    assert_eq!(
+        code, 0,
+        "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["mode"], "batch", "report: {report}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    for name in ["w1.txt", "w2.txt", "w3.txt"] {
+        let text = read_eventually(dir.path(), name);
+        assert!(
+            text.contains('m'),
+            "{name} must contain the routed body; got: {text}"
+        );
+    }
+}
+
+/// In-flight coupling: seda's `DepthGuard` keeps queue depth >= 1 while
+/// an envelope is endpoint-resident — queued or being forwarded
+/// (crates/components/camel-component-seda/src/lib.rs ~803-805) — so the
+/// drain loop cannot see this queue empty while the send/forward path
+/// holds it. Once forwarded, the exchange lives in route-pipeline
+/// residency the endpoint gauge cannot see; the drain's 2.5 s
+/// zero-streak window (batch.rs `DRAIN_ZERO_SAMPLES_REQUIRED`) outlasts
+/// this fixture's 1.5 s worker residency, so the file exists by the
+/// time the gate — and then the process — completes, without relying on
+/// teardown's in-flight wait. If seda/route stop ever gains in-flight
+/// drain, the immediate-read assertion may pass via teardown alone —
+/// re-point this test; the DETERMINISTIC regression net for a broken
+/// drain loop is `batch_timeout_expires_with_timeout_outcome`
+/// (a no-op drain would exit 0 there), not this test.
+#[test]
+fn batch_waits_for_in_flight_worker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    let routes = format!(
+        r#"routes:
+  - id: "fan"
+    from: "direct:fan"
+    steps:
+      - to: "seda:slow"
+  - id: "slow"
+    from: "seda:slow"
+    steps:
+      - delay: 1500
+      - to: "file:{base}?fileName=slow.txt"
+"#,
+        base = dir.path().display()
+    );
+    std::fs::write(dir.path().join("routes/job-route.yaml"), routes).expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"execute:
+  mode: batch
+  timeout: 60s
+  send:
+    to: direct:fan
+    body: "m"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
+    assert_eq!(
+        code, 0,
+        "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    // Deliberately NO retry: the write lands while the drain gate still
+    // counts the in-flight exchange, so the file must exist the moment
+    // the process has exited.
+    let text = std::fs::read_to_string(dir.path().join("slow.txt"))
+        .expect("slow.txt must exist immediately after exit (no retry)");
+    assert!(
+        text.contains('m'),
+        "slow.txt must contain the routed body; got: {text}"
+    );
+}
+
+/// The batch overall timeout on a queue that never drains: a
+/// self-feeding seda route re-enqueues every message it consumes, so the
+/// drain gate can never accumulate the 10 consecutive zero samples it
+/// requires (batch.rs `DRAIN_ZERO_SAMPLES_REQUIRED`): 10 samples span
+/// 2.5 s at the 250 ms sampler cadence, more than this fixture's 2 s
+/// deadline can ever admit — the `Timeout` verdict is
+/// scheduling-independent, exit 2 within a bounded wall clock. This
+/// doubles as the deterministic
+/// regression net for a no-op drain loop: without a real drain this run
+/// would exit 0.
+#[test]
+fn batch_timeout_expires_with_timeout_outcome() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/loop-route.yaml"),
+        r#"routes:
+  - id: "loop"
+    from: "seda:loop"
+    steps:
+      - to: "seda:loop"
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"execute:
+  mode: batch
+  timeout: 2s
+  send:
+    to: seda:loop
+routeFiles:
+  - routes/loop-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let started = std::time::Instant::now();
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
+    let elapsed = started.elapsed();
+    assert_eq!(
         code, 2,
-        "expected exit 2 (batch reserved);\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "expected exit 2 (overall timeout);\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("not available yet"),
-        "stderr must name the reserved mode:\n{stderr}"
+        elapsed < Duration::from_secs(15),
+        "timeout run must stay bounded; took {elapsed:?}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Timeout", "report: {report}");
+    assert!(
+        report["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("timed out")),
+        "report: {report}"
+    );
+    assert!(
+        report.get("shutdown_error").is_none(),
+        "zero-budget teardown artifact must not surface as shutdown_error; report: {report}"
+    );
+}
+
+/// Batch mode + `--arg` injection: the CLI arg reaches the seda worker
+/// as a header, the worker interpolates it before the file write —
+/// exit 0, `Completed`, and the tagged file carries the injected value.
+#[test]
+fn batch_works_with_arg_injection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    let routes = format!(
+        r#"routes:
+  - id: "fan"
+    from: "direct:fan"
+    steps:
+      - to: "seda:w1"
+  - id: "w1"
+    from: "seda:w1"
+    steps:
+      - transform: {{simple: "id-${{header.batch-id}}"}}
+      - to: "file:{base}?fileName=tagged.txt"
+"#,
+        base = dir.path().display()
+    );
+    std::fs::write(dir.path().join("routes/job-route.yaml"), routes).expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"execute:
+  mode: batch
+  timeout: 60s
+  send:
+    to: direct:fan
+    body: "m"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) =
+        run_job_args(dir.path(), &["job.job.yaml", "--arg", "batch-id=42"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    let text = read_eventually(dir.path(), "tagged.txt");
+    assert!(
+        text.contains("id-42"),
+        "tagged.txt must carry the injected arg; got: {text}"
     );
 }
 
@@ -304,6 +588,74 @@ routeFiles:
     assert!(
         report["error"].as_str().is_some_and(|e| !e.is_empty()),
         "report: {report}"
+    );
+}
+
+/// Multiroute hop with a helper route declared `auto_startup: false`:
+/// every document route starts, so the helper still consumes the target
+/// route's `direct:` hop. The seda side route is targeted with
+/// `waitForTaskToComplete=Always` so its file write completes before the
+/// target route returns — seda `stop()` aborts forwarders without
+/// draining in-flight work, so without `Always` the write would be a
+/// scheduling race the process exit would lose.
+#[test]
+fn multiroute_direct_hop_with_autostart_false_helper_completes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    let file_uri = format!("file:{}?fileName=side.txt", dir.path().display());
+    let routes = format!(
+        r#"routes:
+  - id: "job-target"
+    from: "direct:start"
+    steps:
+      - to: "direct:enrich"
+      - to: "seda:side?waitForTaskToComplete=Always"
+  - id: "job-enrich"
+    from: "direct:enrich"
+    auto_startup: false
+    steps:
+      - set_body:
+          value: "enriched"
+  - id: "job-side"
+    from: "seda:side"
+    steps:
+      - to: "{file_uri}"
+"#
+    );
+    std::fs::write(dir.path().join("routes/job-route.yaml"), routes).expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:start
+    body: "ping"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
+    assert_eq!(
+        code, 0,
+        "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(
+        report["reply"]["body"], "enriched",
+        "the auto_startup: false helper route must be forced on and serve the hop; report: {report}"
+    );
+    let side = std::fs::read_to_string(dir.path().join("side.txt"))
+        .expect("side.txt written by the seda side route");
+    assert!(
+        side.contains("enriched"),
+        "side route must write the enriched body; got: {side}"
     );
 }
 
@@ -730,5 +1082,121 @@ fn listing_anchored_at_config_root() {
     assert!(
         stdout.contains("job") && !stdout.contains("decoy"),
         "ROOT jobs/ is listed, not ./jobs/ relative to CWD; got:\n{stdout}"
+    );
+}
+
+// ── --arg header injection (add-job-args-batch) ────────────────────────
+
+/// `--arg NAME=VALUE` pairs reach the route as message headers: the flag
+/// is repeatable, and two distinct names both interpolate in a single
+/// simple expression.
+#[test]
+fn arg_single_and_repeated_reach_route_as_headers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-arg-headers"
+    from: "direct:transform"
+    steps:
+      - transform: {simple: "${header.name}-${header.tier}"}
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: "x"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job_args(
+        dir.path(),
+        &["job.job.yaml", "--arg", "name=John", "--arg", "tier=gold"],
+    );
+    assert_eq!(
+        code, 0,
+        "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(report["reply"]["body"], "John-gold", "report: {report}");
+}
+
+/// A CLI `--arg` overrides a colliding document `send.headers` entry:
+/// CLI values are applied after document headers, so the last write
+/// wins.
+#[test]
+fn arg_overrides_document_header() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-arg-override"
+    from: "direct:transform"
+    steps:
+      - transform: {simple: "${header.name}"}
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: "x"
+    headers:
+      name: Doc
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--arg", "name=Cli"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["reply"]["body"], "Cli", "report: {report}");
+}
+
+/// A malformed `--arg` value (no `=`, or an empty name) is a clap usage
+/// error: exit 2 with the value-parser message on stderr.
+#[test]
+fn malformed_arg_is_usage_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_bare_name_fixture(dir.path());
+
+    let (code, _stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--arg", "noequals"]);
+    assert_eq!(code, 2, "missing = is a usage error; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("expected NAME=VALUE"),
+        "stderr must carry the usage error; got:\n{stderr}"
+    );
+
+    let (code, _stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--arg", "=value"]);
+    assert_eq!(code, 2, "empty name is a usage error; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("name is empty"),
+        "stderr must carry the usage error; got:\n{stderr}"
     );
 }

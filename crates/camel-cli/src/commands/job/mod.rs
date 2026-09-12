@@ -8,10 +8,9 @@
 //! `camel_bundles` cascade, real `${env:}` resolution through
 //! discovery), reuses the document-family route-source keys, then sends
 //! exactly one exchange to the document's `direct:`/`seda:` target and
-//! shuts down. Route side-effect safety: every discovered route is
-//! forced to `auto_startup = false` except the send target, which is
-//! forced on — a job's own trigger must start, other consumer routes
-//! must not.
+//! shuts down. All discovered routes start; side-effect safety comes
+//! from the load-time fail-closed consumer allowlist, with the send
+//! target as the sole entry point.
 //!
 //! Exit codes mirror the `camel test` taxonomy (`2 > 1 > 0`): 0 the
 //! pipeline completed; 1 the pipeline failed; 2 any load, validation,
@@ -21,11 +20,13 @@
 //!
 //! Spec: openspec/changes/cli-jobs.
 
+mod batch;
 mod document;
 
 #[cfg(test)]
 mod document_tests;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -74,6 +75,25 @@ pub struct JobArgs {
         env = "CAMEL_CONFIG_FILE"
     )]
     pub config: String,
+    /// Repeatable NAME=VALUE pair injected as a message header at send
+    /// time (applied after document headers; last occurrence wins).
+    #[arg(
+        long = "arg",
+        value_name = "NAME=VALUE",
+        value_parser = parse_arg_pair
+    )]
+    pub args: Vec<(String, String)>,
+}
+
+/// Parse one `--arg` value as a NAME=VALUE pair: split at the FIRST `=`
+/// (the value may contain further `=`); an empty name is a usage error,
+/// an empty value is allowed.
+fn parse_arg_pair(raw: &str) -> Result<(String, String), String> {
+    match raw.split_once('=') {
+        None => Err(format!("invalid --arg value `{raw}`: expected NAME=VALUE")),
+        Some(("", _)) => Err(format!("invalid --arg value `{raw}`: name is empty")),
+        Some((name, value)) => Ok((name.to_string(), value.to_string())),
+    }
 }
 
 /// The JSON report of one job run.
@@ -81,7 +101,7 @@ pub struct JobArgs {
 struct JobReport {
     /// Displayed path of the job document.
     document: String,
-    /// Execution mode (`one-shot`).
+    /// Execution mode (`one-shot` or `batch`).
     mode: String,
     /// Outcome: `Completed` (or `Stopped`, see `terminated_early`),
     /// `Failed`, or `Timeout`.
@@ -98,10 +118,13 @@ struct JobReport {
     /// reply exchange was returned.
     #[serde(skip_serializing_if = "Option::is_none")]
     reply: Option<ReplyReport>,
-    /// Error detail for `Failed`/`Timeout` outcomes and shutdown
-    /// failures after a recorded verdict.
+    /// Error detail for `Failed`/`Timeout` outcomes.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Teardown failure detail when a shutdown failure follows a recorded
+    /// verdict; `error` keeps the pipeline/timeout verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shutdown_error: Option<String>,
 }
 
 /// The captured reply of the send action.
@@ -427,10 +450,22 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         }
     }
 
-    // Route-target safety: nothing auto-starts except the send target.
-    // Exactly one route must match the target base: zero means the send
-    // has nowhere to land; more than one is ambiguous — both would be
-    // auto-started and either could consume the send.
+    // Batch drain expectation set: every seda consumer route's URI
+    // base. The queue-depth gauge label is exactly the seda URI base
+    // (`seda:<name>`), so the drain waits on precisely these labels.
+    let mut expected_queues = HashSet::new();
+    for def in &defs {
+        if document::scheme_of_uri(def.from_uri()) == Some("seda") {
+            expected_queues.insert(document::uri_base(def.from_uri()).to_string());
+        }
+    }
+
+    // Route-target safety: ALL document routes start. Side-effect safety
+    // comes from the fail-closed consumer allowlist at load, and the
+    // send target stays the sole entry point. The missing- and
+    // ambiguous-target checks below stay: with all routes started, two
+    // consumer routes sharing one base would round-robin both the
+    // target send and any `to:` hops.
     let target_base = document::uri_base(&doc.execute.send.to);
     let target_ids = document::target_route_ids(&defs, target_base);
     match target_ids.len() {
@@ -456,10 +491,7 @@ pub async fn run_job(args: &JobArgs) -> i32 {
     }
     let defs: Vec<_> = defs
         .into_iter()
-        .map(|def| {
-            let is_target = document::uri_base(def.from_uri()) == target_base;
-            def.with_auto_startup(is_target)
-        })
+        .map(|def| def.with_auto_startup(true))
         .collect();
 
     // Conditionally register ExecBundle (route-content-conditional, the
@@ -494,6 +526,18 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         }
     }
 
+    // Batch mode: register the drain probe BEFORE `ctx.start()` so the
+    // seda samplers' emissions fan out to it from their first tick (the
+    // metrics handle composes; every emission reaches the composite).
+    let batch_probe = match doc.execute.mode {
+        document::JobMode::Batch => {
+            let probe = std::sync::Arc::new(batch::BatchDepthProbe::new(expected_queues));
+            ctx.add_lifecycle(batch::BatchProbeLifecycle(std::sync::Arc::clone(&probe)));
+            Some(probe)
+        }
+        document::JobMode::OneShot => None,
+    };
+
     if let Err(e) = ctx.start().await {
         // log-policy: system-broken
         tracing::error!("Failed to start CamelContext: {e}");
@@ -515,63 +559,94 @@ pub async fn run_job(args: &JobArgs) -> i32 {
     } else {
         doc.execute.send.to.clone()
     };
-    let send = send_with_startup_retry(&ctx, &doc.execute.send, &send_to);
+    let send = send_with_startup_retry(&ctx, &doc.execute.send, &send_to, &args.args);
+    // Shared shape for every overall-deadline expiry: the send-timeout
+    // arm and the batch drain-timeout path report identically.
+    let timeout_report = || JobReport {
+        document: document_path.display().to_string(),
+        mode: doc.execute.mode.as_str().to_string(),
+        outcome: "Timeout",
+        terminated_early: false,
+        duration_ms: started.elapsed().as_millis(),
+        reply: None,
+        error: Some(format!(
+            "job timed out after {}",
+            humantime::format_duration(doc.execute.timeout)
+        )),
+        shutdown_error: None,
+    };
     let mut report = match tokio::time::timeout_at(tokio_deadline, send).await {
-        Err(_) => JobReport {
-            document: document_path.display().to_string(),
-            mode: doc.execute.mode.clone(),
-            outcome: "Timeout",
-            terminated_early: false,
-            duration_ms: started.elapsed().as_millis(),
-            reply: None,
-            error: Some(format!(
-                "job timed out after {}",
-                humantime::format_duration(doc.execute.timeout)
-            )),
-        },
+        Err(_) => timeout_report(),
         Ok(Err(SendError::Transport(detail))) => {
             // log-policy: system-broken
             tracing::error!("Job send apparatus failure: {detail}");
             eprintln!("{detail}");
             // The context is booted; run the shutdown path before exiting.
-            if let Err(shutdown_detail) =
-                shutdown(&mut ctx, &boot_handle, MIN_SHUTDOWN_BUDGET).await
-            {
+            // Batch keeps the no-floor rule: teardown cannot run past the
+            // overall deadline (same branch as the post-verdict budget).
+            let transport_budget = shutdown_budget(doc.execute.mode, deadline);
+            if let Err(shutdown_detail) = shutdown(&mut ctx, &boot_handle, transport_budget).await {
                 eprintln!("{shutdown_detail}");
             }
             return 2;
         }
         Ok(Err(SendError::Pipeline(e))) => JobReport {
             document: document_path.display().to_string(),
-            mode: doc.execute.mode.clone(),
+            mode: doc.execute.mode.as_str().to_string(),
             outcome: "Failed",
             terminated_early: false,
             duration_ms: started.elapsed().as_millis(),
             reply: None,
             error: Some(e.to_string()),
+            shutdown_error: None,
         },
-        Ok(Ok(reply)) => JobReport {
-            document: document_path.display().to_string(),
-            mode: doc.execute.mode.clone(),
-            outcome: "Completed",
-            terminated_early: false,
-            duration_ms: started.elapsed().as_millis(),
-            reply: doc
-                .execute
-                .capture_reply
-                .then(|| reply_report(&reply))
-                .map(|(body, headers)| ReplyReport { body, headers }),
-            error: None,
-        },
+        Ok(Ok(reply)) => {
+            // Batch drain: the trigger send's seda hops are
+            // fire-and-forget, so wait until every expected queue has
+            // ten consecutive zero-depth samples (a 2.5 s quiescence
+            // window) — see the `batch` module docs — before the
+            // verdict; pre-send zero samples were reset away. One-shot
+            // skips the drain.
+            let drained = match &batch_probe {
+                Some(probe) => {
+                    probe.reset();
+                    batch::drain_until_empty(probe, tokio_deadline).await
+                }
+                None => true,
+            };
+            if !drained {
+                timeout_report()
+            } else {
+                JobReport {
+                    document: document_path.display().to_string(),
+                    mode: doc.execute.mode.as_str().to_string(),
+                    outcome: "Completed",
+                    terminated_early: false,
+                    duration_ms: started.elapsed().as_millis(),
+                    reply: doc
+                        .execute
+                        .capture_reply
+                        .then(|| reply_report(&reply))
+                        .map(|(body, headers)| ReplyReport { body, headers }),
+                    error: None,
+                    shutdown_error: None,
+                }
+            }
+        }
     };
 
     // ---- Drain + teardown under the remaining budget --------------------
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    let budget = remaining.max(MIN_SHUTDOWN_BUDGET);
+    // Batch: teardown cannot run past the overall deadline (no floor).
+    let budget = shutdown_budget(doc.execute.mode, deadline);
     if let Err(detail) = shutdown(&mut ctx, &boot_handle, budget).await {
         eprintln!("{detail}");
-        if report.error.is_none() {
-            report.error = Some(detail);
+        // A zero-budget teardown failure is the timeout's tail, not an
+        // independent shutdown failure: on the batch Timeout path the
+        // deadline has already fired, so a 0-budget shutdown call is a
+        // foregone timeout artifact. Keep the stderr line, but the
+        // report carries only the Timeout verdict.
+        if budget > Duration::ZERO {
+            report.shutdown_error = Some(detail);
         }
         // Apparatus class outranks the verdict (2 > 1 > 0).
         write_report(args, &report);
@@ -636,6 +711,7 @@ async fn send_with_startup_retry(
     ctx: &camel_core::CamelContext,
     send: &document::JobSendAction,
     send_to: &str,
+    cli_args: &[(String, String)],
 ) -> Result<Exchange, SendError> {
     let body = match &send.body {
         Some(JobBody::Text(s)) => Body::Text(s.clone()),
@@ -647,6 +723,11 @@ async fn send_with_startup_retry(
         for (k, v) in headers {
             message.set_header(k.clone(), v.clone());
         }
+    }
+    // CLI values are applied LAST: they override colliding document
+    // headers, and a repeated name resolves to the last occurrence.
+    for (k, v) in cli_args {
+        message.set_header(k.clone(), serde_json::Value::String(v.clone()));
     }
     let exchange = Exchange::new(message);
     let scheme = document::scheme_of_uri(send_to)
@@ -730,6 +811,19 @@ fn reply_report(
     (body, headers)
 }
 
+/// Compute the teardown budget for a shutdown call: the wall clock
+/// remaining to the overall deadline, floored to [`MIN_SHUTDOWN_BUDGET`]
+/// for one-shot only. Batch keeps the no-floor rule — teardown cannot
+/// run past the overall deadline — so a spent deadline computes a zero
+/// budget there (the Timeout path's teardown artifact).
+fn shutdown_budget(mode: document::JobMode, deadline: Instant) -> Duration {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match mode {
+        document::JobMode::Batch => remaining,
+        document::JobMode::OneShot => remaining.max(MIN_SHUTDOWN_BUDGET),
+    }
+}
+
 /// Tear the context down through the BootHandle with a bounded budget;
 /// the deadline-wrapped pool teardown mirrors `camel run`. Returns the
 /// first failure as a display string (apparatus class, exit 2).
@@ -745,6 +839,105 @@ async fn shutdown(
             "drain timeout: job teardown exceeded {}",
             humantime::format_duration(budget)
         )),
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::JobReport;
+
+    /// A shutdown failure after a recorded verdict serializes alongside
+    /// the verdict error: `error` keeps the pipeline/timeout detail and
+    /// `shutdown_error` carries the teardown detail.
+    #[test]
+    fn shutdown_error_serializes_alongside_error() {
+        let report = JobReport {
+            document: "doc".to_string(),
+            mode: "one-shot".to_string(),
+            outcome: "Failed",
+            terminated_early: false,
+            duration_ms: 1,
+            reply: None,
+            error: Some("pipeline failed".to_string()),
+            shutdown_error: Some("shutdown failure: x".to_string()),
+        };
+        let json = serde_json::to_string(&report).expect("report must serialize");
+        assert!(
+            json.contains("pipeline failed"),
+            "verdict error must serialize: {json}"
+        );
+        assert!(
+            json.contains("shutdown failure: x"),
+            "shutdown detail must serialize: {json}"
+        );
+    }
+
+    /// Without a shutdown failure the `shutdown_error` key is omitted
+    /// from the JSON report.
+    #[test]
+    fn shutdown_error_omitted_when_absent() {
+        let report = JobReport {
+            document: "doc".to_string(),
+            mode: "one-shot".to_string(),
+            outcome: "Failed",
+            terminated_early: false,
+            duration_ms: 1,
+            reply: None,
+            error: Some("pipeline failed".to_string()),
+            shutdown_error: None,
+        };
+        let json = serde_json::to_string(&report).expect("report must serialize");
+        assert!(
+            !json.contains("shutdown_error"),
+            "absent shutdown_error must be omitted: {json}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shutdown_budget_tests {
+    use super::{MIN_SHUTDOWN_BUDGET, shutdown_budget};
+    use crate::commands::job::document::JobMode;
+    use std::time::{Duration, Instant};
+
+    /// Batch: the budget is the remaining wall clock, uncapped below.
+    #[test]
+    fn shutdown_budget_batch_is_remaining() {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let budget = shutdown_budget(JobMode::Batch, deadline);
+        assert!(
+            budget <= Duration::from_secs(3) && budget > Duration::from_secs(2),
+            "expected ~3s remaining, got {budget:?}"
+        );
+    }
+
+    /// Batch with a spent deadline: zero budget, no floor.
+    #[test]
+    fn shutdown_budget_batch_zero_when_past() {
+        let deadline = Instant::now() - Duration::from_secs(1);
+        assert_eq!(shutdown_budget(JobMode::Batch, deadline), Duration::ZERO);
+    }
+
+    /// One-shot with a spent deadline: floored to MIN_SHUTDOWN_BUDGET.
+    #[test]
+    fn shutdown_budget_one_shot_floored() {
+        let deadline = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            shutdown_budget(JobMode::OneShot, deadline),
+            MIN_SHUTDOWN_BUDGET
+        );
+    }
+
+    /// One-shot with ample remaining time: the remaining clock wins over
+    /// the floor.
+    #[test]
+    fn shutdown_budget_one_shot_is_remaining_when_large() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let budget = shutdown_budget(JobMode::OneShot, deadline);
+        assert!(
+            budget <= Duration::from_secs(10) && budget > MIN_SHUTDOWN_BUDGET,
+            "expected ~10s remaining, got {budget:?}"
+        );
     }
 }
 

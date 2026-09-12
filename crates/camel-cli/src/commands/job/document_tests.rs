@@ -29,7 +29,7 @@ routeFiles:
 #[test]
 fn valid_one_shot_parses() {
     let doc = document::parse_job_document(&doc_path(), VALID_ONE_SHOT).expect("parses");
-    assert_eq!(doc.execute.mode, "one-shot");
+    assert_eq!(doc.execute.mode, document::JobMode::OneShot);
     assert_eq!(doc.execute.timeout.as_secs(), 30);
     assert!(doc.execute.capture_reply);
     assert_eq!(doc.execute.send.to, "direct:transform");
@@ -86,20 +86,25 @@ routes:
 }
 
 #[test]
-fn batch_mode_is_reserved_and_rejected() {
+fn batch_mode_parses() {
     let text = VALID_ONE_SHOT.replace("one-shot", "batch");
-    let err = document::parse_job_document(&doc_path(), &text).unwrap_err();
-    assert!(matches!(err, JobDocError::BatchReserved), "got {err:?}");
+    let doc = document::parse_job_document(&doc_path(), &text).expect("batch mode parses");
+    assert_eq!(doc.execute.mode, document::JobMode::Batch);
 }
 
 #[test]
 fn garbage_mode_is_rejected() {
     let text = VALID_ONE_SHOT.replace("one-shot", "sometimes");
     let err = document::parse_job_document(&doc_path(), &text).unwrap_err();
-    match err {
+    match &err {
         JobDocError::UnsupportedMode(mode) => assert_eq!(mode, "sometimes"),
         other => panic!("expected UnsupportedMode, got {other:?}"),
     }
+    let message = err.to_string();
+    assert!(
+        message.contains("one-shot") && message.contains("batch"),
+        "unsupported-mode error must name both accepted modes; got: {message}"
+    );
 }
 
 #[test]
@@ -311,4 +316,58 @@ routes:
         vec!["other".to_string()]
     );
     assert!(document::target_route_ids(&defs, "direct:missing").is_empty());
+}
+
+#[test]
+fn missing_send_is_rejected() {
+    let text = VALID_ONE_SHOT.replace(
+        "  send:\n    to: direct:transform\n    body: \"ping\"\n    headers:\n      X-Job: cli\n",
+        "",
+    );
+    let err = document::parse_job_document(&doc_path(), &text).unwrap_err();
+    match err {
+        JobDocError::Yaml(ref msg) if msg.contains("execute.send is required") => {}
+        other => panic!("expected Yaml naming execute.send, got {other:?}"),
+    }
+}
+
+#[test]
+fn capture_reply_defaults_to_false() {
+    let text = VALID_ONE_SHOT.replace("  capture-reply: true\n", "");
+    let doc =
+        document::parse_job_document(&doc_path(), &text).expect("parses without capture-reply");
+    assert!(!doc.execute.capture_reply);
+}
+
+#[test]
+fn route_files_from_root_without_camel_toml_is_rejected() {
+    let doc = document::JobDocument {
+        execute: document::ExecuteSection {
+            mode: document::JobMode::OneShot,
+            send: document::JobSendAction {
+                to: "direct:transform".to_string(),
+                body: None,
+                headers: None,
+            },
+            capture_reply: false,
+            timeout: std::time::Duration::from_secs(30),
+        },
+        route_files: None,
+        route_files_from_root: Some(vec!["routes/a.yaml".to_string()]),
+        routes: None,
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let err = match document::resolve_route_source(&doc, dir.path()) {
+        Ok(_) => panic!("expected NoProjectRoot error"),
+        Err(e) => e,
+    };
+    match err {
+        JobDocError::RouteSource(TestDocError::NoProjectRoot { doc_dir }) => {
+            assert!(
+                doc_dir.contains(dir.path().display().to_string().as_str()),
+                "doc_dir was: {doc_dir}"
+            );
+        }
+        other => panic!("expected NoProjectRoot, got {other:?}"),
+    }
 }
