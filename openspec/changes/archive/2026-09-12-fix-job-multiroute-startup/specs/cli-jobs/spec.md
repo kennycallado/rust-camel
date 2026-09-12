@@ -1,6 +1,10 @@
-## MODIFIED Requirements
+## REMOVED Requirements
 
 ### Requirement: one-shot send with side-effect-safe route startup
+
+## ADDED Requirements
+
+### Requirement: one-shot send with load-gated route startup
 
 `camel job` SHALL boot the real composition root (the `camel run` seams),
 SHALL force `auto_startup = true` on every discovered route in the job

@@ -1,23 +1,8 @@
-## RENAMED Requirements
+## REMOVED Requirements
 
-- FROM: `### Requirement: batch mode is reserved and rejected`
-- TO: `### Requirement: supported job execution modes`
+### Requirement: batch mode is reserved and rejected
 
 ## MODIFIED Requirements
-
-### Requirement: supported job execution modes
-
-The `mode` key SHALL accept `one-shot` and `batch`. Any other value SHALL
-be rejected at load with an unsupported-mode error naming both accepted
-values, and the process SHALL exit with code 2 before any boot.
-
-#### Scenario: unsupported mode is rejected at load
-
-- **GIVEN** a job document declaring `mode: stream` (or any value other
-  than `one-shot` and `batch`)
-- **WHEN** `camel job` loads the document
-- **THEN** loading fails with an unsupported-mode error naming the
-  accepted values and the process exits with code 2 before any boot
 
 ### Requirement: exit-code taxonomy and JSON report
 
@@ -70,6 +55,20 @@ batch-mode drain that completes within the overall timeout reports outcome
   teardown detail, and the process exits 2
 
 ## ADDED Requirements
+
+### Requirement: supported job execution modes
+
+The `mode` key SHALL accept `one-shot` and `batch`. Any other value SHALL
+be rejected at load with an unsupported-mode error naming both accepted
+values, and the process SHALL exit with code 2 before any boot.
+
+#### Scenario: unsupported mode is rejected at load
+
+- **GIVEN** a job document declaring `mode: stream` (or any value other
+  than `one-shot` and `batch`)
+- **WHEN** `camel job` loads the document
+- **THEN** loading fails with an unsupported-mode error naming the
+  accepted values and the process exits with code 2 before any boot
 
 ### Requirement: arg flag header injection
 
