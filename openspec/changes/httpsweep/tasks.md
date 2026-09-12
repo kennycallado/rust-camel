@@ -197,4 +197,4 @@ landed. Never runs while implementation is unreviewed.
 - Successor bd exists BEFORE rc-wsx2y closes (ordering enforced by Steps).
 - Both closes recorded; close reasons name the 4 sites / transfer target.
 
-- [ ] 1.3
+- [x] 1.3
