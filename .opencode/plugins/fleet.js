@@ -4,10 +4,17 @@
 // no systemd transient unit. Loaded automatically by every opencode instance
 // for this project; only the `serve` instance acts (clients would double-fire).
 //
-// Ported 1:1 from .fleet/listener.mjs (2026-09-09): same buzzer format,
-// same wake protocol text, same 60s per-session debounce, same events.log.
-// Improvement: fleet.json / conductor.json are re-read per event (live roster
-// updates without server restart — the old listener read them once at boot).
+// Hardened 2026-09-12 after the silent-wake outage (root cause: fleet.json
+// entries drifted from plain sid strings to rich mission objects, and
+// `includes(sid)` never matches objects — every mission registered after the
+// drift went silent). Changes vs previous version:
+//   1. Roster check accepts BOTH entry shapes: "ses_…" strings and
+//      { "session": "ses_…", … } mission objects (live-read per event).
+//   2. Wake POST has a 10 s timeout (the old listener logged hung POST
+//      TimeoutErrors; never let a wake hang unbounded).
+//   3. Every WAKE event for an unidentified session is logged once per sid
+//      (ev:"wake-event-miss") — during the outage, misses were invisible,
+//      which made the plugin look dead when it was merely filtering.
 //
 // State dir resolution (import.meta.url based — server cwd independent):
 //   1. <repo>/.opencode/fleet/   (target home, post-migration)
@@ -34,6 +41,7 @@ const WAKE_EVENTS = new Set([
 ]);
 const WAKE_DEBOUNCE_MS = 60_000;
 const lastWake = new Map();
+const loggedMiss = new Set(); // sids already logged as wake-event-miss (once each)
 
 function stateDir() {
   for (const d of [`${PLUGIN_DIR}../fleet/`, `${REPO}.fleet/`]) {
@@ -44,6 +52,22 @@ function stateDir() {
 
 const log = (o) =>
   appendFileSync(`${stateDir()}events.log`, JSON.stringify({ t: new Date().toISOString(), src: "plugin", ...o }) + "\n");
+
+// fleet.json entries may be plain sid strings ("ses_…") or mission objects
+// ({ "session": "ses_…", … }). Normalize both to a Set of ids.
+function rosterIds(dir) {
+  try {
+    const entries = JSON.parse(readFileSync(`${dir}fleet.json`, "utf8"));
+    const ids = new Set();
+    for (const e of entries) {
+      const sid = typeof e === "string" ? e : e?.session;
+      if (typeof sid === "string" && sid) ids.add(sid);
+    }
+    return ids;
+  } catch {
+    return new Set();
+  }
+}
 
 async function wakeConductor(type, sid, dir) {
   let conductor = "";
@@ -70,6 +94,7 @@ async function wakeConductor(type, sid, dir) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ parts: [{ type: "text", text }] }),
+      signal: AbortSignal.timeout(10_000),
     });
     log({ ev: "wake-posted", to: conductor.slice(0, 16), http: res.status });
   } catch (e) {
@@ -90,11 +115,14 @@ export const FleetPlugin = async () => {
         const sid = event?.properties?.sessionID || event?.properties?.session_id || "";
         if (!sid) return;
         // live roster read (no restart needed to update fleet.json)
-        let fleet = [];
-        try {
-          fleet = JSON.parse(readFileSync(`${dir}fleet.json`, "utf8"));
-        } catch {}
-        if (!fleet.includes(sid)) return;
+        const fleet = rosterIds(dir);
+        if (!fleet.has(sid)) {
+          if (!loggedMiss.has(sid)) {
+            loggedMiss.add(sid);
+            log({ ev: "wake-event-miss", type, sid: String(sid).slice(0, 24) });
+          }
+          return;
+        }
         appendFileSync(`${dir}buzzer`, `${new Date().toISOString()} ${type} ${sid}\n`);
         log({ ev: type, sid: String(sid).slice(0, 24), fleet: true });
         await wakeConductor(type, sid, dir);
