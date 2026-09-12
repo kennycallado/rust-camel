@@ -145,7 +145,10 @@ redirect to a host not matching any entry, or whose URL fails to yield a
 host, SHALL fail the request closed with an error naming the fence, and no
 request SHALL be sent to the unlisted host. (Per-hop enforcement landed in
 83cc7e5f, bd rc-sxe1x; hop host classification via `classify_host`, bd
-rc-uwaj.)
+rc-uwaj.) The diagnostics redaction path SHALL mask userinfo whenever the
+rejected URL carries any credential byte in userinfo, including
+password-only userinfo (`http://:pass@host/`, valid RFC 3986), which SHALL
+render with the same `***@` masking shape as username-bearing userinfo.
 
 #### Scenario: armed fence rejects unknown host with redacted error
 
@@ -156,6 +159,17 @@ rc-uwaj.)
 - **THEN** resolution fails, and the error text contains neither `pass` nor
   `s3cret` — the rejected URL is rendered only through the diagnostics
   redaction path
+
+#### Scenario: armed fence rejects password-only userinfo with redacted error
+
+- **GIVEN** an endpoint declaring `allowedUriHosts=api.internal:8443,cdn.example.com`
+  and an exchange carrying
+  `CamelHttpUri=http://:passwordonly@evil.example.com/x?token=querysecret`
+- **WHEN** the producer resolves the outbound URL
+- **THEN** resolution fails, and the error text contains neither
+  `passwordonly` nor `querysecret` — the rejected URL is rendered only
+  through the diagnostics redaction path, with the password-only userinfo
+  masked as `***@`
 
 #### Scenario: armed fence allows listed host
 
