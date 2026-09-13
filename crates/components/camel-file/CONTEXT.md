@@ -106,3 +106,14 @@ _Avoid_: file writer, file sink.
 temp-file-then-rename atomically. Not exported outside the crate (YAGNI — one consumer).
 If a second component needs it later, extract into a shared crate then.
 _Avoid_: file writer utility, fs helper (too generic).
+
+## Log-level policy
+
+Per ADR-0012.
+
+**Outside-contract metric:**
+- `b-prime:file:poll-send` (`fn poll_directory`, `src/poll_logic.rs:613`): a
+  poll candidate's `context.send(exchange)` failed (route channel closed). The
+  poll loop increments the metric and returns `Err(CamelError::ChannelClosed)`;
+  the consumer's poll loop logs `warn!` and continues (nothing reaches
+  supervision) — the metric is the operator signal.

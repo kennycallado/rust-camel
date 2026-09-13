@@ -63,9 +63,12 @@ impl<'de> Deserialize<'de> for ParameterValue {
 /// On a non-string value, returns an error naming the offending key:
 /// `parameter \`retries\` must be a string; quote the value (e.g. `retries:
 /// "3"`)`. Absent fields are handled by `#[serde(default)]` (the function
-/// only runs when the field is present); `visit_unit`/`visit_none` accept
-/// `null` as an empty map where the format's `deserialize_map` routes it
-/// there (noyalib/serde_json currently reject `null` up front).
+/// only runs when the field is present). Null handling is format-specific:
+/// serde_json rejects `parameters: null` up front, while noyalib routes
+/// YAML null through `deserialize_map` to an empty map. The
+/// `visit_unit`/`visit_none` arms accept null as an empty map for
+/// deserializers that route null there (pinned by the direct-deserializer
+/// tests).
 fn deserialize_string_parameters<'de, D>(
     deserializer: D,
 ) -> Result<BTreeMap<String, String>, D::Error>
@@ -2387,10 +2390,11 @@ routes:
 
     #[test]
     fn null_parameters_route_through_null_visitor_arms() {
-        // YAML `null` reaches `visit_unit`/`visit_none` through noyalib's
-        // `deserialize_map` and deserializes to an empty map (serde_json
-        // rejects null up front — see the `deserialize_string_parameters`
-        // doc comment). The direct-deserializer twins below pin both arms
+        // YAML `null` routes through noyalib's `deserialize_map`, which
+        // calls `visit_map(EmptyMapAccess)` and deserializes to an empty
+        // map (serde_json rejects null up front — see the
+        // `deserialize_string_parameters` doc comment). The
+        // direct-deserializer twins below pin `visit_unit`/`visit_none`
         // independent of front-end routing.
         let yaml = r#"
 routes:
@@ -2609,9 +2613,6 @@ pub struct ResequenceCompletionYaml {
     #[serde(default)]
     pub size_or_timeout: Option<Vec<u64>>,
 }
-
-// NOTE: ResequenceStreamYaml intentionally omitted — stream resequencing is
-// not yet implemented (Task 3). Scaffolding will be added when Stream is ready.
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]

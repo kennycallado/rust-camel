@@ -125,4 +125,10 @@ Client-consumer oversized-frame drops log at `warn!` and increment
 Dispatch failure (route channel closed) increments the same metric and the task returns
 `Err` — no log, the error return is the signal.
 
+- **Class (b′)** (`WsConsumer::finish_start`, `src/lib.rs:1428`): the server-side
+  forward loop's pipeline send failure (route channel closed) increments
+  `b-prime:ws:message-dispatch` and the loop exits — no log, the metric is the
+  only signal. Distinct from the client-consumer dispatch failure above, which
+  uses `ws_client_consumer` and returns `Err`.
+
 Each `error!` site keeps the level for loud log visibility and carries `// log-policy: outside-contract`.

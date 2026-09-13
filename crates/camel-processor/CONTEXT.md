@@ -9,49 +9,49 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 |---|---|---|---|
 | `aggregator` | Aggregate | stateful routing / aggregation | `src/aggregator.rs` (`impl AggregatorService`, `fn poll_ready`, `fn call`): defaults are max_buckets=10_000 and bucket_ttl=300s. The background TTL sweep starts lazily on the first `poll_ready` and is managed via `StepLifecycle::start`/`shutdown` (ADR-0022): `shutdown` cancels the sweep token + aborts the handle; `start` resets both so the sweep respawns on route restart. The sweep token is seeded from the constructor's `route_cancel` but lives in an internal swappable cell (`sweep_cancel`), independent of any externally-threaded token. Inline eviction in `call` remains active before the sweep starts (Batch 1 R3-C1). |
 | `cache_eip` | Cache | stateful caching (ADR-0056) | `src/cache_eip.rs` (`CacheService`, `CacheInvalidateService`, `CachePeekStaleService`): OutcomePipeline-backed lookup → on-miss sub-pipeline → write-back. HIT short-circuits; MISS runs body and stores result (subject to `max_entry_bytes`); `coalesce_misses` coalesces concurrent misses on the same key (singleflight). `ttl` propagated to repository `set`. `CacheInvalidateService` removes a single key or a whole namespace (via `key_prefix`). `CachePeekStaleService` serves a post-expiry stale entry, with an optional `on_miss` knob (`"stop"` default or `"continue"`) and sets `CamelCachePeekHit`/`CamelCachePeekStale` exchange properties. |
-| `choice` | Choice | conditional routing | `src/lib.rs:2` |
-| `circuit_breaker` | CircuitBreaker gate | fault tolerance | `src/lib.rs:3` |
-| `claim_check` | Claim Check | stateful repository stash/retrieve (ADR-0046 retro-exempt) | `src/lib.rs:4` |
-| `content_enricher` | Enrich / PollEnrich | enrichment | `src/lib.rs:5` |
+| `choice` | Choice | conditional routing | `src/lib.rs:3` |
+| `circuit_breaker` | CircuitBreaker gate | fault tolerance | `src/lib.rs:4` |
+| `claim_check` | Claim Check | stateful repository stash/retrieve (ADR-0046 retro-exempt) | `src/lib.rs:5` |
+| `content_enricher` | Enrich / PollEnrich | enrichment | `src/lib.rs:6` |
 | `content_negotiation` | ContentNegotiationProcessor | header-only media negotiation gate (REST strict 415/406) | `src/lib.rs:7`: verdict injected as a `ContentNegotiationCheck` closure at compile time (keeps camel-processor free of a camel-dsl dependency); reads only `Content-Type`/`Accept` via case-insensitive header lookup — never touches the body (no polling, no materialization); on `Ok` the exchange passes through unchanged, on `Err` the negotiation error (`UnsupportedMediaType`/`NotAcceptable`) propagates. |
-| `convert_body` | ConvertBodyTo | transformation | `src/lib.rs:6` |
-| `data_format` | built-in data formats | marshal / unmarshal support | `src/lib.rs:7` |
-| `delayer` | Delay | timing | `src/lib.rs:8` (header-derived delay clamped to max_delay_ms, default 3_600_000 — Batch 1 H12) |
-| `do_try` | doTry / catch | error-handling block | `src/lib.rs:9` |
-| `dynamic_router` | DynamicRouter | dynamic routing | `src/lib.rs:11` |
-| `dynamic_set_header` | DynamicSetHeader | transformation | `src/lib.rs:12` |
-| `dynamic_set_property` | DynamicSetProperty | transformation | `src/lib.rs:13` |
-| `endpoint_pipeline` | EndpointPipelineService | endpoint resolution / cache | `src/lib.rs:14` |
-| `enrichment_strategy` | EnrichmentStrategy helpers | enrichment | `src/lib.rs:15` |
-| `error_handler` | RouteErrorHandler + legacy ErrorHandlerLayer | error handling | `src/lib.rs:16` |
-| `filter` | Filter | conditional routing | `src/lib.rs:17` |
-| `idempotent_consumer` | Idempotent Consumer | stateful dedup via repository (ADR-0046 retro-exempt) | `src/lib.rs:18` |
-| `json_schema_validate` | Validate (JSON Schema) | schema validation | `src/lib.rs:19` |
-| `load_balancer` | LoadBalancer | load balancing / failover | `src/lib.rs:20` |
-| `log` | Log / DynamicLog | observability | `src/lib.rs:21` |
-| `loop_eip` | Loop | repeated routing | `src/lib.rs:22` (Count(n) clamped to config.max_iterations, default MAX_LOOP_ITERATIONS=10_000 — configurable per-step per ADR-0039) |
-| `map_body` | MapBody | transformation | `src/lib.rs:23` |
-| `marshal` | Marshal / Unmarshal | data format transformation | `src/lib.rs:24` |
-| `multicast` | Multicast | fan-out routing | `src/lib.rs:25` |
-| `recipient_list` | RecipientList | dynamic recipient routing | `src/lib.rs:27` (expression capped to max_recipients, default 1_000 — Batch 1 H13). Zero-success contract: when at least one recipient is called and zero return Ok, the result is `Err(last_error)` (ADR-0058), never `Ok(original)`. |
-| `resequencer` | Resequencer (batch/stream) | stateful reorder; continuation boundary (ADR-0029) | `src/lib.rs:28` |
-| `routing_slip` | RoutingSlip | dynamic routing | `src/lib.rs:29` |
-| `sampling` | Sampling | deterministic 1-of-N (period>0 enforced at build) | `src/lib.rs:30` |
-| `script_mutator` | ScriptMutator | script-backed mutation | `src/lib.rs:31` |
-| `security_policy_layer` | SecurityPolicyLayer | pre-pipeline authorization, carrier-only strict mode (ADR-0061: evaluates the kernel-minted typed carrier; raw Bearer without a carrier is denied) | `src/lib.rs:32`; ADR-0010, ADR-0061 |
-| `set_body` | SetBody | transformation | `src/lib.rs:33` |
-| `set_header` | SetHeader | transformation | `src/lib.rs:34` |
-| `set_property` | SetProperty | transformation | `src/lib.rs:35` |
-| `sort` | Sort | body array sort (no per-call size cap — audit M8) | `src/lib.rs:36` |
-| `splitter` | Split | splitting / aggregation | `src/lib.rs:38` |
+| `convert_body` | ConvertBodyTo | transformation | `src/lib.rs:8` |
+| `data_format` | built-in data formats | marshal / unmarshal support | `src/lib.rs:9` |
+| `delayer` | Delay | timing | `src/lib.rs:10` (header-derived delay clamped to max_delay_ms, default 3_600_000 — Batch 1 H12) |
+| `do_try` | doTry / catch | error-handling block | `src/lib.rs:11` |
+| `dynamic_router` | DynamicRouter | dynamic routing | `src/lib.rs:13` |
+| `dynamic_set_header` | DynamicSetHeader | transformation | `src/lib.rs:14` |
+| `dynamic_set_property` | DynamicSetProperty | transformation | `src/lib.rs:15` |
+| `endpoint_pipeline` | EndpointPipelineService | endpoint resolution / cache | `src/lib.rs:16` |
+| `enrichment_strategy` | EnrichmentStrategy helpers | enrichment | `src/lib.rs:17` |
+| `error_handler` | RouteErrorHandler + legacy ErrorHandlerLayer | error handling | `src/lib.rs:18` |
+| `filter` | Filter | conditional routing | `src/lib.rs:19` |
+| `idempotent_consumer` | Idempotent Consumer | stateful dedup via repository (ADR-0046 retro-exempt) | `src/lib.rs:20` |
+| `json_schema_validate` | Validate (JSON Schema) | schema validation | `src/lib.rs:22` |
+| `load_balancer` | LoadBalancer | load balancing / failover | `src/lib.rs:23` |
+| `log` | Log / DynamicLog | observability | `src/lib.rs:24` |
+| `loop_eip` | Loop | repeated routing | `src/lib.rs:25` (Count(n) clamped to config.max_iterations, default MAX_LOOP_ITERATIONS=10_000 — configurable per-step per ADR-0039) |
+| `map_body` | MapBody | transformation | `src/lib.rs:26` |
+| `marshal` | Marshal / Unmarshal | data format transformation | `src/lib.rs:27` |
+| `multicast` | Multicast | fan-out routing | `src/lib.rs:28` |
+| `recipient_list` | RecipientList | dynamic recipient routing | `src/lib.rs:30` (expression capped to max_recipients, default 1_000 — Batch 1 H13). Zero-success contract: when at least one recipient is called and zero return Ok, the result is `Err(last_error)` (ADR-0058), never `Ok(original)`. |
+| `resequencer` | Resequencer (batch/stream) | stateful reorder; continuation boundary (ADR-0029) | `src/lib.rs:32` |
+| `routing_slip` | RoutingSlip | dynamic routing | `src/lib.rs:33` |
+| `sampling` | Sampling | deterministic 1-of-N (period>0 enforced at build) | `src/lib.rs:34` |
+| `script_mutator` | ScriptMutator | script-backed mutation | `src/lib.rs:35` |
+| `security_policy_layer` | SecurityPolicyLayer | pre-pipeline authorization, carrier-only strict mode (ADR-0061: evaluates the kernel-minted typed carrier; raw Bearer without a carrier is denied) | `src/lib.rs:36`; ADR-0010, ADR-0061 |
+| `set_body` | SetBody | transformation | `src/lib.rs:37` |
+| `set_header` | SetHeader | transformation | `src/lib.rs:38` |
+| `set_property` | SetProperty | transformation | `src/lib.rs:39` |
+| `sort` | Sort | body array sort (no per-call size cap — audit M8) | `src/lib.rs:40` |
+| `splitter` | Split | splitting / aggregation | `src/lib.rs:42` |
 | `stop` | CompiledStep::Stop | control-flow Stop (ADR-0024) | `CompiledStep` variant (not a `pub mod`); ADR-0025 |
-| `stream_cache` | StreamCache | body materialization | `src/lib.rs:39` |
-| `stream_codec` | StreamSplitCodec implementations | streaming split support | `src/lib.rs:40` |
-| `streaming_splitter` | Streaming Split | streaming splitter | `src/lib.rs:42` |
-| `throttler` | Throttle | rate limiting | `src/lib.rs:43` (try_new returns Err on max_requests=0 or period=0 — Batch 1 D-M8) |
-| `validate` | Validate (predicate) | predicate validation wrapper | `src/lib.rs:44` |
-| `wire_tap` | WireTap | fire-and-forget side route with bounded-admission semaphore (max_concurrent cap, CallerRuns at bound) | `src/lib.rs:45` |
-| `zip_splitter` | ZipSplitter | archive splitting | `src/lib.rs:46` |
+| `stream_cache` | StreamCache | body materialization | `src/lib.rs:43` |
+| `stream_codec` | StreamSplitCodec implementations | streaming split support | `src/lib.rs:44` |
+| `streaming_splitter` | Streaming Split | streaming splitter | `src/lib.rs:46` |
+| `throttler` | Throttle | rate limiting | `src/lib.rs:47` (try_new returns Err on max_requests=0 or period=0 — Batch 1 D-M8) |
+| `validate` | Validate (predicate) | predicate validation wrapper | `src/lib.rs:48` |
+| `wire_tap` | WireTap | fire-and-forget side route with bounded-admission semaphore (max_concurrent cap, CallerRuns at bound) | `src/lib.rs:49` |
+| `zip_splitter` | ZipSplitter | archive splitting | `src/lib.rs:50` |
 
 ## Structural EIP Segments
 
