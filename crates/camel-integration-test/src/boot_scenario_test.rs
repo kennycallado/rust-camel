@@ -651,14 +651,25 @@ max_connections = 1
     #[tokio::test]
     async fn named_shared_memory_uri_dies_with_its_boot() {
         // `sqlite:file:` matches no factory scheme prefix, so the
-        // provider key pins the sqlx factory explicitly.
-        const NAMED_TOML: &str = r#"
-[datasources.appdb]
-db_url = "sqlite:file:memdb_isolation_probe?mode=memory&cache=shared"
+        // provider key pins the sqlx factory explicitly. The alias
+        // derives from this test's temporary project identity (the
+        // unique tempdir name): every invocation owns its own
+        // named-memory database, a sibling test can never share the
+        // alias, and boot A and boot B still use the exact same URI.
+        let (dir, doc) = project("", Some(("routes.yaml", ROUTE)), DOC);
+        let alias = dir
+            .path()
+            .file_name()
+            .expect("tempdir has a name")
+            .to_string_lossy();
+        let camel_toml = format!(
+            r#"[datasources.appdb]
+db_url = "sqlite:file:memdb_{alias}?mode=memory&cache=shared"
 max_connections = 1
 provider = "sqlx"
-"#;
-        let (dir, doc) = project(NAMED_TOML, Some(("routes.yaml", ROUTE)), DOC);
+"#
+        );
+        std::fs::write(dir.path().join("Camel.toml"), camel_toml).expect("rewrite Camel.toml");
 
         let mut run_a = boot_scenario(&doc, dir.path(), &empty_env())
             .await
@@ -679,6 +690,13 @@ provider = "sqlx"
         let catalog_b = run_b.boot.datasource_catalog();
         seed(&catalog_b, "b").await;
         let count_b = count(&catalog_b).await;
+        // A failure here is the distinct SQLite named-memory teardown
+        // class: a boot-A connection outlived the awaited shutdown plus
+        // the landed SQL pool drain. It is not the JWKS cooldown
+        // wall-clock class (bd rc-7dfyq), the camel-http consumer
+        // readiness class, or the macOS errno class (bd rc-62me6); no
+        // sleep, readiness gate, or platform errno takes part in this
+        // proof.
         assert_eq!(
             count_b, 1,
             "the named shared memory database must die with boot A — B sees A's rows"

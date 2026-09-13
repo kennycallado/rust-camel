@@ -265,10 +265,23 @@ starts empty. The `boot_freshness` tests pin the guarantee in its
 load-bearing shape — a named shared-memory URI
 (`sqlite:file:<name>?mode=memory&cache=shared`), where connections
 share one named database and a lingering boot-A connection demonstrably
-leaks rows into boot B without the close (count 2, red-able) — plus the
-opposite contract for file-backed datasources, whose rows persist and
-whose cleanup is the document author's clean-first prepare (ADR-0069
-section 9 mirror). The default-no-op `close`/`close_all` trait methods
+leaks rows into boot B without the close (count 2, red-able). The
+named-memory regression fixture derives its URI name from the test's
+temporary project identity. Every invocation owns a fresh alias, boot A
+and boot B share the exact same URI, and a sibling test can never hold
+that alias open across the boot A teardown window. The happens-before
+proof is the awaited `shutdown` future plus the landed SQL pool drain:
+close disables in-memory pool resurrection, awaits pool close, and
+observes the drain of every pooled connection. Boot B cannot create its
+pool before boot A's close future resolves, so the fixture needs no
+wall-clock sleep as a state signal and stays deterministic without
+delays. A failure in that fixture belongs to the distinct SQLite
+named-memory teardown class, not to the JWKS cooldown wall-clock class
+(bd rc-7dfyq), the camel-http consumer readiness class, or the macOS
+errno class (bd rc-62me6). The tests also pin the opposite contract for
+file-backed datasources, whose rows persist and whose cleanup is the
+document author's clean-first prepare (ADR-0069 section 9 mirror).
+The default-no-op `close`/`close_all` trait methods
 live in `camel-api`; only pool-owning providers override them, and
 close resolves factories by NAME, never by registry key (the handle
 stores `factory.name()`). The scenario-tier convention for memory
