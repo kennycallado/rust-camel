@@ -349,3 +349,207 @@ fn job_signal_during_boot_is_buffered() {
     let report = read_report(&report_path);
     assert_eq!(report["outcome"], "Interrupted", "report: {report}");
 }
+
+// ── Bounded metadata listing (jobdiscovery Task 2.1) ───────────────────
+//
+// The listing-walk tests live in this binary per the jobdiscovery task
+// map (`job_listing_stops_at_` filter): they reuse `common::run_binary`
+// for run-to-completion output and share nothing with the signal
+// stretches above — listing never installs the signal streams.
+
+/// Write the fixture config with `[jobs].dirs`, `log_level = "off"` so
+/// stdout carries ONLY the listing rows (the general tracing layer
+/// writes to stdout).
+fn write_listing_config(dir: &Path, jobs_table: &str) {
+    std::fs::write(
+        dir.join("Camel.toml"),
+        format!(
+            "[default]\nroutes = [\"routes/*.yaml\"]\nlog_level = \"off\"\nwatch = false\n\n[default.jobs]\n{jobs_table}\n"
+        ),
+    )
+    .expect("write Camel.toml");
+}
+
+/// Write one metadata-only job document (listing never parses the
+/// route source, so no route file is needed).
+fn write_listing_job(path: &Path, description: &str) {
+    std::fs::write(
+        path,
+        format!(
+            "description: {description}\nexecute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:transform\n"
+        ),
+    )
+    .expect("write job doc");
+}
+
+/// Run no-argument `camel job` in `dir` to completion and return
+/// `(exit_code, stdout, stderr)`.
+fn run_job_listing(dir: &Path) -> (i32, String, String) {
+    common::run_binary(dir, Path::new(env!("CARGO_BIN_EXE_camel")), &["job"], &[])
+}
+
+/// The listing recurses: a nested `.job.yaml` lists under its
+/// configured-root-relative path while a sibling `.test.yaml` document
+/// is silently skipped.
+#[test]
+fn job_listing_recurses_and_skips_test_documents() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_listing_config(dir.path(), "dirs = [\"jobs\"]");
+    std::fs::create_dir_all(dir.path().join("jobs/domain")).expect("mkdir domain");
+    write_listing_job(
+        &dir.path().join("jobs/domain/report.job.yaml"),
+        "nested job",
+    );
+    write_listing_job(
+        &dir.path().join("jobs/domain/skip.test.yaml"),
+        "must not list",
+    );
+
+    let (code, stdout, stderr) = run_job_listing(dir.path());
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l == "domain/report.job.yaml: report — nested job"),
+        "exact nested line; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(".test.yaml"),
+        "test document silently skipped; got:\n{stdout}"
+    );
+}
+
+/// Depth cap: a job at depth 8 (eight nested directories below the
+/// root) is listed, a depth-9 job is excluded, exactly ONE warning
+/// names the root with the exact truncation phrase, and the SECOND
+/// root still scans.
+#[test]
+fn job_listing_stops_at_depth_eight() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_listing_config(dir.path(), "dirs = [\"first\", \"second\"]");
+    let mut deep = dir.path().join("first");
+    for i in 1..=8 {
+        deep = deep.join(format!("d{i}"));
+    }
+    std::fs::create_dir_all(&deep).expect("mkdir depth-8 chain");
+    std::fs::create_dir_all(deep.join("d9")).expect("mkdir depth-9 dir");
+    write_listing_job(&deep.join("eight.job.yaml"), "depth eight");
+    write_listing_job(&deep.join("d9/nine.job.yaml"), "depth nine");
+    std::fs::create_dir_all(dir.path().join("second")).expect("mkdir second");
+    write_listing_job(&dir.path().join("second/second.job.yaml"), "second job");
+
+    let (code, stdout, stderr) = run_job_listing(dir.path());
+    assert_eq!(
+        code, 0,
+        "truncated listing still exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("d1/d2/d3/d4/d5/d6/d7/d8/eight.job.yaml: eight — depth eight"),
+        "depth-8 job listed; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("nine"),
+        "depth-9 job excluded; got:\n{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|l| l == "second — second job"),
+        "second root continues after the truncated first; got:\n{stdout}"
+    );
+    assert_eq!(
+        stderr.matches("listing truncated").count(),
+        1,
+        "exactly one truncation warning; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("listing truncated at 8; narrow [jobs].dirs") && stderr.contains("first"),
+        "warning names the root and the cap; got:\n{stderr}"
+    );
+}
+
+/// File cap: 512 encountered files per root — after 511 `.txt` files
+/// the 512th file (`511.job.yaml`) is the last processed entry, the
+/// 513th (`512.job.yaml`) is excluded with exactly ONE warning naming
+/// the root, and the second root still scans.
+#[test]
+fn job_listing_stops_at_512_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_listing_config(dir.path(), "dirs = [\"first\", \"second\"]");
+    let first = dir.path().join("first");
+    std::fs::create_dir_all(&first).expect("mkdir first");
+    for i in 0..=510 {
+        std::fs::write(first.join(format!("{i:03}.txt")), "filler").expect("write filler");
+    }
+    write_listing_job(&first.join("511.job.yaml"), "file cap job");
+    write_listing_job(&first.join("512.job.yaml"), "beyond cap job");
+    std::fs::create_dir_all(dir.path().join("second")).expect("mkdir second");
+    write_listing_job(&dir.path().join("second/second.job.yaml"), "second job");
+
+    let (code, stdout, stderr) = run_job_listing(dir.path());
+    assert_eq!(
+        code, 0,
+        "truncated listing still exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.lines().any(|l| l == "511 — file cap job"),
+        "the 512th encountered file is listed; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("beyond cap"),
+        "the 513th file is excluded; got:\n{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|l| l == "second — second job"),
+        "second root continues after the truncated first; got:\n{stdout}"
+    );
+    assert_eq!(
+        stderr.matches("listing truncated").count(),
+        1,
+        "exactly one truncation warning; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("listing truncated at 512; narrow [jobs].dirs") && stderr.contains("first"),
+        "warning names the root and the cap; got:\n{stderr}"
+    );
+}
+
+/// A directory holding more entries than any historical per-directory
+/// buffer bound (1030 subdirectories) is still walked whole: with three
+/// files — far under the 512-file cap — every job is listed in lexical
+/// order and NO truncation warning is emitted. Only depth 8 and 512
+/// encountered files ever truncate a scan.
+#[test]
+fn job_listing_walks_directory_with_many_subdirs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_listing_config(dir.path(), "dirs = [\"first\"]");
+    let first = dir.path().join("first");
+    std::fs::create_dir_all(&first).expect("mkdir first");
+    for i in 0..1030 {
+        std::fs::create_dir(first.join(format!("d{i:04}"))).expect("mkdir wide dir");
+    }
+    write_listing_job(&first.join("d0000/early.job.yaml"), "early job");
+    write_listing_job(&first.join("d1029/late.job.yaml"), "late job");
+    write_listing_job(&first.join("top.job.yaml"), "top job");
+
+    let (code, stdout, stderr) = run_job_listing(dir.path());
+    assert_eq!(
+        code, 0,
+        "wide directory still exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let rows: Vec<&str> = stdout.lines().filter(|l| l.contains(" — ")).collect();
+    assert_eq!(
+        rows,
+        vec![
+            "d0000/early.job.yaml: early — early job",
+            "d1029/late.job.yaml: late — late job",
+            "top — top job",
+        ],
+        "every job of the wide directory is listed in lexical order; got:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("listing truncated"),
+        "a wide directory never truncates; got:\n{stderr}"
+    );
+}

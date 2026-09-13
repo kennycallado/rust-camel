@@ -90,8 +90,9 @@ pub struct CamelConfig {
     #[serde(default)]
     pub datasources: HashMap<String, DatasourceConfig>,
 
-    /// Jobs directory for `camel job` discovery (`[jobs]` in Camel.toml).
-    /// Resolved against the Camel.toml root, never the process CWD.
+    /// Ordered job discovery roots for `camel job` (`[jobs]` in
+    /// Camel.toml); normalize via `resolved_dirs()`. Resolved against the
+    /// Camel.toml root, never the process CWD.
     #[serde(default)]
     pub jobs: JobsCamelConfig,
 
@@ -246,22 +247,39 @@ impl Default for CamelConfig {
 
 /// Jobs configuration for `[jobs]` in Camel.toml.
 ///
-/// `dir` is the `camel job` discovery directory (bare-name resolution
-/// and no-argument listing), resolved against the Camel.toml root.
-/// A job document's route source stays explicit — this table never
-/// feeds route discovery.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+/// Ordered `camel job` discovery roots, resolved against the Camel.toml
+/// root. `dirs` is the ordered discovery set and wins whenever present —
+/// an explicit `dirs = []` means "no roots". The legacy `dir` alias folds
+/// into a single root and is honored only while `dirs` is absent. Key
+/// presence is preserved so callers can tell `dirs = []` from an absent
+/// `dirs`. A job document's route source stays explicit — this table
+/// never feeds route discovery.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct JobsCamelConfig {
-    /// Directory holding `*.job.yaml` documents. Default: `"jobs"`.
-    #[serde(default = "default_jobs_dir")]
-    pub dir: String,
+    /// Legacy single discovery root. Superseded by `dirs` whenever
+    /// `dirs` is present.
+    #[serde(default)]
+    pub dir: Option<String>,
+    /// Ordered discovery roots. Presence (including an empty list)
+    /// overrides the legacy `dir` alias.
+    #[serde(default)]
+    pub dirs: Option<Vec<String>>,
 }
 
-impl Default for JobsCamelConfig {
-    fn default() -> Self {
-        Self {
-            dir: default_jobs_dir(),
+impl JobsCamelConfig {
+    /// Normalized ordered discovery roots.
+    ///
+    /// Precedence: `dirs` whenever present (an explicit empty list wins),
+    /// then the legacy `dir` folded into one root, then the built-in
+    /// `["jobs"]` default when both keys are absent.
+    pub fn resolved_dirs(&self) -> Vec<String> {
+        if let Some(dirs) = &self.dirs {
+            return dirs.clone();
+        }
+        match &self.dir {
+            Some(dir) => vec![dir.clone()],
+            None => vec![default_jobs_dir()],
         }
     }
 }

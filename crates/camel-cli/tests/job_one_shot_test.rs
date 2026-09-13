@@ -884,20 +884,12 @@ fn listing_shows_names_and_descriptions() {
         lines[0], "Jobs in jobs/:",
         "header names the dir; got:\n{stdout}"
     );
-    let job_line = lines
-        .iter()
-        .find(|l| l.starts_with("  job "))
-        .expect("job row listed");
     assert!(
-        job_line.contains("create things via direct:in"),
+        lines.contains(&"job — create things via direct:in"),
         "job row carries its description; got:\n{stdout}"
     );
-    let reindex = lines
-        .iter()
-        .find(|l| l.starts_with("  reindex "))
-        .expect("reindex listed");
     assert!(
-        reindex.contains("(no description)"),
+        lines.contains(&"reindex — (no description)"),
         "reindex has no description; got:\n{stdout}"
     );
 }
@@ -1042,6 +1034,460 @@ fn listing_anchored_at_config_root() {
     assert!(
         stdout.contains("job") && !stdout.contains("decoy"),
         "ROOT jobs/ is listed, not ./jobs/ relative to CWD; got:\n{stdout}"
+    );
+}
+
+// ── Ordered discovery roots (jobdiscovery Task 2.1) ────────────────────
+
+/// Write the fixture config with a `[jobs]` table body (`dirs`, legacy
+/// `dir`, or both), logs off for a clean listing stdout.
+fn write_config_with_jobs(dir: &Path, jobs_table: &str) {
+    std::fs::write(
+        dir.join("Camel.toml"),
+        format!(
+            "[default]\nroutes = [\"routes/*.yaml\"]\nlog_level = \"off\"\nwatch = false\n\n[default.jobs]\n{jobs_table}\n"
+        ),
+    )
+    .expect("write Camel.toml");
+}
+
+/// Write one metadata-only job document: a description plus a minimal
+/// `execute:` block. Listing never parses the route source, so listing
+/// fixtures need no route file.
+fn write_listing_job(path: &Path, description: &str) {
+    std::fs::write(
+        path,
+        format!(
+            "description: {description}\nexecute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:transform\n"
+        ),
+    )
+    .expect("write job doc");
+}
+
+/// Roots are scanned in `[jobs].dirs` declaration order, not stem
+/// order: `zulu` (team-a) must list before `alpha` (team-b) even
+/// though a global name sort would print them the other way.
+#[test]
+fn configured_job_dirs_are_scanned_in_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"team-a\", \"team-b\"]");
+    std::fs::create_dir_all(dir.path().join("team-a")).expect("mkdir team-a");
+    std::fs::create_dir_all(dir.path().join("team-b")).expect("mkdir team-b");
+    write_listing_job(&dir.path().join("team-a/zulu.job.yaml"), "team a job");
+    write_listing_job(&dir.path().join("team-b/alpha.job.yaml"), "team b job");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec![
+            "Jobs in team-a/:",
+            "zulu — team a job",
+            "Jobs in team-b/:",
+            "alpha — team b job",
+        ],
+        "roots scan in declaration order (team-a before team-b); got:\n{stdout}"
+    );
+}
+
+/// `dirs` wins over legacy `dir` when both exist: only `first` and
+/// `second` are scanned, and the legacy-only file never appears.
+#[test]
+fn explicit_job_dirs_override_legacy_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(
+        dir.path(),
+        "dir = \"legacy\"\ndirs = [\"first\", \"second\"]",
+    );
+    std::fs::create_dir_all(dir.path().join("legacy")).expect("mkdir legacy");
+    std::fs::create_dir_all(dir.path().join("first")).expect("mkdir first");
+    std::fs::create_dir_all(dir.path().join("second")).expect("mkdir second");
+    write_listing_job(
+        &dir.path().join("legacy/legacy-only.job.yaml"),
+        "legacy job",
+    );
+    write_listing_job(&dir.path().join("first/first.job.yaml"), "");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.lines().any(|l| l == "first — (no description)"),
+        "exact first-root line; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("legacy-only"),
+        "legacy dir must not be scanned when dirs is present; got:\n{stdout}"
+    );
+}
+
+/// No `[jobs]` setting at all keeps the built-in `jobs` root.
+#[test]
+fn default_jobs_root_is_used() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir_all(dir.path().join("jobs")).expect("mkdir jobs");
+    write_listing_job(&dir.path().join("jobs/only.job.yaml"), "the default job");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Jobs in jobs/:") && stdout.contains("only — the default job"),
+        "default jobs root is scanned; got:\n{stdout}"
+    );
+}
+
+/// A bare name found in only the SECOND root still resolves: the probe
+/// walks every configured root in order, the single match is selected,
+/// and the successful run leaves stderr completely empty.
+#[test]
+fn named_job_uses_later_matching_configured_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"first\", \"second\"]");
+    std::fs::create_dir_all(dir.path().join("first")).expect("mkdir first");
+    std::fs::create_dir_all(dir.path().join("second")).expect("mkdir second");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-transform"
+    from: "direct:transform"
+    steps:
+      - set_body:
+          value: "second-marker"
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.path().join("second/report.job.yaml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: "ping"
+routeFilesFromRoot:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "report");
+    assert_eq!(
+        code, 0,
+        "second-root match resolves and completes;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "no miss or ambiguity on stderr; got:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(report["reply"]["body"], "second-marker", "report: {report}");
+    assert!(
+        report["document"]
+            .as_str()
+            .is_some_and(|d| d.ends_with("second/report.job.yaml")),
+        "the second-root document ran; report: {report}"
+    );
+}
+
+/// Descriptions render on one line, a descriptionless `.job.yml` lists
+/// as `(no description)`, and a bare lookup of that yml stem misses
+/// naming the `.job.yaml` probe.
+#[test]
+fn listing_formats_descriptions_and_yml_is_display_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir_all(dir.path().join("jobs")).expect("mkdir jobs");
+    std::fs::write(
+        dir.path().join("jobs/multi.job.yaml"),
+        "description: |\n  first line\n  second line\nexecute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:transform\n",
+    )
+    .expect("write multi job");
+    write_listing_job(&dir.path().join("jobs/plain.job.yml"), "");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let multi_line = stdout
+        .lines()
+        .find(|l| l.contains("first line"))
+        .expect("multi listed");
+    assert!(
+        multi_line.contains("first line") && multi_line.contains("second line"),
+        "both parts on the listing row; got:\n{stdout}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|l| l.contains("first line") || l.contains("second line"))
+            .count(),
+        1,
+        "description renders on ONE line; got:\n{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|l| l == "plain — (no description)"),
+        "the .job.yml stem lists with no description; got:\n{stdout}"
+    );
+
+    let (code, _stdout, stderr) = run_job(dir.path(), "plain");
+    assert_eq!(
+        code, 2,
+        "bare token does not resolve .job.yml; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no job `plain`") && stderr.contains("plain.job.yaml"),
+        "miss error names the probed .job.yaml; got:\n{stderr}"
+    );
+}
+
+/// A malformed sibling renders `(unparseable)` while the valid job
+/// stays listed and the exit stays 0.
+#[test]
+fn malformed_job_sibling_does_not_abort_listing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir_all(dir.path().join("jobs")).expect("mkdir jobs");
+    write_listing_job(&dir.path().join("jobs/good.job.yaml"), "good job");
+    std::fs::write(dir.path().join("jobs/bad.job.yaml"), "{not yaml").expect("write broken");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "unparseable sibling keeps listing at exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.lines().any(|l| l == "good — good job"),
+        "valid job listed; got:\n{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|l| l == "bad — (unparseable)"),
+        "malformed sibling labeled; got:\n{stdout}"
+    );
+}
+
+/// A configured root that does not exist behaves like `ls`: the
+/// creation hint prints and the listing exits 0.
+#[test]
+fn missing_job_root_is_successful() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"missing\"]");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "absent root is exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("No jobs found in missing/") && stdout.contains("<name>.job.yaml"),
+        "creation hint on stdout; got:\n{stdout}"
+    );
+}
+
+/// A missing leading root never hides the roots after it.
+#[test]
+fn missing_first_root_does_not_hide_second() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"missing\", \"second\"]");
+    std::fs::create_dir_all(dir.path().join("second")).expect("mkdir second");
+    write_listing_job(&dir.path().join("second/only.job.yaml"), "second job");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.lines().any(|l| l == "only — second job"),
+        "second-root job listed after missing first root; got:\n{stdout}"
+    );
+}
+
+/// The walk is lexical and never follows directory symlinks: `a/`
+/// lists before `b/`, and a symlinked directory's target stays absent.
+#[test]
+fn job_listing_is_lexical_and_does_not_follow_directory_symlinks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    let jobs = dir.path().join("jobs");
+    std::fs::create_dir_all(jobs.join("a")).expect("mkdir a");
+    std::fs::create_dir_all(jobs.join("b")).expect("mkdir b");
+    std::fs::create_dir_all(dir.path().join("outside")).expect("mkdir outside");
+    write_listing_job(&jobs.join("a/aa.job.yaml"), "a dir job");
+    write_listing_job(&jobs.join("b/bb.job.yaml"), "b dir job");
+    write_listing_job(&dir.path().join("outside/outsider.job.yaml"), "outside job");
+    std::os::unix::fs::symlink("../outside", jobs.join("linked")).expect("symlink linked");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec![
+            "Jobs in jobs/:",
+            "a/aa.job.yaml: aa — a dir job",
+            "b/bb.job.yaml: bb — b dir job",
+        ],
+        "lexical nested order, no symlinked-directory traversal; got:\n{stdout}"
+    );
+}
+
+/// The same bare name in two roots is an exit-2 ambiguity naming every
+/// matching path, before any execution.
+#[test]
+fn named_job_collision_reports_all_matching_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"first\", \"second\"]");
+    std::fs::create_dir_all(dir.path().join("first")).expect("mkdir first");
+    std::fs::create_dir_all(dir.path().join("second")).expect("mkdir second");
+    std::fs::write(
+        dir.path().join("first/report.job.yaml"),
+        "description: first-marker\nexecute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:transform\n",
+    )
+    .expect("write first job doc");
+    std::fs::write(
+        dir.path().join("second/report.job.yaml"),
+        "description: second-marker\nexecute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:transform\n",
+    )
+    .expect("write second job doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "report");
+    assert_eq!(
+        code, 2,
+        "cross-root collision is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let first = std::fs::canonicalize(dir.path().join("first/report.job.yaml"))
+        .expect("first fixture exists");
+    let second = std::fs::canonicalize(dir.path().join("second/report.job.yaml"))
+        .expect("second fixture exists");
+    assert!(
+        stderr.contains(first.display().to_string().as_str())
+            && stderr.contains(second.display().to_string().as_str()),
+        "stderr names both matching paths; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "no report on a collision; got:\n{stdout}"
+    );
+}
+
+/// Spec scenario "Explicit path and bare-name miss", run from a NESTED
+/// working directory: an explicit `.job.yml` outside every configured
+/// root loads as-is (root probing never runs for explicit paths), while
+/// a bare-name miss names the exact `<name>.job.yaml` probe in EVERY
+/// configured root — anchored at the Camel.toml root, never the CWD —
+/// and exits 2.
+#[test]
+fn explicit_job_path_bypasses_roots_and_bare_miss_is_named() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"first\", \"second\"]");
+    std::fs::create_dir_all(dir.path().join("first")).expect("mkdir first");
+    std::fs::create_dir_all(dir.path().join("second")).expect("mkdir second");
+    std::fs::create_dir_all(dir.path().join("ops")).expect("mkdir ops");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-transform"
+    from: "direct:transform"
+    steps:
+      - set_body:
+          value: "explicit-marker"
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.path().join("ops/one-shot.job.yml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: "ping"
+routeFilesFromRoot:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+    let ops = dir.path().join("ops");
+
+    // Explicit path from the nested CWD: the document is outside both
+    // roots (a bare `one-shot` probe would miss both) and must load
+    // as-is through its `.yml` suffix.
+    let (code, stdout, stderr) =
+        run_job_args(&ops, &["--config", "../Camel.toml", "one-shot.job.yml"]);
+    assert_eq!(
+        code, 0,
+        "explicit path is used as-is;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(
+        report["reply"]["body"], "explicit-marker",
+        "the nested explicit document ran; report: {report}"
+    );
+
+    // Bare-name miss from the same nested CWD: both probes anchor at
+    // the Camel.toml root, not the process directory.
+    let (code, stdout, stderr) = run_job_args(&ops, &["--config", "../Camel.toml", "missing"]);
+    assert_eq!(
+        code, 2,
+        "bare miss is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("first/missing.job.yaml") && stderr.contains("second/missing.job.yaml"),
+        "stderr names every configured root's probe; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "no report on a miss; got:\n{stdout}"
+    );
+}
+
+/// Listing is metadata-only: sentinel values that would fail route
+/// interpolation or security compilation never reach a pipeline — the
+/// description prints and the exit is 0.
+#[test]
+fn job_listing_does_not_boot_route_pipeline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir_all(dir.path().join("jobs")).expect("mkdir jobs");
+    std::fs::write(
+        dir.path().join("jobs/sentinel.job.yaml"),
+        "description: safe listing\nexecute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:transform\n    body: \"${env:JOB_DISCOVERY_MUST_NOT_RUN}\"\nrouteFilesFromRoot:\n  - __invalid_listing_sentinel__.yaml\n",
+    )
+    .expect("write sentinel job doc");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("sentinel") && stdout.contains("safe listing"),
+        "description listed; got:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("JOB_DISCOVERY_MUST_NOT_RUN")
+            && !stderr.contains("__invalid_listing_sentinel__"),
+        "no interpolation or security sentinel errors; got:\n{stderr}"
     );
 }
 

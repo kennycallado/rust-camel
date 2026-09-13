@@ -1,7 +1,7 @@
 # ADR-0062: Reserved Test Suffix and Placement Contract
 
 **Date:** 2026-08-22
-**Status:** Accepted (Amended 2026-09-11 — two reserved suffixes; see "Amendment")
+**Status:** Accepted (Amended 2026-09-13 — ordered job discovery set; see "Amendments")
 **Origin:** OpenSpec change `test-placement-contract` (bd rc-6760)
 
 ## Context
@@ -134,6 +134,20 @@ no longer consumes `*.test.yaml`.
   explicit route source stays mandatory.
 - Test placement rules (colocation, `routeFilesFromRoot` anchoring) are
   unchanged and apply to the test family only.
-- ADR-0069 Decision 6 (the section classifies the document) is
-  untouched: section classification still holds within a suffix; the
-  suffix is now the first discriminator between the two families.
+ - ADR-0069 Decision 6 (the section classifies the document) is
+   untouched: section classification still holds within a suffix; the
+   suffix is now the first discriminator between the two families.
+
+## Amendments
+
+### Amendment (2026-09-13): Ordered job discovery set
+
+The `jobdiscovery` change for bd `rc-k0rvt` extends the job root from one
+directory to ordered `[jobs].dirs`. It keeps `[jobs].dir` as a compatibility
+alias. Listing uses a bounded metadata walk. It does not invoke route
+discovery, interpolation, or security compilation. This amendment does not
+change job arguments, help, or typed argument behavior.
+The walk uses lexical order, root depth 0, maximum depth 8, and 512 files per
+root. It follows no directory symlinks. A truncated root emits one warning.
+If both `dir` and `dirs` exist, `dirs` wins. Nested listing shows relative
+paths. Bare-name lookup remains root-level only.

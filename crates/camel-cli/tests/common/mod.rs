@@ -274,7 +274,11 @@ pub fn spawn_camel_job(dir: &Path, doc: &Path) -> KillOnDrop {
 /// `spawn_camel_job` with extra trailing CLI arguments appended after
 /// the document (e.g. `--report=<path>`, which keeps stdout clean and
 /// routes the JSON report to a file the test asserts on). Same kill-on-
-/// drop guard and piped stdio as `spawn_camel_job`.
+/// drop guard and piped stdio as `spawn_camel_job`. The spawn also
+/// opts in to the `signal streams armed` stderr marker
+/// (`CAMEL_JOB_SIGNAL_MARKER`): the marker is a test-synchronization
+/// device the CLI emits only on request, so these signal tests keep
+/// their pre-config-load synchronization point.
 // Shared by job_signal_test.rs; the test binaries that include `common`
 // without calling it would otherwise warn dead_code (each compilation
 // unit gets its own copy of the module).
@@ -285,6 +289,7 @@ pub fn spawn_camel_job_with_args(dir: &Path, doc: &Path, extra_args: &[&str]) ->
     for arg in extra_args {
         command.arg(arg);
     }
+    command.env("CAMEL_JOB_SIGNAL_MARKER", "1");
     let child = command
         .current_dir(dir)
         .stdout(Stdio::piped())

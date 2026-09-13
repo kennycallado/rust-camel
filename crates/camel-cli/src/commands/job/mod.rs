@@ -1,7 +1,7 @@
 //! `camel job <FILE>` — one-shot route execution from a `*.job.yaml`
 //! document declaring a top-level `execute:` section. A bare name
-//! resolves `{jobs.dir}/<name>.job.yaml`; no argument lists the jobs
-//! directory.
+//! probes `<name>.job.yaml` across the ordered `[jobs].dirs` roots;
+//! no argument lists the discovery set.
 //!
 //! The job boots the REAL composition root (the same seams `camel run`
 //! uses: config load, security compile context, bind-exposure acks, the
@@ -66,8 +66,9 @@ const MIN_SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 #[derive(Args, Debug)]
 pub struct JobArgs {
     /// Path to the job document (`*.job.yaml` with an `execute:`
-    /// section). A bare name (no separator, no suffix) resolves
-    /// `{jobs.dir}/<name>.job.yaml`; omitted lists the jobs directory.
+    /// section). A bare name (no separator, no suffix) probes
+    /// `<name>.job.yaml` in every `[jobs].dirs` root; omitted lists
+    /// the discovery set.
     #[arg(value_name = "FILE")]
     pub document: Option<PathBuf>,
     /// Write the JSON report to this path instead of stdout.
@@ -155,19 +156,39 @@ enum SendError {
     Transport(String),
 }
 
-/// The jobs directory, anchored at the Camel.toml root (never the
-/// process CWD): `canonical_project_root(--config)` joined with
-/// `[jobs].dir`. Shared by bare-name resolution and no-argument
-/// listing so the two surfaces cannot drift. A dangling `--config`
-/// parent is an error for the caller to map — this never inherits
-/// `camel run`'s exit-1 convention, and never silently falls back to
-/// the CWD.
-fn jobs_root(
+/// Maximum directory depth of the metadata listing walk: the root is
+/// depth 0, every nested directory level adds one, and entries deeper
+/// than 8 are never inspected.
+const LISTING_MAX_DEPTH: usize = 8;
+
+/// Maximum encountered files per listing root — every file counts, not
+/// just job documents: the 513th file of a root is never inspected.
+const LISTING_MAX_FILES: usize = 512;
+
+/// The ordered job discovery roots, anchored at the Camel.toml root
+/// (never the process CWD): `try_canonical_project_root(--config)`
+/// joined with each `resolved_dirs()` entry, paired with its
+/// configured label for display. Shared by bare-name resolution and
+/// no-argument listing so the two surfaces cannot drift. A dangling
+/// `--config` parent is an error for the caller to map — this never
+/// inherits `camel run`'s exit-1 convention, and never silently falls
+/// back to the CWD.
+fn jobs_roots(
     args: &JobArgs,
     camel_config: &camel_config::config::CamelConfig,
-) -> Result<PathBuf, String> {
+) -> Result<Vec<(String, PathBuf)>, String> {
     crate::commands::run::try_canonical_project_root(Path::new(&args.config))
-        .map(|root| root.join(&camel_config.jobs.dir))
+        .map(|root| {
+            camel_config
+                .jobs
+                .resolved_dirs()
+                .into_iter()
+                .map(|label| {
+                    let path = root.join(&label);
+                    (label, path)
+                })
+                .collect()
+        })
         .map_err(|e| {
             format!(
                 "cannot resolve project root from --config {}: {e}",
@@ -179,10 +200,13 @@ fn jobs_root(
 /// Resolve a document argument. An explicit path (any path separator,
 /// or a `.yaml`/`.yml`/`.json` suffix) is used as-is — including an
 /// explicit `.job.yml`. A bare name probes exactly
-/// `{jobs_root}/<name>.job.yaml` (one deterministic spelling, no
-/// alternate-suffix probing) and a miss fails with one error naming
-/// the probed file.
-fn resolve_job_path(raw: &Path, jobs_root: &Path) -> Result<PathBuf, String> {
+/// `<root>/<name>.job.yaml` in every configured root (one
+/// deterministic spelling, no alternate-suffix probing, root-level
+/// only — nested documents are never bare-resolved), collecting ALL
+/// matches before selection so a cross-root stem collision is an
+/// explicit error naming every matching path instead of a silent
+/// first win; a miss names every probed file.
+fn resolve_job_path(raw: &Path, roots: &[(String, PathBuf)]) -> Result<PathBuf, String> {
     let name = raw.to_string_lossy();
     let lower = name.to_lowercase();
     let explicit = raw.components().count() > 1
@@ -192,14 +216,33 @@ fn resolve_job_path(raw: &Path, jobs_root: &Path) -> Result<PathBuf, String> {
     if explicit {
         return Ok(raw.to_path_buf());
     }
-    let probe = jobs_root.join(format!("{name}.job.yaml"));
-    if probe.exists() {
-        Ok(probe)
-    } else {
-        Err(format!(
-            "no job `{name}` in `{}` (looked for {name}.job.yaml)",
-            jobs_root.display()
-        ))
+    let probes: Vec<PathBuf> = roots
+        .iter()
+        .map(|(_, root)| root.join(format!("{name}.job.yaml")))
+        .collect();
+    let matches: Vec<PathBuf> = probes
+        .iter()
+        .filter(|probe| probe.exists())
+        .cloned()
+        .collect();
+    match matches.as_slice() {
+        [] => Err(format!(
+            "no job `{name}` in any configured root (looked for {})",
+            probes
+                .iter()
+                .map(|probe| probe.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        [only] => Ok(only.clone()),
+        many => Err(format!(
+            "job `{name}` is ambiguous: matches {} configured roots: {}",
+            many.len(),
+            many.iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
     }
 }
 
@@ -221,68 +264,193 @@ fn probe_description(path: &Path) -> Option<Option<String>> {
     Some(probe.description)
 }
 
-/// List the jobs directory (`camel job` with no document argument).
-/// Exit 0 for found, empty, and absent directories alike — listing is a
-/// query, not a usage error (ls semantics). Listing output and the JSON
-/// run report never co-occur: the report path requires a document.
-fn list_jobs(
-    _args: &JobArgs,
-    camel_config: &camel_config::config::CamelConfig,
-    root: &Path,
-) -> i32 {
-    let dir_label = camel_config.jobs.dir.as_str();
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        // Absent is legitimate for a fresh project (ls semantics, exit 0).
-        // Any other read failure (permissions, ...) is a real error.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!(
-                "No jobs found in {dir_label}/. Create a `<name>.job.yaml` there, or run `camel job <path>`."
-            );
-            return 0;
-        }
-        Err(e) => {
-            eprintln!("cannot read jobs dir `{}`: {e}", root.display());
-            return 2;
-        }
+/// One listed job document: the display name (the bare stem for files
+/// directly under the configured root, `relative/path: stem` for
+/// nested ones) and the probed description.
+struct ListedJob {
+    display: String,
+    description: Option<Option<String>>,
+}
+
+/// The bounded scan of one configured root: the discovered job rows
+/// and, when a cap stopped the walk early, the cap value that
+/// truncated it.
+struct RootScan {
+    jobs: Vec<ListedJob>,
+    truncated_at: Option<usize>,
+}
+
+/// Scan one configured root (metadata only): a lexical, recursive
+/// walk that never follows directory symlinks, bounded by
+/// [`LISTING_MAX_DEPTH`] and [`LISTING_MAX_FILES`]. An absent
+/// root is the caller's hint case; other read failures of the ROOT
+/// surface as `Err`, while failures below the root only skip that
+/// subtree.
+fn scan_root(root: &Path) -> std::io::Result<RootScan> {
+    let mut scan = RootScan {
+        jobs: Vec::new(),
+        truncated_at: None,
     };
+    let mut files_seen = 0usize;
+    walk_level(root, root, 0, &mut scan, &mut files_seen)?;
+    Ok(scan)
+}
 
-    let mut jobs: Vec<(String, Option<Option<String>>)> = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file() && camel_dsl::discovery::is_job_document(path))
-        .map(|path| {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let display = name
-                .strip_suffix(".job.yaml")
-                .or_else(|| name.strip_suffix(".job.yml"))
-                .unwrap_or(&name)
-                .to_string();
-            (display, probe_description(&path))
-        })
-        .collect();
-    jobs.sort_by(|a, b| a.0.cmp(&b.0));
-
-    if jobs.is_empty() {
-        println!(
-            "No jobs found in {dir_label}/. Create a `<name>.job.yaml` there, or run `camel job <path>`."
-        );
-        return 0;
-    }
-
-    println!("Jobs in {dir_label}/:");
-    for (name, description) in &jobs {
-        let rendered = match description {
-            None => "(unparseable)".to_string(),
-            Some(None) => "(no description)".to_string(),
-            Some(Some(d)) => d.replace(['\n', '\r'], " "),
+/// Walk one directory level of a root scan. `depth` is the depth of
+/// the entries directly inside `dir` (the root call passes 0). Entries
+/// are visited in lexical order; directories are traversed only while
+/// their contents stay within [`LISTING_MAX_DEPTH`] (a directory whose
+/// entries would exceed the cap is skipped and marks the scan
+/// truncated), and every encountered file — job document or not —
+/// counts toward [`LISTING_MAX_FILES`] (the first file past the cap
+/// marks the scan truncated and aborts the root). Returns `false`
+/// once the file cap aborts the walk so callers stop the whole root.
+///
+/// The traversal is bounded in memory: the directory is re-read once
+/// per yielded entry and each pass keeps only the lexicographically
+/// smallest name after the cursor — never the directory's full entry
+/// list — so no directory size can force an unbounded allocation and
+/// readdir order can never leak into the output.
+fn walk_level(
+    dir: &Path,
+    root: &Path,
+    depth: usize,
+    scan: &mut RootScan,
+    files_seen: &mut usize,
+) -> std::io::Result<bool> {
+    // Lexical cursor: every pass yields exactly the smallest entry
+    // name strictly greater than the last visited one, so the visit
+    // order is deterministic and per-directory memory stays at one
+    // candidate name.
+    let mut cursor: Option<std::ffi::OsString> = None;
+    loop {
+        let mut next: Option<(std::ffi::OsString, bool)> = None;
+        for entry in std::fs::read_dir(dir)? {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name();
+            if cursor
+                .as_ref()
+                .is_some_and(|seen| name.as_os_str() <= seen.as_os_str())
+            {
+                continue;
+            }
+            let take = match &next {
+                Some((best, _)) => &name < best,
+                None => true,
+            };
+            if take {
+                next = Some((name, file_type.is_dir()));
+            }
+        }
+        let Some((name, is_dir)) = next else {
+            return Ok(true);
         };
-        println!("  {name}      {rendered}");
+        cursor = Some(name.clone());
+        let path = dir.join(&name);
+        // Real directories only: the file type comes from
+        // `DirEntry::file_type`, which never follows the entry, so a
+        // symlinked directory is not traversed.
+        if is_dir {
+            if depth >= LISTING_MAX_DEPTH {
+                scan.truncated_at.get_or_insert(LISTING_MAX_DEPTH);
+                continue;
+            }
+            // A read failure below the root skips the subtree — a
+            // malformed sibling must never abort the listing.
+            if !walk_level(&path, root, depth + 1, scan, files_seen).unwrap_or(true) {
+                return Ok(false);
+            }
+            continue;
+        }
+        // Files count whether or not they are job documents; a symlink
+        // to a file is followed (flat-listing parity), anything else
+        // (dangling symlink, fifo) is skipped.
+        if !path.is_file() {
+            continue;
+        }
+        *files_seen += 1;
+        if *files_seen > LISTING_MAX_FILES {
+            scan.truncated_at.get_or_insert(LISTING_MAX_FILES);
+            return Ok(false);
+        }
+        if !camel_dsl::discovery::is_job_document(&path) {
+            continue;
+        }
+        let name = name.to_string_lossy().into_owned();
+        let stem = name
+            .strip_suffix(".job.yaml")
+            .or_else(|| name.strip_suffix(".job.yml"))
+            .unwrap_or(&name)
+            .to_string();
+        let display = match path.strip_prefix(root) {
+            // Nested documents carry their configured-root-relative
+            // path; root-level documents keep the bare stem.
+            Ok(relative) if relative.components().count() > 1 => {
+                format!("{}: {}", relative.display(), stem)
+            }
+            _ => stem,
+        };
+        scan.jobs.push(ListedJob {
+            display,
+            description: probe_description(&path),
+        });
     }
-    0
+}
+
+/// List the configured job discovery roots (`camel job` with no
+/// document argument). Exit 0 for found, empty, and absent roots alike
+/// — listing is a query, not a usage error (ls semantics). A root the
+/// walker cannot read (permissions, ...) is a real error for THAT root
+/// while the remaining roots keep scanning. Listing output and the
+/// JSON run report never co-occur: the report path requires a
+/// document.
+fn list_jobs(roots: &[(String, PathBuf)]) -> i32 {
+    let mut exit = 0;
+    for (label, root) in roots {
+        let scan = match scan_root(root) {
+            Ok(scan) => scan,
+            // Absent is legitimate for a fresh project (ls semantics,
+            // exit 0). Any other read failure is a real error for this
+            // root; the scan continues with the remaining roots.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!(
+                    "No jobs found in {label}/. Create a `<name>.job.yaml` there, or run `camel job <path>`."
+                );
+                continue;
+            }
+            Err(e) => {
+                eprintln!("cannot read jobs dir `{}`: {e}", root.display());
+                exit = 2;
+                continue;
+            }
+        };
+        // One root-specific truncation warning; the remaining roots
+        // still scan.
+        if let Some(cap) = scan.truncated_at {
+            eprintln!("camel job: root `{label}` listing truncated at {cap}; narrow [jobs].dirs");
+        }
+        if scan.jobs.is_empty() {
+            println!(
+                "No jobs found in {label}/. Create a `<name>.job.yaml` there, or run `camel job <path>`."
+            );
+            continue;
+        }
+        println!("Jobs in {label}/:");
+        for job in &scan.jobs {
+            let rendered = match &job.description {
+                None => "(unparseable)".to_string(),
+                Some(None) => "(no description)".to_string(),
+                Some(Some(d)) => d.replace(['\n', '\r'], " "),
+            };
+            println!("{} — {rendered}", job.display);
+        }
+    }
+    exit
 }
 
 /// Run one job document; returns the process exit code (`main.rs`
@@ -308,14 +476,18 @@ pub async fn run_job(args: &JobArgs) -> i32 {
     // point would go nowhere). Document runs only — the streams (and
     // the marker that synchronizes on them) exist only on the
     // document path; the listing path has no signal-sensitive
-    // stretch.
-    if signals.is_some() {
+    // stretch. The marker is test-synchronization machinery, so it is
+    // emitted only when `CAMEL_JOB_SIGNAL_MARKER` opts in: production
+    // document runs keep a clean stderr (successful runs must leave it
+    // empty).
+    if signals.is_some() && std::env::var_os("CAMEL_JOB_SIGNAL_MARKER").is_some() {
         eprintln!("camel job: signal streams armed");
     }
 
     let started = Instant::now();
 
-    // Config first: bare-name resolution needs `[jobs].dir`.
+    // Config first: bare-name resolution and listing need the ordered
+    // `[jobs].dirs` roots.
     let camel_config = match crate::commands::run::load_config_or_default(&args.config) {
         Ok(config) => config,
         Err(e) => {
@@ -324,8 +496,8 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         }
     };
 
-    let jobs_root = match jobs_root(args, &camel_config) {
-        Ok(root) => root,
+    let jobs_roots = match jobs_roots(args, &camel_config) {
+        Ok(roots) => roots,
         Err(msg) => {
             eprintln!("{msg}");
             return 2;
@@ -340,9 +512,9 @@ pub async fn run_job(args: &JobArgs) -> i32 {
             eprintln!("--report requires a job document");
             return 2;
         }
-        return list_jobs(args, &camel_config, &jobs_root);
+        return list_jobs(&jobs_roots);
     };
-    let resolved = match resolve_job_path(raw_document, &jobs_root) {
+    let resolved = match resolve_job_path(raw_document, &jobs_roots) {
         Ok(path) => path,
         Err(msg) => {
             eprintln!("{msg}");
