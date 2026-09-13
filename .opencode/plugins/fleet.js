@@ -97,6 +97,20 @@ async function wakeConductor(type, sid, dir) {
       signal: AbortSignal.timeout(10_000),
     });
     log({ ev: "wake-posted", to: conductor.slice(0, 16), http: res.status });
+    if (res.status !== 200) {
+      // 2026-09-13 incident: stale conductor.json id → silent 404, parked
+      // mission invisible for hours. A failed delivery must scream at the
+      // desktop so the human notices even when the conductor is deaf.
+      log({ ev: "wake-lost", to: conductor.slice(0, 16), http: res.status });
+      const note =
+        `FLEET WAKE LOST (http ${res.status}) — fix .opencode/fleet/conductor.json`;
+      try {
+        const { execFileSync } = await import("node:child_process");
+        execFileSync("notify-send", ["-u", "critical", "camel-fleet", note], {
+          stdio: "ignore",
+        });
+      } catch {}
+    }
   } catch (e) {
     log({ ev: "wake-error", err: String(e).slice(0, 150) });
   }
