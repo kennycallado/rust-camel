@@ -18,7 +18,11 @@
 //! error. A first SIGINT or SIGTERM cancels the in-flight send or
 //! batch drain, runs bounded teardown, and reports outcome
 //! `Interrupted` (exit 2); a second signal during that teardown
-//! force-exits 1. The process exit is applied only at the `main.rs`
+//! force-exits 1. Every failure after the boot handle is acquired —
+//! route loading, consumer validation, target selection, route
+//! registration, context start — runs the same bounded teardown
+//! before its exit-2 return (the post-boot teardown border, bd
+//! rc-7wl19). The process exit is applied only at the `main.rs`
 //! boundary; this module returns the code.
 //!
 //! Spec: openspec/changes/cli-jobs.
@@ -680,11 +684,11 @@ async fn await_job_operation<T>(
 
 /// The single-document job execution/report lifecycle, shared by the
 /// CLI argv path and embedded artifacts: boot composition (mirrors
-/// `camel run` steps 1-5), route loading, the consumer gate, the
-/// one-shot/batch send, the outcome report, and teardown. Returns the
-/// process exit code. `signals` carries the argv path's registered
-/// SIGINT/SIGTERM streams (first-signal interruption); embedded runs
-/// pass `None`.
+/// `camel run` steps 1-5), the post-boot setup behind the teardown
+/// border, the one-shot/batch send, the outcome report, and teardown.
+/// Returns the process exit code. `signals` carries the argv path's
+/// registered SIGINT/SIGTERM streams (first-signal interruption);
+/// embedded runs pass `None`.
 async fn execute_job(
     doc: JobDocument,
     run: JobRun,
@@ -776,127 +780,35 @@ async fn execute_job(
         }
     };
 
-    // ---- Route loading (real-boot seam: ambient ${env:}) ---------------
-    let defs = match load_route_definitions(&route_load, &camel_config, &security_compile_context) {
-        Ok(defs) => defs,
-        Err(e) => {
-            // log-policy: system-broken
-            tracing::error!("Failed to load job routes: {e}");
-            eprintln!("{e}");
-            return 2;
-        }
-    };
-    if defs.is_empty() {
-        eprintln!("{document_label}: job route source resolved zero route definitions");
-        return 2;
-    }
-
-    // Fail-closed consumer gate (load time): only job-safe schemes may
-    // consume; producers/sinks as to: URIs are unrestricted.
-    for def in &defs {
-        if let Err(e) = document::validate_consumer_uri(def.from_uri()) {
-            eprintln!("{document_label}: route `{}` rejected: {e}", def.route_id());
-            return 2;
-        }
-    }
-
-    // Batch drain expectation set: every seda consumer route's URI
-    // base. The queue-depth gauge label is exactly the seda URI base
-    // (`seda:<name>`), so the drain waits on precisely these labels.
-    let mut expected_queues = HashSet::new();
-    for def in &defs {
-        if document::scheme_of_uri(def.from_uri()) == Some("seda") {
-            expected_queues.insert(document::uri_base(def.from_uri()).to_string());
-        }
-    }
-
-    // Route-target safety: ALL document routes start. Side-effect safety
-    // comes from the fail-closed consumer allowlist at load, and the
-    // send target stays the sole entry point. The missing- and
-    // ambiguous-target checks below stay: with all routes started, two
-    // consumer routes sharing one base would round-robin both the
-    // target send and any `to:` hops.
-    let target_base = document::uri_base(&doc.execute.send.to);
-    let target_ids = document::target_route_ids(&defs, target_base);
-    match target_ids.len() {
-        0 => {
-            eprintln!(
-                "{document_label}: send target `{}` has no matching consumer route",
-                doc.execute.send.to
-            );
-            return 2;
-        }
-        1 => {}
-        count => {
-            eprintln!(
-                "{document_label}: send target `{}` is ambiguous: {} consumer routes share its base: {}",
-                doc.execute.send.to,
-                count,
-                target_ids.join(", ")
-            );
-            return 2;
-        }
-    }
-    let defs: Vec<_> = defs
-        .into_iter()
-        .map(|def| def.with_auto_startup(true))
-        .collect();
-
-    // Conditionally register ExecBundle (route-content-conditional, the
-    // single-bundle seam — mirrors `camel run`).
-    #[cfg(feature = "exec")]
+    // ---- Post-boot teardown border (bd rc-7wl19) -----------------------
+    // The deadline was anchored at process start: it covers the WHOLE
+    // run — boot, setup, send, drain, and teardown — and feeds the
+    // border's early-failure budget below. Every setup failure returns
+    // through this border, which owns the one bounded shutdown; the
+    // send-phase paths that already shut down stay inside
+    // `execute_job` unchanged.
+    let deadline = started + doc.execute.timeout;
+    let batch_probe = match setup_booted_job(
+        &mut ctx,
+        &doc,
+        &document_label,
+        &route_load,
+        &security_compile_context,
+        &camel_config,
+    )
+    .await
     {
-        let exec_used =
-            camel_core::startup_validation::route_definitions_reference_scheme(&defs, "exec");
-        let exec_configured = camel_config.components.raw.contains_key("exec");
-        if (exec_used || exec_configured)
-            && let Err(e) = camel_bundles::register_bundle::<camel_component_exec::ExecBundle>(
-                &mut ctx,
-                &camel_config,
-            )
-        {
-            eprintln!("camel-cli job failed: {e}");
+        Ok(batch_probe) => batch_probe,
+        Err(EarlyJobFailure) => {
+            let budget = shutdown_budget(doc.execute.mode, deadline);
+            if let Err(detail) = shutdown(&mut ctx, &boot_handle, budget).await {
+                eprintln!("{detail}");
+            }
             return 2;
         }
-    }
-
-    // ADR-0033: fail-closed ConfigChecks derived from the routes (e.g.
-    // SqlDynamicQueryCheck for every `sql:` endpoint).
-    camel_bundles::security_boot::install_sql_startup_checks(&mut ctx, &defs);
-
-    for def in defs {
-        let id = def.route_id().to_string();
-        if let Err(e) = ctx.add_route_definition(def).await {
-            // log-policy: system-broken
-            tracing::error!("Failed to add route '{id}': {e}");
-            eprintln!("camel-cli job failed: {e}");
-            return 2;
-        }
-    }
-
-    // Batch mode: register the drain probe BEFORE `ctx.start()` so the
-    // seda samplers' emissions fan out to it from their first tick (the
-    // metrics handle composes; every emission reaches the composite).
-    let batch_probe = match doc.execute.mode {
-        document::JobMode::Batch => {
-            let probe = std::sync::Arc::new(batch::BatchDepthProbe::new(expected_queues));
-            ctx.add_lifecycle(batch::BatchProbeLifecycle(std::sync::Arc::clone(&probe)));
-            Some(probe)
-        }
-        document::JobMode::OneShot => None,
     };
-
-    if let Err(e) = ctx.start().await {
-        // log-policy: system-broken
-        tracing::error!("Failed to start CamelContext: {e}");
-        eprintln!("camel-cli job failed: {e}");
-        return 2;
-    }
 
     // ---- Send under the mandatory overall timeout ----------------------
-    // The deadline was anchored at process start: it covers the WHOLE
-    // run — boot, send, drain, and teardown.
-    let deadline = started + doc.execute.timeout;
     let tokio_deadline = tokio::time::Instant::from_std(deadline);
     // Verdict fidelity for seda: the producer defaults to fire-and-forget
     // on InOnly sends, so force `waitForTaskToComplete=Always` — a
@@ -1074,6 +986,153 @@ async fn execute_job(
         return 2;
     }
     code
+}
+
+/// Marker for a post-boot setup failure whose diagnostic was already
+/// printed at the failure site. The caller — the post-boot teardown
+/// border in [`execute_job`] — owns the single bounded context shutdown
+/// before the exit-2 return (bd rc-7wl19), so no setup branch calls
+/// `shutdown` itself and a future early exit cannot leak the booted
+/// context.
+struct EarlyJobFailure;
+
+/// The post-boot setup stretch between the boot handle and the send:
+/// route loading (real-boot seam), the fail-closed consumer gate, the
+/// send-target selection, conditional bundle registration, route
+/// registration, the batch probe, and `ctx.start()`. Every failure
+/// prints its existing diagnostic here and returns
+/// [`EarlyJobFailure`] — the diagnostic list and exit outcomes are
+/// carried over verbatim from the pre-border control flow — so the
+/// teardown border can run the one bounded shutdown for all of them.
+/// On success it returns the batch drain probe (`None` for one-shot);
+/// the probe is registered before `ctx.start()` so the seda samplers'
+/// emissions fan out to it from their first tick.
+async fn setup_booted_job(
+    ctx: &mut camel_core::CamelContext,
+    doc: &JobDocument,
+    document_label: &str,
+    route_load: &RouteLoad,
+    security_compile_context: &camel_dsl::SecurityCompileContext,
+    camel_config: &camel_config::config::CamelConfig,
+) -> Result<Option<std::sync::Arc<batch::BatchDepthProbe>>, EarlyJobFailure> {
+    // ---- Route loading (real-boot seam: ambient ${env:}) ---------------
+    let defs = match load_route_definitions(route_load, camel_config, security_compile_context) {
+        Ok(defs) => defs,
+        Err(e) => {
+            // log-policy: system-broken
+            tracing::error!("Failed to load job routes: {e}");
+            eprintln!("{e}");
+            return Err(EarlyJobFailure);
+        }
+    };
+    if defs.is_empty() {
+        eprintln!("{document_label}: job route source resolved zero route definitions");
+        return Err(EarlyJobFailure);
+    }
+
+    // Fail-closed consumer gate (load time): only job-safe schemes may
+    // consume; producers/sinks as to: URIs are unrestricted.
+    for def in &defs {
+        if let Err(e) = document::validate_consumer_uri(def.from_uri()) {
+            eprintln!("{document_label}: route `{}` rejected: {e}", def.route_id());
+            return Err(EarlyJobFailure);
+        }
+    }
+
+    // Batch drain expectation set: every seda consumer route's URI
+    // base. The queue-depth gauge label is exactly the seda URI base
+    // (`seda:<name>`), so the drain waits on precisely these labels.
+    let mut expected_queues = HashSet::new();
+    for def in &defs {
+        if document::scheme_of_uri(def.from_uri()) == Some("seda") {
+            expected_queues.insert(document::uri_base(def.from_uri()).to_string());
+        }
+    }
+
+    // Route-target safety: ALL document routes start. Side-effect safety
+    // comes from the fail-closed consumer allowlist at load, and the
+    // send target stays the sole entry point. The missing- and
+    // ambiguous-target checks below stay: with all routes started, two
+    // consumer routes sharing one base would round-robin both the
+    // target send and any `to:` hops.
+    let target_base = document::uri_base(&doc.execute.send.to);
+    let target_ids = document::target_route_ids(&defs, target_base);
+    match target_ids.len() {
+        0 => {
+            eprintln!(
+                "{document_label}: send target `{}` has no matching consumer route",
+                doc.execute.send.to
+            );
+            return Err(EarlyJobFailure);
+        }
+        1 => {}
+        count => {
+            eprintln!(
+                "{document_label}: send target `{}` is ambiguous: {} consumer routes share its base: {}",
+                doc.execute.send.to,
+                count,
+                target_ids.join(", ")
+            );
+            return Err(EarlyJobFailure);
+        }
+    }
+    let defs: Vec<_> = defs
+        .into_iter()
+        .map(|def| def.with_auto_startup(true))
+        .collect();
+
+    // Conditionally register ExecBundle (route-content-conditional, the
+    // single-bundle seam — mirrors `camel run`).
+    #[cfg(feature = "exec")]
+    {
+        let exec_used =
+            camel_core::startup_validation::route_definitions_reference_scheme(&defs, "exec");
+        let exec_configured = camel_config.components.raw.contains_key("exec");
+        if (exec_used || exec_configured)
+            && let Err(e) = camel_bundles::register_bundle::<camel_component_exec::ExecBundle>(
+                ctx,
+                camel_config,
+            )
+        {
+            eprintln!("camel-cli job failed: {e}");
+            return Err(EarlyJobFailure);
+        }
+    }
+
+    // ADR-0033: fail-closed ConfigChecks derived from the routes (e.g.
+    // SqlDynamicQueryCheck for every `sql:` endpoint).
+    camel_bundles::security_boot::install_sql_startup_checks(ctx, &defs);
+
+    for def in defs {
+        let id = def.route_id().to_string();
+        if let Err(e) = ctx.add_route_definition(def).await {
+            // log-policy: system-broken
+            tracing::error!("Failed to add route '{id}': {e}");
+            eprintln!("camel-cli job failed: {e}");
+            return Err(EarlyJobFailure);
+        }
+    }
+
+    // Batch mode: register the drain probe BEFORE `ctx.start()` so the
+    // seda samplers' emissions fan out to it from their first tick (the
+    // metrics handle composes; every emission reaches the composite).
+    let batch_probe = match doc.execute.mode {
+        document::JobMode::Batch => {
+            let probe = std::sync::Arc::new(batch::BatchDepthProbe::new(expected_queues));
+            ctx.add_lifecycle(batch::BatchProbeLifecycle(std::sync::Arc::clone(&probe)));
+            Some(probe)
+        }
+        document::JobMode::OneShot => None,
+    };
+
+    if let Err(e) = ctx.start().await {
+        // log-policy: system-broken
+        tracing::error!("Failed to start CamelContext: {e}");
+        eprintln!("camel-cli job failed: {e}");
+        return Err(EarlyJobFailure);
+    }
+
+    Ok(batch_probe)
 }
 
 /// Load the run's route definitions through the real-boot seams:
@@ -1262,12 +1321,26 @@ fn record_shutdown_failure(report: &mut JobReport, detail: String, budget: Durat
 /// Tear the context down through the BootHandle with a bounded budget;
 /// the deadline-wrapped pool teardown mirrors `camel run`. Returns the
 /// first failure as a display string (apparatus class, exit 2).
+///
+/// Every teardown goes through this helper — the send-failure,
+/// interruption, final, and post-boot-border paths alike — so it is the
+/// single observation point for exactly-one-shutdown assertions: when
+/// `CAMEL_JOB_SHUTDOWN_MARKER` is set, exactly one
+/// `camel job: shutdown complete` line is emitted to stderr after the
+/// bounded shutdown attempt (test seam, mirroring
+/// `CAMEL_JOB_SIGNAL_MARKER`; production output is unchanged by
+/// default).
 async fn shutdown(
     ctx: &mut camel_core::CamelContext,
     boot_handle: &camel_bundles::BootHandle,
     budget: Duration,
 ) -> Result<(), String> {
-    match tokio::time::timeout(budget, boot_handle.shutdown_with_deadline(ctx, budget)).await {
+    let result =
+        tokio::time::timeout(budget, boot_handle.shutdown_with_deadline(ctx, budget)).await;
+    if std::env::var_os("CAMEL_JOB_SHUTDOWN_MARKER").is_some() {
+        eprintln!("camel job: shutdown complete");
+    }
+    match result {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(format!("shutdown failure: {e}")),
         Err(_) => Err(format!(

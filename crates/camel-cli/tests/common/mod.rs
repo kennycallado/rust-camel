@@ -284,12 +284,35 @@ pub fn spawn_camel_job(dir: &Path, doc: &Path) -> KillOnDrop {
 // unit gets its own copy of the module).
 #[allow(dead_code)]
 pub fn spawn_camel_job_with_args(dir: &Path, doc: &Path, extra_args: &[&str]) -> KillOnDrop {
+    spawn_camel_job_with_env(dir, doc, extra_args, &[])
+}
+
+/// `spawn_camel_job_with_args` plus extra environment pairs layered over
+/// the inherited environment (last write wins). Used by the teardown-
+/// observation tests to opt in to the shutdown-completion marker
+/// (`CAMEL_JOB_SHUTDOWN_MARKER`): the marker is a test-observation
+/// device the CLI emits exactly once per shutdown invocation, so the
+/// early-failure tests can distinguish a real bounded teardown from a
+/// bare exit 2 (bd rc-7wl19).
+// Shared by job_early_failure_test.rs; the test binaries that include
+// `common` without calling it would otherwise warn dead_code (each
+// compilation unit gets its own copy of the module).
+#[allow(dead_code)]
+pub fn spawn_camel_job_with_env(
+    dir: &Path,
+    doc: &Path,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+) -> KillOnDrop {
     let mut command = Command::new(env!("CARGO_BIN_EXE_camel"));
     command.arg("job").arg(doc);
     for arg in extra_args {
         command.arg(arg);
     }
     command.env("CAMEL_JOB_SIGNAL_MARKER", "1");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
     let child = command
         .current_dir(dir)
         .stdout(Stdio::piped())
