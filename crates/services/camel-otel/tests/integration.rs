@@ -221,7 +221,8 @@ async fn test_tracing_processor_records_span() {
         DetailLevel::Minimal,
         None,
         None,
-        SpanKindHint::Internal,
+                None, // to_uri: no To-step attribution in this test
+                SpanKindHint::Internal,
     );
 
     // Process the exchange
@@ -438,7 +439,8 @@ async fn test_tracing_processor_chain_preserves_trace_id() {
         DetailLevel::Minimal,
         None,
         None,
-        SpanKindHint::Internal,
+                None, // to_uri: no To-step attribution in this test
+                SpanKindHint::Internal,
     );
 
     let processor2 = BoxProcessor::new(IdentityProcessor);
@@ -449,7 +451,8 @@ async fn test_tracing_processor_chain_preserves_trace_id() {
         DetailLevel::Minimal,
         None,
         None,
-        SpanKindHint::Internal,
+                None, // to_uri: no To-step attribution in this test
+                SpanKindHint::Internal,
     );
 
     // Process through chain
@@ -512,7 +515,8 @@ async fn span_status_success_and_error_exported() {
         DetailLevel::Minimal,
         None,
         None,
-        SpanKindHint::Internal,
+                None, // to_uri: no To-step attribution in this test
+                SpanKindHint::Internal,
     );
 
     let exchange = Exchange::new(Message::new("ok"));
@@ -543,7 +547,8 @@ async fn span_status_success_and_error_exported() {
         DetailLevel::Minimal,
         None,
         None,
-        SpanKindHint::Internal,
+                None, // to_uri: no To-step attribution in this test
+                SpanKindHint::Internal,
     );
 
     let exchange = Exchange::new(Message::new("err"));
