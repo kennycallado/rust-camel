@@ -237,6 +237,53 @@ mod tests {
         );
     }
 
+    /// Contract (openspec pooldrain): `SqlPoolFactory::close` returns
+    /// successfully only after the pool has drained to zero connections,
+    /// verified against a pool that exercised two concurrent connections.
+    #[tokio::test]
+    async fn sql_pool_factory_close_drains_pool_to_zero() {
+        let f = SqlPoolFactory;
+        let cfg = DatasourceConfig {
+            db_url: "sqlite:file:memdb_drain_zero?mode=memory&cache=shared".into(),
+            provider: None,
+            max_connections: Some(3),
+            min_connections: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra: std::collections::HashMap::new(),
+        };
+        let inner = f.create(&cfg).await.unwrap();
+        let pool = Arc::downcast::<AnyPool>(Arc::clone(&inner)).unwrap();
+
+        // Hold the first acquired connection while acquiring a second,
+        // so both pooled connections exist concurrently.
+        let mut conn1 = pool.acquire().await.expect("first connection");
+        let mut conn2 = pool.acquire().await.expect("second connection");
+        sqlx::query("SELECT 1")
+            .execute(&mut *conn1)
+            .await
+            .expect("SELECT 1 through first connection");
+        sqlx::query("SELECT 1")
+            .execute(&mut *conn2)
+            .await
+            .expect("SELECT 1 through second connection");
+        drop(conn1);
+        drop(conn2);
+
+        let handle = DatasourceHandle::new("appdb".into(), f.name().into(), inner);
+        f.close(&handle).await.expect("factory close must succeed");
+        assert!(pool.is_closed(), "factory close must leave the pool closed");
+        assert_eq!(
+            pool.size(),
+            0,
+            "factory close must drain the pool to zero connections"
+        );
+    }
+
     /// Probe (bd rc-25lup.4 review): does the named shared-memory URI
     /// form genuinely share state across pooled connections? The
     /// answer decides whether a lingering boot's connection could leak
@@ -284,5 +331,37 @@ mod tests {
             n, 1,
             "named shared memory URI must share across pool connections"
         );
+    }
+
+    /// Truth table for the memory URL classifier (openspec pooldrain):
+    /// bare `:memory:` forms, named shared-cache `mode=memory` URLs,
+    /// uppercase scheme/query variants, and non-memory near misses.
+    #[test]
+    fn sqlite_memory_url_classifier_table() {
+        let cases: &[(&str, bool)] = &[
+            // True: bare memory forms and named shared-cache memory URLs.
+            ("sqlite::memory:", true),
+            ("sqlite://:memory:", true),
+            ("sqlite:file:memdb1?mode=memory&cache=shared", true),
+            // Uppercase scheme/query variants classify the same.
+            ("SQLITE::MEMORY:", true),
+            ("Sqlite:file:MEMDB2?MODE=MEMORY", true),
+            // Contrived: `mode=memory` inside a filename still matches.
+            ("sqlite:file:demo_mode=memory.db", true),
+            // False: ordinary paths, a `memory.db` filename, wrong scheme.
+            ("sqlite:data.db", false),
+            ("sqlite:file:memory.db", false),
+            ("postgres://host/db?mode=memory", false),
+            // rc-acrek boundary: `::memory:` inside a file path is not
+            // the bare `sqlite::memory:` form.
+            ("sqlite:file::memory:?cache=shared", false),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(
+                is_sqlite_memory_url(url),
+                *expected,
+                "classifier mismatch for {url:?}"
+            );
+        }
     }
 }
