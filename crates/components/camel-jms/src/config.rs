@@ -1073,6 +1073,65 @@ mod tests {
         assert!(err.to_string().contains("must be 0-9"), "got: {}", err);
     }
 
+    /// Adversarial URI validation (jmsmutants 1.2): an unsupported scheme
+    /// must fail with the scheme error, not be misparsed as a destination.
+    #[test]
+    fn from_uri_rejects_unsupported_scheme() {
+        let err = JmsEndpointConfig::from_uri("http:queue:orders").unwrap_err();
+        assert!(err.to_string().contains("expected scheme"), "got: {}", err);
+    }
+
+    /// Adversarial URI validation (jmsmutants 1.2): an empty destination name
+    /// must surface the destination-format error, never the `jms:` shorthand
+    /// ambiguity error — the shorthand guard cannot be replaced with an
+    /// unconditional match arm.
+    #[test]
+    fn from_uri_rejects_empty_destination_name_with_format_error() {
+        for uri in ["jms:queue:", "jms:topic:", "jms:"] {
+            let err = JmsEndpointConfig::from_uri(uri).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("destination must be"),
+                "uri {uri:?} got: {msg}"
+            );
+            assert!(
+                !msg.contains("ambiguous"),
+                "uri {uri:?} must not report ambiguity: {msg}"
+            );
+        }
+    }
+
+    /// Adversarial URI validation (jmsmutants 1.2): a non-empty `jms:<name>`
+    /// shorthand is rejected with the exact ambiguity message, pinning the
+    /// em-dash wording and the queue/topic guidance. Matches the
+    /// `ProcessorError` payload so the assertion is not coupled to the
+    /// framework's `Processor error: ` Display prefix.
+    #[test]
+    fn from_uri_rejects_ambiguous_jms_shorthand() {
+        let err = JmsEndpointConfig::from_uri("jms:orders").unwrap_err();
+        let message = match err {
+            camel_component_api::CamelError::ProcessorError(message) => message,
+            other => panic!("expected ProcessorError, got: {other:?}"),
+        };
+        assert_eq!(
+            message,
+            "URI 'jms:orders' is ambiguous — use 'jms:queue:orders' or 'jms:topic:orders'"
+        );
+    }
+
+    /// Adversarial URI validation (jmsmutants 1.2): priority 9 is the highest
+    /// accepted value and priority 10 is rejected, pinning the strict `p > 9`
+    /// boundary.
+    #[test]
+    fn from_uri_enforces_priority_boundary() {
+        let cfg = JmsEndpointConfig::from_uri("jms:queue:orders?priority=9").unwrap();
+        assert_eq!(cfg.priority, Some(9));
+        assert!(
+            JmsEndpointConfig::from_uri("jms:queue:orders?priority=10").is_err(),
+            "priority 10 must be rejected"
+        );
+    }
+
     #[test]
     fn parse_persistent_delivery_false() {
         let cfg = JmsEndpointConfig::from_uri("jms:queue:orders?persistentDelivery=false").unwrap();
@@ -1160,5 +1219,33 @@ mod tests {
         let cfg = JmsPoolConfig::default();
         assert_eq!(cfg.reconnect.max_attempts, 0); // unlimited
         assert!(cfg.reconnect.enabled);
+    }
+
+    /// Pins every field overridden by `jms_reconnect_default`. `multiplier`
+    /// and `max_delay` are equivalent to the values supplied by
+    /// `NetworkRetryPolicy::default()` (2.0 and 30s respectively), so their
+    /// deletion would not change behavior; the remaining three fields
+    /// (`max_attempts`, `initial_delay`, `jitter_factor`) differ from the
+    /// defaults and are killed by these assertions.
+    #[test]
+    fn jms_reconnect_default_pins_all_overridden_fields() {
+        let policy = jms_reconnect_default();
+        assert_eq!(policy.max_attempts, 0);
+        assert_eq!(policy.initial_delay, Duration::from_secs(5));
+        assert_eq!(policy.jitter_factor, 0.0);
+        assert_eq!(policy.max_delay, Duration::from_secs(30));
+        assert_eq!(policy.multiplier, 2.0);
+    }
+
+    /// Pins the cross-crate cache subdirectory contract (jmsmutants 1.3):
+    /// `default_bridge_cache_dir()` must delegate to the concrete
+    /// `camel_bridge::download::default_cache_dir()` helper and must never
+    /// fall back to an empty `PathBuf`.
+    #[test]
+    fn default_bridge_cache_dir_matches_bridge_download_default() {
+        let delegated = camel_bridge::download::default_cache_dir();
+        let component = default_bridge_cache_dir();
+        assert_eq!(component, delegated);
+        assert_ne!(component, PathBuf::default());
     }
 }
