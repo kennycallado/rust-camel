@@ -14597,6 +14597,7 @@ dependencies = [
  "quote",
  "regex",
  "schemars 1.2.2",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "syn 2.0.119",

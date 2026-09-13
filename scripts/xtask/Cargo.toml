@@ -19,9 +19,10 @@ quote = { workspace = true }
 walkdir = "2"
 zip = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 ureq = "3"
 schemars = { workspace = true }
-tempfile = "3"
+tempfile = { workspace = true }
 toml = { workspace = true }
 glob = { workspace = true }
 ts-rs = { workspace = true }

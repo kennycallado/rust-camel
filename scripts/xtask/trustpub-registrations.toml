@@ -1,0 +1,275 @@
+# Trusted publishing (trustpub) registration manifest.
+#
+# Maintainer-asserted lifecycle state per publishable workspace crate.
+# `registered` asserts that crates.io trusted publishing is configured
+# for the crate; crates.io does not expose trustpub configuration to any
+# API check, so this file is the recorded source of truth for that
+# claim. Entries are ordered exactly like `cargo xtask publish-order`;
+# the offline gate `cargo xtask lint-publish-registration` enforces set
+# and order drift. Case A (published-unregistered) and Case B
+# (new-unpublished) remedies live in the module docs of
+# scripts/xtask/src/lint_publish_registration.rs.
+
+[[crates]]
+name = "camel-api"
+state = "registered"
+
+[[crates]]
+name = "camel-bean-macros"
+state = "registered"
+
+[[crates]]
+name = "camel-endpoint-macros"
+state = "registered"
+
+[[crates]]
+name = "camel-matchers"
+state = "registered"
+
+[[crates]]
+name = "camel-wit"
+state = "registered"
+
+[[crates]]
+name = "camel-bridge"
+state = "registered"
+
+[[crates]]
+name = "camel-proto-compiler"
+state = "registered"
+
+[[crates]]
+name = "camel-health"
+state = "registered"
+
+[[crates]]
+name = "camel-lint"
+state = "registered"
+
+[[crates]]
+name = "camel-language-api"
+state = "registered"
+
+[[crates]]
+name = "camel-auth"
+state = "registered"
+
+[[crates]]
+name = "camel-function"
+state = "registered"
+
+[[crates]]
+name = "camel-bean"
+state = "registered"
+
+[[crates]]
+name = "camel-endpoint"
+state = "registered"
+
+[[crates]]
+name = "camel-dataformat-protobuf"
+state = "registered"
+
+[[crates]]
+name = "camel-lsp"
+state = "registered"
+
+[[crates]]
+name = "camel-language-jsonpath"
+state = "registered"
+
+[[crates]]
+name = "camel-language-minijinja"
+state = "registered"
+
+[[crates]]
+name = "camel-language-rhai"
+state = "registered"
+
+[[crates]]
+name = "camel-language-simple"
+state = "registered"
+
+[[crates]]
+name = "camel-language-xpath"
+state = "registered"
+
+[[crates]]
+name = "camel-component-api"
+state = "registered"
+
+[[crates]]
+name = "camel-processor"
+state = "registered"
+
+[[crates]]
+name = "camel-component-grpc"
+state = "registered"
+
+[[crates]]
+name = "camel-component-keycloak"
+state = "registered"
+
+[[crates]]
+name = "camel-component-seda"
+state = "registered"
+
+[[crates]]
+name = "camel-component-container"
+state = "registered"
+
+[[crates]]
+name = "camel-component-controlbus"
+state = "registered"
+
+[[crates]]
+name = "camel-component-cron"
+state = "registered"
+
+[[crates]]
+name = "camel-component-cxf"
+state = "registered"
+
+[[crates]]
+name = "camel-component-direct"
+state = "registered"
+
+[[crates]]
+name = "camel-component-file"
+state = "registered"
+
+[[crates]]
+name = "camel-component-jms"
+state = "registered"
+
+[[crates]]
+name = "camel-component-log"
+state = "registered"
+
+[[crates]]
+name = "camel-master"
+state = "registered"
+
+[[crates]]
+name = "camel-component-mock"
+state = "registered"
+
+[[crates]]
+name = "camel-component-mqtt"
+state = "registered"
+
+[[crates]]
+name = "camel-component-opensearch"
+state = "registered"
+
+[[crates]]
+name = "camel-component-redis"
+state = "registered"
+
+[[crates]]
+name = "camel-component-sql"
+state = "registered"
+
+[[crates]]
+name = "camel-component-timer"
+state = "registered"
+
+[[crates]]
+name = "camel-xslt"
+state = "registered"
+
+[[crates]]
+name = "camel-language-js"
+state = "registered"
+
+[[crates]]
+name = "camel-redis-repo"
+state = "registered"
+
+[[crates]]
+name = "camel-xj"
+state = "registered"
+
+[[crates]]
+name = "camel-core"
+state = "registered"
+
+[[crates]]
+name = "camel-builder"
+state = "registered"
+
+[[crates]]
+name = "camel-platform-kubernetes"
+state = "registered"
+
+[[crates]]
+name = "camel-component-exec"
+state = "registered"
+
+[[crates]]
+name = "camel-component-llm"
+state = "registered"
+
+[[crates]]
+name = "camel-component-surrealdb"
+state = "registered"
+
+[[crates]]
+name = "camel-template"
+state = "registered"
+
+[[crates]]
+name = "camel-otel"
+state = "registered"
+
+[[crates]]
+name = "camel-prometheus"
+state = "registered"
+
+[[crates]]
+name = "camel-component-http"
+state = "registered"
+
+[[crates]]
+name = "camel-component-kafka"
+state = "registered"
+
+[[crates]]
+name = "camel-component-ws"
+state = "registered"
+
+[[crates]]
+name = "camel-dsl"
+state = "registered"
+
+[[crates]]
+name = "camel-config"
+state = "registered"
+
+[[crates]]
+name = "camel-component-mcp"
+state = "registered"
+
+[[crates]]
+name = "camel-component-validator"
+state = "registered"
+
+[[crates]]
+name = "camel-component-wasm"
+state = "registered"
+
+[[crates]]
+name = "camel-bundles"
+state = "registered"
+
+[[crates]]
+name = "camel-test"
+state = "registered"
+
+[[crates]]
+name = "camel-integration-test"
+state = "registered"
+
+[[crates]]
+name = "camel-cli"
+state = "registered"

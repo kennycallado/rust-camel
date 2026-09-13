@@ -4,6 +4,7 @@ mod lint_component_deps;
 mod lint_context_citations;
 mod lint_gate_forwarding;
 mod lint_metric_labels;
+mod lint_publish_registration;
 mod lint_single_source;
 mod lint_test_sleep;
 mod mutants;
@@ -125,6 +126,17 @@ enum Commands {
     /// component crate source outside `#[cfg(test)]`. Components must
     /// depend on ports (camel-component-api), not concrete adapters.
     LintComponentDeps,
+    /// Enforce trustpub registration manifest drift against the
+    /// workspace publish order. Offline by default; `--online` adds an
+    /// explicit crates.io crate-existence observation for
+    /// non-`registered` entries and fails closed on any status other
+    /// than 200/404 or any transport/timeout error.
+    LintPublishRegistration {
+        /// Query crates.io for crate-level existence to classify
+        /// non-`registered` manifest entries. Offline by default.
+        #[arg(long)]
+        online: bool,
+    },
     /// Enforce publish-topology invariants: no cyclic dev/build-dependencies
     /// on publishable crates, and no publishable crate depends on camel-test
     /// (the publish-order leaf sink).
@@ -425,6 +437,35 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-component-deps error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintPublishRegistration { online } => {
+            let workspace_root = workspace_root_or_exit();
+            let base_url = lint_publish_registration::base_url_from_env();
+            match lint_publish_registration::run(&workspace_root, online, &base_url) {
+                Ok(outcome) if outcome.findings.is_empty() => {
+                    // Online observations target every publishable crate
+                    // the manifest does not assert as `registered`
+                    // (non-`registered` entries and names missing from
+                    // the manifest alike); each observation produces a
+                    // Case A/B finding, so a clean run implies zero
+                    // online queries.
+                    println!("lint-publish-registration: OK (0 findings)");
+                }
+                Ok(outcome) => {
+                    for finding in &outcome.findings {
+                        println!("publish-registration: {}", finding.message);
+                    }
+                    eprintln!(
+                        "\nlint-publish-registration: FAILED ({} findings)",
+                        outcome.findings.len()
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-publish-registration error: {e}");
                     std::process::exit(1);
                 }
             }

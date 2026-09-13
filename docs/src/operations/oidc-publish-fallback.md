@@ -7,6 +7,54 @@ GitHub Actions OIDC token for short-lived crates.io tokens
 (`scripts/trustpub-credential-helper.sh`). The `CARGO_REGISTRY_TOKEN`
 repository secret is kept ONLY as this documented one-shot fallback.
 
+## Before tagging: registration gate
+
+Run the offline gate before creating any release tag:
+
+```bash
+cargo xtask lint-publish-registration
+```
+
+The gate compares the workspace publish order against the committed
+registration manifest (`scripts/xtask/trustpub-registrations.toml`) and
+exits non-zero on drift. Resolve every finding before tagging:
+
+- **Case A** (`published-unregistered`): the crate exists on crates.io but
+  trustpub is not registered for it. Remedy: `register first` — register
+  the crate on crates.io (owner action, ~1 minute), then re-run the gate.
+- **Case B** (`new-unpublished`): the crate has never been published.
+  Remedy: owner manual first publish through the classic
+  `CARGO_REGISTRY_TOKEN` path, then register trustpub, then update the
+  manifest state to `registered` (see the first-publication lifecycle
+  below).
+
+`--online` is optional diagnostic evidence only: it observes crate-level
+existence on crates.io for every publishable crate the manifest does not
+assert as `registered` — including names with no manifest entry (HTTP 200
+classifies the name as Case A, HTTP 404 as Case B) — and may correct a
+stale or missing manifest assertion, but it does NOT prove trustpub
+registration. The offline gate is the release gate; online mode never
+replaces it.
+
+## First publication lifecycle
+
+Each new crate's first publication is owner-controlled through the classic
+`CARGO_REGISTRY_TOKEN` path, followed immediately by trustpub registration.
+OIDC trusted publishing is the steady-state path for subsequent releases.
+
+1. Owner publishes the crate once with the classic token (the
+   `CARGO_REGISTRY_TOKEN` secret in the release workflow).
+2. Owner registers trustpub for the crate on crates.io (registration
+   tuple: owner `kennycallado`, repository `rust-camel`, workflow
+   `release.yml`, environment `crates-io`).
+3. Maintainer updates the manifest state
+   (`scripts/xtask/trustpub-registrations.toml`) to `registered` after
+   first publication or any registration change, preserving publish order.
+
+The manifest is a maintainer assertion: crates.io does not expose
+trusted-publisher configuration to the gate, so the committed state must
+be kept current by hand.
+
 ## First: diagnose, do not fall back
 
 1. Open the failed `publish` job log. Find the crate that failed and the

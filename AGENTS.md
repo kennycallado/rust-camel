@@ -57,6 +57,8 @@
   run: cargo xtask lint-ignore
 - name: lint-publish-cycles
   run: cargo xtask lint-publish-cycles
+- name: lint-publish-registration
+  run: cargo xtask lint-publish-registration
 - name: lint-component-deps
   run: cargo xtask lint-component-deps
 - name: lint-gate-forwarding
