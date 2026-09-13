@@ -248,6 +248,53 @@ mod tests {
     }
 
     #[test]
+    fn qos_level_maps_each_variant_to_rumqttc_qos() {
+        assert_eq!(QosLevel::AtMostOnce.to_rumqttc(), rumqttc::QoS::AtMostOnce);
+        assert_eq!(
+            QosLevel::AtLeastOnce.to_rumqttc(),
+            rumqttc::QoS::AtLeastOnce
+        );
+        assert_eq!(
+            QosLevel::ExactlyOnce.to_rumqttc(),
+            rumqttc::QoS::ExactlyOnce
+        );
+    }
+
+    #[test]
+    fn effective_reconnect_prefers_endpoint_override() {
+        let override_policy = NetworkRetryPolicy {
+            max_attempts: 7,
+            ..NetworkRetryPolicy::default()
+        };
+        let fallback = NetworkRetryPolicy {
+            max_attempts: 3,
+            ..NetworkRetryPolicy::default()
+        };
+        assert_ne!(override_policy, NetworkRetryPolicy::default());
+        assert_ne!(fallback, NetworkRetryPolicy::default());
+        assert_ne!(override_policy, fallback);
+
+        let cfg = MqttEndpointConfig {
+            reconnect: Some(override_policy.clone()),
+            ..MqttEndpointConfig::default()
+        };
+        assert_eq!(cfg.effective_reconnect(&fallback), override_policy);
+    }
+
+    #[test]
+    fn effective_reconnect_uses_fallback_without_override() {
+        let fallback = NetworkRetryPolicy {
+            max_attempts: 3,
+            ..NetworkRetryPolicy::default()
+        };
+        assert_ne!(fallback, NetworkRetryPolicy::default());
+
+        let cfg = MqttEndpointConfig::default();
+        assert!(cfg.reconnect.is_none());
+        assert_eq!(cfg.effective_reconnect(&fallback), fallback);
+    }
+
+    #[test]
     fn broker_config_requires_url() {
         let broker = MqttBrokerConfig {
             url: "mqtt://localhost:1883".to_string(),
@@ -256,6 +303,33 @@ mod tests {
             tls_ca_cert: None,
         };
         assert!(broker.validate().is_ok());
+    }
+
+    #[test]
+    fn broker_validation_accepts_mqtt_schemes_and_rejects_other_schemes() {
+        let plain = MqttBrokerConfig {
+            url: "mqtt://localhost:1883".to_string(),
+            username: None,
+            password: None,
+            tls_ca_cert: None,
+        };
+        assert!(plain.validate().is_ok());
+
+        let tls = MqttBrokerConfig {
+            url: "mqtts://localhost:8883".to_string(),
+            username: None,
+            password: None,
+            tls_ca_cert: None,
+        };
+        assert!(tls.validate().is_ok());
+
+        let http = MqttBrokerConfig {
+            url: "http://localhost:1883".to_string(),
+            username: None,
+            password: None,
+            tls_ca_cert: None,
+        };
+        assert!(http.validate().is_err());
     }
 
     #[test]
@@ -354,6 +428,24 @@ mod tests {
         cfg.broker_name = "primary".to_string();
         cfg.keep_alive_secs = 3600;
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn endpoint_validation_enforces_keep_alive_u16_boundary() {
+        let mut max = MqttEndpointConfig::default();
+        max.broker_name = "primary".to_string();
+        max.keep_alive_secs = u64::from(u16::MAX);
+        assert!(max.validate().is_ok());
+
+        let mut over = MqttEndpointConfig::default();
+        over.broker_name = "primary".to_string();
+        over.keep_alive_secs = u64::from(u16::MAX) + 1;
+        let err = over.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("keepAliveSecs must be <= 65535"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
