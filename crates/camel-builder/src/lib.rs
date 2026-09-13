@@ -225,8 +225,8 @@ pub trait StepAccumulator: Sized {
 
     /// Marshal the message body using the specified data format.
     ///
-    /// Supported formats: `"json"`, `"xml"`, `"csv"`, `"zip"`. Returns `Err(CamelError::Config)` if
-    /// the format name is unknown.
+    /// Supported formats: `"json"`, `"xml"`, `"csv"`, `"zip"`, `"tar"`, `"gzip"`, `"tar.gz"`.
+    /// Returns `Err(CamelError::Config)` if the format name is unknown.
     /// Converts a structured body (e.g., `Body::Json`) to a wire-format body (e.g., `Body::Text`).
     ///
     /// # Example
@@ -247,8 +247,8 @@ pub trait StepAccumulator: Sized {
 
     /// Unmarshal the message body using the specified data format.
     ///
-    /// Supported formats: `"json"`, `"xml"`, `"csv"`, `"zip"`. Returns `Err(CamelError::Config)` if
-    /// the format name is unknown.
+    /// Supported formats: `"json"`, `"xml"`, `"csv"`, `"zip"`, `"tar"`, `"gzip"`, `"tar.gz"`.
+    /// Returns `Err(CamelError::Config)` if the format name is unknown.
     /// Converts a wire-format body (e.g., `Body::Text`) to a structured body (e.g., `Body::Json`).
     ///
     /// # Example

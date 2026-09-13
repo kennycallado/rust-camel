@@ -64,8 +64,9 @@ pub use content_enricher::{EnrichService, PollEnrichService};
 pub use content_negotiation::{ContentNegotiationCheck, ContentNegotiationProcessor};
 pub use convert_body::ConvertBodyTo;
 pub use data_format::{
-    CAMEL_CSV_HEADER_RECORD, CsvConfig, CsvDataFormat, JsonConfig, JsonDataFormat, QuoteMode,
-    RecordSeparator, XmlConfig, XmlDataFormat, ZipConfig, ZipDataFormat, builtin_data_format,
+    CAMEL_CSV_HEADER_RECORD, CsvConfig, CsvDataFormat, GzipConfig, GzipDataFormat, JsonConfig,
+    JsonDataFormat, QuoteMode, RecordSeparator, TarConfig, TarDataFormat, TarGzConfig,
+    TarGzDataFormat, XmlConfig, XmlDataFormat, ZipConfig, ZipDataFormat, builtin_data_format,
     builtin_data_format_with_config,
 };
 pub use delayer::DelayerService;

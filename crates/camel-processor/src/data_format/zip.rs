@@ -52,39 +52,8 @@ impl DataFormat for ZipDataFormat {
     }
 
     fn marshal(&self, body: Body) -> Result<Body, CamelError> {
-        let content: Vec<u8> = match &body {
-            Body::Text(s) => s.as_bytes().to_vec(),
-            Body::Json(v) => serde_json::to_vec(v).map_err(|e| {
-                CamelError::TypeConversionFailed(format!(
-                    "ZipDataFormat::marshal cannot serialize JSON: {e}"
-                ))
-            })?,
-            Body::Bytes(b) => b.to_vec(),
-            Body::Xml(s) => s.as_bytes().to_vec(),
-            Body::Empty => {
-                return Err(CamelError::TypeConversionFailed(
-                    "ZipDataFormat::marshal requires non-empty body".to_string(),
-                ));
-            }
-            Body::Stream(_) => {
-                return Err(CamelError::TypeConversionFailed(
-                    "cannot marshal Body::Stream — add 'stream_cache' or 'convert_body_to' before this step".to_string(),
-                ));
-            }
-            _ => {
-                return Err(CamelError::TypeConversionFailed(
-                    "ZipDataFormat::marshal does not support this body type".to_string(),
-                ));
-            }
-        };
-
-        if content.len() as u64 > self.config.max_input_size {
-            return Err(CamelError::TypeConversionFailed(format!(
-                "ZipDataFormat::marshal input {} bytes exceeds max_input_size {}",
-                content.len(),
-                self.config.max_input_size
-            )));
-        }
+        let content =
+            super::materialize_marshal_input("ZipDataFormat", &body, self.config.max_input_size)?;
 
         let mut buf = Vec::new();
         {
@@ -120,32 +89,7 @@ impl DataFormat for ZipDataFormat {
     }
 
     fn unmarshal(&self, body: Body) -> Result<Body, CamelError> {
-        let raw: Vec<u8> = match &body {
-            Body::Bytes(b) => b.to_vec(),
-            Body::Text(s) => s.as_bytes().to_vec(),
-            Body::Empty => {
-                return Err(CamelError::TypeConversionFailed(
-                    "ZipDataFormat::unmarshal requires non-empty body".to_string(),
-                ));
-            }
-            Body::Stream(_) => {
-                return Err(CamelError::TypeConversionFailed(
-                    "cannot unmarshal Body::Stream — use UnmarshalService which auto-materializes"
-                        .to_string(),
-                ));
-            }
-            Body::Json(_) | Body::Xml(_) => {
-                return Err(CamelError::TypeConversionFailed(
-                    "ZipDataFormat::unmarshal only supports Body::Bytes and Body::Text (ZIP data)"
-                        .to_string(),
-                ));
-            }
-            _ => {
-                return Err(CamelError::TypeConversionFailed(
-                    "ZipDataFormat::unmarshal does not support this body type".to_string(),
-                ));
-            }
-        };
+        let raw = super::raw_unmarshal_body("ZipDataFormat", "ZIP data", &body)?;
 
         let reader = std::io::Cursor::new(&raw);
         let mut archive = ZipArchive::new(reader).map_err(|e| {
