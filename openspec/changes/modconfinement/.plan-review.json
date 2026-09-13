@@ -1,0 +1,6 @@
+{
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "summary": "No findings. Plan covers exact files, five helpers, executable tests, cfg preservation, surgical context citations, and zero public API or dependency changes.",
+  "kind": "plan-review"
+}

@@ -56,7 +56,7 @@ and `crates/components/camel-jms/src/config.rs` (the narrow security files —
 SSRF classification and the mqtt/jms `redact_broker_url` family), and
 event-driven targeted runs via `--file <path>` for the broad files whose
 security-critical functions are a minority of the file (camel-http
-`lib.rs` `redact_url_for_diagnostics`, camel-file `lib.rs`
+`lib.rs` `redact_url_for_diagnostics`, camel-file `src/path_guard.rs`
 `validate_relative_filename`, `crates/camel-processor/src/aggregator.rs` and
 `resequencer/` limit enforcement, and
 `crates/components/camel-jms/src/component.rs` `redact_url`).
@@ -97,4 +97,3 @@ design fallback cascade applies only beyond that tolerance.
 - **WHEN** the result is triaged
 - **THEN** the rate and actionable survivors SHALL be recorded in bd rc-eba8,
   and no CI job, gate, or threshold SHALL consume the number
-

@@ -19,10 +19,10 @@ Spec reference: `docs/superpowers/specs/2026-06-20-rc-o6o-framework-contract-bug
   enforced in two layers: `validate_relative_filename` (lexical pre-check: rejects
   absolute paths, `..` components, NUL bytes — runs BEFORE any filesystem touch, since an
   absolute value would otherwise discard the base on `Path::join`) and
-  `validate_path_is_within_base` (canonicalize-based base containment). Both in `src/lib.rs`.
+  `validate_path_is_within_base` (canonicalize-based base containment). Both in `src/path_guard.rs`.
 - **`fileExist` URI param**: `Override` (default), `Append`, `Fail`, `Ignore`, `TryRename`.
   Unknown values raise `CamelError::InvalidUri` at config time. On Unix, the `Fail`,
-  `Append`, and done-file opens use `O_NOFOLLOW` (`open_options_no_follow`, `src/lib.rs`):
+  `Append`, and done-file opens use `O_NOFOLLOW` (`open_options_no_follow`, `src/path_guard.rs`):
   a SYMLINK LEAF fails the open, closing the check/open race for the final path
   component. Any symlinked component below the configured base is rejected at
   validation time — leaf or intermediate, in-base or escaping — via a cumulative
@@ -35,7 +35,7 @@ Spec reference: `docs/superpowers/specs/2026-06-20-rc-o6o-framework-contract-bug
   directories created during the race). The base itself may be a symlink
   (canonicalized normally).
 - **`tempPrefix` URI param**: a plain filename prefix (no path separators, no absolute paths,
-  no null bytes). Validated by `is_valid_temp_prefix` (`src/lib.rs`). Required when
+  no null bytes). Validated by `is_valid_temp_prefix` (`src/path_guard.rs`). Required when
   `fileExist=TryRename`. The generated temp name carries an additional unpredictable
   64-bit random infix (`prefix + hex + "." + file_name`), so a local attacker cannot
   pre-create the predicted path to force write failures.
