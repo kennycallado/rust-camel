@@ -352,6 +352,7 @@ fn route_files_from_root_without_camel_toml_is_rejected() {
             capture_reply: false,
             timeout: std::time::Duration::from_secs(30),
         },
+        args: None,
         route_files: None,
         route_files_from_root: Some(vec!["routes/a.yaml".to_string()]),
         routes: None,
@@ -370,4 +371,248 @@ fn route_files_from_root_without_camel_toml_is_rejected() {
         }
         other => panic!("expected NoProjectRoot, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_declared_job_args() {
+    // Arrange: a `.job.yaml` with a top-level `args` map beside
+    // `execute`, exercising every allowed declaration field.
+    let text = r#"
+description: create a customer
+args:
+  name:
+    required: true
+    description: Customer name
+  tier:
+    default: gold
+    description: Service tier
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+    body: "ping"
+routeFiles:
+  - routes/job-route.yaml
+"#;
+    // Act
+    let doc = document::parse_job_document(&doc_path(), text).expect("declared args parse");
+    // Assert: declarations preserve required/default/description.
+    let args = doc.args.as_ref().expect("declarations carried");
+    let name = args.entries.get("name").expect("name declaration");
+    assert!(name.required);
+    assert_eq!(name.default, None);
+    assert_eq!(name.description.as_deref(), Some("Customer name"));
+    let tier = args.entries.get("tier").expect("tier declaration");
+    assert!(!tier.required);
+    assert_eq!(tier.default.as_deref(), Some("gold"));
+    assert_eq!(tier.description.as_deref(), Some("Service tier"));
+}
+
+#[test]
+fn reject_unknown_argument_field() {
+    // Arrange: a declaration with the malformed field `requried`.
+    let text = r#"
+args:
+  name:
+    requried: true
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let err = document::parse_job_document(&doc_path(), text).unwrap_err();
+    // Assert: the diagnostic names the unknown field; the CLI maps
+    // every job-document load failure to exit 2 before boot.
+    match &err {
+        JobDocError::UnknownArgumentField { argument, field } => {
+            assert_eq!(argument, "name");
+            assert_eq!(field, "requried");
+        }
+        other => panic!("expected UnknownArgumentField, got {other:?}"),
+    }
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unknown field") && msg.contains("requried"),
+        "unknown-field diagnostic must name the field; got: {msg}"
+    );
+}
+
+#[test]
+fn reject_invalid_argument_name() {
+    // Arrange: a declaration keyed by a non-identifier name.
+    let text = r#"
+args:
+  customer-id:
+    required: true
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let err = document::parse_job_document(&doc_path(), text).unwrap_err();
+    // Assert: the argument-name diagnostic names the offending name.
+    match &err {
+        JobDocError::InvalidArgumentName { name } => assert_eq!(name, "customer-id"),
+        other => panic!("expected InvalidArgumentName, got {other:?}"),
+    }
+    let msg = err.to_string();
+    assert!(
+        msg.contains("customer-id"),
+        "name diagnostic must name the argument; got: {msg}"
+    );
+}
+
+#[test]
+fn reject_non_boolean_required() {
+    // Arrange: a declaration whose `required` field is a string.
+    let text = r#"
+args:
+  name:
+    required: "yes"
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let err = document::parse_job_document(&doc_path(), text).unwrap_err();
+    // Assert: the declaration diagnostic names the argument and the
+    // offending field type.
+    match &err {
+        JobDocError::InvalidArgumentDeclaration { argument, detail } => {
+            assert_eq!(argument, "name");
+            assert!(
+                detail.contains("boolean"),
+                "detail must name the type; got: {detail}"
+            );
+        }
+        other => panic!("expected InvalidArgumentDeclaration, got {other:?}"),
+    }
+    let msg = err.to_string();
+    assert!(
+        msg.contains("name") && msg.contains("boolean"),
+        "declaration diagnostic must name the argument and type; got: {msg}"
+    );
+}
+
+#[test]
+fn reject_non_string_default() {
+    // Arrange: a declaration whose `default` field is a number.
+    let text = r#"
+args:
+  tier:
+    default: 42
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let err = document::parse_job_document(&doc_path(), text).unwrap_err();
+    // Assert: the declaration diagnostic names the argument and the
+    // offending field type.
+    match &err {
+        JobDocError::InvalidArgumentDeclaration { argument, detail } => {
+            assert_eq!(argument, "tier");
+            assert!(
+                detail.contains("string"),
+                "detail must name the type; got: {detail}"
+            );
+        }
+        other => panic!("expected InvalidArgumentDeclaration, got {other:?}"),
+    }
+    let msg = err.to_string();
+    assert!(
+        msg.contains("tier") && msg.contains("string"),
+        "declaration diagnostic must name the argument and type; got: {msg}"
+    );
+}
+
+#[test]
+fn reject_scalar_argument_declaration() {
+    // Arrange: a declaration that is a plain scalar, not a mapping.
+    let text = r#"
+args:
+  name: "just a string"
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let err = document::parse_job_document(&doc_path(), text).unwrap_err();
+    // Assert: the declaration diagnostic names the argument and the
+    // expected mapping shape.
+    match &err {
+        JobDocError::InvalidArgumentDeclaration { argument, detail } => {
+            assert_eq!(argument, "name");
+            assert!(
+                detail.contains("mapping"),
+                "detail must name the shape; got: {detail}"
+            );
+        }
+        other => panic!("expected InvalidArgumentDeclaration, got {other:?}"),
+    }
+    let msg = err.to_string();
+    assert!(
+        msg.contains("name") && msg.contains("mapping"),
+        "declaration diagnostic must name the argument and shape; got: {msg}"
+    );
+}
+
+#[test]
+fn empty_args_select_declared_mode() {
+    // Arrange: `args: {}` — the operator would pass a CLI pair (e.g.
+    // `--arg name=John`); the parser only records the declared mode.
+    let text = r#"
+args: {}
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let doc = document::parse_job_document(&doc_path(), text).expect("empty args parse");
+    // Assert: declarations are present and legacy-header mode is false.
+    let args = doc.args.as_ref().expect("declared mode selected");
+    assert!(args.entries.is_empty());
+    assert!(!doc.legacy_arg_headers());
+}
+
+#[test]
+fn absent_args_select_legacy_mode() {
+    // Arrange: a document without any top-level `args:` block.
+    // Act
+    let doc =
+        document::parse_job_document(&doc_path(), VALID_ONE_SHOT).expect("legacy document parses");
+    // Assert: no declarations and legacy-header mode stays on.
+    assert!(doc.args.is_none());
+    assert!(doc.legacy_arg_headers());
 }

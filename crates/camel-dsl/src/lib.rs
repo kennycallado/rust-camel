@@ -34,7 +34,7 @@ pub use discovery::{
     discover_routes, discover_routes_with_threshold, discover_routes_with_threshold_and_security,
     discover_routes_with_threshold_security_and_env,
 };
-pub use env_interpolation::interpolate_yaml_source;
+pub use env_interpolation::{interpolate_with_args, interpolate_yaml_source};
 pub use json::{
     parse_json, parse_json_to_canonical, parse_json_to_declarative, parse_json_with_threshold,
     parse_json_with_threshold_and_security,

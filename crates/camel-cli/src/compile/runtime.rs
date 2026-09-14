@@ -15,6 +15,10 @@
 //! No compile-time asset is resolved at runtime, nothing is extracted to
 //! a temporary location, and the watcher never activates. `${env:NAME}`
 //! resolves from the deployment environment through the discovery path.
+//! Declared job `args:` resolve at startup through the same parser path
+//! as normal jobs with an EMPTY `--arg` list (jobargs Task 3.2):
+//! embedded declaration defaults fill the interpolated fields, and a
+//! required declaration without a default exits 2 before boot.
 //!
 //! [`self_detect_artifact`] is the binary entry point (Task 2.3): the
 //! `camel` main calls it BEFORE Clap parses anything, so a self-contained
@@ -47,7 +51,10 @@ const IDLE_NOTE: &str = "compiled artifact running (hot-reload disabled). Press 
 /// Parsed artifact argument surface.
 ///
 /// The exclusive modes (`--help`, `--version`, `--manifest`) print and
-/// exit 0 without booting; `--report <path>` pairs with a run.
+/// exit 0 without booting; `--report <path>` pairs with a run. The
+/// surface is deliberately narrow: job arguments (`--arg`) are
+/// unsupported (rejected as unknown) — declared arguments resolve from
+/// the embedded declarations alone (jobargs Task 3.2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArtifactArgs {
     /// `--report <path>`: where the run writes its report.

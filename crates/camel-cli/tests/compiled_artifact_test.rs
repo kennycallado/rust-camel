@@ -97,6 +97,45 @@ routes:
           value: ${env:DEPLOY_GREETING}
 ";
 
+/// A one-shot job document with a DECLARED argument whose default
+/// (`hello`) the artifact must apply at startup (jobargs Task 3.2): the
+/// send body carries `${arg:value}` and the step-free route echoes the
+/// body back as the reply, so the reply value proves the resolution.
+const ARG_DOC: &str = "\
+args:
+  value:
+    default: hello
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: \"${arg:value}\"
+routes:
+  - id: job-arg
+    from: direct:transform
+";
+
+/// A one-shot job document declaring a REQUIRED argument without a
+/// default: an embedded run has no `--arg` surface to fill it, so the
+/// artifact must reject it at startup (exit 2, naming the argument).
+const REQUIRED_ARG_DOC: &str = "\
+args:
+  value:
+    required: true
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: \"${arg:value}\"
+routes:
+  - id: job-arg
+    from: direct:transform
+";
+
 /// Compile `doc` into `artifact` inside `dir` with a clean environment.
 fn compile(dir: &Path, doc: &str, artifact: &str, envs: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_camel"));
@@ -129,6 +168,10 @@ struct Fixture {
     failing_job: PathBuf,
     /// `ENV_DOC` artifact, compiled with a compile-time env value.
     env: PathBuf,
+    /// `ARG_DOC` artifact (declared default applies at startup).
+    arg: PathBuf,
+    /// `REQUIRED_ARG_DOC` artifact (required without a default).
+    required_arg: PathBuf,
 }
 
 static FIXTURE: OnceLock<Fixture> = OnceLock::new();
@@ -225,11 +268,15 @@ fn fixture() -> &'static Fixture {
             "env.bin",
             &[("DEPLOY_GREETING", "compile-secret-value")],
         );
+        let arg = compile_one("args.job.yaml", ARG_DOC, "arg.bin", &[]);
+        let required_arg = compile_one("reqargs.job.yaml", REQUIRED_ARG_DOC, "req.bin", &[]);
         Fixture {
             route,
             job,
             failing_job,
             env,
+            arg,
+            required_arg,
         }
     })
 }
@@ -549,6 +596,135 @@ fn compiled_artifact_resolves_deploy_environment() {
         report["reply"]["body"], "deploy-value",
         "route must observe the deployment value: {report}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// jobargs Task 3.2: embedded declared arguments. The artifact payload is
+// pre-interpolation authoring text; declared `args:` resolve at artifact
+// startup through the same parse path normal jobs use, with EMPTY CLI
+// pairs — embedded defaults only. `--arg` stays outside the artifact
+// surface (`--report`, `--help`, `--version`, `--manifest`).
+// ---------------------------------------------------------------------------
+
+/// A compiled job applies its embedded declaration defaults exactly like
+/// a normal `camel job` run: the same document run both ways produces the
+/// same reply message value (`hello`) and exit 0.
+#[test]
+fn compiled_job_uses_declared_default() {
+    child_guard();
+    let (deploy, artifact) = deploy_artifact(&fixture().arg);
+
+    // Artifact run: the embedded default fills `${arg:value}`.
+    let (code, stdout, stderr) = spawn_child_output(
+        "compiled_job_uses_declared_default",
+        deploy.path(),
+        &artifact,
+        &["--report", "arg-report.json"],
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "default resolution must complete;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let artifact_report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(deploy.path().join("arg-report.json"))
+            .expect("artifact report written"),
+    )
+    .expect("artifact report is JSON");
+    assert_eq!(
+        artifact_report["outcome"], "Completed",
+        "report: {artifact_report}"
+    );
+    assert_eq!(
+        artifact_report["reply"]["body"], "hello",
+        "the embedded default must fill ${{arg:value}}: {artifact_report}"
+    );
+
+    // Parity: the same document through the normal `camel job` path (no
+    // `--arg` there either) resolves the same default.
+    std::fs::write(deploy.path().join("args.job.yaml"), ARG_DOC).expect("write source doc");
+    let (code, stdout, stderr) = common::run_binary(
+        deploy.path(),
+        Path::new(env!("CARGO_BIN_EXE_camel")),
+        &["job", "args.job.yaml", "--report", "job-report.json"],
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "normal job run must complete;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let job_report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(deploy.path().join("job-report.json"))
+            .expect("job report written"),
+    )
+    .expect("job report is JSON");
+    assert_eq!(
+        artifact_report["reply"]["body"], job_report["reply"]["body"],
+        "default resolution parity: artifact vs normal job; {job_report}"
+    );
+}
+
+/// A compiled job with a required declaration and no default has no
+/// `--arg` surface to fill it: artifact startup rejects it with exit 2,
+/// naming the argument, before any boot and without a report.
+#[test]
+fn compiled_job_rejects_required_without_default() {
+    child_guard();
+    let (deploy, artifact) = deploy_artifact(&fixture().required_arg);
+    let (code, stdout, stderr) = spawn_child_output(
+        "compiled_job_rejects_required_without_default",
+        deploy.path(),
+        &artifact,
+        &["--report", "report.json"],
+        &[],
+    );
+    assert_eq!(
+        code, 2,
+        "required without default must exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("value") && combined.contains("required"),
+        "diagnostic must name the argument: {combined}"
+    );
+    assert!(
+        combined.contains("default"),
+        "diagnostic must point at declaring a default: {combined}"
+    );
+    assert!(
+        !combined.contains("pass --arg"),
+        "artifact diagnostic must not suggest the unavailable --arg surface: {combined}"
+    );
+    assert!(!combined.contains("context started"), "no boot: {combined}");
+    assert!(
+        !deploy.path().join("report.json").exists(),
+        "a rejected startup writes no report"
+    );
+}
+
+/// `--arg` stays outside the artifact surface: the existing
+/// unknown-argument rejection applies (exit 2, argument named, no boot).
+#[test]
+fn compiled_job_rejects_arg_flag() {
+    child_guard();
+    let (deploy, artifact) = deploy_artifact(&fixture().arg);
+    let (code, stdout, stderr) = spawn_child_output(
+        "compiled_job_rejects_arg_flag",
+        deploy.path(),
+        &artifact,
+        &["--arg", "value=other"],
+        &[],
+    );
+    assert_eq!(
+        code, 2,
+        "--arg must be rejected as unknown;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("--arg"),
+        "must name the rejected argument: {combined}"
+    );
+    assert!(!combined.contains("context started"), "no boot: {combined}");
 }
 
 /// A compiled artifact runs on a read-only root: no temporary

@@ -1,4 +1,8 @@
-//! `${env:}` interpolation for route sources (rc-ayke).
+//! `${env:}` interpolation for route sources (rc-ayke), generalized to
+//! also resolve `${arg:NAME}` job-argument tokens (jobargs Task 2.1):
+//! both namespaces share one scanner and tree-walk stage, with namespace
+//! dispatch before lookup so `arg:` never falls through to ambient env;
+//! the arg grammar is exactly `${arg:NAME}` (no `:-fallback`).
 //!
 //! Two paths share one string scanner (the `interpolate_string` core behind
 //! [`interpolate_env_with`] and `interpolate_env_tree`):
@@ -37,11 +41,13 @@ use std::sync::OnceLock;
 static ENV_RE: OnceLock<Regex> = OnceLock::new();
 
 fn env_regex() -> &'static Regex {
-    // Escape alternatives exist so `$${env:X}` never falls through to plain
-    // resolution; the full escape form is listed before bare `$$` so it is
-    // consumed atomically.
+    // Escape alternatives exist so `$${env:X}` / `$${arg:X}` never fall
+    // through to plain resolution; the full escape form is listed before
+    // bare `$$` so it is consumed atomically. `arg:` shares the env token
+    // grammar at the same stage, but only the identifier-name form — its
+    // `:-fallback` suffix is rejected at dispatch (jobargs Task 2.1).
     ENV_RE.get_or_init(|| {
-        Regex::new(r"(\$\$\{env:[^}]*\})|(\$\$)|(\$\{env:([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\})")
+        Regex::new(r"(\$\$\{(?:env|arg):[^}]*\})|(\$\$)|(\$\{(env|arg):([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\})")
             .unwrap() // allow-unwrap
     })
 }
@@ -87,7 +93,24 @@ pub fn interpolate_env_with(
     src: &str,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<String, String> {
-    interpolate_string(src, lookup)
+    interpolate_string(src, lookup, &|_| None)
+}
+
+/// The shared interpolation seam for job and embedded-runtime callers
+/// (jobargs Task 2.1): `${env:NAME}` resolves through `env_lookup` and
+/// `${arg:NAME}` through `arg_lookup` in one scanner pass at the same
+/// stage. Same escape forms (`$${env:X}`, `$${arg:X}`, `$$`),
+/// sanitization, and `Err(var_name)` error shape as
+/// [`interpolate_env_with`]. Namespace dispatch happens BEFORE lookup:
+/// `arg:` consults `arg_lookup` only and never falls through to the
+/// environment; its grammar is exactly `${arg:NAME}` (identifier names,
+/// no `:-fallback` — that form returns `Err(name)`).
+pub fn interpolate_with_args(
+    src: &str,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+    arg_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    interpolate_string(src, env_lookup, arg_lookup)
 }
 
 /// Canonical interpolation strategy for a YAML route source (rc-93wct):
@@ -132,8 +155,17 @@ pub(crate) fn interpolate_yaml_source_with_provenance(
 
 /// Shared string scanner for both interpolation paths (legacy whole-text
 /// and parse-tree walk). Grammar: `${env:X}`, `${env:X:-default}`,
-/// `$${env:X}` and `$$` escapes; `Err(var_name)` on an unresolved var.
-fn interpolate_string(s: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
+/// `${arg:X}` (identifier names only — the `:-fallback` form is
+/// rejected), `$${env:X}` / `$${arg:X}` and `$$` escapes;
+/// `Err(var_name)` on an unresolved var or an `arg:` fallback. Namespace
+/// dispatch happens BEFORE lookup: `env:` consults `env_lookup` only,
+/// `arg:` consults `arg_lookup` only — an argument name never falls
+/// through to the environment.
+fn interpolate_string(
+    s: &str,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+    arg_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
     let re = env_regex();
     let mut error: Option<String> = None;
 
@@ -141,7 +173,8 @@ fn interpolate_string(s: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Resul
         if error.is_some() {
             return String::new();
         }
-        // `$${env:...}` escape: emit the literal placeholder text (strip one `$`).
+        // `$${env:...}` / `$${arg:...}` escape: emit the literal
+        // placeholder text (strip one `$`).
         if let Some(escaped) = caps.get(1) {
             return escaped.as_str()[1..].to_string();
         }
@@ -149,9 +182,27 @@ fn interpolate_string(s: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Resul
         if caps.get(2).is_some() {
             return "$".to_string();
         }
-        let var_name = &caps[4];
-        let default_value = caps.get(5).map(|m| m.as_str());
-        match lookup(var_name) {
+        let namespace = &caps[4];
+        let var_name = &caps[5];
+        let default_value = caps.get(6).map(|m| m.as_str());
+        // Namespace dispatch BEFORE lookup (jobargs Task 2.1): `arg:`
+        // consults the argument lookup only — never the environment —
+        // and its grammar is exactly `${arg:NAME}`; the `:-fallback`
+        // form is rejected rather than applied.
+        if namespace == "arg" {
+            if default_value.is_some() {
+                error = Some(var_name.to_string());
+                return String::new();
+            }
+            return match arg_lookup(var_name) {
+                Some(val) => sanitize_env_value(&val),
+                None => {
+                    error = Some(var_name.to_string());
+                    String::new()
+                }
+            };
+        }
+        match env_lookup(var_name) {
             Some(val) => sanitize_env_value(&val),
             None => {
                 if let Some(default) = default_value {
@@ -236,7 +287,10 @@ pub(crate) fn interpolate_env_tree_with_provenance(
     let mut root: serde_yml::Value =
         serde_yml::from_str(raw).map_err(|_| TreeInterpolateError::Fallback)?;
     let mut paths = Vec::new();
-    interpolate_value(&mut root, lookup, &mut Vec::new(), &mut paths)?;
+    // The tree walk is the route-source path: no argument context exists
+    // here, so `${arg:...}` tokens fail closed as unresolved (never an
+    // ambient-environment fall-through).
+    interpolate_value(&mut root, lookup, &|_| None, &mut Vec::new(), &mut paths)?;
     let doc = serde_yml::to_string(&root).map_err(|_| TreeInterpolateError::Fallback)?;
     Ok((doc, paths))
 }
@@ -248,12 +302,15 @@ fn has_env_token(s: &str) -> bool {
 
 /// Whether the ENTIRE scalar is exactly one unescaped `${env:NAME}` or
 /// `${env:NAME:-default}` token — the plain token form of `env_regex()`
-/// spanning the whole string. Escaped forms (`$${env:...}`, `$$`) are
-/// literal text, not substitutions, and never match; a token embedded in
-/// larger text (`x${env:A}`, `${env:A}y`) does not either.
+/// spanning the whole string, `env:` namespace only (`arg:` whole-scalars
+/// are not env provenance and never feed the typed probe). Escaped forms
+/// (`$${env:...}`, `$$`) are literal text, not substitutions, and never
+/// match; a token embedded in larger text (`x${env:A}`, `${env:A}y`) does
+/// not either.
 pub(crate) fn is_whole_scalar_env_token(s: &str) -> bool {
     env_regex()
         .captures(s)
+        .filter(|caps| caps.get(4).is_some_and(|ns| ns.as_str() == "env"))
         .and_then(|caps| caps.get(3))
         .is_some_and(|m| m.start() == 0 && m.end() == s.len())
 }
@@ -266,7 +323,8 @@ pub(crate) fn is_whole_scalar_env_token(s: &str) -> bool {
 /// interpolated but never recorded.
 fn interpolate_value(
     value: &mut serde_yml::Value,
-    lookup: &dyn Fn(&str) -> Option<String>,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+    arg_lookup: &dyn Fn(&str) -> Option<String>,
     path: &mut Vec<ProvenanceSeg>,
     paths: &mut Vec<ProvenancePath>,
 ) -> Result<(), TreeInterpolateError> {
@@ -274,7 +332,8 @@ fn interpolate_value(
         serde_yml::Value::String(s) => {
             if has_env_token(s) {
                 let whole_token = is_whole_scalar_env_token(s);
-                *s = interpolate_string(s, lookup).map_err(TreeInterpolateError::Unresolved)?;
+                *s = interpolate_string(s, env_lookup, arg_lookup)
+                    .map_err(TreeInterpolateError::Unresolved)?;
                 if whole_token {
                     paths.push(path.clone());
                 }
@@ -284,7 +343,7 @@ fn interpolate_value(
         serde_yml::Value::Sequence(seq) => {
             for (index, item) in seq.iter_mut().enumerate() {
                 path.push(ProvenanceSeg::Index(index));
-                interpolate_value(item, lookup, path, paths)?;
+                interpolate_value(item, env_lookup, arg_lookup, path, paths)?;
                 path.pop();
             }
             Ok(())
@@ -299,12 +358,12 @@ fn interpolate_value(
             for (key, val) in map.iter() {
                 let mut key = key.clone();
                 if has_env_token(&key) {
-                    key = interpolate_string(&key, lookup)
+                    key = interpolate_string(&key, env_lookup, arg_lookup)
                         .map_err(TreeInterpolateError::Unresolved)?;
                 }
                 path.push(ProvenanceSeg::Key(key.clone()));
                 let mut val = val.clone();
-                interpolate_value(&mut val, lookup, path, paths)?;
+                interpolate_value(&mut val, env_lookup, arg_lookup, path, paths)?;
                 path.pop();
                 rebuilt.insert(key, val);
             }
@@ -640,5 +699,70 @@ mod tests {
             "two tokens"
         );
         assert!(!is_whole_scalar_env_token("plain"), "no token at all");
+    }
+
+    // ---- `arg:` namespace through the shared scanner (jobargs Task 2.1) ----
+
+    #[test]
+    fn interpolate_arg_tokens_at_shared_stage() {
+        // One call path resolves BOTH namespaces: `env:` through the env
+        // lookup, `arg:` through the argument lookup — same scanner, same
+        // stage, same escape and sanitization behavior.
+        let env = |name: &str| (name == "HOST").then(|| "broker.local".to_string());
+        let arg = |name: &str| (name == "NAME").then(|| "gold".to_string());
+        // URI-like (mixed namespaces in one string).
+        assert_eq!(
+            interpolate_with_args("kafka://${env:HOST}:9092/${arg:NAME}", &env, &arg).unwrap(),
+            "kafka://broker.local:9092/gold"
+        );
+        // Body-like.
+        assert_eq!(
+            interpolate_with_args("Hello, ${arg:NAME} at ${env:HOST}", &env, &arg).unwrap(),
+            "Hello, gold at broker.local"
+        );
+        // Header-like.
+        assert_eq!(
+            interpolate_with_args("X-Tier: ${arg:NAME}", &env, &arg).unwrap(),
+            "X-Tier: gold"
+        );
+    }
+
+    #[test]
+    fn reject_arg_fallback_syntax() {
+        // The arg grammar is exactly `${arg:NAME}`: the `:-fallback` form
+        // must never apply — not even when NAME resolves.
+        let err = interpolate_with_args("${arg:NAME:-fallback}", &|_| None, &|name| {
+            (name == "NAME").then(|| "resolved".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(err, "NAME");
+        // Same rejection when the argument is unresolved.
+        let err = interpolate_with_args("${arg:NAME:-fallback}", &|_| None, &|_| None).unwrap_err();
+        assert_eq!(err, "NAME");
+    }
+
+    #[test]
+    fn arg_namespace_does_not_fall_through() {
+        // Ambient HOME exists, but the argument lookup has no HOME: the
+        // `arg:` namespace must dispatch BEFORE any environment lookup.
+        let home = env::var("HOME").expect("ambient HOME must be set for this test");
+        let env_lookup = |name: &str| env::var(name).ok();
+        // Control: the env namespace resolves the same name.
+        assert_eq!(
+            interpolate_with_args("${env:HOME}", &env_lookup, &|_| None).unwrap(),
+            home
+        );
+        // The arg namespace must NOT fall through to the environment.
+        let err = interpolate_with_args("${arg:HOME}", &env_lookup, &|_| None).unwrap_err();
+        assert_eq!(err, "HOME");
+    }
+
+    #[test]
+    fn escape_arg_form_yields_literal() {
+        let arg = |name: &str| (name == "NAME").then(|| "gold".to_string());
+        assert_eq!(
+            interpolate_with_args("$${arg:NAME} and $$", &|_| None, &arg).unwrap(),
+            "${arg:NAME} and $"
+        );
     }
 }

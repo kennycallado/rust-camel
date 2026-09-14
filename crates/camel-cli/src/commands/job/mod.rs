@@ -89,8 +89,11 @@ pub struct JobArgs {
         env = "CAMEL_CONFIG_FILE"
     )]
     pub config: String,
-    /// Repeatable NAME=VALUE pair injected as a message header at send
-    /// time (applied after document headers; last occurrence wins).
+    /// Repeatable NAME=VALUE pair. On documents WITHOUT `args:` the
+    /// pair is injected as a message header at send time (applied after
+    /// document headers; last occurrence wins; deprecation note on
+    /// stderr). On declared documents the pair must name a declared
+    /// argument and resolves through `${arg:}` interpolation instead.
     #[arg(
         long = "arg",
         value_name = "NAME=VALUE",
@@ -109,6 +112,14 @@ fn parse_arg_pair(raw: &str) -> Result<(String, String), String> {
         Some((name, value)) => Ok((name.to_string(), value.to_string())),
     }
 }
+
+/// The deprecation note for the legacy implicit-header path: emitted
+/// exactly once per run when a document without `args:` receives
+/// `--arg` pairs. The wording is a stable output contract (the delta
+/// spec requires a note "identifying the legacy behavior"; unit tests
+/// pin it verbatim).
+const LEGACY_ARG_DEPRECATION: &str = "camel job: --arg header injection on documents \
+ without an `args:` block is deprecated; declare arguments in a top-level `args:` block instead";
 
 /// The JSON report of one job run.
 #[derive(Serialize)]
@@ -541,13 +552,22 @@ pub async fn run_job(args: &JobArgs) -> i32 {
             return 2;
         }
     };
-    let doc = match document::parse_job_document(&document_path, &text) {
+    let doc = match document::parse_job_document_with_args(&document_path, &text, &args.args) {
         Ok(doc) => doc,
         Err(e) => {
             eprintln!("{}: {e}", document_path.display());
             return 2;
         }
     };
+    // Legacy implicit-header path: pairs stay raw send-time headers, and
+    // the command emits exactly ONE deprecation note identifying the
+    // legacy behavior (only when the behavior is actually exercised).
+    // Declared documents resolved the pairs through their declarations
+    // during the parse above and inject no headers.
+    let legacy_header_args = doc.legacy_arg_headers();
+    if legacy_header_args && !args.args.is_empty() {
+        eprintln!("{LEGACY_ARG_DEPRECATION}");
+    }
     let doc_dir = document_path
         .parent()
         .map(Path::to_path_buf)
@@ -567,7 +587,15 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         route_load,
         project_root: crate::commands::run::canonical_project_root(Path::new(&args.config)),
         report_path: args.report.clone(),
-        cli_args: args.args.clone(),
+        // Raw header pairs are a LEGACY-path construct: declared
+        // documents resolve `--arg` through declarations + interpolation
+        // at parse time and must not get implicit headers; embedded
+        // runs never carry pairs.
+        cli_args: if legacy_header_args {
+            args.args.clone()
+        } else {
+            Vec::new()
+        },
     };
     execute_job(doc, run, camel_config, Some(signals)).await
 }
@@ -602,7 +630,10 @@ struct JobRun {
     project_root: PathBuf,
     /// `--report` path; `None` writes the report to stdout.
     report_path: Option<PathBuf>,
-    /// CLI `--arg NAME=VALUE` header pairs (empty for embedded runs).
+    /// Raw CLI `--arg NAME=VALUE` header pairs — legacy documents only
+    /// (declared documents resolve pairs through declarations +
+    /// interpolation at parse time and pass none; embedded runs pass
+    /// none).
     cli_args: Vec<(String, String)>,
 }
 
@@ -615,6 +646,13 @@ struct JobRun {
 /// the default in-memory config (no Camel.toml, no `CAMEL_*` overrides);
 /// the report/outcome lifecycle and exit codes are exactly the existing
 /// `camel job` taxonomy.
+///
+/// Declared `args:` documents (jobargs Task 3.2) resolve through the same
+/// parse path as normal jobs with EMPTY `--arg` pairs: the embedded
+/// declaration defaults fill `to`, `body`, `headers`, and `timeout` via
+/// the shared namespace-specific interpolation stage, and a required
+/// declaration without a default fails HERE — exit 2, before boot —
+/// because an artifact has no `--arg` surface to fill it.
 pub(crate) async fn run_embedded_job(
     source_name: &str,
     text: &str,
@@ -628,8 +666,16 @@ pub(crate) async fn run_embedded_job(
             return 2;
         }
     };
-    let doc = match document::parse_job_document(Path::new(source_name), text) {
+    let doc = match document::parse_job_document_with_args(Path::new(source_name), text, &[]) {
         Ok(doc) => doc,
+        Err(document::JobDocError::MissingRequiredArgument { name }) => {
+            eprintln!(
+                "compiled://{source_name}: missing required argument `{name}`: compiled \
+                 artifacts cannot accept --arg; declare a `default` for the argument in \
+                 the document instead"
+            );
+            return 2;
+        }
         Err(e) => {
             eprintln!("compiled://{source_name}: {e}");
             return 2;
@@ -1198,6 +1244,9 @@ async fn send_with_startup_retry(
     }
     // CLI values are applied LAST: they override colliding document
     // headers, and a repeated name resolves to the last occurrence.
+    // Legacy path only — declared documents pass an empty pair list
+    // (`JobRun::cli_args`), their values having already been resolved
+    // through `${arg:}` interpolation.
     for (k, v) in cli_args {
         message.set_header(k.clone(), serde_json::Value::String(v.clone()));
     }

@@ -20,7 +20,10 @@
 //!
 //! Runtime endpoint URI paths (e.g. `file:`, `kafka:`, `log:`), runtime
 //! `${env:}` expressions outside forbidden fields, and deploy-side I/O stay
-//! permitted. Field names match the blessed v1 matrix exactly; the
+//! permitted. Top-level job `args:` declarations (`required`, `default`,
+//! `description`) are ordinary document data, not assets, so declared job
+//! documents compile (jobargs Task 3.2). Field names match the blessed v1
+//! matrix exactly; the
 //! camelCase/path spellings the rest of the codebase uses for the same
 //! fields (`route_files`, `certPath`, `clientCaPath`, …) are rejected too,
 //! so a rename cannot smuggle an asset through. Every violation is named
@@ -244,5 +247,44 @@ fn any_string(value: &serde_yml::Value, pred: fn(&str) -> bool) -> bool {
         serde_yml::Value::Mapping(map) => map.values().any(|v| any_string(v, pred)),
         serde_yml::Value::Sequence(seq) => seq.iter().any(|v| any_string(v, pred)),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Job `args:` declarations are ordinary document data and compile,
+    /// while unsupported route assets stay rejected (jobargs Task 3.2).
+    #[test]
+    fn job_args_declarations_permitted_and_assets_rejected() {
+        let declared = "\
+args:
+  value:
+    required: true
+    default: hello
+    description: the value to send
+execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: direct:transform
+    body: \"${arg:value}\"
+routes:
+  - id: job-arg
+    from: direct:transform
+";
+        reject_unsupported_assets(declared, TrailerKind::Job)
+            .expect("args declarations are not compile-time assets");
+
+        let err = reject_unsupported_assets(
+            "args:\n  value:\n    default: hi\nrouteFiles:\n  - routes/*.yaml\n",
+            TrailerKind::Job,
+        )
+        .expect_err("route-file assets must stay rejected alongside declarations");
+        let CompileError::UnsupportedAsset(text) = err else {
+            panic!("unexpected error variant");
+        };
+        assert!(text.contains("routeFiles"), "err: {text}");
     }
 }

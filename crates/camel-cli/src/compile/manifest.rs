@@ -203,9 +203,13 @@ fn push_mcp_listener(listeners: &mut Vec<String>, entry: &serde_yml::Value) {
 
 /// Token scanner for `${env:NAME}` / `${env:NAME:-default}` placeholders.
 ///
-/// SYNC: grammar mirrors camel-dsl `env_interpolation` `env_regex()` (escape
-/// forms `$${env:...}` and `$$` are literal text, never substitutions);
-/// crate purity forbids the dependency. Update both together.
+/// SYNC: env-only subset of camel-dsl `env_interpolation` `env_regex()` —
+/// since jobargs Task 2.1 that grammar also carries `arg:` tokens, which
+/// the manifest deliberately does NOT collect (job arguments are not
+/// deployment env requirements; `$${arg:...}` still drops its leading
+/// `$$` via the escape arm, and bare `${arg:NAME}` simply never matches).
+/// Escape forms `$${env:...}` and `$$` are literal text, never
+/// substitutions; crate purity forbids the dependency.
 fn env_token_re() -> &'static Regex {
     static ENV_RE: OnceLock<Regex> = OnceLock::new();
     ENV_RE.get_or_init(|| {
@@ -313,6 +317,41 @@ mcp:
     assert!(
         !json.contains("OUT_DIR"),
         "defaulted env tokens must not appear in the manifest"
+    );
+}
+
+/// The manifest env-name scan stays an env-only subset of the shared
+/// interpolation grammar (jobargs Task 3.2, per the jobargs Task 2.1
+/// generalization): bare `${arg:NAME}` tokens and escaped `$${arg:NAME}`
+/// forms contribute nothing to `env_names`, and the derived manifest of a
+/// declared job lists only the genuine `${env:...}` requirement.
+#[test]
+fn manifest_env_scan_ignores_arg_tokens() {
+    let document = "\
+args:
+  value:
+    default: hello
+execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: direct:transform
+    body: \"${arg:value}\"
+routes:
+  - id: job-arg
+    from: direct:lit
+    steps:
+      - set_body:
+          value: \"$${arg:lit} ${env:HOST}\"
+";
+
+    let manifest = derive("args.job.yaml", TrailerKind::Job, document)
+        .expect("declared job document must derive a manifest");
+
+    assert_eq!(
+        manifest.env_names,
+        vec!["HOST"],
+        "arg tokens (bare and escaped) must contribute nothing to env_names"
     );
 }
 

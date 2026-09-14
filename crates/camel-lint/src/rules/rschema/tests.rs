@@ -896,3 +896,115 @@ steps:
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn rschema_arg_no_default_flagged() {
+    // jobargs Task 2.1: the lint tree has no argument context, so a
+    // whole-scalar `${arg:NAME}` Unresolved-fails exactly like an
+    // unresolved env token (boot parity). The arg message carries NO
+    // "(no default)" qualifier — the arg grammar has no substitutable
+    // default form at all, so the qualifier would be a lie.
+    let source = "\
+id: ${arg:JOB_NAME}
+from: direct:start
+steps:
+  - to: log:out
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected exactly one Error flagging the unresolved arg token; got: {errors:?}"
+    );
+    assert!(
+        errors[0]
+            .message
+            .contains("unresolved ${arg:JOB_NAME} placeholder"),
+        "Error message must name the arg namespace and variable; got: {}",
+        errors[0].message
+    );
+    assert!(
+        !errors[0].message.contains("(no default)"),
+        "arg tokens must carry no default qualifier; got: {}",
+        errors[0].message
+    );
+    assert!(
+        slice(source, &errors[0].span).contains("${arg:JOB_NAME}"),
+        "Error must anchor on the token; sliced: {:?}",
+        slice(source, &errors[0].span)
+    );
+}
+
+#[test]
+fn rschema_arg_fallback_rejected() {
+    // jobargs Task 2.1: `${arg:NAME:-gold}` is NOT the env default form —
+    // the arg grammar rejects `:-fallback`, so the boot tree-walk fails on
+    // it and lint must flag it as an unresolved arg instead of emitting a
+    // substituted-default Info note (no arg substitution ever happens
+    // lint-side).
+    let source = "\
+id: ${arg:NAME:-gold}
+from: direct:start
+steps:
+  - to: log:out
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected exactly one Error rejecting the arg fallback form; got: {errors:?}"
+    );
+    assert!(
+        errors[0]
+            .message
+            .contains("unresolved ${arg:NAME} placeholder"),
+        "Error message must name the arg variable; got: {}",
+        errors[0].message
+    );
+    assert!(
+        rschema.iter().all(|d| d.severity != Severity::Info),
+        "the arg fallback must never be substituted (no Info note); got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        slice(source, &errors[0].span).contains("${arg:NAME:-gold}"),
+        "Error must anchor on the full token including the fallback; sliced: {:?}",
+        slice(source, &errors[0].span)
+    );
+}
+
+#[test]
+fn rschema_arg_escaped_silent() {
+    // jobargs Task 2.1: `$${arg:NAME}` is the escape form — boot emits the
+    // literal `${arg:NAME}` text, so lint must stay completely silent
+    // (same policy as `$${env:...}`).
+    let source = "\
+id: $${arg:ESCAPED_ARG}
+from: direct:start
+steps:
+  - to: log:out
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "escaped $${{arg:...}} must produce no diagnostics; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+}

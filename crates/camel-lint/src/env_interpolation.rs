@@ -1,6 +1,6 @@
-// SYNC: `interpolate_env_with` below mirrors
-// camel-dsl::env_interpolation::interpolate_env_with (rc-93wct); crate
-// purity forbids the dependency. Update both together.
+// SYNC: `interpolate_string` / `interpolate_env_with` below mirror
+// camel-dsl::env_interpolation (rc-93wct); crate purity forbids the
+// dependency. Update both together.
 // `interpolated_validation_copy` / `whole_scalar_env_token` are lint-side
 // helpers (validation copy + typing mirror) with no camel-dsl counterpart.
 // The clean-integer gate for the typing-mirror integer-position carve-out
@@ -14,11 +14,13 @@ use std::sync::OnceLock;
 static ENV_RE: OnceLock<Regex> = OnceLock::new();
 
 pub(crate) fn env_regex() -> &'static Regex {
-    // Escape alternatives exist so `$${env:X}` never falls through to plain
-    // resolution; the full escape form is listed before bare `$$` so it is
-    // consumed atomically.
+    // Escape alternatives exist so `$${env:X}` / `$${arg:X}` never fall
+    // through to plain resolution; the full escape form is listed before
+    // bare `$$` so it is consumed atomically. `arg:` shares the env token
+    // grammar at the same stage, but only the identifier-name form — its
+    // `:-fallback` suffix is rejected at dispatch (jobargs Task 2.1).
     ENV_RE.get_or_init(|| {
-        Regex::new(r"(\$\$\{env:[^}]*\})|(\$\$)|(\$\{env:([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\})")
+        Regex::new(r"(\$\$\{(?:env|arg):[^}]*\})|(\$\$)|(\$\{(env|arg):([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\})")
             .unwrap() // allow-unwrap
     })
 }
@@ -61,14 +63,31 @@ pub(crate) fn interpolate_env_with(
     src: &str,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<String, String> {
+    interpolate_string(src, lookup, &|_| None)
+}
+
+/// Shared string scanner, byte-equivalent to
+/// `camel_dsl::env_interpolation::interpolate_string` (SYNC gate).
+/// Grammar: `${env:X}`, `${env:X:-default}`, `${arg:X}` (identifier names
+/// only — the `:-fallback` form is rejected), `$${env:X}` / `$${arg:X}`
+/// and `$$` escapes; `Err(var_name)` on an unresolved var or an `arg:`
+/// fallback. Namespace dispatch happens BEFORE lookup: `arg:` consults
+/// `arg_lookup` only — an argument name never falls through to the
+/// environment.
+fn interpolate_string(
+    s: &str,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+    arg_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
     let re = env_regex();
     let mut error: Option<String> = None;
 
-    let result = re.replace_all(src, |caps: &regex::Captures| {
+    let result = re.replace_all(s, |caps: &regex::Captures| {
         if error.is_some() {
             return String::new();
         }
-        // `$${env:...}` escape: emit the literal placeholder text (strip one `$`).
+        // `$${env:...}` / `$${arg:...}` escape: emit the literal
+        // placeholder text (strip one `$`).
         if let Some(escaped) = caps.get(1) {
             return escaped.as_str()[1..].to_string();
         }
@@ -76,9 +95,27 @@ pub(crate) fn interpolate_env_with(
         if caps.get(2).is_some() {
             return "$".to_string();
         }
-        let var_name = &caps[4];
-        let default_value = caps.get(5).map(|m| m.as_str());
-        match lookup(var_name) {
+        let namespace = &caps[4];
+        let var_name = &caps[5];
+        let default_value = caps.get(6).map(|m| m.as_str());
+        // Namespace dispatch BEFORE lookup (jobargs Task 2.1): `arg:`
+        // consults the argument lookup only — never the environment —
+        // and its grammar is exactly `${arg:NAME}`; the `:-fallback`
+        // form is rejected rather than applied.
+        if namespace == "arg" {
+            if default_value.is_some() {
+                error = Some(var_name.to_string());
+                return String::new();
+            }
+            return match arg_lookup(var_name) {
+                Some(val) => sanitize_env_value(&val),
+                None => {
+                    error = Some(var_name.to_string());
+                    String::new()
+                }
+            };
+        }
+        match env_lookup(var_name) {
             Some(val) => sanitize_env_value(&val),
             None => {
                 if let Some(default) = default_value {
@@ -107,17 +144,20 @@ pub(crate) struct SubstitutedDefault {
 /// Build the per-token validation copy R-SCHEMA validates.
 ///
 /// `${env:X:-d}` tokens resolve to `d` (recorded in the returned list);
-/// `$${env:...}` and `$$` escapes apply; a no-default token is left
-/// literally untouched so schema validation still flags the genuinely
-/// undefined variable. Per-token semantics: a whole-document `Err → raw`
-/// fallback would re-literal defaulted tokens too, which the route-lint
-/// mixed-document scenario forbids.
+/// `$${env:...}` / `$${arg:...}` and `$$` escapes apply; a no-default env
+/// token is left literally untouched so schema validation still flags the
+/// genuinely undefined variable. `${arg:...}` tokens have no lint-side
+/// argument context: they stay literally untouched too (same treatment as
+/// no-default env tokens). Per-token semantics: a whole-document
+/// `Err → raw` fallback would re-literal defaulted tokens too, which the
+/// route-lint mixed-document scenario forbids.
 pub(crate) fn interpolated_validation_copy(raw: &str) -> (String, Vec<SubstitutedDefault>) {
     let re = env_regex();
     let mut substituted = Vec::new();
     let copy = re
         .replace_all(raw, |caps: &regex::Captures| {
-            // `$${env:...}` escape: emit the literal placeholder text (strip one `$`).
+            // `$${env:...}` / `$${arg:...}` escape: emit the literal
+            // placeholder text (strip one `$`).
             if let Some(escaped) = caps.get(1) {
                 return escaped.as_str()[1..].to_string();
             }
@@ -125,12 +165,19 @@ pub(crate) fn interpolated_validation_copy(raw: &str) -> (String, Vec<Substitute
             if caps.get(2).is_some() {
                 return "$".to_string();
             }
+            // Arg namespace: no lint-side argument context — leave the
+            // token literally untouched (including any `:-fallback` text;
+            // the arg fallback form is the boot layer's rejection, not a
+            // schema concern).
+            if &caps[4] == "arg" {
+                return caps[0].to_string();
+            }
             // No-default token: leave the whole match literally untouched.
-            let Some(default) = caps.get(5) else {
+            let Some(default) = caps.get(6) else {
                 return caps[0].to_string();
             };
             substituted.push(SubstitutedDefault {
-                var: caps[4].to_string(),
+                var: caps[5].to_string(),
                 default: default.as_str().to_string(),
             });
             sanitize_env_value(default.as_str())
@@ -285,5 +332,80 @@ mod tests {
         // Non-token scalars (including empty miss spans) never match.
         assert_eq!(whole_scalar_env_token(""), None);
         assert_eq!(whole_scalar_env_token("plain"), None);
+    }
+
+    #[test]
+    fn lint_scanner_matches_dsl_scanner() {
+        // Parity vectors for the camel-dsl scanner (SYNC gate): identical
+        // inputs must produce identical outputs and errors through both
+        // scanners. Covers direct, embedded, escaped, mixed, and
+        // unresolved tokens for both namespaces, plus arg fallback
+        // rejection and the env-only namespace dispatch (arg never falls
+        // through to the env lookup).
+        let env_some = Some("broker.local");
+        let arg_some = Some("gold");
+        let scan = |src: &str, env: Option<&str>, arg: Option<&str>| {
+            interpolate_string(
+                src,
+                &move |name: &str| {
+                    if name == "HOST" {
+                        env.map(str::to_string)
+                    } else {
+                        None
+                    }
+                },
+                &move |name: &str| {
+                    if name == "NAME" {
+                        arg.map(str::to_string)
+                    } else {
+                        None
+                    }
+                },
+            )
+        };
+        /// (input, env value for HOST, arg value for NAME, expected
+        /// output or error name) — the shared parity vector shape.
+        type Case<'a> = (
+            &'a str,
+            Option<&'a str>,
+            Option<&'a str>,
+            Result<&'a str, &'a str>,
+        );
+        let cases: Vec<Case> = vec![
+            // Direct tokens.
+            ("uri: ${env:HOST}", env_some, None, Ok("uri: broker.local")),
+            ("${arg:NAME}", None, arg_some, Ok("gold")),
+            // Embedded tokens.
+            ("x${env:HOST}y", env_some, None, Ok("xbroker.localy")),
+            ("a ${arg:NAME} b", None, arg_some, Ok("a gold b")),
+            // Escaped tokens are literal text, both namespaces plus $$.
+            ("$${env:HOST}", env_some, None, Ok("${env:HOST}")),
+            ("$${arg:NAME}", None, arg_some, Ok("${arg:NAME}")),
+            ("a$$b", None, None, Ok("a$b")),
+            // Mixed namespaces in one string.
+            (
+                "${env:HOST}/${arg:NAME}",
+                env_some,
+                arg_some,
+                Ok("broker.local/gold"),
+            ),
+            // env fallback still applies...
+            ("${env:HOST:-d}", None, None, Ok("d")),
+            // ...while the arg fallback form is rejected even when resolved.
+            ("${arg:NAME:-fallback}", None, arg_some, Err("NAME")),
+            ("${arg:NAME:-fallback}", None, None, Err("NAME")),
+            // Unresolved tokens error with the name.
+            ("${env:HOST}", None, None, Err("HOST")),
+            ("${arg:NAME}", None, None, Err("NAME")),
+            // Namespace dispatch: HOST resolves via env, never for arg.
+            ("${arg:HOST}", env_some, None, Err("HOST")),
+        ];
+        for (src, env, arg, expected) in cases {
+            assert_eq!(
+                scan(src, env, arg),
+                expected.map(str::to_string).map_err(str::to_string),
+                "input: {src}"
+            );
+        }
     }
 }

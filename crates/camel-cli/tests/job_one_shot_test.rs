@@ -1606,3 +1606,326 @@ fn malformed_arg_is_usage_error() {
         "stderr must carry the usage error; got:\n{stderr}"
     );
 }
+
+// ── Declared `args:` end to end (jobargs Task 4.1) ─────────────────────
+
+/// The field-matrix fixture: four declared arguments (`target`, `text`,
+/// `header`, `wait`) referenced in the four send surfaces. The route
+/// echoes the interpolated header and body into the reply body, so one
+/// capture-reply assertion observes `to`, `body`, and `headers` at once;
+/// a successful run with `timeout: "${arg:wait}"` proves the timeout
+/// interpolated to a duration BEFORE the humantime check rejected it.
+fn write_args_matrix_fixture(dir: &Path, mode: &str) {
+    write_config(dir);
+    std::fs::create_dir(dir.join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-args-matrix"
+    from: "direct:in"
+    steps:
+      - transform: {simple: "${header.X-Env}:${body}"}
+"#,
+    )
+    .expect("write route");
+    let doc = format!(
+        r#"args:
+  target: {{default: "direct:in"}}
+  text: {{default: "hello"}}
+  header: {{default: "gold"}}
+  wait: {{default: "30s"}}
+execute:
+  mode: {mode}
+  timeout: "${{arg:wait}}"
+  capture-reply: true
+  send:
+    to: "${{arg:target}}"
+    body: "${{arg:text}}"
+    headers:
+      X-Env: "${{arg:header}}"
+routeFiles:
+  - routes/job-route.yaml
+"#
+    );
+    std::fs::write(dir.join("job.job.yaml"), doc).expect("write job doc");
+}
+
+/// The four-field interpolation matrix in BOTH execution modes: one-shot
+/// resolves embedded defaults for `to`, `body`, `headers`, and `timeout`;
+/// batch resolves explicit `--arg` pairs over the same defaults. Exit 0
+/// and a `Completed` report whose reply body carries the interpolated
+/// header and body (`${header.X-Env}:${body}`).
+#[test]
+fn job_args_end_to_end_field_matrix() {
+    // One-shot: defaults only, no `--arg` pairs.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_args_matrix_fixture(dir.path(), "one-shot");
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
+    assert_eq!(
+        code, 0,
+        "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(report["mode"], "one-shot", "report: {report}");
+    assert_eq!(
+        report["reply"]["body"], "gold:hello",
+        "declared defaults must resolve in headers and body; report: {report}"
+    );
+
+    // Batch: explicit pairs win over the same defaults; the direct
+    // target keeps the drain empty-queue immediate.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_args_matrix_fixture(dir.path(), "batch");
+    let (code, stdout, stderr) = run_job_args(
+        dir.path(),
+        &[
+            "job.job.yaml",
+            "--arg",
+            "text=hi",
+            "--arg",
+            "header=silver",
+            "--arg",
+            "wait=45s",
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(report["mode"], "batch", "report: {report}");
+    assert_eq!(
+        report["reply"]["body"], "silver:hi",
+        "explicit pairs must win over defaults in batch mode; report: {report}"
+    );
+}
+
+/// Declared-argument validation happens before boot and exits 2 naming
+/// the offending argument: an `--arg` naming an undeclared argument, and
+/// an omitted required argument with no default. Early exit-2 classes
+/// are stderr-only — no JSON report reaches stdout.
+#[test]
+fn job_args_validation_exit_two() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-args-validation"
+    from: "direct:transform"
+    steps:
+      - set_body:
+          value: "unreached"
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"args:
+  name: {required: true}
+execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: direct:transform
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    // Unknown name: exit 2 before boot, stderr names `tier`.
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--arg", "tier=gold"]);
+    assert_eq!(
+        code, 2,
+        "unknown declared argument is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unknown argument `tier`"),
+        "stderr must name the undeclared argument; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "early exit-2 class is stderr-only; got:\n{stdout}"
+    );
+
+    // Missing required: exit 2 before boot, stderr names `name`.
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
+    assert_eq!(
+        code, 2,
+        "missing required argument is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("missing required argument `name`"),
+        "stderr must name the required argument; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "early exit-2 class is stderr-only; got:\n{stdout}"
+    );
+}
+
+/// An `${arg:ghost}` reference without a `ghost` declaration fails
+/// interpolation at the same stage and scanner as `${env:}`: exit 2
+/// before boot with a diagnostic naming `ghost`. The `arg:` namespace is
+/// dispatched before lookup, so no environment fallthrough can rescue
+/// the run (the fixture sets no such variable anyway).
+#[test]
+fn job_args_interpolation_failure_exit_two() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-args-interp"
+    from: "direct:transform"
+    steps:
+      - set_body:
+          value: "unreached"
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"args:
+  known: {default: "x"}
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+    body: "ghost says ${arg:ghost}"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
+    assert_eq!(
+        code, 2,
+        "unresolved ${{arg:}} token is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unresolved argument `ghost`"),
+        "stderr must name the unresolved argument; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "early exit-2 class is stderr-only; got:\n{stdout}"
+    );
+}
+
+/// Run `camel job <args...>` in `dir` with explicit environment overrides
+/// (`envs`) and removals (`env_remove`), returning
+/// `(exit_code, stdout, stderr)`. Unlike [`common::run_binary`], this can
+/// scrub a variable from the child's inherited environment, so a
+/// `${env:}` probe distinguishes "set" from "unset" without depending on
+/// the ambient test-runner environment.
+fn run_job_args_with_env(
+    dir: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    env_remove: &[&str],
+) -> (i32, String, String) {
+    let mut full: Vec<&str> = vec!["job"];
+    full.extend(args.iter().copied());
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_camel"));
+    command
+        .args(&full)
+        .envs(envs.iter().copied())
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null());
+    for key in env_remove {
+        command.env_remove(key);
+    }
+    let output = command.output().expect("spawn `camel job`");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// `${env:VAR}` inside a DECLARED document's `execute.send` surface
+/// resolves through the ambient environment at the same interpolation
+/// stage as `${arg:}`. With the variable set, the substituted value
+/// reaches the captured reply body; with it scrubbed from the child
+/// explicitly, the run is the same early exit-2 class that names the
+/// unresolved token. Regression lock for the holistic-review finding I1.
+#[test]
+fn job_env_in_declared_send_fields() {
+    const PROBE: &str = "JOBARGS_ENV_PROBE";
+    const VALUE: &str = "env-probe-ok-7f3a";
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-env-send"
+    from: "direct:env-send"
+    steps:
+      - transform: {simple: "${body}"}
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        format!(
+            r#"args:
+  probe: {{default: "declared"}}
+execute:
+  mode: one-shot
+  timeout: 30s
+  capture-reply: true
+  send:
+    to: direct:env-send
+    body: "${{env:{PROBE}}}"
+routeFiles:
+  - routes/job-route.yaml
+"#
+        ),
+    )
+    .expect("write job doc");
+
+    // Set: the ambient value substitutes into the send body and reaches
+    // the captured reply.
+    let (code, stdout, stderr) =
+        run_job_args_with_env(dir.path(), &["job.job.yaml"], &[(PROBE, VALUE)], &[]);
+    assert_eq!(
+        code, 0,
+        "resolved ${{env:}} token must run to completion;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(
+        report["reply"]["body"], VALUE,
+        "capture-reply body must carry the substituted ${{env:}} value; report: {report}"
+    );
+
+    // Unset: scrub the variable from the child explicitly — same early
+    // exit-2 class as the `${arg:}` scanner failure, stderr names it.
+    let (code, stdout, stderr) =
+        run_job_args_with_env(dir.path(), &["job.job.yaml"], &[], &[PROBE]);
+    assert_eq!(
+        code, 2,
+        "unresolved ${{env:}} token is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unresolved argument `JOBARGS_ENV_PROBE`"),
+        "stderr must name the unresolved environment token; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "early exit-2 class is stderr-only; got:\n{stdout}"
+    );
+}

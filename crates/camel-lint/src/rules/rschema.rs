@@ -209,14 +209,22 @@ impl Rule for RSchemaRule {
         // reports the type defect, the other names the unresolved variable
         // (boot-parity hard failure). Do not "deduplicate" them.
         for u in unresolved {
+            // `arg:` tokens fail the boot tree walk regardless of a
+            // fallback suffix (the arg grammar rejects `:-fallback`), so
+            // the "(no default)" qualifier only applies to `env:`.
+            let qualifier = if u.namespace == "env" {
+                " (no default)"
+            } else {
+                ""
+            };
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::RSchema,
                 severity: Severity::Error,
                 span: u.span,
                 message: format!(
-                    "unresolved ${{env:{}}} placeholder (no default): route loading \
+                    "unresolved ${{{}:{}}} placeholder{}: route loading \
                      would fail on this placeholder",
-                    u.var
+                    u.namespace, u.var, qualifier
                 ),
                 fix: None,
             });
@@ -348,8 +356,11 @@ fn collect_placeholder_spans(
 }
 
 /// A whole-scalar `${env:VAR}` token (no default) found at a value
-/// position — reported as an Error (boot hard-fails on it).
+/// position — reported as an Error (boot hard-fails on it). The
+/// namespace is `env` or `arg`; `arg:` tokens hard-fail the boot tree
+/// walk with or without a fallback suffix (jobargs Task 2.1).
 struct UnresolvedPlaceholder {
+    namespace: &'static str,
     var: String,
     span: Span,
 }
@@ -491,7 +502,11 @@ fn enforce_typing_mirror(
                     }
                 }
                 Some(WholeScalarEnvToken::NoDefault { var }) => {
-                    unresolved.push(UnresolvedPlaceholder { var, span });
+                    unresolved.push(UnresolvedPlaceholder {
+                        namespace: "env",
+                        var,
+                        span,
+                    });
                 }
                 None => {
                     // Embedded-token parity (rc-93wct): the boot tree-walk
@@ -499,22 +514,34 @@ fn enforce_typing_mirror(
                     // including ones inside a larger scalar
                     // (`id: svc-${env:HOST}`). The whole-scalar arms above
                     // cannot see them, so scan the authored slice with
-                    // ENV_RE — it consumes `$${env:...}` / `$$` escapes
-                    // atomically — and flag each bare no-default match,
-                    // span-anchored at its offset inside the leaf. Value
-                    // leaves only: comments and mapping keys are never
-                    // visited by this walk.
+                    // ENV_RE — it consumes `$${env:...}` / `$${arg:...}` /
+                    // `$$` escapes atomically — and flag each bare
+                    // no-default match, span-anchored at its offset inside
+                    // the leaf. Value leaves only: comments and mapping
+                    // keys are never visited by this walk.
                     for caps in env_regex().captures_iter(authored) {
-                        let (Some(whole), Some(var)) = (caps.get(3), caps.get(4)) else {
-                            // `$${env:...}` / `$$` escape arm — never unresolved.
+                        let (Some(whole), Some(namespace), Some(var)) =
+                            (caps.get(3), caps.get(4), caps.get(5))
+                        else {
+                            // `$${env:...}` / `$${arg:...}` / `$$` escape
+                            // arm — never unresolved.
                             continue;
                         };
-                        if caps.get(5).is_some() {
-                            // Has a default: substituted validation + Info
-                            // note, not unresolved.
+                        // Boot-tree parity (jobargs Task 2.1): the tree
+                        // walk has no argument context, so EVERY unescaped
+                        // `arg:` token Unresolved-fails it — including the
+                        // `:-fallback` form, which the arg grammar
+                        // rejects. Env tokens only fail without a default
+                        // (a default substitutes cleanly).
+                        if namespace.as_str() != "arg" && caps.get(6).is_some() {
                             continue;
                         }
                         unresolved.push(UnresolvedPlaceholder {
+                            namespace: if namespace.as_str() == "arg" {
+                                "arg"
+                            } else {
+                                "env"
+                            },
                             var: var.as_str().to_string(),
                             span: Span::new(span.start + whole.start(), span.start + whole.end()),
                         });
