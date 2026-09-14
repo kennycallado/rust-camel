@@ -52,7 +52,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `validate` | Validate (predicate) | predicate validation wrapper | `src/lib.rs:48` |
 | `wire_tap` | WireTap | fire-and-forget side route with bounded-admission semaphore (max_concurrent cap, CallerRuns at bound) | `src/lib.rs:49` |
 | `zip_splitter` | ZipSplitter | archive splitting | `src/lib.rs:52` |
-| `tar_splitter` | TarSplitter | TAR/TAR.GZ archive splitting (entry-per-exchange, bounded caps per ADR-0038) | `src/lib.rs:48` |
+| `tar_splitter` | TarSplitter | TAR and TAR.GZ archive splitting (entry-per-exchange, bounded caps per ADR-0038) | `src/lib.rs:48` |
 | `archive_splitter` | shared archive splitting core (`DuplicatePolicy`, caps, stream helpers; private module) | archive splitting | `src/lib.rs:2` |
 
 ## Structural EIP Segments
