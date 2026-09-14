@@ -1,8 +1,12 @@
 //! Unit tests for the `camel job <name> --help` renderer.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
-use super::document::{JobArgumentDeclaration, JobArgumentDeclarations, JobHelpInfo};
+use super::document::{
+    JobArgType, JobArgumentDeclaration, JobArgumentDeclarations, JobDocError, JobHelpInfo,
+    parse_job_document_for_help,
+};
 use super::help::render_job_help;
 
 /// The declared interface pinned by the full-render test: mode
@@ -17,6 +21,7 @@ fn declared_interface_info() -> JobHelpInfo {
             required: true,
             default: None,
             description: Some("Feed identifier".to_string()),
+            arg_type: JobArgType::String,
         },
     );
     entries.insert(
@@ -25,6 +30,7 @@ fn declared_interface_info() -> JobHelpInfo {
             required: false,
             default: Some("eu-west-1".to_string()),
             description: None,
+            arg_type: JobArgType::String,
         },
     );
     JobHelpInfo {
@@ -94,6 +100,7 @@ fn render_multiline_values_collapse_to_one_row() {
             required: false,
             default: Some("a\nb".to_string()),
             description: Some("c\r\nd".to_string()),
+            arg_type: JobArgType::String,
         },
     );
     let info = JobHelpInfo {
@@ -149,4 +156,177 @@ fn render_token_send_target_verbatim() {
         .find(|line| line.starts_with("Sends to:"))
         .expect("Sends to: line exists");
     assert_eq!(line, "Sends to:  ${arg:target}");
+}
+
+/// A declaration with only its type set (optional, no default, no
+/// description).
+fn typed_declaration(arg_type: JobArgType) -> JobArgumentDeclaration {
+    JobArgumentDeclaration {
+        required: false,
+        default: None,
+        description: None,
+        arg_type,
+    }
+}
+
+/// The `required`/`optional` marker's column index on the row of
+/// `name`, or the row's length when no marker is present.
+fn marker_index(rendered: &str, name: &str) -> usize {
+    let row = rendered
+        .lines()
+        .find(|line| line.starts_with(&format!("  {name} ")))
+        .unwrap_or_else(|| panic!("row for `{name}` exists"));
+    row.find("required")
+        .or_else(|| row.find("optional"))
+        .unwrap_or_else(|| panic!("row for `{name}` carries a marker: {row}"))
+}
+
+#[test]
+fn help_renders_declared_type_per_argument() {
+    let mut entries = BTreeMap::new();
+    entries.insert("count".to_string(), typed_declaration(JobArgType::Int));
+    entries.insert("name".to_string(), typed_declaration(JobArgType::String));
+    entries.insert(
+        "tier".to_string(),
+        typed_declaration(JobArgType::Enum(vec![
+            "bronze".to_string(),
+            "gold".to_string(),
+        ])),
+    );
+    entries.insert("verbose".to_string(), typed_declaration(JobArgType::Bool));
+    let info = JobHelpInfo {
+        mode: "one-shot".to_string(),
+        send_to: "direct:ingest".to_string(),
+        args: Some(JobArgumentDeclarations { entries }),
+    };
+    let rendered = render_job_help("daily-sync", None, &info);
+    let row = |name: &str| {
+        rendered
+            .lines()
+            .find(|line| line.starts_with(&format!("  {name} ")))
+            .unwrap_or_else(|| panic!("row for `{name}` exists"))
+    };
+    assert!(row("count").contains("int"), "count row: {}", row("count"));
+    assert!(
+        row("verbose").contains("bool"),
+        "verbose row: {}",
+        row("verbose")
+    );
+    assert!(
+        row("tier").contains("enum[bronze,gold]"),
+        "tier row: {}",
+        row("tier")
+    );
+    assert!(row("name").contains("string"), "name row: {}", row("name"));
+}
+
+#[test]
+fn help_type_column_aligns_across_rows() {
+    let mut mixed_entries = BTreeMap::new();
+    mixed_entries.insert("count".to_string(), typed_declaration(JobArgType::Int));
+    mixed_entries.insert(
+        "tier".to_string(),
+        typed_declaration(JobArgType::Enum(vec![
+            "bronze".to_string(),
+            "gold".to_string(),
+        ])),
+    );
+    let mixed = JobHelpInfo {
+        mode: "one-shot".to_string(),
+        send_to: "direct:ingest".to_string(),
+        args: Some(JobArgumentDeclarations {
+            entries: mixed_entries,
+        }),
+    };
+    let rendered_mixed = render_job_help("daily-sync", None, &mixed);
+    // The widest type (`enum[bronze,gold]`) sets the column, so both
+    // markers start at the same index.
+    assert_eq!(
+        marker_index(&rendered_mixed, "count"),
+        marker_index(&rendered_mixed, "tier")
+    );
+    // A job where every row IS the widest type aligns identically.
+    let mut widest_entries = BTreeMap::new();
+    widest_entries.insert(
+        "count".to_string(),
+        typed_declaration(JobArgType::Enum(vec![
+            "bronze".to_string(),
+            "gold".to_string(),
+        ])),
+    );
+    widest_entries.insert(
+        "tier".to_string(),
+        typed_declaration(JobArgType::Enum(vec![
+            "bronze".to_string(),
+            "gold".to_string(),
+        ])),
+    );
+    let widest = JobHelpInfo {
+        mode: "one-shot".to_string(),
+        send_to: "direct:ingest".to_string(),
+        args: Some(JobArgumentDeclarations {
+            entries: widest_entries,
+        }),
+    };
+    let rendered_widest = render_job_help("daily-sync", None, &widest);
+    assert_eq!(
+        marker_index(&rendered_mixed, "count"),
+        marker_index(&rendered_widest, "count")
+    );
+}
+
+#[test]
+fn help_untyped_job_renders_string_column_unchanged() {
+    // The A3 golden declarations: `feed` (required, described) and
+    // `region` (optional, defaulted) — the same set the full-render
+    // golden test pins. Untyped declarations render `string` as both
+    // the widest and only type, so the output is byte-identical to the
+    // pre-change renderer.
+    let info = declared_interface_info();
+    let rendered = render_job_help("daily-sync", Some("Ingest the daily feed"), &info);
+    let expected = "\
+daily-sync
+
+Ingest the daily feed
+
+Mode:      one-shot
+Sends to:  direct:ingest
+
+Arguments:
+  feed    string  required  Feed identifier
+  region  string  optional  default=eu-west-1";
+    assert_eq!(rendered, expected);
+}
+
+#[test]
+fn help_declaration_error_exits_2() {
+    // Help shares the declaration checks with execution parsing: a
+    // typed default failing coercion fails the help parse with the same
+    // error class.
+    let text = "\
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:in
+routeFiles:
+  - routes.yaml
+args:
+  count:
+    type: int
+    default: \"abc\"";
+    let err = parse_job_document_for_help(Path::new("daily.job.yaml"), text)
+        .expect_err("typed default failing coercion must fail the help parse");
+    match err {
+        JobDocError::ArgumentCoercion {
+            name,
+            expected,
+            raw,
+        } => {
+            assert_eq!(name, "count");
+            assert_eq!(expected, JobArgType::Int);
+            assert_eq!(raw, "abc");
+        }
+        other => panic!("expected ArgumentCoercion, got {other:?}"),
+    }
 }

@@ -54,6 +54,9 @@ use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 
 use document::{JobBody, JobDocument, JobRouteSource};
+// Compile-time declaration gate for `camel compile` (jobtyped Task 5);
+// the `document` module is private to this one.
+pub(crate) use document::validate_job_declarations_for_compile;
 use signal::{JobSignals, JobWaitOutcome, await_job_operation_or_signal};
 
 /// Startup-race retry sleep for the send's producer delivery.

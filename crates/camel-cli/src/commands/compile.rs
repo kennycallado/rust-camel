@@ -184,6 +184,19 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
         .route_documents
         .first()
         .expect("the resolver always leads the plan with the entry document"); // allow-unwrap
+    // Job documents run the argument-declaration checks at compile time
+    // (jobtyped): name grammar, unknown fields, `type` grammar, and
+    // typed-default coercion — a failure exits 2 with NO artifact
+    // written. Route documents keep the exact prior path, and no
+    // execution-value validation runs at compile time (cli-jobs spec,
+    // `typed argument coercion`).
+    if kind == TrailerKind::Job
+        && let Err(e) =
+            crate::commands::job::validate_job_declarations_for_compile(&entry_document.1)
+    {
+        eprintln!("camel compile: {e}");
+        return EXIT_REJECTION;
+    }
     if let Err(e) = policy::reject_entry_document_assets(&entry_document.1, kind) {
         eprintln!("camel compile: {e}");
         return EXIT_REJECTION;

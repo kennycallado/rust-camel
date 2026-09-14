@@ -231,6 +231,92 @@ routes:
     from: direct:transform
 ";
 
+/// A one-shot job document declaring a TYPED argument whose default
+/// (`"007"`) must coerce to the canonical `7` at resolution (jobtyped
+/// Task 5): the send target `direct:${arg:count}` interpolates to
+/// `direct:7` and the route consumer is declared ONLY at `direct:7`,
+/// so an uncoerced `direct:007` target would find no consumer and fail
+/// the send — exit 0 on both run paths proves the canonical form.
+const TYPED_DEFAULT_ARG_DOC: &str = "\
+args:
+  count:
+    type: int
+    default: \"007\"
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: \"direct:${arg:count}\"
+    body: ping
+routes:
+  - id: job-count
+    from: direct:7
+";
+
+/// A one-shot job document whose typed default FAILS coercion
+/// (`default: "abc"` under `type: int`): `camel compile` must reject it
+/// at compile time with no artifact (jobtyped Task 5).
+const BAD_TYPED_DEFAULT_DOC: &str = "\
+args:
+  count:
+    type: int
+    default: \"abc\"
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: \"direct:${arg:count}\"
+    body: ping
+routes:
+  - id: job-count
+    from: direct:7
+";
+
+/// A one-shot job document with the `requried:` typo in its `args:`
+/// declaration (the A2-era malformed-declaration class): `camel compile`
+/// must reject it with the unknown-field diagnostic and no
+/// artifact (jobtyped Task 5).
+const MALFORMED_DECLARATION_DOC: &str = "\
+args:
+  count:
+    requried: true
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: \"direct:${arg:count}\"
+    body: ping
+routes:
+  - id: job-count
+    from: direct:7
+";
+
+/// A STRUCTURE-invalid job document whose `args:` declarations are
+/// perfectly valid: the unknown top-level field `wat:` fails the full
+/// parser (`deny_unknown_fields`) at document load — artifact startup or
+/// a normal run — but the compile seam runs the argument-declaration
+/// checks ONLY, so `camel compile` must accept it (jobtyped Task 5).
+const STRUCTURE_INVALID_WELL_DECLARED_DOC: &str = "\
+wat: oops
+args:
+  count:
+    type: int
+    default: \"007\"
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: \"direct:${arg:count}\"
+    body: ping
+routes:
+  - id: job-count
+    from: direct:7
+";
+
 /// Compile `doc` into `artifact` inside `dir` with a clean environment.
 fn compile(dir: &Path, doc: &str, artifact: &str, envs: &[(&str, &str)]) -> Output {
     compile_full(dir, doc, artifact, envs, None, &[])
@@ -295,6 +381,9 @@ struct Fixture {
     /// Multi-document job artifact whose indexed route resolves
     /// `${env:DEPLOY_GREETING}`, compiled with a compile-time value.
     multi_env: PathBuf,
+    /// `TYPED_DEFAULT_ARG_DOC` artifact (typed default coerces at
+    /// startup, jobtyped Task 5).
+    typed_arg: PathBuf,
 }
 
 static FIXTURE: OnceLock<Fixture> = OnceLock::new();
@@ -454,6 +543,7 @@ fn fixture() -> &'static Fixture {
             "multi-env.bin",
             &[("DEPLOY_GREETING", "compile-secret-value")],
         );
+        let typed_arg = compile_one("typed.job.yaml", TYPED_DEFAULT_ARG_DOC, "typed.bin", &[]);
         Fixture {
             route,
             job,
@@ -464,6 +554,7 @@ fn fixture() -> &'static Fixture {
             multi_route,
             multi_job,
             multi_env,
+            typed_arg,
         }
     })
 }
@@ -937,6 +1028,166 @@ fn compiled_job_rejects_arg_flag() {
         "must name the rejected argument: {combined}"
     );
     assert!(!combined.contains("context started"), "no boot: {combined}");
+}
+
+// ---------------------------------------------------------------------------
+// jobtyped Task 5: compile-time declaration validation and typed-default
+// artifact parity. `camel compile` runs the argument-declaration checks
+// (`type` grammar, typed-default coercion) on job documents — exit 2, no
+// artifact on failure — and compiled artifacts coerce embedded typed
+// defaults at startup through the same rules as a normal job.
+// ---------------------------------------------------------------------------
+
+/// A compiled job coerces its embedded TYPED default exactly like a
+/// normal `camel job` run: `count: {type: int, default: "007"}`
+/// resolves to the canonical `7`, so both runs send to the identical
+/// interpolated target `direct:7` — the route consumer is declared only
+/// there, so an uncoerced `007` target would find no consumer and fail —
+/// and both runs exit 0.
+#[test]
+fn compiled_job_coerces_typed_default() {
+    child_guard();
+    let (deploy, artifact) = deploy_artifact(&fixture().typed_arg);
+
+    // Artifact run: the embedded typed default coerces `007` -> `7`.
+    let (code, stdout, stderr) = spawn_child_output(
+        "compiled_job_coerces_typed_default",
+        deploy.path(),
+        &artifact,
+        &["--report", "typed-report.json"],
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "typed default must coerce and complete;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let artifact_report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(deploy.path().join("typed-report.json"))
+            .expect("artifact report written"),
+    )
+    .expect("artifact report is JSON");
+    assert_eq!(
+        artifact_report["outcome"], "Completed",
+        "report: {artifact_report}"
+    );
+    assert_eq!(
+        artifact_report["reply"]["body"], "ping",
+        "the coerced target must route to the `direct:7` consumer: {artifact_report}"
+    );
+
+    // Parity: the same document through the normal `camel job` path
+    // (no `--arg` there either) coerces to the identical send target.
+    std::fs::write(deploy.path().join("typed.job.yaml"), TYPED_DEFAULT_ARG_DOC)
+        .expect("write source doc");
+    let (code, stdout, stderr) = common::run_binary(
+        deploy.path(),
+        Path::new(env!("CARGO_BIN_EXE_camel")),
+        &["job", "typed.job.yaml", "--report", "typed-job-report.json"],
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "normal job run must complete;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let job_report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(deploy.path().join("typed-job-report.json"))
+            .expect("job report written"),
+    )
+    .expect("job report is JSON");
+    assert_eq!(job_report["outcome"], "Completed", "report: {job_report}");
+    assert_eq!(
+        artifact_report["reply"]["body"], job_report["reply"]["body"],
+        "identical send target: artifact vs normal job; {job_report}"
+    );
+}
+
+/// Compiling a job document whose typed default fails coercion exits 2
+/// with the `ArgumentCoercion` diagnostic naming the argument and
+/// produces NO artifact file (jobtyped Task 5).
+#[test]
+fn compile_rejects_bad_typed_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("bad.job.yaml"), BAD_TYPED_DEFAULT_DOC).expect("write document");
+    let output = compile(dir.path(), "bad.job.yaml", "bad.bin", &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "compile must reject the bad typed default: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("count") && stderr.contains("int") && stderr.contains("abc"),
+        "diagnostic must name the argument, the expected type, and the raw value: {stderr}"
+    );
+    assert!(
+        !dir.path().join("bad.bin").exists(),
+        "a rejected compile must produce no artifact"
+    );
+    assert!(
+        !dir.path().join("bad.bin.tmp").exists(),
+        "a rejected compile must leave no partial artifact"
+    );
+}
+
+/// Compiling a job document with a malformed declaration (the
+/// `requried:` typo) exits 2 with the unknown-field diagnostic and
+/// produces no artifact — the same declaration class the load path
+/// rejects (jobtyped Task 5).
+#[test]
+fn compile_rejects_malformed_declaration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("typo.job.yaml"), MALFORMED_DECLARATION_DOC)
+        .expect("write document");
+    let output = compile(dir.path(), "typo.job.yaml", "typo.bin", &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "compile must reject the malformed declaration: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requried") && stderr.contains("count"),
+        "unknown-field diagnostic must name the field and the argument: {stderr}"
+    );
+    assert!(
+        !dir.path().join("typo.bin").exists(),
+        "a rejected compile must produce no artifact"
+    );
+    assert!(
+        !dir.path().join("typo.bin.tmp").exists(),
+        "a rejected compile must leave no partial artifact"
+    );
+}
+
+/// The compile seam is declaration-ONLY: a job document that is
+/// structure-invalid for the full parser (unknown top-level field under
+/// `deny_unknown_fields`) but whose `args:` declarations are perfectly
+/// valid compiles with exit 0 and a written artifact. Structure
+/// rejection belongs to artifact startup / normal runs, not to `camel
+/// compile` — this pins the spec sentence "no other execution-value
+/// validation SHALL run at compile time" against future refactors that
+/// would swap the seam to the full parser (jobtyped Task 5).
+#[test]
+fn compile_allows_structure_invalid_but_well_declared_job() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("loose.job.yaml"),
+        STRUCTURE_INVALID_WELL_DECLARED_DOC,
+    )
+    .expect("write document");
+    let output = compile(dir.path(), "loose.job.yaml", "loose.bin", &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "compile must run declaration checks ONLY;\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        dir.path().join("loose.bin").is_file(),
+        "the accepted compile must write the artifact"
+    );
 }
 
 /// A compiled artifact runs on a read-only root: no temporary

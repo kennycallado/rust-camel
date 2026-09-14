@@ -369,6 +369,270 @@ routeFiles:
     assert_eq!(json["reply"]["headers"]["X-Tier"], "gold", "report: {json}");
 }
 
+/// The typed all-fields job shared by the canonical-substitution and
+/// coercion-failure tests: `to`, `body`, `headers`, and `timeout` all
+/// carry `${arg:}` references backed by typed declarations, and the
+/// route file defines BOTH enum members as consumer routes so the send
+/// target's selection is observable (each tap stamps the body with its
+/// `in-` / `out-` prefix through the reply-echoing pipeline).
+fn write_typed_canonical_job(dir: &std::path::Path) {
+    std::fs::create_dir(dir.join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-tap-in"
+    from: "direct:in"
+    steps:
+      - transform: {simple: "in-${body}"}
+  - id: "job-tap-out"
+    from: "direct:out"
+    steps:
+      - transform: {simple: "out-${body}"}
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.join("job.job.yaml"),
+        r#"args:
+  target:
+    type: "enum[direct:in,direct:out]"
+  count:
+    type: int
+    default: "7"
+  verbose:
+    type: bool
+  wait:
+    type: int
+    default: "30"
+execute:
+  mode: one-shot
+  timeout: "${arg:wait}s"
+  capture-reply: true
+  send:
+    to: "${arg:target}"
+    body: "n=${arg:count} v=${arg:verbose}"
+    headers:
+      tier: "${arg:target}"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+}
+
+/// Typed canonical forms substitute at EVERY interpolation site: the
+/// enum member reaches `to` (the run selects the `direct:out` consumer,
+/// proven by the route's body stamp) and `headers` (`tier=direct:out`),
+/// the CLI pair `count=007` canonicalizes to `7` in the body next to
+/// the canonicalized bool (`v=false`), and the typed default
+/// `wait: "30"` canonicalizes into the accepted `30s` timeout (the run
+/// completing with exit 0 proves the duration parsed).
+#[test]
+fn typed_args_interpolate_canonical_forms_all_fields() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_typed_canonical_job(dir.path());
+    let report = dir.path().join("report.json");
+
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &[
+            "job.job.yaml",
+            "--report",
+            report.to_str().expect("utf8"),
+            "--arg",
+            "verbose=false",
+            "--arg",
+            "target=direct:out",
+            "--arg",
+            "count=007",
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "canonical-forms run must complete (timeout 30s accepted); stderr:\n{stderr}"
+    );
+    let json = read_report(&report);
+    assert_eq!(json["outcome"], "Completed", "report: {json}");
+    // The `direct:out` consumer's stamp proves the enum member was the
+    // send target; the body carries the canonical int and bool forms.
+    assert_eq!(json["reply"]["body"], "out-n=7 v=false", "report: {json}");
+    assert_eq!(
+        json["reply"]["headers"]["tier"], "direct:out",
+        "report: {json}"
+    );
+}
+
+/// A typed coercion failure exits 2 BEFORE boot: the diagnostic names
+/// the argument (`count`), the expected type (`int`), and the raw value
+/// (`abc`), no boot failure text appears, and no report is written —
+/// the coercion pass runs inside document parsing, ahead of route
+/// loading.
+#[test]
+fn typed_coercion_failure_exits_2_before_boot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_typed_canonical_job(dir.path());
+    let report = dir.path().join("report.json");
+
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &[
+            "job.job.yaml",
+            "--report",
+            report.to_str().expect("utf8"),
+            "--arg",
+            "count=abc",
+        ],
+    );
+    assert_eq!(code, 2, "coercion failure must exit 2; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("invalid value `abc` for argument `count`"),
+        "diagnostic must name the raw value and the argument; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("expected type `int`"),
+        "diagnostic must name the expected type; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("camel-cli job failed"),
+        "coercion must fail before boot; stderr:\n{stderr}"
+    );
+    assert!(
+        !report.exists(),
+        "coercion failure must write no report; stderr:\n{stderr}"
+    );
+}
+
+/// An UNtyped declaration keeps the A2 verbatim behavior: a `--arg`
+/// override whose text has leading zeros (`007`) substitutes exactly
+/// that text — no int canonicalization, body reads `value=007`, not
+/// `value=7`.
+#[test]
+fn untyped_document_behavior_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_tap_route(dir.path());
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"args:
+  tier:
+    default: gold
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:tap
+    body: "value=${arg:tier}"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+    let report = dir.path().join("report.json");
+
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &[
+            "job.job.yaml",
+            "--report",
+            report.to_str().expect("utf8"),
+            "--arg",
+            "tier=007",
+        ],
+    );
+    assert_eq!(code, 0, "untyped run must complete; stderr:\n{stderr}");
+    let json = read_report(&report);
+    assert_eq!(json["outcome"], "Completed", "report: {json}");
+    assert_eq!(
+        json["reply"]["body"], "value=007",
+        "untyped values must pass through verbatim (A2 behavior): {json}"
+    );
+}
+
+/// Read `name` under `dir`, retrying until it exists (up to 2 s) —
+/// the process has already exited, so the retry only smooths FS
+/// visibility, not progress (same shape as the integration-fixture
+/// `read_eventually`).
+fn read_file_eventually(dir: &std::path::Path, name: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(dir.join(name)) {
+            return text;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("{name} missing under {} after 2 s", dir.display());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+/// Batch mode + typed argument canonicalization: the declared int
+/// argument's coerced canonical value reaches the seda worker through
+/// the send headers, and the worker stamps it into a `file:` write —
+/// the `batch_works_with_arg_injection` observation shape (`mock:` is
+/// in-memory and unreadable across the subprocess harness boundary).
+/// Declared documents inject no implicit headers, so the document
+/// carries the value explicitly as `${arg:batch_id}` on the send
+/// headers; the `007` pair must arrive at the worker as `7`, and the
+/// batch must drain its seda queue to exit 0.
+#[test]
+fn batch_typed_arg_coerces_and_drains() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    let routes = format!(
+        r#"routes:
+  - id: "fan"
+    from: "direct:fan"
+    steps:
+      - to: "seda:w1"
+  - id: "w1"
+    from: "seda:w1"
+    steps:
+      - transform: {{simple: "id-${{header.batch_id}}"}}
+      - to: "file:{base}?fileName=tagged.txt"
+"#,
+        base = dir.path().display()
+    );
+    std::fs::write(dir.path().join("routes/job-route.yaml"), routes).expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"args:
+  batch_id:
+    type: int
+execute:
+  mode: batch
+  timeout: 60s
+  send:
+    to: direct:fan
+    body: "m"
+    headers:
+      batch_id: "${arg:batch_id}"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) =
+        run_camel_job(dir.path(), &["job.job.yaml", "--arg", "batch_id=007"]);
+    assert_eq!(
+        code, 0,
+        "batch run must complete and drain;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["mode"], "batch", "report: {report}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    let tagged = read_file_eventually(dir.path(), "tagged.txt");
+    assert!(
+        tagged.contains("id-7"),
+        "tagged.txt must carry the COERCED canonical value (7, not 007); got: {tagged}"
+    );
+}
+
 // ---- jobhelp Task 1.3: `--help` wiring ----------------------------------
 //
 // The `--help` contract spans argv parsing, bare-name resolution, the

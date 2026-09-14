@@ -4,7 +4,7 @@
 //! ([`super::document::parse_job_document_for_help`]), probes the
 //! description, and prints the returned text.
 
-use super::document::{JobArgumentDeclaration, JobHelpInfo};
+use super::document::{JobArgType, JobArgumentDeclaration, JobHelpInfo};
 
 /// Render the declared interface of one job document as its
 /// `camel job <name> --help` text. Pure: no I/O, no process state; the
@@ -47,9 +47,25 @@ pub(crate) fn render_job_help(stem: &str, description: Option<&str>, info: &JobH
                 .map(String::len)
                 .max()
                 .unwrap_or_default();
+            // Type column width: the widest rendered type in this job,
+            // padded by byte length — the same strategy as the name
+            // column. Enum members are not grammar-restricted to
+            // ASCII, so exotic members may visually misalign; tighten
+            // the `enum[...]` member grammar if that ever matters.
+            let type_width = declarations
+                .entries
+                .values()
+                .map(|declaration| JobArgType::render(&declaration.arg_type).len())
+                .max()
+                .unwrap_or_default();
             for (name, declaration) in &declarations.entries {
                 out.push('\n');
-                out.push_str(&render_argument_row(name, name_width, declaration));
+                out.push_str(&render_argument_row(
+                    name,
+                    name_width,
+                    type_width,
+                    declaration,
+                ));
             }
         }
         _ => out.push_str("\n  (no arguments)"),
@@ -58,19 +74,25 @@ pub(crate) fn render_job_help(stem: &str, description: Option<&str>, info: &JobH
 }
 
 /// Render one argument row: two leading spaces, the name padded on the
-/// right to the table's name column, the fixed `string` type column,
-/// the requirement flag, then the `  default=<value>` and
+/// right to the table's name column, the declared type rendered by
+/// [`JobArgType::render`] and padded on the right to the table's type
+/// column, the requirement flag, then the `  default=<value>` and
 /// `  <description>` suffixes when declared.
 fn render_argument_row(
     name: &str,
     name_width: usize,
+    type_width: usize,
     declaration: &JobArgumentDeclaration,
 ) -> String {
     let mut row = String::new();
     row.push_str("  ");
     row.push_str(name);
     row.push_str(&" ".repeat(name_width - name.len()));
-    row.push_str("  string  ");
+    row.push_str("  ");
+    let rendered_type = declaration.arg_type.render();
+    row.push_str(&rendered_type);
+    row.push_str(&" ".repeat(type_width - rendered_type.len()));
+    row.push_str("  ");
     row.push_str(if declaration.required {
         "required"
     } else {

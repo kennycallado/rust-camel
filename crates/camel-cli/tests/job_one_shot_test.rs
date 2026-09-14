@@ -717,6 +717,41 @@ fn bare_name_resolves_from_jobs_dir() {
 }
 
 #[test]
+fn execute_sequence_is_rejected_before_boot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::write(
+        dir.path().join("sequence.job.yaml"),
+        r#"execute:
+  - mode: one-shot
+    timeout: 30s
+    send:
+      to: direct:first
+  - mode: batch
+    timeout: 30s
+    send:
+      to: direct:second
+routes: []
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "sequence.job.yaml");
+    assert_eq!(
+        code, 2,
+        "execute sequence must be a parser rejection;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "no report before boot; got:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("invalid job document") && stderr.contains("execute"),
+        "stderr must carry the execute parse error; got:\n{stderr}"
+    );
+}
+
+#[test]
 fn bare_name_miss_single_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_bare_name_fixture(dir.path());

@@ -28,8 +28,9 @@
 //! discovery and config seams. Declared job `args:` resolve at startup
 //! through the same parser path as normal jobs with an EMPTY `--arg`
 //! list (jobargs Task 3.2): embedded declaration defaults fill the
-//! interpolated fields, and a required declaration without a default
-//! exits 2 before boot.
+//! interpolated fields — typed
+//! defaults coerced through the same rules (jobtyped) — and a required
+//! declaration without a default exits 2 before boot.
 //!
 //! [`self_detect_artifact`] is the binary entry point (Task 2.3): the
 //! `camel` main calls it BEFORE Clap parses anything, so a self-contained

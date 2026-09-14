@@ -819,3 +819,496 @@ routeFiles:
         }
     }
 }
+
+#[test]
+fn arg_type_each_spelling_accepted() {
+    // Arrange: one argument per accepted `type` spelling, plus an
+    // untyped sibling to compare against.
+    let text = r#"
+args:
+  a:
+    type: string
+  b:
+    type: int
+  c:
+    type: bool
+  d:
+    type: "enum[x,y]"
+  u:
+    default: gold
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let doc = document::parse_job_document(&doc_path(), text).expect("typed args parse");
+    // Assert: four declarations carry the matching type model.
+    let args = doc.args.as_ref().expect("declarations carried");
+    assert_eq!(
+        args.entries.get("a").expect("a declaration").arg_type,
+        document::JobArgType::String
+    );
+    assert_eq!(
+        args.entries.get("b").expect("b declaration").arg_type,
+        document::JobArgType::Int
+    );
+    assert_eq!(
+        args.entries.get("c").expect("c declaration").arg_type,
+        document::JobArgType::Bool
+    );
+    assert_eq!(
+        args.entries.get("d").expect("d declaration").arg_type,
+        document::JobArgType::Enum(vec!["x".to_string(), "y".to_string()])
+    );
+    // Assert: `a` is indistinguishable from the untyped declaration.
+    let untyped = args.entries.get("u").expect("u declaration");
+    assert_eq!(
+        args.entries.get("a").expect("a declaration").arg_type,
+        untyped.arg_type
+    );
+}
+
+#[test]
+fn arg_type_unknown_word_rejected() {
+    // Arrange: an unknown type word.
+    let text = r#"
+args:
+  count:
+    type: flot
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let err = document::parse_job_document(&doc_path(), text).unwrap_err();
+    // Assert: the diagnostic names the argument and the raw value.
+    match &err {
+        JobDocError::InvalidArgumentType { argument, raw } => {
+            assert_eq!(argument, "count");
+            assert_eq!(raw, "flot");
+        }
+        other => panic!("expected InvalidArgumentType, got {other:?}"),
+    }
+    let msg = err.to_string();
+    assert!(
+        msg.contains("flot") && msg.contains("count"),
+        "type diagnostic must name the argument and raw value; got: {msg}"
+    );
+}
+
+#[test]
+fn arg_type_malformed_enum_grammar_rejected() {
+    // Arrange: one malformed enum value per rejection rule (empty
+    // list, empty member after trim, duplicate member after trim,
+    // forbidden `[`, `]`, LF, and CR inside a member).
+    for raw in [
+        "enum[]",
+        "enum[a,,b]",
+        "enum[a,a]",
+        "enum[a[b]",
+        "enum[a]b]",
+        "enum[a\nb]",
+        "enum[a\rb]",
+    ] {
+        // LF/CR must reach the parser as YAML escape sequences inside
+        // the double-quoted scalar; a literal line break would be a
+        // YAML continuation error before the type grammar runs.
+        let escaped = raw.replace('\n', "\\n").replace('\r', "\\r");
+        let text = format!(
+            r#"
+args:
+  count:
+    type: "{escaped}"
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#
+        );
+        // Act
+        let err = document::parse_job_document(&doc_path(), &text).unwrap_err();
+        // Assert: the diagnostic names the argument and the raw value.
+        match &err {
+            JobDocError::InvalidArgumentType {
+                argument,
+                raw: value,
+            } => {
+                assert_eq!(argument, "count");
+                assert_eq!(value, raw);
+            }
+            other => panic!("expected InvalidArgumentType for {raw}, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("count") && msg.contains(raw),
+            "enum diagnostic must name the argument and raw value; got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn arg_type_enum_members_trimmed_and_case_preserved() {
+    // Arrange: an enum whose members carry padding whitespace.
+    let text = r#"
+args:
+  tier:
+    type: "enum[gold, silver]"
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let doc = document::parse_job_document(&doc_path(), text).expect("enum type parses");
+    // Assert: members are trimmed, and their case is preserved.
+    let args = doc.args.as_ref().expect("declarations carried");
+    assert_eq!(
+        args.entries.get("tier").expect("tier declaration").arg_type,
+        document::JobArgType::Enum(vec!["gold".to_string(), "silver".to_string()])
+    );
+}
+
+#[test]
+fn arg_type_non_string_scalar_rejected() {
+    // Arrange: a `type` holding a YAML integer.
+    let text = r#"
+args:
+  count:
+    type: 42
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let err = document::parse_job_document(&doc_path(), text).unwrap_err();
+    // Assert: the declaration diagnostic says `type` must be a string.
+    match &err {
+        JobDocError::InvalidArgumentDeclaration { argument, detail } => {
+            assert_eq!(argument, "count");
+            assert!(
+                detail.contains("type") && detail.contains("string"),
+                "detail must say type must be a string; got: {detail}"
+            );
+        }
+        other => panic!("expected InvalidArgumentDeclaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn arg_type_typed_default_failing_coercion_fails_load() {
+    // Arrange: a typed declaration whose default cannot coerce.
+    let text = r#"
+args:
+  count:
+    type: int
+    default: "abc"
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let err = document::parse_job_document(&doc_path(), text).unwrap_err();
+    // Assert: the coercion diagnostic names the argument, the
+    // expected type, and the raw value.
+    match &err {
+        JobDocError::ArgumentCoercion {
+            name,
+            expected,
+            raw,
+        } => {
+            assert_eq!(name, "count");
+            assert_eq!(*expected, document::JobArgType::Int);
+            assert_eq!(raw, "abc");
+        }
+        other => panic!("expected ArgumentCoercion, got {other:?}"),
+    }
+    let msg = err.to_string();
+    assert!(
+        msg.contains("count") && msg.contains("int") && msg.contains("abc"),
+        "coercion diagnostic must name the argument, type, and raw value; got: {msg}"
+    );
+}
+
+#[test]
+fn arg_type_omitted_defaults_to_string() {
+    // Arrange: a declaration without a `type` key whose default text
+    // would NOT survive an int coercion.
+    let text = r#"
+args:
+  count:
+    default: "007"
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let doc = document::parse_job_document(&doc_path(), text).expect("untyped args parse");
+    // Assert: the type defaults to string and the raw default text
+    // survives verbatim.
+    let args = doc.args.as_ref().expect("declarations carried");
+    let count = args.entries.get("count").expect("count declaration");
+    assert_eq!(count.arg_type, document::JobArgType::String);
+    assert_eq!(count.default.as_deref(), Some("007"));
+}
+
+/// Parse an `args:` YAML fragment into normalized declarations — the
+/// shared arrangement for the resolution tests (the surrounding
+/// document is the minimal valid one).
+fn parse_declarations(args_block: &str) -> document::JobArgumentDeclarations {
+    let text = format!(
+        "args:\n{args_block}\nexecute:\n  mode: one-shot\n  timeout: 30s\n  \
+         send:\n    to: direct:transform\nroutes:\n  - id: r\n    from: direct:transform\n"
+    );
+    let doc = document::parse_job_document(&doc_path(), &text).expect("declarations parse");
+    doc.args.expect("declared mode")
+}
+
+/// Resolve successfully and return the lookup map (declared mode
+/// always yields one).
+fn resolve_ok(
+    decls: &document::JobArgumentDeclarations,
+    pairs: &[(String, String)],
+) -> std::collections::BTreeMap<String, String> {
+    document::resolve_job_args(Some(decls), pairs)
+        .expect("resolves")
+        .expect("declared mode yields a map")
+}
+
+#[test]
+fn resolve_int_coerces_canonical_form() {
+    // Arrange: an `int` declaration and a pair in a non-canonical but
+    // parsable form.
+    let decls = parse_declarations("  count:\n    type: int");
+    let pairs = vec![("count".to_string(), "007".to_string())];
+    // Act
+    let resolved = resolve_ok(&decls, &pairs);
+    // Assert: the canonical plain-decimal form substitutes.
+    assert_eq!(resolved.get("count").map(String::as_str), Some("7"));
+}
+
+#[test]
+fn resolve_int_rejects_non_integer() {
+    // Arrange: an `int` declaration; one failing raw per rejection rule
+    // (non-numeric, float, surrounding whitespace).
+    let decls = parse_declarations("  count:\n    type: int");
+    for raw in ["abc", "3.5", " 42"] {
+        let pairs = vec![("count".to_string(), raw.to_string())];
+        // Act
+        let err = document::resolve_job_args(Some(&decls), &pairs).unwrap_err();
+        // Assert: the coercion diagnostic names the argument, the
+        // expected type, and the raw value.
+        match &err {
+            JobDocError::ArgumentCoercion {
+                name,
+                expected,
+                raw: value,
+            } => {
+                assert_eq!(name, "count");
+                assert_eq!(*expected, document::JobArgType::Int);
+                assert_eq!(value, raw);
+            }
+            other => panic!("expected ArgumentCoercion for {raw:?}, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("count") && msg.contains("int") && msg.contains(raw),
+            "coercion diagnostic must name the argument, type, and raw value; got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn resolve_int_plus_sign_and_overflow() {
+    // Arrange: an `int` declaration; a sign-carrying value and one
+    // beyond the i64 range.
+    let decls = parse_declarations("  count:\n    type: int");
+    let plus = vec![("count".to_string(), "+5".to_string())];
+    // Act + Assert: an explicit `+` is accepted and stripped.
+    let resolved = resolve_ok(&decls, &plus);
+    assert_eq!(resolved.get("count").map(String::as_str), Some("5"));
+    // Act + Assert: overflow rejects with ArgumentCoercion.
+    let overflow = vec![("count".to_string(), "99999999999999999999".to_string())];
+    let err = document::resolve_job_args(Some(&decls), &overflow).unwrap_err();
+    match &err {
+        JobDocError::ArgumentCoercion {
+            name,
+            expected,
+            raw,
+        } => {
+            assert_eq!(name, "count");
+            assert_eq!(*expected, document::JobArgType::Int);
+            assert_eq!(raw, "99999999999999999999");
+        }
+        other => panic!("expected ArgumentCoercion, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_bool_case_insensitive_canonical_lowercase() {
+    // Arrange: a `bool` declaration; both accepted spellings in mixed
+    // case.
+    let decls = parse_declarations("  verbose:\n    type: bool");
+    let t = vec![("verbose".to_string(), "TRUE".to_string())];
+    // Act + Assert: uppercase TRUE canonicalizes lowercase.
+    let resolved = resolve_ok(&decls, &t);
+    assert_eq!(resolved.get("verbose").map(String::as_str), Some("true"));
+    let f = vec![("verbose".to_string(), "False".to_string())];
+    let resolved = resolve_ok(&decls, &f);
+    assert_eq!(resolved.get("verbose").map(String::as_str), Some("false"));
+}
+
+#[test]
+fn resolve_bool_rejects_numeric_and_unknown() {
+    // Arrange: a `bool` declaration; `1`/`0` are NOT bool spellings.
+    let decls = parse_declarations("  verbose:\n    type: bool");
+    for raw in ["1", "0", "yes"] {
+        let pairs = vec![("verbose".to_string(), raw.to_string())];
+        // Act
+        let err = document::resolve_job_args(Some(&decls), &pairs).unwrap_err();
+        // Assert: the coercion diagnostic names the argument, the
+        // expected type, and the raw value.
+        match &err {
+            JobDocError::ArgumentCoercion {
+                name,
+                expected,
+                raw: value,
+            } => {
+                assert_eq!(name, "verbose");
+                assert_eq!(*expected, document::JobArgType::Bool);
+                assert_eq!(value, raw);
+            }
+            other => panic!("expected ArgumentCoercion for {raw:?}, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("verbose") && msg.contains("bool") && msg.contains(raw),
+            "coercion diagnostic must name the argument, type, and raw value; got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn resolve_enum_member_verbatim_and_outsider_lists_members() {
+    // Arrange: an `enum[bronze,gold]` declaration.
+    let decls = parse_declarations("  tier:\n    type: \"enum[bronze,gold]\"");
+    let gold = vec![("tier".to_string(), "gold".to_string())];
+    // Act + Assert: a member passes verbatim.
+    let resolved = resolve_ok(&decls, &gold);
+    assert_eq!(resolved.get("tier").map(String::as_str), Some("gold"));
+    // Act + Assert: an outsider AND a case mismatch both reject, and
+    // the rendered message lists the allowed members verbatim.
+    for raw in ["silver", "Gold"] {
+        let pairs = vec![("tier".to_string(), raw.to_string())];
+        let err = document::resolve_job_args(Some(&decls), &pairs).unwrap_err();
+        match &err {
+            JobDocError::ArgumentCoercion {
+                name,
+                expected,
+                raw: value,
+            } => {
+                assert_eq!(name, "tier");
+                assert_eq!(
+                    *expected,
+                    document::JobArgType::Enum(vec!["bronze".to_string(), "gold".to_string()])
+                );
+                assert_eq!(value, raw);
+            }
+            other => panic!("expected ArgumentCoercion for {raw:?}, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("enum[bronze,gold]"),
+            "enum coercion diagnostic must list the members; got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn resolve_typed_default_canonicalizes_without_pair() {
+    // Arrange: a typed default and NO `--arg` pairs at all.
+    let decls = parse_declarations("  count:\n    type: int\n    default: \"007\"");
+    let pairs: Vec<(String, String)> = Vec::new();
+    // Act
+    let resolved = resolve_ok(&decls, &pairs);
+    // Assert: the applied default is canonicalized at resolution too.
+    assert_eq!(resolved.get("count").map(String::as_str), Some("7"));
+}
+
+#[test]
+fn resolve_unknown_name_precedes_coercion() {
+    // Arrange: one typed declaration; the pairs carry an unknown name
+    // AND an uncoercible value.
+    let decls = parse_declarations("  count:\n    type: int");
+    let pairs = vec![
+        ("ghost".to_string(), "1".to_string()),
+        ("count".to_string(), "abc".to_string()),
+    ];
+    // Act
+    let err = document::resolve_job_args(Some(&decls), &pairs).unwrap_err();
+    // Assert: unknown-name wins over coercion.
+    match &err {
+        JobDocError::UnknownArgumentName { name } => assert_eq!(name, "ghost"),
+        other => panic!("expected UnknownArgumentName, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_missing_required_precedes_coercion() {
+    // Arrange: a required `name` without a default plus a typed
+    // `count`; the only pair carries an uncoercible `count` value.
+    let decls = parse_declarations(
+        "  name:\n    type: string\n    required: true\n  count:\n    type: int",
+    );
+    let pairs = vec![("count".to_string(), "abc".to_string())];
+    // Act
+    let err = document::resolve_job_args(Some(&decls), &pairs).unwrap_err();
+    // Assert: missing-required wins over coercion.
+    match &err {
+        JobDocError::MissingRequiredArgument { name } => assert_eq!(name, "name"),
+        other => panic!("expected MissingRequiredArgument, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_untyped_values_stay_verbatim() {
+    // Arrange: an untyped declaration (A2 behavior).
+    let decls = parse_declarations("  tier:\n    default: gold");
+    let pairs = vec![("tier".to_string(), "007".to_string())];
+    // Act
+    let resolved = resolve_ok(&decls, &pairs);
+    // Assert: verbatim, bit-identical to A2.
+    assert_eq!(resolved.get("tier").map(String::as_str), Some("007"));
+}

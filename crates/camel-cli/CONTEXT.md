@@ -106,9 +106,26 @@ no exit 2). The covered stretch on non-Unix starts at the send/drain race.
 
 `camel job <doc>` runs one `*.job.yaml` document declaring a top-level `execute:` section (mode `one-shot`/`batch`, one `direct:`/`seda:` send, mandatory `timeout`, one family route source, optional `description:` for listing). A bare name resolves `<name>.job.yaml` across ordered `[jobs].dirs` roots (`[jobs].dir` remains a one-root compatibility alias, default `jobs`, anchored at the Camel.toml root); an explicit path always wins. `dirs` takes precedence when both keys exist. `camel job` with no argument lists the discovery set — name plus relative path when needed and description via a cheap probe parse, `(unparseable)` siblings tolerated, empty/absent roots exit 0. The metadata walk uses lexical order, root depth 0, depth limit 8, 512 files per root, no directory symlinks, and one warning per truncated root. Bare-name lookup remains root-level only. It boots the REAL composition root (the `camel run` seams: config, security context, bind acks, the `camel_bundles` cascade, ambient `${env:}` discovery), starts every document route and relies on the load-time consumer allowlist for side-effect safety, with the send target as the sole entry point, sends one exchange, tears down through `BootHandle::shutdown_with_deadline`, and emits a JSON report to stdout (or `--report`) for outcomes that reach the send (verdict, interruption, or timeout) plus shutdown failures after a verdict; early exit-2 classes are stderr-only. Seda targets are rewritten to `waitForTaskToComplete=Always` so the send is synchronous (verdict fidelity). Exit precedence mirrors `camel test`: `2 > 1 > 0`. Route side-effect safety is fail-closed: documents whose routes consume (`from:`) from any scheme outside `{direct, seda, log, mock}` are rejected at load; `to:` URIs are unrestricted. `mode` accepts `one-shot` and `batch`; other values are rejected at load. The general tracing layer writes to stdout, so a machine-parseable stdout report needs `log_level = "off"` or `--report`.
 
+Documents MAY declare job arguments in a top-level `args:` block beside
+`execute:`. Names match `[A-Za-z_][A-Za-z0-9_]*`; each declaration admits
+`required` (boolean), `default` (string), and `description` (string), and MAY
+carry `type` (`string` default, `int`, `bool`, or `enum[...]` as one string
+scalar with trimmed, non-empty, unique members); unknown fields fail. Typed
+values coerce at resolution, coercion and typed-default failures exit 2, and
+`${arg:NAME}` substitutes the canonical string form. Every
+`--arg NAME=VALUE` pair on a declared document must name a declaration;
+unknown and missing-required names exit 2, defaults fill omissions, and
+explicit pairs win. Resolved values interpolate through `${arg:NAME}` in
+`to`, `body`, `headers`, and `timeout` before field validation, at the same
+scanner stage as `${env:NAME}`. The `arg:` namespace never falls through to
+the environment, `:-fallback` is rejected, and unresolved names exit 2.
+Declared documents inject no implicit headers; legacy documents keep raw
+send fields and header injection with one deprecation note on stderr.
+
 | Failure mode | Trigger | Exit code |
 |--------------|---------|-----------|
 | Doc load error | unreadable file, non-`*.job.yaml` suffix (a `*.test.yaml` declaring `execute:` gets rename guidance), missing `execute:`, mixed `scenario:`/unit-tier sections, serde/grammar errors, unsupported `mode` (accepted: `one-shot`, `batch`), missing/invalid `timeout`, non-`direct:`/`seda:` send target, route-source conflict, no `Camel.toml` ancestor for `routeFilesFromRoot`, bare-name miss across configured `[jobs].dirs` roots | 2 |
+| Argument validation | invalid `args:` declaration or `type` grammar, typed-default or resolved-value coercion failure, undeclared or missing-required `--arg`, unresolved `${arg:}`/`${env:}` in a declared document | 2 |
 | Job-safety rejection | a discovered route consumes from a scheme outside the `{direct, seda, log, mock}` allowlist; or the send target has no matching consumer route, or its base is ambiguous across several; or the route source resolves zero routes | 2 |
 | Boot failure | config load, context configure, security compile context, `camel_bundles::boot`, route discovery/parse, route registration, `ctx.start()` | 2 |
 | Pipeline failure | the send's route pipeline failed (`PipelineOutcome::Failed` through the producer reply seam) | 1 |

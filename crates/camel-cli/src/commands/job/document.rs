@@ -121,10 +121,39 @@ pub(crate) enum JobBody {
     Json(serde_json::Value),
 }
 
+/// The declared type of a job argument (the `type:` scalar). An
+/// omitted `type:` key is [`JobArgType::String`], indistinguishable
+/// from an explicit `type: string`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum JobArgType {
+    /// Verbatim strings (the A2 default).
+    String,
+    /// `i64` integers; the canonical form is plain decimal.
+    Int,
+    /// `true`/`false` case-insensitively; the canonical form is lowercase.
+    Bool,
+    /// Exact, case-sensitive membership; members are stored trimmed.
+    Enum(Vec<String>),
+}
+
+impl JobArgType {
+    /// The document spelling of the type: `string`, `int`, `bool`, or
+    /// `enum[m1,m2,...]`. ONE renderer, shared by coercion diagnostics
+    /// and the `--help` type column.
+    pub(crate) fn render(&self) -> String {
+        match self {
+            Self::String => "string".to_string(),
+            Self::Int => "int".to_string(),
+            Self::Bool => "bool".to_string(),
+            Self::Enum(members) => format!("enum[{}]", members.join(",")),
+        }
+    }
+}
+
 /// One declared job argument: the strict per-entry shape of the
-/// top-level `args:` map. Only `required`, `default`, and `description`
-/// are admitted, values are string-only, and the name is the map key
-/// validated against the identifier grammar.
+/// top-level `args:` map. Only `required`, `default`, `description`,
+/// and `type` are admitted, values are string-only, and the name is
+/// the map key validated against the identifier grammar.
 #[derive(Debug, Clone)]
 pub(crate) struct JobArgumentDeclaration {
     /// Whether the CLI must supply a value.
@@ -133,6 +162,9 @@ pub(crate) struct JobArgumentDeclaration {
     pub(crate) default: Option<String>,
     /// Author documentation for the argument.
     pub(crate) description: Option<String>,
+    /// The declared `type:`; an omitted key is [`JobArgType::String`]
+    /// (A2 behavior unchanged).
+    pub(crate) arg_type: JobArgType,
 }
 
 /// The declared top-level `args:` map, normalized: declarations keyed
@@ -176,8 +208,18 @@ pub(crate) enum JobDocError {
     /// A top-level `args:` name violates the identifier grammar.
     InvalidArgumentName { name: String },
     /// A top-level `args:` declaration contains a field outside the
-    /// allowed `required`/`default`/`description` set.
+    /// allowed `required`/`default`/`description`/`type` set.
     UnknownArgumentField { argument: String, field: String },
+    /// A top-level `args:` declaration carries a `type:` value that is
+    /// neither `string`, `int`, `bool`, nor a well-formed `enum[...]`.
+    InvalidArgumentType { argument: String, raw: String },
+    /// A typed argument's value does not coerce to its declared type
+    /// (load time: a typed `default`; resolution time: a CLI value).
+    ArgumentCoercion {
+        name: String,
+        expected: JobArgType,
+        raw: String,
+    },
     /// A top-level `args:` declaration is not a mapping, or one of its
     /// fields has the wrong type (values remain string-only).
     InvalidArgumentDeclaration { argument: String, detail: String },
@@ -245,7 +287,20 @@ impl std::fmt::Display for JobDocError {
             ),
             Self::UnknownArgumentField { argument, field } => write!(
                 f,
-                "unknown field `{field}` in the declaration of argument `{argument}`: expected `required`, `default`, or `description`"
+                "unknown field `{field}` in the declaration of argument `{argument}`: expected `required`, `default`, `description`, or `type`"
+            ),
+            Self::InvalidArgumentType { argument, raw } => write!(
+                f,
+                "invalid type `{raw}` for argument `{argument}`: expected `string`, `int`, `bool`, or `enum[...]`"
+            ),
+            Self::ArgumentCoercion {
+                name,
+                expected,
+                raw,
+            } => write!(
+                f,
+                "invalid value `{raw}` for argument `{name}`: expected type `{}`",
+                expected.render()
             ),
             Self::InvalidArgumentDeclaration { argument, detail } => {
                 write!(f, "invalid declaration for argument `{argument}`: {detail}")
@@ -610,9 +665,12 @@ fn is_argument_identifier(name: &str) -> bool {
 }
 
 /// Normalize the raw top-level `args:` map: each name must match the
-/// identifier grammar and each declaration the strict three-field
-/// shape. An empty map stays `Some` (the declared mode); only an
-/// absent `args:` key yields `None` (the legacy path).
+/// identifier grammar and each declaration the strict
+/// `required`/`default`/`description`/`type` shape. An empty map stays
+/// `Some` (the declared mode); only an absent `args:` key yields `None`
+/// (the legacy path). A typed declaration whose `default` fails
+/// coercion fails here — document load — so execution and `--help`
+/// parsing reject the same document the same way.
 fn normalize_job_args(
     raw: Option<BTreeMap<String, serde_yaml::Value>>,
 ) -> Result<Option<JobArgumentDeclarations>, JobDocError> {
@@ -625,14 +683,61 @@ fn normalize_job_args(
             return Err(JobDocError::InvalidArgumentName { name });
         }
         let declaration = job_argument_declaration(&name, &value)?;
+        // Typed-default load check: rejection only. The declaration
+        // keeps the RAW default text — canonicalization happens at
+        // resolution.
+        if declaration.arg_type != JobArgType::String
+            && let Some(default) = &declaration.default
+            && coerce_argument(default, &declaration.arg_type).is_none()
+        {
+            return Err(JobDocError::ArgumentCoercion {
+                name,
+                expected: declaration.arg_type.clone(),
+                raw: default.clone(),
+            });
+        }
         entries.insert(name, declaration);
     }
     Ok(Some(JobArgumentDeclarations { entries }))
 }
 
+/// Compile-time argument-declaration validation for `camel compile`
+/// (jobtyped Task 5). Parses `text` as an UNTYPED
+/// [`serde_yaml::Value`] — deliberately NOT [`JobDocumentDoc`], whose
+/// strict shape would drag the document-structure checks into compile
+/// time — and runs ONLY the top-level `args:` declaration checks via
+/// [`normalize_job_args`]: name grammar, unknown fields, `type`
+/// grammar, and typed-default coercion. An absent (or null) `args:` is
+/// trivially valid; an `args:` present but not a mapping fails with the
+/// [`JobDocError::Yaml`] class the full parser produces for the same
+/// input. No document-structure or execution-value validation runs
+/// here (cli-jobs spec, `typed argument coercion`).
+pub(crate) fn validate_job_declarations_for_compile(text: &str) -> Result<(), JobDocError> {
+    let value = serde_yaml::from_str::<serde_yaml::Value>(text)
+        .map_err(|e| JobDocError::Yaml(e.to_string()))?;
+    let args = match value.get("args") {
+        None | Some(serde_yaml::Value::Null) => return Ok(()),
+        Some(args) => args,
+    };
+    let mapping = args.as_mapping().ok_or_else(|| {
+        JobDocError::Yaml(
+            "top-level `args:` must be a mapping of argument declarations".to_string(),
+        )
+    })?;
+    let raw = mapping
+        .iter()
+        // The compat `Mapping` is string-keyed, so every argument name
+        // is a string by construction (family parity with
+        // `job_argument_declaration`).
+        .map(|(key, value)| (key.as_str().to_string(), value.clone()))
+        .collect::<BTreeMap<String, serde_yaml::Value>>();
+    normalize_job_args(Some(raw)).map(|_| ())
+}
+
 /// Validate one declaration mapping and build its normalized form.
 /// Unknown fields and non-string/non-boolean values produce
-/// argument-specific diagnostics.
+/// argument-specific diagnostics; the `type` value is parsed by
+/// [`parse_arg_type`].
 fn job_argument_declaration(
     name: &str,
     value: &serde_yaml::Value,
@@ -642,12 +747,16 @@ fn job_argument_declaration(
         detail,
     };
     let mapping = value.as_mapping().ok_or_else(|| {
-        invalid("expected a mapping of `required`, `default`, and `description` fields".to_string())
+        invalid(
+            "expected a mapping of `required`, `default`, `description`, and `type` fields"
+                .to_string(),
+        )
     })?;
     let mut declaration = JobArgumentDeclaration {
         required: false,
         default: None,
         description: None,
+        arg_type: JobArgType::String,
     };
     for (key, val) in mapping {
         // The compat `Mapping` is string-keyed, so every field name is
@@ -670,6 +779,16 @@ fn job_argument_declaration(
                     .ok_or_else(|| invalid("`description` must be a string".to_string()))?;
                 declaration.description = Some(raw.to_string());
             }
+            "type" => {
+                let raw = val
+                    .as_str()
+                    .ok_or_else(|| invalid("`type` must be a string".to_string()))?;
+                declaration.arg_type =
+                    parse_arg_type(raw).map_err(|raw| JobDocError::InvalidArgumentType {
+                        argument: name.to_string(),
+                        raw,
+                    })?;
+            }
             other => {
                 return Err(JobDocError::UnknownArgumentField {
                     argument: name.to_string(),
@@ -679,6 +798,60 @@ fn job_argument_declaration(
         }
     }
     Ok(declaration)
+}
+
+/// Parse the `type:` scalar: the exact words `string`, `int`, `bool`,
+/// or a single `enum[...]` scalar whose comma-separated member list is
+/// trimmed, non-empty, unique after trimming, and free of `[`, `]`,
+/// `,`, CR, and LF. `Err` carries the raw value for the
+/// [`JobDocError::InvalidArgumentType`] diagnostic.
+fn parse_arg_type(raw: &str) -> Result<JobArgType, String> {
+    match raw {
+        "string" => return Ok(JobArgType::String),
+        "int" => return Ok(JobArgType::Int),
+        "bool" => return Ok(JobArgType::Bool),
+        _ => {}
+    }
+    let interior = raw
+        .strip_prefix("enum[")
+        .and_then(|rest| rest.strip_suffix(']'))
+        .ok_or_else(|| raw.to_string())?;
+    let mut members: Vec<String> = Vec::new();
+    for member in interior.split(',') {
+        let member = member.trim();
+        if member.is_empty()
+            // No `","` here: `split(',')` makes a comma inside a
+            // member impossible.
+            || ["[", "]", "\r", "\n"]
+                .iter()
+                .any(|forbidden| member.contains(forbidden))
+            || members.iter().any(|seen| seen == member)
+        {
+            return Err(raw.to_string());
+        }
+        members.push(member.to_string());
+    }
+    Ok(JobArgType::Enum(members))
+}
+
+/// Coerce `value` to `arg_type`, returning the canonical string form:
+/// `string` keeps the value verbatim; `int` parses as `i64` (no
+/// surrounding whitespace, no overflow) and canonicalizes as plain
+/// decimal (`007` becomes `7`, `+5` becomes `5`); `bool` accepts
+/// `true`/`false` case-insensitively (NOT `1`/`0`) and canonicalizes
+/// lowercase; `enum` matches a member exactly (case-sensitive) and
+/// yields it verbatim. `None` is a coercion failure.
+fn coerce_argument(value: &str, arg_type: &JobArgType) -> Option<String> {
+    match arg_type {
+        JobArgType::String => Some(value.to_string()),
+        JobArgType::Int => value.parse::<i64>().ok().map(|int| int.to_string()),
+        JobArgType::Bool => match value.to_ascii_lowercase().as_str() {
+            "true" => Some("true".to_string()),
+            "false" => Some("false".to_string()),
+            _ => None,
+        },
+        JobArgType::Enum(members) => members.iter().find(|m| *m == value).cloned(),
+    }
 }
 
 /// Resolve the CLI `--arg NAME=VALUE` pairs against the declared
@@ -695,9 +868,18 @@ fn job_argument_declaration(
 ///    [`JobDocError::MissingRequiredArgument`].
 /// 4. Declarations with a `default` fill omissions; an explicit pair
 ///    always wins over the default.
+/// 5. Every resolved value under a non-`string` declaration is coerced
+///    to its canonical form (via [`coerce_argument`]) and the canonical
+///    text OVERWRITES the map entry — pairs and defaults alike — so
+///    interpolation only ever sees canonical text; a coercion failure
+///    is [`JobDocError::ArgumentCoercion`].
+///
+/// Precedence is therefore unknown-name > missing-required > coercion:
+/// the checks run in that order and the first failure wins.
 ///
 /// The returned map is the complete `${arg:NAME}` lookup for
-/// [`interpolate_declared_fields`].
+/// [`interpolate_declared_fields`], with typed values in canonical
+/// form.
 pub(crate) fn resolve_job_args(
     declarations: Option<&JobArgumentDeclarations>,
     pairs: &[(String, String)],
@@ -720,6 +902,28 @@ pub(crate) fn resolve_job_args(
             resolved
                 .entry(name.clone())
                 .or_insert_with(|| default.clone());
+        }
+    }
+    // Final coercion pass (lexical order): canonicalize every typed
+    // value in the map, whether it came from a pair or a default.
+    // `string` declarations are skipped — their values stay verbatim.
+    for (name, declaration) in &declarations.entries {
+        if declaration.arg_type == JobArgType::String {
+            continue;
+        }
+        if let Some(raw) = resolved.get(name).cloned() {
+            match coerce_argument(&raw, &declaration.arg_type) {
+                Some(canonical) => {
+                    resolved.insert(name.clone(), canonical);
+                }
+                None => {
+                    return Err(JobDocError::ArgumentCoercion {
+                        name: name.clone(),
+                        expected: declaration.arg_type.clone(),
+                        raw,
+                    });
+                }
+            }
         }
     }
     Ok(Some(resolved))
