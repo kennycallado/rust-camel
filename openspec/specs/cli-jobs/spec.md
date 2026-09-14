@@ -411,62 +411,67 @@ values, and the process SHALL exit with code 2 before any boot.
 
 ### Requirement: arg flag header injection
 
-`camel job` SHALL accept a repeatable `--arg NAME=VALUE` flag. Each pair
-SHALL inject one string header onto the trigger exchange at send time,
-applied after the document's `send.headers`, so a CLI value overrides a
-document header with the same name. When the same name repeats on the
-command line, the last occurrence SHALL win. Values SHALL be raw strings
-with no interpolation. A malformed pair (no `=`, or an empty name) SHALL
-fail as a usage error with exit 2 before any boot. The flag SHALL work in
-both execution modes.
+`camel job` SHALL accept a repeatable `--arg NAME=VALUE` flag. When the job
+document has no top-level `args:` block, each pair SHALL inject one string
+header onto the trigger exchange at send time, applied after document headers;
+repeated names use the last value, values remain raw strings with no
+interpolation, and a CLI value overrides a colliding document header. When
+`args:` is present, each pair SHALL instead satisfy a declared argument and
+SHALL NOT inject an implicit header. Malformed pairs and declared-argument
+validation failures SHALL exit 2 before boot. The flag SHALL work in both
+execution modes on the legacy path.
 
-#### Scenario: single and repeated args reach the route
+#### Scenario: declared and legacy paths differ
 
-- **GIVEN** a job document whose target route records exchange headers to
-  a `mock:` endpoint
-- **WHEN** `camel job` runs the document with `--arg name=John` and
-  `--arg tier=gold`
-- **THEN** the job exits 0 and the recorded exchange carries headers
-  `name=John` and `tier=gold`
+- **GIVEN** one document without `args:` and one document declaring `name`
+- **WHEN** both run with `--arg name=John`
+- **THEN** the first sends a `name=John` header and the second resolves only its declared interpolation
 
 #### Scenario: arg overrides a colliding document header
 
-- **GIVEN** a job document whose `send.headers` declares `name: Doc` and
-  whose target route records exchange headers to a `mock:` endpoint
-- **WHEN** `camel job` runs the document with `--arg name=Cli`
-- **THEN** the job exits 0 and the recorded header `name` holds `Cli`
+- **GIVEN** a no-`args:` document with `send.headers.name: Doc`
+- **WHEN** it runs with repeated `--arg name=First --arg name=Last`
+- **THEN** the trigger exchange carries raw string header `name=Last`
+
+#### Scenario: single and repeated args reach the route
+
+- **GIVEN** a no-`args:` job whose target route records exchange headers
+- **WHEN** it runs with `--arg name=John --arg tier=gold`
+- **THEN** the recorded headers are `name=John` and `tier=gold`, with the last occurrence winning
 
 #### Scenario: malformed arg is a usage error
 
-- **GIVEN** an `--arg` value with no `=` (for example `nameonly`) or an
-  empty name (for example `=value`)
-- **WHEN** `camel job` runs the document with that flag value
-- **THEN** the process exits 2 with a usage error before any boot
+- **GIVEN** an `--arg` value with no `=` or with an empty name
+- **WHEN** `camel job` parses the flag
+- **THEN** it exits 2 before boot with a usage error
 
 ### Requirement: batch mode drains until empty
 
 A `mode: batch` job SHALL boot the same composition root, apply the same
-send-target validation, start all document routes, and send the same
-single trigger exchange as a one-shot job, including the `seda:`
-`waitForTaskToComplete=Always` rewrite and `--arg` header injection.
-After the trigger send the job SHALL drain: it SHALL wait until every
-`seda:` consumer queue of the document's routes is empty, then emit the
-JSON report with outcome `Completed` and mode `batch`, and exit 0. A
-batch document with no `seda:` consumer routes SHALL complete immediately
-after the trigger send. Zero-depth observations made before the trigger
-send completes SHALL NOT satisfy the drain. The mandatory overall
-`timeout` SHALL still bound boot, send, drain, and teardown; expiry
-reports outcome `Timeout` with exit 2. A trigger-send pipeline failure
-reports `Failed` with exit 1 under the existing taxonomy.
+send-target validation, start all document routes, and send one trigger
+exchange. It SHALL retain the same declared-argument validation, defaulting,
+interpolation, and legacy no-`args:` header behavior as one-shot execution.
+For a `seda:` target it SHALL rewrite `waitForTaskToComplete` to `Always` so
+the send is synchronous.
+After the trigger send it SHALL drain every `seda:` consumer queue until empty,
+then emit the existing JSON report with outcome `Completed` and mode `batch`,
+and exit 0. A batch job with no `seda:` consumer routes completes immediately.
+Observations before the trigger send completes do not satisfy the drain. The
+declared timeout bounds boot, send, drain, and teardown; expiry reports
+`Timeout` with exit 2, while trigger-send pipeline failure reports `Failed`
+with exit 1.
+
+#### Scenario: batch applies declared defaults
+
+- **GIVEN** a batch job declaring `tier: {default: gold}` and using `${arg:tier}`
+- **WHEN** it runs without `--arg tier=...`
+- **THEN** the default is resolved before the trigger send and the batch drains normally
 
 #### Scenario: batch drains a fan-out pipeline then exits 0
 
-- **GIVEN** a batch job whose target route fans messages out through one
-  or more `seda:` queues to worker routes
-- **WHEN** `camel job` runs the document
-- **THEN** the job waits until every document `seda:` queue is empty, the
-  report shows outcome `Completed` with mode `batch`, and the process
-  exits 0
+- **GIVEN** a batch job whose trigger route fans out through one or more `seda:` queues
+- **WHEN** the job runs
+- **THEN** it waits for in-flight work and queue emptiness, reports `Completed` with mode `batch`, and exits 0
 
 #### Scenario: batch does not complete while work is in flight
 
@@ -479,11 +484,9 @@ reports `Failed` with exit 1 under the existing taxonomy.
 
 #### Scenario: batch overall timeout expiry
 
-- **GIVEN** a batch job whose traffic does not quiesce within the
-  declared `timeout`
+- **GIVEN** a batch job whose `seda:` work does not drain before `timeout`
 - **WHEN** the deadline expires
-- **THEN** the JSON report carries outcome `Timeout` with a
-  drain-timeout-class error and the process exits with code 2
+- **THEN** it reports `Timeout` and exits 2
 
 #### Scenario: batch works with arg injection
 
@@ -584,4 +587,110 @@ The system SHALL not invoke route discovery, environment interpolation, or secur
 - **SETUP:** Create `sentinel.job.yaml` with `description: safe listing`, `${env:JOB_DISCOVERY_MUST_NOT_RUN}` in an unused body field, and `security_policy: __invalid_listing_sentinel__` in its route source.
 - **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test job_listing_does_not_boot_route_pipeline`.
 - **ASSERT:** stdout contains `sentinel` and `safe listing`, stderr contains neither `JOB_DISCOVERY_MUST_NOT_RUN` nor `__invalid_listing_sentinel__`, and exit status is 0.
+
+### Requirement: declared job arguments
+
+A job document MAY contain a top-level `args:` mapping as a sibling of
+`execute:`. Argument names SHALL match `[A-Za-z_][A-Za-z0-9_]*`. Each argument declaration SHALL accept only `required` (boolean,
+default `false`), `default` (string), and `description` (string). The
+document and each declaration SHALL reject unknown fields. Version 1 SHALL
+support string values only.
+
+#### Scenario: valid declaration is parsed
+
+- **GIVEN** a `.job.yaml` document with `args: {name: {required: true, description: "Customer name"}}`
+- **WHEN** the document is loaded
+- **THEN** the declaration is accepted as a top-level sibling of `execute:`
+
+#### Scenario: malformed declaration is rejected
+
+- **GIVEN** an argument declaration containing `requried: true`
+- **WHEN** the document is loaded
+- **THEN** loading fails with an unknown-field diagnostic and exit 2 before boot
+
+### Requirement: declared argument validation
+
+When `args:` is present, `--arg NAME=VALUE` SHALL name a declared argument.
+Unknown names SHALL fail with a diagnostic naming the name. A required argument
+without a default SHALL fail when omitted. Optional arguments with defaults
+SHALL receive their default. Explicit values SHALL override defaults. All such
+validation failures SHALL use exit 2.
+
+#### Scenario: unknown declared argument fails
+
+- **GIVEN** a job declaring only `name`
+- **WHEN** it runs with `--arg tier=gold`
+- **THEN** it exits 2 and names `tier` in the error
+
+#### Scenario: required argument is missing
+
+- **GIVEN** a job declaring `name: {required: true}` without a default
+- **WHEN** it runs without `--arg name=...`
+- **THEN** it exits 2 and names `name` in the error
+
+#### Scenario: default applies
+
+- **GIVEN** a job declaring `tier: {default: gold}`
+- **WHEN** it runs without `--arg tier=...`
+- **THEN** `${arg:tier}` resolves to `gold`
+
+### Requirement: argument interpolation
+
+`${arg:NAME}` SHALL resolve at the same interpolation stage and through the
+same scanner as `${env:NAME}`. The argument grammar is exactly
+`${arg:NAME}` with an identifier `NAME`; the `${arg:NAME:-fallback}` form is
+not supported. Resolved arguments SHALL be available in `to`, `body`,
+`headers`, and `timeout`; unresolved names SHALL fail with exit 2. Normal jobs
+accept declared values through `--arg`; compiled artifacts use embedded
+defaults and reject required declarations without defaults at startup while
+retaining their existing narrow argument surface.
+
+#### Scenario: all job fields interpolate
+
+- **GIVEN** declared arguments `target: {default: "direct:in"}`, `text: {default: "hello"}`, `header: {default: "gold"}`, and `wait: {default: "30s"}` referenced in `to`, `body`, `headers`, and `timeout`
+- **WHEN** the job runs
+- **THEN** each reference resolves to the same string value before field validation
+
+#### Scenario: compiled artifact matches normal job
+
+- **GIVEN** one job document declaring `value: {default: "hello"}` compiled into an artifact and run normally
+- **WHEN** both runs resolve `${arg:value}`
+- **THEN** both paths produce identical interpolated route and message data, the artifact rejects `--arg value=other`, and a compiled declaration with `required: true` and no default exits 2
+
+### Requirement: legacy argument compatibility
+
+When a document has no `args:` block, undeclared `--arg NAME=VALUE` pairs
+SHALL continue to inject string headers after document headers. The command
+SHALL emit a deprecation note identifying the legacy behavior. This path SHALL
+remain available in both execution modes.
+
+#### Scenario: no declaration preserves header injection
+
+- **GIVEN** a job document with no top-level `args:` block
+- **WHEN** it runs with `--arg name=John`
+- **THEN** `name=John` reaches the trigger exchange header and stderr contains the deprecation note
+
+### Requirement: declared arguments replace legacy header injection
+
+The existing `arg flag header injection` requirement SHALL be modified so
+`--arg` pairs inject headers only when the document has no top-level `args:`
+block. Declared documents SHALL resolve values through their declarations and
+interpolation surface instead of implicitly creating headers.
+
+#### Scenario: declared argument is not an implicit header
+
+- **GIVEN** a document declaring `name` and referencing `${arg:name}` in its body
+- **WHEN** it runs with `--arg name=John`
+- **THEN** the body receives `John` and no automatic `name` header is added
+
+### Requirement: argument validation exit status
+
+Every argument parse, declaration, unknown-name, missing-required, or
+interpolation validation failure SHALL exit 2. No new exit code SHALL be added.
+
+#### Scenario: malformed CLI argument exits 2
+
+- **GIVEN** `--arg nameonly`
+- **WHEN** the CLI parses arguments
+- **THEN** it exits 2 before boot
 

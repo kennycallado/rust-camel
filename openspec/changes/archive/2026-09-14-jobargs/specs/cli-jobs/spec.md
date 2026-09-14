@@ -95,6 +95,18 @@ interpolation surface instead of implicitly creating headers.
 - **WHEN** it runs with `--arg name=John`
 - **THEN** the body receives `John` and no automatic `name` header is added
 
+### Requirement: argument validation exit status
+
+Every argument parse, declaration, unknown-name, missing-required, or
+interpolation validation failure SHALL exit 2. No new exit code SHALL be added.
+
+#### Scenario: malformed CLI argument exits 2
+
+- **GIVEN** `--arg nameonly`
+- **WHEN** the CLI parses arguments
+- **THEN** it exits 2 before boot
+
+
 ## MODIFIED Requirements
 
 ### Requirement: arg flag header injection
@@ -115,19 +127,19 @@ execution modes on the legacy path.
 - **WHEN** both run with `--arg name=John`
 - **THEN** the first sends a `name=John` header and the second resolves only its declared interpolation
 
-#### Scenario: legacy header precedence remains stable
+#### Scenario: arg overrides a colliding document header
 
 - **GIVEN** a no-`args:` document with `send.headers.name: Doc`
 - **WHEN** it runs with repeated `--arg name=First --arg name=Last`
 - **THEN** the trigger exchange carries raw string header `name=Last`
 
-#### Scenario: legacy single and repeated args reach route
+#### Scenario: single and repeated args reach the route
 
 - **GIVEN** a no-`args:` job whose target route records exchange headers
 - **WHEN** it runs with `--arg name=John --arg tier=gold`
 - **THEN** the recorded headers are `name=John` and `tier=gold`, with the last occurrence winning
 
-#### Scenario: malformed legacy arg is a usage error
+#### Scenario: malformed arg is a usage error
 
 - **GIVEN** an `--arg` value with no `=` or with an empty name
 - **WHEN** `camel job` parses the flag
@@ -155,25 +167,31 @@ with exit 1.
 - **WHEN** it runs without `--arg tier=...`
 - **THEN** the default is resolved before the trigger send and the batch drains normally
 
-#### Scenario: batch drains fan-out work
+#### Scenario: batch drains a fan-out pipeline then exits 0
 
 - **GIVEN** a batch job whose trigger route fans out through one or more `seda:` queues
 - **WHEN** the job runs
 - **THEN** it waits for in-flight work and queue emptiness, reports `Completed` with mode `batch`, and exits 0
 
-#### Scenario: batch timeout covers drain
+#### Scenario: batch does not complete while work is in flight
+
+- **GIVEN** a batch job whose worker route holds each exchange in flight
+  for a short delay before recording it to a `mock:` endpoint
+- **WHEN** the drain observes a queue-depth sample of zero while the
+  exchange is still in flight
+- **THEN** the job does not complete from that sample: exit happens only
+  after the worker recorded the exchange
+
+#### Scenario: batch overall timeout expiry
 
 - **GIVEN** a batch job whose `seda:` work does not drain before `timeout`
 - **WHEN** the deadline expires
 - **THEN** it reports `Timeout` and exits 2
 
-### Requirement: argument validation exit status
+#### Scenario: batch works with arg injection
 
-Every argument parse, declaration, unknown-name, missing-required, or
-interpolation validation failure SHALL exit 2. No new exit code SHALL be added.
-
-#### Scenario: malformed CLI argument exits 2
-
-- **GIVEN** `--arg nameonly`
-- **WHEN** the CLI parses arguments
-- **THEN** it exits 2 before boot
+- **GIVEN** a batch job whose worker routes record exchange headers to a
+  `mock:` endpoint
+- **WHEN** `camel job` runs the document with `--arg batch-id=42`
+- **THEN** the job drains, exits 0, and the recorded exchanges carry
+  header `batch-id=42`
