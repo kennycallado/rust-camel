@@ -1,0 +1,28 @@
+# Task 1.2 — RED pre-fix run: readiness_survives_concurrent_registry_reset
+
+Command: cargo test -p camel-component-http --lib readiness_survives_concurrent_registry_reset -- --test-threads=1
+Date: 2026-09-14 (pre-fix, Task 1.3 not yet applied)
+Failure mode: readiness panic — hammer reset landed inside the unprotected stage→ready window (5s deadline). Expected post-fix: test passes.
+
+--- verbatim output ---
+    Finished `test` profile [unoptimized] target(s) in 0.34s
+     Running unittests src/lib.rs (target/debug/deps/camel_component_http-27a97a573c7b7f67)
+
+running 1 test
+test tests::readiness_survives_concurrent_registry_reset ... FAILED
+
+failures:
+
+---- tests::readiness_survives_concurrent_registry_reset stdout ----
+
+thread 'tests::readiness_survives_concurrent_registry_reset' (2017168) panicked at crates/components/camel-http/src/lib.rs:9249:13:
+consumer server did not become ready on port 35595
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::readiness_survives_concurrent_registry_reset
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 367 filtered out; finished in 5.00s
+
+error: test failed, to rerun pass `-p camel-component-http --lib`

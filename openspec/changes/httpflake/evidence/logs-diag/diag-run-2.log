@@ -1,0 +1,17 @@
+    Finished `test` profile [unoptimized] target(s) in 0.79s
+     Running unittests src/lib.rs (target/debug/deps/camel_component_http-27a97a573c7b7f67)
+
+running 10 tests
+test tests::test_server_registry_global_is_singleton ... ok
+test tests::registry_rejects_tls_on_plain_port ... ok
+test tests::test_content_type_inferred_for_xml_body ... ok
+test tests::test_server_registry_distinguishes_host_and_port ... ok
+test tests::test_concurrent_get_or_spawn_returns_same_registry ... ok
+test tests::test_content_type_inferred_for_json_body ... ok
+test static_endpoint::tests::test_consumer_start_registers_mount_in_registry ... ok
+test tests::readiness_survives_concurrent_registry_reset ... ok
+test tests::test_server_registry_reset_clears_entries ... ok
+test tests::test_content_type_inferred_for_text_body ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 359 filtered out; finished in 0.10s
+

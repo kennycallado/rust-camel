@@ -3380,6 +3380,20 @@ impl Service<Exchange> for HttpProducer {
 #[cfg(test)]
 pub(crate) static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Poison-recovering acquire of REGISTRY_TEST_MUTEX (httpflake).
+///
+/// The mutex guards test SERIALIZATION only - the registry own data is
+/// protected by its inner lock - so a sibling test that panics while
+/// holding the guard must not poison the mutex and cascade failures
+/// into every other holder. Recovery via into_inner is therefore safe
+/// and keeps one failing test failing as ONE test.
+#[cfg(test)]
+pub(crate) fn lock_registry_test_mutex() -> std::sync::MutexGuard<'static, ()> {
+    REGISTRY_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Map a pipeline error to an HTTP reply.
 ///
 /// Extracted from the inline `match` in `dispatch_handler` for unit
@@ -6027,7 +6041,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_concurrent_get_or_spawn_returns_same_registry() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -6072,7 +6086,7 @@ mod tests {
 
     #[test]
     fn test_server_registry_distinguishes_host_and_port() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let registry = ServerRegistry::global();
@@ -6112,7 +6126,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_shared_server_max_request_body_policy_is_deterministic() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         let registry = ServerRegistry::global();
         // First registration: maxRequestBody = 1 MB
         let d1 = registry
@@ -6154,7 +6168,7 @@ mod tests {
 
     #[test]
     fn test_server_registry_reset_clears_entries() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             // Register something on a unique port
@@ -6190,8 +6204,14 @@ mod tests {
         });
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn registry_rejects_tls_on_plain_port() {
+        // httpflake: this reset previously ran WITHOUT the registry test
+        // mutex, so it could wipe another test's freshly staged entry
+        // mid-window (traced 2026-09-14) — spec law: every reset caller
+        // holds REGISTRY_TEST_MUTEX.
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
         let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
 
@@ -6235,7 +6255,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_unregister_last_http_route_keeps_server_alive() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
         let registry = ServerRegistry::global();
 
@@ -6343,7 +6363,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn staged_listener_first_spawn_serves_without_second_bind() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
         let registry = ServerRegistry::global();
         let (listener, _probe, addr) = clone_fixture_listener().await;
@@ -6388,7 +6408,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn staged_entry_reused_by_second_caller() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
         let registry = ServerRegistry::global();
         let (listener, _probe, addr) = clone_fixture_listener().await;
@@ -6437,7 +6457,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn staged_race_two_callers_single_resolver() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
         let registry = ServerRegistry::global();
         let (listener, _probe, addr) = clone_fixture_listener().await;
@@ -6488,7 +6508,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn unstaged_spawn_binds_legacy() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
         let registry = ServerRegistry::global();
         // Fresh port P2: reserve then release — the legacy path rebinds.
@@ -6524,7 +6544,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn wrong_host_staged_port_fails_deterministically() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
         let registry = ServerRegistry::global();
         let (listener, _probe, addr) = clone_fixture_listener().await;
@@ -6577,7 +6597,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn duplicate_stage_same_key_rejected() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
         let registry = ServerRegistry::global();
         let (listener, probe, addr) = clone_fixture_listener().await;
@@ -6624,7 +6644,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn distinct_keys_stage_independently() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
         let registry = ServerRegistry::global();
         let (l1, _p1, addr1) = clone_fixture_listener().await;
@@ -6688,7 +6708,7 @@ mod tests {
         // TLS registry tests).
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
         let registry = ServerRegistry::global();
         let (listener, _probe, addr) = clone_fixture_listener().await;
@@ -6741,7 +6761,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn with_listener_direct_spawn_keyed_by_actual_addr() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
         let registry = ServerRegistry::global();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -6976,7 +6996,7 @@ mod tests {
     async fn test_http_consumer_emits_mark_ready_after_bind() {
         use camel_component_api::{ConsumerContext, StartupSignal};
 
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -7181,7 +7201,7 @@ mod tests {
     async fn test_http_consumer_enforces_max_response_body_for_bytes() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -7233,7 +7253,7 @@ mod tests {
     async fn test_http_consumer_enforces_max_response_body_for_json() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -7286,7 +7306,7 @@ mod tests {
     async fn test_http_consumer_enforces_max_response_body_for_xml() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -7342,7 +7362,7 @@ mod tests {
         };
         use futures::stream;
 
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
 
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -7410,7 +7430,7 @@ mod tests {
         // Spawns an HTTP consumer on the global ServerRegistry
         // (HttpConsumer::start → get_or_spawn). Serialize against the other
         // registry tests so parallel runs do not race on shared global state.
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
 
         // Get an OS-assigned free port (ephemeral)
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -7468,7 +7488,7 @@ mod tests {
     async fn test_integration_two_consumers_shared_port() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
 
         // Get an OS-assigned free port (ephemeral)
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -7543,7 +7563,7 @@ mod tests {
     async fn test_integration_unregistered_path_returns_404() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
 
         // Get an OS-assigned free port (ephemeral)
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -9197,6 +9217,7 @@ mod tests {
     // Content-Type inference tests
     // -----------------------------------------------------------------------
 
+    #[allow(clippy::await_holding_lock)]
     async fn setup_consumer_on_free_port(
         path: &str,
     ) -> (
@@ -9212,6 +9233,17 @@ mod tests {
         // between probe and serve (no bind-read-drop race).
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+
+        // Hold the registry test mutex across the whole stage→spawn→ready
+        // window so a concurrent `ServerRegistry::reset()` cannot evict the
+        // staged listener between staging and readiness. The guard covers
+        // stage_listener, the consumer spawn, the readiness poll and the
+        // tail-yield loop; it releases when this helper returns.
+        // Poison-recovering acquire: a failed sibling test must not
+        // cascade — the mutex guards test serialization only, no
+        // structural invariant, so recovery via into_inner is safe.
+        let _registry_guard = lock_registry_test_mutex();
+
         ServerRegistry::global()
             .stage_listener(listener)
             .await
@@ -9237,26 +9269,119 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
 
         // Readiness without a fixed wall-clock sleep: poll the registry
-        // entry live (1ms backoff, 5s deadline), then yield so the spawned
-        // `start()` completes route registration (that tail path has no
-        // pending timers — only the registry lock — so scheduler yields
-        // order it deterministically behind this loop).
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while ServerRegistry::global()
-            .bound_addr("127.0.0.1", port)
-            .is_none()
-        {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "consumer server did not become ready on port {port}"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
+        // entry live (1ms doubling backoff, 10s deadline), then yield so
+        // the spawned `start()` completes route registration (that tail
+        // path has no pending timers — only the registry lock — so
+        // scheduler yields order it deterministically behind this loop).
+        wait_for_registry_ready("127.0.0.1", port).await;
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
 
         (port, rx, token)
+    }
+
+    /// Poll `ServerRegistry::bound_addr(host, port)` until the entry
+    /// appears: 1ms backoff doubling per iteration, capped at 64ms, with
+    /// a 10s deadline. Panics with a hint naming the likely causes when
+    /// the deadline fires.
+    async fn wait_for_registry_ready(host: &str, port: u16) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut backoff = std::time::Duration::from_millis(1);
+        while ServerRegistry::global().bound_addr(host, port).is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "consumer server did not become ready on port {port} — registry entry absent (concurrent reset or starvation)"
+            );
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(std::time::Duration::from_millis(64));
+        }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "registry entry absent (concurrent reset or starvation)")]
+    async fn readiness_deadline_fires_loud_with_hint() {
+        // Poll a key no writer can produce. Registry keys come from
+        // either the listener's resolved IP string (staged path) or the
+        // caller-provided host verbatim (legacy get_or_spawn path), so a
+        // synthetic host literal that no test passes is unreachable on
+        // BOTH paths. Binding and HOLDING the listener (never dropped,
+        // never staged) additionally keeps its port out of the ephemeral
+        // pool, so no concurrent test can register that port either.
+        // (Earlier drafts polled 127.0.0.2 — rejected: macOS exposes only
+        // 127.0.0.1 and the bind fails there, rc-dwmd; and "localhost" —
+        // rejected: the legacy host-verbatim path could produce it.)
+        let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = held.local_addr().unwrap().port();
+        wait_for_registry_ready("httpflake-unreachable-host", port).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Readiness vs concurrent registry reset (httpflake, regression RED)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn readiness_survives_concurrent_registry_reset() {
+        let contended = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Hammer thread: loop legal resets, counting a contention whenever
+        // its try-lock on the registry test mutex blocks (someone else held
+        // it). The guard is dropped at each iteration end.
+        let contended_hammer = std::sync::Arc::clone(&contended);
+        let stop_hammer = std::sync::Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !stop_hammer.load(std::sync::atomic::Ordering::Relaxed) {
+                let _guard = match REGISTRY_TEST_MUTEX.try_lock() {
+                    Err(_) => {
+                        contended_hammer.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        lock_registry_test_mutex()
+                    }
+                    Ok(guard) => guard,
+                };
+                ServerRegistry::reset();
+            }
+        });
+
+        // Drop guard: even if a setup panics, stop the hammer and join it so
+        // the thread never outlives the test.
+        struct StopHammerOnDrop {
+            handle: Option<std::thread::JoinHandle<()>>,
+            stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Drop for StopHammerOnDrop {
+            fn drop(&mut self) {
+                self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(handle) = self.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
+        let _hammer_guard = StopHammerOnDrop {
+            handle: Some(handle),
+            stop,
+        };
+
+        // Always at least 25 setups on fresh ephemeral ports; continue past
+        // 25 only until one contended reset is observed; hard cap 50.
+        let mut setups = 0;
+        loop {
+            setups += 1;
+            let (_port, rx, token) = setup_consumer_on_free_port("/reset-hammer").await;
+            drop(rx);
+            token.cancel();
+            if (setups >= 25 && contended.load(std::sync::atomic::Ordering::SeqCst) >= 1)
+                || setups >= 50
+            {
+                break;
+            }
+        }
+
+        let contended_hits = contended.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            contended_hits >= 1,
+            "expected at least one contended registry reset across {setups} setups, got {contended_hits}"
+        );
     }
 
     #[tokio::test]
@@ -9661,7 +9786,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_static_file_serving_serves_file_contents() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
 
         // Create temp dir with test files
@@ -9730,7 +9855,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_spa_fallback_serves_index_for_unknown_paths() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
 
         let temp_dir = std::env::temp_dir().join(format!("http_spa_test_{}", std::process::id()));
@@ -9818,7 +9943,7 @@ mod tests {
     // matching gate in serve_via_serve_dir so the 304 keeps its Cache-Control).
     #[allow(clippy::await_holding_lock)]
     async fn run_conditional_get_returns_304(mode: MountMode) {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -9988,7 +10113,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_error_page_mapping_serves_custom_404() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
 
         let temp_dir = std::env::temp_dir().join(format!("http_error_test_{}", std::process::id()));
@@ -10348,7 +10473,7 @@ mod tests {
         // Verify that static file serving still works after the
         // dispatch refactor. We register a temp-dir mount and request
         // a file from it; the static dispatcher should serve it.
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
         ServerRegistry::reset();
 
         let temp_dir = std::env::temp_dir().join(format!("http_regress_{}", std::process::id()));
@@ -10823,7 +10948,7 @@ mod tests {
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         // Serialize against global ServerRegistry singleton
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
 
         // Generate CA + server cert
         let (ca_pem, cert_pem, key_pem) = tls::gen_server_cert();
@@ -10900,7 +11025,7 @@ mod tests {
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         // Serialize against global ServerRegistry singleton
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = lock_registry_test_mutex();
 
         let (_, cert_pem, key_pem) = tls::gen_server_cert();
         let cert_path = tls::write_pem_tmp("http-neg-cert.pem", &cert_pem);

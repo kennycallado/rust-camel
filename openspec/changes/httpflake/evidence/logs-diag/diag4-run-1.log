@@ -1,0 +1,20 @@
+   Compiling camel-component-http v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/components/camel-http)
+error[E0382]: borrow of moved value: `key`
+    --> crates/components/camel-http/src/lib.rs:1147:48
+     |
+1000 |         let key = (host.to_string(), port);
+     |             --- move occurs because `key` has type `(std::string::String, u16)`, which does not implement the `Copy` trait
+...
+1025 |                 .entry(key)
+     |                        --- value moved here
+...
+1147 |         eprintln!("HTTPFLAKE-DBG cell-SET key={key:?} thread={:?}", std::thread::current().id());
+     |                                                ^^^ value borrowed here after move
+     |
+help: consider cloning the value if the performance cost is acceptable
+     |
+1025 |                 .entry(key.clone())
+     |                           ++++++++
+
+For more information about this error, try `rustc --explain E0382`.
+error: could not compile `camel-component-http` (lib test) due to 1 previous error

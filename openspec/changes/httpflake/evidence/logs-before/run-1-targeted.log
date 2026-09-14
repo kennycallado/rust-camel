@@ -1,0 +1,29 @@
+    Finished `test` profile [unoptimized] target(s) in 0.60s
+     Running unittests src/lib.rs (target/debug/deps/camel_component_http-27a97a573c7b7f67)
+
+running 9 tests
+test static_endpoint::tests::test_consumer_start_registers_mount_in_registry ... ok
+test tests::registry_rejects_tls_on_plain_port ... ok
+test tests::test_concurrent_get_or_spawn_returns_same_registry ... ok
+test tests::test_server_registry_global_is_singleton ... ok
+test tests::test_content_type_inferred_for_text_body ... ok
+test tests::test_content_type_inferred_for_json_body ... ok
+test tests::test_server_registry_reset_clears_entries ... ok
+test tests::test_server_registry_distinguishes_host_and_port ... ok
+test tests::test_content_type_inferred_for_xml_body ... FAILED
+
+failures:
+
+---- tests::test_content_type_inferred_for_xml_body stdout ----
+
+thread 'tests::test_content_type_inferred_for_xml_body' (1958474) panicked at crates/components/camel-http/src/lib.rs:9249:13:
+consumer server did not become ready on port 34613
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::test_content_type_inferred_for_xml_body
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 358 filtered out; finished in 5.01s
+
+error: test failed, to rerun pass `-p camel-component-http --lib`

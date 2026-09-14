@@ -1,0 +1,58 @@
+   Compiling camel-component-http v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/components/camel-http)
+error[E0433]: cannot find `Self` in this scope
+    --> crates/components/camel-http/src/lib.rs:9304:17
+     |
+9304 |                 Self::dbg_log(format!("poll#{dbg_polls} keys={keys:?}"));
+     |                 ^^^^ `Self` is only available in impls, traits, and type definitions
+
+error[E0599]: no associated function or constant named `dbg_log` found for struct `HttpConsumer` in the current scope
+    --> crates/components/camel-http/src/lib.rs:1773:15
+     |
+1748 | pub struct HttpConsumer {
+     | ----------------------- associated function or constant `dbg_log` not found for this struct
+...
+1773 |         Self::dbg_log(format!("start-ENTER port={}", self.config.port));
+     |               ^^^^^^^ associated function or constant not found in `HttpConsumer`
+     |
+note: if you're trying to build a new `HttpConsumer`, consider using `HttpConsumer::new` which returns `HttpConsumer`
+    --> crates/components/camel-http/src/lib.rs:1759:5
+     |
+1759 |     pub fn new(config: HttpServerConfig, runtime: Arc<dyn RuntimeObservability>) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `dbg_log` found for struct `HttpConsumer` in the current scope
+    --> crates/components/camel-http/src/lib.rs:1786:15
+     |
+1748 | pub struct HttpConsumer {
+     | ----------------------- associated function or constant `dbg_log` not found for this struct
+...
+1786 |         Self::dbg_log(format!("start-GOT-REGISTRY port={}", self.config.port));
+     |               ^^^^^^^ associated function or constant not found in `HttpConsumer`
+     |
+note: if you're trying to build a new `HttpConsumer`, consider using `HttpConsumer::new` which returns `HttpConsumer`
+    --> crates/components/camel-http/src/lib.rs:1759:5
+     |
+1759 |     pub fn new(config: HttpServerConfig, runtime: Arc<dyn RuntimeObservability>) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0433]: cannot find `Self` in this scope
+    --> crates/components/camel-http/src/lib.rs:7068:13
+     |
+7068 |             Self::dbg_log(format!("spawn-task-ENTER port={dbg_port}"));
+     |             ^^^^ `Self` is only available in impls, traits, and type definitions
+
+error[E0433]: cannot find `Self` in this scope
+    --> crates/components/camel-http/src/lib.rs:7072:27
+     |
+7072 |                 Ok(()) => Self::dbg_log(format!("start-OK port={dbg_port} after {:?}", started.elapsed())),
+     |                           ^^^^ `Self` is only available in impls, traits, and type definitions
+
+error[E0433]: cannot find `Self` in this scope
+    --> crates/components/camel-http/src/lib.rs:7073:31
+     |
+7073 |                 Err(ref e) => Self::dbg_log(format!("start-ERR port={dbg_port} after {:?}: {e}", started.elapsed())),
+     |                               ^^^^ `Self` is only available in impls, traits, and type definitions
+
+Some errors have detailed explanations: E0433, E0599.
+For more information about an error, try `rustc --explain E0433`.
+error: could not compile `camel-component-http` (lib test) due to 6 previous errors

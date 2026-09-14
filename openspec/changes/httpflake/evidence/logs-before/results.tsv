@@ -1,0 +1,10 @@
+run	kind	rc	matches	seconds
+1	full	0	0	2
+2	full	0	0	2
+3	full	0	0	2
+4	full	0	0	1
+5	full	0	0	2
+6	full	0	0	2
+7	full	0	0	1
+8	full	0	0	2
+1	targeted	101	1	6

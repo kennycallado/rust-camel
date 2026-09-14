@@ -1,0 +1,75 @@
+    Finished `test` profile [unoptimized] target(s) in 0.81s
+     Running unittests src/lib.rs (target/debug/deps/camel_component_http-27a97a573c7b7f67)
+
+running 10 tests
+test tests::test_server_registry_global_is_singleton ... ok
+test tests::registry_rejects_tls_on_plain_port ... ok
+test tests::test_content_type_inferred_for_text_body ... FAILED
+test static_endpoint::tests::test_consumer_start_registers_mount_in_registry ... FAILED
+test tests::readiness_survives_concurrent_registry_reset ... FAILED
+test tests::test_content_type_inferred_for_json_body ... FAILED
+test tests::test_server_registry_reset_clears_entries ... FAILED
+test tests::test_concurrent_get_or_spawn_returns_same_registry ... FAILED
+test tests::test_content_type_inferred_for_xml_body ... FAILED
+test tests::test_server_registry_distinguishes_host_and_port ... FAILED
+
+failures:
+
+---- tests::test_content_type_inferred_for_text_body stdout ----
+
+thread 'tests::test_content_type_inferred_for_text_body' (2195825) panicked at crates/components/camel-http/src/lib.rs:9288:17:
+HTTPFLAKE-DBG consumer server did not become ready on port 33019 — registry entry absent (concurrent reset or starvation) [polls=160 entries=1 staged=0 inner_poisoned=false]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- static_endpoint::tests::test_consumer_start_registers_mount_in_registry stdout ----
+
+thread 'static_endpoint::tests::test_consumer_start_registers_mount_in_registry' (2195820) panicked at crates/components/camel-http/src/static_endpoint.rs:405:49:
+called `Result::unwrap()` on an `Err` value: PoisonError { .. }
+
+---- tests::readiness_survives_concurrent_registry_reset stdout ----
+
+thread 'tests::readiness_survives_concurrent_registry_reset' (2195821) panicked at crates/components/camel-http/src/lib.rs:9231:58:
+REGISTRY_TEST_MUTEX: PoisonError { .. }
+
+thread '<unnamed>' (2195830) panicked at crates/components/camel-http/src/lib.rs:9330:30:
+registry test mutex poisoned under hammer: PoisonError { .. }
+
+---- tests::test_content_type_inferred_for_json_body stdout ----
+
+thread 'tests::test_content_type_inferred_for_json_body' (2195824) panicked at crates/components/camel-http/src/lib.rs:9231:58:
+REGISTRY_TEST_MUTEX: PoisonError { .. }
+
+---- tests::test_server_registry_reset_clears_entries stdout ----
+
+thread 'tests::test_server_registry_reset_clears_entries' (2195829) panicked at crates/components/camel-http/src/lib.rs:6157:49:
+called `Result::unwrap()` on an `Err` value: PoisonError { .. }
+
+---- tests::test_concurrent_get_or_spawn_returns_same_registry stdout ----
+
+thread 'tests::test_concurrent_get_or_spawn_returns_same_registry' (2195823) panicked at crates/components/camel-http/src/lib.rs:6030:49:
+called `Result::unwrap()` on an `Err` value: PoisonError { .. }
+
+---- tests::test_content_type_inferred_for_xml_body stdout ----
+
+thread 'tests::test_content_type_inferred_for_xml_body' (2195826) panicked at crates/components/camel-http/src/lib.rs:9231:58:
+REGISTRY_TEST_MUTEX: PoisonError { .. }
+
+---- tests::test_server_registry_distinguishes_host_and_port stdout ----
+
+thread 'tests::test_server_registry_distinguishes_host_and_port' (2195827) panicked at crates/components/camel-http/src/lib.rs:6075:49:
+called `Result::unwrap()` on an `Err` value: PoisonError { .. }
+
+
+failures:
+    static_endpoint::tests::test_consumer_start_registers_mount_in_registry
+    tests::readiness_survives_concurrent_registry_reset
+    tests::test_concurrent_get_or_spawn_returns_same_registry
+    tests::test_content_type_inferred_for_json_body
+    tests::test_content_type_inferred_for_text_body
+    tests::test_content_type_inferred_for_xml_body
+    tests::test_server_registry_distinguishes_host_and_port
+    tests::test_server_registry_reset_clears_entries
+
+test result: FAILED. 2 passed; 8 failed; 0 ignored; 0 measured; 359 filtered out; finished in 10.04s
+
+error: test failed, to rerun pass `-p camel-component-http --lib`

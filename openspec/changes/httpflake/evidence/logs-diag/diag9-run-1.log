@@ -1,0 +1,40 @@
+   Compiling aws-lc-sys v0.45.0
+   Compiling ring v0.17.14
+   Compiling blake3 v1.8.7
+   Compiling camel-api v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/camel-api)
+   Compiling camel-language-api v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/languages/camel-language-api)
+   Compiling camel-endpoint v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/camel-endpoint)
+   Compiling camel-bean v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/camel-bean)
+   Compiling camel-language-simple v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/languages/camel-language-simple)
+   Compiling rcgen v0.14.10
+   Compiling aws-lc-rs v1.18.1
+   Compiling rustls v0.23.43
+   Compiling rustls-webpki v0.103.15
+   Compiling jsonwebtoken v11.0.0
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling axum-server v0.8.0
+   Compiling camel-auth v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/services/camel-auth)
+   Compiling camel-component-api v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/components/camel-component-api)
+   Compiling camel-processor v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/camel-processor)
+   Compiling camel-core v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/camel-core)
+   Compiling camel-component-http v0.46.0 (/home/shared/rust-camel-worktrees/httpflake/crates/components/camel-http)
+    Finished `test` profile [unoptimized] target(s) in 1m 22s
+     Running unittests src/lib.rs (target/debug/deps/camel_component_http-27a97a573c7b7f67)
+
+running 10 tests
+test tests::registry_rejects_tls_on_plain_port ... ok
+test tests::test_server_registry_global_is_singleton ... ok
+test tests::test_server_registry_distinguishes_host_and_port ... ok
+test static_endpoint::tests::test_consumer_start_registers_mount_in_registry ... ok
+test tests::test_server_registry_reset_clears_entries ... ok
+test tests::test_concurrent_get_or_spawn_returns_same_registry ... ok
+test tests::readiness_survives_concurrent_registry_reset ... ok
+test tests::test_content_type_inferred_for_json_body ... ok
+test tests::test_content_type_inferred_for_xml_body ... ok
+test tests::test_content_type_inferred_for_text_body ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 359 filtered out; finished in 0.12s
+

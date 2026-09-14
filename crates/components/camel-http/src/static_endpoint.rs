@@ -246,7 +246,6 @@ mod tests {
     }
 
     use super::*;
-    use crate::REGISTRY_TEST_MUTEX;
     use camel_component_api::{ConsumerContext, ExchangeEnvelope};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -343,7 +342,7 @@ mod tests {
     async fn test_static_consumer_emits_mark_ready_after_register() {
         use camel_component_api::{ConsumerContext, StartupSignal};
 
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::lock_registry_test_mutex();
         ServerRegistry::reset();
 
         let dir = std::env::temp_dir();
@@ -402,7 +401,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_consumer_start_registers_mount_in_registry() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::lock_registry_test_mutex();
         // Reset registry for clean test
         ServerRegistry::reset();
 
@@ -467,7 +466,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_consumer_stop_unregisters_mount() {
-        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::lock_registry_test_mutex();
         // Reset registry for clean test
         ServerRegistry::reset();
 
