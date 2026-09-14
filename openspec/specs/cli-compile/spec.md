@@ -81,29 +81,59 @@ The artifact reader SHALL distinguish an absent trailer from a malformed trailer
 
 ### Requirement: Run embedded documents without extraction
 
-The artifact SHALL feed the embedded document into the existing parse, runtime interpolation, lowering, boot, and start path without extracting files or enabling watch behavior. Route artifacts SHALL use virtual source identity `compiled://<manifest.source_name>` and the existing report writer for `--report <path>`. Job artifacts SHALL use the existing single-document job lifecycle with in-memory default configuration, the same virtual identity, the embedded document as its only route source, and existing job outcome reporting.
+The artifact SHALL feed the indexed documents through the existing parse, runtime interpolation, lowering, boot, and start paths using an in-memory virtual store. Runtime SHALL build configuration from embedded `Camel.toml`, include, and selected-profile entries. Runtime SHALL perform no source-tree reads, glob expansion, ambient `Camel.toml` or profile loading, canonicalization, temporary extraction, watch, or hot reload. Source diagnostics SHALL use `compiled://<logical-path>` identities. `${env:NAME}` expressions SHALL resolve from the deployment environment, not the compiler environment. Route `--report <path>` SHALL write JSON object `{ "kind": "route", "status": "completed"|"failed", "error": string|null }`; job reports SHALL use the existing job outcome schema. Boot and report-write failures SHALL exit 2; route pipeline failures SHALL exit 1; completed routes SHALL exit 0.
+
+#### Scenario: Multi-document artifact runs without its source tree
+
+- **GIVEN** a valid compiled artifact whose source files, `Camel.toml`, and working directory are unavailable
+- **WHEN** the artifact starts with required deployment environment values
+- **THEN** all indexed route documents boot and run from memory without file discovery, extraction, or temporary writes
+
+#### Scenario: Runtime cannot discover an unembedded file
+
+- **GIVEN** a compiled artifact and a new route file placed beside it after compilation
+- **WHEN** the artifact starts
+- **THEN** the new file is ignored because runtime consumes only indexed store entries
+
+#### Scenario: Unknown store schema fails closed
+
+- **GIVEN** a marked artifact whose index declares a store schema the executable does not support
+- **WHEN** the artifact starts
+- **THEN** it exits 2 before configuration or route boot
 
 #### Scenario: Read-only deployment
 
-- **GIVEN** a valid route or job artifact running with a read-only root filesystem and required runtime environment
-- **WHEN** the artifact starts
-- **THEN** it boots and runs without temporary extraction or writes other than an explicitly requested report
+- **GIVEN** a valid multi-document artifact running with a read-only root filesystem
+- **WHEN** it boots and receives deployment environment values
+- **THEN** it runs without materializing documents or writing files other than an explicitly requested report
 
 ### Requirement: Restrict artifact arguments and expose manifest
 
-The artifact SHALL accept `--report <path>`, `--help`, `--version`, and `--manifest`; duplicate exclusive flags, missing report values, positional arguments, and all other arguments SHALL exit 2. `--manifest` SHALL print runtime version, artifact kind, embedded components, required environment variables without defaults, and listener declarations as literal ports or unresolved expressions. Route `--report <path>` SHALL write JSON object `{ "kind": "route", "status": "completed"|"failed", "error": string|null }` after boot/runtime completion or failure; job reports SHALL use the existing job outcome schema. Route artifacts SHALL exit 0 after graceful completion, 1 on pipeline failure, and 2 on boot or report-write failure.
+The artifact SHALL accept only `--report <path>`, `--help`, `--version`, and `--manifest` plus the sanctioned R4 signature-verification surface. Duplicate exclusive flags, missing report values, positional arguments, and other arguments SHALL exit 2. The operational manifest SHALL contain a separate `manifest_schema` field and an `embedded_files` list with canonical logical paths, document kinds, byte lengths, and content digests. Manifest schema values SHALL be validated independently from trailer version. `--manifest` SHALL print this metadata without booting. The manifest SHALL not contain compile-time environment values and SHALL list required environment variables without defaults.
+
+#### Scenario: Manifest inspection
+
+- **GIVEN** a valid multi-document artifact
+- **WHEN** the operator runs `./app --manifest`
+- **THEN** the command exits 0 without booting and prints manifest schema, artifact kind, logical embedded-file metadata, components, required environment names, and listener declarations
+
+#### Scenario: Unknown manifest schema fails closed
+
+- **GIVEN** a marked artifact with a manifest schema that the reader does not support
+- **WHEN** the artifact starts
+- **THEN** it exits 2 before boot and does not reinterpret trailer version as manifest schema
 
 #### Scenario: Unknown artifact argument
 
 - **GIVEN** a valid artifact
-- **WHEN** the operator supplies an unsupported argument
-- **THEN** the artifact exits 2 and reports the rejected argument
+- **WHEN** the operator supplies an unknown, positional, duplicate-exclusive, or incomplete report argument
+- **THEN** it exits 2, names the rejected argument, and does not boot
 
-#### Scenario: Manifest inspection
+#### Scenario: Manifest includes operational version
 
-- **GIVEN** a valid artifact
+- **GIVEN** a valid multi-document artifact
 - **WHEN** the operator runs `./app --manifest`
-- **THEN** the artifact prints its operational manifest and exits 0 without booting routes
+- **THEN** output includes runtime version, artifact kind, embedded files, required environment names, and listener declarations without booting
 
 ### Requirement: Record the artifact decision
 
@@ -117,7 +147,7 @@ The project SHALL document the format and trust boundary in ADR 0075 and define 
 
 ### Requirement: Permanent v1 non-goals
 
-The compiled artifact SHALL remain a sealed deployment unit and SHALL NOT grow development-loop or ambient-configuration capabilities. Permanent v1 non-goals are: watch or hot-reload; runtime file discovery or globbing; ambient `Camel.toml` loading (no external configuration is loaded); a wide argument surface (the artifact remains limited to `--report`, `--help`, `--version`, and `--manifest`, with R4 signature verification as the single sanctioned future surface extension); and compile-time `CAMEL_*` configuration overrides. Deployment-time `${env:NAME}` interpolation in the embedded document remains permitted and is distinct from compile-time `CAMEL_*` overrides.
+The R1 artifact SHALL preserve the sealed deployment-unit wall: no watch or hot reload, runtime file discovery or globbing, ambient `Camel.toml`, compile-time `CAMEL_*` overrides, wider artifact-runtime arguments, compression, signing, cross-target compilation, or R2 deploy-time asset embedding. Compile-time source selection may use explicit `--config` and `--profile` options, but runtime accepts only `--report`, `--help`, `--version`, and `--manifest` plus the sanctioned R4 signature-verification surface. R1 SHALL keep one logical entry point even though its store contains multiple documents. R3 may extend entry-point cardinality using this store without changing R1 runtime semantics.
 
 #### Scenario: Permanent non-goals remain outside the artifact contract
 
@@ -136,4 +166,38 @@ The compiled artifact SHALL remain a sealed deployment unit and SHALL NOT grow d
 - **GIVEN** a valid compiled artifact
 - **WHEN** the operator supplies an argument other than `--report`, `--help`, `--version`, `--manifest`, or the sanctioned R4 signature-verification surface
 - **THEN** the artifact rejects the argument with exit 2 and does not expand its command surface
+
+#### Scenario: MUST-NOT capabilities remain rejected
+
+- **GIVEN** a proposal to add ambient configuration, runtime discovery, compile-time overrides, watch, a wider artifact argument surface, or asset embedding to R1
+- **WHEN** the proposal is evaluated against the sealed-artifact contract
+- **THEN** it is rejected as outside this change and recorded for its roadmap owner rather than added to the virtual-store implementation
+
+### Requirement: Resolve and confine compile-time sources
+
+The compiler SHALL normalize source names to UTF-8 relative paths using `/`, anchor resolution to the explicitly selected `Camel.toml` root (or the primary document directory when no configuration root is required), and reject absolute paths, empty or `.` components, `..` traversal, non-UTF-8 names, symlink escapes, duplicate canonical targets, missing sources, and references outside the root. Resolution SHALL be deterministic and SHALL not depend on ambient current-directory discovery. The compiler SHALL reject unsupported asset-bearing fields rather than treating them as virtual documents.
+
+#### Scenario: Path escape fails before output
+
+- **GIVEN** a route source pattern or include that resolves outside the selected root, including through a symlink
+- **WHEN** compilation runs
+- **THEN** it exits 2 with a confinement diagnostic and does not create a usable artifact
+
+#### Scenario: Overlapping sources fail closed
+
+- **GIVEN** two route-file patterns resolve the same canonical source or two names normalize to the same logical path
+- **WHEN** compilation runs
+- **THEN** it exits 2 naming the duplicate and does not silently embed two copies
+
+#### Scenario: Deterministic ordering is stable
+
+- **GIVEN** the same source tree presented with filesystem enumeration in different orders
+- **WHEN** compilation runs twice
+- **THEN** the store index, source plan, and embedded bytes are identical
+
+#### Scenario: Store offsets and schema are validated
+
+- **GIVEN** a marked artifact with an unknown `store_schema`, an out-of-bounds or overlapping content range, a missing source-plan target, noncanonical index ordering, or unreferenced content
+- **WHEN** the artifact starts
+- **THEN** it exits 2 before boot with a format diagnostic and does not reinterpret the bytes as a different store schema
 

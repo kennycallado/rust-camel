@@ -106,7 +106,7 @@ The artifact SHALL feed the indexed documents through the existing parse, runtim
 - **WHEN** the artifact starts
 - **THEN** it exits 2 before configuration or route boot
 
-#### Scenario: Read-only deployment remains supported
+#### Scenario: Read-only deployment
 
 - **GIVEN** a valid multi-document artifact running with a read-only root filesystem
 - **WHEN** it boots and receives deployment environment values
@@ -116,7 +116,7 @@ The artifact SHALL feed the indexed documents through the existing parse, runtim
 
 The artifact SHALL accept only `--report <path>`, `--help`, `--version`, and `--manifest` plus the sanctioned R4 signature-verification surface. Duplicate exclusive flags, missing report values, positional arguments, and other arguments SHALL exit 2. The operational manifest SHALL contain a separate `manifest_schema` field and an `embedded_files` list with canonical logical paths, document kinds, byte lengths, and content digests. Manifest schema values SHALL be validated independently from trailer version. `--manifest` SHALL print this metadata without booting. The manifest SHALL not contain compile-time environment values and SHALL list required environment variables without defaults.
 
-#### Scenario: Manifest inspection exposes store metadata
+#### Scenario: Manifest inspection
 
 - **GIVEN** a valid multi-document artifact
 - **WHEN** the operator runs `./app --manifest`
@@ -128,7 +128,7 @@ The artifact SHALL accept only `--report <path>`, `--help`, `--version`, and `--
 - **WHEN** the artifact starts
 - **THEN** it exits 2 before boot and does not reinterpret trailer version as manifest schema
 
-#### Scenario: Artifact argument contract remains narrow
+#### Scenario: Unknown artifact argument
 
 - **GIVEN** a valid artifact
 - **WHEN** the operator supplies an unknown, positional, duplicate-exclusive, or incomplete report argument
@@ -143,6 +143,24 @@ The artifact SHALL accept only `--report <path>`, `--help`, `--version`, and `--
 ### Requirement: Permanent v1 non-goals
 
 The R1 artifact SHALL preserve the sealed deployment-unit wall: no watch or hot reload, runtime file discovery or globbing, ambient `Camel.toml`, compile-time `CAMEL_*` overrides, wider artifact-runtime arguments, compression, signing, cross-target compilation, or R2 deploy-time asset embedding. Compile-time source selection may use explicit `--config` and `--profile` options, but runtime accepts only `--report`, `--help`, `--version`, and `--manifest` plus the sanctioned R4 signature-verification surface. R1 SHALL keep one logical entry point even though its store contains multiple documents. R3 may extend entry-point cardinality using this store without changing R1 runtime semantics.
+
+#### Scenario: Permanent non-goals remain outside the artifact contract
+
+- **GIVEN** an operator or roadmap proposal requests watch/hot-reload, runtime file discovery/globbing, ambient `Camel.toml`, a command argument beyond `--report`/`--help`/`--version`/`--manifest` other than the sanctioned R4 signature-verification surface, or a compile-time `CAMEL_*` configuration override
+- **WHEN** the proposal is evaluated against the v1 compiled-artifact contract
+- **THEN** the capability is rejected as a permanent non-goal rather than added to the artifact surface
+
+#### Scenario: Embedded configuration does not become ambient configuration
+
+- **GIVEN** a compiled artifact is deployed without its source tree or an ambient `Camel.toml`
+- **WHEN** the artifact starts
+- **THEN** it loads no external configuration, resolves only permitted deployment-time `${env:NAME}` expressions from the embedded document, and performs no runtime discovery, globbing, watch, or hot-reload behavior
+
+#### Scenario: Artifact arguments stay narrow
+
+- **GIVEN** a valid compiled artifact
+- **WHEN** the operator supplies an argument other than `--report`, `--help`, `--version`, `--manifest`, or the sanctioned R4 signature-verification surface
+- **THEN** the artifact rejects the argument with exit 2 and does not expand its command surface
 
 #### Scenario: MUST-NOT capabilities remain rejected
 
