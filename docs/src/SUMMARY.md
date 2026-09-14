@@ -99,6 +99,7 @@
   - [Schema](configuration/schema.md)
   - [Environment variable interpolation](configuration/env-interpolation.md)
   - [Hot reload](configuration/hot-reload.md)
+  - [Jobs discovery](configuration/jobs.md)
 - [Services & observability](services/index.md)
   - [Metrics](services/metrics.md)
   - [Tracing](services/tracing.md)

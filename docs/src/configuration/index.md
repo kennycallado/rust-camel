@@ -2,7 +2,7 @@
 
 `Camel.toml` is the operator surface for rust-camel. `CamelConfig` deserializes the file into a profile-aware tree. Fields live under `[default]` and `[<profile>]` sections, deep-merged with includes and `CAMEL_*` overrides.
 
-Top-level sections: `[default.routes]` (discovery globs), `[components.*]` (per-component defaults, untyped TOML), `[supervision]` (retry and backoff), `[observability]` (tracing and metrics), `[idempotent_repo]` (persistent idempotent backend).
+Top-level sections: `[default.routes]` (discovery globs), `[jobs]` (camel job discovery roots), `[components.*]` (per-component defaults, untyped TOML), `[supervision]` (retry and backoff), `[observability]` (tracing and metrics), `[idempotent_repo]` (persistent idempotent backend).
 
 Set `CAMEL_PROFILE` to select a profile. The `[default]` section always applies. The named profile merges on top. Use `include = ["path/to/file.toml"]` to pull shared sections from other files. An `include` list can also live inside `[default]` or a named profile section. Profile-scoped lists override top-level lists on key conflicts.
 
