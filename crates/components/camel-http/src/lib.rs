@@ -2887,8 +2887,10 @@ fn mask_base_url_userinfo(raw: &str) -> String {
 /// Redact credentials from a URL before it reaches logs or error values
 /// (ADR-0051 redact-by-construction). Masks userinfo (`user:pass@`) and the
 /// query string (which commonly carries API keys/tokens). Host and path stay
-/// visible for diagnosability. Best-effort: on parse failure the raw string is
-/// returned truncated to 256 chars (never a secret-bearing suffix).
+/// visible for diagnosability. Fail-closed: when the parse fails and the
+/// `//`-authority window contains `@`, only the `[redacted]` sentinel is
+/// returned; otherwise the raw string stays visible with the query dropped
+/// and the result capped at 256 bytes on a UTF-8 char boundary.
 pub(crate) fn redact_url_for_diagnostics(raw: &str) -> String {
     const MAX_URL_LOG_LEN: usize = 256;
     match url::Url::parse(raw) {
@@ -2905,23 +2907,48 @@ pub(crate) fn redact_url_for_diagnostics(raw: &str) -> String {
                     s = stripped.to_string();
                 }
                 s.push_str("?[redacted]");
-                if s.len() > MAX_URL_LOG_LEN {
-                    s.truncate(MAX_URL_LOG_LEN);
-                }
+                truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN);
                 return s;
             }
             let mut s = u.to_string();
-            if s.len() > MAX_URL_LOG_LEN {
-                s.truncate(MAX_URL_LOG_LEN);
-            }
+            truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN);
             s
         }
         Err(_) => {
+            // Fail closed: an unparseable string with `@` inside its
+            // authority window may carry credentials the parser never
+            // validated, so nothing of it is rendered.
+            if let Some(start) = raw.find("//").map(|idx| idx + 2) {
+                let end = raw[start..]
+                    .find(['/', '?', '#'])
+                    .map_or(raw.len(), |offset| start + offset);
+                if raw[start..end].contains('@') {
+                    return "[redacted]".to_string();
+                }
+            }
             let mut s = raw.to_string();
-            s.truncate(MAX_URL_LOG_LEN);
+            if let Some(query_start) = raw.find('?') {
+                s.truncate(query_start);
+                s.push_str("?[redacted]");
+            }
+            truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN);
             s
         }
     }
+}
+
+/// Truncate `s` to at most `max` bytes, walking the cut down to the nearest
+/// UTF-8 char boundary so a multibyte character straddling the cap cannot
+/// panic.
+fn truncate_utf8_safe(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut cut = max;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
 }
 
 /// Maximum bytes of an upstream error response body embedded into
@@ -3716,6 +3743,113 @@ mod tests {
         let long = "x".repeat(1000);
         let redacted = redact_url_for_diagnostics(&long);
         assert_eq!(redacted.len(), 256, "unparseable URL must be truncated");
+    }
+
+    #[test]
+    fn redact_url_suppresses_unparseable_authority_credentials() {
+        let fixtures = [
+            "http://u:secretpw@/x",
+            "http://u:secretpw@host:99999/x",
+            "http://u:secretpw@host:99999",
+            "//u:secretpw@h/x",
+        ];
+        for fixture in fixtures {
+            assert!(
+                url::Url::parse(fixture).is_err(),
+                "fixture must be unparseable: {fixture}"
+            );
+            let redacted = redact_url_for_diagnostics(fixture);
+            assert_eq!(
+                redacted, "[redacted]",
+                "credential-bearing authority must be suppressed: {fixture}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_url_bd_repro_never_leaks_credentials() {
+        let redacted = redact_url_for_diagnostics("http://user:pa%ss@host/path");
+        assert!(
+            !redacted.contains("user:pa%ss"),
+            "bd rc-2i5c5 repro leaked userinfo: {redacted}"
+        );
+        assert!(
+            !redacted.contains("pa%ss"),
+            "bd rc-2i5c5 repro leaked password: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_unparseable_query_redacted_short_and_long() {
+        let short = "http://host:99999/path?token=shortsecret";
+        assert!(
+            url::Url::parse(short).is_err(),
+            "fixture must be unparseable: {short}"
+        );
+        let redacted = redact_url_for_diagnostics(short);
+        assert_eq!(
+            redacted, "http://host:99999/path?[redacted]",
+            "short unparseable query must end with the suffix: {redacted}"
+        );
+
+        let mut long = String::from("http://host:99999/");
+        long.push_str(&"a".repeat(300));
+        long.push_str("?token=longsecret");
+        assert!(
+            url::Url::parse(&long).is_err(),
+            "fixture must be unparseable: {long}"
+        );
+        let redacted = redact_url_for_diagnostics(&long);
+        assert!(
+            !redacted.contains("longsecret"),
+            "long unparseable query leaked a query byte: {redacted}"
+        );
+        assert!(
+            redacted.len() <= 256,
+            "long unparseable query must be capped: {} bytes",
+            redacted.len()
+        );
+    }
+
+    #[test]
+    fn redact_url_unparseable_utf8_straddle_no_panic() {
+        let fixture = format!("a{}", "é".repeat(200));
+        let redacted = redact_url_for_diagnostics(&fixture);
+        assert!(
+            redacted.len() <= 256,
+            "straddle fixture must be capped: {} bytes",
+            redacted.len()
+        );
+        assert!(
+            redacted.len() >= 253,
+            "straddle fixture must not over-truncate: {} bytes",
+            redacted.len()
+        );
+        assert!(
+            fixture.is_char_boundary(redacted.len()),
+            "cut must land on a UTF-8 char boundary: {} bytes",
+            redacted.len()
+        );
+    }
+
+    #[test]
+    fn redact_url_at_sign_outside_authority_window_visible() {
+        let at_sign_in_path = "http://host:99999/x@y";
+        assert!(
+            url::Url::parse(at_sign_in_path).is_err(),
+            "fixture must be unparseable: {at_sign_in_path}"
+        );
+        assert_eq!(
+            redact_url_for_diagnostics(at_sign_in_path),
+            at_sign_in_path,
+            "at-sign in path must not be suppressed"
+        );
+        // mailto parses as a cannot-be-a-base URL (no is_err precondition).
+        assert_eq!(
+            redact_url_for_diagnostics("mailto:user@example.com"),
+            "mailto:user@example.com",
+            "at-sign in mailto must round-trip byte-identically"
+        );
     }
 
     #[test]
@@ -8764,6 +8898,41 @@ mod tests {
         let message = err.to_string();
         assert!(!message.contains("pass"), "userinfo leaked: {message}");
         assert!(!message.contains("s3cret"), "query leaked: {message}");
+    }
+
+    #[test]
+    fn armed_fence_rejects_unparseable_override_redacted() {
+        let cfg = HttpEndpointConfig::from_uri(
+            "http://x?allowedUriHosts=api.internal:8443,cdn.example.com",
+        )
+        .unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://u:fencesecret@evil.example.com:99999/x".to_string()),
+        );
+
+        let err = HttpProducer::resolve_url(&exchange, &cfg)
+            .expect_err("unparseable override outside the fence must fail resolution");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("allowedUriHosts fence"),
+            "fence must be named: {message}"
+        );
+        assert!(
+            message.contains("[redacted]"),
+            "suppression sentinel missing: {message}"
+        );
+        assert!(
+            !message.contains("evil.example.com"),
+            "host leaked: fail-closed arm must render only the sentinel: {message}"
+        );
+        assert!(
+            !message.contains("fencesecret"),
+            "password leaked: {message}"
+        );
+        assert!(!message.contains("u:"), "userinfo leaked: {message}");
     }
 
     #[test]
