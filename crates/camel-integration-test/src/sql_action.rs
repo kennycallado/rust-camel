@@ -120,10 +120,14 @@ pub fn ensure_sqlite_memory_shared(config: &CamelConfig) -> Result<(), CamelErro
     names.sort();
     for name in names {
         let lowered = config.datasources[name].db_url.to_lowercase();
-        let prefix = ["sqlite::memory:", "sqlite://:memory:"]
-            .iter()
-            .find(|p| lowered.starts_with(**p))
-            .copied();
+        let prefix = [
+            "sqlite::memory:",
+            "sqlite://:memory:",
+            "sqlite://file::memory:",
+        ]
+        .iter()
+        .find(|p| lowered.starts_with(**p))
+        .copied();
         if let Some(prefix) = prefix {
             let remainder = &lowered[prefix.len()..];
             if !remainder.contains("cache=shared") {
@@ -319,6 +323,19 @@ mod tests {
     #[test]
     fn lint_named_file_uri_passes() {
         let config = lint_config("sqlite:file:memdb_appdb?mode=memory&cache=shared");
+        assert!(ensure_sqlite_memory_shared(&config).is_ok());
+    }
+
+    #[test]
+    fn lint_rejects_file_memory_uri_without_shared_cache() {
+        let config = lint_config("sqlite://file::memory:?mode=memory");
+        let err = ensure_sqlite_memory_shared(&config).unwrap_err();
+        assert!(err.to_string().contains(SQL_MEMORY_NOT_SHARED));
+    }
+
+    #[test]
+    fn lint_accepts_file_memory_uri_with_shared_cache() {
+        let config = lint_config("sqlite://file::memory:?mode=memory&cache=shared");
         assert!(ensure_sqlite_memory_shared(&config).is_ok());
     }
 }

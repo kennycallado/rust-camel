@@ -624,6 +624,10 @@ fn build_bridge(
         return Err("Docker is required but not running. Start Docker and retry.".to_string());
     }
 
+    // Stale-class guard (rc-oztv): every bridge build starts from a clean
+    // Gradle build/ directory, in-container and native alike.
+    wipe_gradle_build_dir(&bridge_dir);
+
     // 3. Optional: clear Gradle cache
     if no_cache {
         let cache_dir = bridge_dir.join(".gradle-docker-cache");
@@ -742,6 +746,22 @@ fn build_bridge(
     Ok(())
 }
 
+/// Wipe the bridge Gradle `build/` directory before a rebuild.
+///
+/// Gradle incremental cache can serve a stale compiled class to Quarkus
+/// augmentation even when compileJava reports "executed" (observed:
+/// NativeImageReflectionRegistrations shipping an old reflection list).
+/// A clean `build/` makes every native bridge build reproducible from
+/// source (rc-oztv).
+fn wipe_gradle_build_dir(bridge_dir: &std::path::Path) {
+    let build_dir = bridge_dir.join("build");
+    match std::fs::remove_dir_all(&build_dir) {
+        Ok(()) => println!("  Wiped {}", build_dir.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => println!("  Warning: could not wipe {}: {e}", build_dir.display()),
+    }
+}
+
 fn build_bridge_native(bridge: &str, version: Option<&str>, target: &str) -> Result<(), String> {
     let (bridge_name, bridge_dir, binary_name, extra_gradle_args) = match bridge {
         "jms" => ("JMS", "jms", "jms-bridge", ""),
@@ -786,6 +806,10 @@ fn build_bridge_native(bridge: &str, version: Option<&str>, target: &str) -> Res
     let workspace_root = workspace_root()?;
 
     let bridge_path = workspace_root.join("bridges").join(bridge_dir);
+
+    // Stale-class guard (rc-oztv): every native bridge build starts from
+    // a clean Gradle build/ directory.
+    wipe_gradle_build_dir(&bridge_path);
 
     println!("Building {bridge_name} bridge native image (native, no Docker)...");
     println!("  Bridge:  {bridge}");
@@ -6872,5 +6896,30 @@ mod artifact_hash {
             std::fs::write(dir.path().join("spec.md"), "hello EVIL").unwrap(); // allow-unwrap
             assert_ne!(h1, compute(d).unwrap()); // allow-unwrap
         }
+    }
+}
+
+#[cfg(test)]
+mod bridge_wipe_tests {
+    use super::*;
+
+    #[test]
+    fn wipe_removes_stale_build_dir() {
+        let root = std::env::temp_dir().join(format!("xtask-wipe-{}", std::process::id()));
+        let classes = root.join("build").join("classes");
+        std::fs::create_dir_all(&classes).unwrap(); // allow-unwrap
+        std::fs::write(classes.join("Stale.class"), b"stale").unwrap(); // allow-unwrap
+        wipe_gradle_build_dir(&root);
+        assert!(!root.join("build").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn wipe_tolerates_missing_build_dir() {
+        let root = std::env::temp_dir().join(format!("xtask-wipe-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap(); // allow-unwrap
+        wipe_gradle_build_dir(&root);
+        assert!(root.exists());
+        std::fs::remove_dir_all(&root).ok();
     }
 }
