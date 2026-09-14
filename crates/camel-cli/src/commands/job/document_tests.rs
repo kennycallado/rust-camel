@@ -616,3 +616,206 @@ fn absent_args_select_legacy_mode() {
     assert!(doc.args.is_none());
     assert!(doc.legacy_arg_headers());
 }
+
+#[test]
+fn help_parse_accepts_arg_tokens_in_to_and_timeout() {
+    // Arrange: a declared document whose `to`/`timeout` hold
+    // `${arg:...}` tokens; the help projection must not interpolate or
+    // validate the duration text.
+    let text = r#"
+args:
+  target:
+    required: true
+execute:
+  mode: one-shot
+  timeout: "${arg:wait}"
+  send:
+    to: "${arg:target}"
+routeFiles:
+  - routes/job-route.yaml
+"#;
+    // Act
+    let info = document::parse_job_document_for_help(&doc_path(), text).expect("help parse");
+    // Assert: raw token text, the validated mode spelling, and the
+    // normalized declaration.
+    assert_eq!(info.send_to, "${arg:target}");
+    assert_eq!(info.mode, "one-shot");
+    let args = info.args.as_ref().expect("declarations carried");
+    let target = args.entries.get("target").expect("target declaration");
+    assert!(target.required);
+}
+
+#[test]
+fn help_parse_accepts_unsatisfiable_required_argument() {
+    // Arrange: a `required: true` argument with no default and no
+    // `--arg` pairs available; help renders the interface, so nothing
+    // may demand a value.
+    let text = r#"
+args:
+  name:
+    required: true
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routeFiles:
+  - routes/job-route.yaml
+"#;
+    // Act
+    let info = document::parse_job_document_for_help(&doc_path(), text);
+    // Assert: no MissingRequiredArgument can fire at help time.
+    assert!(info.is_ok(), "got {info:?}");
+}
+
+#[test]
+fn help_parse_rejects_structural_errors() {
+    // Arrange: one text per structural failure class.
+    let unknown_top_level = r#"
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routeFiles:
+  - routes/job-route.yaml
+surprise: true
+"#;
+    let unknown_argument_field = r#"
+args:
+  name:
+    requried: true
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routeFiles:
+  - routes/job-route.yaml
+"#;
+    let missing_execute = "routeFiles:\n  - routes/job-route.yaml\n";
+    // Act + Assert: the same variants the execution parser produces.
+    match document::parse_job_document_for_help(&doc_path(), unknown_top_level) {
+        Err(JobDocError::UnknownField(_)) => {}
+        other => panic!("expected UnknownField, got {other:?}"),
+    }
+    match document::parse_job_document_for_help(&doc_path(), unknown_argument_field) {
+        Err(JobDocError::UnknownArgumentField { argument, field }) => {
+            assert_eq!(argument, "name");
+            assert_eq!(field, "requried");
+        }
+        other => panic!("expected UnknownArgumentField, got {other:?}"),
+    }
+    let err = document::parse_job_document_for_help(&doc_path(), missing_execute).unwrap_err();
+    assert!(matches!(err, JobDocError::MissingExecute), "got {err:?}");
+}
+
+#[test]
+fn help_parse_requires_send_and_timeout_presence() {
+    // Arrange: one text without `execute.send`, one without
+    // `execute.timeout`.
+    let no_send = r#"
+execute:
+  mode: one-shot
+  timeout: 30s
+routeFiles:
+  - routes/job-route.yaml
+"#;
+    let no_timeout = r#"
+execute:
+  mode: one-shot
+  send:
+    to: direct:transform
+routeFiles:
+  - routes/job-route.yaml
+"#;
+    // Both missing: parity with the execution parser — timeout
+    // presence is checked first, so this reports MissingTimeout.
+    let neither = r#"
+execute:
+  mode: one-shot
+routeFiles:
+  - routes/job-route.yaml
+"#;
+    // Act
+    let send_err = document::parse_job_document_for_help(&doc_path(), no_send).unwrap_err();
+    let timeout_err = document::parse_job_document_for_help(&doc_path(), no_timeout).unwrap_err();
+    let both_err = document::parse_job_document_for_help(&doc_path(), neither).unwrap_err();
+    // Assert: the send-presence error is the shared `Yaml` spelling;
+    // the timeout-presence error is its own variant (no duration parse).
+    match send_err {
+        JobDocError::Yaml(msg) => assert_eq!(
+            msg, "execute.send is required: exactly one send action",
+            "send-presence payload must match the execution parser verbatim"
+        ),
+        other => panic!("expected Yaml naming execute.send, got {other:?}"),
+    }
+    assert!(
+        matches!(timeout_err, JobDocError::MissingTimeout),
+        "got {timeout_err:?}"
+    );
+    assert!(
+        matches!(both_err, JobDocError::MissingTimeout),
+        "both-missing must report MissingTimeout (impl check order); got {both_err:?}"
+    );
+}
+
+#[test]
+fn help_parse_covers_structural_prefix_errors() {
+    // Arrange: one minimal failing input per copied structural-prefix
+    // branch. Parity form: each error must equal what the execution
+    // parser yields for the SAME input, so the copies cannot drift
+    // from `parse_job_document_impl`.
+    let valid = r#"
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routeFiles:
+  - routes/job-route.yaml
+"#;
+    let cases: Vec<(&str, std::path::PathBuf, String)> = vec![
+        (
+            "NotJobSuffix",
+            Path::new("fixtures/job.yaml").to_path_buf(),
+            valid.to_string(),
+        ),
+        (
+            "ExclusiveWithScenario",
+            doc_path(),
+            format!("{valid}scenario:\n  actions: []\n"),
+        ),
+        (
+            "MixedVocabulary",
+            doc_path(),
+            format!("{valid}expects:\n  mock:out:\n    count: 1\n"),
+        ),
+        (
+            "RouteSource",
+            doc_path(),
+            format!("{valid}routes:\n  - id: r\n    from: direct:transform\n"),
+        ),
+        (
+            "UnsupportedMode",
+            doc_path(),
+            valid.replace("one-shot", "sometimes"),
+        ),
+    ];
+    for (label, path, text) in cases {
+        // Act
+        let help = document::parse_job_document_for_help(&path, &text);
+        let exec = document::parse_job_document(&path, &text);
+        // Assert
+        match (help, exec) {
+            (Err(help_err), Err(exec_err)) => assert_eq!(
+                format!("{help_err:?}"),
+                format!("{exec_err:?}"),
+                "help projection must match the execution parser for {label}"
+            ),
+            (help_result, exec_result) => panic!(
+                "expected both parsers to reject the {label} input; help {help_result:?}, exec {exec_result:?}"
+            ),
+        }
+    }
+}

@@ -498,6 +498,105 @@ fn parse_job_document_impl(
     })
 }
 
+/// The declared interface of a job document, projected for
+/// `camel job <name> --help`: the validated mode spelling, the raw
+/// (uninterpolated) send target, and the normalized argument
+/// declarations. Deliberately narrower than [`JobDocument`]: no route
+/// sources, no body/headers, no resolved execution values. Consumed by
+/// the `--help` renderer ([`super::help::render_job_help`]).
+#[derive(Debug)]
+pub(crate) struct JobHelpInfo {
+    /// The validated `execute.mode` spelling (`"one-shot"` or
+    /// `"batch"`).
+    pub(crate) mode: String,
+    /// The raw `execute.send.to` text, unvalidated and uninterpolated
+    /// (`${arg:...}` tokens survive verbatim).
+    pub(crate) send_to: String,
+    /// The normalized `args:` declarations; `None` is the legacy
+    /// (undeclared) path.
+    pub(crate) args: Option<JobArgumentDeclarations>,
+}
+
+/// Project the declared interface of a job document for
+/// `camel job <name> --help`. Runs the same structural prefix as
+/// [`parse_job_document_impl`] — suffix contract, section exclusivity,
+/// strict serde shape, exactly-one route source, argument
+/// normalization, mode spelling, `send`/`timeout` presence — but stops
+/// before execution-value validation: no duration parse, no send-scheme
+/// check, no pair resolution, no defaulting, no interpolation.
+pub(crate) fn parse_job_document_for_help(
+    path: &Path,
+    text: &str,
+) -> Result<JobHelpInfo, JobDocError> {
+    if !camel_dsl::discovery::is_job_document(path) {
+        return Err(JobDocError::NotJobSuffix {
+            path: path.display().to_string(),
+        });
+    }
+    let value = serde_yaml::from_str::<serde_yaml::Value>(text)
+        .map_err(|e| JobDocError::Yaml(e.to_string()))?;
+    let has = |key: &str| value.get(key).is_some();
+    if !has("execute") {
+        return Err(JobDocError::MissingExecute);
+    }
+    if has("scenario") {
+        return Err(JobDocError::ExclusiveWithScenario);
+    }
+    let mixed: Vec<&'static str> = TEST_VOCABULARY_KEYS
+        .iter()
+        .copied()
+        .filter(|key| has(key))
+        .collect();
+    if !mixed.is_empty() {
+        return Err(JobDocError::MixedVocabulary { sections: mixed });
+    }
+
+    let mut raw =
+        serde_yaml::from_str::<JobDocumentDoc>(text).map_err(|e| classify(&e.to_string()))?;
+
+    // Route-source conflict: the family rule, verbatim.
+    let mut present: Vec<&'static str> = Vec::new();
+    if raw.route_files.is_some() {
+        present.push("routeFiles");
+    }
+    if raw.route_files_from_root.is_some() {
+        present.push("routeFilesFromRoot");
+    }
+    if raw.routes.is_some() {
+        present.push("routes");
+    }
+    if present.len() != 1 {
+        return Err(JobDocError::RouteSource(
+            TestDocError::RouteSourceConflict { present },
+        ));
+    }
+
+    let args = normalize_job_args(raw.args.take())?;
+
+    let execute = raw.execute;
+    let mode_raw = execute.mode.ok_or(JobDocError::MissingMode)?;
+    let mode = match mode_raw.as_str() {
+        "one-shot" | "batch" => mode_raw,
+        other => return Err(JobDocError::UnsupportedMode(other.to_string())),
+    };
+    // Presence only: the timeout text is rendered, never parsed. The
+    // order mirrors `parse_job_document_impl` (timeout before send) so
+    // both-missing documents report the same error from either parser.
+    execute.timeout.ok_or(JobDocError::MissingTimeout)?;
+    let send_to = execute
+        .send
+        .ok_or(JobDocError::Yaml(
+            "execute.send is required: exactly one send action".to_string(),
+        ))?
+        .to;
+
+    Ok(JobHelpInfo {
+        mode,
+        send_to,
+        args,
+    })
+}
+
 /// Whether `name` matches the argument identifier grammar
 /// `[A-Za-z_][A-Za-z0-9_]*` (shared with the `${arg:NAME}` token form).
 fn is_argument_identifier(name: &str) -> bool {

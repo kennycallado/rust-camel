@@ -6,7 +6,7 @@
 //! it through the EXISTING lifecycles:
 //!
 //! - route artifacts drive the shared `camel run` lifecycle
-//!   ([`crate::commands::run::drive_lifecycle`]) with the default
+//!   (`crate::commands::run::drive_lifecycle`) with the default
 //!   in-memory config, the embedded discovery seam, and `watch = false`;
 //! - job artifacts drive the existing single-document job
 //!   report/outcome lifecycle with the embedded document as their sole

@@ -29,10 +29,14 @@
 
 mod batch;
 mod document;
+mod help;
 mod signal;
 
 #[cfg(test)]
 mod document_tests;
+
+#[cfg(test)]
+mod help_tests;
 
 #[cfg(test)]
 mod tests;
@@ -68,6 +72,11 @@ const MIN_SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 
 /// CLI args for `camel job`.
 #[derive(Args, Debug)]
+// The `job` subcommand owns its `--help`/`-h` surface: a bare usage
+// print without a name, the declared interface with one. clap's auto
+// help flag is disabled for this subcommand only — the top-level
+// `camel --help` and every other subcommand keep clap help.
+#[command(disable_help_flag = true)]
 pub struct JobArgs {
     /// Path to the job document (`*.job.yaml` with an `execute:`
     /// section). A bare name (no separator, no suffix) probes
@@ -75,6 +84,10 @@ pub struct JobArgs {
     /// the discovery set.
     #[arg(value_name = "FILE")]
     pub document: Option<PathBuf>,
+    /// With a job name it renders the job's declared interface;
+    /// without a name it prints `camel job` usage.
+    #[arg(long = "help", short = 'h', action = clap::ArgAction::SetTrue)]
+    pub help: bool,
     /// Write the JSON report to this path instead of stdout.
     #[arg(long, value_name = "FILE")]
     pub report: Option<PathBuf>,
@@ -270,13 +283,33 @@ struct JobListProbe {
     description: Option<String>,
 }
 
-/// Probe one job document for its description. Outer `None` = unreadable
-/// or unparseable (row renders `(unparseable)`); `Some(None)` = parseable
-/// without `description:`; `Some(Some(d))` = the description string.
+/// Probe the in-memory job document text for its description. Outer
+/// `None` = unparseable; `Some(None)` = parseable without
+/// `description:`; `Some(Some(d))` = the description string. Shared by
+/// the listing probe (file text) and the `--help` path (the text
+/// already read for the document parse).
+fn probe_description_str(text: &str) -> Option<Option<String>> {
+    let probe: JobListProbe = serde_yaml::from_str(text).ok()?;
+    Some(probe.description)
+}
+
+/// Probe one job document for its description: read the file, then
+/// [`probe_description_str`] on its text. Outer `None` covers an
+/// unreadable file and an unparseable document alike (the row renders
+/// `(unparseable)`).
 fn probe_description(path: &Path) -> Option<Option<String>> {
     let text = std::fs::read_to_string(path).ok()?;
-    let probe: JobListProbe = serde_yaml::from_str(&text).ok()?;
-    Some(probe.description)
+    probe_description_str(&text)
+}
+
+/// The display stem of a job document file name: the name with its
+/// `.job.yaml`/`.job.yml` suffix stripped, or the full name when
+/// neither suffix is present. Shared by the listing display names and
+/// the `--help` interface header so the two surfaces cannot drift.
+fn job_stem(name: &str) -> &str {
+    name.strip_suffix(".job.yaml")
+        .or_else(|| name.strip_suffix(".job.yml"))
+        .unwrap_or(name)
 }
 
 /// One listed job document: the display name (the bare stem for files
@@ -397,11 +430,7 @@ fn walk_level(
             continue;
         }
         let name = name.to_string_lossy().into_owned();
-        let stem = name
-            .strip_suffix(".job.yaml")
-            .or_else(|| name.strip_suffix(".job.yml"))
-            .unwrap_or(&name)
-            .to_string();
+        let stem = job_stem(&name).to_string();
         let display = match path.strip_prefix(root) {
             // Nested documents carry their configured-root-relative
             // path; root-level documents keep the bare stem.
@@ -473,17 +502,19 @@ fn list_jobs(roots: &[(String, PathBuf)]) -> i32 {
 /// goes to stdout (default) or `--report`.
 pub async fn run_job(args: &JobArgs) -> i32 {
     // 0. Register the SIGINT/SIGTERM streams BEFORE config load, but
-    //    only when a document run follows: a signal arriving during
-    //    boot is buffered by the runtime and consumed by the send
-    //    race below, instead of hitting the default disposition and
-    //    killing the process (spec: signal during boot is buffered).
-    //    Both streams stay preserved until the first signal is
-    //    consumed; ownership then moves to the force-exit guard. The
-    //    no-document listing path never installs the streams: handlers
-    //    whose streams are never consumed would swallow SIGINT/SIGTERM
-    //    during listing instead of letting the default disposition
+    //    only when an execution run follows (a document AND no
+    //    `--help`): a signal arriving during boot is buffered by the
+    //    runtime and consumed by the send race below, instead of
+    //    hitting the default disposition and killing the process
+    //    (spec: signal during boot is buffered). Both streams stay
+    //    preserved until the first signal is consumed; ownership then
+    //    moves to the force-exit guard. Every other path — the
+    //    no-document listing, `--help` in either spelling — never
+    //    installs the streams: handlers whose streams are never
+    //    consumed would swallow SIGINT/SIGTERM during listing or help
+    //    rendering instead of letting the default disposition
     //    terminate the process.
-    let signals = args.document.is_some().then(JobSignals::arm);
+    let signals = (args.document.is_some() && !args.help).then(JobSignals::arm);
     // Flush the `signal streams armed` marker for subprocess
     // synchronization: stderr is unbuffered and flushed here, while
     // the tracing subscriber installs only inside
@@ -519,10 +550,18 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         }
     };
 
-    // The tuple pairs the document with its entry-armed streams; both
-    // arms key off the same predicate, so the else branch is exactly
-    // the no-document listing path (streams never installed there).
-    let (Some(raw_document), Some(signals)) = (&args.document, signals) else {
+    // The no-document else branch is the usage/listing path; the
+    // document branch internally splits help vs execution on
+    // `args.help`. `signals` (armed only for execution runs) passes
+    // through as the `Option` `execute_job` already accepts.
+    let Some(raw_document) = &args.document else {
+        if args.help {
+            print!(
+                "{}",
+                JobArgs::augment_args(clap::Command::new("camel job")).render_help()
+            );
+            return 0;
+        }
         if args.report.is_some() {
             eprintln!("--report requires a job document");
             return 2;
@@ -552,6 +591,33 @@ pub async fn run_job(args: &JobArgs) -> i32 {
             return 2;
         }
     };
+    // `--help` renders the declared interface and returns HERE —
+    // before pair validation, boot, report write, and route-source
+    // resolution. A malformed document still fails loud with the same
+    // `{path}: {error}` diagnostic shape the execution path uses.
+    if args.help {
+        let info = match document::parse_job_document_for_help(&document_path, &text) {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("{}: {e}", document_path.display());
+                return 2;
+            }
+        };
+        let file_name = document_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| document_path.display().to_string());
+        let description = probe_description_str(&text);
+        println!(
+            "{}",
+            help::render_job_help(
+                job_stem(&file_name),
+                description.flatten().as_deref(),
+                &info
+            )
+        );
+        return 0;
+    }
     let doc = match document::parse_job_document_with_args(&document_path, &text, &args.args) {
         Ok(doc) => doc,
         Err(e) => {
@@ -597,7 +663,7 @@ pub async fn run_job(args: &JobArgs) -> i32 {
             Vec::new()
         },
     };
-    execute_job(doc, run, camel_config, Some(signals)).await
+    execute_job(doc, run, camel_config, signals).await
 }
 
 /// How a job run loads its route definitions.

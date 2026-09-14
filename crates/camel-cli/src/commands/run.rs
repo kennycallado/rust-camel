@@ -11,7 +11,7 @@
 //! shutdown. The handle logs teardown failures; the exit code never
 //! changes.
 //!
-//! The lifecycle core ([`drive_lifecycle`]) is shared with compiled
+//! The lifecycle core (`drive_lifecycle`) is shared with compiled
 //! artifacts (openspec change `cli-compile`): `run()` contributes config
 //! loading, CLI overrides, and filesystem discovery; an embedded artifact
 //! contributes the default in-memory config, the embedded discovery seam,
@@ -107,7 +107,7 @@ pub(crate) fn try_canonical_project_root(
 // Shared runtime lifecycle (camel run + compiled artifacts)
 // ---------------------------------------------------------------------------
 
-/// How [`drive_lifecycle`] obtains route definitions.
+/// How `drive_lifecycle` obtains route definitions.
 #[derive(Debug, Clone)]
 pub(crate) enum Discover {
     /// `camel run`'s filesystem discovery: glob patterns through the

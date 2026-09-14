@@ -43,20 +43,10 @@ fn job_test_binary() -> std::path::PathBuf {
 
 /// Run `camel job` in `dir` to completion and return
 /// `(exit_code, stdout, stderr)`. Blocks until the child exits; the
-/// job fixtures use short one-shot runs.
+/// job fixtures use short one-shot runs. The ergonomic no-env default
+/// over [`run_camel_job_env`].
 fn run_camel_job(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
-    let mut full: Vec<&str> = vec!["job"];
-    full.extend(args.iter().copied());
-    let output = std::process::Command::new(job_test_binary())
-        .args(full)
-        .current_dir(dir)
-        .output()
-        .expect("spawn camel binary");
-    (
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    run_camel_job_env(dir, args, &[])
 }
 
 /// The fixture config: logs off so stderr carries only diagnostics the
@@ -377,6 +367,332 @@ routeFiles:
     assert_eq!(json["outcome"], "Completed", "report: {json}");
     assert_eq!(json["reply"]["body"], "hello", "report: {json}");
     assert_eq!(json["reply"]["headers"]["X-Tier"], "gold", "report: {json}");
+}
+
+// ---- jobhelp Task 1.3: `--help` wiring ----------------------------------
+//
+// The `--help` contract spans argv parsing, bare-name resolution, the
+// help projection parse, and the pre-boot early return, so the tests
+// act through the same subprocess harness as the jobargs family.
+
+/// Run `camel job` in `dir` with extra environment entries set on the
+/// child and return `(exit_code, stdout, stderr)`. The single spawn
+/// path — [`run_camel_job`] delegates here with no extra environment
+/// (e.g. `CAMEL_JOB_SIGNAL_MARKER` opt-in).
+fn run_camel_job_env(
+    dir: &std::path::Path,
+    args: &[&str],
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> (i32, String, String) {
+    let mut full: Vec<&str> = vec!["job"];
+    full.extend(args.iter().copied());
+    let output = std::process::Command::new(job_test_binary())
+        .args(full)
+        .envs(env.iter().cloned())
+        .current_dir(dir)
+        .output()
+        .expect("spawn camel binary");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Write one job document under the default `[jobs]` root
+/// (`jobs/<name>.job.yaml`): bare-name resolution probes exactly this
+/// spelling through the default config (no `[jobs]` table). The
+/// jobargs fixtures use explicit paths, so this writer is new.
+fn write_jobs_root_document(dir: &std::path::Path, name: &str, document: &str) {
+    let jobs = dir.join("jobs");
+    std::fs::create_dir_all(&jobs).expect("mkdir jobs");
+    std::fs::write(jobs.join(format!("{name}.job.yaml")), document).expect("write job doc");
+}
+
+/// A minimal valid job document with the given description, args
+/// block, and send target: one route source (inline `routes:`), a
+/// valid `execute:` grammar, and no external route files — the help
+/// path never loads routes, so the fixture stays self-contained.
+fn jobs_root_help_document(description: &str, args: &str, send_to: &str) -> String {
+    format!(
+        r#"description: {description}
+{args}execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: {send_to}
+    body: "ping"
+routes: |
+  routes:
+    - id: "job-tap"
+      from: "direct:tap"
+"#
+    )
+}
+
+/// `--help` with a job name renders the declared interface: the stem,
+/// description, the mode/sends-to pair, and one row per declared
+/// argument — never clap's own help (no `Usage:` line).
+#[test]
+fn help_with_name_renders_declared_interface() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    let document = jobs_root_help_document(
+        "Ingest the daily feed",
+        r#"args:
+  target:
+    required: true
+    description: Where to send the feed
+  retries:
+    default: "3"
+    description: How many attempts to make
+"#,
+        "direct:tap",
+    );
+    write_jobs_root_document(dir.path(), "daily-sync", &document);
+
+    let (code, stdout, stderr) = run_camel_job(dir.path(), &["daily-sync", "--help"]);
+    assert_eq!(code, 0, "--help must exit 0; stderr:\n{stderr}");
+    assert!(
+        stdout.starts_with("daily-sync"),
+        "stdout must start with the stem; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Ingest the daily feed"),
+        "description must render; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Mode:      one-shot"),
+        "mode row must render; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Sends to:"),
+        "send target row must render; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("  retries  string  optional  default=3  How many attempts to make"),
+        "optional argument row must render; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("  target   string  required  Where to send the feed"),
+        "required argument row must render; stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Usage:"),
+        "the interface is not clap help; stdout:\n{stdout}"
+    );
+}
+
+/// The help render shows the RAW `${arg:}` send target without pair
+/// validation: a required argument missing its `--arg` value, which
+/// the execution path rejects pre-boot, never blocks `--help`.
+#[test]
+fn help_with_name_reports_required_args_without_pairs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    let document = jobs_root_help_document(
+        "Ingest the daily feed",
+        r#"args:
+  target:
+    required: true
+"#,
+        r#""${arg:target}""#,
+    );
+    write_jobs_root_document(dir.path(), "daily-sync", &document);
+
+    // No --arg: the execution path would fail pair validation; help
+    // must still render.
+    let (code, stdout, stderr) = run_camel_job(dir.path(), &["daily-sync", "--help"]);
+    assert_eq!(
+        code, 0,
+        "--help must exit 0 without pairs; stderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Sends to:  ${arg:target}"),
+        "raw ${{arg:}} token must survive verbatim; stdout:\n{stdout}"
+    );
+}
+
+/// A document without `args:` renders the `Arguments:` section with
+/// the explicit `(no arguments)` row.
+#[test]
+fn help_no_args_block_prints_no_arguments() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    let document = jobs_root_help_document("Do the thing quietly", "", "direct:tap");
+    write_jobs_root_document(dir.path(), "quiet-sync", &document);
+
+    let (code, stdout, stderr) = run_camel_job(dir.path(), &["quiet-sync", "--help"]);
+    assert_eq!(code, 0, "--help must exit 0; stderr:\n{stderr}");
+    assert!(
+        stdout.contains("Arguments:\n  (no arguments)"),
+        "absent args block must render the placeholder row; stdout:\n{stdout}"
+    );
+}
+
+/// `--help` returns before any boot, report write, or signal-stream
+/// arming: with the marker env opting in, no marker line is printed,
+/// and the `--report` path is never touched.
+#[test]
+fn help_writes_no_report_and_boots_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_tap_route(dir.path());
+    // A fully runnable document: if the help path wrongly booted, the
+    // run would complete and write the report — the missing file
+    // proves the early return.
+    write_jobs_root_document(
+        dir.path(),
+        "daily-sync",
+        r#"description: Ingest the daily feed
+execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: direct:tap
+    body: "ping"
+routeFiles:
+  - ../routes/job-route.yaml
+"#,
+    );
+    let report = dir.path().join("out.json");
+
+    let (code, stdout, stderr) = run_camel_job_env(
+        dir.path(),
+        &["daily-sync", "--help", "--report", "out.json"],
+        &[(
+            std::ffi::OsString::from("CAMEL_JOB_SIGNAL_MARKER"),
+            std::ffi::OsString::from("1"),
+        )],
+    );
+    assert_eq!(code, 0, "--help must exit 0; stderr:\n{stderr}");
+    assert!(
+        !report.exists(),
+        "help must not write the report file; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.starts_with("daily-sync"),
+        "stdout is the declared interface; stdout:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("signal streams armed"),
+        "help installs no signal streams; stderr:\n{stderr}"
+    );
+}
+
+/// An unknown bare name under `--help` fails with the existing
+/// bare-name resolution diagnostic (exit 2), not clap help.
+#[test]
+fn help_unknown_name_fails_loud() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    let other = jobs_root_help_document("Unrelated job", "", "direct:tap");
+    write_jobs_root_document(dir.path(), "other", &other);
+
+    let (code, _stdout, stderr) = run_camel_job(dir.path(), &["ghost", "--help"]);
+    assert_eq!(code, 2, "unknown name must exit 2; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("ghost"),
+        "diagnostic must name the job; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no job `ghost` in any configured root"),
+        "bare-name resolution diagnostic must carry; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Usage:"),
+        "failure is not clap help; stderr:\n{stderr}"
+    );
+}
+
+/// A malformed document under `--help` fails with the parse
+/// diagnostic (exit 2), not clap help.
+#[test]
+fn help_malformed_document_fails_loud() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_jobs_root_document(
+        dir.path(),
+        "broken",
+        r#"description: Broken on purpose
+totallyUnknownField: yes
+execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: direct:tap
+routes: |
+  routes:
+    - id: "job-tap"
+      from: "direct:tap"
+"#,
+    );
+
+    let (code, _stdout, stderr) = run_camel_job(dir.path(), &["broken", "--help"]);
+    assert_eq!(code, 2, "malformed document must exit 2; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("unknown field in job document"),
+        "parse diagnostic must carry; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Usage:"),
+        "failure is not clap help; stderr:\n{stderr}"
+    );
+}
+
+/// `--help` without a name prints `camel job` usage; a bare
+/// `camel job` invocation still prints the discovery listing.
+#[test]
+fn help_without_name_prints_usage() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    let document = jobs_root_help_document("Ingest the daily feed", "", "direct:tap");
+    write_jobs_root_document(dir.path(), "daily-sync", &document);
+
+    let (code, stdout, _stderr) = run_camel_job(dir.path(), &["--help"]);
+    assert_eq!(code, 0, "usage help must exit 0");
+    assert!(
+        stdout.contains("Usage: camel job"),
+        "usage line must carry; stdout:\n{stdout}"
+    );
+
+    // No flags: the A1 discovery listing still runs.
+    let (code, stdout, _stderr) = run_camel_job(dir.path(), &[]);
+    assert_eq!(code, 0, "bare listing must stay exit 0");
+    assert!(
+        stdout.contains("Jobs in jobs/:"),
+        "bare invocation still lists; stdout:\n{stdout}"
+    );
+}
+
+/// `-h` behaves exactly like `--help`: same exit code, same stdout.
+#[test]
+fn help_short_flag_behaves_like_long() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    let document = jobs_root_help_document(
+        "Ingest the daily feed",
+        r#"args:
+  target:
+    required: true
+    description: Where to send the feed
+  retries:
+    default: "3"
+    description: How many attempts to make
+"#,
+        "direct:tap",
+    );
+    write_jobs_root_document(dir.path(), "daily-sync", &document);
+
+    let (long_code, long_stdout, _long_stderr) =
+        run_camel_job(dir.path(), &["daily-sync", "--help"]);
+    let (short_code, short_stdout, short_stderr) = run_camel_job(dir.path(), &["daily-sync", "-h"]);
+    assert_eq!(short_code, 0, "-h must exit 0; stderr:\n{short_stderr}");
+    assert_eq!(long_code, 0, "--help must exit 0");
+    assert_eq!(
+        short_stdout, long_stdout,
+        "-h and --help must render identically"
+    );
 }
 
 mod exit_code_tests {
