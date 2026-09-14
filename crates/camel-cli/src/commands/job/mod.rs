@@ -680,6 +680,12 @@ enum RouteLoad {
     /// artifacts): virtual identity `compiled://<source_name>`, ambient
     /// (deployment) environment as the `${env:}` lookup.
     Embedded { text: String, source_name: String },
+    /// Route definitions already discovered from an embedded virtual
+    /// store's indexed route files (v2 compiled artifacts, multidoc
+    /// Task 2.2): parsed through `camel_dsl::discover_virtual_store`
+    /// with the deployment environment before boot — no filesystem
+    /// route discovery ever runs.
+    Discovered(Vec<camel_core::RouteDefinition>),
 }
 
 /// Everything one job execution needs beyond the parsed document.
@@ -770,6 +776,144 @@ pub(crate) async fn run_embedded_job(
     };
     let run = JobRun {
         label: format!("compiled://{source_name}"),
+        started,
+        route_load,
+        project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        report_path: report,
+        cli_args: Vec::new(),
+    };
+    execute_job(doc, run, camel_config, None).await
+}
+
+/// Validate and reduce the consumed store's source plan to the
+/// route-kind references the discovery pass accepts
+/// (`discover_virtual_store` parses route-kind plan references only;
+/// the entry point job document is parsed separately from its store
+/// entry, so it is dropped from the plan).
+///
+/// The ONLY job-kind reference a plan may legitimately drop is the
+/// entry document itself. Any OTHER job-kind reference would be a
+/// second entry point — not representable in the single-entry runtime —
+/// and is returned here as a named rejection instead of being silently
+/// dropped. (`validate_typed_references` bounds plan kinds to
+/// route|job, so job is the only reachable non-route kind.)
+fn filter_store_source_plan(
+    store: &mut crate::compile::store::VirtualDocumentStore,
+) -> Option<String> {
+    use crate::compile::store::StoreEntryKind;
+
+    let entry_point = store.index.entry_point.clone();
+    let unexpected = store
+        .index
+        .source_plan
+        .references
+        .iter()
+        .find(|path| {
+            *path != &entry_point
+                && store
+                    .index
+                    .entries
+                    .iter()
+                    .any(|entry| entry.path == **path && entry.kind == StoreEntryKind::Job)
+        })
+        .cloned();
+    if unexpected.is_some() {
+        return unexpected;
+    }
+    store.index.source_plan.references.retain(|path| {
+        *path != entry_point
+            && store
+                .index
+                .entries
+                .iter()
+                .any(|entry| entry.path == *path && entry.kind == StoreEntryKind::Route)
+    });
+    None
+}
+
+/// Run one embedded virtual-store job artifact (v2 multi-document,
+/// openspec change `multidoc`, Task 2.2). The store is the document's
+/// sole source universe: the job document is the indexed entry point,
+/// configuration comes from the merged embedded config/include/profile
+/// entries (deployment-time `${env:}` resolution only — no ambient
+/// `Camel.toml`, no `CAMEL_*` overrides), and routes come from the
+/// indexed route files of the source plan (or the job document's inline
+/// `routes:` block, the exactly-one-source rule). No filesystem
+/// route discovery ever runs; the report/outcome lifecycle and exit codes are
+/// exactly the existing `camel job` taxonomy. The store is consumed:
+/// its source plan is filtered in place (see [`filter_store_source_plan`])
+/// instead of cloning the content blob.
+pub(crate) async fn run_embedded_job_store(
+    mut store: crate::compile::store::VirtualDocumentStore,
+    report: Option<PathBuf>,
+) -> i32 {
+    let started = Instant::now();
+    let entry_point = store.index.entry_point.clone();
+    let identity = format!("compiled://{entry_point}");
+    // Route files: the source plan minus the job entry document. A plan
+    // carrying any OTHER job-kind reference is a named rejection.
+    if let Some(path) = filter_store_source_plan(&mut store) {
+        eprintln!("{identity}: store plan carries an unexpected job document reference: {path}");
+        return 2;
+    }
+    let ambient = |name: &str| std::env::var(name).ok();
+    let (camel_config, routes) =
+        match crate::compile::runtime::resolve_virtual_store(&store, &ambient) {
+            Ok(resolved) => resolved,
+            Err(crate::compile::runtime::VirtualStoreResolveError::Discovery(e)) => {
+                eprintln!("{identity}: {e}");
+                return 2;
+            }
+            Err(crate::compile::runtime::VirtualStoreResolveError::Config(e)) => {
+                eprintln!("camel-cli job failed: {e}");
+                return 2;
+            }
+        };
+    let text = match store.read_text(&entry_point) {
+        Some(text) => text.to_string(),
+        None => {
+            eprintln!("{identity}: entry point names no store entry");
+            return 2;
+        }
+    };
+    let doc = match document::parse_job_document_with_args(Path::new(&entry_point), &text, &[]) {
+        Ok(doc) => doc,
+        Err(document::JobDocError::MissingRequiredArgument { name }) => {
+            eprintln!(
+                "{identity}: missing required argument `{name}`: compiled artifacts cannot accept \
+                 --arg; declare a `default` for the argument in the document instead"
+            );
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{identity}: {e}");
+            return 2;
+        }
+    };
+    // Route source: the exactly-one-source rule makes the inline
+    // `routes:` block and the indexed route files mutually exclusive.
+    // The inline branch never consults the filesystem (the file-form
+    // fields are absent); the file forms deliberately bypass
+    // `resolve_route_source` — its `routeFilesFromRoot` arm would walk
+    // ancestor directories for a `Camel.toml`, a forbidden runtime
+    // read, and the compile already resolved those sources into the
+    // store.
+    let route_load = if doc.routes.is_some() {
+        match document::resolve_route_source(&doc, Path::new(".")) {
+            Ok(JobRouteSource::Inline(text)) => RouteLoad::Embedded {
+                text,
+                source_name: entry_point,
+            },
+            Ok(JobRouteSource::Patterns(_)) | Err(_) => {
+                eprintln!("{identity}: job document route source did not resolve inline");
+                return 2;
+            }
+        }
+    } else {
+        RouteLoad::Discovered(routes)
+    };
+    let run = JobRun {
+        label: identity,
         started,
         route_load,
         project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -904,7 +1048,7 @@ async fn execute_job(
         &mut ctx,
         &doc,
         &document_label,
-        &route_load,
+        route_load,
         &security_compile_context,
         &camel_config,
     )
@@ -1123,7 +1267,7 @@ async fn setup_booted_job(
     ctx: &mut camel_core::CamelContext,
     doc: &JobDocument,
     document_label: &str,
-    route_load: &RouteLoad,
+    route_load: RouteLoad,
     security_compile_context: &camel_dsl::SecurityCompileContext,
     camel_config: &camel_config::config::CamelConfig,
 ) -> Result<Option<std::sync::Arc<batch::BatchDepthProbe>>, EarlyJobFailure> {
@@ -1255,19 +1399,19 @@ async fn setup_booted_job(
 /// AMBIENT environment as lookup (the hermetic document-env closure is
 /// test-family machinery and is deliberately not used here).
 fn load_route_definitions(
-    load: &RouteLoad,
+    load: RouteLoad,
     camel_config: &camel_config::config::CamelConfig,
     security_compile_context: &camel_dsl::SecurityCompileContext,
 ) -> Result<Vec<camel_core::RouteDefinition>, String> {
     let ambient = &|name: &str| std::env::var(name).ok();
     match load {
         RouteLoad::Discovery(patterns) => camel_dsl::discover_routes_with_threshold_and_security(
-            patterns,
+            &patterns,
             camel_config.stream_caching.threshold,
             security_compile_context.clone(),
         )
         .map_err(|e| e.to_string()),
-        RouteLoad::Inline(text) => match camel_dsl::parse_routes_with_env(text, ambient) {
+        RouteLoad::Inline(text) => match camel_dsl::parse_routes_with_env(&text, ambient) {
             Ok(defs) => Ok(defs),
             Err(camel_dsl::RoutesEnvError::Unresolved(var)) => Err(format!(
                 "Environment variable '{var}' not set (required by inline routes)"
@@ -1275,12 +1419,15 @@ fn load_route_definitions(
             Err(camel_dsl::RoutesEnvError::Parse(e)) => Err(format!("inline routes: {e}")),
         },
         RouteLoad::Embedded { text, source_name } => camel_dsl::discover_embedded_text(
-            text,
-            source_name,
+            &text,
+            &source_name,
             camel_dsl::EmbeddedDocumentKind::Job,
             ambient,
         )
         .map_err(|e| e.to_string()),
+        // Already discovered from the store's indexed route files with
+        // the deployment environment — nothing to load.
+        RouteLoad::Discovered(defs) => Ok(defs),
     }
 }
 

@@ -900,3 +900,60 @@ mod shutdown_budget_tests {
         );
     }
 }
+
+mod store_plan_tests {
+    use crate::commands::job::filter_store_source_plan;
+    use crate::compile::store::{StoreDocument, StoreEntryKind, VirtualDocumentStore};
+
+    /// A store with the entry job document, one route document, and a
+    /// SECOND job document; `plan` selects the source-plan references.
+    fn store(plan: &[&str]) -> VirtualDocumentStore {
+        let job_text =
+            "execute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:start\n";
+        VirtualDocumentStore::build(
+            "job.job.yaml",
+            &[
+                StoreDocument {
+                    path: "job.job.yaml".to_string(),
+                    kind: StoreEntryKind::Job,
+                    bytes: job_text.as_bytes().to_vec(),
+                },
+                StoreDocument {
+                    path: "other.job.yaml".to_string(),
+                    kind: StoreEntryKind::Job,
+                    bytes: job_text.as_bytes().to_vec(),
+                },
+                StoreDocument {
+                    path: "routes/a.yaml".to_string(),
+                    kind: StoreEntryKind::Route,
+                    bytes: "routes:\n  - id: a\n    from: timer:a\n"
+                        .as_bytes()
+                        .to_vec(),
+                },
+            ],
+            &[],
+            &plan.iter().map(|p| (*p).to_string()).collect::<Vec<_>>(),
+        )
+        .expect("valid store builds")
+    }
+
+    /// The entry job document is dropped from the plan (it is parsed
+    /// separately); route references are kept in declared order.
+    #[test]
+    fn store_plan_entry_dropped_routes_kept() {
+        let mut store = store(&["job.job.yaml", "routes/a.yaml"]);
+        assert_eq!(filter_store_source_plan(&mut store), None);
+        assert_eq!(store.index.source_plan.references, vec!["routes/a.yaml"]);
+    }
+
+    /// A SECOND job-kind plan reference is named and rejected, never
+    /// silently dropped: only the entry point may leave the plan.
+    #[test]
+    fn store_plan_extra_job_reference_named() {
+        let mut store = store(&["job.job.yaml", "routes/a.yaml", "other.job.yaml"]);
+        assert_eq!(
+            filter_store_source_plan(&mut store),
+            Some("other.job.yaml".to_string())
+        );
+    }
+}

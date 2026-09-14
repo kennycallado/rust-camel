@@ -1,17 +1,25 @@
-//! Fail-closed v1 compile asset policy.
+//! Fail-closed compile asset policy (multidoc Task 1.2 narrowing).
 //!
-//! [`reject_unsupported_assets`] inspects the normalized, pre-interpolation
-//! document text and rejects every asset class the compiled-artifact v1
-//! format cannot embed:
+//! [`reject_entry_document_assets`] inspects the normalized,
+//! pre-interpolation ENTRY document and rejects every asset class the
+//! artifact format cannot embed:
 //!
-//! - route-source fields (`routeFiles`, `routeFilesFromRoot`, glob patterns)
-//! - configuration fields (`profiles`, `includes`; `Camel.toml` and
-//!   `CAMEL_*` compile overrides are rejected separately by `run_compile`)
+//! - configuration-selection fields (`profiles`, `includes`: profiles
+//!   and includes are selected through `--config`/`--profile` and
+//!   resolved by [`super::sources`], never declared inside a route/job
+//!   document)
 //! - asset-bearing fields (`cert`, `key`, `client_ca`, `wasm`, `plugin`,
 //!   `xslt`, `xsd`, `sql`, `static_dir`, file-valued secret fields)
 //! - asset-bearing endpoint URI schemes (`wasm:`, `xslt:`, `validator:`)
 //!   in every URI-bearing field (`from`, `to`, `wire_tap`, `poll_enrich`,
 //!   `enrich`, `dead_letter_channel`, `scatter_gather.endpoints`)
+//!
+//! `routeFiles`/`routeFilesFromRoot` are NOT rejected in the entry
+//! document: the multidoc resolver embeds their matches as typed store
+//! entries. [`reject_unsupported_assets`] applies the stricter NESTED
+//! rule to every additionally embedded route/job document — a resolved
+//! route document declaring its own route sources would need recursive
+//! resolution, which R1 does not support, so it stays rejected there.
 //!
 //! The certificate/key/CA fields are scoped to TLS and listener contexts
 //! (`tls`, `ssl`, `rest`, `mcp` ancestors): a bare `key:` under ordinary
@@ -22,7 +30,7 @@
 //! `${env:}` expressions outside forbidden fields, and deploy-side I/O stay
 //! permitted. Top-level job `args:` declarations (`required`, `default`,
 //! `description`) are ordinary document data, not assets, so declared job
-//! documents compile (jobargs Task 3.2). Field names match the blessed v1
+//! documents compile (jobargs Task 3.2). Field names match the blessed
 //! matrix exactly; the
 //! camelCase/path spellings the rest of the codebase uses for the same
 //! fields (`route_files`, `certPath`, `clientCaPath`, …) are rejected too,
@@ -39,11 +47,22 @@ use super::trailer::TrailerKind;
 
 /// Asset class for a forbidden document field key, or `None` if allowed.
 ///
+/// `allow_route_sources` permits the `routeFiles`/`routeFilesFromRoot`
+/// fields: the entry document's route sources are resolved and embedded
+/// by [`super::sources`]; every nested document keeps them forbidden.
+///
 /// The certificate/key/CA family is only an asset when the walk is inside a
 /// TLS or listener context ([`is_asset_context`]); elsewhere (message
 /// steps, claim checks, generic maps) a `key:`/`cert:` field is ordinary
 /// data and compiles.
-fn forbidden_field(key: &str, tls_context: bool) -> Option<&'static str> {
+fn forbidden_field(
+    key: &str,
+    tls_context: bool,
+    allow_route_sources: bool,
+) -> Option<&'static str> {
+    if allow_route_sources && matches!(key, "routeFiles" | "routeFilesFromRoot") {
+        return None;
+    }
     match key {
         "routeFiles" | "routeFilesFromRoot" | "route_files" | "route_files_from_root" => {
             Some("route source")
@@ -130,7 +149,10 @@ fn label(kind: TrailerKind, class: &str) -> String {
     }
 }
 
-/// Reject every unsupported compile-time asset named by the document.
+/// Reject every unsupported compile-time asset named by an additionally
+/// embedded route/job document (the NESTED rule: route sources are not
+/// recursively resolvable, so they stay forbidden outside the entry
+/// document).
 ///
 /// Walks the parsed document tree (YAML shim accepts JSON too) and collects
 /// ALL violations, so one diagnostic names every rejected asset class.
@@ -138,10 +160,30 @@ pub fn reject_unsupported_assets(
     document_text: &str,
     kind: TrailerKind,
 ) -> Result<(), CompileError> {
+    reject_with(document_text, kind, false)
+}
+
+/// Reject every unsupported compile-time asset named by the ENTRY
+/// document: identical to [`reject_unsupported_assets`] except that the
+/// document's own `routeFiles`/`routeFilesFromRoot` declarations are
+/// permitted — [`super::sources`] resolves, confines, and embeds them.
+pub fn reject_entry_document_assets(
+    document_text: &str,
+    kind: TrailerKind,
+) -> Result<(), CompileError> {
+    reject_with(document_text, kind, true)
+}
+
+/// Shared fail-closed walk entry point.
+fn reject_with(
+    document_text: &str,
+    kind: TrailerKind,
+    allow_route_sources: bool,
+) -> Result<(), CompileError> {
     let root: serde_yml::Value = serde_yml::from_str(document_text)
         .map_err(|e| CompileError::InvalidDocument(format!("not a YAML/JSON document: {e}")))?;
     let mut violations: Vec<String> = Vec::new();
-    walk(&root, kind, &mut violations, false);
+    walk(&root, kind, &mut violations, false, allow_route_sources);
     if violations.is_empty() {
         Ok(())
     } else {
@@ -156,12 +198,13 @@ fn walk(
     kind: TrailerKind,
     violations: &mut Vec<String>,
     tls_context: bool,
+    allow_route_sources: bool,
 ) {
     match value {
         serde_yml::Value::Mapping(map) => {
             for (key, val) in map {
                 let key = key.as_str();
-                if let Some(class) = forbidden_field(key, tls_context) {
+                if let Some(class) = forbidden_field(key, tls_context, allow_route_sources) {
                     violations.push(format!(
                         "field '{key}' ({}, {})",
                         label(kind, class),
@@ -187,12 +230,18 @@ fn walk(
                         }
                     }
                 }
-                walk(val, kind, violations, tls_context || is_asset_context(key));
+                walk(
+                    val,
+                    kind,
+                    violations,
+                    tls_context || is_asset_context(key),
+                    allow_route_sources,
+                );
             }
         }
         serde_yml::Value::Sequence(seq) => {
             for item in seq {
-                walk(item, kind, violations, tls_context);
+                walk(item, kind, violations, tls_context, allow_route_sources);
             }
         }
         _ => {}

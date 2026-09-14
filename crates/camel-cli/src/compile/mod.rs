@@ -1,10 +1,19 @@
-//! Compiled-artifact support for `camel compile` (openspec change `cli-compile`).
+//! Compiled-artifact support for `camel compile` (openspec changes
+//! `cli-compile` and `multidoc`).
 //!
-//! The artifact format appends `payload || manifest || fixed footer` to a copy
-//! of the current executable. This module owns the pieces:
+//! The artifact format appends a marked trailer to a copy of the current
+//! executable: v1 is `payload || manifest || fixed footer` (68-byte footer),
+//! v2 is `CAMELTR1 || content || index || manifest || footer` (76-byte
+//! footer) bundling a multi-document virtual store. This module owns the
+//! pieces:
 //!
-//! - [`trailer`] — deterministic EOF trailer codec (exact 68-byte footer).
-//! - [`manifest`] — canonical operational manifest embedded next to the payload.
+//! - [`trailer`] — deterministic EOF trailer codec (v1 and v2 framing).
+//! - [`manifest`] — canonical operational manifest embedded next to the
+//!   payload.
+//! - [`sources`] — explicit multi-document source selection, resolution,
+//!   and confinement (multidoc Task 1.2).
+//! - [`store`] — re-export of the canonical virtual-document store model
+//!   from `camel-dsl`.
 //!
 //! The artifact embeds authoring text, never `RouteDefinition` or compiled
 //! steps: DSL stays responsible for parsing and interpolation, runtime for
@@ -13,6 +22,8 @@
 pub mod manifest;
 pub mod policy;
 pub mod runtime;
+pub mod sources;
+pub mod store;
 pub mod trailer;
 
 use std::fmt;

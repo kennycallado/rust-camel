@@ -335,6 +335,246 @@ fn embedded_text_rejects_extensionless_and_unsupported_source_names() {
     }
 }
 
+/// Build an in-memory [`camel_dsl::VirtualDocumentStore`] from
+/// `(path, kind, text)` triples (openspec change `multidoc`, Task 2.1).
+fn virtual_store(
+    entry_point: &str,
+    documents: &[(&str, camel_dsl::StoreEntryKind, &str)],
+    config_references: &[&str],
+    source_plan: &[&str],
+) -> camel_dsl::VirtualDocumentStore {
+    let documents: Vec<camel_dsl::StoreDocument> = documents
+        .iter()
+        .map(|(path, kind, text)| camel_dsl::StoreDocument {
+            path: (*path).to_string(),
+            kind: *kind,
+            bytes: text.as_bytes().to_vec(),
+        })
+        .collect();
+    let config_references: Vec<String> =
+        config_references.iter().map(|s| (*s).to_string()).collect();
+    let source_plan: Vec<String> = source_plan.iter().map(|s| (*s).to_string()).collect();
+    camel_dsl::VirtualDocumentStore::build(
+        entry_point,
+        &documents,
+        &config_references,
+        &source_plan,
+    )
+    .expect("virtual store must build")
+}
+
+/// `${env:}` in embedded route documents resolves exclusively through
+/// the injected deployment lookup: no compile-time value is required
+/// (or ever appears), and the merged configuration keeps its
+/// placeholders raw for the caller's typed `CamelConfig` resolution.
+#[test]
+fn discover_virtual_store_resolves_deployment_environment() {
+    use camel_dsl::StoreEntryKind;
+    use camel_dsl::discovery::discover_virtual_store;
+
+    let config = "[default]\nlog_level = \"${env:RC_VS_LOG_LEVEL:-info}\"\n";
+    let main = "routes:\n  - id: vs-env-main\n    from: \"direct:${env:RC_VS_DEPLOY_TARGET}\"\n    steps: []\n";
+    let orders = "routes:\n  - id: vs-env-orders\n    from: \"timer:${env:RC_VS_DEPLOY_URI}\"\n    steps: []\n";
+    let store = virtual_store(
+        "routes/main.yaml",
+        &[
+            ("Camel.toml", StoreEntryKind::Config, config),
+            ("routes/main.yaml", StoreEntryKind::Route, main),
+            ("routes/orders.yaml", StoreEntryKind::Route, orders),
+        ],
+        &["Camel.toml"],
+        &["routes/main.yaml", "routes/orders.yaml"],
+    );
+
+    // The lookup provides ONLY deployment values; the RC_VS_* names are
+    // absent from the process environment, and a stale compile-time
+    // value must never surface in the parsed routes.
+    let discovered = discover_virtual_store(&store, &|name| match name {
+        "RC_VS_DEPLOY_TARGET" => Some("deploy-target".to_string()),
+        "RC_VS_DEPLOY_URI" => Some("deploy".to_string()),
+        "RC_VS_COMPILE_TARGET" => Some("compile-target".to_string()),
+        _ => None,
+    })
+    .expect("virtual-store discovery must resolve through the deployment lookup");
+
+    assert_eq!(discovered.routes.len(), 2);
+    assert_eq!(discovered.routes[0].route_id(), "vs-env-main");
+    assert_eq!(discovered.routes[0].from_uri(), "direct:deploy-target");
+    assert_eq!(discovered.routes[1].route_id(), "vs-env-orders");
+    assert_eq!(discovered.routes[1].from_uri(), "timer:deploy");
+    for route in &discovered.routes {
+        let uri = route.from_uri();
+        assert!(
+            !uri.contains("compile-target"),
+            "compile-time value leaked into {uri}"
+        );
+    }
+
+    // Configuration placeholders stay raw: typed deployment resolution
+    // belongs to the caller's CamelConfig deserialization.
+    assert_eq!(
+        discovered.config.get("log_level").and_then(|v| v.as_str()),
+        Some("${env:RC_VS_LOG_LEVEL:-info}")
+    );
+}
+
+/// The merged configuration follows the filesystem loader's ordered
+/// include/profile overlay (camel-config `load_includes` as lowest
+/// priority, the configuration document above it, `[default]` merged
+/// with the selected profile section, arrays replaced by overlays).
+#[test]
+fn discover_virtual_store_builds_config_in_index_order() {
+    use camel_dsl::StoreEntryKind;
+    use camel_dsl::discovery::discover_virtual_store;
+
+    // Expected filesystem-equivalent values for profile `prod`:
+    // - `log_level = "debug"` — include-only key survives below the
+    //   configuration document;
+    // - `timeout_ms = 10000` — the configuration outranks the include
+    //   (60000 loses), and `[prod]` overlays `[default]` (30000 loses);
+    // - `routes = [main, orders]` — the `[prod]` array replaces the
+    //   `[default]` array (never concatenates).
+    let config = concat!(
+        "include = [\"conf/base.toml\"]\n",
+        "\n",
+        "[default]\n",
+        "timeout_ms = 30000\n",
+        "routes = [\"routes/main.yaml\"]\n",
+        "\n",
+        "[prod]\n",
+        "timeout_ms = 10000\n",
+        "routes = [\"routes/main.yaml\", \"routes/orders.yaml\"]\n",
+    );
+    let include = "log_level = \"debug\"\ntimeout_ms = 60000\n";
+    let profile = concat!(
+        "[prod]\n",
+        "timeout_ms = 10000\n",
+        "routes = [\"routes/main.yaml\", \"routes/orders.yaml\"]\n",
+    );
+    let main = "routes:\n  - id: vs-cfg-main\n    from: \"direct:start\"\n    steps: []\n";
+    let orders = "routes:\n  - id: vs-cfg-orders\n    from: \"direct:orders\"\n    steps: []\n";
+
+    let store = virtual_store(
+        "routes/main.yaml",
+        &[
+            ("Camel.toml", StoreEntryKind::Config, config),
+            ("conf/base.toml", StoreEntryKind::Include, include),
+            ("prod.profile.toml", StoreEntryKind::Profile, profile),
+            ("routes/main.yaml", StoreEntryKind::Route, main),
+            ("routes/orders.yaml", StoreEntryKind::Route, orders),
+        ],
+        &["Camel.toml", "conf/base.toml", "prod.profile.toml"],
+        &["routes/main.yaml", "routes/orders.yaml"],
+    );
+
+    let discovered = discover_virtual_store(&store, &|_| None)
+        .expect("virtual-store discovery must assemble the embedded configuration");
+
+    assert_eq!(
+        discovered.config.get("log_level").and_then(|v| v.as_str()),
+        Some("debug"),
+        "include-only key must survive below the configuration document"
+    );
+    assert_eq!(
+        discovered
+            .config
+            .get("timeout_ms")
+            .and_then(|v| v.as_integer()),
+        Some(10000),
+        "configuration [prod] must outrank both the include and [default]"
+    );
+    let routes: Vec<&str> = discovered
+        .config
+        .get("routes")
+        .and_then(|v| v.as_array())
+        .expect("merged routes list must exist")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        routes,
+        vec!["routes/main.yaml", "routes/orders.yaml"],
+        "profile section arrays must replace, not concatenate"
+    );
+
+    // The plan's route documents still discover through the same pass.
+    assert_eq!(discovered.routes.len(), 2);
+}
+
+/// Discovery consumes only store entries: logical paths that exist
+/// nowhere on disk still parse, no configuration is discovered, and no
+/// extraction or temporary writes happen.
+#[test]
+fn discover_virtual_store_does_not_touch_filesystem() {
+    use camel_dsl::StoreEntryKind;
+    use camel_dsl::discovery::discover_virtual_store;
+
+    let main = "routes:\n  - id: vs-memory\n    from: \"direct:start\"\n    steps: []\n";
+    let store = virtual_store(
+        "payload/vs-main.yaml",
+        &[("payload/vs-main.yaml", StoreEntryKind::Route, main)],
+        &[],
+        &["payload/vs-main.yaml"],
+    );
+
+    let discovered = discover_virtual_store(&store, &|_| None)
+        .expect("virtual-store discovery must run purely from the store");
+    assert_eq!(discovered.routes.len(), 1);
+    assert_eq!(discovered.routes[0].route_id(), "vs-memory");
+    assert!(
+        discovered.config.as_table().is_some_and(|t| t.is_empty()),
+        "a store without configuration references assembles an empty config"
+    );
+
+    // No extraction, no temporary writes: a fresh directory stays empty.
+    let dir = tempdir().unwrap();
+    let entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        entries.is_empty(),
+        "virtual-store discovery must not write files, found {entries:?}"
+    );
+}
+
+/// A malformed plan document surfaces as a parse diagnostic naming its
+/// virtual `compiled://<logical-path>` identity, never a filesystem
+/// path.
+#[test]
+fn discover_virtual_store_preserves_virtual_provenance() {
+    use camel_dsl::StoreEntryKind;
+    use camel_dsl::discovery::{DiscoveryError, discover_virtual_store};
+
+    let main = "routes:\n  - id: vs-prov-main\n    from: \"direct:start\"\n    steps: []\n";
+    // Unterminated quote: fails YAML parsing in the shared pass.
+    let orders = "routes:\n  - id: \"broken\n";
+    let store = virtual_store(
+        "routes/main.yaml",
+        &[
+            ("routes/main.yaml", StoreEntryKind::Route, main),
+            ("routes/orders.yaml", StoreEntryKind::Route, orders),
+        ],
+        &[],
+        &["routes/main.yaml", "routes/orders.yaml"],
+    );
+
+    let err = match discover_virtual_store(&store, &|_| None) {
+        Ok(discovered) => panic!(
+            "malformed route document must fail discovery, got {} route(s)",
+            discovered.routes.len()
+        ),
+        Err(err) => err,
+    };
+    match err {
+        DiscoveryError::Yaml { path, error } => {
+            assert_eq!(path, "compiled://routes/orders.yaml");
+            assert!(!error.is_empty());
+        }
+        other => panic!("expected DiscoveryError::Yaml, got {other:?}"),
+    }
+}
+
 #[test]
 fn comment_placeholder_file_loads_via_discovery() {
     use camel_dsl::discovery::discover_routes_with_threshold_security_and_env;

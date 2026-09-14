@@ -10,6 +10,7 @@ use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::Path;
 
+use crate::embedded_store::{STORE_SCHEMA, StoreEntryKind, StoreError, VirtualDocumentStore};
 use crate::env_interpolation::{
     ProvenancePath, interpolate_env_with, interpolate_yaml_source_with_provenance,
 };
@@ -93,6 +94,26 @@ pub enum DiscoveryError {
     /// Duplicate template id across files, or invalid template spec in file.
     #[error("Template error in {path}: {error}")]
     TemplateSpec { path: String, error: String },
+
+    /// Embedded virtual-store failure: unsupported store schema or a
+    /// reference rule violation, named by [`StoreError`] (missing
+    /// entry-point/configuration/source-plan reference, or a reference
+    /// naming an entry of the wrong document kind).
+    #[error("Virtual store error: {0}")]
+    VirtualStore(#[from] StoreError),
+
+    /// An embedded configuration document (config, include, or profile
+    /// fragment) is not valid TOML, is not valid UTF-8, or breaks an
+    /// assembly rule (duplicate configuration document, malformed
+    /// profile fragment path, unknown profile selection).
+    #[error("Malformed embedded configuration in {path}: {error}")]
+    MalformedVirtualConfig { path: String, error: String },
+
+    /// A source-plan reference names content that cannot be a route
+    /// document (non-UTF-8 bytes). Missing or wrong-kind references
+    /// surface as [`DiscoveryError::VirtualStore`] instead.
+    #[error("Invalid virtual route source plan entry {path}: {reason}")]
+    InvalidVirtualSourcePlan { path: String, reason: String },
 }
 
 /// A single template materialization failure, carrying the file path it
@@ -150,7 +171,12 @@ fn read_file_capped(path: &Path) -> Result<String, DiscoveryError> {
 /// Only patterns whose **file target extension** is `.json` (case-insensitive) return true.
 /// A `.json` segment appearing only in a directory path (e.g. `config/.json/routes/*`)
 /// does **not** authorize JSON loading.
-fn pattern_targets_json(pattern: &str) -> bool {
+///
+/// Public since multidoc Task 1.2: `camel compile` resolves route-file
+/// patterns at compile time and must apply the identical JSON
+/// authorization rule as filesystem discovery (additive change, no
+/// behavior difference for existing callers).
+pub fn pattern_targets_json(pattern: &str) -> bool {
     let lower = pattern.to_lowercase();
     // Extract the last path segment (the file/target portion) and check if it ends with .json
     lower
@@ -193,7 +219,12 @@ pub fn is_reserved_document(path: &Path) -> bool {
 /// A lone `]` or `}` also counts as a metacharacter, so a pathologically
 /// named literal is skipped under wildcard rules rather than erroring
 /// (accepted behavior).
-fn pattern_is_literal(pattern: &str) -> bool {
+///
+/// Public since multidoc Task 1.2: `camel compile` distinguishes literal
+/// from wildcard route-file patterns to decide whether an empty match is
+/// a missing source or an empty set (additive change, no behavior
+/// difference for existing callers).
+pub fn pattern_is_literal(pattern: &str) -> bool {
     !pattern.contains(['*', '?', '[', ']', '{', '}'])
 }
 
@@ -290,6 +321,50 @@ pub enum EmbeddedDocumentKind {
     Job,
 }
 
+/// Per-document gates shared by every embedded seam (single embedded
+/// text and the virtual store): the reserved-document check for route
+/// documents and the fail-closed extension check, both naming the
+/// virtual `compiled://<source_name>` identity. Returns the accepted
+/// lowercase extension for the shared parse pass.
+fn embedded_document_gates(
+    source_name: &str,
+    kind: EmbeddedDocumentKind,
+) -> Result<String, DiscoveryError> {
+    let path_str = format!("compiled://{source_name}");
+
+    // Reserved-document gate (route kind only): `.test.yaml`/`.job.yaml`
+    // names belong to `camel test`/`camel job`, never to route discovery —
+    // the same fail-closed rule as a literal filesystem pattern. The job
+    // kind keeps the suffix contract of the CLI job-document parser, which
+    // runs upstream of this seam.
+    if matches!(kind, EmbeddedDocumentKind::Route) && is_reserved_document(Path::new(source_name)) {
+        return Err(DiscoveryError::ReservedDocumentSuffix { path: path_str });
+    }
+
+    // Extension gate BEFORE parsing — the same fail-closed rule as
+    // filesystem discovery: the shared parse pass only handles
+    // yaml/yml/json and its fallback arm is unreachable, so an
+    // extensionless or unsupported source name must fail with
+    // `UnsupportedExtension` (naming the virtual `compiled://` identity),
+    // never panic. The embedded seams have no glob pattern, so the JSON
+    // explicit-pattern gate does not apply — a `.json` source name is
+    // explicitly named in the artifact manifest.
+    let ext = file_extension(Path::new(source_name));
+    let Some(ext) = ext else {
+        return Err(DiscoveryError::UnsupportedExtension {
+            path: path_str,
+            extension: String::new(),
+        });
+    };
+    match ext.as_str() {
+        "yaml" | "yml" | "json" => Ok(ext),
+        other => Err(DiscoveryError::UnsupportedExtension {
+            path: path_str,
+            extension: other.to_string(),
+        }),
+    }
+}
+
 /// Discovers routes from one embedded document without touching the
 /// filesystem (cli-compile).
 ///
@@ -315,41 +390,8 @@ pub fn discover_embedded_text(
     kind: EmbeddedDocumentKind,
     env_lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<RouteDefinition>, DiscoveryError> {
+    let ext = embedded_document_gates(source_name, kind)?;
     let path_str = format!("compiled://{source_name}");
-
-    // Reserved-document gate (route kind only): `.test.yaml`/`.job.yaml`
-    // names belong to `camel test`/`camel job`, never to route discovery —
-    // the same fail-closed rule as a literal filesystem pattern. The job
-    // kind keeps the suffix contract of the CLI job-document parser, which
-    // runs upstream of this seam.
-    if matches!(kind, EmbeddedDocumentKind::Route) && is_reserved_document(Path::new(source_name)) {
-        return Err(DiscoveryError::ReservedDocumentSuffix { path: path_str });
-    }
-
-    // Extension gate BEFORE parsing — the same fail-closed rule as
-    // filesystem discovery: the shared parse pass only handles
-    // yaml/yml/json and its fallback arm is unreachable, so an
-    // extensionless or unsupported source name must fail with
-    // `UnsupportedExtension` (naming the virtual `compiled://` identity),
-    // never panic. The embedded seam has no glob pattern, so the JSON
-    // explicit-pattern gate does not apply — a `.json` source name is
-    // explicitly named in the artifact manifest.
-    let ext = file_extension(Path::new(source_name));
-    match ext.as_deref() {
-        Some("yaml") | Some("yml") | Some("json") => {}
-        Some(other) => {
-            return Err(DiscoveryError::UnsupportedExtension {
-                path: path_str,
-                extension: other.to_string(),
-            });
-        }
-        None => {
-            return Err(DiscoveryError::UnsupportedExtension {
-                path: path_str,
-                extension: String::new(),
-            });
-        }
-    }
 
     let mut routes = Vec::new();
     let mut templates: HashMap<String, RouteTemplateSpec> = HashMap::new();
@@ -357,7 +399,7 @@ pub fn discover_embedded_text(
     parse_document_routes(
         text,
         &path_str,
-        ext.as_deref(),
+        Some(ext.as_str()),
         None,
         None,
         env_lookup,
@@ -367,6 +409,354 @@ pub fn discover_embedded_text(
     )?;
     materialize_templated_routes(&mut routes, &templates, &templated_specs, None, None)?;
     Ok(routes)
+}
+
+/// Result of embedded virtual-store discovery (openspec change
+/// `multidoc`, Task 2.1): the merged deployment configuration plus
+/// every route definition of the ordered source plan.
+///
+/// `config` is the merged TOML tree of the embedded
+/// config/include/profile documents with filesystem-loader semantics:
+/// includes are lowest priority in declaration order, the
+/// configuration document sits above them, `[default]` merges with the
+/// selected profile sections in selection order, and overlays replace
+/// arrays (never concatenate). `${env:...}` placeholders stay raw — the
+/// caller resolves them against the deployment environment during
+/// `CamelConfig` deserialization, preserving camel-config's typed
+/// placeholder handling. Route documents, by contrast, resolve
+/// placeholders through the injected deployment lookup inside this
+/// discovery.
+pub struct VirtualStoreDiscovery {
+    /// Merged configuration value for `CamelConfig` deserialization.
+    pub config: toml::Value,
+    /// Route definitions from the store's ordered source plan, in plan
+    /// order.
+    pub routes: Vec<RouteDefinition>,
+}
+
+/// Discovers routes and configuration from an embedded
+/// [`VirtualDocumentStore`] without touching the filesystem
+/// (openspec change `multidoc`, Task 2.1).
+///
+/// This is the multi-document seam for v2 compiled artifacts: the store
+/// carries the normalized documents and a validated index; the one
+/// logical entry point, the ordered configuration references, and the
+/// ordered source plan are consumed strictly by index lookup. No glob
+/// expansion, filesystem discovery, canonicalization, or temporary-file
+/// helper is ever invoked; `${env:NAME}` placeholders in route
+/// documents resolve exclusively through `env_lookup`, and every
+/// diagnostic names the virtual `compiled://<logical-path>` identity of
+/// its document.
+///
+/// Configuration is assembled first (named `MalformedVirtualConfig`
+/// errors for invalid TOML or violated merge rules), then only the
+/// source-plan references are parsed through the shared discovery pass
+/// (interpolation with provenance, typed env probing, template parsing
+/// and cross-document materialization, reserved-document validation,
+/// lowering) — the same semantics as filesystem discovery, so
+/// templates may be declared in one plan document and instantiated in
+/// another.
+pub fn discover_virtual_store(
+    store: &VirtualDocumentStore,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<VirtualStoreDiscovery, DiscoveryError> {
+    // Fail-closed store gates. `build`/`decode` already enforce these on
+    // the canonical paths; a hand-constructed store re-validates here so
+    // the named errors never depend on the construction route.
+    if store.index.store_schema != STORE_SCHEMA {
+        return Err(StoreError::UnsupportedStoreSchema(store.index.store_schema).into());
+    }
+    let entry_point = store
+        .index
+        .entry(&store.index.entry_point)
+        .ok_or_else(|| StoreError::MissingReference(store.index.entry_point.clone()))?;
+    if !matches!(
+        entry_point.kind,
+        StoreEntryKind::Route | StoreEntryKind::Job
+    ) {
+        return Err(StoreError::KindMismatch {
+            path: entry_point.path.clone(),
+            expected: "route or job",
+            got: entry_point.kind.as_str(),
+        }
+        .into());
+    }
+
+    // Configuration assembly first, from the indexed config/include/
+    // profile texts in index order.
+    let config = build_virtual_config(store)?;
+
+    // Route documents: only source-plan references, only by index
+    // lookup. Templates and templated specs accumulate across documents
+    // and materialize once at the end, exactly like the filesystem pass.
+    let mut routes = Vec::new();
+    let mut templates: HashMap<String, RouteTemplateSpec> = HashMap::new();
+    let mut templated_specs: Vec<(String, TemplatedRouteSpec)> = Vec::new();
+    for path in &store.index.source_plan.references {
+        let entry = store
+            .index
+            .entry(path)
+            .ok_or_else(|| StoreError::MissingReference(path.clone()))?;
+        if entry.kind != StoreEntryKind::Route {
+            return Err(StoreError::KindMismatch {
+                path: path.clone(),
+                expected: "route",
+                got: entry.kind.as_str(),
+            }
+            .into());
+        }
+        let text =
+            store
+                .read_text(path)
+                .ok_or_else(|| DiscoveryError::InvalidVirtualSourcePlan {
+                    path: path.clone(),
+                    reason: "route document is not valid UTF-8".to_string(),
+                })?;
+        let ext = embedded_document_gates(path, EmbeddedDocumentKind::Route)?;
+        let identity = format!("compiled://{path}");
+        parse_document_routes(
+            text,
+            &identity,
+            Some(ext.as_str()),
+            None,
+            None,
+            env_lookup,
+            &mut routes,
+            &mut templates,
+            &mut templated_specs,
+        )?;
+    }
+    materialize_templated_routes(&mut routes, &templates, &templated_specs, None, None)?;
+
+    Ok(VirtualStoreDiscovery { config, routes })
+}
+
+/// Classified configuration references of a store (in index order).
+struct VirtualConfigRefs {
+    /// The `Camel.toml` document path, when the store embeds one.
+    config: Option<String>,
+    /// Include fragment paths in declaration order.
+    includes: Vec<String>,
+    /// Selected profile names in selection order, from the synthesized
+    /// `<name>.profile.toml` fragment paths.
+    profiles: Vec<String>,
+}
+
+/// Classify `config_references` by document kind. Every reference must
+/// name a config, include, or profile entry; violations surface as the
+/// named store errors (missing reference, kind mismatch) and structural
+/// breakage (duplicate config document, malformed profile fragment
+/// path) as `MalformedVirtualConfig`.
+fn classify_virtual_config(
+    store: &VirtualDocumentStore,
+) -> Result<VirtualConfigRefs, DiscoveryError> {
+    let mut refs = VirtualConfigRefs {
+        config: None,
+        includes: Vec::new(),
+        profiles: Vec::new(),
+    };
+    for path in &store.index.config_references {
+        let entry = store
+            .index
+            .entry(path)
+            .ok_or_else(|| StoreError::MissingReference(path.clone()))?;
+        match entry.kind {
+            StoreEntryKind::Config => {
+                if refs.config.replace(path.clone()).is_some() {
+                    return Err(DiscoveryError::MalformedVirtualConfig {
+                        path: path.clone(),
+                        error: "duplicate configuration document".to_string(),
+                    });
+                }
+            }
+            StoreEntryKind::Include => refs.includes.push(path.clone()),
+            StoreEntryKind::Profile => {
+                let Some(name) = path.strip_suffix(".profile.toml").filter(|n| !n.is_empty())
+                else {
+                    return Err(DiscoveryError::MalformedVirtualConfig {
+                        path: path.clone(),
+                        error: "profile entry path must be `<name>.profile.toml`".to_string(),
+                    });
+                };
+                refs.profiles.push(name.to_string());
+            }
+            kind => {
+                return Err(StoreError::KindMismatch {
+                    path: path.clone(),
+                    expected: "config, include, or profile",
+                    got: kind.as_str(),
+                }
+                .into());
+            }
+        }
+    }
+    Ok(refs)
+}
+
+/// Build the merged configuration value from the indexed
+/// config/include/profile texts, mirroring camel-config's
+/// `load_includes` + `build_from_toml_value_inner` ordering: includes
+/// are pre-sources in declaration order (lowest priority), the
+/// configuration document sits above them, and profile-section
+/// selection applies per document before merging.
+///
+/// SYNC: the mirror lives here because the dependency direction
+/// (camel-config depends on camel-dsl) forbids sharing the camel-config
+/// `pub(crate)` helpers; behavioral changes there must be reflected
+/// here and in the compiler's `camel-cli` `compile::sources`.
+fn build_virtual_config(store: &VirtualDocumentStore) -> Result<toml::Value, DiscoveryError> {
+    let refs = classify_virtual_config(store)?;
+
+    // Includes (lowest priority), in declaration order. Each fragment
+    // drops any `include` key (recursive includes are unsupported, as
+    // in camel-config's loader) and applies lenient profile-section
+    // selection before merging.
+    let mut merged = toml::Value::Table(toml::Table::new());
+    for path in &refs.includes {
+        let text = virtual_config_text(store, path)?;
+        let mut value = parse_virtual_config_toml(path, &text)?;
+        if let toml::Value::Table(table) = &mut value
+            && table.remove("include").is_some()
+        {
+            tracing::warn!(
+                path,
+                "embedded include declares 'include'; recursive includes are unsupported — ignoring"
+            );
+        }
+        select_profile_sections(&mut value, &refs.profiles);
+        merge_toml_values(&mut merged, &value);
+    }
+
+    // The configuration document above the includes: strip `include`
+    // keys from every declaring location (top-level, `[default]`, and
+    // the selected profile sections), enforce the strict unknown-profile
+    // rule (a configuration with `[default]` must carry every selected
+    // profile section — the filesystem loader's error), then apply the
+    // profile-section selection and merge.
+    if let Some(path) = &refs.config {
+        let text = virtual_config_text(store, path)?;
+        let mut value = parse_virtual_config_toml(path, &text)?;
+        strip_include_keys(&mut value, &refs.profiles);
+        if let toml::Value::Table(table) = &value {
+            let has_structure = table.contains_key("default")
+                || refs.profiles.iter().any(|p| table.contains_key(p));
+            let selected_present = refs.profiles.iter().any(|p| table.contains_key(p));
+            if has_structure
+                && !refs.profiles.is_empty()
+                && table.contains_key("default")
+                && !selected_present
+            {
+                return Err(DiscoveryError::MalformedVirtualConfig {
+                    path: path.clone(),
+                    error: format!(
+                        "unknown profile: none of the selected profiles ({}) exist in the \
+                         configuration",
+                        refs.profiles.join(", ")
+                    ),
+                });
+            }
+        }
+        select_profile_sections(&mut value, &refs.profiles);
+        merge_toml_values(&mut merged, &value);
+    }
+
+    Ok(merged)
+}
+
+/// Read one configuration document as UTF-8 text (named failure for
+/// missing-validity).
+fn virtual_config_text(store: &VirtualDocumentStore, path: &str) -> Result<String, DiscoveryError> {
+    store.read_text(path).map(str::to_string).ok_or_else(|| {
+        DiscoveryError::MalformedVirtualConfig {
+            path: path.to_string(),
+            error: "configuration document is not valid UTF-8".to_string(),
+        }
+    })
+}
+
+/// Parse one configuration document as TOML (named failure).
+fn parse_virtual_config_toml(path: &str, text: &str) -> Result<toml::Value, DiscoveryError> {
+    toml::from_str(text).map_err(|e| DiscoveryError::MalformedVirtualConfig {
+        path: path.to_string(),
+        error: e.to_string(),
+    })
+}
+
+/// Remove `include` keys from the top-level table and from the
+/// `[default]` plus selected profile sections, mirroring camel-config's
+/// `extract_includes` stripping (the embedded include order already
+/// encodes the same walk).
+fn strip_include_keys(value: &mut toml::Value, profiles: &[String]) {
+    let Some(table) = value.as_table_mut() else {
+        return;
+    };
+    table.remove("include");
+    let mut sections: Vec<&str> = vec!["default"];
+    sections.extend(profiles.iter().map(String::as_str));
+    for section in sections {
+        if let Some(toml::Value::Table(section_table)) = table.get_mut(section) {
+            section_table.remove("include");
+        }
+    }
+}
+
+/// Apply the filesystem profile-section selection to one document,
+/// generalized to the store's ordered selected profiles: the
+/// `[default]` section forms the base when present (else the first
+/// selected section), every selected profile section overlays it in
+/// selection order, and the selected content REPLACES the document
+/// root. A document with neither `[default]` nor any selected section
+/// stays as-is (flat config).
+///
+/// SYNC: mirrors camel-config's `apply_profile` and
+/// `apply_profile_lenient` (`config.rs`, `pub(crate)`); with exactly one
+/// selected profile the selection is byte-for-byte the filesystem
+/// behavior.
+fn select_profile_sections(value: &mut toml::Value, profiles: &[String]) {
+    let Some(table) = value.as_table_mut() else {
+        return;
+    };
+    let mut base = match table.get("default").cloned() {
+        Some(default) => default,
+        None => match profiles.iter().find(|p| table.contains_key(p.as_str())) {
+            Some(first) => match table.get(first.as_str()) {
+                Some(section) => section.clone(),
+                // `find` proved presence; unreachable in practice.
+                None => return,
+            },
+            // Flat document with no profile structure: keep as-is.
+            None => return,
+        },
+    };
+    for profile in profiles {
+        if let Some(section) = table.get(profile.as_str()) {
+            merge_toml_values(&mut base, section);
+        }
+    }
+    *value = base;
+}
+
+/// Deep-merge `overlay` into `base`: tables merge recursively, every
+/// other value (arrays included) is replaced by the overlay — array
+/// replacement is what gives profile overlays such as `routes` their
+/// replace, never concatenate, semantics.
+///
+/// SYNC: mirrors camel-config's `merge_toml_values` (`config.rs`,
+/// `pub(crate)`); the dependency direction forbids sharing the
+/// implementation, so behavioral changes there must be mirrored here.
+fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
+    match (base, overlay) {
+        (toml::Value::Table(base_table), toml::Value::Table(overlay_table)) => {
+            for (key, value) in overlay_table {
+                if let Some(base_value) = base_table.get_mut(key) {
+                    merge_toml_values(base_value, value);
+                } else {
+                    base_table.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        (base, overlay) => *base = overlay.clone(),
+    }
 }
 
 /// Parse a `TemplateError::InvalidParameter` Display string

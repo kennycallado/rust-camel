@@ -107,8 +107,11 @@ pub(crate) fn try_canonical_project_root(
 // Shared runtime lifecycle (camel run + compiled artifacts)
 // ---------------------------------------------------------------------------
 
-/// How `drive_lifecycle` obtains route definitions.
-#[derive(Debug, Clone)]
+/// How [`drive_lifecycle`] obtains route definitions.
+///
+/// Undebugable/uncloneable by payload: the [`Discover::VirtualStore`]
+/// arm carries parsed `RouteDefinition`s, which own non-`Debug`
+/// builder state.
 pub(crate) enum Discover {
     /// `camel run`'s filesystem discovery: glob patterns through the
     /// real-boot discovery seam (ambient `${env:}`, stream-caching
@@ -130,6 +133,17 @@ pub(crate) enum Discover {
         source_name: String,
         /// Route/job document kind recorded in the trailer.
         kind: camel_dsl::EmbeddedDocumentKind,
+    },
+    /// A v2 multi-document artifact's virtual store (multidoc Task
+    /// 2.2): route definitions already discovered from the store's
+    /// ordered source plan through `camel_dsl::discover_virtual_store`
+    /// — configuration assembly forced that discovery before boot, so
+    /// the lifecycle receives the parsed definitions directly. No
+    /// filesystem, glob, or external route source is ever touched.
+    VirtualStore {
+        /// Route definitions of the store's ordered source plan,
+        /// resolved with the deployment environment.
+        routes: Vec<camel_core::RouteDefinition>,
     },
 }
 
@@ -422,6 +436,23 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
                 }
                 Err(e) => return Err(LifecycleFailure::Discovery(e)),
             }
+        }
+        Discover::VirtualStore { routes } => {
+            // Virtual-store seam (multidoc Task 2.2): the definitions
+            // were discovered from the embedded store before boot (the
+            // merged store configuration drove it), with the deployment
+            // environment as the `${env:}` lookup — no filesystem
+            // access happens here.
+            tracing::info!(
+                "camel-cli: loading {} routes from the embedded virtual store",
+                routes.len()
+            );
+            if routes.is_empty() {
+                tracing::warn!(
+                    "embedded virtual store declared zero routes; starting with no routes"
+                );
+            }
+            routes
         }
     };
 

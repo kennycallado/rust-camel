@@ -28,6 +28,7 @@ camel-endpoint.workspace = true
 glob = { workspace = true }
 regex.workspace = true
 percent-encoding.workspace = true
+toml = { workspace = true }
 schemars = { workspace = true, optional = true }
 ts-rs = { workspace = true, optional = true }
 

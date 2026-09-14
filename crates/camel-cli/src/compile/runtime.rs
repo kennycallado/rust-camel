@@ -1,24 +1,35 @@
-//! Embedded-document runtime for compiled artifacts (openspec change
-//! `cli-compile`, Tasks 2.2 and 2.3).
+//! Embedded-document runtime for compiled artifacts (openspec changes
+//! `cli-compile` Tasks 2.2/2.3 and `multidoc` Task 2.2).
 //!
-//! [`run_embedded_document`] takes a validated [`EmbeddedRequest`] — the
-//! decoded trailer payload plus the parsed artifact arguments — and runs
-//! it through the EXISTING lifecycles:
+//! [`run_embedded_document`] takes a validated [`EmbeddedRequest`] — a
+//! v1 single-document trailer or a v2 decoded
+//! [`VirtualDocumentStore`](super::store::VirtualDocumentStore) plus
+//! the parsed artifact arguments — and runs it through the EXISTING
+//! lifecycles:
 //!
-//! - route artifacts drive the shared `camel run` lifecycle
+//! - v1 route artifacts drive the shared `camel run` lifecycle
 //!   (`crate::commands::run::drive_lifecycle`) with the default
-//!   in-memory config, the embedded discovery seam, and `watch = false`;
-//! - job artifacts drive the existing single-document job
-//!   report/outcome lifecycle with the embedded document as their sole
-//!   route source.
+//!   in-memory config, the embedded single-document discovery seam,
+//!   and `watch = false`;
+//! - v2 multi-document route artifacts call
+//!   [`camel_dsl::discover_virtual_store`] BEFORE boot (the merged
+//!   embedded configuration feeds the context), build the
+//!   `CamelConfig` through the deployment-time `${env:}` seam, and
+//!   drive the same lifecycle with the discovered routes;
+//! - job artifacts drive the existing job report/outcome lifecycle:
+//!   v1 with the embedded document as the sole inline route source,
+//!   v2 consuming the embedded job/config/route entries (indexed
+//!   route files or the inline `routes:` block) with no filesystem
+//!   route discovery.
 //!
-//! No compile-time asset is resolved at runtime, nothing is extracted to
-//! a temporary location, and the watcher never activates. `${env:NAME}`
-//! resolves from the deployment environment through the discovery path.
-//! Declared job `args:` resolve at startup through the same parser path
-//! as normal jobs with an EMPTY `--arg` list (jobargs Task 3.2):
-//! embedded declaration defaults fill the interpolated fields, and a
-//! required declaration without a default exits 2 before boot.
+//! No compile-time asset is resolved at runtime, nothing is extracted
+//! to a temporary location, and the watcher never activates.
+//! `${env:NAME}` resolves from the deployment environment through the
+//! discovery and config seams. Declared job `args:` resolve at startup
+//! through the same parser path as normal jobs with an EMPTY `--arg`
+//! list (jobargs Task 3.2): embedded declaration defaults fill the
+//! interpolated fields, and a required declaration without a default
+//! exits 2 before boot.
 //!
 //! [`self_detect_artifact`] is the binary entry point (Task 2.3): the
 //! `camel` main calls it BEFORE Clap parses anything, so a self-contained
@@ -28,8 +39,8 @@
 //!
 //! Exit codes: 0 graceful completion / job Completed; 1 job pipeline
 //! failure (route runs end either in graceful completion or a boot-class
-//! failure, so 1 stays reserved for them); 2 argument misuse, boot
-//! failure, or report-write failure.
+//! failure, so 1 stays reserved for them); 2 argument misuse, store or
+//! configuration validation, boot failure, or report-write failure.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -214,29 +225,57 @@ impl RouteReport {
     }
 }
 
-/// One validated embedded run request: the decoded trailer document plus
-/// the parsed artifact arguments. Built from a `Trailer` by
-/// [`EmbeddedRequest::from_trailer`] (integrity was verified at decode).
+/// One validated embedded run request: the decoded artifact plus the
+/// parsed artifact arguments.
+///
+/// - v1 (`[`EmbeddedRequest::SingleDocument`]`, built by
+///   [`EmbeddedRequest::from_trailer`]): the single-document trailer
+///   payload runs through the single-document seams — default
+///   in-memory config, embedded-text discovery. v1 artifacts keep this
+///   path verbatim.
+/// - v2 ([`EmbeddedRequest::VirtualStore`], built by
+///   [`EmbeddedRequest::from_v2`]; multidoc Task 2.2): the decoded
+///   multi-document store runs through the virtual-store runtime —
+///   merged embedded configuration, ordered source-plan routes,
+///   deployment-time `${env:}` resolution. Single-document v2 stores
+///   take the same path.
 #[derive(Debug, Clone)]
-pub struct EmbeddedRequest {
-    /// Embedded artifact kind (route/job).
-    pub kind: TrailerKind,
-    /// Logical source name; the runtime source identity is
-    /// `compiled://<source_name>`.
-    pub source_name: String,
-    /// Normalized document text (pre-interpolation authoring text).
-    pub document: String,
-    /// Canonical manifest JSON (printed verbatim by `--manifest`).
-    pub manifest_json: String,
-    /// Parsed artifact arguments.
-    pub args: ArtifactArgs,
+pub enum EmbeddedRequest {
+    /// v1 single-document artifact.
+    SingleDocument {
+        /// Embedded artifact kind (route/job).
+        kind: TrailerKind,
+        /// Logical source name; the runtime source identity is
+        /// `compiled://<source_name>`.
+        source_name: String,
+        /// Normalized document text (pre-interpolation authoring text).
+        document: String,
+        /// Canonical manifest JSON (printed verbatim by `--manifest`).
+        manifest_json: String,
+        /// Parsed artifact arguments.
+        args: ArtifactArgs,
+    },
+    /// v2 multi-document virtual-store artifact (multidoc Task 2.2).
+    VirtualStore {
+        /// Embedded artifact kind (route/job).
+        kind: TrailerKind,
+        /// Decoded virtual-document store; the entry point is
+        /// `store.index.entry_point` and every document is read through
+        /// the store, never the filesystem.
+        store: super::store::VirtualDocumentStore,
+        /// Canonical manifest JSON (printed verbatim by `--manifest`).
+        manifest_json: String,
+        /// Parsed artifact arguments.
+        args: ArtifactArgs,
+    },
 }
 
 impl EmbeddedRequest {
-    /// Build the request from a decoded trailer and parsed arguments.
-    /// Both payload and manifest are validated UTF-8 (the encoder
-    /// normalized the document and serialized the manifest as canonical
-    /// UTF-8 JSON); the manifest must carry its `source_name`.
+    /// Build the request from a decoded v1 trailer and parsed
+    /// arguments. Both payload and manifest are validated UTF-8 (the
+    /// encoder normalized the document and serialized the manifest as
+    /// canonical UTF-8 JSON); the manifest must carry its
+    /// `source_name`.
     pub fn from_trailer(trailer: Trailer, args: ArtifactArgs) -> Result<Self, CompileError> {
         let document = String::from_utf8(trailer.payload).map_err(|_| CompileError::InvalidUtf8)?;
         let manifest_json =
@@ -252,10 +291,31 @@ impl EmbeddedRequest {
             .ok_or_else(|| {
                 CompileError::InvalidDocument("manifest carries no source_name".to_string())
             })?;
-        Ok(Self {
+        Ok(Self::SingleDocument {
             kind: trailer.kind,
             source_name,
             document,
+            manifest_json,
+            args,
+        })
+    }
+
+    /// Build the request from a decoded v2 multi-document trailer and
+    /// parsed arguments (multidoc Task 2.2). `decode_artifact` already
+    /// verified the checksums, the store index, the typed references,
+    /// and the manifest/store agreement; the store decodes again here
+    /// and the typed reference invariants re-check — defense in depth
+    /// so a hand-routed `TrailerV2` fails by name too, before boot.
+    pub fn from_v2(v2: trailer::TrailerV2, args: ArtifactArgs) -> Result<Self, CompileError> {
+        let store = super::store::VirtualDocumentStore::decode(v2.content, &v2.index)
+            .map_err(|e| CompileError::InvalidDocument(format!("invalid virtual store: {e}")))?;
+        super::store::validate_typed_references(&store.index, v2.kind)
+            .map_err(|e| CompileError::InvalidDocument(format!("invalid virtual store: {e}")))?;
+        let manifest_json =
+            String::from_utf8(v2.manifest).map_err(|_| CompileError::InvalidUtf8)?;
+        Ok(Self::VirtualStore {
+            kind: v2.kind,
+            store,
             manifest_json,
             args,
         })
@@ -270,7 +330,8 @@ pub async fn run_embedded_document(request: EmbeddedRequest) -> ExitCode {
 
 /// Self-detect a compiled artifact before any CLI parsing (Task 2.3).
 ///
-/// Probes `current_exe()` and decodes its trailer:
+/// Probes `current_exe()` and decodes its trailer (version-aware:
+/// [`trailer::decode_artifact`]):
 ///
 /// - absent trailer (no exact terminal magic; also an unreadable or
 ///   missing executable image) → `None`: the caller falls through to the
@@ -285,13 +346,23 @@ pub async fn run_embedded_document(request: EmbeddedRequest) -> ExitCode {
 ///   the request dispatches through [`run_embedded_document_code`]:
 ///   `--help`, `--version`, and `--manifest` print and exit 0 without
 ///   booting.
+///
+/// Version dispatch (multidoc Task 2.2): a v1 artifact feeds the
+/// single-document runtime (default in-memory config, embedded-text
+/// discovery); a v2 multi-document artifact feeds the virtual-store
+/// runtime — `discover_virtual_store` assembles the merged embedded
+/// configuration and the ordered source-plan routes before boot, with
+/// the deployment environment as the `${env:}` lookup.
+/// `decode_artifact` has already validated the store, its references,
+/// and the manifest/store agreement before this point; the request
+/// builder re-validates as defense in depth.
 pub async fn self_detect_artifact() -> Option<i32> {
     // A missing or unreadable executable image carries no trailer
     // evidence: that is absence, not corruption, so fall through.
     let exe = std::env::current_exe().ok()?;
     let bytes = std::fs::read(exe).ok()?;
-    let trailer = match trailer::decode(&bytes) {
-        Ok(Some(trailer)) => trailer,
+    let decoded = match trailer::decode_artifact(&bytes) {
+        Ok(Some(decoded)) => decoded,
         Ok(None) => return None,
         Err(e) => {
             eprintln!("compiled artifact integrity error: {e}");
@@ -306,46 +377,65 @@ pub async fn self_detect_artifact() -> Option<i32> {
             return Some(EXIT_REJECTION);
         }
     };
-    let request = match EmbeddedRequest::from_trailer(trailer, args) {
-        Ok(request) => request,
+    let request = match decoded {
+        trailer::DecodedArtifact::V1(v1) => EmbeddedRequest::from_trailer(v1, args),
+        trailer::DecodedArtifact::V2(v2) => EmbeddedRequest::from_v2(v2, args),
+    };
+    match request {
+        Ok(request) => Some(run_embedded_document_code(request).await),
         Err(e) => {
             eprintln!("compiled artifact integrity error: {e}");
-            return Some(EXIT_REJECTION);
+            Some(EXIT_REJECTION)
         }
-    };
-    Some(run_embedded_document_code(request).await)
+    }
 }
 
 /// Same dispatch returning the raw process code (0/1/2); the seam for
 /// harness children that re-exit with [`std::process::exit`] (an
 /// `ExitCode` cannot be read back out).
 pub async fn run_embedded_document_code(request: EmbeddedRequest) -> i32 {
-    let EmbeddedRequest {
-        kind,
-        source_name,
-        document,
-        manifest_json,
-        args,
-    } = request;
-    if args.help {
+    // The exclusive print-and-exit modes are common to both artifact
+    // versions and never boot.
+    let (help, version, manifest, report) = match &request {
+        EmbeddedRequest::SingleDocument { args, .. }
+        | EmbeddedRequest::VirtualStore { args, .. } => {
+            (args.help, args.version, args.manifest, args.report.clone())
+        }
+    };
+    if help {
         print_artifact_usage();
         return 0;
     }
-    if args.version {
+    if version {
         println!("camel {}", manifest::RUNTIME_VERSION);
         return 0;
     }
-    if args.manifest {
+    if manifest {
+        let manifest_json = match &request {
+            EmbeddedRequest::SingleDocument { manifest_json, .. }
+            | EmbeddedRequest::VirtualStore { manifest_json, .. } => manifest_json,
+        };
         println!("{manifest_json}");
         return 0;
     }
-    match kind {
-        TrailerKind::Route => {
-            run_embedded_route(&source_name, &document, args.report.as_deref()).await
-        }
-        TrailerKind::Job => {
-            crate::commands::job::run_embedded_job(&source_name, &document, args.report).await
-        }
+    match request {
+        EmbeddedRequest::SingleDocument {
+            kind,
+            source_name,
+            document,
+            ..
+        } => match kind {
+            TrailerKind::Route => {
+                run_embedded_route(&source_name, &document, report.as_deref()).await
+            }
+            TrailerKind::Job => {
+                crate::commands::job::run_embedded_job(&source_name, &document, report).await
+            }
+        },
+        EmbeddedRequest::VirtualStore { kind, store, .. } => match kind {
+            TrailerKind::Route => run_embedded_store_route(&store, report.as_deref()).await,
+            TrailerKind::Job => crate::commands::job::run_embedded_job_store(store, report).await,
+        },
     }
 }
 
@@ -397,6 +487,99 @@ async fn run_embedded_route(source_name: &str, document: &str, report: Option<&P
     }
 }
 
+/// Pre-boot failure of the shared virtual-store resolution. The two
+/// phases fail for disjoint reasons, and the job lifecycle reports them
+/// under different labels, so the variant is preserved for the caller.
+#[derive(Debug)]
+pub(crate) enum VirtualStoreResolveError {
+    /// Store validation or source-plan discovery failed.
+    Discovery(camel_dsl::DiscoveryError),
+    /// The merged configuration failed to deserialize into a
+    /// `CamelConfig`.
+    Config(config::ConfigError),
+}
+
+impl fmt::Display for VirtualStoreResolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Discovery(e) => e.fmt(f),
+            Self::Config(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for VirtualStoreResolveError {}
+
+/// Shared pre-boot resolution for v2 virtual-store artifacts (multidoc
+/// Task 2.2): discovery assembles the merged embedded configuration and
+/// the ordered source-plan routes, then the merged TOML tree
+/// deserializes into the deployment `CamelConfig` with `${env:}`
+/// resolution through `env`. Both steps run strictly BEFORE boot; the
+/// caller owns the error reporting and the lifecycle hand-off.
+pub(crate) fn resolve_virtual_store(
+    store: &super::store::VirtualDocumentStore,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<
+    (
+        camel_config::config::CamelConfig,
+        Vec<camel_core::RouteDefinition>,
+    ),
+    VirtualStoreResolveError,
+> {
+    let discovery = camel_dsl::discover_virtual_store(store, env)
+        .map_err(VirtualStoreResolveError::Discovery)?;
+    let config = camel_config::config::CamelConfig::from_toml_value_with_env(discovery.config, env)
+        .map_err(VirtualStoreResolveError::Config)?;
+    Ok((config, discovery.routes))
+}
+
+/// Route-artifact lifecycle for a v2 virtual store (multidoc Task 2.2):
+/// merged embedded configuration, ordered source-plan routes, `watch =
+/// false` — the same boot, route registration, context start, signal,
+/// and shutdown path `camel run` drives. Writes the [`RouteReport`] to
+/// `report` when given.
+///
+/// Store validation, configuration assembly, and route discovery run
+/// BEFORE boot ([`resolve_virtual_store`]): an unknown schema, invalid
+/// reference, malformed range, kind mismatch, or malformed
+/// configuration entry exits 2 with a named diagnostic and no boot.
+/// Exit codes: 0 graceful completion; 2
+/// validation/discovery/config/boot/report-write failure.
+async fn run_embedded_store_route(
+    store: &super::store::VirtualDocumentStore,
+    report: Option<&Path>,
+) -> i32 {
+    let identity = store.index.entry_point.clone();
+    let ambient = |name: &str| std::env::var(name).ok();
+    let (config, routes) = match resolve_virtual_store(store, &ambient) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            eprintln!("compiled://{identity}: {e}");
+            return fail_route(report, e.to_string());
+        }
+    };
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let spec = LifecycleSpec {
+        config,
+        project_root,
+        discover: Discover::VirtualStore { routes },
+        watch: None,
+        trust_note: false,
+        idle_note: IDLE_NOTE,
+    };
+    match crate::commands::run::drive_lifecycle(spec).await {
+        Ok(()) => {
+            if let Err(e) = write_route_report(report, &RouteReport::completed()) {
+                eprintln!("failed to write route report: {e}");
+                return EXIT_REJECTION;
+            }
+            0
+        }
+        Err(LifecycleFailure::Discovery(e)) => fail_route(report, e.to_string()),
+        Err(LifecycleFailure::Boot(e)) => fail_route(report, e.to_string()),
+    }
+}
+
 /// Record a failed run: write the failed report (best effort) and return
 /// the boot-failure exit code.
 fn fail_route(report: Option<&Path>, error: String) -> i32 {
@@ -416,7 +599,7 @@ fn write_route_report(report: Option<&Path>, value: &RouteReport) -> std::io::Re
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactArgError, ArtifactArgs, RouteReport};
+    use super::{ArtifactArgError, ArtifactArgs, RouteReport, TrailerKind};
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
@@ -490,6 +673,69 @@ mod tests {
         assert_eq!(
             RouteReport::failed("boom".to_string()).to_json(),
             r#"{"kind":"route","status":"failed","error":"boom"}"#
+        );
+    }
+
+    /// `from_v2` decodes the store and re-validates the typed reference
+    /// invariants as defense in depth: a hand-constructed store whose
+    /// entry point kind disagrees with the artifact kind fails by name
+    /// (multidoc Task 2.2 — the runtime-level rejection is pinned by
+    /// `compiled_runtime_rejects_invalid_store_before_boot`, which
+    /// replaced the interim fail-closed bridge test).
+    #[test]
+    fn from_v2_rejects_kind_mismatched_stores() {
+        use super::super::store::{StoreDocument, StoreEntryKind};
+
+        let route_doc = |path: &str| StoreDocument {
+            path: path.to_string(),
+            kind: StoreEntryKind::Route,
+            bytes: b"routes:\n  - id: demo\n".to_vec(),
+        };
+        let job_doc = |path: &str| StoreDocument {
+            path: path.to_string(),
+            kind: StoreEntryKind::Job,
+            bytes: b"execute:\n  mode: one-shot\n".to_vec(),
+        };
+        let v2 = |store: &super::super::store::VirtualDocumentStore| {
+            use super::super::trailer::TrailerV2;
+            TrailerV2 {
+                kind: TrailerKind::Route,
+                content: store.content.clone(),
+                index: store.index.encode_canonical().expect("canonical index"),
+                manifest: br#"{"manifest_schema":2,"source_name":"app.yaml"}"#.to_vec(),
+            }
+        };
+
+        // Kind agreement: a route artifact over a route entry point
+        // builds the virtual-store request.
+        let route_store = super::super::store::VirtualDocumentStore::build(
+            "app.yaml",
+            &[route_doc("app.yaml")],
+            &[],
+            &["app.yaml".to_string()],
+        )
+        .expect("route store builds");
+        let request = super::EmbeddedRequest::from_v2(v2(&route_store), Default::default())
+            .expect("kind-agreeing store builds a request");
+        assert!(matches!(
+            request,
+            super::EmbeddedRequest::VirtualStore { .. }
+        ));
+
+        // Kind mismatch: a route artifact over a job entry point fails
+        // by name before any boot.
+        let job_store = super::super::store::VirtualDocumentStore::build(
+            "ingest.job.yaml",
+            &[job_doc("ingest.job.yaml")],
+            &[],
+            &["ingest.job.yaml".to_string()],
+        )
+        .expect("job store builds");
+        let err = super::EmbeddedRequest::from_v2(v2(&job_store), Default::default())
+            .expect_err("kind-mismatched store must fail closed");
+        assert!(
+            err.to_string().contains("expected route"),
+            "the rejection must name the kind mismatch: {err}"
         );
     }
 }

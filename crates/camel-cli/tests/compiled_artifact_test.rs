@@ -96,6 +96,101 @@ routes:
       - set_body:
           value: ${env:DEPLOY_GREETING}
 ";
+/// The configuration document of the multi-route fixture: one include
+/// fragment plus the `routes` pattern that pulls the second embedded
+/// route file into the source plan.
+const MULTI_CONFIG: &str = "\
+include = [\"conf/base.toml\"]
+routes = [\"routes/*.yaml\"]
+[default]
+log_level = \"info\"
+";
+
+/// The configuration document of the multi-document job fixtures: the
+/// include fragment without a `routes` pattern — the job document's
+/// `routeFiles` names the indexed route source explicitly, and a
+/// pattern here would duplicate it.
+const MULTI_JOB_CONFIG: &str = "\
+include = [\"conf/base.toml\"]
+[default]
+log_level = \"info\"
+";
+
+/// The include fragment of the multi-document fixtures.
+const MULTI_INCLUDE: &str = "[default]\ndrain_timeout_ms = 5000\n";
+
+/// The entry route document of the multi-route fixture: the `alpha`
+/// route, observable through its logged body marker.
+const MULTI_ENTRY_ROUTE: &str = "\
+routes:
+  - id: alpha
+    from: timer:tick?period=200
+    steps:
+      - set_body:
+          value: alpha-marker
+      - to: log:alpha
+";
+
+/// The indexed route file of the multi-route fixture: the `beta` route.
+const MULTI_INDEXED_ROUTE: &str = "\
+routes:
+  - id: beta
+    from: timer:tick?period=200
+    steps:
+      - set_body:
+          value: beta-marker
+      - to: log:beta
+";
+
+/// The multi-document job document: one-shot send against a route that
+/// lives in an indexed route file (resolved through `--config`).
+const MULTI_JOB_DOC: &str = "\
+routeFiles:
+  - routes/transform.yaml
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: ping
+";
+
+/// The environment fixture's job document: same send shape, but its
+/// indexed route file is the `${env:}`-resolving one.
+const MULTI_ENV_JOB_DOC: &str = "\
+routeFiles:
+  - routes/greet.yaml
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: ping
+";
+
+/// The indexed route file of the multi-document job fixture.
+const MULTI_JOB_ROUTE: &str = "\
+routes:
+  - id: job-transform
+    from: direct:transform
+    steps:
+      - set_body:
+          value: multi-job-done
+";
+
+/// The indexed route file of the multi-document environment fixture:
+/// the `${env:}` expression stays raw in the artifact and resolves from
+/// the deployment environment.
+const MULTI_ENV_ROUTE: &str = "\
+routes:
+  - id: greet-transform
+    from: direct:transform
+    steps:
+      - set_body:
+          value: ${env:DEPLOY_GREETING}
+";
 
 /// A one-shot job document with a DECLARED argument whose default
 /// (`hello`) the artifact must apply at startup (jobargs Task 3.2): the
@@ -138,11 +233,30 @@ routes:
 
 /// Compile `doc` into `artifact` inside `dir` with a clean environment.
 fn compile(dir: &Path, doc: &str, artifact: &str, envs: &[(&str, &str)]) -> Output {
+    compile_full(dir, doc, artifact, envs, None, &[])
+}
+
+/// Full compile invocation with the multidoc source-selection flags: an
+/// explicit `--config <Camel.toml>` and repeatable `--profile <name>`.
+fn compile_full(
+    dir: &Path,
+    doc: &str,
+    artifact: &str,
+    envs: &[(&str, &str)],
+    config: Option<&str>,
+    profiles: &[&str],
+) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_camel"));
     cmd.env_clear()
         .envs(envs.iter().copied())
         .current_dir(dir)
         .args(["compile", doc, "-o", artifact]);
+    if let Some(config) = config {
+        cmd.arg("--config").arg(config);
+    }
+    for profile in profiles {
+        cmd.arg("--profile").arg(profile);
+    }
     cmd.output().expect("spawn `camel compile`")
 }
 
@@ -172,6 +286,15 @@ struct Fixture {
     arg: PathBuf,
     /// `REQUIRED_ARG_DOC` artifact (required without a default).
     required_arg: PathBuf,
+    /// Multi-document route artifact (config, include, entry route,
+    /// indexed route file).
+    multi_route: PathBuf,
+    /// Multi-document job artifact (config, job document, indexed
+    /// route file).
+    multi_job: PathBuf,
+    /// Multi-document job artifact whose indexed route resolves
+    /// `${env:DEPLOY_GREETING}`, compiled with a compile-time value.
+    multi_env: PathBuf,
 }
 
 static FIXTURE: OnceLock<Fixture> = OnceLock::new();
@@ -270,6 +393,67 @@ fn fixture() -> &'static Fixture {
         );
         let arg = compile_one("args.job.yaml", ARG_DOC, "arg.bin", &[]);
         let required_arg = compile_one("reqargs.job.yaml", REQUIRED_ARG_DOC, "req.bin", &[]);
+        // Multi-document fixtures: each compile gets its own source
+        // subtree so one compile's route sources never capture
+        // another's.
+        let compile_multi = |subdir: &str,
+                             config: &str,
+                             entry: &str,
+                             entry_doc: &str,
+                             route_path: &str,
+                             route_doc: &str,
+                             artifact: &str,
+                             envs: &[(&str, &str)]|
+         -> PathBuf {
+            let root = dir.join(subdir);
+            std::fs::create_dir_all(root.join("conf")).expect("mkdir conf");
+            std::fs::create_dir_all(root.join("routes")).expect("mkdir routes");
+            std::fs::write(root.join("Camel.toml"), config).expect("write config");
+            std::fs::write(root.join("conf").join("base.toml"), MULTI_INCLUDE)
+                .expect("write include");
+            std::fs::write(root.join(route_path), route_doc).expect("write indexed route");
+            std::fs::write(root.join(entry), entry_doc).expect("write entry document");
+            // `-o` is relative to the compile working directory (the
+            // subtree root), so the artifact lands beside its sources.
+            let output = compile_full(&root, entry, artifact, envs, Some("Camel.toml"), &[]);
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "multi-document compile must succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            root.join(artifact)
+        };
+        let multi_route = compile_multi(
+            "multi-route",
+            MULTI_CONFIG,
+            "multi-app.yaml",
+            MULTI_ENTRY_ROUTE,
+            "routes/beta.yaml",
+            MULTI_INDEXED_ROUTE,
+            "multi-route.bin",
+            &[],
+        );
+        let multi_job = compile_multi(
+            "multi-job",
+            MULTI_JOB_CONFIG,
+            "ingest-m.job.yaml",
+            MULTI_JOB_DOC,
+            "routes/transform.yaml",
+            MULTI_JOB_ROUTE,
+            "multi-job.bin",
+            &[],
+        );
+        let multi_env = compile_multi(
+            "multi-env",
+            MULTI_JOB_CONFIG,
+            "greet-m.job.yaml",
+            MULTI_ENV_JOB_DOC,
+            "routes/greet.yaml",
+            MULTI_ENV_ROUTE,
+            "multi-env.bin",
+            &[("DEPLOY_GREETING", "compile-secret-value")],
+        );
         Fixture {
             route,
             job,
@@ -277,6 +461,9 @@ fn fixture() -> &'static Fixture {
             env,
             arg,
             required_arg,
+            multi_route,
+            multi_job,
+            multi_env,
         }
     })
 }
@@ -299,14 +486,25 @@ fn deploy_artifact(artifact: &Path) -> (tempfile::TempDir, PathBuf) {
 
 /// Harness-child branch: decode the artifact named by [`CHILD_ENV`], parse
 /// the artifact argv (after `--`), run the embedded document, and exit
-/// with its code.
+/// with its code. Decode and request-validation failures fail closed
+/// exactly like the binary self-detect path: the integrity diagnostic
+/// prints to stderr and the child exits 2 — never a panic, so the
+/// rejection is observable as an exit code with a named diagnostic.
 fn run_child() -> i32 {
     let artifact = std::env::var(CHILD_ENV).expect("child env names the artifact");
     let argv: Vec<String> = std::env::args().skip_while(|a| a != "--").skip(1).collect();
     let bytes = std::fs::read(&artifact).expect("child reads the artifact");
-    let decoded = trailer::decode(&bytes)
-        .expect("trailer must decode")
-        .expect("artifact must carry the terminal marker");
+    let decoded = match trailer::decode_artifact(&bytes) {
+        Ok(Some(decoded)) => decoded,
+        Ok(None) => {
+            eprintln!("compiled artifact integrity error: no terminal marker");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("compiled artifact integrity error: {e}");
+            return 2;
+        }
+    };
     let args = match ArtifactArgs::parse(&argv) {
         Ok(args) => args,
         Err(e) => {
@@ -314,7 +512,21 @@ fn run_child() -> i32 {
             return 2;
         }
     };
-    let request = EmbeddedRequest::from_trailer(decoded, args).expect("embedded request");
+    // Version dispatch mirrors the binary self-detect path: a v1
+    // trailer builds the single-document request, a v2 multi-document
+    // trailer builds the virtual-store request (store decode plus
+    // typed-reference re-validation inside the constructor).
+    let request = match decoded {
+        trailer::DecodedArtifact::V1(v1) => EmbeddedRequest::from_trailer(v1, args),
+        trailer::DecodedArtifact::V2(v2) => EmbeddedRequest::from_v2(v2, args),
+    };
+    let request = match request {
+        Ok(request) => request,
+        Err(e) => {
+            eprintln!("compiled artifact integrity error: {e}");
+            return 2;
+        }
+    };
     tokio::runtime::Runtime::new()
         .expect("tokio runtime")
         .block_on(async { camel_cli::compile::runtime::run_embedded_document_code(request).await })
@@ -819,8 +1031,9 @@ fn compiled_route_report_writes_status_json() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 2.3: self-detection before CLI parsing. These tests spawn the
-// artifact binary itself, so `main` runs the trailer probe before Clap.
+// Task 2.3 (cli-compile and multidoc): self-detection before CLI parsing.
+// These tests spawn the artifact binary itself, so `main` runs the trailer
+// probe before Clap; the multidoc cases drive the v2 virtual-store path.
 // ---------------------------------------------------------------------------
 
 /// Make `path` executable (artifacts written by hand in the tests below).
@@ -898,12 +1111,70 @@ fn artifact_manifest_exits_without_boot() {
     assert!(!all.contains("context started"), "no route boot: {all}");
 }
 
+/// `--manifest` on a v2 virtual-store artifact prints the schema-2
+/// canonical manifest — `manifest_schema` 2, the runtime version, and
+/// EVERY embedded logical path with its document kind — and exits 0
+/// without booting (multidoc Task 2.3). The v1 six-field form above is
+/// untouched; a v2 artifact carries the independent store metadata.
+#[test]
+fn artifact_manifest_lists_virtual_store_without_boot() {
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_route);
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &["--manifest"], &[]);
+    assert_eq!(
+        code, 0,
+        "--manifest exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is manifest JSON");
+    assert_eq!(manifest["manifest_schema"], 2, "manifest: {manifest}");
+    assert_eq!(manifest["kind"], "route", "manifest: {manifest}");
+    assert_eq!(
+        manifest["source_name"], "multi-app.yaml",
+        "manifest: {manifest}"
+    );
+    assert_eq!(
+        manifest["runtime_version"],
+        camel_cli::compile::manifest::RUNTIME_VERSION,
+        "manifest: {manifest}"
+    );
+
+    // Every embedded logical path of the virtual store, in canonical
+    // path order, with its document kind.
+    let files = manifest["embedded_files"]
+        .as_array()
+        .expect("embedded_files array");
+    let listed: Vec<(String, String)> = files
+        .iter()
+        .map(|f| {
+            (
+                f["path"].as_str().expect("path").to_string(),
+                f["kind"].as_str().expect("kind").to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            ("Camel.toml".to_string(), "config".to_string()),
+            ("conf/base.toml".to_string(), "include".to_string()),
+            ("multi-app.yaml".to_string(), "route".to_string()),
+            ("routes/beta.yaml".to_string(), "route".to_string()),
+        ],
+        "every embedded logical path is listed: {manifest}"
+    );
+
+    let all = format!("{stdout}{stderr}");
+    assert!(!all.contains("context started"), "no route boot: {all}");
+}
+
 /// Duplicate/exclusive flags, a missing `--report` value, an unknown
 /// flag, and a positional argument each exit 2 and name the rejected
-/// argument, without booting.
+/// argument, without booting (multidoc Task 2.3: exercised on a v2
+/// virtual-store artifact — argument parsing rejects misuse before any
+/// version dispatch or boot).
 #[test]
-fn artifact_rejects_unknown_and_positional_args() {
-    let (deploy, artifact) = deploy_artifact(&fixture().route);
+fn artifact_rejects_unknown_positional_and_duplicate_args() {
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_route);
     let cases: &[(&[&str], &str)] = &[
         (&["--help", "--version"], "--version"),
         (&["--report", "a.json", "--report", "b.json"], "--report"),
@@ -961,6 +1232,142 @@ fn artifact_rejects_marked_corruption() {
     }
 }
 
+/// v2 marked corruption and unknown schemas fail closed through the REAL
+/// self-detect entry (multidoc Task 2.3): the artifact binary itself
+/// probes its trailer before Clap, and every rejected form retains the
+/// terminal marker while failing with an integrity/format diagnostic,
+/// exit 2, and zero route boot.
+///
+/// Two byte-level corruptions of a real compiled artifact — the last
+/// embedded content byte and a v2 footer checksum byte — break the
+/// BLAKE3 checksum. Two checksum-consistent rejections carry exactly one
+/// schema mutation re-sealed through `encode_v2`, so the named failure
+/// is the schema rule, never a checksum mismatch: an index declaring
+/// `store_schema` 99, and a manifest declaring `manifest_schema` 99.
+#[test]
+fn artifact_rejects_v2_corruption_and_unknown_schemas() {
+    use camel_cli::compile::store::{
+        StoreDocument, StoreEntryKind, StoreIndex, VirtualDocumentStore,
+    };
+    use camel_cli::compile::trailer::{TrailerKind, TrailerV2};
+
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_route);
+    let valid = std::fs::read(&artifact).expect("artifact bytes");
+    let data_end = valid.len() - trailer::FOOTER_LEN_V2;
+    let footer = &valid[data_end..];
+    let le = |range: std::ops::Range<usize>| {
+        u64::from_le_bytes(footer[range].try_into().expect("length field"))
+    };
+    let total = (le(12..20) + le(20..28) + le(28..36)) as usize;
+    let content_start = data_end - total;
+    // The executable image ends right before the leading family magic.
+    let image = valid[..content_start - trailer::MAGIC.len()].to_vec();
+
+    // Run the rejected image through the real binary and assert the
+    // closed failure: exit 2, integrity diagnostic naming the defect,
+    // and no route boot. Each ~283 MB file is removed before the next
+    // variant to keep the transient disk use bounded.
+    let run_rejected = |name: &str, bytes: &[u8], diagnostic: &str| {
+        let path = deploy.path().join(name);
+        std::fs::write(&path, bytes).expect("write rejected artifact");
+        #[cfg(unix)]
+        make_executable(&path);
+        let (code, stdout, stderr) = common::run_binary(deploy.path(), &path, &[], &[]);
+        assert_eq!(
+            code, 2,
+            "{name} must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        let combined = format!("{stdout}{stderr}");
+        assert!(
+            combined.contains("integrity error"),
+            "{name} must carry the integrity diagnostic: {combined}"
+        );
+        assert!(
+            combined.contains(diagnostic),
+            "{name} must name the failure: {combined}"
+        );
+        assert!(
+            !combined.contains("context started"),
+            "{name} must not boot: {combined}"
+        );
+        drop(std::fs::remove_file(&path));
+    };
+
+    // Content corruption: flip the last embedded content byte — framing
+    // stays intact (both magics), only the checksum breaks.
+    let content_len = le(12..20) as usize;
+    let mut corrupt_content = valid.clone();
+    corrupt_content[content_start + content_len - 1] ^= 0xFF;
+    run_rejected(
+        "corrupt-content.bin",
+        &corrupt_content,
+        "trailer checksum mismatch",
+    );
+
+    // Footer corruption: flip a byte inside the v2 footer checksum.
+    let mut corrupt_footer = valid.clone();
+    corrupt_footer[data_end + 40] ^= 0xFF;
+    run_rejected(
+        "corrupt-footer.bin",
+        &corrupt_footer,
+        "trailer checksum mismatch",
+    );
+
+    // Checksum-consistent schema rejections: a minimal valid store with
+    // exactly one schema mutation per artifact, re-sealed via
+    // `encode_v2` and prefixed with the executable image so the real
+    // self-detect path decodes it.
+    let route_text = "routes:\n  - id: demo\n    from: timer:tick?period=300\n    steps:\n      - to: log:demo\n";
+    let store = VirtualDocumentStore::build(
+        "app.yaml",
+        &[StoreDocument {
+            path: "app.yaml".to_string(),
+            kind: StoreEntryKind::Route,
+            bytes: route_text.as_bytes().to_vec(),
+        }],
+        &[],
+        &["app.yaml".to_string()],
+    )
+    .expect("valid store builds");
+    let manifest = camel_cli::compile::manifest::derive_for_store(
+        &store,
+        TrailerKind::Route,
+        &[("app.yaml".to_string(), route_text.to_string())],
+    )
+    .expect("manifest derives");
+
+    // Unknown store schema in the index.
+    let mut bad_index: StoreIndex = store.index.clone();
+    bad_index.store_schema = 99;
+    let mut bytes = image.clone();
+    bytes.extend_from_slice(&trailer::encode_v2(&TrailerV2 {
+        kind: TrailerKind::Route,
+        content: store.content.clone(),
+        index: bad_index.encode_canonical().expect("canonical index"),
+        manifest: manifest.to_canonical_json().into_bytes(),
+    }));
+    run_rejected("schema99-index.bin", &bytes, "unsupported store schema 99");
+
+    // Unknown manifest schema.
+    let mut manifest_value: serde_json::Value =
+        serde_json::from_str(&manifest.to_canonical_json()).expect("manifest JSON");
+    manifest_value["manifest_schema"] = serde_json::json!(99);
+    let mut bytes = image;
+    bytes.extend_from_slice(&trailer::encode_v2(&TrailerV2 {
+        kind: TrailerKind::Route,
+        content: store.content.clone(),
+        index: store.index.encode_canonical().expect("canonical index"),
+        manifest: serde_json::to_string(&manifest_value)
+            .expect("manifest JSON")
+            .into_bytes(),
+    }));
+    run_rejected(
+        "schema99-manifest.bin",
+        &bytes,
+        "unsupported manifest schema 99",
+    );
+}
+
 /// Truncation through the terminal magic leaves no recognizable trailer,
 /// so the image is indistinguishable from a plain executable and falls
 /// back to the unchanged Clap path.
@@ -993,6 +1400,31 @@ fn artifact_truncated_without_marker_keeps_clap_fallback() {
         stderr.starts_with("error:"),
         "unchanged Clap fallback: {stderr}"
     );
+
+    // v2 (multidoc Task 2.3): a virtual-store artifact truncated through
+    // the terminal magic is likewise indistinguishable from a plain
+    // executable and falls back to the unchanged Clap path.
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_route);
+    let mut bytes = std::fs::read(&artifact).expect("artifact bytes");
+    bytes.truncate(bytes.len() - trailer::MAGIC.len());
+    assert!(
+        matches!(trailer::decode_artifact(&bytes), Ok(None)),
+        "truncation must remove the v2 marker"
+    );
+    let path = deploy.path().join("truncated-v2.bin");
+    std::fs::write(&path, bytes).expect("write truncated v2 artifact");
+    #[cfg(unix)]
+    make_executable(&path);
+
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &path, &["--watch"], &[]);
+    assert_eq!(
+        code, 2,
+        "Clap misuse exits 2 on truncated v2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.starts_with("error:"),
+        "unchanged Clap fallback for truncated v2: {stderr}"
+    );
 }
 
 /// `--help` and `--version` each exit 0 without booting.
@@ -1023,5 +1455,509 @@ fn artifact_help_and_version_exit_zero() {
 
     for stream in [&stdout, &stderr] {
         assert!(!stream.contains("context started"), "no boot: {stream}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// multidoc Task 2.2: virtual-store runtime for v2 multi-document
+// artifacts.
+// ---------------------------------------------------------------------------
+
+/// A multi-document route artifact runs with no source tree and no
+/// working-directory configuration: the deploy directory holds only the
+/// artifact, every embedded route (entry document plus indexed route
+/// file) boots and executes, and the embedded configuration/include
+/// feed the run.
+#[test]
+fn compiled_multidocument_route_runs_without_source_tree() {
+    child_guard();
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_route);
+    for absent in ["multi-app.yaml", "Camel.toml", "routes", "conf"] {
+        assert!(
+            !deploy.path().join(absent).exists(),
+            "no source/config tree: {absent} must not exist"
+        );
+    }
+
+    let mut child = spawn_child(
+        "compiled_multidocument_route_runs_without_source_tree",
+        deploy.path(),
+        &artifact,
+        &[],
+        &[],
+    );
+    let drained = spawn_drained(&mut child);
+    assert!(
+        wait_for_marker(&drained, "context started", Duration::from_secs(60)),
+        "artifact must boot without its source tree: {}",
+        drained.captured()
+    );
+    // Every embedded route executes: both body markers reach the log.
+    assert!(
+        wait_for_marker(&drained, "alpha-marker", Duration::from_secs(30)),
+        "entry-document route must execute: {}",
+        drained.captured()
+    );
+    assert!(
+        wait_for_marker(&drained, "beta-marker", Duration::from_secs(30)),
+        "indexed route file must execute: {}",
+        drained.captured()
+    );
+    send_signal(&child.0, "-TERM");
+    let code = wait_exit_code(&mut child, Duration::from_secs(30));
+    assert_eq!(
+        code,
+        0,
+        "graceful shutdown after full multi-document run: {}",
+        drained.captured()
+    );
+}
+
+/// A multi-document job artifact consumes its embedded job document,
+/// indexed route sources, and configuration through the existing job
+/// outcome/report lifecycle — no source-tree read.
+#[test]
+fn compiled_job_uses_embedded_route_plan_and_report() {
+    child_guard();
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_job);
+    for absent in ["ingest-m.job.yaml", "Camel.toml", "routes", "conf"] {
+        assert!(
+            !deploy.path().join(absent).exists(),
+            "no source/config tree: {absent} must not exist"
+        );
+    }
+
+    let (code, stdout, stderr) = spawn_child_output(
+        "compiled_job_uses_embedded_route_plan_and_report",
+        deploy.path(),
+        &artifact,
+        &["--report", "report.json"],
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "multi-document job must complete;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(deploy.path().join("report.json"))
+            .expect("job report must be written"),
+    )
+    .expect("job report is JSON");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(
+        report["document"], "compiled://ingest-m.job.yaml",
+        "virtual entry-point identity: {report}"
+    );
+    assert_eq!(report["mode"], "one-shot", "report: {report}");
+    assert_eq!(
+        report["reply"]["body"], "multi-job-done",
+        "indexed route file must drive the pipeline: {report}"
+    );
+}
+
+/// `${env:NAME}` inside a multi-document artifact survives compilation
+/// raw and resolves from the deployment environment only.
+#[test]
+fn compiled_multidocument_resolves_deployment_environment() {
+    child_guard();
+    // The fixture compiled the artifact WITH a compile-time value
+    // present: it must never enter the artifact.
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_env);
+    let artifact_bytes = std::fs::read(&artifact).expect("artifact exists");
+    assert!(
+        artifact_bytes
+            .windows(b"${env:DEPLOY_GREETING}".len())
+            .any(|w| w == b"${env:DEPLOY_GREETING}"),
+        "artifact must keep the env expression"
+    );
+    assert!(
+        !artifact_bytes
+            .windows(b"compile-secret-value".len())
+            .any(|w| w == b"compile-secret-value"),
+        "artifact must not embed the compile-time value"
+    );
+
+    let (code, stdout, stderr) = spawn_child_output(
+        "compiled_multidocument_resolves_deployment_environment",
+        deploy.path(),
+        &artifact,
+        &["--report", "env-report.json"],
+        &[("DEPLOY_GREETING", "deploy-value")],
+    );
+    assert_eq!(
+        code, 0,
+        "job must complete;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(deploy.path().join("env-report.json")).expect("report written"),
+    )
+    .expect("report is JSON");
+    assert_eq!(
+        report["reply"]["body"], "deploy-value",
+        "route must observe the deployment value only: {report}"
+    );
+}
+
+/// A multi-document artifact runs on a read-only root with no source
+/// files: no temporary extraction, no glob expansion, no watcher
+/// activation, and the virtual-store loading seam (not the pattern
+/// discovery seam) feeds the routes.
+#[test]
+fn compiled_multidocument_does_not_extract_glob_or_watch() {
+    child_guard();
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_route);
+
+    // Read-only deploy root (owner r-x): any extraction would fail here.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(deploy.path(), std::fs::Permissions::from_mode(0o555))
+            .expect("chmod read-only");
+    }
+
+    let mut child = spawn_child(
+        "compiled_multidocument_does_not_extract_glob_or_watch",
+        deploy.path(),
+        &artifact,
+        &[],
+        &[],
+    );
+    let drained = spawn_drained(&mut child);
+    assert!(
+        wait_for_marker(&drained, "context started", Duration::from_secs(60)),
+        "artifact must boot on a read-only root: {}",
+        drained.captured()
+    );
+    let all_output = format!(
+        "{}{}",
+        drained.out.lock().expect("stdout lock"),
+        drained.err.lock().expect("stderr lock")
+    );
+    assert!(
+        all_output.contains("virtual store"),
+        "the virtual-store loading seam must be visible: {all_output}"
+    );
+    assert!(
+        !all_output.contains("loading routes from patterns"),
+        "no glob discovery may run: {all_output}"
+    );
+    assert!(
+        !all_output.contains("hot-reload watching"),
+        "the watcher must never activate: {all_output}"
+    );
+    send_signal(&child.0, "-TERM");
+    let code = wait_exit_code(&mut child, Duration::from_secs(30));
+    assert_eq!(code, 0, "graceful shutdown on read-only root");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(deploy.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("restore writable for cleanup");
+    }
+    let mut entries: Vec<String> = std::fs::read_dir(deploy.path())
+        .expect("read deploy dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["app.bin".to_string()],
+        "no extraction or other writes: {entries:?}"
+    );
+}
+
+/// A post-compile decoy route file placed beside the deployed artifact
+/// is never loaded: only the indexed store routes execute.
+#[test]
+fn compiled_multidocument_ignores_post_compile_decoy() {
+    child_guard();
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_route);
+
+    // Post-compile decoy: a fresh route file beside the artifact.
+    std::fs::create_dir_all(deploy.path().join("routes")).expect("mkdir decoy routes");
+    std::fs::write(
+        deploy.path().join("routes").join("decoy.yaml"),
+        "routes:\n  - id: decoy\n    from: timer:tick?period=100\n    steps:\n      - set_body:\n          value: decoy-marker\n      - to: log:decoy\n",
+    )
+    .expect("write decoy route");
+
+    let mut child = spawn_child(
+        "compiled_multidocument_ignores_post_compile_decoy",
+        deploy.path(),
+        &artifact,
+        &[],
+        &[],
+    );
+    let drained = spawn_drained(&mut child);
+    assert!(
+        wait_for_marker(&drained, "alpha-marker", Duration::from_secs(60)),
+        "embedded entry route must execute: {}",
+        drained.captured()
+    );
+    assert!(
+        wait_for_marker(&drained, "beta-marker", Duration::from_secs(30)),
+        "embedded indexed route must execute: {}",
+        drained.captured()
+    );
+    // Give the decoy's faster timer a chance to fire, then prove it
+    // never did.
+    thread::sleep(Duration::from_millis(500));
+    let all_output = format!(
+        "{}{}",
+        drained.out.lock().expect("stdout lock"),
+        drained.err.lock().expect("stderr lock")
+    );
+    assert!(
+        !all_output.contains("decoy-marker"),
+        "the decoy route must never load: {all_output}"
+    );
+    send_signal(&child.0, "-TERM");
+    let code = wait_exit_code(&mut child, Duration::from_secs(30));
+    assert_eq!(code, 0, "graceful shutdown with decoy present");
+}
+
+/// A v1 single-document artifact still runs through the v1
+/// single-entry adapter: the single-document embedded seam boots the
+/// payload and the virtual-store runtime stays out of the picture.
+#[test]
+fn compiled_v1_artifact_uses_single_entry_adapter() {
+    child_guard();
+    let deploy = tempfile::tempdir().expect("deploy tempdir");
+
+    // Hand-build a v1 artifact: the v1 trailer alone (the library seam
+    // decodes from the file tail; no executable image is needed).
+    let manifest =
+        camel_cli::compile::manifest::derive("app.yaml", trailer::TrailerKind::Route, ROUTE_DOC)
+            .expect("v1 manifest derives");
+    let v1 = trailer::Trailer {
+        kind: trailer::TrailerKind::Route,
+        payload: ROUTE_DOC.as_bytes().to_vec(),
+        manifest: manifest.to_legacy_json().into_bytes(),
+    };
+    let artifact = deploy.path().join("app.bin");
+    std::fs::write(&artifact, trailer::encode(&v1)).expect("write v1 artifact");
+
+    let mut child = spawn_child(
+        "compiled_v1_artifact_uses_single_entry_adapter",
+        deploy.path(),
+        &artifact,
+        &[],
+        &[],
+    );
+    let drained = spawn_drained(&mut child);
+    assert!(
+        wait_for_marker(&drained, "context started", Duration::from_secs(60)),
+        "v1 artifact must boot: {}",
+        drained.captured()
+    );
+    let all_output = format!(
+        "{}{}",
+        drained.out.lock().expect("stdout lock"),
+        drained.err.lock().expect("stderr lock")
+    );
+    assert!(
+        all_output.contains("loading routes from compiled://app.yaml"),
+        "the v1 single-document seam must serve the run: {all_output}"
+    );
+    assert!(
+        !all_output.contains("virtual store"),
+        "v1 artifacts keep the single-entry adapter path: {all_output}"
+    );
+    send_signal(&child.0, "-TERM");
+    let code = wait_exit_code(&mut child, Duration::from_secs(30));
+    assert_eq!(code, 0, "graceful shutdown on the v1 path");
+}
+
+/// An invalid decoded store fails closed before boot: a structurally
+/// valid trailer whose embedded configuration document is not parseable
+/// TOML exits 2 naming the configuration, with no route boot. The
+/// interim "runtime not available" bridge message is gone — the real
+/// virtual-store validation produces the diagnostic.
+///
+/// The same holds for checksum-consistent stores that violate an index
+/// rule. Each child below hand-crafts a v2 artifact from a VALID store
+/// with exactly one mutated index field and re-seals it through
+/// `encode_v2` (the BLAKE3 over the `rust-camel-trailer-v2` domain is
+/// recomputed), so the child's named failure is STORE VALIDATION — never
+/// a checksum mismatch — and no route ever boots:
+///
+/// - unknown store schema (`store_schema` 99);
+/// - missing reference (a source-plan reference to an absent entry);
+/// - kind mismatch (a `job` entry point under a `route` trailer kind).
+#[test]
+fn compiled_runtime_rejects_invalid_store_before_boot() {
+    child_guard();
+    use camel_cli::compile::store::{
+        StoreDocument, StoreEntryKind, StoreIndex, VirtualDocumentStore,
+    };
+    use camel_cli::compile::trailer::{TrailerKind, TrailerV2};
+
+    let deploy = tempfile::tempdir().expect("deploy tempdir");
+    let route_text = "routes:\n  - id: demo\n    from: timer:tick?period=300\n    steps:\n      - to: log:demo\n";
+    // The store passes every structural invariant (schema, ranges,
+    // references, kinds) but its configuration document is not TOML:
+    // only the runtime's pre-boot store validation catches it.
+    let store = VirtualDocumentStore::build(
+        "app.yaml",
+        &[
+            StoreDocument {
+                path: "app.yaml".to_string(),
+                kind: StoreEntryKind::Route,
+                bytes: route_text.as_bytes().to_vec(),
+            },
+            StoreDocument {
+                path: "Camel.toml".to_string(),
+                kind: StoreEntryKind::Config,
+                bytes: b"this is not = = valid toml [[\n".to_vec(),
+            },
+        ],
+        &["Camel.toml".to_string()],
+        &["app.yaml".to_string()],
+    )
+    .expect("structurally valid store builds");
+    let manifest = camel_cli::compile::manifest::derive_for_store(
+        &store,
+        TrailerKind::Route,
+        &[("app.yaml".to_string(), route_text.to_string())],
+    )
+    .expect("manifest derives");
+    let artifact_bytes = trailer::encode_v2(&TrailerV2 {
+        kind: TrailerKind::Route,
+        content: store.content.clone(),
+        index: store.index.encode_canonical().expect("canonical index"),
+        manifest: manifest.to_canonical_json().into_bytes(),
+    });
+    let artifact = deploy.path().join("invalid.bin");
+    std::fs::write(&artifact, artifact_bytes).expect("write invalid artifact");
+
+    let (code, stdout, stderr) = spawn_child_output(
+        "compiled_runtime_rejects_invalid_store_before_boot",
+        deploy.path(),
+        &artifact,
+        &[],
+        &[],
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert_eq!(
+        code, 2,
+        "invalid store must fail closed with exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        combined.contains("Camel.toml"),
+        "the diagnostic must name the malformed configuration: {combined}"
+    );
+    assert!(
+        !combined.contains("not available in this build"),
+        "the interim bridge message must be gone: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "no boot may happen: {combined}"
+    );
+
+    // A fully valid store as the base for the index-level corruptions:
+    // every mutation below is the ONLY defect in an otherwise valid
+    // artifact, so the named diagnostic is attributable to the store
+    // rule it violates.
+    let valid_store = VirtualDocumentStore::build(
+        "app.yaml",
+        &[
+            StoreDocument {
+                path: "app.yaml".to_string(),
+                kind: StoreEntryKind::Route,
+                bytes: route_text.as_bytes().to_vec(),
+            },
+            StoreDocument {
+                path: "Camel.toml".to_string(),
+                kind: StoreEntryKind::Config,
+                bytes: b"[profiles.default]\n".to_vec(),
+            },
+        ],
+        &["Camel.toml".to_string()],
+        &["app.yaml".to_string()],
+    )
+    .expect("structurally valid store builds");
+    let valid_manifest = camel_cli::compile::manifest::derive_for_store(
+        &valid_store,
+        TrailerKind::Route,
+        &[("app.yaml".to_string(), route_text.to_string())],
+    )
+    .expect("manifest derives");
+
+    // One index mutation per scenario.
+    fn schema_99(index: &mut StoreIndex) {
+        index.store_schema = 99;
+    }
+    fn missing_plan_reference(index: &mut StoreIndex) {
+        index
+            .source_plan
+            .references
+            .push("routes/ghost.yaml".to_string());
+    }
+    fn job_entry_point(index: &mut StoreIndex) {
+        for entry in &mut index.entries {
+            if entry.path == index.entry_point {
+                entry.kind = StoreEntryKind::Job;
+            }
+        }
+    }
+
+    for (label, diagnostic, mutate) in [
+        (
+            "unknown-store-schema",
+            "unsupported store schema 99",
+            schema_99 as fn(&mut StoreIndex),
+        ),
+        (
+            "missing-plan-reference",
+            "store reference to missing entry \"routes/ghost.yaml\"",
+            missing_plan_reference,
+        ),
+        (
+            "entry-point-kind-mismatch",
+            "store reference \"app.yaml\" names a job entry, expected route",
+            job_entry_point,
+        ),
+    ] {
+        let mut index = valid_store.index.clone();
+        mutate(&mut index);
+        // `encode_v2` re-seals the footer checksum over the
+        // rust-camel-trailer-v2 domain: the child must fail on STORE
+        // validation, never on a checksum mismatch.
+        let artifact_bytes = trailer::encode_v2(&TrailerV2 {
+            kind: TrailerKind::Route,
+            content: valid_store.content.clone(),
+            index: index.encode_canonical().expect("mutated index encodes"),
+            manifest: valid_manifest.to_canonical_json().into_bytes(),
+        });
+        let artifact = deploy.path().join(format!("{label}.bin"));
+        std::fs::write(&artifact, artifact_bytes).expect("write corrupted artifact");
+
+        let (code, stdout, stderr) = spawn_child_output(
+            "compiled_runtime_rejects_invalid_store_before_boot",
+            deploy.path(),
+            &artifact,
+            &[],
+            &[],
+        );
+        let combined = format!("{stdout}{stderr}");
+        assert_eq!(
+            code, 2,
+            "{label} must fail closed with exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            combined.contains(diagnostic),
+            "{label} must name the store failure: {combined}"
+        );
+        assert!(
+            !combined.contains("checksum mismatch"),
+            "{label} must not fail on integrity (the artifact is re-sealed): {combined}"
+        );
+        assert!(
+            !combined.contains("context started"),
+            "{label} must boot zero routes: {combined}"
+        );
     }
 }

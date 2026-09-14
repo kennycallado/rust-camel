@@ -134,10 +134,12 @@ async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Self-detect a compiled artifact BEFORE Clap parses anything
-    // (openspec cli-compile, Task 2.3): a trailer-free image returns
-    // `None` and falls through to the normal CLI unchanged; marked
-    // corruption fails closed; a valid artifact consumes the process
-    // argv itself and exits with the artifact contract codes.
+    // (openspec cli-compile Task 2.3 and multidoc Task 2.3): a
+    // trailer-free image returns `None` and falls through to the normal
+    // CLI unchanged; marked corruption and unsupported v1/v2 schemas fail
+    // closed; a valid artifact consumes the process argv itself and exits
+    // with the artifact contract codes (v1 single-document or v2
+    // virtual-store runtime).
     if let Some(code) = camel_cli::compile::runtime::self_detect_artifact().await {
         std::process::exit(code);
     }

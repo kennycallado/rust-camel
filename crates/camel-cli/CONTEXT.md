@@ -104,11 +104,11 @@ no exit 2). The covered stretch on non-Unix starts at the send/drain race.
 
 ## camel job failure modes
 
-`camel job <doc>` runs one `*.job.yaml` document declaring a top-level `execute:` section (mode `one-shot`/`batch`, one `direct:`/`seda:` send, mandatory `timeout`, one family route source, optional `description:` for listing). A bare name resolves `<name>.job.yaml` across ordered `[jobs].dirs` roots (`[jobs].dir` remains a one-root compatibility alias, default `jobs`, anchored at the Camel.toml root); an explicit path always wins. `dirs` takes precedence when both keys exist. `camel job` with no argument lists the discovery set — name plus relative path when needed and description via a cheap probe parse, `(unparseable)` siblings tolerated, empty/absent roots exit 0. The metadata walk uses lexical order, root depth 0, depth limit 8, 512 files per root, no directory symlinks, and one warning per truncated root. Bare-name lookup remains root-level only. It boots the REAL composition root (the `camel run` seams: config, security context, bind acks, the `camel_bundles` cascade, ambient `${env:}` discovery), starts every document route and relies on the load-time consumer allowlist for side-effect safety, with the send target as the sole entry point, sends one exchange, tears down through `BootHandle::shutdown_with_deadline`, and emits a JSON report to stdout (or `--report`) for outcomes that reach the send (verdict, interruption, or timeout) plus shutdown failures after a verdict; early exit-2 classes are stderr-only. Seda targets are rewritten to `waitForTaskToComplete=Always` so the send is synchronous (verdict fidelity). Exit precedence mirrors `camel test`: `2 > 1 > 0`. Route side-effect safety is fail-closed: documents whose routes consume (`from:`) from any scheme outside `{direct, seda, log, mock}` are rejected at load; `to:` URIs are unrestricted. `mode` accepts `one-shot` and `batch`; other values are rejected at load. Documents MAY declare job arguments in a top-level `args:` block beside `execute:`. Names match `[A-Za-z_][A-Za-z0-9_]*`; each declaration admits only `required` (boolean), `default` (string), and `description` (string), and unknown fields fail. On a declared document every `--arg NAME=VALUE` pair must name a declaration: an unknown name or an omitted required name without a default exits 2 before boot, a `default` fills an omission, and an explicit pair wins. Resolved values interpolate through `${arg:NAME}` in `to`, `body`, `headers`, and `timeout` before those fields validate, at the same stage and scanner as `${env:NAME}` with namespace dispatch before lookup: `arg:` never falls through to the environment, the `:-fallback` form is rejected, and an unresolved name exits 2. That same-stage rule is strict for both namespaces, so a declared document hard-fails exit 2 on an unresolved `${env:GHOST}` in a send field, while a legacy document (no `args:`) never interpolates its send fields and sends the raw literal through. Declared documents inject no implicit headers; legacy documents keep header injection after document headers (last value wins) with one deprecation note on stderr. The general tracing layer writes to stdout, so a machine-parseable stdout report needs `log_level = "off"` or `--report`.
+`camel job <doc>` runs one `*.job.yaml` document declaring a top-level `execute:` section (mode `one-shot`/`batch`, one `direct:`/`seda:` send, mandatory `timeout`, one family route source, optional `description:` for listing). A bare name resolves `<name>.job.yaml` across ordered `[jobs].dirs` roots (`[jobs].dir` remains a one-root compatibility alias, default `jobs`, anchored at the Camel.toml root); an explicit path always wins. `dirs` takes precedence when both keys exist. `camel job` with no argument lists the discovery set — name plus relative path when needed and description via a cheap probe parse, `(unparseable)` siblings tolerated, empty/absent roots exit 0. The metadata walk uses lexical order, root depth 0, depth limit 8, 512 files per root, no directory symlinks, and one warning per truncated root. Bare-name lookup remains root-level only. It boots the REAL composition root (the `camel run` seams: config, security context, bind acks, the `camel_bundles` cascade, ambient `${env:}` discovery), starts every document route and relies on the load-time consumer allowlist for side-effect safety, with the send target as the sole entry point, sends one exchange, tears down through `BootHandle::shutdown_with_deadline`, and emits a JSON report to stdout (or `--report`) for outcomes that reach the send (verdict, interruption, or timeout) plus shutdown failures after a verdict; early exit-2 classes are stderr-only. Seda targets are rewritten to `waitForTaskToComplete=Always` so the send is synchronous (verdict fidelity). Exit precedence mirrors `camel test`: `2 > 1 > 0`. Route side-effect safety is fail-closed: documents whose routes consume (`from:`) from any scheme outside `{direct, seda, log, mock}` are rejected at load; `to:` URIs are unrestricted. `mode` accepts `one-shot` and `batch`; other values are rejected at load. The general tracing layer writes to stdout, so a machine-parseable stdout report needs `log_level = "off"` or `--report`.
 
 | Failure mode | Trigger | Exit code |
 |--------------|---------|-----------|
-| Doc load error | unreadable file, non-`*.job.yaml` suffix (a `*.test.yaml` declaring `execute:` gets rename guidance), missing `execute:`, mixed `scenario:`/unit-tier sections, serde/grammar errors, invalid `args:` declarations, undeclared or missing-required `--arg` values, unresolved `${arg:}`/`${env:}` interpolation in a declared document's send fields, unsupported `mode` (accepted: `one-shot`, `batch`), missing/invalid `timeout`, non-`direct:`/`seda:` send target, route-source conflict, no `Camel.toml` ancestor for `routeFilesFromRoot`, bare-name miss across configured `[jobs].dirs` roots | 2 |
+| Doc load error | unreadable file, non-`*.job.yaml` suffix (a `*.test.yaml` declaring `execute:` gets rename guidance), missing `execute:`, mixed `scenario:`/unit-tier sections, serde/grammar errors, unsupported `mode` (accepted: `one-shot`, `batch`), missing/invalid `timeout`, non-`direct:`/`seda:` send target, route-source conflict, no `Camel.toml` ancestor for `routeFilesFromRoot`, bare-name miss across configured `[jobs].dirs` roots | 2 |
 | Job-safety rejection | a discovered route consumes from a scheme outside the `{direct, seda, log, mock}` allowlist; or the send target has no matching consumer route, or its base is ambiguous across several; or the route source resolves zero routes | 2 |
 | Boot failure | config load, context configure, security compile context, `camel_bundles::boot`, route discovery/parse, route registration, `ctx.start()` | 2 |
 | Pipeline failure | the send's route pipeline failed (`PipelineOutcome::Failed` through the producer reply seam) | 1 |
@@ -121,43 +121,68 @@ no exit 2). The covered stretch on non-Unix starts at the send/drain race.
 ## Compiled artifacts (`camel compile`)
 
 `camel compile <document> -o <artifact>` produces a self-contained native
-Linux preview artifact: a copy of the current executable with a fixed 68-byte
-EOF trailer appended (normalized pre-interpolation document payload +
-operational manifest + BLAKE3 footer; ADR-0075). The payload is captured
-before `${env:}` interpolation, so `${env:NAME}` expressions resolve from the
-deployment environment at artifact runtime, never from the compile
-environment. V1 supports one route document or one job document;
-cross-compilation, AST/AOT serialization, compiled tests, multi-entry jobs,
-compression, signing, and long-running route-server artifacts are deferred.
+Linux preview artifact: a copy of the current executable with a trailer
+appended (ADR-0075). The payload is captured before `${env:}` interpolation,
+so `${env:NAME}` expressions resolve from the deployment environment at
+artifact runtime, never from the compile environment. This crate owns both
+sides of the format: `compile::sources` (`SourceSelection`, `resolve`)
+resolves compile inputs, `compile::trailer` owns the `CAMELTR1` codec
+(v1 68-byte footer, v2 76-byte footer, `decode_artifact` dispatch), and
+`compile::manifest` owns the operational manifest with its independent
+`manifest_schema: 2` and `embedded_files` list. The canonical store model
+lives in camel-dsl and is re-exported verbatim; this crate never defines a
+second one.
 
-Compilation fails closed (exit 2, no output) for non-native targets and for
-every unsupported compile-time asset: route-source fields (`routeFiles`,
-`routeFilesFromRoot`, glob patterns), configuration fields (`Camel.toml`,
-profiles, `includes`, `CAMEL_*` compile overrides), and asset-bearing
-endpoint fields (certificates, private keys, CA files, WASM/plugin files,
-XSLT/XSD, SQL files, static directories, literal secret files, dynamic
-placeholders in those fields). Asset-bearing endpoint URI schemes (`wasm:`,
-`xslt:`, `validator:`) are rejected in every URI-bearing field (`from`, `to`,
-`wire_tap`, `poll_enrich`, `enrich`, `dead_letter_channel`,
-`scatter_gather.endpoints`). Runtime endpoint URI paths (e.g. `file:`,
-`kafka:`, `log:`), runtime `${env:}` expressions outside forbidden fields,
-and deploy-side network/file I/O remain permitted.
+Compile-time source selection is explicit. Sources come only from
+`--config <Camel.toml>` and repeated `--profile <name>`; `--profile`
+without `--config` is rejected. Without `--config` the compiler embeds no
+configuration and selects no profile, and it never discovers ambient
+configuration. Resolution stays confined to the selected root: names
+normalize to UTF-8 relative `/` paths, and absolute paths, `.`/`..`
+components, non-UTF-8 names, symlink escapes, duplicate canonical targets,
+duplicate logical paths, and out-of-root references fail with exit 2
+before any output is created. Declared pattern order is preserved and each
+pattern's matches sort by normalized logical path, so identical inputs
+produce identical artifact bytes. The aggregate normalized embedded bytes
+stay capped at 16 MiB. The store packs typed entries (`route`, `job`,
+`config`, `include`, `profile`) plus a canonical index (`store_schema: 1`,
+one logical entry point, ordered source plan). Compilation also fails
+closed (exit 2, no output) for non-native targets, for unsupported
+asset-bearing endpoint fields (certificates, private keys, CA files,
+WASM/plugin files, XSLT/XSD, SQL files, static directories, literal secret
+files, dynamic placeholders in those fields), and for compile-time
+`CAMEL_*` overrides. Explicitly declared route files, includes, profile
+sections, and job route sources are the supported virtual documents, not
+assets. Asset-bearing endpoint URI schemes (`wasm:`, `xslt:`,
+`validator:`) stay rejected in every URI-bearing field. Runtime endpoint
+URI paths (e.g. `file:`, `kafka:`, `log:`), runtime `${env:}` expressions
+outside forbidden fields, and deploy-side network/file I/O remain
+permitted.
 
 The binary self-detects its trailer before Clap parsing (`fn
 self_detect_artifact`): a trailer-free image keeps the normal CLI; marked
-corruption exits 2 with an integrity diagnostic; a valid artifact accepts
-only `--report <path>`, `--help`, `--version`, and `--manifest` (anything
-else exits 2 naming the argument). `--manifest` prints the operational
-manifest and exits 0 without boot. Route artifacts run the embedded document
-through the existing `camel run` lifecycle with the default in-memory config,
-virtual source identity `compiled://<source_name>`, and watch disabled; job
-artifacts use the existing single-document job lifecycle with the embedded
-document as their sole route source. Declared `args:` on a job artifact
-resolve through the embedded defaults only — the `--arg` surface stays
-closed, and a required declaration without a default exits 2 pointing at
-declaring a `default`. No temporary extraction occurs, so
-artifacts run from a read-only root; the only write is an explicitly
-requested report.
+corruption, an unsupported trailer version, or an unsupported
+store/manifest schema exits 2 with an integrity diagnostic; a valid
+artifact accepts only `--report <path>`, `--help`, `--version`, and
+`--manifest` (anything else exits 2 naming the argument). `--manifest`
+prints the manifest — schema, runtime version, kind, `embedded_files` metadata,
+components, required environment names, and listeners — and exits 0 without boot.
+Decoding yields an `EmbeddedRequest`: v1 trailers adapt to
+`EmbeddedRequest::SingleDocument` with unchanged behavior; v2 trailers
+build `EmbeddedRequest::VirtualStore` with the decoded store, manifest,
+and one entry point. Route artifacts call
+`camel_dsl::discover_virtual_store`, register every referenced route, and
+reuse the existing `camel run` boot, context start, signal shutdown,
+report, and exit handling with watch disabled; job artifacts consume the
+embedded job/config/route entries through the existing job outcome
+lifecycle. Virtual source diagnostics use the `compiled://<logical-path>`
+identity. The runtime performs no source or config reads, no globbing, no
+canonicalization, no extraction, and no watch; only deployment-time
+endpoint I/O and `${env:}` resolution run. Stores are validated before
+boot, and unknown schemas, invalid references, malformed ranges, kind
+mismatches, checksum failures, or missing configuration entries exit 2
+with zero routes booted, so artifacts run from a read-only root and a file
+placed beside the artifact after compilation is never loaded.
 
 Route `--report <path>` writes the exact JSON object
 `{"kind":"route","status":"completed"|"failed","error":string|null}` after
@@ -167,6 +192,12 @@ failures). Job artifacts keep the existing job outcome report and exit
 precedence (`2 > 1 > 0`). Boot still performs parse, interpolation, lowering,
 component boot, and context start, so no boot-speed claim is made before P0
 measurement.
+
+Extension boundaries sit on the store, not on new formats. R2 (deploy-time
+asset embedding) may add embedded files to the store; R3 (multi-entry
+artifacts) may extend entry-point cardinality using the same store without
+changing R1 runtime semantics. Compression, signing, and cross-target
+compilation stay deferred.
 
 ## Metrics
 

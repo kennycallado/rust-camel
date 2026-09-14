@@ -7,6 +7,7 @@ pub mod canonical;
 pub mod compile;
 pub mod contract;
 pub mod discovery;
+pub mod embedded_store;
 mod env_int_probe;
 pub mod env_interpolation;
 mod input_format;
@@ -30,9 +31,14 @@ pub use compile::{
 };
 pub use contract::{DeclarativeStepKind, is_rust_only_kind, mandatory_declarative_step_kinds};
 pub use discovery::{
-    DiscoveryError, EmbeddedDocumentKind, MaterializationFailure, discover_embedded_text,
-    discover_routes, discover_routes_with_threshold, discover_routes_with_threshold_and_security,
-    discover_routes_with_threshold_security_and_env,
+    DiscoveryError, EmbeddedDocumentKind, MaterializationFailure, VirtualStoreDiscovery,
+    discover_embedded_text, discover_routes, discover_routes_with_threshold,
+    discover_routes_with_threshold_and_security, discover_routes_with_threshold_security_and_env,
+    discover_virtual_store,
+};
+pub use embedded_store::{
+    STORE_SCHEMA, SourcePlan, StoreDocument, StoreEntry, StoreEntryKind, StoreError, StoreIndex,
+    VirtualDocumentStore,
 };
 pub use env_interpolation::{interpolate_with_args, interpolate_yaml_source};
 pub use json::{

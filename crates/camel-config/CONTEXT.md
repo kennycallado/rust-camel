@@ -130,6 +130,19 @@ The loader strips all `include` keys from the raw tree pre-placeholder and resol
 An entry like `include = ["${env:CAMEL_INCLUDE_CONF}"]` therefore fails with "included file not found": the raw marker is treated as the filename.
 Recursive includes are unsupported in V1: `fn load_includes` drops a nested `include` key with a warning (`include.rs:91`).
 
+**Embedded virtual-store configuration seam (`multidoc`, ADR-0075).**
+`CamelConfig::from_toml_value_with_env(value, lookup)` types an
+ALREADY-MERGED tree — the shape `camel_dsl::discover_virtual_store`
+produces for v2 compiled artifacts. It runs the loader's final steps
+only: placeholder resolution through the injected lookup, strict typed
+deserialization with the env-int placeholder probe, empty-topology
+normalization, and validation. No file read, no include expansion, no
+ambient `CAMEL_PROFILE` selection, and no allowlisted `CAMEL_*` override
+merge run on this path: an embedded configuration is self-contained by
+construction. Parity with the filesystem loader is pinned by the
+cross-loader tests in `config_tests/virtual_store_file_parity_tests.rs`
+and `config_tests/virtual_store_config_tests.rs`.
+
 **Switching cache backend between profiles requires a complete section.**
 Profile merges are additive: overlay scalars replace while omitted base keys survive, and TOML offers no remove-key sentinel (`fn merge_toml_values`, `config.rs:1623`).
 `CamelConfig::validate` rejects every cross-backend key — the redis branch rejects `path`, `cache_size`, `sweep_interval`, `max_entries`, `max_capacity` (`config.rs:2056`), while the redb branch rejects `url` and its siblings (`config.rs:1977`) — so a partial profile overlay cannot switch backends.

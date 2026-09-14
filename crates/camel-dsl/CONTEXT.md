@@ -113,6 +113,52 @@ apply; both entries keep the 16 MiB cap and path-annotated parse errors.
 _Avoid_: env-aware loading, pre-parse substitution (the tree walk
 interpolates parsed scalars; only the fallback splices raw text)
 
+**virtual document store (`VirtualDocumentStore`)**:
+The canonical in-memory pack of compile-time documents for v2 compiled
+artifacts (ADR-0075). Public `embedded_store` module
+(`src/embedded_store.rs`): `VirtualDocumentStore` (content blob plus
+validated `StoreIndex`), `StoreEntry`, `StoreEntryKind`
+(`route`/`job`/`config`/`include`/`profile`), `SourcePlan`, and
+`StoreError`. Entry paths are normalized UTF-8 relative `/` paths;
+entries sit in canonical (lexicographic) path order for stable bytes,
+while the `SourcePlan` preserves declared route-source order as the
+normative array order. Build and decode are fail-closed: unknown
+`STORE_SCHEMA`, duplicate paths, noncanonical order, out-of-bounds or
+overlapping ranges, unreferenced content, and missing references are
+named `StoreError`s, never reinterpreted. `camel-cli` re-exports this
+model verbatim; no second store model exists.
+_Avoid_: embedded bundle, artifact archive, virtual FS
+
+**discover_virtual_store**:
+The filesystem-free discovery seam for embedded stores
+(`discovery.rs`): accepts a `VirtualDocumentStore` and a deployment
+`env_lookup` closure, and returns `VirtualStoreDiscovery` — the merged
+configuration tree plus route definitions in plan order. Configuration
+assembly is typed and ordered: the indexed `Camel.toml`, include, and
+selected-profile texts merge in index order (includes lowest, then the
+configuration document, profile-section selection per document), mirroring
+camel-config's loader ordering (see the SYNC note in `discovery.rs`).
+Only source-plan references resolve, strictly by index lookup, through
+the shared interpolation, typed env probing, template materialization,
+reserved-document validation, parsing, and lowering paths — the same
+semantics as filesystem discovery. The seam NEVER touches the
+filesystem: no discovery, no glob expansion, no canonicalization, no
+temporary-file helpers. A file placed beside the artifact after
+compilation is invisible because the store is the only document source.
+Invalid embedded TOML or violated merge rules surface as
+`MalformedVirtualConfig`; missing or mistyped references surface as the
+named `StoreError`s. Authority: ADR-0075.
+_Avoid_: embedded discovery (ambiguous), runtime discovery (this seam
+forbids exactly that)
+
+**`compiled://` provenance**:
+The virtual source identity of a store document: a diagnostic for the
+entry at logical path `routes/orders.yaml` names
+`compiled://routes/orders.yaml`. Document boundaries and provenance
+survive without filesystem paths; every parse or interpolation error on
+an embedded document reports this identity. Authority: ADR-0075.
+_Avoid_: source file path (an embedded document has none at runtime)
+
 **RouteDefinition**:
 The structured representation of a Route — produced by RouteBuilder or by parsing a YAML/JSON file. CamelContext consumes RouteDefinitions to build and start Routes.
 _Avoid_: route spec, route config, route descriptor

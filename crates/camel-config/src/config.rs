@@ -1345,6 +1345,16 @@ mod empty_topology_normalization_tests;
 #[cfg(test)]
 #[path = "config_tests/cache_repo_env_override_tests.rs"]
 mod cache_repo_env_override_tests;
+#[cfg(test)]
+#[path = "config_tests/virtual_store_config_tests.rs"]
+mod virtual_store_config_tests;
+
+/// Cross-loader parity (openspec change `multidoc` Task 3.1): the
+/// virtual-store configuration assembly must match the filesystem
+/// loader for the same fixture tree.
+#[cfg(test)]
+#[path = "config_tests/virtual_store_file_parity_tests.rs"]
+mod virtual_store_file_parity_tests;
 impl Default for CacheRepoConfig {
     fn default() -> Self {
         Self {
@@ -2558,6 +2568,51 @@ impl CamelConfig {
         lookup: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, ConfigError> {
         Self::load_from_file_inner(path, Some(profile), false, lookup)
+    }
+
+    /// Build a `CamelConfig` from an already-merged TOML tree — the
+    /// embedded virtual-store configuration seam (openspec change
+    /// `multidoc`, Task 2.2). The tree is the final merged shape
+    /// `camel_dsl::discover_virtual_store` produces: includes merged,
+    /// profile sections already selected at compile time.
+    ///
+    /// Only deployment-time `${env:}` resolution runs, through
+    /// `lookup`. The process environment is never consulted implicitly,
+    /// no ambient `CAMEL_PROFILE` selection applies, no allowlisted
+    /// `CAMEL_*` override merge runs, and no file is read: an embedded
+    /// configuration is self-contained by construction. Resolution,
+    /// strict typed deserialization (with the env-int placeholder
+    /// probe), empty-topology normalization, and validation mirror the
+    /// filesystem loader's final steps exactly.
+    pub fn from_toml_value_with_env(
+        mut value: toml::Value,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        // Defensive: `include` is not a CamelConfig field — the virtual
+        // store's merged tree never carries one, but the loader strips
+        // it on every path and this seam keeps the same contract.
+        if let toml::Value::Table(ref mut table) = value {
+            table.remove("include");
+        }
+        let provenance = resolve_tree_with_provenance(&mut value, lookup)?;
+        let mut config: CamelConfig = deserialize_with_probe(&value, &provenance)?;
+        // FR1 (deployment-resolvable-cache-repo-topology), mirroring the
+        // filesystem loader: topology values that expanded empty become
+        // absent before validation selects the topology.
+        if let Some(repo) = config.cache_repo.as_mut()
+            && repo.backend == "redis"
+        {
+            repo.normalize_empty_topology();
+        }
+        if let Some(repo) = config.idempotent_repo.as_mut()
+            && repo.backend == "redis"
+        {
+            repo.normalize_empty_topology();
+        }
+        config
+            .validate()
+            .map_err(|e| ConfigError::Message(e.to_string()))?;
+        Ok(config)
     }
 
     fn load_from_file_inner(
