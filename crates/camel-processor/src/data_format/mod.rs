@@ -1,5 +1,7 @@
 mod csv;
-mod gzip;
+// `pub(crate)` so the TAR.GZ stream splitter can reuse the bounded
+// single-member GZIP decoder without widening the public data-format API.
+pub(crate) mod gzip;
 mod json;
 mod tar;
 mod tar_gz;

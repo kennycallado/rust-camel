@@ -29,6 +29,6 @@ JSON, CSV, XML, ZIP, `tar`, `gzip`, and `tar.gz` are registered by default. Prot
 
 Each format caps its `marshal` input at `max_input_size` and caps the decoded `unmarshal` output at `max_decompressed_size` before the bytes are materialized. For `gzip` and `tar.gz`, the output cap covers the full decoded stream, including TAR headers, padding, and skipped entries. `compression_level` accepts 0–9. Invalid levels and unknown configuration fields fail closed. For `tar.gz`, the compressed archive gets a fixed TAR framing bound (entry header, payload padding, end-of-archive marker) on top of the raw-body input cap, so the effective raw-body cap stays `max_input_size`. `Body::Empty` and stream bodies are rejected. Zero-length byte and text bodies stay materialized bodies and follow archive semantics.
 
-These formats do not split an archive into one exchange per entry and do not extract entries to disk. Entry-per-exchange splitting stays a splitter concern: `zip_splitter` keeps its current scope, and no TAR splitter exists.
+These formats do not split an archive into one exchange per entry and do not extract entries to disk. Entry-per-exchange splitting stays a splitter concern: the [ZIP Splitter](../eip/zip-splitter.md) covers ZIP archives, and the [TAR Splitter](../eip/tar-splitter.md) covers TAR and TAR.GZ archives.
 
 **Reference**: [DataFormat trait](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-api/src/data_format.rs)

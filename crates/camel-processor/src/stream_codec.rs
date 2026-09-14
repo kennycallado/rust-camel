@@ -49,6 +49,14 @@ pub fn resolve_format(
                     "stream split format=Auto: ZIP archives require explicit stream.format: zip"
                         .into(),
                 )),
+                "application/x-tar" => Err(CamelError::Config(
+                    "stream split format=Auto: TAR archives require explicit stream.format: tar"
+                        .into(),
+                )),
+                "application/gzip" | "application/x-gzip" => Err(CamelError::Config(
+                    "stream split format=Auto: GZIP archives require explicit stream.format: tar.gz"
+                        .into(),
+                )),
                 "" => Err(CamelError::Config(
                     "stream split format=Auto but stream has no content_type".into(),
                 )),
@@ -65,6 +73,8 @@ pub fn resolve_format(
 #[derive(Debug)]
 pub enum ArchiveSplitKind {
     Zip,
+    Tar,
+    TarGz,
 }
 
 pub enum ResolvedStreamSplit {
@@ -82,6 +92,9 @@ pub fn resolve_incremental_codec(
         StreamSplitFormat::Zip => Err(CamelError::Config(
             "Zip is a materialized archive format, not an incremental codec".into(),
         )),
+        StreamSplitFormat::Tar | StreamSplitFormat::TarGz => Err(CamelError::Config(
+            "Tar and TarGz are materialized archive formats, not incremental codecs".into(),
+        )),
         StreamSplitFormat::Auto => Err(CamelError::Config(
             "resolve_incremental_codec requires a resolved format, not Auto".into(),
         )),
@@ -97,6 +110,12 @@ pub fn resolve_split(
     match resolved {
         StreamSplitFormat::Zip => Ok(ResolvedStreamSplit::MaterializedArchive(
             ArchiveSplitKind::Zip,
+        )),
+        StreamSplitFormat::Tar => Ok(ResolvedStreamSplit::MaterializedArchive(
+            ArchiveSplitKind::Tar,
+        )),
+        StreamSplitFormat::TarGz => Ok(ResolvedStreamSplit::MaterializedArchive(
+            ArchiveSplitKind::TarGz,
         )),
         _ => Ok(ResolvedStreamSplit::Incremental(resolve_incremental_codec(
             &resolved,
@@ -133,6 +152,61 @@ mod tests {
             result,
             ResolvedStreamSplit::MaterializedArchive(ArchiveSplitKind::Zip)
         ));
+    }
+
+    #[test]
+    fn test_resolve_split_tar_is_materialized() {
+        let result = resolve_split(&StreamSplitFormat::Tar, &default_metadata()).unwrap();
+        assert!(matches!(
+            result,
+            ResolvedStreamSplit::MaterializedArchive(ArchiveSplitKind::Tar)
+        ));
+    }
+
+    #[test]
+    fn test_resolve_split_tar_gz_is_materialized() {
+        let result = resolve_split(&StreamSplitFormat::TarGz, &default_metadata()).unwrap();
+        assert!(matches!(
+            result,
+            ResolvedStreamSplit::MaterializedArchive(ArchiveSplitKind::TarGz)
+        ));
+    }
+
+    #[test]
+    fn test_resolve_incremental_codec_rejects_tar_formats() {
+        for format in [StreamSplitFormat::Tar, StreamSplitFormat::TarGz] {
+            let result = resolve_incremental_codec(&format);
+            let msg = match result {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("expected Err for {format:?}"),
+            };
+            assert!(
+                msg.contains("materialized archive format"),
+                "expected materialized-archive rejection, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_auto_tar_content_types_suggest_explicit_format() {
+        for (ct, expected) in [
+            ("application/x-tar", "format: tar"),
+            ("application/gzip", "format: tar.gz"),
+        ] {
+            let meta = StreamMetadata {
+                content_type: Some(ct.to_string()),
+                ..Default::default()
+            };
+            let result = resolve_split(&StreamSplitFormat::Auto, &meta);
+            let msg = match result {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("expected Err for Auto + {ct}"),
+            };
+            assert!(
+                msg.contains(expected),
+                "expected suggestion '{expected}' in error, got: {msg}"
+            );
+        }
     }
 
     #[test]

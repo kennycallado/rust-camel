@@ -27,6 +27,8 @@ The Streaming Splitter is a Message Routing pattern from Hohpe and Woolf. It spl
 
 The included example builds a `Body::Stream` that holds three NDJSON chunks. A `StreamingSplitterService` reads the stream through a `StreamSplitCodec`, which resolves the format from the content type. For `application/x-ndjson`, the codec parses each line into a separate fragment exchange. The sub-pipeline logs each fragment. When the split scope closes, the aggregation strategy combines the fragment outputs into the result body.
 
+Archive formats are not handled by the incremental codec. The `zip`, `tar`, and `tar.gz` format names route to materialized archive splitters: the [ZIP Splitter](zip-splitter.md) and the [TAR Splitter](tar-splitter.md) each parse their own archive structure, with no generic archive-splitting abstraction between them.
+
 The streaming variant is the memory-efficient alternative to the [Splitter](splitter.md). The Splitter materializes every fragment before it processes the first one. The Streaming Splitter pulls one fragment from the source, runs the sub-pipeline, then pulls the next. A multi-gigabyte NDJSON file or a long-running log stream fits in constant memory. The codec reads bytes lazily, so the source produces data only as fast as the sub-pipeline accepts it.
 
 Backpressure flows through the segment boundary. When the sub-pipeline pauses, the segment stops pulling from the stream, and the source stops producing. A `Stopped` outcome drops the underlying stream and returns the fragment exchange to the outer pipeline. The outer pipeline sees the same outcome shape it would from the eager Splitter.

@@ -3,7 +3,6 @@ use camel_api::body::Body;
 use camel_api::data_format::DataFormat;
 use camel_api::error::CamelError;
 use flate2::Compression;
-use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use serde::Deserialize;
 use std::io::{Read, Write};
@@ -78,6 +77,54 @@ impl GzipDataFormat {
     }
 }
 
+/// Outcome of a bounded single-member GZIP decode.
+pub(crate) struct FirstGzipMember {
+    /// Decompressed bytes of the first member, capped at the caller's
+    /// `take_limit`.
+    pub data: Vec<u8>,
+    /// True when the input holds bytes beyond the end of the first member
+    /// (a concatenated second member or any trailing data).
+    pub has_trailing_input: bool,
+}
+
+/// Bounded decode of the first GZIP member, shared by the standalone
+/// `GzipDataFormat::unmarshal` (which keeps its historical first-member
+/// semantics by ignoring [`FirstGzipMember::has_trailing_input`]) and the
+/// TAR.GZ stream splitter (which rejects multi-member input).
+///
+/// `take_limit` caps the emitted bytes at one past the caller's real bound so
+/// an overshoot stays detectable without materializing the full stream.
+///
+/// Trailing-input detection: `flate2::read::GzDecoder` wraps the reader in a
+/// `BufReader`, so the underlying cursor position over-reads. This helper
+/// constructs the same `bufread::GzDecoder<BufReader<Cursor>>` stack directly
+/// and subtracts the unconsumed buffer bytes from the cursor position, which
+/// yields the exact compressed size of the first member.
+pub(crate) fn decode_first_member(
+    raw: &[u8],
+    take_limit: u64,
+) -> Result<FirstGzipMember, std::io::Error> {
+    let decoder =
+        flate2::bufread::GzDecoder::new(std::io::BufReader::new(std::io::Cursor::new(raw)));
+    let mut data = Vec::new();
+    let mut limited = decoder.take(take_limit);
+    limited.read_to_end(&mut data)?;
+
+    // Unwrap the Take, the `bufread::GzDecoder`, and the `BufReader`. The
+    // cursor position includes bytes pulled into the buffer but not yet
+    // consumed by the decoder, so subtract the buffered remainder to get the
+    // exact compressed size of the first member.
+    let buf_reader = limited.into_inner().into_inner();
+    let buffered = buf_reader.buffer().len() as u64;
+    let position = buf_reader.into_inner().position();
+    let consumed = position.saturating_sub(buffered);
+
+    Ok(FirstGzipMember {
+        data,
+        has_trailing_input: consumed < raw.len() as u64,
+    })
+}
+
 impl DataFormat for GzipDataFormat {
     fn name(&self) -> &str {
         "gzip"
@@ -108,24 +155,24 @@ impl DataFormat for GzipDataFormat {
 
         // Read at most cap + 1 decompressed bytes so a decompression bomb
         // never materializes more than one byte past the limit, and so the
-        // overshoot is detectable before returning.
-        let limit = self.config.max_decompressed_size.saturating_add(1);
-        let mut limited = GzDecoder::new(std::io::Cursor::new(&raw)).take(limit);
-        let mut data = Vec::new();
-        limited.read_to_end(&mut data).map_err(|e| {
+        // overshoot is detectable before returning. Trailing input after the
+        // first member is ignored: the standalone format keeps its
+        // historical first-member semantics.
+        let take_limit = self.config.max_decompressed_size.saturating_add(1);
+        let first = decode_first_member(&raw, take_limit).map_err(|e| {
             CamelError::TypeConversionFailed(format!(
                 "GzipDataFormat::unmarshal invalid GZIP stream: {e}"
             ))
         })?;
 
-        if data.len() as u64 > self.config.max_decompressed_size {
+        if first.data.len() as u64 > self.config.max_decompressed_size {
             return Err(CamelError::TypeConversionFailed(format!(
                 "GzipDataFormat::unmarshal decompressed size exceeds max_decompressed_size {}",
                 self.config.max_decompressed_size
             )));
         }
 
-        Ok(Body::Bytes(Bytes::from(data)))
+        Ok(Body::Bytes(Bytes::from(first.data)))
     }
 }
 
@@ -240,6 +287,34 @@ mod tests {
         );
         let restored = tar_df.unmarshal(decompressed).unwrap();
         assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn gzip_data_format_first_member_behavior_is_unchanged() {
+        let df = GzipDataFormat::default();
+        let first = match df
+            .marshal(Body::Bytes(Bytes::from_static(b"first member payload")))
+            .unwrap()
+        {
+            Body::Bytes(b) => b.to_vec(),
+            other => panic!("expected Body::Bytes: {other:?}"),
+        };
+        let second = match df
+            .marshal(Body::Bytes(Bytes::from_static(b"second member payload")))
+            .unwrap()
+        {
+            Body::Bytes(b) => b.to_vec(),
+            other => panic!("expected Body::Bytes: {other:?}"),
+        };
+        let mut concatenated = first;
+        concatenated.extend_from_slice(&second);
+
+        // The standalone format keeps its historical first-member semantics:
+        // concatenated members decode to the first member's payload only.
+        let restored = df
+            .unmarshal(Body::Bytes(Bytes::from(concatenated)))
+            .unwrap();
+        assert_bytes(restored, b"first member payload");
     }
 
     #[test]

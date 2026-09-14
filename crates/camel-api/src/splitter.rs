@@ -91,6 +91,12 @@ pub enum StreamSplitFormat {
     Chunks,
     /// ZIP archive — materialized format, each entry becomes a fragment exchange.
     Zip,
+    /// TAR archive — materialized format, each regular-file entry becomes a fragment exchange.
+    Tar,
+    /// GZIP-compressed TAR archive — materialized format, each regular-file entry becomes a fragment exchange.
+    #[serde(rename = "tar.gz")]
+    #[ts(rename = "tar.gz")]
+    TarGz,
 }
 
 /// Configuration for splitting a streaming body into fragments.
@@ -143,7 +149,9 @@ impl StreamSplitConfig {
     /// - `batch_size` is `0`
     /// - `max_record_bytes` is `0`
     /// - `format` is [`Chunks`](StreamSplitFormat::Chunks) but `chunk_size` is `None`
-    /// - `format` is [`Zip`](StreamSplitFormat::Zip) but `chunk_size` is `Some(...)`
+    /// - `format` is a materialized archive format ([`Zip`](StreamSplitFormat::Zip),
+    ///   [`Tar`](StreamSplitFormat::Tar), [`TarGz`](StreamSplitFormat::TarGz)) but
+    ///   `chunk_size` is `Some(...)`
     /// - `chunk_size` is `Some(0)`
     pub fn validate(&self) -> Result<(), CamelError> {
         if self.batch_size == 0 {
@@ -161,12 +169,24 @@ impl StreamSplitConfig {
                 "stream split format=Chunks requires chunk_size".into(),
             ));
         }
-        // Zip+chunk_size check must come before the generic chunk_size zero/exceeds
-        // checks so that `Zip + Some(0)` yields the more specific error.
+        // Materialized archive formats split whole entries, not byte chunks,
+        // so chunk_size is meaningless. The Zip+chunk_size check must come
+        // before the generic chunk_size zero/exceeds checks so that
+        // `Zip + Some(0)` yields the more specific error.
         if self.format == StreamSplitFormat::Zip && self.chunk_size.is_some() {
             return Err(CamelError::Config(
                 "stream split format=Zip does not support chunk_size".into(),
             ));
+        }
+        if matches!(
+            self.format,
+            StreamSplitFormat::Tar | StreamSplitFormat::TarGz
+        ) && self.chunk_size.is_some()
+        {
+            return Err(CamelError::Config(format!(
+                "stream split format={:?} is a materialized archive format and does not support chunk_size",
+                self.format
+            )));
         }
         if let Some(cs) = self.chunk_size
             && cs == 0

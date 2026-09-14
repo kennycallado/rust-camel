@@ -51,7 +51,9 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `throttler` | Throttle | rate limiting | `src/lib.rs:47` (try_new returns Err on max_requests=0 or period=0 — Batch 1 D-M8) |
 | `validate` | Validate (predicate) | predicate validation wrapper | `src/lib.rs:48` |
 | `wire_tap` | WireTap | fire-and-forget side route with bounded-admission semaphore (max_concurrent cap, CallerRuns at bound) | `src/lib.rs:49` |
-| `zip_splitter` | ZipSplitter | archive splitting | `src/lib.rs:50` |
+| `zip_splitter` | ZipSplitter | archive splitting | `src/lib.rs:52` |
+| `tar_splitter` | TarSplitter | TAR/TAR.GZ archive splitting (entry-per-exchange, bounded caps per ADR-0038) | `src/lib.rs:48` |
+| `archive_splitter` | shared archive splitting core (`DuplicatePolicy`, caps, stream helpers; private module) | archive splitting | `src/lib.rs:2` |
 
 ## Structural EIP Segments
 
@@ -85,7 +87,7 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `ContentNegotiationProcessor`, `ContentNegotiationCheck` | stable | `pub use content_negotiation::{...}` | Header-only media negotiation gate; verdict injected as a check closure at compile time; never touches the body (REST strict 415/406). |
 | `ConvertBodyTo` | stable | `pub use convert_body::ConvertBodyTo` | Body conversion. |
 | `CsvConfig`, `CsvDataFormat`, `QuoteMode`, `RecordSeparator`, `CAMEL_CSV_HEADER_RECORD`, `JsonConfig`, `JsonDataFormat`, `XmlConfig`, `XmlDataFormat`, `ZipConfig`, `ZipDataFormat`, `builtin_data_format`, `builtin_data_format_with_config` | stable | `pub use data_format::{...}` | Built-in data formats. CSV added per ADR-0030. Configurable DoS caps per ADR-0038. |
-| `GzipConfig`, `GzipDataFormat`, `TarConfig`, `TarDataFormat`, `TarGzConfig`, `TarGzDataFormat` | stable | `pub use data_format::{...}`; `struct GzipConfig`, `struct GzipDataFormat`, `struct TarConfig`, `struct TarDataFormat`, `struct TarGzConfig`, `struct TarGzDataFormat` | Archive data formats resolved by the built-in factory as `tar`, `gzip`, and `tar.gz`, with bounded input/output caps per ADR-0038. `tar` marshals one `payload` regular-file entry and unmarshals the first regular-file entry fully in memory (`allow_multi_entry` policy; non-regular entries are never followed and no filesystem path is accessed). `gzip` is a standalone bounded GZIP format over materialized bytes. `tar.gz` applies the `tar` entry policy to a gzip-compressed TAR stream and is wire-compatible with composed `tar` then `gzip` in both directions. No TAR splitter and no disk extraction; `zip_splitter` is unchanged. |
+| `GzipConfig`, `GzipDataFormat`, `TarConfig`, `TarDataFormat`, `TarGzConfig`, `TarGzDataFormat` | stable | `pub use data_format::{...}`; `struct GzipConfig`, `struct GzipDataFormat`, `struct TarConfig`, `struct TarDataFormat`, `struct TarGzConfig`, `struct TarGzDataFormat` | Archive data formats resolved by the built-in factory as `tar`, `gzip`, and `tar.gz`, with bounded input/output caps per ADR-0038. `tar` marshals one `payload` regular-file entry and unmarshals the first regular-file entry fully in memory (`allow_multi_entry` policy; non-regular entries are never followed and no filesystem path is accessed). `gzip` is a standalone bounded GZIP format over materialized bytes. `tar.gz` applies the `tar` entry policy to a gzip-compressed TAR stream and is wire-compatible with composed `tar` then `gzip` in both directions. The `tar_splitter` emits one exchange per regular-file entry (`TarSplitConfig`, bounded caps, `DuplicatePolicy` default `AllowWithIndex`); no disk extraction anywhere. |
 | `DelayerService` | stable | `pub use delayer::DelayerService` | Delay EIP. |
 | `CatchClause`, `CatchMatcher`, `DoTryService` | stable | `pub use do_try::{...}` | doTry Tower service. |
 | `CatchClauseSegment`, `DoTrySegment`, `FinallyClauseSegment` | stable | `pub use do_try_segment::{...}` | Outcome-aware doTry segment. |

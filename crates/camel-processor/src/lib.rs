@@ -1,4 +1,5 @@
 pub mod aggregator;
+mod archive_splitter;
 pub mod cache_eip;
 pub mod choice;
 pub mod circuit_breaker;
@@ -44,6 +45,7 @@ pub mod stream_cache;
 pub mod stream_codec;
 pub mod streaming_split_segment;
 pub mod streaming_splitter;
+pub mod tar_splitter;
 pub mod throttler;
 pub mod validate;
 pub mod wire_tap;

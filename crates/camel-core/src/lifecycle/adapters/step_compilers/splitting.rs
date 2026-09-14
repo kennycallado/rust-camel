@@ -26,9 +26,13 @@ use crate::lifecycle::adapters::step_resolution::{await_eval, compile_language_e
 use crate::lifecycle::application::route_definition::BuilderStep;
 
 /// Collect a byte stream into a single `Bytes` value, enforcing a size limit.
+///
+/// `archive_label` names the archive in the cap-violation error (e.g.
+/// "ZIP archive", "TAR archive").
 async fn collect_stream_with_limit(
     stream: futures::stream::BoxStream<'static, Result<Bytes, CamelError>>,
     max_bytes: u64,
+    archive_label: &str,
 ) -> Result<Bytes, CamelError> {
     let mut stream = stream;
     let mut buf = Vec::new();
@@ -37,7 +41,7 @@ async fn collect_stream_with_limit(
         let new_len = buf.len().saturating_add(chunk.len());
         if new_len as u64 > max_bytes {
             return Err(CamelError::TypeConversionFailed(format!(
-                "ZIP archive exceeds max compressed size: {max_bytes}"
+                "{archive_label} exceeds max compressed size: {max_bytes}"
             )));
         }
         buf.extend_from_slice(&chunk);
@@ -47,7 +51,12 @@ async fn collect_stream_with_limit(
 
 /// Extract bytes from a materialized body (Bytes or Text), creating a parent exchange
 /// with an empty body.
-fn extract_bytes_from_body(exchange: &Exchange) -> Result<(Bytes, Exchange), CamelError> {
+///
+/// `archive_label` names the archive in the unsupported-body error (e.g. "ZIP", "TAR").
+fn extract_bytes_from_body(
+    exchange: &Exchange,
+    archive_label: &str,
+) -> Result<(Bytes, Exchange), CamelError> {
     match &exchange.input.body {
         Body::Bytes(b) => {
             let bytes = b.clone();
@@ -61,9 +70,9 @@ fn extract_bytes_from_body(exchange: &Exchange) -> Result<(Bytes, Exchange), Cam
             parent.input.body = Body::Empty;
             Ok((bytes, parent))
         }
-        _ => Err(CamelError::ProcessorError(
-            "ZIP split requires Body::Bytes, Body::Text, or Body::Stream".into(),
-        )),
+        _ => Err(CamelError::ProcessorError(format!(
+            "{archive_label} split requires Body::Bytes, Body::Text, or Body::Stream"
+        ))),
     }
 }
 
@@ -185,6 +194,7 @@ impl StepCompiler for SplittingCompiler {
 
                 let config_clone = stream_config.clone();
                 let zip_config = camel_processor::zip_splitter::ZipSplitConfig::default();
+                let tar_config = camel_processor::tar_splitter::TarSplitConfig::default();
                 let expression: camel_api::StreamingSplitExpression = Arc::new(
                     move |exchange: Exchange| {
                         let config = config_clone.clone();
@@ -209,6 +219,7 @@ impl StepCompiler for SplittingCompiler {
                                                 match collect_stream_with_limit(
                                                     stream,
                                                     zip_config.max_compressed_size,
+                                                    "ZIP archive",
                                                 )
                                                 .await
                                                 {
@@ -237,7 +248,7 @@ impl StepCompiler for SplittingCompiler {
                                             }
                                         })
                                     }
-                                    _ => match extract_bytes_from_body(&exchange) {
+                                    _ => match extract_bytes_from_body(&exchange, "ZIP") {
                                         Ok((bytes, mut parent)) => {
                                             parent.set_property(
                                                 "CamelSplitMaterialized",
@@ -255,6 +266,99 @@ impl StepCompiler for SplittingCompiler {
                                             Box::pin(futures::stream::once(async move { Err(e) }))
                                         }
                                     },
+                                }
+                            }
+                            StreamSplitFormat::Tar | StreamSplitFormat::TarGz => {
+                                let tar_config = tar_config.clone();
+                                let gz = matches!(config.format, StreamSplitFormat::TarGz);
+                                match &exchange.input.body {
+                                    Body::Stream(sb) => {
+                                        let sb = sb.clone();
+                                        let mut parent = exchange.clone();
+                                        parent.input.body = Body::Empty;
+                                        let stream = match take_stream(&sb) {
+                                            Ok(s) => s,
+                                            Err(e) => {
+                                                return Box::pin(futures::stream::once(
+                                                    async move { Err(e) },
+                                                ));
+                                            }
+                                        };
+                                        Box::pin(async_stream::stream! {
+                                            let label = if gz {
+                                                "TAR.GZ archive"
+                                            } else {
+                                                "TAR archive"
+                                            };
+                                            let collected =
+                                                match collect_stream_with_limit(
+                                                    stream,
+                                                    tar_config.max_compressed_size,
+                                                    label,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(b) => b,
+                                                    Err(e) => {
+                                                        yield Err(e);
+                                                        return;
+                                                    }
+                                                };
+                                            parent.set_property(
+                                                "CamelSplitMaterialized",
+                                                Value::Bool(true),
+                                            );
+                                            parent.set_property(
+                                                "CamelSplitMaterializedBytes",
+                                                Value::from(collected.len() as u64),
+                                            );
+                                            let mut result_stream = if gz {
+                                                camel_processor::tar_splitter::split_tar_gz_bytes(
+                                                    parent,
+                                                    collected,
+                                                    tar_config,
+                                                )
+                                            } else {
+                                                camel_processor::tar_splitter::split_tar_bytes(
+                                                    parent,
+                                                    collected,
+                                                    tar_config,
+                                                )
+                                            };
+                                            while let Some(item) = result_stream.next().await {
+                                                yield item;
+                                            }
+                                        })
+                                    }
+                                    _ => {
+                                        let label = if gz { "TAR.GZ" } else { "TAR" };
+                                        match extract_bytes_from_body(&exchange, label) {
+                                            Ok((bytes, mut parent)) => {
+                                                parent.set_property(
+                                                    "CamelSplitMaterialized",
+                                                    Value::Bool(true),
+                                                );
+                                                parent.set_property(
+                                                    "CamelSplitMaterializedBytes",
+                                                    Value::from(bytes.len() as u64),
+                                                );
+                                                if gz {
+                                                    camel_processor::tar_splitter::split_tar_gz_bytes(
+                                                        parent, bytes, tar_config,
+                                                    )
+                                                } else {
+                                                    camel_processor::tar_splitter::split_tar_bytes(
+                                                        parent, bytes, tar_config,
+                                                    )
+                                                }
+                                            }
+                                            Err(e) => {
+                                                Box::pin(futures::stream::once(
+                                                    async move { Err(e) },
+                                                ))
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             _ => {
@@ -736,6 +840,182 @@ mod tests {
                 assert!(msg.contains("stream"), "message: {msg}");
                 assert!(
                     msg.contains("add an unmarshal step before split"),
+                    "message: {msg}"
+                );
+            }
+            other => panic!(
+                "expected PipelineOutcome::Failed, got success={}",
+                other.is_success()
+            ),
+        }
+    }
+
+    /// Build one 512-byte ustar header with a valid checksum for a regular
+    /// file entry, mirroring the shape produced by the `tar` crate.
+    fn tar_header(name: &str, size: u64) -> [u8; 512] {
+        let mut h = [0u8; 512];
+        h[..name.len()].copy_from_slice(name.as_bytes());
+        h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+        // Checksum field must be spaces while the checksum is computed.
+        h[148..156].copy_from_slice(b"        ");
+        h[156] = b'0'; // regular file
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        h
+    }
+
+    /// Assemble regular-file entries and the two-block end marker into an
+    /// in-memory TAR archive.
+    fn tar_archive(entries: &[(&str, &[u8])]) -> Bytes {
+        let mut buf = Vec::new();
+        for (name, data) in entries {
+            buf.extend_from_slice(&tar_header(name, data.len() as u64));
+            buf.extend_from_slice(data);
+            let pad = (512 - data.len() % 512) % 512;
+            buf.resize(buf.len() + pad, 0);
+        }
+        buf.extend_from_slice(&[0u8; 1024]);
+        Bytes::from(buf)
+    }
+
+    /// Compile a `DeclarativeStreamSplit` step for `format` through the full
+    /// step-compiler registry and return the resulting segment.
+    fn compile_stream_split(
+        ctx: &CompilationContext<'_>,
+        registry: &StepCompilerRegistry,
+        format: StreamSplitFormat,
+    ) -> camel_api::OutcomeSegment {
+        let split_step = BuilderStep::DeclarativeStreamSplit {
+            stream_config: camel_api::StreamSplitConfig {
+                format,
+                ..Default::default()
+            },
+            aggregation: camel_api::splitter::AggregationStrategy::LastWins,
+            stop_on_exception: false,
+            steps: vec![],
+        };
+        match registry
+            .compile_step(split_step, 0, ctx)
+            .expect("compilation should succeed")
+            .expect("should match DeclarativeStreamSplit")
+        {
+            CompiledStep::Segment { segment, .. } => segment,
+            other => panic!("Expected CompiledStep::Segment, got {other:?}"),
+        }
+    }
+
+    /// Assert the aggregated outcome is the last TAR fragment with the
+    /// splitter's entry metadata and the materialized marker property.
+    fn assert_last_tar_fragment(ex: &Exchange) {
+        assert_eq!(
+            ex.input
+                .headers
+                .get(camel_processor::tar_splitter::CAMEL_TAR_ENTRY_NAME),
+            Some(&Value::String("b.txt".to_string()))
+        );
+        assert_eq!(
+            ex.input
+                .headers
+                .get(camel_processor::tar_splitter::CAMEL_TAR_ENTRY_INDEX),
+            Some(&Value::from(1u64))
+        );
+        match &ex.input.body {
+            Body::Bytes(b) => assert_eq!(b.as_ref(), b"world"),
+            other => panic!("expected Body::Bytes, got {other:?}"),
+        }
+        assert_eq!(
+            ex.property("CamelSplitMaterialized"),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[tokio::test]
+    async fn tar_stream_split_compiles_from_bytes_and_stream() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+        let reg = build_registry();
+
+        let tar_bytes = tar_archive(&[("a.txt", b"hello"), ("b.txt", b"world")]);
+
+        // -- Byte body: TAR splitter selected on the materialized path. --
+        let mut segment = compile_stream_split(&ctx, &reg, StreamSplitFormat::Tar);
+        let exchange = Exchange::new(camel_api::Message::new(Body::Bytes(tar_bytes.clone())));
+        let outcome = segment.run(exchange).await;
+        match outcome {
+            PipelineOutcome::Completed(ex) => assert_last_tar_fragment(&ex),
+            other => panic!(
+                "expected PipelineOutcome::Completed, got success={}",
+                other.is_success()
+            ),
+        }
+
+        // -- Stream body: TAR splitter selected on the bounded stream path.
+        //    Chunks are misaligned with the 512-byte record size so the
+        //    collection must reassemble them before splitting. --
+        let chunks = futures::stream::iter(vec![
+            Ok(tar_bytes.slice(..1000)),
+            Ok(tar_bytes.slice(1000..)),
+        ]);
+        let mut segment = compile_stream_split(&ctx, &reg, StreamSplitFormat::Tar);
+        let exchange = Exchange::new(camel_api::Message::new(Body::Stream(
+            camel_api::StreamBody {
+                stream: Arc::new(tokio::sync::Mutex::new(Some(Box::pin(chunks)))),
+                metadata: camel_api::StreamMetadata::default(),
+            },
+        )));
+        let outcome = segment.run(exchange).await;
+        match outcome {
+            PipelineOutcome::Completed(ex) => assert_last_tar_fragment(&ex),
+            other => panic!(
+                "expected PipelineOutcome::Completed, got success={}",
+                other.is_success()
+            ),
+        }
+
+        // -- Unknown format remains rejected: TAR is a materialized archive
+        //    format, so the incremental codec path must not accept it. --
+        let err =
+            match camel_processor::stream_codec::resolve_incremental_codec(&StreamSplitFormat::Tar)
+            {
+                Err(e) => e,
+                Ok(_) => panic!("Tar is a materialized archive format, not an incremental codec"),
+            };
+        assert!(
+            err.to_string().contains("materialized archive format"),
+            "message: {err}"
+        );
+
+        // -- TAR.GZ with an unsupported body fails closed instead of
+        //    silently dispatching. --
+        let mut segment = compile_stream_split(&ctx, &reg, StreamSplitFormat::TarGz);
+        let exchange = Exchange::new(camel_api::Message::new(Body::Json(Value::Null)));
+        let outcome = segment.run(exchange).await;
+        match outcome {
+            PipelineOutcome::Failed(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("TAR.GZ split requires Body::Bytes, Body::Text, or Body::Stream"),
                     "message: {msg}"
                 );
             }

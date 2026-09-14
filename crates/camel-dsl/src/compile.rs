@@ -4754,6 +4754,53 @@ mod tests {
     }
 
     #[test]
+    fn compile_stream_split_tar_formats_to_canonical() {
+        for (format, expected) in [
+            (camel_api::StreamSplitFormat::Tar, "tar"),
+            (camel_api::StreamSplitFormat::TarGz, "tar.gz"),
+        ] {
+            let route = DeclarativeRoute {
+                from: "direct:start".into(),
+                route_id: "tar-canonical".into(),
+                auto_startup: true,
+                startup_order: 0,
+                concurrency: None,
+                error_handler: None,
+                circuit_breaker: None,
+                security_policy: None,
+                unit_of_work: None,
+                steps: vec![DeclarativeStep::Split(SplitStepDef {
+                    expression: SplitExpressionDef::Stream(camel_api::StreamSplitConfig {
+                        format: format.clone(),
+                        max_record_bytes: 1024 * 1024,
+                        batch_size: 1,
+                        chunk_size: None,
+                        include_origin: true,
+                    }),
+                    aggregation: SplitAggregationDef::LastWins,
+                    parallel: false,
+                    parallel_limit: None,
+                    stop_on_exception: false,
+                    steps: vec![],
+                })],
+            };
+            let (spec, _) = compile_declarative_route_to_canonical(route, false).unwrap();
+            let CanonicalStepSpec::Split { expression, .. } = &spec.steps[0] else {
+                panic!("expected Split canonical step");
+            };
+            let CanonicalSplitExpressionSpec::Stream(config) = expression else {
+                panic!("expected Stream canonical expression");
+            };
+            assert_eq!(config.format, format);
+            let json = serde_json::to_string(&spec).unwrap();
+            assert!(
+                json.contains(&format!("\"format\":\"{expected}\"")),
+                "canonical JSON must preserve '{expected}', got {json}"
+            );
+        }
+    }
+
+    #[test]
     fn compile_declarative_route_to_canonical_rejects_error_handler() {
         let route = DeclarativeRoute {
             from: "direct:start".into(),

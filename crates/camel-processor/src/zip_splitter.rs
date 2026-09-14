@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 use std::pin::Pin;
@@ -10,11 +10,19 @@ use tokio::sync::mpsc;
 use camel_api::{Body, CamelError, Exchange, Message, StreamingSplitExpression, Value};
 use futures::Stream;
 
+use crate::archive_splitter::{
+    DEFAULT_MAX_PATH_LENGTH, next_free_indexed_name, validate_entry_path,
+};
+
+/// Duplicate-name policy shared with the TAR splitter; re-exported to
+/// preserve the historical public path
+/// `camel_processor::zip_splitter::DuplicatePolicy`.
+pub use crate::archive_splitter::DuplicatePolicy;
+
 const DEFAULT_MAX_ENTRIES: usize = 10000;
 const DEFAULT_MAX_TOTAL_DECOMPRESSED_SIZE: u64 = 1_073_741_824;
 const DEFAULT_MAX_PER_ENTRY_SIZE: u64 = 512 * 1024 * 1024;
 const DEFAULT_MAX_COMPRESSED_SIZE: u64 = 1_073_741_824;
-const DEFAULT_MAX_PATH_LENGTH: usize = 4096;
 const DEFAULT_CHANNEL_CAPACITY: usize = 2;
 
 pub const CAMEL_ZIP_ENTRY_NAME: &str = "CamelZipEntryName";
@@ -25,12 +33,6 @@ pub const CAMEL_ZIP_ENTRY_COMPRESSED_SIZE: &str = "CamelZipEntryCompressedSize";
 pub const CAMEL_ZIP_ENTRY_CRC32: &str = "CamelZipEntryCrc32";
 pub const CAMEL_ZIP_ENTRY_IS_DIRECTORY: &str = "CamelZipEntryIsDirectory";
 pub const CAMEL_ZIP_ENTRY_COMPRESSION: &str = "CamelZipEntryCompression";
-
-#[derive(Debug, Clone)]
-pub enum DuplicatePolicy {
-    AllowWithIndex,
-    Reject,
-}
 
 #[derive(Debug, Clone)]
 pub struct ZipSplitConfig {
@@ -57,53 +59,6 @@ impl Default for ZipSplitConfig {
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
         }
     }
-}
-
-fn validate_entry_path(path: &str, max_length: usize) -> Result<String, CamelError> {
-    if path.len() > max_length {
-        return Err(CamelError::TypeConversionFailed(format!(
-            "ZIP entry path exceeds max length: {} > {}",
-            path.len(),
-            max_length
-        )));
-    }
-
-    if path.contains('\0') {
-        return Err(CamelError::TypeConversionFailed(
-            "ZIP entry path contains NUL byte".to_string(),
-        ));
-    }
-
-    if Path::new(path).is_absolute() {
-        return Err(CamelError::TypeConversionFailed(format!(
-            "ZIP entry path is absolute: {path}"
-        )));
-    }
-
-    for component in Path::new(path).components() {
-        if let std::path::Component::ParentDir = component {
-            return Err(CamelError::TypeConversionFailed(format!(
-                "ZIP entry path contains '..' traversal: {path}"
-            )));
-        }
-    }
-
-    if path.contains('\\') {
-        return Err(CamelError::TypeConversionFailed(format!(
-            "ZIP entry path contains backslash: {path}"
-        )));
-    }
-
-    if let Some(c) = path.chars().next()
-        && c.is_ascii_alphabetic()
-        && path.chars().nth(1) == Some(':')
-    {
-        return Err(CamelError::TypeConversionFailed(format!(
-            "ZIP entry path contains Windows drive prefix: {path}"
-        )));
-    }
-
-    Ok(path.to_string())
 }
 
 struct ZipEntryData {
@@ -151,15 +106,23 @@ pub fn split_zip_bytes(
 
         let total_decompressed = Arc::new(AtomicU64::new(0));
         let entry_count = Arc::new(AtomicUsize::new(0));
-        let seen_names: Arc<std::sync::Mutex<HashSet<String>>> =
-            Arc::new(std::sync::Mutex::new(HashSet::new()));
+        // Entry name -> occurrence count; drives both duplicate policies and
+        // mirrors the TAR splitter's bookkeeping exactly.
+        let seen_names: Arc<std::sync::Mutex<HashMap<String, usize>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        // Names already emitted (original or indexed). The occurrence
+        // counter alone cannot guarantee uniqueness — a literal entry can
+        // occupy an indexed name first — so this set is the collision
+        // authority, mirroring the TAR splitter.
+        let emitted_names: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
         let max_entries = config.max_entries;
         let max_per_entry = config.max_per_entry_size;
         let max_total = config.max_total_decompressed_size;
         let max_path_len = config.max_path_length;
         let allow_dirs = config.allow_empty_directories;
-        let dup_policy = config.duplicate_names_policy.clone();
+        let dup_policy = config.duplicate_names_policy;
 
         tokio::task::spawn_blocking(move || {
             let reader = std::io::Cursor::new(bytes);
@@ -187,7 +150,7 @@ pub fn split_zip_bytes(
                 let raw_name = entry.name().to_string();
                 let is_dir = entry.is_dir();
 
-                let validated = match validate_entry_path(&raw_name, max_path_len) {
+                let mut validated = match validate_entry_path(&raw_name, max_path_len, "ZIP") {
                     Ok(p) => p,
                     Err(e) => {
                         let _ = tx.blocking_send(Err(e));
@@ -268,15 +231,51 @@ pub fn split_zip_bytes(
                 match &dup_policy {
                     DuplicatePolicy::Reject => {
                         let mut seen = seen_names.lock().unwrap_or_else(|e| e.into_inner());
-                        if seen.contains(&validated) {
+                        if seen.contains_key(&validated) {
                             let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
                                 format!("Duplicate ZIP entry name: {validated}"),
                             )));
                             return;
                         }
-                        seen.insert(validated.clone());
+                        seen.insert(validated.clone(), 0);
+                        emitted_names
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(validated.clone());
                     }
-                    DuplicatePolicy::AllowWithIndex => {}
+                    DuplicatePolicy::AllowWithIndex => {
+                        let mut seen = seen_names.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut emitted_set =
+                            emitted_names.lock().unwrap_or_else(|e| e.into_inner());
+                        let occurrences = seen.entry(validated.clone()).or_insert(0);
+                        let start = if *occurrences > 0 {
+                            *occurrences
+                        } else if emitted_set.contains(&validated) {
+                            1
+                        } else {
+                            0
+                        };
+                        if start > 0 {
+                            // Identical to the TAR splitter: later duplicates
+                            // and literal collisions with already-emitted
+                            // indexed names get a deterministic collision-free
+                            // index inserted before the extension, and the
+                            // suffix grows the name, so the path-length cap
+                            // stays authoritative for indexed names too.
+                            let (candidate, used) =
+                                next_free_indexed_name(&validated, start, &emitted_set);
+                            validated =
+                                match validate_entry_path(&candidate, max_path_len, "ZIP") {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        let _ = tx.blocking_send(Err(e));
+                                        return;
+                                    }
+                                };
+                            *occurrences = (*occurrences).max(used + 1);
+                        }
+                        emitted_set.insert(validated.clone());
+                    }
                 }
 
                 if tx
@@ -392,6 +391,7 @@ pub fn zip_splitter(config: ZipSplitConfig) -> StreamingSplitExpression {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive_splitter::test_util::make_zip_raw;
     use futures::StreamExt;
     use std::io::Write;
 
@@ -564,10 +564,14 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    /// Under `Reject`, unique names always pass. True duplicate names never
+    /// reach the splitter — the `zip` reader indexes the central directory by
+    /// name and collapses them — so the reject branch is defense-in-depth
+    /// shared with the TAR splitter (see
+    /// `archive_splitter::indexed_duplicate_name` and the cross-format parity
+    /// test in `tar_splitter`).
     #[tokio::test]
     async fn test_zip_split_duplicate_names_reject() {
-        // NOTE: zip crate v2 prevents creating archives with duplicate entry names,
-        // so this test validates that the Reject policy works correctly with unique names.
         let files: Vec<(&str, &[u8])> = vec![("a.txt", b"first"), ("b.txt", b"second")];
         let zip_data = make_zip_with_files(files);
         let config = ZipSplitConfig {
@@ -577,6 +581,45 @@ mod tests {
         let results = collect_entries(config, zip_data).await;
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|r| r.is_ok()));
+    }
+    /// Boundary guard: a hand-built ZIP carrying true duplicate names has
+    /// them collapsed by the `zip` reader (first position, last entry's data
+    /// wins) before the splitter sees it, so `AllowWithIndex` observes only
+    /// unique names and never mangles. If a reader upgrade starts surfacing
+    /// duplicates, this test fails and the shared index-mangling branch
+    /// becomes live end-to-end.
+    #[tokio::test]
+    async fn test_zip_split_raw_duplicate_entries_collapse_at_reader() {
+        let zip_data = make_zip_raw(&[
+            ("dup.txt", b"first"),
+            ("other.txt", b"mid"),
+            ("dup.txt", b"second"),
+        ]);
+        let results = collect_entries(ZipSplitConfig::default(), zip_data).await;
+        assert_eq!(
+            results.len(),
+            2,
+            "duplicate names must collapse at the reader: {results:?}"
+        );
+        let first = results[0].as_ref().unwrap();
+        assert_eq!(
+            first.input.headers.get(CAMEL_ZIP_ENTRY_PATH),
+            Some(&Value::String("dup.txt".to_string())),
+            "the first position wins with the surviving name unmangled"
+        );
+        match &first.input.body {
+            Body::Bytes(b) => assert_eq!(b.as_ref(), b"second", "last entry's data wins"),
+            other => panic!("expected Body::Bytes, got {other:?}"),
+        }
+        assert_eq!(
+            results[1]
+                .as_ref()
+                .unwrap()
+                .input
+                .headers
+                .get(CAMEL_ZIP_ENTRY_PATH),
+            Some(&Value::String("other.txt".to_string()))
+        );
     }
 
     #[tokio::test]
@@ -624,5 +667,53 @@ mod tests {
         let results = collect_entries(ZipSplitConfig::default(), buf).await;
         let has_error = results.iter().any(|r| r.is_err());
         assert!(has_error);
+    }
+
+    /// Regression guard for the shared-validator extraction: safe names are
+    /// accepted and unsafe names are rejected with the exact pre-refactor
+    /// ZIP error text.
+    #[tokio::test]
+    async fn zip_path_validation_behavior_is_unchanged() {
+        // Safe relative name is accepted with its path preserved.
+        let safe = collect_entries(
+            ZipSplitConfig::default(),
+            make_zip_with_files(vec![("docs/readme.txt", b"ok")]),
+        )
+        .await;
+        assert_eq!(safe.len(), 1);
+        let ex = safe[0].as_ref().unwrap();
+        assert_eq!(
+            ex.input.headers.get(CAMEL_ZIP_ENTRY_PATH),
+            Some(&Value::String("docs/readme.txt".to_string()))
+        );
+
+        // Absolute and traversal names are rejected with identical error text.
+        let cases = [
+            ("/etc/passwd", "ZIP entry path is absolute: /etc/passwd"),
+            (
+                "../etc/passwd",
+                "ZIP entry path contains '..' traversal: ../etc/passwd",
+            ),
+        ];
+        for (name, expected) in cases {
+            let results = collect_entries(
+                ZipSplitConfig::default(),
+                make_zip_with_files(vec![(name, b"oops")]),
+            )
+            .await;
+            assert_eq!(
+                results.len(),
+                1,
+                "expected exactly the validation error for {name}"
+            );
+            let err = results[0]
+                .as_ref()
+                .expect_err(&format!("'{name}' must be rejected"))
+                .to_string();
+            assert!(
+                err.contains(expected),
+                "error text mismatch for {name}: {err}"
+            );
+        }
     }
 }

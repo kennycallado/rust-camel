@@ -1051,6 +1051,8 @@ pub(crate) fn route_step_to_declarative_step(
                         Some("lines") => StreamSplitFormat::Lines,
                         Some("chunks") => StreamSplitFormat::Chunks,
                         Some("zip") => StreamSplitFormat::Zip,
+                        Some("tar") => StreamSplitFormat::Tar,
+                        Some("tar.gz") => StreamSplitFormat::TarGz,
                         Some("auto") | None => StreamSplitFormat::Auto,
                         Some(other) => {
                             return Err(CamelError::RouteError(format!(
@@ -4594,6 +4596,76 @@ routes:
                         config.format,
                         camel_api::StreamSplitFormat::Zip,
                         "expected Zip format"
+                    );
+                    assert_eq!(config.max_record_bytes, 1024 * 1024);
+                    assert_eq!(config.batch_size, 1);
+                    assert_eq!(config.chunk_size, None);
+                    assert!(config.include_origin);
+                }
+                other => panic!("expected Stream expression, got {other:?}"),
+            },
+            other => panic!("expected Split step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_streaming_true_with_format_tar_produces_tar_def() {
+        let yaml = r#"
+routes:
+  - id: "tar-split-test"
+    from: "direct:start"
+    steps:
+      - split:
+          streaming: true
+          stream:
+            format: tar
+          steps:
+            - to: "mock:out"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let step = &routes[0].steps[0];
+        match step {
+            DeclarativeStep::Split(def) => match &def.expression {
+                SplitExpressionDef::Stream(config) => {
+                    assert_eq!(
+                        config.format,
+                        camel_api::StreamSplitFormat::Tar,
+                        "expected Tar format"
+                    );
+                    assert_eq!(config.max_record_bytes, 1024 * 1024);
+                    assert_eq!(config.batch_size, 1);
+                    assert_eq!(config.chunk_size, None);
+                    assert!(config.include_origin);
+                }
+                other => panic!("expected Stream expression, got {other:?}"),
+            },
+            other => panic!("expected Split step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_streaming_true_with_format_tar_gz_produces_tar_gz_def() {
+        let yaml = r#"
+routes:
+  - id: "tar-gz-split-test"
+    from: "direct:start"
+    steps:
+      - split:
+          streaming: true
+          stream:
+            format: tar.gz
+          steps:
+            - to: "mock:out"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let step = &routes[0].steps[0];
+        match step {
+            DeclarativeStep::Split(def) => match &def.expression {
+                SplitExpressionDef::Stream(config) => {
+                    assert_eq!(
+                        config.format,
+                        camel_api::StreamSplitFormat::TarGz,
+                        "expected TarGz format"
                     );
                     assert_eq!(config.max_record_bytes, 1024 * 1024);
                     assert_eq!(config.batch_size, 1);
