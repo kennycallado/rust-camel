@@ -62,9 +62,10 @@ password-only userinfo, rc-u4jk6), query rendered `?[redacted]`, same
 
 #### Scenario: at-sign outside the authority window is not suppressed
 
-- **GIVEN** a string that fails `url::Url::parse` where every `@` lies
-  after the authority window, such as `http://host:99999/x@y`, or a
+- **GIVEN** a string whose `@` lies outside the authority window, such as
+  `http://host:99999/x@y` (fails `url::Url::parse` on the port), or a
   scheme-only string like `mailto:user@example.com` with no `//` at all
+  (parses; the render contract is byte-identical under either arm)
 - **WHEN** the string passes through the diagnostics redaction path
 - **THEN** the string is not suppressed to the sentinel — it renders under
   the query-redaction and cap rules only
