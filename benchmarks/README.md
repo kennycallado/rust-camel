@@ -22,6 +22,17 @@ bench run --scenarios=<scenario>[,<scenario>...] [flags...]
 `bench run` passes through to the harness with identical flags and
 environment. See `bench help` for subcommands.
 
+For the full canonical record (all scenarios AND all metrics) use:
+
+```bash
+bench run-all --metric=m1+m2+m3+m4
+```
+
+`run-all` without `--metric` defaults to `m1+m2`: every scenario runs,
+but the sustained-throughput (m3) and memory-growth (m4) arms are
+silently skipped. The record standard requires all four — always pass
+the flag. See [runner/RUNBOOK.md](runner/RUNBOOK.md) §4.
+
 ## Where records live
 
 Completed runs land in `records/`, one directory per run, indexed by date

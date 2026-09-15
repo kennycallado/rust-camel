@@ -70,9 +70,15 @@ native cell fails.
 ## 4. The run — one command
 
 ```console
-$ bash benchmarks/bench run-all
+$ bash benchmarks/bench run-all --metric=m1+m2+m3+m4
 ```
 
+- **`--metric` is REQUIRED for a full record.** The harness default
+  is `m1+m2` (run.sh METRIC default): a bare `run-all` covers every
+  SCENARIO but silently skips the m3 (sustained throughput) and m4
+  (memory-growth) arms. The sealed record standard (see
+  `records/SCHEMA.md`) carries all four metrics — launch without the
+  flag and the run is partial (rc-awyoj).
 - **Coverage**: EVERY active scenario × every contender
   (auto-discovery of `benchmarks/scenarios/` minus `spike-*` and
   unregistered dirs like `multi-step`). No subsets, no env vars —
