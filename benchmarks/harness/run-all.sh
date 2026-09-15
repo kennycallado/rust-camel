@@ -252,7 +252,7 @@ exec docker run --rm \
     -e QUARKUS_NATIVE_BUILDER_IMAGE \
     -e BENCH_SEED="$ORDER_SEED" \
     -e BENCH_RESULTS_ROOT="$OUT_ROOT" \
-    -e BENCH_SCRATCH_DIR="$OUT_ROOT/scratch" \
+    -e BENCH_SCRATCH_DIR="${BENCH_SCRATCH_DIR:-$OUT_ROOT/scratch}" \
     "${DEBUG_DROP_CELL_ARGS[@]}" \
     -e NATIVE_ZLIB_LINK="" \
     -e GRADLE_BIN=/opt/gradle/bin/gradle \
