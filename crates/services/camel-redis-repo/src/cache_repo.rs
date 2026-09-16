@@ -248,6 +248,12 @@ impl CacheRepository for RedisCacheRepository {
         self.peek_stale_entry(key).await
     }
 
+    async fn peek_row_silent(&self, key: &str) -> Result<Option<CacheEntry>, CamelError> {
+        // Raw entry fetch: get_entry performs no hit/miss accounting
+        // (trait contract — maintenance reads are invisible to stats).
+        self.get_entry(key).await
+    }
+
     async fn invalidate(&self, key: &str) -> Result<(), CamelError> {
         self.invalidate_key(key).await
     }

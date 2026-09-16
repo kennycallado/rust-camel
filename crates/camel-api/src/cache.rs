@@ -95,6 +95,19 @@ pub trait CacheRepository: Send + Sync + std::fmt::Debug + 'static {
     /// Returns `Ok(None)` if the key is absent or not yet expired.
     async fn peek_stale(&self, key: &str) -> Result<Option<CacheEntry>, CamelError>;
 
+    /// Maintenance-only row peek: return the stored row for `key`
+    /// regardless of expiry WITHOUT mutating any observable statistic
+    /// (`hits`, `misses`, `peek_stale_served`). For internal
+    /// bookkeeping such as the disk-offload decorator's predecessor
+    /// reclaim; application reads must use `get` or `peek_stale`.
+    ///
+    /// Default `Ok(None)`: backends without silent row access report
+    /// "no row", and callers fall back to their asynchronous backstop
+    /// (the sweeper) — never to a counted path.
+    async fn peek_row_silent(&self, _key: &str) -> Result<Option<CacheEntry>, CamelError> {
+        Ok(None)
+    }
+
     /// Remove a specific key from the cache.
     async fn invalidate(&self, key: &str) -> Result<(), CamelError>;
 

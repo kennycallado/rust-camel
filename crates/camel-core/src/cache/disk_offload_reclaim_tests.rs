@@ -293,12 +293,14 @@ async fn same_content_next_second_reclaims_old_blob() {
     assert_eq!(got.bytes, payload, "payload must round-trip");
 }
 
-/// An expired-but-retained row is invisible to the backend's `get`, so an
-/// overwrite must NOT eagerly reclaim its blob — the sweeper owns it at
-/// its death epoch.
-/// Expected: PASS now (no reclaim yet) and after the implementation.
+/// An expired-but-retained row is invisible to `get`, but the silent
+/// maintenance read (`peek_row_silent`) sees the raw row, so an
+/// overwrite eagerly reclaims the dead blob too — its content is
+/// unreachable (miss on read) and the unlink only frees disk sooner.
+/// The sweeper still owns whatever no overwrite touches.
+/// Expected: PASS (behavior tightened with the silent-read seam).
 #[tokio::test]
-async fn expired_retained_row_not_eagerly_reclaimed() {
+async fn expired_retained_row_blob_is_eagerly_reclaimed() {
     let dir = tempdir().expect("tempdir");
     let inner = inner_repo();
     // Fixed decorator clock: deterministic far-future death epochs. The
@@ -343,8 +345,8 @@ async fn expired_retained_row_not_eagerly_reclaimed() {
 
     let names = dir_names(dir.path());
     assert!(
-        names.contains(&b1),
-        "expired-but-retained row's blob must not be eagerly reclaimed, got {names:?}"
+        !names.contains(&b1),
+        "expired-but-retained row's blob IS eagerly reclaimed (silent raw read sees it; content was unreachable), got {names:?}"
     );
     let got = repo.get("k").await.expect("get").expect("present");
     assert_eq!(got.bytes, payload_b, "second payload must be served");
@@ -415,6 +417,15 @@ impl CacheRepository for FailGetRepo {
             ));
         }
         self.inner.get(key).await
+    }
+
+    async fn peek_row_silent(&self, key: &str) -> Result<Option<CacheEntry>, CamelError> {
+        if self.fail_get.load(Ordering::SeqCst) {
+            return Err(CamelError::Io(
+                "fail-get-memory: injected silent-read failure".into(),
+            ));
+        }
+        self.inner.peek_row_silent(key).await
     }
 
     async fn set(
@@ -512,10 +523,9 @@ impl Drop for RestorePerms<'_> {
     }
 }
 
-/// A pre-swap row read failure (`get` → `Err`) must skip the reclaim with
-/// a WARN and never fail the write — the reclaim adds no failure mode.
-/// Expected NOW (no pre-swap read exists): FAIL — no such WARN. After the
-/// reclaim implementation: PASS.
+/// A pre-swap SILENT row read failure (`peek_row_silent` → `Err`) must
+/// skip the reclaim with a WARN and never fail the write — the reclaim
+/// adds no failure mode.
 #[tokio::test]
 async fn preswap_row_read_failure_skips_reclaim() {
     let dir = tempdir().expect("tempdir");

@@ -845,3 +845,51 @@ async fn blob_reclaimed_after_death() {
         "blob must be reclaimed after its death epoch"
     );
 }
+
+#[tokio::test]
+async fn set_never_touches_public_stats() {
+    // Demo-team report on the rc-uteoa fix: the predecessor capture in
+    // set() traveled the counted read path, so every first write added a
+    // phantom miss and every overwrite a phantom hit to /ops/cache/stats
+    // and camel_cache_{hits,misses}_total. The maintenance read must be
+    // silent.
+    let dir = tempdir().expect("tempdir");
+    let inner = inner_repo();
+    let repo = new_repo(
+        Arc::clone(&inner),
+        dir.path().to_path_buf(),
+        fixed_clock(SystemTime::now()),
+    );
+
+    repo.set(
+        "k",
+        entry(b"one".to_vec(), ContentType::Json),
+        Some(Duration::from_secs(60)),
+    )
+    .await
+    .unwrap();
+    repo.set(
+        "k",
+        entry(b"two".to_vec(), ContentType::Json),
+        Some(Duration::from_secs(60)),
+    )
+    .await
+    .unwrap();
+    repo.set(
+        "k",
+        entry(b"three".to_vec(), ContentType::Json),
+        Some(Duration::from_secs(60)),
+    )
+    .await
+    .unwrap();
+
+    let stats = repo.stats().await;
+    assert_eq!(
+        stats.hits, 0,
+        "internal predecessor capture must not count as hits"
+    );
+    assert_eq!(
+        stats.misses, 0,
+        "internal predecessor capture must not count as misses"
+    );
+}

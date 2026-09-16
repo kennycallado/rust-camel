@@ -396,9 +396,12 @@ impl CacheRepository for DiskOffloadRepository {
         let effective_ttl = ttl.unwrap_or(self.payload_max_ttl);
         // Capture the predecessor's blob name before the index swap so a
         // successful overwrite can reclaim it eagerly (ADR-0065 amendment,
-        // "bd rc-uteoa"). A failed read only skips the reclaim — the write
-        // proceeds unchanged in every case.
-        let old_name = match self.inner.get(key).await {
+        // "bd rc-uteoa"). The SILENT maintenance read keeps the capture off
+        // every counted path — a phantom miss on first write or a phantom
+        // hit on overwrite would distort /ops/cache/stats and
+        // camel_cache_{hits,misses}_total. A failed read only skips the
+        // reclaim — the write proceeds unchanged in every case.
+        let old_name = match self.inner.peek_row_silent(key).await {
             Ok(Some(row)) => row.payload_path,
             Ok(None) => None,
             Err(e) => {

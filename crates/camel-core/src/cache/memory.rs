@@ -133,6 +133,11 @@ impl CacheRepository for MemoryCacheRepository {
         Ok(entry)
     }
 
+    async fn peek_row_silent(&self, key: &str) -> Result<Option<CacheEntry>, CamelError> {
+        // Raw store read: no hit/miss/peek accounting (trait contract).
+        Ok(self.inner.get(key).await)
+    }
+
     async fn invalidate(&self, key: &str) -> Result<(), CamelError> {
         self.inner.invalidate(key).await;
         self.invalidations.fetch_add(1, Ordering::Relaxed);

@@ -474,6 +474,12 @@ impl CacheRepository for RedbCacheRepository {
         Ok(())
     }
 
+    async fn peek_row_silent(&self, key: &str) -> Result<Option<CacheEntry>, CamelError> {
+        // Same raw read as peek_stale: redb counts nothing here, and the
+        // trait contract forbids the counted get path.
+        self.peek_stale(key).await
+    }
+
     async fn peek_stale(&self, key: &str) -> Result<Option<CacheEntry>, CamelError> {
         let db = Arc::clone(&self.db);
         let key = key.to_string();
