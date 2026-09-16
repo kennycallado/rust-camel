@@ -361,7 +361,12 @@ pub async fn self_detect_artifact() -> Option<i32> {
     // A missing or unreadable executable image carries no trailer
     // evidence: that is absence, not corruption, so fall through.
     let exe = std::env::current_exe().ok()?;
-    let bytes = std::fs::read(exe).ok()?;
+    // Bounded tail probe (rc-j329x): the trailer lives at the image end,
+    // so only the footer window plus declared sections are read. The
+    // previous whole-image read cost ~80 ms and one-binary-size RSS on
+    // every CLI startup, including `--help`.
+    let mut image = std::fs::File::open(&exe).ok()?;
+    let bytes = trailer::read_probe_tail(&mut image).ok().flatten()?;
     let decoded = match trailer::decode_artifact(&bytes) {
         Ok(Some(decoded)) => decoded,
         Ok(None) => return None,

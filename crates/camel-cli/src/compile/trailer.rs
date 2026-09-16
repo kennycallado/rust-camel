@@ -41,6 +41,7 @@
 //! content digest) before the image is accepted.
 
 use std::fmt;
+use std::io::{self, Read, Seek, SeekFrom};
 
 use super::CompileError;
 use super::manifest;
@@ -648,6 +649,86 @@ pub fn decode_artifact(bytes: &[u8]) -> Result<Option<DecodedArtifact>, TrailerE
     decode(bytes).map(|trailer| trailer.map(DecodedArtifact::V1))
 }
 
+/// Read the smallest tail slice of an image that carries every byte
+/// [`decode_artifact`] may inspect, so a startup probe never reads the
+/// whole executable (rc-j329x: the previous whole-image read cost ~80 ms
+/// and one-binary-size RSS allocation on every CLI invocation of a
+/// ~100 MB image, including `--help`).
+///
+/// Equivalence contract with `decode_artifact(&whole_image)`:
+///
+/// - terminal magic absent → `Ok(None)`; the probe reads at most
+///   [`FOOTER_LEN_V2`] bytes, never the image body;
+/// - terminal magic present → `Ok(Some(tail))` where `tail` covers the
+///   footer plus every declared section (v2 also its leading magic), so
+///   `decode_artifact(&tail)` returns exactly what the whole image
+///   returns: valid trailers decode identically because all framing
+///   arithmetic is relative to the image end, and marked corruption
+///   fails closed through the same error paths;
+/// - a declared span wider than the image clamps to the image length,
+///   and `decode_artifact` then reports the same out-of-bounds
+///   corruption it reports on the full image.
+///
+/// The span floor at the footer-window length keeps the tail at least
+/// as wide as the dispatch window, so `decode_artifact(&tail)` walks
+/// the same version-dispatch path as the whole image.
+pub fn read_probe_tail<R: Read + Seek>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
+    let len = reader.seek(SeekFrom::End(0))?;
+    let footer_win = read_tail(reader, len, FOOTER_LEN_V2 as u64)?;
+    if footer_win.len() < MAGIC.len() || footer_win[footer_win.len() - MAGIC.len()..] != MAGIC {
+        return Ok(None);
+    }
+    let span = probe_declared_span(&footer_win)
+        .min(len)
+        .max(footer_win.len() as u64);
+    Ok(Some(read_tail(reader, len, span)?))
+}
+
+/// One seek-plus-read of the last `want` bytes of a `len`-byte image.
+fn read_tail<R: Read + Seek>(reader: &mut R, len: u64, want: u64) -> io::Result<Vec<u8>> {
+    let take = want.min(len);
+    reader.seek(SeekFrom::End(-(take as i64)))?;
+    let mut buf = vec![0u8; take as usize];
+    reader.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+/// Footer-relative span arithmetic for a marked image (terminal magic
+/// present): mirror the [`decode_artifact`] dispatch to derive the exact
+/// byte span the declared trailer occupies, without trusting the
+/// declaration. Saturating sums keep a corrupt length field from
+/// panicking; the clamp in [`read_probe_tail`] turns an oversized span
+/// into a full-image read that `decode_artifact` then rejects as
+/// out-of-bounds, exactly as it does today.
+fn probe_declared_span(footer_win: &[u8]) -> u64 {
+    if footer_win.len() < FOOTER_LEN_V2 {
+        // Short marked image: the whole image is the only candidate tail.
+        return footer_win.len() as u64;
+    }
+    let version = u16::from_le_bytes([footer_win[8], footer_win[9]]);
+    if version == FORMAT_VERSION_V2 {
+        let sections = le_u64(&footer_win[12..20])
+            .saturating_add(le_u64(&footer_win[20..28]))
+            .saturating_add(le_u64(&footer_win[28..36]));
+        return sections.saturating_add(FOOTER_LEN_V2 as u64 + MAGIC.len() as u64);
+    }
+    let v1_footer = &footer_win[footer_win.len() - FOOTER_LEN..];
+    if v1_footer[0..MAGIC.len()] != MAGIC {
+        // Unsupported v2-family version: decode_artifact fails on the
+        // footer window alone; no section bytes are needed.
+        return FOOTER_LEN_V2 as u64;
+    }
+    let sections = le_u64(&v1_footer[12..20]).saturating_add(le_u64(&v1_footer[20..28]));
+    sections.saturating_add(FOOTER_LEN as u64)
+}
+
+/// Little-endian `u64` from the first 8 bytes of `win`.
+fn le_u64(win: &[u8]) -> u64 {
+    let mut field8 = [0u8; 8];
+    field8.copy_from_slice(&win[..8]);
+    u64::from_le_bytes(field8)
+}
+
 /// Normalize raw document bytes for embedding: valid UTF-8 only, remove one
 /// leading BOM, convert CRLF and lone CR to LF, preserve terminal-newline
 /// state, and enforce the [`MAX_PAYLOAD_BYTES`] encoded-byte limit.
@@ -920,6 +1001,298 @@ fn normalization_removes_bom_and_normalizes_line_endings() {
         normalize_document(&over_cap),
         Err(CompileError::PayloadTooLarge)
     );
+}
+
+/// `Read` wrapper that counts delivered bytes, so the probe tests can pin
+/// the bounded-read mechanism (rc-j329x) without any wall-clock assert.
+#[cfg(test)]
+struct CountingReader<R> {
+    inner: R,
+    read_bytes: usize,
+}
+
+#[cfg(test)]
+impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read_bytes += n;
+        Ok(n)
+    }
+}
+
+#[cfg(test)]
+impl<R: std::io::Seek> std::io::Seek for CountingReader<R> {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+#[cfg(test)]
+fn counting<R>(inner: R) -> CountingReader<R> {
+    CountingReader {
+        inner,
+        read_bytes: 0,
+    }
+}
+
+/// Debug-string comparison: whole-image decode vs tail decode must agree
+/// in the `Debug` rendering of their `Result` (value or named error).
+#[cfg(test)]
+fn assert_tail_decode_matches_whole(tail: &[u8], whole: &[u8]) {
+    assert_eq!(
+        format!("{:?}", decode_artifact(tail)),
+        format!("{:?}", decode_artifact(whole)),
+        "bounded tail decode must equal whole-image decode"
+    );
+}
+
+#[test]
+fn probe_tail_plain_image_reads_only_footer_window() {
+    // A plain (non-artifact) image: absence after one footer-window read.
+    // The bound is the mechanism pin: a regression back to whole-image
+    // reads delivers `image.len()` bytes and fails this assert.
+    let image = vec![0u8; 4 * 1024 * 1024];
+    let mut reader = counting(std::io::Cursor::new(image));
+    let tail = read_probe_tail(&mut reader).expect("plain image must probe cleanly");
+    assert!(tail.is_none(), "no terminal magic: absence, not corruption");
+    assert!(
+        reader.read_bytes <= FOOTER_LEN_V2,
+        "probe read {} bytes; footer window is {}",
+        reader.read_bytes,
+        FOOTER_LEN_V2
+    );
+}
+
+#[test]
+fn probe_tail_short_image_is_absence() {
+    for short in [0u8, 1, 7] {
+        let mut reader = counting(std::io::Cursor::new(vec![0u8; short as usize]));
+        let tail = read_probe_tail(&mut reader).expect("short image must probe cleanly");
+        assert!(tail.is_none(), "{short}-byte image cannot carry magic");
+    }
+}
+
+#[test]
+fn probe_tail_v1_image_equivalence_and_bound() {
+    let mut image = vec![0u8; 64 * 1024];
+    image.extend_from_slice(&encode(&sample(TrailerKind::Route)));
+    let mut reader = counting(std::io::Cursor::new(image.clone()));
+    let tail = read_probe_tail(&mut reader)
+        .expect("marked image must probe cleanly")
+        .expect("terminal magic is present");
+    assert_tail_decode_matches_whole(&tail, &image);
+    decode_artifact(&tail)
+        .expect("valid v1 trailer must decode from the tail")
+        .expect("magic marks it present");
+    // One footer window plus the exact v1 trailer span — never the image.
+    assert!(
+        reader.read_bytes <= FOOTER_LEN_V2 + FOOTER_LEN + PAYLOAD.len() + MANIFEST.len(),
+        "probe read {} bytes",
+        reader.read_bytes
+    );
+}
+
+#[test]
+fn probe_tail_v2_image_equivalence_and_bound() {
+    let documents = sample_documents();
+    let store = VirtualDocumentStore::build(
+        "routes/main.yaml",
+        &documents,
+        &["cfg/camel.toml".to_string()],
+        &[
+            "routes/main.yaml".to_string(),
+            "routes/other.yaml".to_string(),
+        ],
+    )
+    .expect("store must build");
+    let manifest_struct = sample_manifest(&documents, &store.index);
+    let trailer = TrailerV2 {
+        kind: TrailerKind::Route,
+        content: store.content.clone(),
+        index: store.index.encode_canonical().expect("index encodes"),
+        manifest: manifest_struct.to_canonical_json().into_bytes(),
+    };
+    let mut image = vec![0u8; 64 * 1024];
+    image.extend_from_slice(&encode_v2(&trailer));
+    let mut reader = counting(std::io::Cursor::new(image.clone()));
+    let tail = read_probe_tail(&mut reader)
+        .expect("marked image must probe cleanly")
+        .expect("terminal magic is present");
+    assert_tail_decode_matches_whole(&tail, &image);
+    // One footer window plus the exact v2 span (footer + leading magic +
+    // all three sections) — never the image.
+    assert!(
+        reader.read_bytes
+            <= FOOTER_LEN_V2
+                + FOOTER_LEN_V2
+                + MAGIC.len()
+                + trailer.content.len()
+                + trailer.index.len()
+                + trailer.manifest.len(),
+        "probe read {} bytes",
+        reader.read_bytes
+    );
+}
+
+#[test]
+fn probe_tail_marked_corruption_stays_fail_closed() {
+    // Checksum-corrupted v2 image: the tail probe must surface Some and
+    // the whole-image decode error, never a silent absence.
+    let documents = sample_documents();
+    let store = VirtualDocumentStore::build(
+        "routes/main.yaml",
+        &documents,
+        &["cfg/camel.toml".to_string()],
+        &[
+            "routes/main.yaml".to_string(),
+            "routes/other.yaml".to_string(),
+        ],
+    )
+    .expect("store must build");
+    let manifest_struct = sample_manifest(&documents, &store.index);
+    let mut image = encode_v2(&TrailerV2 {
+        kind: TrailerKind::Route,
+        content: store.content.clone(),
+        index: store.index.encode_canonical().expect("index encodes"),
+        manifest: manifest_struct.to_canonical_json().into_bytes(),
+    });
+    // Corrupt one checksum byte inside the footer, terminal magic intact.
+    let last = image.len() - 1;
+    image[last - 20] ^= 0xFF;
+    let mut reader = counting(std::io::Cursor::new(image.clone()));
+    let tail = read_probe_tail(&mut reader)
+        .expect("marked image must probe cleanly")
+        .expect("terminal magic is present");
+    assert_tail_decode_matches_whole(&tail, &image);
+    assert!(
+        decode_artifact(&tail).is_err(),
+        "checksum corruption must fail closed from the tail"
+    );
+}
+
+#[test]
+fn probe_tail_truncated_marked_image_fail_closed() {
+    // An image that ends in the terminal magic but is shorter than any
+    // footer: whole-image decode reports the named error; the probe
+    // must agree.
+    let mut image = vec![0u8; 40];
+    image.extend_from_slice(&MAGIC);
+    let mut reader = counting(std::io::Cursor::new(image.clone()));
+    let tail = read_probe_tail(&mut reader)
+        .expect("marked image must probe cleanly")
+        .expect("terminal magic is present");
+    assert_tail_decode_matches_whole(&tail, &image);
+    assert!(decode_artifact(&image).is_err());
+}
+
+#[test]
+fn probe_tail_unsupported_version_without_v1_magic_reads_footer_only() {
+    // A marked 76-byte window declaring version 3 whose last-68 bytes
+    // do not open with the family magic: decode_artifact fails on the
+    // footer window alone (InvalidVersion), so the probe must return
+    // exactly that window — never more, never absence.
+    let mut window = vec![0u8; FOOTER_LEN_V2];
+    window[8..10].copy_from_slice(&3u16.to_le_bytes());
+    window[FOOTER_LEN_V2 - MAGIC.len()..].copy_from_slice(&MAGIC);
+    let mut image = vec![0u8; 1000];
+    image.extend_from_slice(&window);
+    let mut reader = counting(std::io::Cursor::new(image.clone()));
+    let tail = read_probe_tail(&mut reader)
+        .expect("marked image must probe cleanly")
+        .expect("terminal magic is present");
+    assert_tail_decode_matches_whole(&tail, &image);
+    assert!(decode_artifact(&tail).is_err());
+    assert!(
+        reader.read_bytes <= 2 * FOOTER_LEN_V2,
+        "probe read {} bytes; two footer windows suffice",
+        reader.read_bytes
+    );
+}
+
+#[test]
+fn probe_tail_overflowing_declared_lengths_fail_closed() {
+    // A v2-marked footer whose content length is u64::MAX: the probe's
+    // saturating span clamps to the image length (one whole-image read,
+    // the corruption ceiling) and decode_artifact reports the same
+    // length-overflow error as it does on the full image.
+    let documents = sample_documents();
+    let store = VirtualDocumentStore::build(
+        "routes/main.yaml",
+        &documents,
+        &["cfg/camel.toml".to_string()],
+        &[
+            "routes/main.yaml".to_string(),
+            "routes/other.yaml".to_string(),
+        ],
+    )
+    .expect("store must build");
+    let manifest_struct = sample_manifest(&documents, &store.index);
+    let mut image = encode_v2(&TrailerV2 {
+        kind: TrailerKind::Route,
+        content: store.content.clone(),
+        index: store.index.encode_canonical().expect("index encodes"),
+        manifest: manifest_struct.to_canonical_json().into_bytes(),
+    });
+    let len = image.len();
+    // Footer content-length field: last 76 bytes, offset 12..20.
+    image[len - FOOTER_LEN_V2 + 12..len - FOOTER_LEN_V2 + 20]
+        .copy_from_slice(&u64::MAX.to_le_bytes());
+    let mut reader = counting(std::io::Cursor::new(image.clone()));
+    let tail = read_probe_tail(&mut reader)
+        .expect("marked image must probe cleanly")
+        .expect("terminal magic is present");
+    assert_tail_decode_matches_whole(&tail, &image);
+    assert!(decode_artifact(&tail).is_err());
+}
+
+#[test]
+fn probe_tail_out_of_bounds_declared_lengths_fail_closed() {
+    // A v2-marked footer declaring sections wider than the image (but
+    // not u64-overflowing): the clamp yields the whole image and
+    // decode_artifact reports LengthOutOfBounds, as on the full image.
+    let documents = sample_documents();
+    let store = VirtualDocumentStore::build(
+        "routes/main.yaml",
+        &documents,
+        &["cfg/camel.toml".to_string()],
+        &[
+            "routes/main.yaml".to_string(),
+            "routes/other.yaml".to_string(),
+        ],
+    )
+    .expect("store must build");
+    let manifest_struct = sample_manifest(&documents, &store.index);
+    let mut image = encode_v2(&TrailerV2 {
+        kind: TrailerKind::Route,
+        content: store.content.clone(),
+        index: store.index.encode_canonical().expect("index encodes"),
+        manifest: manifest_struct.to_canonical_json().into_bytes(),
+    });
+    let len = image.len();
+    // Content length far beyond the image, no u64 overflow.
+    image[len - FOOTER_LEN_V2 + 12..len - FOOTER_LEN_V2 + 20]
+        .copy_from_slice(&(len as u64 * 4).to_le_bytes());
+    let mut reader = counting(std::io::Cursor::new(image.clone()));
+    let tail = read_probe_tail(&mut reader)
+        .expect("marked image must probe cleanly")
+        .expect("terminal magic is present");
+    assert_tail_decode_matches_whole(&tail, &image);
+    assert!(decode_artifact(&tail).is_err());
+}
+
+#[test]
+fn probe_tail_short_marked_window_between_v1_footer_and_v2_footer() {
+    // 68..75-byte image ending in the terminal magic: shorter than the
+    // v2 dispatch window, long enough for the v1 footer check — the
+    // short-image branch probes the whole image and stays fail-closed.
+    let mut image = vec![0u8; 64];
+    image.extend_from_slice(&MAGIC);
+    let mut reader = counting(std::io::Cursor::new(image.clone()));
+    let tail = read_probe_tail(&mut reader)
+        .expect("marked image must probe cleanly")
+        .expect("terminal magic is present");
+    assert_tail_decode_matches_whole(&tail, &image);
+    assert!(decode_artifact(&image).is_err());
 }
 
 #[cfg(test)]
