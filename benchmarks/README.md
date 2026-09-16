@@ -22,16 +22,17 @@ bench run --scenarios=<scenario>[,<scenario>...] [flags...]
 `bench run` passes through to the harness with identical flags and
 environment. See `bench help` for subcommands.
 
-For the full canonical record (all scenarios AND all metrics) use:
+For the full canonical record (all scenarios AND all metrics):
 
 ```bash
-bench run-all --metric=m1+m2+m3+m4
+bench run-all
 ```
 
-`run-all` without `--metric` defaults to `m1+m2`: every scenario runs,
-but the sustained-throughput (m3) and memory-growth (m4) arms are
-silently skipped. The record standard requires all four — always pass
-the flag. See [runner/RUNBOOK.md](runner/RUNBOOK.md) §4.
+A bare `run-all` defaults to the full metric set `m1+m2+m3+m4` (run.sh
+METRIC default, bd rc-awyoj): every scenario runs AND every metric arm
+(m1 cold-start, m2 warm p99, m3 sustained throughput, m4 memory
+growth) is measured. Explicit `--metric=` subsets remain a developer
+knob for focused runs. See [runner/RUNBOOK.md](runner/RUNBOOK.md) §4.
 
 ## Where records live
 

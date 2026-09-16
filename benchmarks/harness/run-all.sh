@@ -4,7 +4,11 @@
 # mounts.
 #
 # Usage: bash benchmarks/harness/run-all.sh [harness args...]
-# Example: bash benchmarks/harness/run-all.sh --metric=m1+m2 --n=50
+# Example: bash benchmarks/harness/run-all.sh --n=50
+#          (no --metric needed: the harness default is the full set
+#          m1+m2+m3+m4 — a bare run-all covers every scenario AND
+#          every metric). Developer knob: --metric=m1+m2 for a
+#          subset run.
 #
 # NO SUBSETS (2026-08-31, owner ruling): the default run measures
 # EVERY active scenario × every contender (auto-discovery of

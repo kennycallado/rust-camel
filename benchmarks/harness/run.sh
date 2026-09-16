@@ -49,6 +49,11 @@ export LC_ALL=C
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCENARIOS_DIR="$REPO_ROOT/benchmarks/scenarios"
 
+# Native-image build cache (bd rc-wdy13): skip decision + runner
+# resolution live in lib/native_cache.sh; the fingerprint is written
+# ONLY after a successful build + runner resolution.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/native_cache.sh"
+
 # Right-size the Serial GC max heap for every Quarkus/Mandrel native
 # runner. Mandrel CE defaults the Serial GC max heap to 80% of physical
 # RAM (~22 GiB on this host); each full GC single-threadedly traverses
@@ -265,9 +270,13 @@ SCENARIOS_FILTER=""
 N=50
 WARMUP_N=3
 DRY_RUN=false
+METRIC_EXPLICIT=false
 
+# Default metric set is the FULL set (owner ruling 2026-09-16, bd
+# rc-awyoj): a bare invocation must never silently produce a partial
+# record. Subsets are opt-in via --metric=.
+METRIC=m1+m2+m3+m4
 # M2 defaults (spec §4.2 + §4.3 verbatim).
-METRIC=m1+m2
 M2_WARMUP_TIME=30
 M2_WARMUP_MSGS=1000
 M2_ROUNDS=5
@@ -299,10 +308,12 @@ usage: run.sh [--scenarios=<csv>] [--n=<count>] [--warmup=<count>]
   --n                 M1 measured runs per cell (default 50).
   --warmup            M1 warmup runs per cell, discarded (default 3).
   --metric            m1, m2, m1+m2, m3, m3+m4, or m1+m2+m3+m4
-                      (default m1+m2). m1 = v2 cold-start measurement;
-                      m2 = v3 warm p99/service-time (spec §4.1);
-                      m3 = sustained throughput (T3 http-server only);
-                      m4 = memory growth under load (runs with m3).
+                      (default m1+m2+m3+m4 — the full record; subsets
+                      are explicit opt-in). m1 = v2 cold-start
+                      measurement; m2 = v3 warm p99/service-time
+                      (spec §4.1); m3 = sustained throughput (T3
+                      http-server only); m4 = memory growth under load
+                      (runs with m3).
   --warmup-time       M2 warmup wall-clock seconds per cell (default 30).
   --warmup-msgs       M2 warmup message bound per cell (default 1000).
   --rounds            M2 measurement rounds per cell (default 5).
@@ -331,7 +342,7 @@ while [[ $# -gt 0 ]]; do
         --scenarios=*)         SCENARIOS_FILTER="${1#*=}" ;;
         --n=*)                 N="${1#*=}" ;;
         --warmup=*)            WARMUP_N="${1#*=}" ;;
-        --metric=*)            METRIC="${1#*=}" ;;
+        --metric=*)            METRIC="${1#*=}"; METRIC_EXPLICIT=true ;;
         --warmup-time=*)       M2_WARMUP_TIME="${1#*=}" ;;
         --warmup-msgs=*)       M2_WARMUP_MSGS="${1#*=}" ;;
         --rounds=*)            M2_ROUNDS="${1#*=}" ;;
@@ -1041,111 +1052,14 @@ resolve_sibling_gradle() {
     echo "$sibling_gradle"
 }
 
-# Portable glob-existence check (replacement for bash's `compgen -G`,
-# which is missing in the NixOS bash 5.3 build). Populates the named
-# array variable passed as $1 with the glob matches (or empty).
-# Returns 0 if at least one match, 1 otherwise.
-glob_exists() {
-    local -n _out_arr=$1
-    shift
-    # Use nullglob so unmatched globs expand to nothing, not the
-    # literal pattern. Disable the nullglob side-effect after the
-    # expansion so the rest of the script is unaffected.
-    local prev_nullglob
-    prev_nullglob="$(shopt -p nullglob 2>/dev/null || true)"
-    shopt -s nullglob
-    _out_arr=( "$@" )
-    eval "$prev_nullglob" 2>/dev/null || shopt -u nullglob
-    [[ ${#_out_arr[@]} -gt 0 ]]
-}
-
-# Compute fingerprint for a native artifact (4c). Hashes all inputs
-# that could change the resulting native binary, in a deterministic
-# order, and writes the hash to <native-subproject>/.bench-fingerprint.
-# Returns 0 if fingerprint matches the existing one (cache hit), 1
-# if it doesn't (cache miss — rebuild needed).
-compute_and_check_fingerprint() {
-    local native_dir="$1" shared_src_main="$2" sibling_gradle="$3" \
-          settings_gradle="$4" gradle_dir="$5" \
-          app_props="$6" \
-          fp_file="$native_dir/.bench-fingerprint"
-
-    # Build a manifest of (path, content) for every input that could
-    # change the native binary. The manifest is hashed with sha256sum;
-    # the digest becomes the fingerprint. Sources are sorted so the
-    # fingerprint is stable across runs.
-    local manifest=""
-    manifest+="=== JAVA_HOME === $JAVA_HOME"$'\n'
-    manifest+="=== build mode === $BENCH_NATIVE_MODE"$'\n'
-    manifest+="=== builder image === $QUARKUS_NATIVE_BUILDER_IMAGE"$'\n'
-    if [[ "$BENCH_NATIVE_MODE" == "local" ]]; then
-        manifest+="=== native-image --version ==="$'\\n'
-        manifest+="$("$NATIVE_IMAGE_BIN" --version 2>&1 || echo MISSING)"$'\n'
-    else
-        # Container build — native-image version lives inside the builder
-        # image, captured implicitly via the image digest. Including the
-        # image tag in the manifest (above) is sufficient to invalidate
-        # the cache when the image is upgraded.
-        manifest+="=== native-image --version === container (skipped)"$'\n'
-    fi
-
-    # 1) All files under the shared JVM sibling src/main/ (recursive).
-    if [[ -d "$shared_src_main" ]]; then
-        manifest+="=== shared src/main ==="$'\\n'
-        while IFS= read -r f; do
-            manifest+="$f"$'\t'
-            manifest+="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"$'\n'
-        done < <(find "$shared_src_main" -type f | LC_ALL=C sort)
-    fi
-
-    # 2) Native subproject's own build.gradle.kts.
-    if [[ -f "$native_dir/build.gradle.kts" ]]; then
-        manifest+="=== native build.gradle.kts ==="$'\\n'
-        manifest+="$(sha256sum "$native_dir/build.gradle.kts" | awk '{print $1}')"$'\n'
-    fi
-
-    # 3) Parent settings.gradle.kts.
-    if [[ -f "$settings_gradle" ]]; then
-        manifest+="=== settings.gradle.kts ==="$'\\n'
-        manifest+="$(sha256sum "$settings_gradle" | awk '{print $1}')"$'\n'
-    fi
-
-    # 4) JVM sibling's build.gradle.kts.
-    if [[ -f "$sibling_gradle" ]]; then
-        manifest+="=== sibling build.gradle.kts ==="$'\\n'
-        manifest+="$(sha256sum "$sibling_gradle" | awk '{print $1}')"$'\n'
-    fi
-
-    # 5) Native subproject's own application.properties.
-    if [[ -f "$app_props" ]]; then
-        manifest+="=== application.properties ==="$'\\n'
-        manifest+="$(sha256sum "$app_props" | awk '{print $1}')"$'\n'
-    fi
-
-    # 6) gradle/ wrapper directory contents.
-    if [[ -d "$gradle_dir" ]]; then
-        manifest+="=== gradle/ ==="$'\\n'
-        while IFS= read -r f; do
-            manifest+="$f"$'\t'
-            manifest+="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"$'\n'
-        done < <(find "$gradle_dir" -type f | LC_ALL=C sort)
-    fi
-
-    # Hash the manifest. Print the digest to stdout (caller captures).
-    local fp
-    fp="$(printf '%s' "$manifest" | sha256sum | awk '{print $1}')"
-
-    if [[ -f "$fp_file" ]] && [[ "$(cat "$fp_file")" == "$fp" ]]; then
-        return 0   # cache hit
-    fi
-    # Cache miss — write new fingerprint for next time. The runner
-    # existence is checked separately (post-build).
-    printf '%s' "$fp" > "$fp_file"
-    return 1
-}
+# Compute fingerprint for a native artifact (4c). Superseded by
+# lib/native_cache.sh (rc-wdy13): native_cache_plan computes without
+# writing, and write_native_fingerprint is the only write path.
 
 # Build a native Quarkus artifact (4c + 4d). Skips the build if the
-# fingerprint is unchanged AND the runner exists. Runs the harness
+# fingerprint is unchanged AND the runner exists (native_cache_plan /
+# resolve_native_runner / write_native_fingerprint in
+# lib/native_cache.sh — rc-wdy13). Runs the harness
 # gradle binary directly (wrapper download fails on this network —
 # see spike-results.md "Toolchain" section).
 build_native_artifact() {
@@ -1173,20 +1087,20 @@ build_native_artifact() {
         fi
     fi
 
-    # Compute fingerprint and decide whether to skip the build.
+    # Skip decision + runner resolution live in lib/native_cache.sh
+    # (rc-wdy13). The plan NEVER writes the fingerprint; it advances
+    # ONLY after a successful build + runner resolution below, so a
+    # failed build can no longer wedge a stale fingerprint with an
+    # old runner image.
     local cached=false
-    if compute_and_check_fingerprint "$native_dir" "$shared_src_main" \
-                                     "$sibling_gradle" "$settings_gradle" \
-                                     "$gradle_dir" "$app_props"; then
-        # Fingerprint matched. Verify the runner binary exists; if
-        # not (partial state from a previous failed build), rebuild.
-        local matches=()
-        if glob_exists matches $runner_glob; then
-            echo "  fingerprint match + runner present, skipping build for $subproject"
-            cached=true
-        else
-            echo "  fingerprint match but runner missing at $runner_glob — rebuilding"
-        fi
+    if native_cache_plan "$native_dir" "$shared_src_main" \
+                         "$sibling_gradle" "$settings_gradle" \
+                         "$gradle_dir" "$app_props" "$runner_glob"; then
+        echo "  fingerprint match + runner present, skipping build for $subproject"
+        cached=true
+    elif [[ "$(cat "$native_dir/.bench-fingerprint" 2>/dev/null || true)" \
+                == "$NATIVE_CACHE_FINGERPRINT" ]]; then
+        echo "  fingerprint match but runner missing at $runner_glob — rebuilding"
     else
         echo "  fingerprint changed, building $subproject..."
     fi
@@ -1230,12 +1144,18 @@ build_native_artifact() {
             exit 1
         fi
 
-        # Pre-flight post-build (4d check 3): output glob resolvable.
-        local post_matches=()
-        if ! glob_exists post_matches $runner_glob; then
+        # Pre-flight post-build (4d check 3): output glob resolvable
+        # via the shared resolver (rc-wdy13 — lib/native_cache.sh).
+        NATIVE_CACHE_RUNNER="$(resolve_native_runner "$runner_glob")"
+        if [[ -z "$NATIVE_CACHE_RUNNER" ]]; then
             echo "error: pre-flight failed: native build for $subproject did not produce any file matching $runner_glob" >&2
             exit 1
         fi
+        # Build succeeded AND runner resolved — the only point at
+        # which the fingerprint may advance (rc-wdy13). A failed
+        # build exits above WITHOUT writing, so the next run re-plans
+        # a build.
+        write_native_fingerprint "$native_dir"
     fi
 }
 
@@ -1407,7 +1327,8 @@ resolve_bridge_scenario_cells() {
         build_native_artifact "camel-quarkus-dsl-native" "$q_dir" "$q_dsl_native_glob"
     fi
     local qdn_bin
-    qdn_bin="$(ls $q_dsl_native_glob 2>/dev/null | head -1 || true)"
+    # Runner resolution lives in lib/native_cache.sh (rc-wdy13).
+    qdn_bin="$(resolve_native_runner "$q_dsl_native_glob")"
     if [[ -z "$qdn_bin" ]]; then
         if [[ "$DRY_RUN" == "true" ]]; then
             qdn_bin="<would-build:camel-quarkus-dsl-native>"
@@ -1711,13 +1632,13 @@ resolve_all_cells() {
         fi
 
         # Resolve native runner paths (post-build — may have just
-        # been built). Use the first glob match as the resolved path.
-        # In --dry-run mode, the runner may not exist yet (builds are
-        # skipped); surface a placeholder so the 16-cell list still
-        # resolves and the shuffle is testable pre-build.
+        # been built). Runner resolution lives in lib/native_cache.sh
+        # (rc-wdy13). In --dry-run mode, the runner may not exist yet
+        # (builds are skipped); surface a placeholder so the 16-cell
+        # list still resolves and the shuffle is testable pre-build.
         local q_dsl_native_bin q_yaml_native_bin
-        q_dsl_native_bin="$(ls $q_dsl_native_glob 2>/dev/null | head -1 || true)"
-        q_yaml_native_bin="$(ls $q_yaml_native_glob 2>/dev/null | head -1 || true)"
+        q_dsl_native_bin="$(resolve_native_runner "$q_dsl_native_glob")"
+        q_yaml_native_bin="$(resolve_native_runner "$q_yaml_native_glob")"
         if [[ -z "$q_dsl_native_bin" ]]; then
             if [[ "$DRY_RUN" == "true" ]]; then
                 q_dsl_native_bin="<would-build:camel-quarkus-dsl-native>"
@@ -3244,7 +3165,11 @@ run_m3_with_validation() {
 
 echo "=== benchmark harness v2 (bd rc-p9ki) + v3 M2 extension (bd rc-2vxg) + v3.5 M3/M4 extension ==="
 echo "scenarios: ${SCENARIOS_FILTER:-<auto-discover>}"
-echo "metric: $METRIC"
+if [[ "$METRIC_EXPLICIT" == "true" ]]; then
+    echo "metric set: $METRIC (explicit)"
+else
+    echo "metric set: $METRIC (default — full record; override with --metric=…)"
+fi
 echo "M1: n=$N (+ $WARMUP_N warmup, discarded)"
 # Substring dispatch (not exact-match): the validator accepts combos
 # (m1+m2, m1+m2+m3+m4, ...); exact equality silently skipped arms for
