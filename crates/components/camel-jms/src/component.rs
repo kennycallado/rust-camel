@@ -22,9 +22,7 @@ use tonic::transport::Channel;
 use tower::Service;
 use tracing::{info, warn};
 
-use crate::config::{
-    BrokerConfig, JmsEndpointConfig, JmsPoolConfig, mask_authority_windows, truncate_utf8_safe,
-};
+use crate::config::{BrokerConfig, JmsEndpointConfig, JmsPoolConfig};
 use crate::consumer::JmsConsumer;
 use crate::health::JmsHealthCheck;
 use crate::producer::JmsProducer;
@@ -937,44 +935,14 @@ impl Service<Exchange> for LazyJmsProducer {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Redact credentials from a broker URL for safe logging. String-based
-/// surgery aligned with the camel-http reference semantics (bd rc-eh49):
-/// [`mask_authority_windows`] masks userinfo in every `//`-window, then
-/// everything from the earliest `?` or `#` is dropped. The sentinels
-/// compose: each distinct introducer character (`?` and/or `#`) that
-/// occurs anywhere in the raw URL appends its matching `?[redacted]` /
-/// `#[redacted]` sentinel in first-occurrence order. The result is capped
-/// at 256 bytes on a UTF-8 char boundary. No URL parser in this
-/// component, so in-place windowed masking is the strictest feasible
-/// handling.
+/// Redact credentials from a broker URL for safe logging. Delegates to the
+/// canonical [`camel_api::redact::redact_url`] (bd rc-eh49): userinfo in
+/// every authority window (maximal `/`+`\` runs, backslash runs gated on a
+/// scheme prefix) is masked, everything from the earliest `?` or `#` is
+/// dropped, the sentinels compose in first-occurrence order, and the
+/// result is capped at 256 bytes on a UTF-8 char boundary.
 fn redact_url(url: &str) -> String {
-    let mut out = mask_authority_windows(url);
-    if let Some(i) = out.find(['?', '#']) {
-        // Compose-both: one sentinel per distinct introducer found in the
-        // raw URL, in first-occurrence order.
-        let query_pos = out.find('?');
-        let fragment_pos = out.find('#');
-        out.truncate(i);
-        // Reserve the sentinel bytes before truncating so the cap never
-        // splits an appended sentinel (e_gpt stage-4).
-        let sentinel_total = match (query_pos, fragment_pos) {
-            (Some(_), Some(_)) => 22,
-            (Some(_), None) | (None, Some(_)) => 11,
-            (None, None) => 0,
-        };
-        if sentinel_total > 0 {
-            truncate_utf8_safe(&mut out, 256 - sentinel_total);
-        }
-        match (query_pos, fragment_pos) {
-            (Some(q), Some(f)) if f < q => out.push_str("#[redacted]?[redacted]"),
-            (Some(_), Some(_)) => out.push_str("?[redacted]#[redacted]"),
-            (Some(_), None) => out.push_str("?[redacted]"),
-            (None, Some(_)) => out.push_str("#[redacted]"),
-            (None, None) => {}
-        }
-    }
-    truncate_utf8_safe(&mut out, 256);
-    out
+    camel_api::redact::redact_url(url)
 }
 
 pub fn is_bridge_transport_error(err: &CamelError) -> bool {
@@ -1868,6 +1836,19 @@ mod tests {
     #[test]
     fn redact_url_passes_clean_url_unchanged() {
         assert_eq!(redact_url("tcp://localhost:61616"), "tcp://localhost:61616");
+    }
+
+    /// Spec cross-surface identity fixture (jms surface): the component
+    /// `redact_url` delegates to `camel_api::redact::redact_url`, so both
+    /// surfaces must return the same bytes on the same input.
+    #[test]
+    fn redact_url_shared_fixture_pin() {
+        let raw = "http://h:99999/p?token=secret";
+        assert_eq!(
+            camel_api::redact::redact_url(raw),
+            "http://h:99999/p?[redacted]"
+        );
+        assert_eq!(redact_url(raw), camel_api::redact::redact_url(raw));
     }
 
     #[test]

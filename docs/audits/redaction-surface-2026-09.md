@@ -91,6 +91,10 @@ length-cap dimensions converge.
   parses backslashes as separators for special schemes, so those cases take
   the parsed arm. Non-special schemes keep the residual risk. A test pins
   the parsed-arm behavior.
+  - Update 2026-09-16 (mission redact2, bd rc-f05q8): this residual risk
+    is CLOSED. The canonical window scan now treats scheme-prefixed
+    backslash runs as authority openers, so non-special schemes such as
+    `foo:\user:pass@evil/` mask on every arm.
 
 ## Outcomes (landed on `feature/redactleaks`)
 
@@ -156,3 +160,12 @@ semantics per the table above.
 
 rc-eh49 is therefore partial by design: semantic convergence in-lease,
 structural consolidation parked. The close reason must state this.
+
+Update 2026-09-16 (mission redact2, bd rc-924sb + rc-r7v8s + rc-f05q8):
+the parked proposal LANDED. `camel_api::redact` is the canonical home;
+camel-config, camel-jms, and camel-http render through it and carry no
+local copies. The broker query allowlist exception survives as
+`redact_url_with_query_allowlist` with the unchanged key list. bd
+rc-r7v8s added the minimal-decode rule (percent-encoded credentials
+under benign keys mask as `<redacted>`). See
+openspec/changes/redact2/ for the blessed contract.

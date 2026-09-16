@@ -52,7 +52,11 @@ directory.
 process receives the username as plain text and the password through
 `Redacted::new`. `redact_url` masks URL user information as `***@`, drops
 the query and fragment behind `?[redacted]` / `#[redacted]` sentinels, and
-caps the output at 256 bytes before logging.
+caps the output at 256 bytes before logging. `BrokerConfig` Debug renders
+`broker_url` through `redact_broker_url` (`camel_api::redact::
+redact_url_with_query_allowlist`): sensitive keys redact per key, benign
+keys stay visible for ActiveMQ failover diagnosis, and values that decode
+to credential shapes (`user:pass@host`) mask as `<redacted>`.
 Tests `broker_config_debug_redacts_password` and
 `redact_url_strips_userinfo_with_password` verify these properties.
 

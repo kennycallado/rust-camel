@@ -43,6 +43,7 @@ pub mod platform;
 pub mod processor;
 pub mod producer;
 pub mod recipient_list;
+pub mod redact;
 pub mod resequencer;
 pub mod route_controller;
 pub mod routing_slip;

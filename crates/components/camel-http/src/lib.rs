@@ -2891,23 +2891,27 @@ fn mask_base_url_userinfo(raw: &str) -> String {
 /// fragment (OAuth2 callback tokens such as `#access_token=...`) is
 /// dropped and replaced with the `#[redacted]` sentinel in both the
 /// parsed arm and the unparseable arm. Fail-closed: when the parse fails
-/// and the `//`-authority window contains `@`, only the `[redacted]`
-/// sentinel is returned. Every `//` window is scanned: each window starts
-/// after the `//` plus any run of extra slashes (so evaders like
-/// `scheme:////user:pass@evil/` cannot hide a `@` behind a slash run) and
-/// ends at the next `/`, `?`, or `#`; scanning all windows keeps later
-/// `//user:pass@` substrings from hiding behind a benign first window.
-/// The same window mask is applied to the parsed arm's rendered string
-/// (`mask_rendered_windows`), because rust-url can park later-window
-/// userinfo bytes in the path (`https://h//user:pass@evil/`).
-/// Everything from the earliest `?` or `#` is dropped; the sentinels
-/// compose: each distinct introducer character (`?` and/or `#`) that
-/// occurs anywhere in the raw string appends its matching
-/// `?[redacted]` / `#[redacted]` sentinel in first-occurrence order, in
-/// both arms. Otherwise the raw string stays visible, and the result is
-/// capped at 256 bytes on a UTF-8 char boundary.
+/// and any authority window contains `@`, only the `[redacted]`
+/// sentinel is returned. Every authority window is scanned: windows are
+/// enumerated over maximal runs of `/` and `\` — pure-slash runs of two
+/// or more characters, backslash-bearing runs only behind an RFC 3986
+/// scheme prefix (see [`camel_api::redact`] for the canonical window
+/// rule) — each window starts immediately after the run (so evaders like
+/// `scheme:////user:pass@evil/` cannot hide a `@` behind a slash run)
+/// and ends at the next `/`, `?`, or `#`; scanning all windows keeps
+/// later `//user:pass@` substrings from hiding behind a benign first
+/// window.
+///
+/// The parsed arm keeps `url::Url::parse` (the authority can only be
+/// judged by the parser) and masks the real authority accessors, then
+/// delegates wholesale to the canonical string surgery in
+/// [`camel_api::redact::redact_url`]: rust-url can park later-window
+/// userinfo bytes in the path (`https://h//user:pass@evil/`), and the
+/// canonical helper owns window masking, `?`/`#` sentinel composition
+/// (one per distinct introducer, first-occurrence order), and the
+/// 256-byte UTF-8 cap. The unparseable arm delegates to
+/// [`camel_api::redact::redact_url_fail_closed`].
 pub(crate) fn redact_url_for_diagnostics(raw: &str) -> String {
-    const MAX_URL_LOG_LEN: usize = 256;
     match url::Url::parse(raw) {
         Ok(mut u) => {
             // Fail closed when an authority marker was accepted but no
@@ -2916,146 +2920,23 @@ pub(crate) fn redact_url_for_diagnostics(raw: &str) -> String {
             // `unix:///@socket`) can put a `@` in that window too. Such
             // inputs are sentineled wholesale — deliberate fail-closed
             // over-redaction per ADR-0051.
-            if !u.cannot_be_a_base() && u.host_str().is_none() && window_has_at_sign(raw) {
+            if !u.cannot_be_a_base()
+                && u.host_str().is_none()
+                && camel_api::redact::window_has_at_sign(raw)
+            {
                 return "[redacted]".to_string();
             }
             if !u.username().is_empty() || u.password().is_some() {
                 let _ = u.set_username("***");
                 let _ = u.set_password(None);
             }
-            let had_query = u.query().is_some();
-            let had_fragment = u.fragment().is_some();
-            u.set_query(None);
-            u.set_fragment(None);
-            let mut s = u.to_string();
-            while s.ends_with('?') || s.ends_with('#') {
-                s.pop();
-            }
-            // The parser can park later-window userinfo bytes in the path
-            // (`https://h//user:pass@evil/`); the accessor mask above only
-            // covers the real authority. Apply the same window surgery the
-            // string-based redactors use, before the sentinels are
-            // appended.
-            let mut s = mask_rendered_windows(&s);
-            // Reserve the sentinel bytes before truncating so the cap never
-            // splits an appended sentinel (e_gpt stage-4).
-            let sentinel_total = usize::from(had_query) * 11 + usize::from(had_fragment) * 11;
-            if sentinel_total > 0 {
-                truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN - sentinel_total);
-            }
-            if had_query {
-                s.push_str("?[redacted]");
-            }
-            if had_fragment {
-                s.push_str("#[redacted]");
-            }
-            truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN);
-            s
+            // Query and fragment stay on the rendered URL; the canonical
+            // redactor drops them and composes the sentinels.
+            let s = u.to_string();
+            camel_api::redact::redact_url(&s)
         }
-        Err(_) => {
-            // Fail closed: an unparseable string with `@` inside its
-            // authority window may carry credentials the parser never
-            // validated, so nothing of it is rendered.
-            if window_has_at_sign(raw) {
-                return "[redacted]".to_string();
-            }
-            let mut s = raw.to_string();
-            if let Some(i) = raw.find(['?', '#']) {
-                // Compose-both: one sentinel per distinct introducer found
-                // in the raw string, in first-occurrence order.
-                let query_pos = raw.find('?');
-                let fragment_pos = raw.find('#');
-                s.truncate(i);
-                // Reserve the sentinel bytes before truncating so the cap
-                // never splits an appended sentinel (e_gpt stage-4).
-                let sentinel_total = match (query_pos, fragment_pos) {
-                    (Some(_), Some(_)) => 22,
-                    (Some(_), None) | (None, Some(_)) => 11,
-                    (None, None) => 0,
-                };
-                if sentinel_total > 0 {
-                    truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN - sentinel_total);
-                }
-                match (query_pos, fragment_pos) {
-                    (Some(q), Some(f)) if f < q => s.push_str("#[redacted]?[redacted]"),
-                    (Some(_), Some(_)) => s.push_str("?[redacted]#[redacted]"),
-                    (Some(_), None) => s.push_str("?[redacted]"),
-                    (None, Some(_)) => s.push_str("#[redacted]"),
-                    (None, None) => {}
-                }
-            }
-            truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN);
-            s
-        }
+        Err(_) => camel_api::redact::redact_url_fail_closed(raw),
     }
-}
-
-/// Window-masking surgery on an already-rendered URL string, mirroring the
-/// string-based redactors in camel-config and camel-jms (cross-crate
-/// sharing is deliberately avoided): collect every `//` window — each
-/// starts after the `//` plus any run of extra slashes and ends at the
-/// next `/`, `?`, or `#` — dedup windows that share one slash run, and
-/// replace the bytes from window start through the LAST `@` with `***`, in
-/// reverse offset order (over-masking is safe, under-masking is not).
-/// Idempotent: an already-masked `***@host` window rewrites to itself.
-fn mask_rendered_windows(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = s.to_string();
-    let mut windows: Vec<(usize, usize)> = Vec::new();
-    for (idx, _) in s.match_indices("//") {
-        let mut start = idx + 2;
-        while bytes.get(start) == Some(&b'/') {
-            start += 1;
-        }
-        let end = s[start..]
-            .find(['/', '?', '#'])
-            .map_or(s.len(), |offset| start + offset);
-        windows.push((start, end));
-    }
-    windows.sort_unstable();
-    windows.dedup();
-    for (start, end) in windows.into_iter().rev() {
-        if let Some(at) = out[start..end].rfind('@') {
-            out.replace_range(start..start + at, "***");
-        }
-    }
-    out
-}
-
-/// Whether a `@` appears in any `//`-authority-style window of `raw`.
-/// Each window starts after a `//` plus any run of extra slashes (evaders
-/// hide a `@` behind `scheme:////...`) and ends at the next `/`, `?`, or
-/// `#`. Every `//` occurrence is scanned, so credentials cannot hide in a
-/// later window behind a benign first one (`http://h/a//user:pass@e/`).
-fn window_has_at_sign(raw: &str) -> bool {
-    let bytes = raw.as_bytes();
-    for (idx, _) in raw.match_indices("//") {
-        let mut start = idx + 2;
-        while bytes.get(start) == Some(&b'/') {
-            start += 1;
-        }
-        let end = raw[start..]
-            .find(['/', '?', '#'])
-            .map_or(raw.len(), |offset| start + offset);
-        if raw[start..end].contains('@') {
-            return true;
-        }
-    }
-    false
-}
-
-/// Truncate `s` to at most `max` bytes, walking the cut down to the nearest
-/// UTF-8 char boundary so a multibyte character straddling the cap cannot
-/// panic.
-fn truncate_utf8_safe(s: &mut String, max: usize) {
-    if s.len() <= max {
-        return;
-    }
-    let mut cut = max;
-    while !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    s.truncate(cut);
 }
 
 /// Maximum bytes of an upstream error response body embedded into
@@ -3482,8 +3363,12 @@ impl Service<Exchange> for HttpProducer {
 /// with another test that has a live server on a fixed port (e.g. 9991),
 /// the registry entry is removed while the OS socket is still bound, so
 /// the next `get_or_spawn` call on that port fails with "Address already
-/// in use". Holding this mutex for the full body of each affected test
-/// prevents the race without requiring `--test-threads=1`.
+/// in use". This mutex does not give blanket protection by itself. It
+/// helps only where every participant follows the mutex law: the
+/// consumer-test readiness helper holds it from `stage_listener` until
+/// readiness-complete (http-test-harness spec, requirement
+/// "Registry-mutation serialization during setup"), and each `reset()`
+/// caller takes it before the reset.
 #[cfg(test)]
 pub(crate) static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -4042,6 +3927,73 @@ mod tests {
     }
 
     #[test]
+    fn non_special_backslash_authority_masked() {
+        // Non-special scheme: the url crate does not normalize the
+        // backslashes, so the string carries no `//` run — the
+        // scheme-prefixed backslash window must still suppress the
+        // credentials.
+        let redacted = redact_url_for_diagnostics("foo:\\user:pass@evil/");
+        assert!(
+            !redacted.contains("user:pass"),
+            "non-special backslash authority leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("pass"),
+            "non-special backslash authority leaked a credential byte: {redacted}"
+        );
+        // Clean sibling stays visible (spec scenario's second given).
+        assert_eq!(
+            redact_url_for_diagnostics("foo:\\clean/path"),
+            "foo:\\clean/path"
+        );
+    }
+
+    #[test]
+    fn one_char_scheme_credential_content_masked() {
+        // Single backslash after the one-character scheme `x:` with
+        // credential-shaped window content (`:` before the last `@`).
+        let redacted = redact_url_for_diagnostics("x:\\user:pass@evil");
+        assert!(
+            !redacted.contains("user:pass"),
+            "one-char-scheme backslash authority leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("pass"),
+            "one-char-scheme backslash authority leaked a credential byte: {redacted}"
+        );
+    }
+
+    #[test]
+    fn drive_and_unc_inputs_stay_visible() {
+        // Drive path: single backslash after a one-character scheme, no
+        // `:` in the candidate window — no qualifying backslash window.
+        // The parse-success arm lowercases the scheme (`C:` → `c:`); the
+        // diagnostic content must stay visible with no sentinel and no
+        // mask (spec scenario: query-redaction/cap rules only).
+        let drive = redact_url_for_diagnostics("C:\\Users\\x@corp\\file");
+        assert!(
+            !drive.contains("[redacted]"),
+            "drive path must not be sentineled: {drive}"
+        );
+        assert!(
+            !drive.contains("***"),
+            "drive path must not be masked: {drive}"
+        );
+        assert!(
+            drive.contains("x@corp"),
+            "drive path keeps its at-sign content visible: {drive}"
+        );
+        // UNC path: no scheme prefix before the backslash run; the
+        // unparseable arm renders it byte-identically.
+        let unc = redact_url_for_diagnostics("\\\\server\\x@y");
+        assert_eq!(unc, "\\\\server\\x@y");
+        assert!(
+            !unc.contains("[redacted]"),
+            "UNC path must not be sentineled: {unc}"
+        );
+    }
+
+    #[test]
     fn redact_url_masks_userinfo_and_query() {
         let redacted =
             redact_url_for_diagnostics("http://user:secretpass@internal.example/api?token=abc123");
@@ -4263,6 +4215,39 @@ mod tests {
             redact_url_for_diagnostics("mailto:user@example.com"),
             "mailto:user@example.com",
             "at-sign in mailto must round-trip byte-identically"
+        );
+    }
+
+    #[test]
+    fn parse_success_fragment_composes() {
+        // Parsed arm: the fragment stays on the rendered URL and the
+        // canonical redactor drops it and appends the sentinel.
+        assert_eq!(
+            redact_url_for_diagnostics("https://h/p#access_token=x"),
+            "https://h/p#[redacted]"
+        );
+        // A `?` inside the fragment composes both sentinels, in
+        // first-occurrence order (# before ?).
+        assert_eq!(
+            redact_url_for_diagnostics("https://h/cb#f?state=x"),
+            "https://h/cb#[redacted]?[redacted]"
+        );
+    }
+
+    #[test]
+    fn err_arm_delegation_pin() {
+        // Unparseable (port 99999) with userinfo in the authority window:
+        // the Err arm delegates wholesale to the fail-closed canonical
+        // redactor — nothing of the URL is rendered.
+        assert_eq!(
+            redact_url_for_diagnostics("http://u:secretpw@host:99999/x"),
+            "[redacted]"
+        );
+        // Cross-surface fixture: same unparseable port without userinfo —
+        // drop at `?`, append the query sentinel.
+        assert_eq!(
+            redact_url_for_diagnostics("http://h:99999/p?token=secret"),
+            "http://h:99999/p?[redacted]"
         );
     }
 

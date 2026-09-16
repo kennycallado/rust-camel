@@ -391,6 +391,19 @@ pub struct BrokerConfig {
     pub password: Option<String>,
 }
 
+/// Sensitive query-key substrings for broker URL redaction (7 entries,
+/// same order as the landed `redact_broker_url` list): a pair whose
+/// lowercased key contains any of these renders as `k=<redacted>`.
+const BROKER_SENSITIVE_KEY_SUBSTRINGS: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "credential",
+    "token",
+    "username",
+    "user",
+];
+
 /// Redact credentials embedded in a JMS broker URL (audit 2026-08-31,
 /// F5-3; windowed alignment bd rc-eh49). ActiveMQ-style URLs routinely
 /// carry credentials:
@@ -406,99 +419,11 @@ pub struct BrokerConfig {
 /// allowlist. Fragments are never echoed: everything from the first `#`
 /// is dropped and replaced with the `#[redacted]` sentinel. The result is
 /// capped at 256 bytes on a UTF-8 char boundary. String-based (no url
-/// crate dep in this component).
+/// crate dep in this component). Delegates to the canonical
+/// [`camel_api::redact::redact_url_with_query_allowlist`] with the
+/// component's 7-entry key list.
 pub(crate) fn redact_broker_url(raw: &str) -> String {
-    let sensitive = [
-        "password",
-        "passwd",
-        "secret",
-        "credential",
-        "token",
-        "username",
-        "user",
-    ];
-    // 1) Mask userinfo in every `//`-window (see [`mask_authority_windows`]).
-    let after_userinfo = mask_authority_windows(raw);
-    // 2) Redact sensitive query params, keep the rest for diagnosability.
-    let mut out = match after_userinfo.split_once('?') {
-        Some((base, query)) => {
-            let redacted: Vec<String> = query
-                .split('&')
-                .map(|pair| {
-                    let key = pair.split('=').next().unwrap_or(pair).to_lowercase();
-                    if sensitive.iter().any(|s| key.contains(s)) {
-                        let k = pair.split('=').next().unwrap_or(pair);
-                        format!("{k}=<redacted>")
-                    } else {
-                        pair.to_string()
-                    }
-                })
-                .collect();
-            format!("{base}?{}", redacted.join("&"))
-        }
-        None => after_userinfo,
-    };
-    // 3) Fragments are never echoed. Reserve the sentinel bytes before
-    // truncating so the cap never splits the appended `#[redacted]`
-    // (e_gpt stage-4); the kept query content is part of the base.
-    if let Some(i) = out.find('#') {
-        out.truncate(i);
-        truncate_utf8_safe(&mut out, 256 - 11);
-        out.push_str("#[redacted]");
-    }
-    truncate_utf8_safe(&mut out, 256);
-    out
-}
-
-/// Shared with `component.rs` (`redact_url`): return `input` with userinfo
-/// masked in every `//` window. A window starts after a `//` plus any run
-/// of extra slashes and ends at the next `/`, `?`, or `#`; a window
-/// containing `@` carries userinfo, and the bytes from window start
-/// through the LAST `@` are replaced with `***` (over-masking is safe,
-/// under-masking is not). Windows are collected on the input and masked in
-/// reverse offset order (with duplicates from one slash run deduped) so an
-/// edit never shifts a yet-to-be-processed window. Idempotent: an
-/// already-masked `***@host` window rewrites to itself. `pub(crate)` lets
-/// both redaction call sites share one implementation without exposing
-/// anything outside the crate.
-pub(crate) fn mask_authority_windows(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = input.to_string();
-    let mut windows: Vec<(usize, usize)> = Vec::new();
-    for (idx, _) in input.match_indices("//") {
-        let mut start = idx + 2;
-        while bytes.get(start) == Some(&b'/') {
-            start += 1;
-        }
-        let end = input[start..]
-            .find(['/', '?', '#'])
-            .map_or(input.len(), |offset| start + offset);
-        windows.push((start, end));
-    }
-    windows.sort_unstable();
-    windows.dedup();
-    for (start, end) in windows.into_iter().rev() {
-        if let Some(at) = out[start..end].rfind('@') {
-            out.replace_range(start..start + at, "***");
-        }
-    }
-    out
-}
-
-/// Shared with `component.rs` (`redact_url`): truncate `s` to at most `max`
-/// bytes, walking the cut down to the nearest UTF-8 char boundary so a
-/// multibyte character straddling the cap cannot panic. `pub(crate)` lets
-/// both redaction call sites share one implementation without exposing
-/// anything outside the crate.
-pub(crate) fn truncate_utf8_safe(s: &mut String, max: usize) {
-    if s.len() <= max {
-        return;
-    }
-    let mut cut = max;
-    while !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    s.truncate(cut);
+    camel_api::redact::redact_url_with_query_allowlist(raw, BROKER_SENSITIVE_KEY_SUBSTRINGS)
 }
 
 impl std::fmt::Debug for BrokerConfig {
@@ -694,6 +619,17 @@ mod tests {
         assert_eq!(redact_broker_url("tcp://host:61616"), "tcp://host:61616");
     }
 
+    /// Delegation pin: `redact_broker_url` is a thin wrapper over the
+    /// canonical `camel_api::redact::redact_url_with_query_allowlist` —
+    /// benign params stay visible (ActiveMQ diagnosability).
+    #[test]
+    fn redact_broker_url_delegation_pin() {
+        assert_eq!(
+            redact_broker_url("tcp://h:61616?keepAlive=true"),
+            "tcp://h:61616?keepAlive=true"
+        );
+    }
+
     /// Exact-output pin: userinfo is fully masked by `***`, never partially
     /// truncated, in scheme://...@ authority position.
     #[test]
@@ -833,6 +769,27 @@ mod tests {
         };
         let dbg = format!("{cfg:?}");
         assert!(!dbg.contains("topsecret"), "Debug must not leak: {dbg}");
+    }
+
+    /// bd rc-r7v8s (redact2 jms spec scenario): a percent-encoded
+    /// credential riding a benign-looking redirect param must not survive
+    /// Debug output — neither the decoded secret nor the encoded userinfo
+    /// bytes may appear, and the bare `<redacted>` marker must.
+    #[test]
+    fn broker_debug_masks_encoded_credentials() {
+        let cfg = BrokerConfig {
+            broker_url: "tcp://h:61616?redirect=http%3A%2F%2Fuser%3Asecret%40host".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            username: None,
+            password: None,
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("secret"), "encoded credential leaked: {dbg}");
+        assert!(
+            !dbg.contains("user%3Asecret%40"),
+            "encoded userinfo leaked: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"), "bare marker expected: {dbg}");
     }
 
     #[test]

@@ -190,6 +190,10 @@ _Avoid_: URI wrapper (vague), parsed URL (implies full RFC 3986 semantics)
 Typed error for `EndpointUri` construction: `DuplicateKey`, `MissingScheme`, `EmptyQueryKey`, `InvalidParamKey`. Converts into `CamelError::EndpointUri`.
 _Avoid_: stringly Config errors for URI merge failures
 
+**redact**:
+Canonical string-based URL redaction for diagnostic surfaces (`redact.rs`, ADR-0051): masks userinfo in every authority window as `***`. A window begins after a maximal run of `/` and `\`; backslash-bearing runs open only behind an RFC 3986 scheme prefix. Replaces query/fragment content with `?[redacted]`/`#[redacted]` sentinels and caps at 256 bytes on a UTF-8 char boundary. Operates on raw URL strings that may be malformed or hostile; it never parses. Variants: `redact_url` (strict), `redact_url_fail_closed` (wholesale `[redacted]` when any window carries `@`), `redact_url_with_query_allowlist` (per-key query redaction, benign keys stay visible; masks percent-encoded credential shapes under benign keys), `window_has_at_sign` (guard). Consumed by camel-config, camel-jms, and camel-http diagnostic surfaces. Distinct from `EndpointUri` `to_redacted_string`, which redacts the catalog-driven authored-URI layer.
+_Avoid_: URL sanitizer, endpoint redaction (that is `to_redacted_string`)
+
 **MetricsCollector**:
 The metrics emission contract (`metrics.rs`): five exchange-lifecycle methods
 (duration, errors, exchanges, queue depth, circuit-breaker transitions), two
