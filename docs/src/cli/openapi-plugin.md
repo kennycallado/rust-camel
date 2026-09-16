@@ -191,7 +191,7 @@ The CLI converts hyphens in the plugin name to underscores for the wasm artifact
 
 ## See also
 
-- [CLI usage](../getting-started/cli.md) for the rest of the CLI surface.
+- [CLI reference](index.md) for the full command surface.
 - [YAML DSL](../yaml-dsl/index.md) for the full `rest:` block reference.
 - [WASM component](../components/index.md) for runtime plugin loading.
 

@@ -20,5 +20,6 @@ registration order, stop in reverse order, and report `Stopped`,
 | [Auth](auth.md) | `camel-auth` | Token validation, claim mapping, permission checks |
 | [Function runtime](function.md) | `camel-function` | Out-of-process user code invoked as `function:` pipeline steps |
 | [Bridge](bridge.md) | `camel-bridge` | Spawns and supervises Java bridge processes for JVM-only components (JMS, XML, CXF) |
+| [Redis repository](https://github.com/kennycallado/rust-camel/blob/main/crates/services/camel-redis-repo/CONTEXT.md) | `camel-redis-repo` | Redis-backed idempotent and cache repositories |
 
 **Reference**: [Services crate](https://github.com/kennycallado/rust-camel/blob/main/crates/services/CONTEXT.md). See also [Health endpoints](../operations/health.md).

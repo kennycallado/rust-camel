@@ -9,9 +9,11 @@ providers live in component crates such as `camel-component-keycloak`.
 
 The auth pipeline has three layers:
 
-1. **TokenAuthenticator** validates a bearer or API token and returns a `Principal`. Implementations include `IntrospectionAuthenticator` (RFC 7662), `StaticTokenAuthenticator`, and `LocalJwtValidator`.
+1. **TokenAuthenticator** validates a bearer or API token and returns a `Principal`. Implementations include `IntrospectionAuthenticator` (RFC 7662), `StaticTokenAuthenticator`, and `LocalJwtValidator`. `LocalJwtValidator` is JWKS-backed.
 2. **ClaimsMapper** maps token or introspection claims into `Principal` fields: subject, roles, scopes, issuer, audience. `JsonPointerClaimsMapper` resolves JSON Pointer paths, so any OIDC provider works without code.
 3. **PermissionEvaluator** evaluates resource, action, and scope requests and returns a `PermissionDecision`. Route-level `security_policy.permission` calls it.
+
+`RemoteJwksProvider` fetches the signing keys from a remote JWKS endpoint. It caps the response body at 1 MiB. It clamps a parsed `max-age` to the range 60 to 3600 seconds. It resolves DNS with a 5-second timeout and rejects SSRF-blocked IPs. It pins the validated IPs into the HTTP client to close the time-of-check/time-of-use window. It disables redirects and applies 5-second connect and 10-second request timeouts.
 
 The enforcement boundary is `SecurityPolicyLayer` in camel-core. It evaluates BEFORE route steps run. A granted decision stores `Principal` properties on the Exchange. A denied decision returns `Unauthorized` into route error handling.
 

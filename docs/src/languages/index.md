@@ -13,6 +13,6 @@ Every language implements the `Language` trait from `camel-language-api`. Langua
 | [XPath](xpath.md) | `camel-language-xpath` | Query XML message bodies |
 | [JavaScript](js.md) | `camel-language-js` | Full JS expressions via embedded engine |
 | [Rhai](rhai.md) | `camel-language-rhai` | Rust-native embedded scripting |
-| [MiniJinja](minijinja.md) | `camel-language-minijinja` | Jinja2-compatible templating |
+| [MiniJinja](minijinja.md) | `camel-language-minijinja` | Python Jinja2-inspired templating |
 
 **Reference**: [Languages overview](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/CONTEXT.md) · [Language SPI](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-api/CONTEXT.md)

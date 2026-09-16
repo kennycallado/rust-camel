@@ -93,6 +93,7 @@ Validation rules from `KubernetesPlatformConfig::validate()`:
 
 - `renew_deadline` must be less than `lease_duration`.
 - `retry_period` must be less than `renew_deadline`.
+- `lease_duration - renew_deadline` must be at least `retry_period`. This leaves one retry window of renewal slack.
 - `jitter_factor` must be in the range `[0.0, 1.0]`.
 
 See `crates/platforms/camel-platform-kubernetes/CONTEXT.md` for the

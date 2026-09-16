@@ -1,7 +1,7 @@
 # Documentation workflow
 
 Build the book locally, keep code examples honest with the include system,
-follow the page template, apply the voice rules, and run the linters.
+follow the page template, and apply the voice rules.
 
 ## Build the book locally
 
@@ -85,13 +85,18 @@ prose.
 
 ## Structural checks
 
-The mdBook build is the structural check for the guide. Run it before you commit:
+Two mdBook commands are the structural checks for the guide. Run both before you commit:
 
 ```bash
 nix shell nixpkgs#mdbook -c mdbook build docs
+nix shell nixpkgs#mdbook -c mdbook test docs
 ```
 
-The build verifies every include directive, link, and page. It does not assess prose quality. Prose quality depends on the `ste-writing` skill and human review. ADR citation validity and glossary consistency with the Key Terms in [`CONTEXT-MAP.md`](https://github.com/kennycallado/rust-camel/blob/main/CONTEXT-MAP.md) are also review-enforced; no xtask lint covers them.
+The build verifies every include directive, link, and page. The test compiles every Rust block; tag non-Rust fences (`text`, `yaml`, `output`) or the test fails. Neither command assesses prose quality. Prose quality depends on the `ste-writing` skill and human review. ADR citation validity and glossary consistency with the Key Terms in [`CONTEXT-MAP.md`](https://github.com/kennycallado/rust-camel/blob/main/CONTEXT-MAP.md) are also review-enforced; no xtask lint covers them.
+
+## SUMMARY wiring
+
+`SUMMARY.md` is the mdBook table of contents. Structure rules: each major section has one parent page with entries indented underneath; sections over about ten siblings split into family sub-groups with their own hub page; never a fourth nesting level. The full rules are in `docs/AGENTS.md`.
 
 ## Two-source rule
 

@@ -2,6 +2,8 @@
 
 This section describes how to test routes with the lean `camel test` boot and with route interception. Interception rewrites `to:` send points at compile time. It supports isolated unit tests without `mock:` lines in production routes.
 
+For Rust-level integration tests, the workspace ships a harness crate: `crates/camel-test` provides `CamelTestContext` and a `TimeController` for deterministic polling, plus the shared matcher re-exports (ADR-0072). See [`crates/camel-test/README.md`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-test/README.md) and its CONTEXT.md.
+
 ## Route interception
 
 Use route interception to replace or copy a send without changing the route. Rules run at compile time. Validation happens once, in `InterceptRules::new`; the compiler consults the frozen rules at each send point.
@@ -79,7 +81,7 @@ Further detail lives in [`crates/camel-core/CONTEXT.md`](https://github.com/kenn
 
 ## Declarative camel test
 
-`camel test` loads each `*.test.yaml` document. The document selects route files, injects `direct:` inputs, and asserts `mock:` expectations. An optional `intercepts` block adds route interception without editing production routes. `camel run` ignores test documents and never parses the `intercepts` block.
+`camel test` loads each `*.test.yaml` (or `*.test.yml`) document. The document selects route files, injects `direct:` inputs, and asserts `mock:` expectations. An optional `intercepts` block adds route interception without editing production routes. `camel run` wildcard discovery skips test documents; naming one literally in a route pattern fails with a reserved-suffix error that points at `camel test`. `camel run` never parses the `intercepts` block.
 
 ### Intercepts
 
@@ -269,7 +271,7 @@ Identifier interpolation has a fixed grammar and scope. The doc-side identifier 
 
 Every executed document prints one tier annotation line before its `PASS`/`FAIL` rows: `[lean]` for the unit tier, `[full]` for the integration tier. CI parsers that consume stdout must account for these lines.
 
-Exit codes follow a fixed contract. Verdict failures exit 1: expectation mismatch, settle timeout, reply assertion failure, scenario `receive-timeout`, and `validation-mismatch`. Apparatus failures exit 2: runtime `scenario-var-unresolved` (an unset variable is an authoring bug, not a product failure), `action-transport-failure`, `partner-startup-failure`, `shutdown-failure`, and `infra-unavailable`. Document validation failures exit 2: unreadable file, parse error, boot failure, and harness wiring errors. Precedence is 2 over 1 over 0.
+Exit codes follow a fixed contract. Verdict failures exit 1: expectation mismatch, settle timeout, reply assertion failure, scenario `receive-timeout`, and `validation-mismatch`. Apparatus failures exit 2: runtime `scenario-var-unresolved` (an unset variable is an authoring bug, not a product failure), `action-transport-failure`, `partner-startup-failure`, `partner-bind-failure`, `log-capture-unavailable`, `shutdown-failure`, and `infra-unavailable`. Document validation failures exit 2: unreadable file, parse error, boot failure, and harness wiring errors. Precedence is 2 over 1 over 0.
 
 Scenario documents run through one of two execution paths. The build selects the path.
 

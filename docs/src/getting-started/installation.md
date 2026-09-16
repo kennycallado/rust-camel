@@ -35,14 +35,17 @@ resulting `[dependencies]` block looks like:
 
 ```toml
 [dependencies]
-camel-api = "0.29"
-camel-core = "0.29"
-camel-builder = "0.29"
-camel-component-timer = "0.29"
-camel-component-log = "0.29"
+camel-api = "0.47"
+camel-core = "0.47"
+camel-builder = "0.47"
+camel-component-timer = "0.47"
+camel-component-log = "0.47"
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = "0.3"
 ```
+
+Versions move with each release. The commands above always resolve the
+current published version; update the block when a release lands.
 
 `camel-core` provides `CamelContext`, the runtime that starts and stops routes.
 `camel-builder` provides the fluent `RouteBuilder` API. `camel-api` provides
@@ -81,7 +84,7 @@ Write your first YAML route next: [First route in YAML](yaml-route.md).
 
 ## Run the examples from source
 
-The repository ships compiled examples. Clone it and run one to verify your
+The repository ships example projects. Clone it and run one to verify your
 toolchain:
 
 ```console

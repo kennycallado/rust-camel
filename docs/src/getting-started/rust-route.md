@@ -58,8 +58,9 @@ The route references two endpoint schemes, `timer` and `log`. The context
 resolves a scheme to a component only after you register that component.
 `ctx.register_component(TimerComponent::new())` registers the `timer`
 scheme. `ctx.register_component(LogComponent::new())` registers the `log`
-scheme. Without registration, `RouteBuilder::from("timer:...")` fails at
-build time with an unknown scheme.
+scheme. A URI without a scheme separator fails at build time. A
+well-formed but unregistered scheme passes the builder and fails later,
+when the context resolves endpoints at route add or start time.
 
 ### Author the route
 
@@ -82,7 +83,8 @@ and writes it through `tracing`. The query parameters tell the component to
 include the headers and the correlation ID in each output line.
 
 `.build()` consumes the builder and returns a `RouteDefinition`. The
-builder is a single-shot object. You cannot clone or reuse it after build.
+builder is a single-shot object. Clone it first when you need to build
+two variants of one route.
 
 ### Register and start the route
 

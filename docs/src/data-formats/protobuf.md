@@ -20,12 +20,15 @@ let df = ProtobufDataFormat::new("protos/helloworld.proto", "helloworld.HelloReq
 
 The constructor compiles the proto file at runtime through `camel-proto-compiler`. Pass a shared `ProtoCache` to `new_with_cache` to reuse the compiled descriptor pool across formats.
 
-The protobuf format is not built-in. Register it before the route starts:
+## Route usage
 
-```rust,ignore
-ctx.data_format_registry()
-    .register("protobuf", std::sync::Arc::new(df));
+The protobuf format is not built-in. The YAML DSL resolves it through the `protobuf:<path>#<Message>` data format string:
+
+```yaml
+- marshal: "protobuf:protos/helloworld.proto#helloworld.HelloRequest"
 ```
+
+The `camel-dsl` crate gates this format behind its non-default `protobuf` cargo feature. A route that names `protobuf:` fails at compile time when the feature is off. The proto path must be relative and cannot contain `..`.
 
 ## Body type support
 

@@ -9,9 +9,10 @@ The `camel` CLI runs, scaffolds, and inspects integration routes from the termin
 | `run` | Start routes from a config file | `camel run` |
 | `new` | Scaffold a new project | `camel new my-integration` |
 | `journal inspect` | Read events from a journal file | `camel journal inspect runtime.db` |
-| `plugin new` | Scaffold a WASM plugin | `camel plugin new my-plugin` |
-| `plugin build` | Compile and install a WASM plugin | `camel plugin build` |
-| `openapi generate` | Emit an OpenAPI document from REST routes | `camel openapi generate routes.yaml` |
+| `lint` | Lint a route file | `camel lint routes/api.yaml` |
+| `test` | Run declarative mock tests | `camel test tests/` |
+| `job` | Run or list jobs | `camel job report-nightly` |
+| `compile` | Pack a route or job into an artifact | `camel compile routes.yaml -o app` |
 
 ## camel run
 
@@ -77,13 +78,11 @@ The `development` profile sets `log_level = "DEBUG"` and `watch = true`. The `pr
 
 ### Hot-reload
 
-With `--watch`, the CLI monitors route files for changes. The watcher groups rapid edits behind a 300 ms debounce window. Set `watch_debounce_ms` in `Camel.toml` to change it. Edits take effect without a restart.
+Hot-reload is off by default. With `--watch`, the CLI monitors route files for changes. The watcher groups rapid edits behind a 300 ms debounce window. Set `watch_debounce_ms` in `Camel.toml` to change it. Edits take effect without a restart.
 
 ```console
 camel run --watch
 ```
-
-See `crates/camel-config/CONTEXT.md` for the debounce default.
 
 ### Minimal config
 
@@ -158,103 +157,16 @@ SEQ        TIMESTAMP                   EVENT                    ROUTE_ID
 
 Pass `--format json` to pipe events into another tool.
 
-## camel plugin
+## More commands
 
-Scaffold and build WASM plugins. Plugins extend the runtime with custom processors, beans, or authorization policies. The CLI ships two subcommands: `new` and `build`.
+This page covers the commands you use to start. The rest of the CLI surface:
 
-### camel plugin new
-
-Create a plugin project from a template.
-
-```console
-camel plugin new my-plugin
-```
-
-| Flag | Description |
-|------|-------------|
-| `<name>` (positional) | Plugin name (letters, digits, hyphens, underscores) |
-| `--type <TYPE>` | `processor` (default), `bean`, or `authorization-policy` |
-| `--force` | Overwrite files if the directory already exists |
-
-Flag definitions live in `crates/camel-cli/src/commands/plugin.rs`.
-
-### Expected output
-
-```text
-Created camel processor plugin 'my-plugin'
-
-Next steps:
-  cd my-plugin
-  camel plugin build
-```
-
-### camel plugin build
-
-Compile a plugin to the `wasm32-wasip2` target and install the artifact into the project plugins directory.
-
-```console
-camel plugin build
-```
-
-Run this from inside the plugin directory, or pass a path:
-
-```console
-camel plugin build ./my-plugin
-```
-
-| Flag | Description |
-|------|-------------|
-| `<path>` (positional, optional) | Plugin directory (default: current directory) |
-| `--debug` | Build without `--release` |
-
-The CLI copies the compiled `.wasm` into the plugins directory. It reads the directory from `[default.components.wasm].plugins_dir` in `Camel.toml`. The default is `plugins`. See `crates/camel-cli/src/commands/plugin.rs` for the resolution rules.
-
-### Expected output
-
-```text
-Built and installed plugin 'my-plugin'
-  source: /path/to/my-plugin/target/wasm32-wasip2/release/my_plugin.wasm
-  installed: /path/to/camel-root/plugins/my-plugin.wasm
-```
-
-## camel openapi
-
-Emit an OpenAPI 3.0.3 document from the `rest:` blocks in a YAML or JSON route file. The CLI ships one subcommand: `generate`.
-
-```console
-camel openapi generate routes.yaml
-```
-
-| Flag | Description |
-|------|-------------|
-| `<file>` (positional) | Path to the route file (`.yaml`, `.yml`, or `.json`) |
-| `--title <TITLE>` | API title for the `info` section (default: `Generated API`) |
-| `--version <VER>` | API version for the `info` section (default: `1.0.0`) |
-
-Flag definitions live in `crates/camel-cli/src/commands/openapi.rs`.
-
-### Expected output
-
-The command prints a pretty JSON document to stdout. The top-level `openapi` field is `3.0.3`. Each `rest:` block becomes a path entry. Each operation becomes a verb under that path.
-
-```json
-{
-  "openapi": "3.0.3",
-  "info": {
-    "title": "Generated API",
-    "version": "1.0.0"
-  },
-  "paths": {
-    "/api/users": {
-      "get": { "operationId": "listUsers" }
-    }
-  }
-}
-```
-
-If a file has no `rest:` blocks, the command exits with an error. Validation warnings print to stderr.
-
-`${env:}` placeholders in `rest:` blocks resolve default-only at generate time. String-typed positions take the concrete default in the emitted document; integer- and boolean-typed positions with a placeholder fail generation. The process environment is never read.
+- [`camel job`](../cli/job.md) runs and lists jobs from `*.job.yaml` documents, with typed declared arguments.
+- [`camel compile`](../cli/compile.md) packs a route or job document into a self-contained executable artifact.
+- [`camel plugin new` and `camel plugin build`](../cli/openapi-plugin.md) scaffold and build WASM plugins.
+- [`camel openapi generate`](../cli/openapi-plugin.md) emits an OpenAPI 3.0.3 document from `rest:` blocks.
+- [`camel test`](../testing/index.md) runs declarative mock tests.
+- The full command table lives in the [CLI reference](../cli/index.md).
 
 ## Next steps
 

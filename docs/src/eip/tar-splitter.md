@@ -29,13 +29,13 @@ The splitter walks the archive in header order and emits regular files sequentia
 
 | Header | Meaning |
 | --- | --- |
-| `CAMEL_TAR_ENTRY_NAME` | File name of the entry, without directory components |
-| `CAMEL_TAR_ENTRY_PATH` | Full entry path inside the archive |
-| `CAMEL_TAR_ENTRY_INDEX` | Zero-based index of the emitted entry |
-| `CAMEL_TAR_ENTRY_SIZE` | Decoded entry size in bytes |
-| `CAMEL_TAR_ENTRY_IS_DIRECTORY` | Always `false`; directories are never emitted |
+| `CamelTarEntryName` | File name of the entry, without directory components |
+| `CamelTarEntryPath` | Full entry path inside the archive |
+| `CamelTarEntryIndex` | Zero-based index of the emitted entry |
+| `CamelTarEntrySize` | Decoded entry size in bytes |
+| `CamelTarEntryIsDirectory` | Always `false`; directories are never emitted |
 
-The index counts emitted regular-file entries, not raw archive headers. A directory or link at header position one does not advance the index of the file that follows it. Parent `Content-Length` and `Content-Type` headers are removed from each fragment because they describe the archive, not the entry. Duplicate entry names follow the shared archive `DuplicatePolicy` semantics: deterministic collision-free indexed names by default (`AllowWithIndex`) — an indexed name never reuses a name another entry already emitted — or reject when configured with `Reject`. The ZIP splitter's duplicate handling is unchanged historical behavior: its reader collapses duplicate names, so the policy branches there are dormant.
+The index counts emitted regular-file entries, not raw archive headers. A directory or link at header position one does not advance the index of the file that follows it. Parent `Content-Length` and `Content-Type` headers are removed from each fragment because they describe the archive, not the entry. Duplicate entry names follow the shared archive `DuplicatePolicy` semantics: deterministic collision-free indexed names by default (`AllowWithIndex`) — an indexed name never reuses a name another entry already emitted — or reject when configured with `Reject`. The ZIP splitter applies the same shared policy per entry.
 
 ## Materialization and caps
 
@@ -67,6 +67,6 @@ Every entry name is validated before use: absolute paths, `..` traversal, backsl
 
 `AggregationStrategy::Original` returns the original exchange after the split scope closes. The split is not a round-trip: the route result body is the original archive, not a reassembly of fragment outputs, and no archive is re-encoded. Use `collect_all` when the route needs the fragment outputs as a list.
 
-The TAR Splitter and the [ZIP Splitter](zip-splitter.md) each parse their own archive format; there is no generic archive-splitting abstraction. Both differ from the [Streaming Splitter](streaming-splitter.md), which splits incremental byte streams such as NDJSON, log lines, or raw chunks. Use the TAR Splitter when the input is a TAR or TAR.GZ archive and you need per-entry metadata.
+The TAR Splitter and the [ZIP Splitter](zip-splitter.md) each parse their own archive format; they share duplicate-entry bookkeeping but not a generic splitter walk. Both differ from the [Streaming Splitter](streaming-splitter.md), which splits incremental byte streams such as NDJSON, log lines, or raw chunks. Use the TAR Splitter when the input is a TAR or TAR.GZ archive and you need per-entry metadata.
 
 Per [ADR-0001](../adr/0001-tower-data-plane-split-from-control-plane.md), the splitter compiles into a `Service<Exchange>` step in the Tower middleware pipeline. The per-entry sub-pipeline compiles into child steps on the same route channel. The processor contract is documented in [camel-processor/CONTEXT.md](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-processor/CONTEXT.md).

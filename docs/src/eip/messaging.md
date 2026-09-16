@@ -6,6 +6,7 @@ Messaging patterns change the cardinality or order of exchanges. They split one 
 - [Splitter](splitter.md) — break a composite message into one exchange per fragment
 - [Streaming Splitter](streaming-splitter.md) — split a byte-stream body into fragment exchanges with backpressure
 - [Zip Splitter](zip-splitter.md) — split a ZIP archive into one exchange per entry
+- [Tar Splitter](tar-splitter.md) — split a TAR or TAR.GZ archive into one exchange per entry with per-entry headers
 - [Resequencer](resequencer.md) — reorder exchanges by sequence number in batches or streams
 - [Sort](sort.md) — sort an array body by a comparator expression
 - [Sampling](sampling.md) — pass through one out of every N exchanges

@@ -257,7 +257,7 @@ _Avoid_: authentication config, ACL, policy step
 **Concurrency**:
 Route-level override for processing Exchanges sequentially or concurrently, with an optional
 maximum parallelism. Compiles to `ConcurrencyModel`. Declared as `sequential: true` or
-`concurrent: { max: N }` in YAML.
+`concurrent: 8` (integer max) in YAML.
 _Avoid_: threading mode, parallelism setting, DeclarativeConcurrency
 
 **UnitOfWork** (YAML hooks):

@@ -21,12 +21,10 @@ The `ObservabilityConfig.health` field accepts an optional
 {{#include ../../../examples/health-demo/src/main.rs:health-config}}
 ```
 
-> **Note:** Service registration is Rust API only. YAML routes compile to
-> the same `RouteDefinition`. The service wiring stays in application
-> code.
-
 The `enabled` flag starts the HealthServer. `host` and `port` set the bind
-address. `handler_timeout_ms` limits each probe handler. The default is 6
+address. The defaults are host `0.0.0.0` and port `8081`. On `camel run`,
+`--health-port <PORT>` overrides the port and enables the standalone health
+server. `handler_timeout_ms` limits each probe handler. The default is 6
 seconds (`DEFAULT_HANDLER_TIMEOUT`). `forced_ttl_ms` controls how long a
 forced-unhealthy state persists before the registry re-evaluates the route.
 

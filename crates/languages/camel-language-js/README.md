@@ -22,7 +22,11 @@ prototype members from affecting bound exchange data.
 
 ## Resource limits
 
-Each evaluation uses a fresh Boa context and these defaults:
+Evaluations reuse one persistent worker Boa context. Each evaluation
+reinstalls and verifies the `camel` and `console` bindings. On integrity
+drift the worker recycles the realm. There is no realm isolation: global
+properties and intrinsic state may survive across exchanges and routes
+until realm recycling. The context applies these defaults:
 
 | Limit | Default |
 |---|---:|

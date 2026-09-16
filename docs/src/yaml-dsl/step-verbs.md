@@ -1,7 +1,7 @@
 # Step verbs reference
 
 Every YAML step verb and field, derived from the authoritative source
-`crates/camel-dsl/src/route_ast.rs`. Each verb maps to a struct that
+`crates/camel-dsl/src/route_ast.rs`. Each verb maps to a struct documented in
 [Route structure](route-structure.md).
 
 Where a verb takes a predicate or value expression, the standard language fields
@@ -17,6 +17,7 @@ Send the exchange to an endpoint URI.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `to` | string | yes | Target endpoint URI |
+| `parameters` | map | no | Per-endpoint parameters merged into the URI query (`{}` default) |
 
 ```yaml
 - to: "log:info"
@@ -252,13 +253,16 @@ Split the body into fragments and process each.
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `expression` | string/object | no | — | Split expression (string or language block) |
+| `expression` | string/object | no | `body_lines` | Split expression. String form: `body_lines`, `lines`, `body_json_array`, or `json_array`. Language-block form also accepted. |
 | `aggregation` | string | no | `last_wins` | Aggregation strategy |
 | `parallel` | bool | no | `false` | Process fragments in parallel |
 | `parallel_limit` | integer | no | — | Max parallel fragments |
 | `stop_on_exception` | bool | no | `true` | Stop on first error |
-| `streaming` | bool | no | `false` | Stream the split |
-| `stream` | object | no | — | Stream config (`format`, `max_record_bytes`, `batch_size`, `chunk_size`) |
+| `streaming` | bool | no | `false` | Stream the split. `stream` applies only when this is `true`. |
+| `stream.format` | string | no | `auto` | Stream record format: `ndjson`, `lines`, `chunks`, `zip`, `tar`, `tar.gz`, or `auto`. |
+| `stream.max_record_bytes` | integer | no | 1 MiB | Per-record byte cap in streaming mode |
+| `stream.batch_size` | integer | no | `1` | Records per streaming batch |
+| `stream.chunk_size` | integer | no | — | Chunk byte size for `chunks` format |
 | `steps` | list | no | `[]` | Per-fragment steps |
 
 ```yaml
@@ -291,6 +295,7 @@ pipeline, so `aggregate` has no nested `steps` block.
 | `completion_predicate` | object | no | — | Predicate-block completion trigger |
 | `strategy` | string | no | `collect_all` | Aggregation strategy |
 | `max_buckets` | integer | no | — | Max concurrent buckets |
+| `max_bucket_size` | integer | no | builder default | Max exchanges held in one bucket before forced completion |
 | `bucket_ttl_ms` | integer | no | — | Bucket time-to-live |
 | `force_completion_on_stop` | bool | no | — | Emit pending buckets on route stop |
 | `discard_on_timeout` | bool | no | — | Drop buckets that time out |
@@ -414,6 +419,8 @@ Materialize a stream body into bytes.
 ### `wire_tap`
 
 Send a fire-and-forget copy of the exchange to another endpoint.
+
+The full form takes `uri` and an optional `parameters` map merged into the URI query.
 
 ```yaml
 - wire_tap: "log:tap"
@@ -560,7 +567,7 @@ Enrich the exchange by requesting data from an endpoint.
 | Short | `enrich: "http:..."` |
 | Full | `enrich: { uri: "...", strategy: "...", timeout: 5000 }` |
 
-The full form takes `uri` (required), `strategy`, and `timeout`.
+The full form takes `uri` (required), `strategy`, `timeout`, and an optional `parameters` map merged into the URI query.
 
 ```yaml
 - enrich: "http:my-service/api/data"
@@ -572,7 +579,7 @@ The full form takes `uri` (required), `strategy`, and `timeout`.
 
 ### `poll_enrich`
 
-Enrich the exchange by polling an endpoint. Same fields as `enrich`.
+Enrich the exchange by polling an endpoint. Same fields as `enrich`, including the `parameters` map.
 
 ```yaml
 - poll_enrich: "file:data"
@@ -635,7 +642,7 @@ Cache a computed body by key with TTL. On hit, serves the cached body. On miss, 
 | `ttl` | duration | no | — | Time-to-live for the cached entry |
 | `max_entry_bytes` | integer | no | 10 MiB | Maximum body size to cache |
 | `coalesce_misses` | bool | no | `false` | Run one `on_miss` per concurrent miss wave on the same key |
-| `on_miss` | list | yes | — | Sub-pipeline to run on cache miss |
+| `on_miss` | list | no | — | Sub-pipeline to run on cache miss. Omit it to let the exchange pass through unchanged on a miss. |
 
 ```yaml
 - cache:
@@ -700,6 +707,7 @@ Serve a cached entry, ignoring its in-band expiry. Used as a stale-read fallback
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `repository` | string | no | Repository name (default: the default cache repository) |
 | `key` | string | yes | Cache key expression |
 | `on_miss` | string | no | On-miss policy: `"stop"` (default) or `"continue"` |
 
@@ -744,15 +752,26 @@ Sort the body array by a key expression.
 
 ### `resequence`
 
-Reorder exchanges by sequence number. Batch mode collects and sorts; stream mode
-is reserved for future use.
+Reorder exchanges by sequence number. Batch mode collects and sorts a bounded
+group. Stream mode reorders a continuous flow with gap detection.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `batch` | object | no | Batch config: `correlation`, `sort`, `completion` |
-| `stream` | object | no | Stream config (not yet implemented) |
+| `batch` | object | no | Batch config. `correlation`, `sort`, and `completion` are all required inside it. |
+| `stream` | object | no | Stream config. `sequence` is required inside it. |
 
-The `completion` object accepts `size`, `timeout`, and `size_or_timeout`.
+The batch `completion` object accepts `size`, `timeout`, and `size_or_timeout`.
+
+The `stream` object fields:
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `sequence` | string | yes | — | Sequence number expression |
+| `capacity` | integer | no | `1000` | Max in-flight sequence slots |
+| `dedup` | bool | no | `false` | Drop duplicate sequence numbers |
+| `gap_timeout` | integer (ms) | no | `5000` | Wait for a missing sequence number before the gap policy fires |
+| `on_capacity_exceeded` | string | no | `log_and_drop` | Capacity policy: `log_and_drop` or `drop_oldest` |
+| `on_gap` | string | no | `emit_partial` | Gap policy: `emit_partial` or `drop_and_log` |
 
 ```yaml
 - resequence:
@@ -762,6 +781,14 @@ The `completion` object accepts `size`, `timeout`, and `size_or_timeout`.
       completion:
         size: 100
         timeout: 5000
+```
+
+```yaml
+- resequence:
+    stream:
+      sequence: "${header.seq}"
+      capacity: 500
+      on_gap: drop_and_log
 ```
 
 ## Route-level config
@@ -821,6 +848,9 @@ Choose exactly one form: `roles`, `scopes`, `ref`, `wasm`, or `permission`.
 | `roles` | list | no | Required roles |
 | `scopes` | list | no | Required scopes |
 | `all_required` | bool | no | All roles/scopes required |
+| `audiences` | list | no | Accepted audience values. See [Authentication and authorization](../services/auth.md). |
+| `credential_sources` | list | no | Where the credential is read from. Same forms as route-level `credential_sources`. |
+| `provider` | string | no | Auth provider selection |
 | `ref` | string | no | Reference to a policy |
 | `wasm` | string | no | WASM policy source |
 | `config` | map | no | Policy-specific config |
@@ -862,6 +892,15 @@ REST operation:
 
 Operations bind in one of two modes. The default `json` mode accepts JSON-essence media types for `consumes` and `produces`: bare `application/json`, parameterized forms such as `application/json; charset=utf-8`, and `+json` suffixes such as `application/problem+json`. It unmarshals requests, marshals responses, and validates declared schemas automatically. Any other media type in `json` mode fails route load. The `raw` mode accepts any RFC 9110 type/subtype media type, leaves the request as `Body::Stream` with no automatic unmarshal or marshal, and sends the trimmed `produces` value as the response Content-Type. `request_schema` and `response.schema` are rejected in `raw` mode. The default success status is injected in both modes; a `raw` POST returns `201` with the declared `produces` type.
 
+#### Media negotiation gate
+
+Lowering injects a media negotiation gate as the first step of every lowered REST route. The gate enforces the declared `consumes` and `produces`:
+
+- A request `Content-Type` the operation does not declare fails with `415`. Body-less verbs skip the request check.
+- The `Accept` header is matched by media-range precedence; a mismatch fails with `406`. Equal-specificity ties take the lowest q value.
+- An absent header or an undeclared side is permissive.
+- A malformed `Accept` header degrades to `*/*`. A malformed `Content-Type` fails closed.
+
 ```yaml
 - method: post
   path: /ingest
@@ -902,6 +941,36 @@ The contract:
 - **Client disconnects do not fail the consumer.** If a client drops the
   connection during a streamed reply, the server keeps serving subsequent
   requests.
+
+### MCP catalog
+
+The `mcp` key declares an MCP server catalog (ADR-0060). Each tool lowers to an `mcp:<server>/tool/<name>` consumer route; each resource lowers to an `mcp:<server>/resource/<name>` consumer route.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `server` | object | no | Server declaration: `name`, `bind`, `security_policy` |
+| `tools` | list | no | Tool declarations: `name`, `input_schema` |
+| `resources` | list | no | Resource declarations: `name`, `uri` |
+
+```yaml
+mcp:
+  server:
+    name: crm
+    bind: 127.0.0.1:9100
+    security_policy: { roles: [mcp-client] }
+  tools:
+    - name: lookup
+      input_schema:
+        type: object
+        properties:
+          id: { type: string }
+        required: [id]
+  resources:
+    - name: customers
+      uri: crm://customers
+```
+
+The input schema and resource URI travel percent-encoded on the lowered route's query string. Server runtime config (bind, TLS, caps) is owned by `Camel.toml` under `mcp.servers.<name>`; the block's server `name` must match a TOML key or the consumer start fails. The server `security_policy` propagates to every lowered route. See [MCP component](../components/mcp.md).
 
 ### Template declaration
 

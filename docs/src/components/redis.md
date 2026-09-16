@@ -1,6 +1,6 @@
 # Redis
 
-The Redis component executes Redis commands and subscribes to Redis channels. One crate covers both directions. The Producer sends the Exchange body to Redis as a command argument. The Consumer subscribes to Pub/Sub channels or blocks on a list key. The `redis` URI scheme uses plaintext. The `rediss` URI scheme uses TLS.
+The Redis component executes Redis commands and subscribes to Redis channels. One crate covers both directions. The Producer sends the Exchange body to Redis as a command argument. The Consumer subscribes to Pub/Sub channels or blocks on a list key. The `redis` scheme is the route URI scheme. Enable TLS with `ssl = true` on the URI, or `tls_mode` in config; TLS auto-enables for non-loopback hosts. Sentinel clusters register under `redis-sentinel` and `rediss-sentinel`, where a `rediss://` node URL requires TLS.
 
 The redis-example wires a string producer, a Pub/Sub consumer, a queue consumer, and a Pub/Sub producer against a testcontainers Redis instance:
 

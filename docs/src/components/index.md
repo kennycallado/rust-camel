@@ -6,25 +6,25 @@ Components connect routes to external systems. Each Component owns a URI scheme 
 
 | Scheme | Direction | Authority |
 | --- | --- | --- |
-| `timer` | consumer | [parent](https://github.com/kennycallado/rust-camel/blob/main/crates/components/CONTEXT.md) |
+| `timer` | consumer | [camel-timer](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-timer/CONTEXT.md) |
 | `log` | producer | [camel-log](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-log/CONTEXT.md) |
 | `direct` | both | [camel-direct](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-direct/CONTEXT.md) |
 | `seda` | both | [camel-component-seda](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-seda/CONTEXT.md) |
 | `controlbus` | producer | [camel-controlbus](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-controlbus/CONTEXT.md) |
-| `mock` | both | [parent](https://github.com/kennycallado/rust-camel/blob/main/crates/components/CONTEXT.md) |
+| `mock` | producer | [parent](https://github.com/kennycallado/rust-camel/blob/main/crates/components/CONTEXT.md) |
 | `file` | both | [camel-file](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-file/CONTEXT.md) |
-| `http`, `http-static` | both | [camel-http](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-http/CONTEXT.md) |
+| `http`, `https`, `http-static` | both | [camel-http](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-http/CONTEXT.md) |
 | `ws`, `wss` | both | [camel-ws](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-ws/CONTEXT.md) |
-| `grpc`, `grpcs` | both | [camel-component-grpc](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-grpc/CONTEXT.md) |
+| `grpc` | both | [camel-component-grpc](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-grpc/CONTEXT.md) |
 | `cron` | consumer | [camel-cron](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-cron/CONTEXT.md) |
 | `kafka` | both | [camel-kafka](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-kafka/CONTEXT.md) |
-| `jms` | both | [camel-jms](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-jms/CONTEXT.md) |
+| `jms`, `activemq`, `artemis` | both | [camel-jms](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-jms/CONTEXT.md) |
 | `mqtt` | both | [camel-mqtt](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-mqtt/CONTEXT.md) |
-| `redis`, `rediss` | both | [camel-redis](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-redis/CONTEXT.md) |
+| `redis`, `redis-sentinel`, `rediss-sentinel` | both | [camel-redis](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-redis/CONTEXT.md) |
 | `sql` | both | [camel-sql](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-sql/CONTEXT.md) |
 | `surrealdb` | both | [camel-component-surrealdb](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-surrealdb/CONTEXT.md) |
 | `opensearch`, `opensearchs` | producer | [camel-opensearch](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-opensearch/CONTEXT.md) |
-| `master` | consumer | [parent](https://github.com/kennycallado/rust-camel/blob/main/crates/components/CONTEXT.md) |
+| `master` | both | [parent](https://github.com/kennycallado/rust-camel/blob/main/crates/components/CONTEXT.md) |
 | `container` | both | [camel-container](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-container/CONTEXT.md) |
 | `llm` | producer | [camel-component-llm](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-llm/CONTEXT.md) |
 | `mcp` | both | [camel-component-mcp](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-mcp/CONTEXT.md) |
@@ -37,7 +37,7 @@ Components connect routes to external systems. Each Component owns a URI scheme 
 | `wasm` | both | [camel-component-wasm](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-wasm/CONTEXT.md) |
 | `template` | producer | [parent](https://github.com/kennycallado/rust-camel/blob/main/crates/components/CONTEXT.md) |
 
-The table covers every crate under `crates/components/`. The contract crate `camel-component-api` defines the Component SPI and the Consumer, Producer, and Endpoint traits. It registers no URI scheme.
+The table covers every crate under `crates/components/` and every registered URI scheme. The contract crate `camel-component-api` defines the Component SPI and the Consumer, Producer, and Endpoint traits. It registers no URI scheme. The `mock` and `template` components have no per-crate CONTEXT.md; their parent entry is the available authority.
 
 ## Direction
 
@@ -45,31 +45,12 @@ The table covers every crate under `crates/components/`. The contract crate `cam
 
 `master` wraps a delegate Consumer in a leadership gate. The bridge exposes inbound traffic only while this node holds the leadership lock ([ADR-0035](../adr/0035-leader-epoch-fencing-token.md)).
 
-## Narrative pages
+## Families
 
-- [Timer and log](timer-log.md). The smallest working route.
-- [File](file.md). Directory poller and disk writer.
-- [HTTP](http.md). Server Consumer and response handling.
-- [gRPC](grpc.md). Service consumer and producer.
-- [WebSocket and SOAP](ws-soap.md). Bidirectional WebSocket traffic and SOAP calls through the Java bridge.
-- [Kafka](kafka.md). Broker producer and consumer.
-- [JMS](jms.md). Java bridge consumer and producer.
-- [MQTT](mqtt.md). MQTT 3.1.1 broker producer and consumer.
-- [Redis](redis.md). Datastore and pub/sub.
-- [Database](database.md). SQL access.
-- [SurrealDB](surrealdb.md). Multi-model database.
-- [OpenSearch](opensearch.md). Search and indexing.
-- [LLM](llm.md). Chat completions and embeddings.
-- [MCP](mcp.md). Model Context Protocol server and client.
-- [WASM](wasm.md). Sandboxed plugins with capability model.
-- [Cron](cron.md). Scheduled message generation.
-- [Direct](direct.md). Synchronous in-process routing.
-- [SEDA](seda.md). Asynchronous staging between routes.
-- [ControlBus](controlbus.md). Runtime control messages.
-- [Master](master.md). Leader-only route execution.
-- [Template](template.md). External template rendering.
-- [Validator](validator.md). Schema validation.
-- [Exec](exec.md). External process execution.
-- [Keycloak](keycloak.md). OIDC auth and JWKS validation.
-- [XML transform](xml-transform.md). XSLT and JSON-XML conversion.
-- [Mock](mock.md). Testing assertions.
+- [In-process routing](in-process.md). Components that move Exchanges between routes inside one process.
+- [Network endpoints](network.md). Components that connect routes to remote systems over a network.
+- [Messaging brokers](brokers.md). Components that exchange messages through a broker.
+- [Data stores](datastores.md). Components that read from and write to external data stores.
+- [Files, scheduling, and processes](local.md). Components that work with the local machine.
+- [AI and extension](ai.md). Components that add AI and extension capabilities.
+- [Validation, testing, and rendering](testing.md). Components that validate, test, or render Exchange content.

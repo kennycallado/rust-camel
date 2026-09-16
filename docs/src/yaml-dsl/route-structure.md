@@ -27,6 +27,7 @@ below. The `security_policy` object is documented in
 | `id` | string | yes | — | Unique route identifier |
 | `from` | string | yes | — | Source endpoint URI |
 | `steps` | list | no | `[]` | Ordered step verbs |
+| `parameters` | map | no | `{}` | Per-route parameter map merged into endpoint URIs |
 | `auto_startup` | bool | no | `true` | Start the route when the context starts |
 | `startup_order` | integer | no | `1000` | Ascending start order; shutdown reverses it |
 | `sequential` | bool | no | `false` | Process exchanges one at a time |

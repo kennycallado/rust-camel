@@ -2,7 +2,7 @@
 
 > Testing utilities for rust-camel
 
-Testing utilities for [rust-camel](https://github.com/rust-camel/rust-camel).
+Testing utilities for [rust-camel](https://github.com/kennycallado/rust-camel).
 
 ## Overview
 
@@ -34,8 +34,10 @@ async fn test_route() {
     h.add_route(route).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
+    // Wait for the timer's deliveries — never sleep for system state
+    // (see CONTEXT.md; poll or await a condition instead).
+    h.mock().get_endpoint("result").unwrap()
+        .await_exchanges(3, Duration::from_secs(5)).await;
     h.mock().get_endpoint("result").unwrap().assert_exchange_count(3).await;
     h.stop().await; // deterministic teardown (drop is best-effort fallback)
 }

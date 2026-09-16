@@ -40,7 +40,7 @@ Some Components also expose a pull-based `PollingConsumer`. A PollingConsumer do
 
 ## Producer
 
-A Producer is the sink side. The Runtime creates it for each `to:` Endpoint. It sends an Exchange to an external system. Producers are strictly write and send. Every Producer is a Tower `Service<Exchange>`. To read a resource mid-route, use a `PollingConsumer`. Do not use a producer mode for reads.
+A Producer is the sink side. The Runtime creates it for each `to:` Endpoint. It sends an Exchange to an external system, including request/reply calls such as an HTTP client producer. Every Producer is a Tower `Service<Exchange>`. To poll a resource into a route on a schedule, use a `PollingConsumer` instead of a producer.
 
 ## URI scheme resolution
 

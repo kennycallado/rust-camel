@@ -42,7 +42,8 @@ route glob and a log level:
 
 The `routes` glob selects which files the CLI loads. The `log_level`
 sets the tracing threshold for the whole context. See
-[CLI usage](cli.md) for the full config reference.
+[`crates/camel-cli/README.md`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-cli/README.md)
+for the full config reference.
 
 ## How it works
 

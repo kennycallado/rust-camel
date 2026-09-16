@@ -21,9 +21,9 @@ Register the collector with `CamelContext::builder().metrics(...)`:
 {{#include ../../../examples/metrics-demo/src/main.rs:metrics-context-builder}}
 ```
 
-> **Note:** Service registration is Rust API only. YAML routes compile to
-> the same `RouteDefinition`. The service wiring stays in application
-> code.
+> **Note:** YAML routes cannot declare services. Wire a custom collector
+> through the Rust API. The `[observability.prometheus]` block configures
+> the built-in Prometheus service.
 
 <details>
 <summary>YAML equivalent for the route</summary>
@@ -55,9 +55,9 @@ routes:
 {{#include ../../../examples/prometheus-demo/src/main.rs:prometheus-service-setup}}
 ```
 
-> **Note:** Service registration is Rust API only. YAML routes compile to
-> the same `RouteDefinition`. The service wiring stays in application
-> code.
+> **Note:** YAML routes cannot declare services. Wire `PrometheusService`
+> through the Rust API or the `[observability.prometheus]` block in
+> `Camel.toml`.
 
 The server exposes these endpoints:
 
@@ -70,13 +70,13 @@ The server exposes these endpoints:
 
 ### Exposure posture
 
-Diagnostic endpoints follow the Prometheus scrape convention: unauthenticated by default, with TLS and auth as opt-in hooks. The service binds exactly the address the caller supplies; there is no loopback default. Binding to `0.0.0.0` emits a startup warning.
+Diagnostic endpoints follow the Prometheus scrape convention: unauthenticated by default, with TLS and auth as opt-in hooks. The service binds exactly the address the caller supplies; there is no loopback default. Binding to any non-loopback address emits a startup warning.
 
 See [ADR-0052](../adr/0052-diagnostic-endpoint-exposure-posture.md) for the full posture.
 
 ### Cardinality contract
 
-Metric label values must come from a closed or bounded set. Never pass raw Exchange body, header, property, or correlation-key data as a label value. Each distinct label combination creates a new Prometheus series. The registry has no cardinality cap or eviction.
+Metric label values must come from a closed or bounded set. Never pass raw Exchange body, header, property, or correlation-key data as a label value. Each distinct label combination creates a new Prometheus series. Dynamic collector names are capped at 1024 by default. `max_dynamic_collectors` raises or lowers the cap. Observations beyond the cap are dropped with a log. Label combinations per collector remain unbounded.
 
 See [ADR-0032](../adr/0032-exchange-data-trust-boundary.md) for the exchange-data trust boundary.
 

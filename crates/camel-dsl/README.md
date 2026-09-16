@@ -21,7 +21,7 @@
 - **Route-level configuration**: Auto-startup, startup ordering, concurrency, error handling, circuit breaker, unit-of-work hooks
 
 - **Environment variable interpolation**: Inject env vars in route files using `${env:VAR_NAME}` syntax with optional defaults `${env:VAR_NAME:-default}`
-- **All step types**: to, set_header, set_header_if_absent, set_property, set_body, convert_body_to, dynamic_router, filter, function, load_balance, log, choice, split, aggregate, wire_tap, multicast, routing_slip, recipient_list, stop, throttle, script, stream_cache, marshal, unmarshal, validate, bean, delay, loop, enrich, poll_enrich, idempotent_consumer, claim_check, sampling, sort, resequence, do_try
+- **All step types**: to, set_header, set_property, set_body, remove_header, convert_body_to, dynamic_router, filter, function, load_balance, log, choice, split, aggregate, wire_tap, multicast, routing_slip, recipient_list, stop, throttle, script, stream_cache, marshal, unmarshal, validate, bean, delay, loop, enrich, poll_enrich, idempotent_consumer, claim_check, sampling, sort, resequence, do_try, transform, scatter_gather, cache, cache_lookup, cache_peek_stale, cache_put, cache_evict, cache_invalidate (`set_header_if_absent` is internal-only, not a YAML verb)
 - **REST DSL** — declarative `rest:` blocks in YAML/JSON that lower to HTTP
   consumer routes with automatic JSON binding, path templates (`/users/{id}`),
   and optional request schema validation.
@@ -493,7 +493,7 @@ routes:
       - to: "${env:OUTPUT_ENDPOINT}"
 ```
 
-Interpolation is tree-walk-first: the parsed document is interpolated scalar-by-scalar before deserialization (comments are never touched), so placeholders work in any position — URIs, log messages, header values, etc. A substituted scalar keeps **string** typing: a whole-scalar placeholder on an integer- or boolean-typed field (e.g. `throttle.max_requests: ${env:LIMIT:-3}`) fails the load even when it has a default, matching the runtime's boot behavior; placeholders embedded inside a larger string (e.g. `timer:tick?period=${env:POLL_MS:-1000}`) interpolate normally. If an environment variable is not set and no default is provided via the `:-` syntax, discovery returns a `DiscoveryError::Env` error — the literal `${env:VAR_NAME}` string is **not** left in place.
+Interpolation is tree-walk-first: the parsed document is interpolated scalar-by-scalar before deserialization (comments are never touched), so placeholders work in any position — URIs, log messages, header values, etc. String and polymorphic positions keep **string** typing. An int-typed field under `routes:` with a whole-scalar placeholder (e.g. `throttle.max_requests: ${env:LIMIT:-3}`) loads through the typed probe when the substituted value parses as an integer, coerced to the number; a value that does not parse fails the load. Placeholders embedded inside a larger string (e.g. `timer:tick?period=${env:POLL_MS:-1000}`) interpolate normally. If an environment variable is not set and no default is provided via the `:-` syntax, discovery returns a `DiscoveryError::Env` error — the literal `${env:VAR_NAME}` string is **not** left in place.
 
 > **Caution:** JSON route files still use the legacy whole-text splice (`interpolate_env_with` — the YAML-shim tree re-serializes to YAML, not JSON), so env values injected into JSON string positions must already be valid for their JSON context. For example, an env var containing an unescaped double quote will produce invalid JSON, causing a `DiscoveryError::Json` parse error.
 
@@ -562,7 +562,7 @@ routes:
     from: "timer:tick?period=1000"
     auto_startup: true        # Default: true
     startup_order: 100       # Default: 1000, lower = earlier
-    concurrency: concurrent  # or "sequential"
+    sequential: false          # or concurrent: 8 (max parallel exchanges)
     error_handler:             # Optional error handling
       dead_letter_channel: "log:errors"
       # Legacy single catch-all retry (still supported)

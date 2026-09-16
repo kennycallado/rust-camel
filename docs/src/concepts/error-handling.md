@@ -9,7 +9,7 @@ Block-level `do_try` adds a third, local scope for a small group of steps.
 ## Error model
 
 Every failure in the data plane is a `CamelError`. The enum lives in
-`crates/camel-api/src/error.rs`.
+`crates/camel-api/src/error.rs`. The table lists the variants routes meet most often; the enum is `#[non_exhaustive]` and carries more.
 
 | Variant | Cause |
 |---|---|
@@ -21,8 +21,9 @@ Every failure in the data plane is a `CamelError`. The enum lives in
 | `HttpOperationFailed { .. }` | An HTTP call returned an error status. |
 | `ValidationError(String)` | Exchange validation failed. |
 | `Unauthorized(String)` | Authorization denied the exchange. |
+| `TypeConversionFailed` | A body conversion between types failed. |
 | `ConfigValidation(ConfigValidationError)` | Route or context configuration is invalid. |
-| `ConsumerStopping` | The consumer is shutting down. This is a control signal, not a processing failure. |
+| `ConsumerStopping` | Route infrastructure is shutting down: the producer channel or semaphore is closing, an inline-dispatch consumer is stopping, or the pipeline was cancelled. This is a control signal, not a processing failure. |
 
 `CamelError` is `#[non_exhaustive]`. New variants can arrive in any release
 without a breaking change. Match with a `_` arm in downstream code. See
@@ -340,8 +341,8 @@ failures inside their normal receive loop. They do not restart their own task
 after a task-level failure. That decision belongs to the route control plane.
 See [ADR-0007](../adr/0007-route-supervised-consumer-failure.md).
 
-The `SupervisingRouteController` watches crashed routes and restarts them.
-Configure it with `SupervisionConfig`:
+A supervision task in the runtime watches crashed routes and restarts them.
+Enable it with `SupervisionConfig` on the context builder:
 
 ```rust,ignore
 let ctx = CamelContext::builder()
@@ -366,5 +367,5 @@ See `examples/auto-restart/` for a complete example.
   shorthand builder API.
 - `examples/do-try/` covers catch by variant, catch by predicate, and finally
   cleanup.
-- `examples/auto-restart/` covers the `SupervisingRouteController` with
+- `examples/auto-restart/` covers supervised route restart with
   exponential backoff.

@@ -16,9 +16,10 @@ Configure the OTLP endpoint and service identity with `OtelConfig`:
 {{#include ../../../examples/otel-demo/src/main.rs:otel-config}}
 ```
 
-> **Note:** Service registration is Rust API only. YAML routes compile to
-> the same `RouteDefinition`. The service wiring stays in application
-> code.
+> **Note:** YAML routes cannot declare services. Wire the service through
+> the Rust API or the `[observability.otel]` block in `Camel.toml`. The
+> `--otel`, `--otel-endpoint`, and `--service-name` CLI flags override
+> the config.
 
 Create the service and register it with the context:
 
@@ -26,9 +27,10 @@ Create the service and register it with the context:
 {{#include ../../../examples/otel-demo/src/main.rs:otel-service-setup}}
 ```
 
-> **Note:** Service registration is Rust API only. YAML routes compile to
-> the same `RouteDefinition`. The service wiring stays in application
-> code.
+> **Note:** YAML routes cannot declare services. Wire the service through
+> the Rust API or the `[observability.otel]` block in `Camel.toml`. The
+> `--otel`, `--otel-endpoint`, and `--service-name` CLI flags override
+> the config.
 
 `with_lifecycle()` auto-registers the metrics collector from
 `OtelService::as_metrics_collector()`. The runtime records route-level

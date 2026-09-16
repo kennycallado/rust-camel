@@ -346,10 +346,9 @@ watch_and_reload(
 
 ## Supervision
 
-`SupervisingRouteController` wraps any controller with automatic crash recovery:
+The supervision task wraps route controllers with automatic crash recovery:
 
 ```rust
-use camel_core::SupervisingRouteController;
 use camel_api::supervision::SupervisionConfig;
 
 let config = SupervisionConfig {
@@ -359,7 +358,7 @@ let config = SupervisionConfig {
     max_attempts: 5,
 };
 
-let ctx = CamelContext::with_supervision(config);
+let ctx = CamelContext::builder().supervision(config).build().await?;
 ```
 
 ## Architecture Tests

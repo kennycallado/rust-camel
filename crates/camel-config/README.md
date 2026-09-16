@@ -11,7 +11,7 @@ Configuration management for the Rust Camel framework. Provides profile-based co
 - **Camel.toml files** - Central configuration file
 - **Config modularization** - Split config across files with `include = [...]`
 - **Profile support** - Environment-specific settings ([default], [production], etc.)
-- **Environment variables** - Override any setting with `CAMEL_*` variables
+- **Environment variables** - Override allowlisted settings with `CAMEL_*` variables
 - **Route discovery** - Automatic route file discovery via glob patterns
 - **Component defaults** - Global defaults for HTTP, Kafka, JMS, Redis, SQL, File, Container components
 - **Supervision configuration** - Retry and backoff settings for route supervision
@@ -20,7 +20,7 @@ Configuration management for the Rust Camel framework. Provides profile-based co
 
 - 🎯 **Profile-based configuration** - Deep merge of profile settings with defaults
 - 📦 **Config modularization** - Split `Camel.toml` across multiple files with `include`
-- 🌍 **Environment variable overrides** - Override any config value with `CAMEL_*` prefix
+- 🌍 **Environment variable overrides** - Override allowlisted config values with the `CAMEL_` prefix
 - 📁 **Route discovery** - Automatic route file discovery from glob patterns
 - ⚙️ **Component defaults** - Set global defaults for all component endpoints
 - 🔄 **Hot reload support** - Optional file watching for configuration changes
@@ -129,18 +129,19 @@ allow_internal = true  # Allow internal services in dev
 | `routes` | `[String]` |  | Glob patterns for route files (default examples use YAML; explicit `.json` globs also supported). Wildcard globs skip `*.test.yaml` / `*.test.yml` camel test documents, which `camel test` owns. Naming one literally fails with the reserved-suffix error |
 | `watch` | `bool` |  | Enable hot reload on file changes |
 | `runtime_journal` | `[runtime_journal]` table | unset | Optional redb runtime event journal (`path`, `durability`, `compaction_threshold_events`); when set, enables local runtime journal replay |
-| `idempotent_repo` | `[idempotent_repo]` table | unset | Optional persistent redb idempotent repository (`path`, `durability`); when set, registers a `"redb"` backend for `idempotent_consumer` steps. The default `"memory"` repo remains available either way |
+| `idempotent_repo` | `[idempotent_repo]` table | unset | Optional persistent idempotent repository. `backend` selects `"redb"` (default) or `"redis"` (standalone `url` or `sentinel_nodes` cluster). When set, registers a `"redb"` or `"redis"` backend for `idempotent_consumer` steps. The default `"memory"` repo remains available either way |
+| `cache_repo` | `[cache_repo]` table | unset | Optional cache repository. `backend` selects `"memory"` (default), `"redb"`, or `"redis"`. When unset, only the default `"memory"` cache repository is registered |
 | `log_level` | `String` |  | Logging level (trace/debug/info/warn/error) |
 | `timeout_ms` | `u64` |  | Default operation timeout |
 | `drain_timeout_ms` | `u64` |  | Max time to wait for in-flight exchanges to complete on Restart/Remove (default: 10000) |
 | `watch_debounce_ms` | `u64` | `300` | Debounce window in ms for the hot-reload file watcher. Set to `0` to disable debouncing. |
 | `supervision.*` | - |  | Retry and backoff settings |
 | `observability.health.enabled` | `bool` | `false` | Enable standalone health server |
-| `observability.health.port` | `u16` | `8080` | Health server port |
+| `observability.health.port` | `u16` | `8081` | Health server port |
 
 ### `[idempotent_repo]` — Persistent Idempotent Repository (opt-in)
 
-By default, idempotency is volatile: the built-in `"memory"` repository loses its keys on restart, so duplicate messages arriving after a restart are reprocessed. Setting `[default.idempotent_repo]` registers an additional `"redb"` backend — an embedded, ACID, pure-Rust store (redb) — that persists dedup keys to disk so at-most-once delivery survives restarts. It is local/embedded only; multi-replica topologies still need a shared store (Redis/SQL-backed).
+By default, idempotency is volatile: the built-in `"memory"` repository loses its keys on restart, so duplicate messages arriving after a restart are reprocessed. Setting `[default.idempotent_repo]` registers an additional persistent backend — `"redb"` (default, embedded) or `"redis"` (shared) — that persists dedup keys so at-most-once delivery survives restarts.
 
 ```toml
 [default.idempotent_repo]
@@ -148,8 +149,25 @@ path = ".camel/idempotent.redb"   # Created if missing (parent dir is created to
 durability = "immediate"          # "immediate" (default, fsync per added key) | "eventual" (no fsync)
 ```
 
-- Reference it from a route step: `idempotent_consumer { repository: "redb", ... }`. The default `"memory"` repo stays registered, so routes that omit a repository or name `"memory"` are unaffected.
-- **Durability trade-off:** `immediate` (the default) fsyncs on every added key — full at-most-once correctness across OS/power crash, at the cost of one fsync per deduplicated message on the hot path. `eventual` skips fsync for throughput, accepting that a crash may lose recently-added keys (at-least-once degradation). Prefer `eventual` only for high-throughput routes that tolerate occasional reprocessing.
+For multi-replica topologies that need a shared store, use the Redis backend instead. Pick ONE topology — standalone `url` or sentinel cluster (they are mutually exclusive; sentinel requires `master_name`). Note that `path` and `durability` are redb-only keys and are rejected for `backend = "redis"`:
+
+```toml
+# standalone:
+[default.idempotent_repo]
+backend = "redis"
+url = "redis://prod-redis:6379"
+```
+
+```toml
+# sentinel cluster:
+[default.idempotent_repo]
+backend = "redis"
+sentinel_nodes = ["sentinel-1:26379", "sentinel-2:26379"]
+master_name = "mymaster"
+```
+
+- Reference it from a route step with the backend's repository name: `idempotent_consumer { repository: "redb", ... }` or `repository: "redis"`. The default `"memory"` repo stays registered, so routes that omit a repository or name `"memory"` are unaffected.
+- **Durability trade-off (redb only):** `immediate` (the default) fsyncs on every added key — full at-most-once correctness across OS/power crash, at the cost of one fsync per deduplicated message on the hot path. `eventual` skips fsync for throughput, accepting that a crash may lose recently-added keys (at-least-once degradation). Prefer `eventual` only for high-throughput routes that tolerate occasional reprocessing. The Redis backend has no durability knob (rejected by validation).
 
 ## Component Defaults
 
@@ -500,7 +518,7 @@ If not set, defaults to the `[default]` profile only.
 
 ## Environment Variables
 
-Override any configuration value with environment variables using the `CAMEL_` prefix:
+Selected settings can be overridden with environment variables using the `CAMEL_` prefix. The override surface is a fixed allowlist; other `CAMEL_*` variables are ignored with a warning:
 
 ```bash
 # Override log level
@@ -515,10 +533,9 @@ export CAMEL_RUNTIME_JOURNAL_PATH=.camel/runtime-events.jsonl
 # Override supervision settings
 export CAMEL_SUPERVISION_INITIAL_DELAY_MS=2000
 export CAMEL_SUPERVISION_MAX_ATTEMPTS=10
-
-# Override routes
-export CAMEL_ROUTES='["routes/*.yaml", "routes/extra/*.yaml"]'
 ```
+
+The allowlist covers timeouts (`CAMEL_TIMEOUT_MS`, `CAMEL_DRAIN_TIMEOUT_MS`), watch settings (`CAMEL_WATCH`, `CAMEL_WATCH_DEBOUNCE_MS`), `CAMEL_LOG_LEVEL`, the runtime journal (`CAMEL_RUNTIME_JOURNAL_*`), the idempotent repository (`CAMEL_IDEMPOTENT_REPO_*`), the cache repository (`CAMEL_CACHE_REPO_*`), and supervision (`CAMEL_SUPERVISION_*`). See `docs/src/configuration/schema.md` for the complete table. Route globs are not overridable through the environment.
 
 Environment variables take precedence over file configuration and are applied after profile merging.
 

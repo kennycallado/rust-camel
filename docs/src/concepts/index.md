@@ -19,6 +19,8 @@ Read the pages in this order:
    lifecycle run on separate trait hierarchies.
 6. [Glossary](glossary.md) - the canonical name for every term. Open it
    when a word needs a precise definition.
+7. Coming from Apache Camel? Read [From Apache Camel](from-camel.md)
+   for the vocabulary map.
 
 When the model is clear, the [EIP patterns](../eip/index.md) show how to
 compose these concepts into routing, transformation, and messaging solutions.

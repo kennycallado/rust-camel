@@ -49,7 +49,7 @@ Most EIP step names match between Apache Camel and rust-camel. The YAML DSL uses
 | `unmarshal` | `unmarshal` | `.unmarshal(format)` |
 | `enrich` | `enrich` | `.enrich(uri)` |
 | `pollEnrich` | `poll_enrich` | `.poll_enrich(uri, timeout)` |
-| `validate` | `validate` | `.validate(predicate)` |
+| `validate` | `validate` | `.validate(expression)` |
 | `doTry` | `do_try` | `.do_try()` |
 | `doCatch` | `catch` (under `do_try`) | `.do_catch_exception(&[...])` |
 | `doFinally` | `finally` (under `do_try`) | `.do_finally()` |

@@ -4,8 +4,10 @@ Substitute environment variables into route files and `Camel.toml` with
 `${env:VAR}` tokens. The tokens work in endpoint URIs, log messages,
 header values, and any other string field.
 
-The expansion point differs by surface. Route files expand in the raw
-route source, before YAML parsing. `Camel.toml` expands every string
+The expansion point differs by surface. Route files expand in the parsed
+YAML tree: the loader walks the tree and substitutes every string scalar
+first (`interpolate_yaml_source`), and only an unparseable document falls
+back to raw-text substitution. `Camel.toml` expands every string
 leaf of the parsed, merged tree. The tree combines the main file,
 include files, and `CAMEL_*` environment overrides. Expansion runs
 before typed deserialization.
@@ -69,8 +71,9 @@ a string leaf fails load with an actionable message: placeholders use
 
 ## How it works
 
-The DSL loader (`camel_dsl::interpolate_env`) scans raw route source
-before YAML parsing. `camel-config` walks the merged `Camel.toml` tree
+The DSL loader (`camel_dsl::interpolate_yaml_source`) walks the parsed
+route tree, with raw-text substitution as the fallback for unparseable
+documents. `camel-config` walks the merged `Camel.toml` tree
 after the builder merges the main file, include files, and `CAMEL_*`
 environment overrides (`resolve_tree_placeholders`). The walk replaces
 `${env:...}` patterns before typed deserialization. Substituted values

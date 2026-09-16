@@ -119,7 +119,7 @@ cd my-integration
 camel run
 ```
 
-See [`crates/camel-cli/README.md`](crates/camel-cli/README.md) for all commands.
+See the [CLI reference](https://kennycallado.github.io/rust-camel/docs/cli/index.html) in the guide for all commands, including `camel job` and `camel compile`, or [`crates/camel-cli/README.md`](crates/camel-cli/README.md) for the crate-level manual.
 
 ## Core Concepts
 
@@ -245,8 +245,11 @@ brokers = "prod-kafka:9092"
 - **Profiles** — multiple environments (`[default]`, `[production]`, ...) in
   one file, selected with `CAMEL_PROFILE=production`.
 - **Route discovery** — `routes = ["routes/**/*.yaml"]` loads routes via glob.
-- **Environment overrides** — any value via `CAMEL_*` env vars
-  (`CAMEL_LOG_LEVEL=DEBUG`, `CAMEL_ROUTES_0="custom/*.yaml"`).
+- **Environment overrides** — allowlisted settings via `CAMEL_*` env vars
+  (`CAMEL_LOG_LEVEL=DEBUG`, `CAMEL_CACHE_REPO_BACKEND=redis`); see the
+  allowlist in `crates/camel-config/src/config.rs` (`ALLOWED_ENV_OVERRIDES`).
+  `CAMEL_CONFIG_FILE` and `CAMEL_PROFILE` select the source file and
+  profile.
 - **Deep merge** — nested configs merge; URI parameters always win.
 
 Optional components (http, ws, kafka, redis, sql, jms, file, container)

@@ -77,9 +77,12 @@ Components ----> Runtime ----> Processors
 ```
 
 **Contracts** (`camel-api`, `camel-component-api`, `camel-language-api`,
-`camel-wit`, `camel-config`, `camel-endpoint`, `camel-bean`, `camel-test`,
-`camel-bench`) define the types and traits that every other crate depends on.
-They have no runtime dependency.
+`camel-wit`, `camel-endpoint`, `camel-bean`) define the types and traits that
+every other crate depends on. They have no runtime dependency. The
+aggregators `camel-config`, `camel-test`, and `camel-bench` sit beside them in
+the layering but pull in runtime crates: `camel-config` merges configuration
+with component defaults, `camel-test` provides the Rust test harness, and
+`camel-bench` carries benchmarks.
 
 **Runtime** (`camel-core`, `camel-cli`, `camel-health`) owns the execution
 engine, route lifecycle, hot reload, and registries. `camel-core` depends on
@@ -89,10 +92,12 @@ contract crates and drives every other family.
 Tower middleware. They depend on `camel-api` for `Exchange` and `Processor`.
 
 **DSL** (`camel-dsl`) parses YAML and JSON route definitions into
-`RouteDefinition`. It depends on `camel-api` and `camel-builder`.
+`RouteDefinition`. It depends on `camel-api`, `camel-core`, `camel-processor`,
+`camel-component-api`, and `camel-auth` for lowering.
 
 **Components** connect routes to external systems. Each component crate depends
-on `camel-component-api` and `camel-core`. See the
+on `camel-component-api`; a few (for example `camel-http`) also depend on
+`camel-core`. See the
 [component catalog](../components/index.md) for the full list.
 
 **Languages** evaluate expressions and predicates. Each language crate depends
@@ -157,8 +162,10 @@ Core patterns, lifecycle, pipeline, and route authoring.
 | [0045](../adr/0045-camel-core-architecture-charter.md) | camel-core architecture charter | Codifies Clean + DDD + CQRS + vertical slices + hexagonal discipline crate-wide. |
 | [0046](../adr/0046-apache-camel-inspiration-not-conformance.md) | Apache Camel inspiration, not conformance | Apache Camel is design inspiration, not conformance authority. |
 | [0047](../adr/0047-template-rendering-engine.md) | Template rendering engine | MiniJinja-based external template engine with compile-once caching and atomic hot reload. |
-| [0058](../adr/0058-outcome-aware-segment-composition.md) | Outcome-aware segment composition contract | Defines how outcome-aware EIP segments compose with `PipelineOutcome` semantics. |
 | [0053](../adr/0053-wit-interface-versioning.md) | WIT interface versioning | `camel:plugin` uses one package-level WIT SemVer, independent from Rust crate versions. |
+| [0058](../adr/0058-outcome-aware-segment-composition.md) | Outcome-aware segment composition contract | Defines how outcome-aware EIP segments compose with `PipelineOutcome` semantics. |
+| [0073](../adr/0073-rest-strict-content-negotiation.md) | Default-strict REST content negotiation | Lowered REST routes enforce `consumes`/`produces` with 415 and 406 gates. |
+| [0075](../adr/0075-self-contained-executable-artifact-format.md) | Self-contained executable artifact format | `camel compile` packs documents into a `CAMELTR1`-trailed executable with a virtual document store. |
 
 ### Security
 
@@ -178,6 +185,7 @@ Authentication, authorization, trust boundaries, and capability models.
 | [0052](../adr/0052-diagnostic-endpoint-exposure-posture.md) | Diagnostic endpoint exposure posture | Diagnostic endpoints follow the Prometheus scrape model; network isolation is the operator's duty. |
 | [0057](../adr/0057-http-header-emission-policy.md) | HTTP header emission policy | Sorts HTTP headers into three RFC-derived buckets that decide what the component emits. |
 | [0059](../adr/0059-auth-extraction-path-divergence.md) | Auth extraction path divergence | Documents where credential extraction diverges from the shared trust-boundary path and why. |
+| [0061](../adr/0061-unified-transport-auth.md) | Unified transport authentication kernel | One authentication kernel shared across transport components; amends ADR-0060. |
 
 ### Error Handling
 
@@ -200,6 +208,8 @@ DoS caps, cardinality limits, and resource bounds.
 | [0038](../adr/0038-configurable-dos-caps-via-per-format-config-channel.md) | Configurable DoS caps | Per-format config channel for operator-overridable data-format DoS caps. |
 | [0039](../adr/0039-configurable-loop-iteration-cap.md) | Configurable loop iteration cap | Per-step `max_iterations` escape hatch for loop iteration limits. |
 | [0040](../adr/0040-configurable-materialize-limits.md) | Configurable materialize limits | Configurable materialize limits for XSLT, XJ, and WASM producers. |
+| [0065](../adr/0065-cache-payload-offload.md) | Cache payload offload | Cache payload storage modes: inline entries or offloaded disk payloads. |
+| [0074](../adr/0074-step-latency-otel-attribution.md) | Step latency OTel attribution | Step URIs are retained at compile time so latency metrics attribute to steps; amends ADR-0042 and ADR-0066. |
 
 ### Integration
 
@@ -215,6 +225,10 @@ WASM, functions, components, and cross-cutting contracts.
 | [0048](../adr/0048-attestation-provenance-retired.md) | Attestation provenance (retired) | Retired HMAC-SHA256 attestation decision kept for history. |
 | [0049](../adr/0049-workspace-non-exhaustive-policy-for-v1-contract-enums.md) | Workspace non-exhaustive policy | Public contract enums are `#[non_exhaustive]` by default before the 1.0 API freeze. |
 | [0060](../adr/0060-mcp-first-class-component.md) | MCP as a first-class component | MCP becomes a first-class component with its own adapter confinement and trust rules. |
+| [0063](../adr/0063-redis-repository-service.md) | Redis repository service | Redis-backed implementations for the idempotent and cache repository ports; amends ADR-0023 and ADR-0056. |
+| [0066](../adr/0066-metrics-collector-binding-and-lifetime.md) | Metrics collector binding and lifetime | Binding and shutdown lifetime rules for metrics collectors. |
+| [0067](../adr/0067-jms-message-type-forwarding-policy.md) | JMS message-type forwarding policy | Defines how JMS message types map onto exchange bodies and headers. |
+| [0068](../adr/0068-mcp-registry-owner-liveness.md) | MCP registry owner-liveness entries | MCP registry entries track owner liveness. |
 
 ### Process and Tooling
 
@@ -224,3 +238,8 @@ Workspace policy for tests, builds, and publishing.
 | --- | --- | --- |
 | [0054](../adr/0054-ignore-test-classification-policy.md) | `#[ignore]` test classification policy | Ignored tests must carry a reason and a classification; an xtask lint enforces the policy. |
 | [0055](../adr/0055-publish-topology-no-cyclic-devdeps.md) | Publish topology without cyclic dev-dependencies | Publishable crates must not form cyclic dev/build dependency chains in the publish topology. |
+| [0062](../adr/0062-reserved-test-suffix-and-placement-contract.md) | Reserved test suffix and placement contract | `*.test.yaml` names a `camel test` document; wildcard discovery skips it, literal naming fails. Amended for the job suffix and job arguments. |
+| [0064](../adr/0064-two-tier-testing-contract.md) | Two-tier testing contract | Unit-tier and integration-tier test documents run under one command. |
+| [0069](../adr/0069-integration-tier-testing-contract.md) | Integration-tier testing contract | Scenario documents exercise routes against real apparatus. |
+| [0070](../adr/0070-staged-listener-port-determinism.md) | Staged listeners for port-deterministic tests | Listeners start in stages so integration tests get deterministic ports. |
+| [0072](../adr/0072-test-pyramid-v2.md) | Test pyramid v2 (shared matcher algebra) | One matcher algebra shared across test tiers; vocabulary supersedes part of ADR-0069. |

@@ -24,7 +24,7 @@ The Circuit Breaker is a System Management pattern from Hohpe and Woolf. It trip
 
 </details>
 
-The breaker cycles through three states. In **Closed**, traffic flows. Each failed call increments a consecutive-failure counter. A successful call resets that counter to zero. When the counter reaches `failure_threshold`, the breaker trips into **Open**. In Open, the breaker rejects every call with `CamelError::CircuitOpen`. The route never touches the downstream service. The breaker holds Open for `open_duration`, then enters **HalfOpen**.
+The breaker cycles through three states. In **Closed**, traffic flows. Each failed call increments a consecutive-failure counter. A successful call resets that counter to zero. When the counter reaches `failure_threshold`, the breaker trips into **Open**. In Open, the breaker rejects every call with `CamelError::CircuitOpen`. The route never touches the downstream service. The breaker holds Open for `open_duration_ms`, then enters **HalfOpen**.
 
 HalfOpen admits a single probe call. The breaker rejects concurrent callers in that window so the probe runs in isolation. A probe that succeeds closes the breaker and resets the counter. A probe that fails reopens the breaker for another full cool-down. This single-probe design stops a backlog of traffic from stampeding the service. The dependency gets one probe, not a flood, at the first sign of recovery.
 

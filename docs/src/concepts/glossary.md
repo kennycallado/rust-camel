@@ -27,8 +27,10 @@ the decision or crate that defines it.
 - **CircuitBreaker** — DSL-declared fault tolerance pattern. It compiles into
   error-handling middleware, not a Pipeline Step. [Circuit breaker](../eip/circuit-breaker.md),
   [ADR-0019](../adr/0019-error-disposition-pipeline-recovery.md).
-- **ConsumerStopping** — `CamelError` variant for producer shutdown. It is
-  raised in the producer `call()` when the channel or semaphore is closing.
+- **ConsumerStopping** — `CamelError` variant for route infrastructure
+  shutdown. Raised when the producer channel or semaphore is closing, an
+  inline-dispatch consumer stops, or a cancelled pipeline resolves to
+  `Failed(ConsumerStopping)`.
   Distinct from Stop EIP. [Error handling](error-handling.md),
   [ADR-0024](../adr/0024-pipeline-outcome-replaces-camel-error-stopped.md).
 - **Credential redaction boundary** — types that hold passwords, tokens,

@@ -2,10 +2,17 @@
 
 The `[jobs]` table in `Camel.toml` configures where the `camel job` command looks for job documents. It is an operator-tool surface, separate from route discovery by design: `[routes]` entries are globs for the always-on data plane; `[jobs]` entries are discovery roots for a bounded directory walk.
 
+In a config with profiles, place the table under the profile sections:
+
 ```toml
-[jobs]
+[default.jobs]
 dirs = ["jobs", "src/jobs"]
+
+[production.jobs]
+dirs = ["jobs/production"]
 ```
+
+A top-level `[jobs]` table works only in a flat config, one without `[default]` or profile sections. When `[default]` exists, profile application replaces the whole root with the merged `[default]` tree, and a top-level `[jobs]` is silently dropped.
 
 ## Keys
 
@@ -16,7 +23,7 @@ Entries are literal directory paths, not globs. Do not use `src/**/*.yaml` patte
 
 ## Profiles
 
-`[jobs]` follows the standard profile rules: a `[<profile>.jobs]` section merges on top of `[default.jobs]` (or top-level `[jobs]`), and table merges are additive.
+`[jobs]` follows the standard profile rules: a `[<profile>.jobs]` section merges on top of `[default.jobs]`, and table merges are additive.
 
 Use the same key at both levels. If one profile sets `dirs` and another sets `dir`, the merged table carries both keys and `dirs` takes precedence — the profile-level `dir` is ignored without a warning:
 
@@ -27,6 +34,14 @@ dirs = ["jobs"]
 [production.jobs]
 dirs = ["jobs/production"]   # same key: replaces the default list
 ```
+
+## Declared arguments
+
+A job document can declare its interface with a top-level `args:` map. Each entry names one argument and admits four keys: `type` (one of `string`, `int`, `bool`, or `enum[a,b,c]`), `required` (boolean), `default`, and `description` (strings).
+
+The declaration is part of the document, not of `Camel.toml`, so it travels with the job. `camel job` resolves `--arg NAME=VALUE` pairs against it, applies defaults, coerces typed values, and interpolates the results through `${arg:NAME}` tokens in the document's `to`, `body`, `headers`, and `timeout`. A required argument without a default must arrive on the command line, or the run fails before boot.
+
+See [camel job](../cli/job.md) for the full grammar, coercion rules, and the `--help` interface renderer. Authority: the `cli-jobs` canonical spec and [`crates/camel-cli/CONTEXT.md`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-cli/CONTEXT.md).
 
 ## Discovery behavior
 

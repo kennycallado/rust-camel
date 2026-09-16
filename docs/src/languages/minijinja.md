@@ -1,6 +1,6 @@
 # MiniJinja
 
-A MiniJinja (Jinja2-compatible) template rendering implementation of the Language SPI. It renders structured output such as HTML, JSON, or prompts from Exchange data.
+A MiniJinja (Python Jinja2-inspired) template rendering implementation of the Language SPI. It renders structured output such as HTML, JSON, or prompts from Exchange data.
 
 ```rust,ignore
 use camel_language_api::Language;
@@ -35,7 +35,7 @@ let expr = lang.create_expression(
 
 </details>
 
-Each `MinijinjaExpression` owns an `Arc<minijinja::Environment<'static>>`. Templates are added once during construction and compiled immediately. Subsequent evaluations look up templates by name with no recompilation. At evaluation time, the expression renders the template against the exchange context and returns the output as the expression value. Exchange headers are available as `headers.name` inside the template.
+Each `MinijinjaExpression` owns an `Arc<minijinja::Environment<'static>>`. Templates are added once during construction and compiled immediately. Subsequent evaluations look up templates by name with no recompilation. At evaluation time, the expression renders the template against the exchange context and returns the output as the expression value. The template context exposes `body`, `headers`, and `exchangeProperty`. Exchange headers are available as `headers.name` inside the template. An XML body renders as a flat string.
 
 Every template source must wrap in exactly one top-level `{% autoescape "html"|"json"|"none" %}...{% endautoescape %}` block. A lexical validator enforces this at compile time and rejects malformed templates immediately. This gives render output a declared escape strategy before any data interpolation occurs. Synchronous MiniJinja rendering runs on a Tokio blocking thread via `spawn_blocking`. The route future wraps the join handle in `tokio::time::timeout` for the configured render deadline. MiniJinja fuel provides an instruction budget that stops runaway templates, infinite loops, and algorithmic-complexity attacks.
 

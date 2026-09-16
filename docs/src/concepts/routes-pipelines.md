@@ -50,7 +50,7 @@ The pipeline executor produces a `PipelineOutcome` ([ADR-0024](../adr/0024-pipel
 
 ## Structural EIPs
 
-Steps come in two shapes. A leaf EIP (setBody, log, marshal) is one Processor that maps an Exchange to an Exchange. A structural EIP (Filter, Choice, Loop, Throttle, doTry, Split, Multicast, LoadBalance) contains child steps that form a sub-pipeline.
+Steps come in two shapes. A leaf EIP (setBody, log, marshal) is one Processor that maps an Exchange to an Exchange. A structural EIP (Filter, Choice, Loop, Throttle, doTry, Split, StreamingSplit, Multicast, LoadBalance) contains child steps that form a sub-pipeline.
 
 ```rust,ignore
 {{#include ../../../examples/content-based-router/src/main.rs:cbr-route}}
