@@ -123,6 +123,7 @@
   - [Health](operations/health.md)
   - [OIDC publish fallback](operations/oidc-publish-fallback.md)
 - [Testing](testing/index.md)
+  - [SQL state assertions](testing/scenario-sql.md)
 - [Extending rust-camel](extending/index.md)
   - [Custom component](extending/custom-component.md)
 - [Architecture](architecture/index.md)

@@ -123,7 +123,7 @@ any partner binds. A typo of a real key, for example `http://127.0.0.1:0/order` 
 
 ## `validate` targets
 
-A `validate` action asserts against one of three targets, chosen by the
+A `validate` action asserts against one of four targets, chosen by the
 single key of its `target` map:
 
 - `lastReceived`: the last message a `receive` action collected on that
@@ -134,6 +134,7 @@ single key of its `target` map:
   against the variable's value.
 - `partner`: the recorded-request count of a harness partner, described
   next.
+- `sql`: datasource rows at rest, described under [SQL actions](#sql-actions).
 
 A `partner` target asserts the recorded-request
 count of a harness partner. The expectation holds `count`, an exact
@@ -151,6 +152,41 @@ at every snapshot and never settles back.
 Partner expectations are exact-count, not subset like message
 expectations: the count must equal the filtered arrivals, never a lower
 bound.
+
+## SQL actions
+
+An `sql:` action prepares datasource state before the assertions:
+
+```yaml
+scenario:
+- sql:
+    datasource: appdb
+    prepare:
+    - DELETE FROM orders
+    - INSERT INTO orders VALUES ('seed-a')
+```
+
+`datasource` names a key under `[datasources]` in `Camel.toml`.
+`prepare` is an ordered list of non-SELECT statements, run in order over
+the datasource's pool. An empty list, or a statement with a
+`select`/`with` prefix, fails doc validation: reads belong to the
+`validate` sql target.
+
+That target pairs the prepare action with a read assertion:
+
+```yaml
+- validate:
+    target: {sql: {datasource: appdb, query: SELECT id FROM orders}}
+    expectation: {rows: [[1]]}
+    deadline: 5s
+```
+
+The expectation holds row patterns (`rows`, with optional `columns` and
+`unordered`) or a row-count bound (`count`, `atLeast`, `atMost`). The
+`deadline` is valid on `partner` and `sql` targets only. The full
+surface — row grammar, cell verbs, settle semantics, and the sqlite
+shared-memory rule — is documented in the book's
+[SQL state assertions](../../docs/src/testing/scenario-sql.md) page.
 
 ## Concurrency: the burst-send recipe
 
@@ -263,27 +299,26 @@ against a faulted partner and asserts the two wire attempts.
 
 ## Capability matrix: what the tier can drive today
 
-The tier is black-box at the HTTP boundary only (rc-xnob). Route
-shapes and their coverage:
+The tier is black-box at the HTTP boundary (rc-xnob) and asserts SQL
+state at rest ([SQL actions](#sql-actions)). Route shapes and their
+coverage:
 
 | route shape | trigger today | effect observable today |
 |---|---|---|
 | `from:http` -> `to:http` | YES scenario client role | YES partner + `receive` (v1 flagship) |
-| `from:http` -> `to:kafka`/`to:sql` | YES scenario | NO consumer/probe exists |
+| `from:http` -> `to:sql` | YES scenario | YES `validate` sql target |
+| `from:http` -> `to:kafka` | YES scenario | NO consumer/probe exists |
+| `from:sql` -> `to:http` | YES `sql:` prepare (seeds rows) | YES partner |
 | `from:kafka` -> `to:http` | NO producer exists | YES partner (matchers + `lastReceived` already free) |
-| `from:sql` -> `to:http` | NO seeding exists | YES partner |
 
-The two gaps are independent capabilities, each unlocking half of the
-matrix: a non-HTTP trigger (partner-as-producer for kafka, or sql
-seeding) unlocks the bottom rows; a non-HTTP effect (a kafka consumer
-partner or an sql probe action) unlocks the right column. The
-extension points already exist in the contract — the `Provisioning`
-enum for partner transports and the scenario action enum for a future
-probe action (`query` -> `extract` -> `validate` reuses the existing
-variables and matchers). Open design questions for that horizon:
-partner lifecycle for long-lived transports (topics vs listeners),
-seeding ownership (harness vs app fixtures), and CI infrastructure
-(kafka container).
+The remaining gap is kafka on both sides: a partner-as-producer unlocks
+the `from:kafka` trigger, and a kafka consumer partner unlocks the
+`to:kafka` effect. The extension points already exist in the contract —
+the `Provisioning` enum for partner transports and the scenario action
+enum for a future probe action (`query` -> `extract` -> `validate`
+reuses the existing variables and matchers). Open design questions for
+that horizon: partner lifecycle for long-lived transports (topics vs
+listeners) and CI infrastructure (kafka container).
 
 ## Related crates
 

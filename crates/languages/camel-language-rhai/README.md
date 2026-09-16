@@ -38,7 +38,7 @@ body = "new content";              // set body — propagated back
 let v = headers["existing"];       // read header
 ```
 
-Changes are applied atomically: if the script throws an error, all modifications are rolled back and the Exchange is restored to its pre-execution state.
+Changes are applied atomically: modifications are written back only after the script evaluates successfully; an error leaves the Exchange in its pre-execution state.
 
 The `.script()` builder method uses this API automatically:
 

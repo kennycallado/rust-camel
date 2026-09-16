@@ -216,9 +216,15 @@ mcp:
 ```
 
 The input schema and resource URI travel percent-encoded on the lowered
-route's query string, never in Exchange headers or bodies. Server runtime
-config (bind, TLS, caps) is owned by `Camel.toml` (`mcp.servers.<name>`); the
-block's server `name` must match a TOML key or the consumer start fails. The
+route's query string, never in Exchange headers or bodies. The block owns
+server runtime config (bind, TLS, caps): these values lower onto every
+route of the block as `mcp.declared.*` endpoint parameters and are the
+runtime values for the shared listener. TOML `mcp.servers.<name>` still
+must carry the entry (the block's server `name` must match a TOML key or
+the consumer start fails) and remains the source for keys with no DSL
+counterpart, such as `allowed_hosts`. Overlapping keys must agree: a key
+declared by both sides with different values fails consumer start, while
+a key declared by one side only takes that side's value. The
 block's server `security_policy` propagates to every lowered tool and
 resource route, where the route-level `SecurityPolicy` enforces it per
 request. The block is a step-less catalog declaration; tool and resource
@@ -552,8 +558,12 @@ Many steps support language expressions for dynamic values:
 ```
 
 ### Available Languages
-- `simple` - Built-in Simple language (supports header/body interpolation)
-- `rhai` - Rhai scripting language (requires `camel-language-rhai` feature)
+- `simple` - Built-in Simple language (always registered; supports header/body/property interpolation)
+- `js` / `javascript` - JavaScript language, Boa-backed (requires the `camel-core` `lang-js` feature, which enables the `camel-language-js` crate)
+- `rhai` - Rhai scripting language (requires the `camel-core` `lang-rhai` feature, which enables the `camel-language-rhai` crate)
+- `jsonpath` - JSONPath expressions, RFC 9535 (requires the `camel-core` `lang-jsonpath` feature, which enables the `camel-language-jsonpath` crate)
+- `xpath` - XPath 1.0 expressions over `sxd-xpath` (requires the `camel-core` `lang-xpath` feature, which enables the `camel-language-xpath` crate)
+- `minijinja` - MiniJinja template rendering (requires the `camel-core` `lang-minijinja` feature, which enables the `camel-language-minijinja` crate)
 
 ## Route-Level Configuration
 ```yaml
@@ -696,8 +706,10 @@ routes:
     security_policy:
       permission:
         policy: "resource-access"
-        resource: "${header.resource-id}"
-        action: "read"
+        resource:
+          header: "resource-id"
+        action:
+          literal: "read"
         scopes: ["view"]
         cache_ttl_secs: 60
         cache_negative_ttl_secs: 5
@@ -708,11 +720,15 @@ routes:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `policy` | string | yes | Name of the registered permission provider |
-| `resource` | string or expression | yes | Resource identifier (supports `${header.*}` expressions) |
-| `action` | string or expression | yes | Requested action (supports `${header.*}` expressions) |
+| `resource` | value source | no | Resource identifier; defaults to the `x-resource` header |
+| `action` | value source | no | Requested action; defaults to the `x-action` header |
 | `scopes` | [string] | no | Additional permission scopes |
 | `cache_ttl_secs` | u64 | no | Override positive cache TTL |
 | `cache_negative_ttl_secs` | u64 | no | Override negative cache TTL |
+
+A value source is a mapping with `literal`, `header`, or `property`. Declare
+exactly one; a mapping with none fails at load time. When several are set,
+resolution follows that order (`literal`, then `header`, then `property`).
 
 ### `credential_sources:` -- Credential Extraction Sources
 

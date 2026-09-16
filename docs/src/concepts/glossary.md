@@ -20,6 +20,10 @@ the decision or crate that defines it.
   synthetic error-bearing Exchange through `send_and_wait`. The route error
   handler owns the operational signal. [Error handling](error-handling.md),
   [ADR-0012](../adr/0012-log-level-convention-handler-contract-boundaries.md).
+- **Cache EIP** — DSL steps (`cache`, `cache_invalidate`, `cache_peek_stale`,
+  `cache_clear`, `cache_stats`) that compile to `OutcomeSegment` services in
+  camel-core. `cache` coalesces concurrent misses on one key.
+  [Cache](../eip/cache.md), [ADR-0056](../adr/0056-cache-repository-port.md).
 - **CanonicalRouteSpec** — versioned minimal route contract that runtime
   commands, config tooling, and hot-reload consume. v2 adds lifecycle
   metadata and rejects unsupported fields. [Route structure](../yaml-dsl/route-structure.md),
@@ -27,6 +31,10 @@ the decision or crate that defines it.
 - **CircuitBreaker** — DSL-declared fault tolerance pattern. It compiles into
   error-handling middleware, not a Pipeline Step. [Circuit breaker](../eip/circuit-breaker.md),
   [ADR-0019](../adr/0019-error-disposition-pipeline-recovery.md).
+- **Cohort Activation Barrier** — context-lifecycle mechanism that parks the
+  first consumer-envelope dispatch of a route drain. It holds dispatch from
+  `start_context` entry until the sequential StartRoute cohort completes or
+  boot returns, then re-arms each boot. [Planes](planes.md), crate camel-core.
 - **ConsumerStopping** — `CamelError` variant for route infrastructure
   shutdown. Raised when the producer channel or semaphore is closing, an
   inline-dispatch consumer stops, or a cancelled pipeline resolves to
@@ -70,6 +78,12 @@ the decision or crate that defines it.
 - **Handler-contract boundary** — conceptual line between an error emitter
   and the route element that owns the failure's operational signal. Emitters
   inside the boundary log at `warn!` or below. [Error handling](error-handling.md),
+  [ADR-0012](../adr/0012-log-level-convention-handler-contract-boundaries.md).
+- **Inline dispatch** — zero-handoff `direct:` dispatch. camel-core publishes
+  an `InlineRouteDispatcher` capability, so `DirectProducer` runs the consumer
+  pipeline inline under a task-local cycle/depth guard. Missing capability,
+  concurrent consumers, or aggregate splits fall back to channel submission.
+  [Routes & pipelines](routes-pipelines.md),
   [ADR-0012](../adr/0012-log-level-convention-handler-contract-boundaries.md).
 - **InterceptRule** — exact-URI rule that maps a send URI to a `SkipTo` or
   `DivertCopyTo` action. [Testing](../testing/index.md),

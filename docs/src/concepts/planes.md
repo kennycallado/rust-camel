@@ -26,7 +26,7 @@ The example shows both planes at work. The `RouteBuilder::from(...)` chain build
 
 ## Data plane: the hot path
 
-The data plane processes every Exchange. Each step in the pipeline is a Tower `Service<Exchange>`. A `Filter` wraps a `BoxProcessor`. A `Choice` routes to one of several `BoxProcessor` arms. A `WireTap` forks to a secondary `BoxProcessor`. EIP composition maps cleanly to Tower's `Service` plus `Layer` pair (ADR-0001).
+The data plane processes every Exchange. Each step in the pipeline is a Tower `Service<Exchange>`. Structural EIPs compile to `OutcomeSegment` implementations: a `Filter` and each `Choice` arm become a `CompiledStep::Segment` (ADR-0025). A `WireTap` keeps its own Tower decoration: the fork targets a secondary `BoxProcessor`. EIP composition maps cleanly to Tower's `Service` plus `Layer` pair (ADR-0001).
 
 This is the hot path. Every microsecond matters. Tower's `poll_ready` and `call` protocol gives backpressure from the first step back to the Consumer. Services are cheap to clone and compose. The data plane must stay free of locks, allocations, and blocking operations. A step that blocks starves every Exchange behind it.
 

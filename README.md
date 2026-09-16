@@ -164,7 +164,7 @@ implementations.
 | Stream Cache               | `.stream_cache(n)`                            |
 | try / catch / finally      | `.do_try()` / `.do_catch()` / `.do_finally()` |
 
-Marshal formats: JSON, XML, CSV, ZIP.
+Marshal formats: JSON, XML, CSV, ZIP, tar, gzip, tar.gz; protobuf via a separate crate.
 
 ## REST DSL & OpenAPI
 
