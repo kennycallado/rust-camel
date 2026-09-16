@@ -8,6 +8,14 @@
       "path": "20260903T084658Z/",
       "run_id": "20260903T084658Z",
       "scenarios": "http-server,split-aggregate,startup-minimal,t2-json,t2-realistic-eip,xsd-validation-bridge,xslt-bridge"
+    },
+    {
+      "date": "2026-09-16",
+      "era": "2",
+      "git_commit": "918a8398bae17647a754834df81dc1a4a84007b4",
+      "path": "20260915T093128Z/",
+      "run_id": "20260915T093128Z",
+      "scenarios": "http-server,split-aggregate,startup-minimal,t2-json,t2-realistic-eip,xsd-validation-bridge,xslt-bridge"
     }
   ]
 }
