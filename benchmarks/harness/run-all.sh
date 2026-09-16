@@ -231,12 +231,24 @@ if [[ -n "${BENCH_DEBUG_SILENCE_CELL:-}" ]]; then
     DEBUG_DROP_CELL_ARGS+=(-e "BENCH_DEBUG_SILENCE_CELL=$BENCH_DEBUG_SILENCE_CELL")
 fi
 
+# Out-of-tree scratch: when BENCH_SCRATCH_DIR points outside the repo
+# mount, bind-mount it into the container so run.sh can write there
+# (rc-awyoj ENOSPC lesson: a full m3+m4 arm writes ~9G of scratch; a
+# /home-constrained host needs the scratch redirected to a bigger
+# partition, and the container must see the same path).
+SCRATCH_MOUNT_ARGS=()
+if [[ -n "${BENCH_SCRATCH_DIR:-}" ]]; then
+    mkdir -p "$BENCH_SCRATCH_DIR"
+    SCRATCH_MOUNT_ARGS=(-v "$BENCH_SCRATCH_DIR:$BENCH_SCRATCH_DIR")
+fi
+
 echo "=== Launching $IMAGE_NAME ==="
 # Two-phase invocation inside the container:
 #   Phase 1: build all Rust + Maven artifacts (Quarkus native deferred to harness)
 #   Phase 2: run the measurement harness
 exec docker run --rm \
     -v "$REPO_ROOT:$REPO_ROOT" \
+    "${SCRATCH_MOUNT_ARGS[@]}" \
     "${DOCKER_SOCK_ARGS[@]}" \
     -w "$REPO_ROOT" \
     --user "$(id -u):$(id -g)" \
