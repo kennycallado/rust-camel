@@ -30,6 +30,17 @@ request. The lib-vs-cli gap in m3 (66k vs 83k msgs/s) must not be
 read as a product claim. The cli +23.3% delta vs era-2 is also
 pending fixture-shape verification at `9e8f36f`.
 
+**Addendum 2026-09-16 (post-seal, annotation only):** the
+fixture-fairness audit landed at `6a375fbb`
+(`benchmarks/audits/fixture-fairness-2026-09.md`, 53/53 cells
+verified) discharged the pending verification: at `9e8f36f` BOTH
+rust http-server cells were symmetric-bare, so the cli +23.3%
+vs era-2 delta is fixture-valid. The divergence from era-2 shape
+was on the LIB side (rc-am22 restore), not the cli. No
+measurement value changed; the lib-vs-cli cross-cell caveat above
+stands until the era-3 re-run under the blessed minimal-bare
+shape (e_opus ruling D1, 2026-09-16).
+
 ## http-server rust-camel-cli M1 RSS: wrapper-launched (`n/a`)
 
 The cli http-server cell launches through a wrapper script; GNU
