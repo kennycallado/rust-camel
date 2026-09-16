@@ -12,11 +12,16 @@
 **Canonical language is English.** The project is international. Write all prose in English: ADRs, `CONTEXT.md`, `CONTEXT-MAP.md`, README, `docs/**`, OpenSpec artifacts, code comments, commit messages, bd issues, and PR descriptions.
 
 - **Identifiers, code, commands, and file paths are never translated.** Translate prose only.
-- **Existing non-English docs are technical debt.** Do not author new non-English docs. When you edit a non-English doc, translate the section you touch. Known Spanish backlog: `docs/audits/**`, `docs/reviews/**`, parts of `docs/superpowers/archived/**` and `docs/archived/**`. Live ADRs 0046, 0050, 0052 were translated to English on 2026-08-09.
+- **Existing non-English docs are technical debt.** Do not author new non-English docs. When you edit a non-English doc, translate the section you touch. Known Spanish backlog: `docs/reviews/**`, parts of `docs/superpowers/archived/**` and `docs/archived/**`. Live ADRs 0046, 0050, 0052 were translated to English on 2026-08-09.
 - **Exceptions (non-English is intentional):**
   - Unicode test fixtures (`café`, `María`, `dirección`, `usuários`) that exercise UTF-8 handling.
   - Region-specific integration analysis whose source material is in another language (for example `docs/archived/analysis/mejoras-necesarias-cxf.md`, 112 Baleares). Keep the body in its language but add a short English summary at the top.
 - **Quoting translated ADRs:** audit and review docs that quote ADR-0046/0050/0052 in Spanish now hold stale quotes. When you encounter one, update the quote to the English text.
+
+## DOCS GOVERNANCE
+
+- **`docs/audits/` is not versioned** (e_gpt ruling 2026-09-16, ADR-0076 adjacent): durable decisions go to `docs/adr/`, normative behavior to `openspec/specs/`, audit evidence to the fleet inbox or bd. Nothing under `docs/audits` is tracked or re-included from `.gitignore` — `cargo xtask lint-ignore` fails otherwise.
+- Security findings are not decisions: accepted risks or rejected mitigations go to an ADR; actionable findings go to bd.
 
 ## IMPORTANT
 

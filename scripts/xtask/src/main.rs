@@ -2120,6 +2120,46 @@ pub fn lint_ignore(workspace_root: &Path) -> Result<Vec<Violation>, String> {
 
     let mut violations = Vec::new();
 
+    // Docs-audits contract (e_gpt ruling 2026-09-16): audits evidence
+    // is fleet-internal. Nothing under docs/audits may be tracked, and
+    // .gitignore may not re-include it. Decisions go to docs/adr,
+    // behavior to openspec specs.
+    {
+        let git_out = std::process::Command::new("git")
+            .args(["ls-files", "--", "docs/audits"])
+            .current_dir(workspace_root)
+            .output();
+        if let Ok(out) = git_out {
+            let tracked = String::from_utf8_lossy(&out.stdout);
+            for f in tracked.lines().filter(|l| !l.trim().is_empty()) {
+                violations.push(Violation {
+                    file: f.to_string(),
+                    line: 0,
+                    snippet: "tracked file under docs/audits — audits are not \
+                              versioned; decisions -> docs/adr, evidence -> fleet \
+                              inbox (e_gpt ruling 2026-09-16)"
+                        .to_string(),
+                });
+            }
+        }
+        let gitignore = workspace_root.join(".gitignore");
+        if let Ok(text) = std::fs::read_to_string(&gitignore) {
+            for (i, line) in text.lines().enumerate() {
+                let l = line.trim();
+                if l.starts_with("!docs/audits") {
+                    violations.push(Violation {
+                        file: ".gitignore".to_string(),
+                        line: i + 1,
+                        snippet: format!(
+                            "{l} — docs/audits must not be re-included \
+                             (e_gpt ruling 2026-09-16)"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     for entry in WalkDir::new(workspace_root)
         .follow_links(false)
         .into_iter()
