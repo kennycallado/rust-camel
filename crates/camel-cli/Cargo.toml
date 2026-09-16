@@ -47,7 +47,7 @@ camel-bean.workspace = true
 camel-bundles.workspace = true
 camel-integration-test.workspace = true
 camel-dsl.workspace = true
-camel-core = { workspace = true, features = ["lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath", "lang-minijinja"] }
+camel-core.workspace = true
 camel-matchers.workspace = true
 camel-config = { workspace = true, features = ["otel", "kubernetes"] }
 camel-component-api.workspace = true
@@ -83,8 +83,8 @@ camel-component-cxf = { workspace = true }
 camel-function = { workspace = true }
 camel-wit.workspace = true
 camel-lint.workspace = true
-camel-lsp.workspace = true
-tower-lsp.workspace = true
+camel-lsp = { workspace = true, optional = true }
+tower-lsp = { workspace = true, optional = true }
 ariadne.workspace = true
 rustls.workspace = true
 camel-component-surrealdb = { workspace = true, optional = true }
@@ -108,7 +108,6 @@ camel-component-exec = { workspace = true, optional = true }
 tikv-jemallocator = { version = "0.7", optional = true, default-features = false, features = ["stats", "profiling"] }
 # must stay in lockstep with tikv-jemallocator 0.7
 tikv-jemalloc-ctl = { version = "0.7", optional = true, default-features = false, features = ["use_std", "stats", "profiling"] }
-mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
 # camel-auth is test-only here (run_tests.rs / test/scenario.rs mod
@@ -122,7 +121,24 @@ serde_json.workspace = true
 ron = { workspace = true }
 
 [features]
-default = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "integration-sql", "security", "redis-tls"]
+default = ["full"]
+# `full` = the historical `default` set plus the language adapters and the
+# LSP server. Those were previously unconditional dependencies, so the union
+# reproduces today's default closure exactly (golden fixture proof:
+# tests/feature_profiles.rs::default_closure_matches_golden). Slim profiles
+# start from `--no-default-features`.
+full = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "integration-sql", "security", "redis-tls", "lsp", "lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath", "lang-minijinja"]
+# LSP server surface (`camel lsp`): tower-lsp transport + camel-lsp backend.
+lsp = ["dep:camel-lsp", "dep:tower-lsp"]
+# Language adapter forwarding features (camel-core compiles them in).
+lang-js = ["camel-core/lang-js"]
+lang-rhai = ["camel-core/lang-rhai"]
+lang-jsonpath = ["camel-core/lang-jsonpath"]
+lang-xpath = ["camel-core/lang-xpath"]
+lang-minijinja = ["camel-core/lang-minijinja"]
+# Named marker for the `--no-default-features` http-only baseline. Enables
+# nothing itself: the slim closure is whatever is left when defaults are off.
+slim-http = []
 otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # security forwards to the shared security-boot builder in camel-bundles
 # (scenario-shared-boot): default-on so `camel run` default builds keep
@@ -178,10 +194,10 @@ integration-sql = ["camel-integration-test/sql"]
 # scenario documents stay out of the default suite (runtime and spawn
 # cost); the integration-http CI job enables them explicitly.
 itest-e2e = []
-# Global allocator overrides for the `camel` release binary. Additive and
-# independent; if both are enabled, jemalloc wins. Soak/migration plan: bd rc-vnm8.
+# Global allocator override for the `camel` release binary. Single path:
+# jemalloc is the only allocator override (the alternative backend feature
+# was removed as dead surface). Soak/migration plan: bd rc-vnm8.
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
-mimalloc = ["dep:mimalloc"]
 
 [lints]
 workspace = true

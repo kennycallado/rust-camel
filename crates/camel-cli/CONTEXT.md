@@ -216,6 +216,45 @@ artifacts) may extend entry-point cardinality using the same store without
 changing R1 runtime semantics. Compression, signing, and cross-target
 compilation stay deferred.
 
+## Build profiles
+
+The `camel` binary composes its dependency closure from two orthogonal
+axes: the allocator override and the feature profile.
+
+**Allocator policy.** Default builds use the platform system allocator
+(glibc malloc on gnu images; the Dockerfile musl production image opts
+into jemalloc). `jemalloc` is the sole opt-in override: it backs musl
+production builds and powers the allocator gauges (`allocator_metrics.rs`,
+ADR-0066) and heap profiling (see below). The alternative backend feature
+(`mimalloc`) was removed as dead surface — it was structurally
+unreachable whenever jemalloc was enabled and no build path enabled it
+(bd rc-rrz6a).
+
+**Feature profiles.** `default = ["full"]`, where `full` is exactly the
+pre-change default set plus the language adapters and the LSP server
+(those were previously unconditional dependencies, so the union
+reproduces the historical default closure — golden-fixture proof in
+`tests/feature_profiles.rs`). `slim-http` is the named
+`--no-default-features` baseline: an http-only deployment that links the
+non-optional core plumbing and excludes the controllable optional set
+(kafka, grpc, wasm, llm, mcp, mqtt, surrealdb, exec, the lsp stack, and
+the `lang-*` runtimes). `lsp` and each `lang-*` feature are individually
+selectable and compose additively with `slim-http`.
+`camel-language-minijinja` stays linked in every profile — camel-template
+hard-depends on it (non-optional out-of-lease paths; the `lang-minijinja`
+forward feature stays for full parity). The bundles-unconditional bridges
+(jms, sql, redis, opensearch, ws, cxf, xslt, xj) remain linked in every
+profile until the deferred camel-bundles-side optionalization lands (bd
+follow-up by the master).
+
+The integration-sql CI profile
+(`cargo test -p camel-cli --no-default-features --features
+integration-sql,itest-e2e` in `.github/workflows/integration-sql.yml`)
+is lang-free and lsp-free BY DESIGN since this change: the SQL
+independence proof must not pull the language runtimes or the LSP stack.
+If a future itest fixture needs a language expression, add the `lang-*`
+feature to that job's feature list then.
+
 ## Metrics
 
 Metrics instrumentation for CLI commands is limited to the jemalloc memory

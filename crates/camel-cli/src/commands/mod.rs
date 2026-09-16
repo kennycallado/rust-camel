@@ -4,6 +4,7 @@ pub mod errors;
 pub mod job;
 pub mod journal;
 pub mod lint;
+#[cfg(feature = "lsp")]
 pub mod lsp;
 pub mod new;
 pub mod openapi;

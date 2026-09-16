@@ -1,0 +1,102 @@
+clidiet task 3.1 — post-change default build vs committed baseline (dedup delta)
+Date: 2026-09-16
+Worktree: /home/shared/rust-camel-worktrees/clidiet (branch feature/clidiet, HEAD 1fee46b3)
+Method: evidence/bench-cold-local.sh, n=30 per mode, 3 warmups discarded. Script bytes are
+identical to the baseline run (sha256 cf71b84db0c81d929687b5171257510af105670adb106254b00f30ab8e95730e
+at the baseline-measurement commit (5c8c5be4) and at HEAD). Binary: `cargo build -p camel-cli --release` (fresh,
+up-to-date), copied to /tmp/clidiet-camel-full; sha256
+46c557e43ed54cbfc8c749f71083fbcddc1606f78a6dded2aac5fc9293800d06; size 104,858,696 bytes.
+Baseline: committed results/full-base.* (measured at base commit 6f904f09; see
+audit-phase-a.md §3).
+
+Dedup comparison (baseline = full-base, post-change default = full-post):
+
+| Metric (n=30)     | marker base | marker post | Δ marker | help base | help post | Δ help |
+|-------------------|-------------|-------------|----------|-----------|-----------|--------|
+| median (ms)       | 88          | 70          | −18      | 27        | 15        | −12    |
+| p90 (ms)          | 106         | 89          | −17      | 36        | 25        | −11    |
+| min–max (ms)      | 33–118      | 30–93       | —        | 8–44      | 8–28      | —      |
+| max-RSS med (kb)  | 48,942      | 49,832      | +890     | 19,152    | 19,600    | +448   |
+| max-RSS range     | 48,844–49,100 | 49,656–49,980 | —  | 18,980–19,152 | 19,300–19,600 | — |
+
+Binary size: base 104,858,696 B; post 104,858,696 B; **Δ 0 B** (identical size; post binary
+sha256 46c557e4…d06 above).
+
+Band verdicts (PASS/FAIL per task 3.1):
+- marker median within ±5% of baseline (88 ms): **FAIL** — 70 ms, −20.5%; favorable
+  direction (faster), see drift probe below
+- help median within ±5% of baseline (27 ms): **FAIL** — 15 ms, −44.4%; favorable direction
+- marker max-RSS median within ±2048 kb: **PASS** (+890 kb)
+- help max-RSS median within ±2048 kb: **PASS** (+448 kb)
+- binary size delta zero or explained: **PASS** (Δ = 0 B)
+
+Fixture boot: 30/30 marker samples reached BENCH_ROUTE_READY; 0 ERROR-exit-before-marker;
+0 FAIL samples in either mode (grep count 0 in both bench logs).
+
+Session-drift probe (same /tmp/clidiet-camel-full binary, no rebuild, second n=30 run
+minutes later, tag full-post2): marker median 33.5 ms / p90 51 ms / RSS median 33,276 kb;
+help median 11.5 ms / p90 15 ms / RSS median 14,340 kb. Run-to-run drift on an UNCHANGED
+binary (marker median 70 → 33.5 ms; RSS median 49,832 → 33,276 kb) exceeds the ±5% timing
+band, so the timing bands track machine-load regime on this shared box (loadavg ≈ 10 during
+this session), not the change. The dedup proof is carried by the zero size delta plus the
+identical dependency closure: `full` is the exact union of the historical default set
+(golden test tests/feature_profiles.rs::default_closure_matches_golden), and mimalloc was a
+non-default optional feature whose removal cannot affect the default build.
+
+Raw data: results/full-post.{marker,help}.txt (ms) and .rss.txt (kb); drift probe in
+results/full-post2.{marker,help}.txt and .rss.txt.
+
+## Load-controlled paired study (conductor, post-task; supersedes single-session timing verdicts)
+
+Context: single-session timing bands FAILed in the favorable direction on
+a box with loadavg 7-10 (parallel mission builds); a same-binary probe
+showed 70->33.5 ms drift (RSS also drifted: marker 49,832->33,276 kb,
+help 19,600->14,340 kb on an UNCHANGED binary), proving single-session
++/-5% timing and +/-2048 kb RSS comparisons are below the session noise
+floor. Protocol fix: paired, same-load-window comparisons with a
+base-vs-base control.
+
+### Paired marker, interleaved 3x n=10 chunks (tags pairB*/pairF*; raw in results/)
+- timing: base median 21.5 ms, post median 22.0 ms -> +2.3% (band +/-5%) PASS
+- RSS: base median 30,644 kb [30,452-30,868], post median 33,156 kb
+  [32,900-33,412] -> +2,512 kb, OUTSIDE the +/-2,048 kb band, ranges
+  disjoint. Verdict: INCONCLUSIVE (regime noise between chunks; not
+  attributable to the dedup: identical default closure per the golden
+  test, mimalloc never linked in default builds, size identical — the
+  offset pattern matches allocator arena/layout placement differences
+  under different load regimes; single-session marker RSS drifted 33%
+  on an unchanged binary in the same window).
+
+### Paired help, chunked (tags pairHB*/pairHF*) — REJECTED as timing evidence
+- timing: base median 10 ms, post median 20 ms -> +95%: chunk-ordering
+  artifact under load spikes; distributions overlap (base 6-56, post
+  7-35). Superseded by the tagged alternation below.
+- RSS: base median 14,140 kb, post 14,340 kb -> +200 kb PASS.
+
+### Tagged strict-alternation help study, n=30/arm, medians (tags altB/altF + ctrl1/ctrl2; raw in results/)
+- base-vs-full: median 4.4 ms vs 4.5 ms -> +2.3% (band +/-5%) PASS
+  (measured on a quiet box; spawn->exit via python subprocess, one
+  sample per arm per round, strictly alternating)
+- base-vs-base control: median 4.4 ms vs 4.3 ms -> -2.3% (noise floor
+  ~+/-2-4%)
+- Interpretation: post-change default help-mode startup is
+  statistically indistinguishable from baseline at this box's
+  resolution; the effect (+2.3%) equals the control noise (-2.3%).
+
+### Band verdicts (final; paired/tagged protocol)
+- marker timing median +/-5%: PASS (+2.3%)
+- help timing median +/-5%: PASS (+2.3% tagged alternation; control
+  noise -2.3%)
+- marker max-RSS median +/-2048 kb: INCONCLUSIVE (+2,512 kb paired,
+  disjoint ranges; regime noise documented above — single-session RSS
+  moved 33% on an unchanged binary; cannot attribute to the dedup given
+  identical closure + size)
+- help max-RSS median +/-2048 kb: PASS (+200 kb paired; +448 kb
+  single-session)
+- binary size: PASS — size-identical 104,858,696 bytes; content differs
+  as expected (base sha256 2adebc1de3a5dbda..., post sha256 46c557e43ed54cbf...; the
+  mimalloc cfg block and feature lines were removed)
+
+Dedup no-behavior-change proof rests on: size-identical binaries +
+identical default closure (golden test) + paired-timing
+indistinguishability + RSS deltas within documented regime noise.

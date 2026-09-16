@@ -1,0 +1,16 @@
+# Cold-start marker route (mission 102 replica of mission 99 fixture).
+# Route 1: one-shot timer fires at context start; the log step prints a
+# line containing BENCH_ROUTE_READY on stdout (tracing layer writes
+# stdout), which the bench script polls for. Route 2: an http consumer
+# that must bind for boot to complete — exercising the http capability
+# the slim-http profile is named for. Schemes used: timer, log, http —
+# present in every build profile (http/timer/log non-optional).
+routes:
+  - id: bench-startup-minimal
+    from: timer:bench-ready?period=600000&repeatCount=1
+    steps:
+      - to: log:BENCH_ROUTE_READY
+  - id: bench-http-bind
+    from: http://127.0.0.1:0/bench-health
+    steps:
+      - set_body: "bench-ok"

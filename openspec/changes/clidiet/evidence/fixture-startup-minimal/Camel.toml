@@ -1,0 +1,5 @@
+# Minimal cold-start fixture (mission 102 replica of mission 99 fixture).
+# Boots three schemes: an http consumer (must bind — exercises the http
+# capability the slim-http profile names), a one-shot timer, and a log
+# step. All three are non-optional in every build profile, so the same
+# fixture measures the full-default and slim binaries.

@@ -1,0 +1,37 @@
+clidiet task 2.3 — compile matrix + slim release binary
+Date: 2026-09-16
+Worktree: /home/shared/rust-camel-worktrees/clidiet (branch feature/clidiet, HEAD 70ab7d73)
+Environment: sccache active; no exit-254 retries needed.
+
+Compile matrix (command | exit code | wall time):
+
+cargo check -p camel-cli                                                            | exit 0 | 0.6s
+cargo check -p camel-cli --no-default-features --features slim-http                 | exit 0 | 0.5s
+cargo check -p camel-cli --no-default-features --features slim-http,grpc            | exit 0 | 0.5s
+cargo check -p camel-cli --no-default-features --features slim-http,lang-js         | exit 0 | 45.0s
+cargo check -p camel-cli --no-default-features --features slim-http,lsp             | exit 0 | 18.3s
+cargo check -p camel-cli --features jemalloc                                        | exit 0 | 75.7s
+cargo clippy -p camel-cli --no-default-features --features slim-http -- -D warnings | exit 0 | 18.5s
+
+jemalloc scenario: `--features jemalloc` opt-in override still compiles with
+allocator gauges included; the `#[global_allocator]` backing half of the
+scenario is covered by the unchanged main.rs wiring (integrity verified by
+task 1.2 step 2).
+
+Slim release build (Phase 3 measurement artifact):
+
+cargo build -p camel-cli --release --no-default-features --features slim-http | exit 0 | 210.8s
+Path:   /tmp/clidiet-camel-slim (kept out of the repo tree)
+Size:   55600192 bytes (~54 MiB)
+--version: camel 0.47.0 (exit 0)
+
+Closure counts (cargo tree, edge kind `-e no-dev` for both, canonical
+normalization `sed -E 's| \(/[^)]*\)||g; s| \(\*\)||g; s| \[\*\]||g' | sort -u`):
+
+default (full):     876 normalized lines
+slim (slim-http):   550 normalized lines
+
+Context: the feature-edge golden was 2955 normalized lines; re-measured on
+this tree as 2945 via `-e features,no-dev` (small delta from the t1.2/t2.2
+allocator/feature surface reduction). The two counts above are the
+like-for-like plain `-e no-dev` closure comparison.

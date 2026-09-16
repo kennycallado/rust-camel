@@ -1,13 +1,10 @@
-// Global allocator overrides (feature-gated, binary-only). Library crates
-// must never set a global allocator. If both features are enabled, jemalloc
-// wins. Soak/migration plan: bd rc-vnm8.
+// Global allocator override (feature-gated, binary-only). Library crates
+// must never set a global allocator. jemalloc is the single override
+// path; default builds use the system allocator. Soak/migration
+// plan: bd rc-vnm8.
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
-#[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use camel_cli::commands;
 use clap::{Parser, Subcommand};
@@ -109,6 +106,7 @@ enum Commands {
     Job(commands::job::JobArgs),
 
     /// Start Language Server Protocol server over stdio.
+    #[cfg(feature = "lsp")]
     Lsp,
 
     /// Compile a single route/job document into a self-contained
@@ -196,6 +194,7 @@ async fn main() {
         Commands::Lint(args) => {
             commands::lint::run(args).await;
         }
+        #[cfg(feature = "lsp")]
         Commands::Lsp => {
             let code = commands::lsp::run().await;
             std::process::exit(code);

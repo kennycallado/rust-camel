@@ -1,0 +1,51 @@
+clidiet task 3.2 — slim-http release build vs full default build (win table)
+Date: 2026-09-16
+Worktree: /home/shared/rust-camel-worktrees/clidiet (branch feature/clidiet, HEAD be89f9a8)
+Method: evidence/bench-cold-local.sh, n=30 per mode, 3 warmups discarded (same
+protocol as results-full.txt). Slim binary: `cargo build -p camel-cli --release
+--no-default-features --features slim-http` (built in task 2.3), copied to
+/tmp/clidiet-camel-slim; sha256 83269dc44889627d3e329007c0986125ae8301c1858c3c393ca899924ef8685c;
+size 55,600,192 bytes. Full binary: /tmp/clidiet-camel-full (task 3.1), sha256
+46c557e43ed54cbfc8c749f71083fbcddc1606f78a6dded2aac5fc9293800d06; size 104,858,696 bytes.
+Full-post stats below are the task 3.1 single-session numbers from results-full.txt.
+
+Full-vs-slim comparison (full-post vs slim-post, both n=30, same protocol):
+
+| Metric (n=30)     | full-post | slim-post | Δ (full→slim) |
+|-------------------|-----------|-----------|---------------|
+| marker median (ms)| 70        | 21        | −49 (−70.0%)  |
+| marker p90 (ms)   | 89        | 22        | −67 (−75.3%)  |
+| marker min–max    | 30–93     | 15–22     | —             |
+| marker max-RSS med (kb) | 49,832 | 25,524 | −24,308 (−48.8%) |
+| marker max-RSS range    | 49,656–49,980 | 25,224–25,716 | — |
+| help median (ms)  | 15        | 5         | −10 (−66.7%)  |
+| help p90 (ms)     | 25        | 5         | −20 (−80.0%)  |
+| help min–max      | 8–28      | 5–6       | —             |
+| help max-RSS med (kb) | 19,600 | 11,694 | −7,906 (−40.3%) |
+| help max-RSS range    | 19,300–19,600 | 11,512–11,832 | — |
+| binary size (B)   | 104,858,696 | 55,600,192 | −49,258,504 (−47.0%) |
+| closure (cargo tree -e no-dev, normalized lines) | 876 | 550 | −326 (−37.2%) |
+
+Closure counts from evidence/matrix.txt (task 2.3): default (full) 876 vs slim
+(slim-http) 550 normalized lines, canonical normalization
+`sed -E 's| \(/[^)]*\)||g; s| \(\*\)||g; s| \[\*\]||g' | sort -u`.
+
+Fixture boot: 30/30 slim marker samples reached BENCH_ROUTE_READY; 0
+ERROR-exit-before-marker; 0 FAIL samples in either mode (grep count 0 in both
+bench logs). The fixture's http consumer bind (http://127.0.0.1:0/bench-health)
+plus the timer→log marker route booted on the slim binary, proving the
+slim-http profile is self-coherent (spec scenario "slim build compiles and
+boots an http route"): no dangling forward such as otel without the http
+bridge, and the LSP-free binary still parses and boots routes.
+
+Single-session caveat: timing comparisons across sessions carry this box's
+load noise (see results-full.txt paired-study preamble). full-post was
+measured under loadavg ≈ 10; slim-post under loadavg ≈ 7.75. The win table
+cites the deltas as measured, single-session, same protocol for both
+binaries' tags full-post/slim-post measured close in time (19:43 vs 20:0x).
+The RSS and size deltas are the load-robust evidence: −48.8% marker RSS,
+−40.3% help RSS, −47.0% size, −37.2% closure — all consistent with dropping
+the controllable optional surfaces (kafka/grpc/wasm/llm/mcp/mqtt/surrealdb/
+exec/lsp/lang-*), which the full build links but the slim build excludes.
+
+Raw data: results/slim-post.{marker,help}.txt (ms) and .rss.txt (kb).
