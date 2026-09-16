@@ -19,6 +19,10 @@ name = "camel-bean-macros"
 state = "registered"
 
 [[crates]]
+name = "camel-bridge"
+state = "registered"
+
+[[crates]]
 name = "camel-endpoint-macros"
 state = "registered"
 
@@ -27,27 +31,11 @@ name = "camel-matchers"
 state = "registered"
 
 [[crates]]
-name = "camel-wit"
-state = "registered"
-
-[[crates]]
-name = "camel-bridge"
-state = "registered"
-
-[[crates]]
 name = "camel-proto-compiler"
 state = "registered"
 
 [[crates]]
-name = "camel-health"
-state = "registered"
-
-[[crates]]
-name = "camel-lint"
-state = "registered"
-
-[[crates]]
-name = "camel-language-api"
+name = "camel-wit"
 state = "registered"
 
 [[crates]]
@@ -56,6 +44,18 @@ state = "registered"
 
 [[crates]]
 name = "camel-function"
+state = "registered"
+
+[[crates]]
+name = "camel-health"
+state = "registered"
+
+[[crates]]
+name = "camel-language-api"
+state = "registered"
+
+[[crates]]
+name = "camel-lint"
 state = "registered"
 
 [[crates]]
@@ -68,10 +68,6 @@ state = "registered"
 
 [[crates]]
 name = "camel-dataformat-protobuf"
-state = "registered"
-
-[[crates]]
-name = "camel-lsp"
 state = "registered"
 
 [[crates]]
@@ -95,23 +91,11 @@ name = "camel-language-xpath"
 state = "registered"
 
 [[crates]]
+name = "camel-lsp"
+state = "registered"
+
+[[crates]]
 name = "camel-component-api"
-state = "registered"
-
-[[crates]]
-name = "camel-processor"
-state = "registered"
-
-[[crates]]
-name = "camel-component-grpc"
-state = "registered"
-
-[[crates]]
-name = "camel-component-keycloak"
-state = "registered"
-
-[[crates]]
-name = "camel-component-seda"
 state = "registered"
 
 [[crates]]
@@ -139,15 +123,19 @@ name = "camel-component-file"
 state = "registered"
 
 [[crates]]
+name = "camel-component-grpc"
+state = "registered"
+
+[[crates]]
 name = "camel-component-jms"
 state = "registered"
 
 [[crates]]
-name = "camel-component-log"
+name = "camel-component-keycloak"
 state = "registered"
 
 [[crates]]
-name = "camel-master"
+name = "camel-component-log"
 state = "registered"
 
 [[crates]]
@@ -167,6 +155,10 @@ name = "camel-component-redis"
 state = "registered"
 
 [[crates]]
+name = "camel-component-seda"
+state = "registered"
+
+[[crates]]
 name = "camel-component-sql"
 state = "registered"
 
@@ -175,15 +167,23 @@ name = "camel-component-timer"
 state = "registered"
 
 [[crates]]
+name = "camel-master"
+state = "registered"
+
+[[crates]]
+name = "camel-processor"
+state = "registered"
+
+[[crates]]
 name = "camel-xslt"
 state = "registered"
 
 [[crates]]
-name = "camel-language-js"
+name = "camel-redis-repo"
 state = "registered"
 
 [[crates]]
-name = "camel-redis-repo"
+name = "camel-language-js"
 state = "registered"
 
 [[crates]]
@@ -215,15 +215,15 @@ name = "camel-component-surrealdb"
 state = "registered"
 
 [[crates]]
-name = "camel-template"
-state = "registered"
-
-[[crates]]
 name = "camel-otel"
 state = "registered"
 
 [[crates]]
 name = "camel-prometheus"
+state = "registered"
+
+[[crates]]
+name = "camel-template"
 state = "registered"
 
 [[crates]]
@@ -243,15 +243,15 @@ name = "camel-dsl"
 state = "registered"
 
 [[crates]]
-name = "camel-config"
-state = "registered"
-
-[[crates]]
 name = "camel-component-mcp"
 state = "registered"
 
 [[crates]]
 name = "camel-component-validator"
+state = "registered"
+
+[[crates]]
+name = "camel-config"
 state = "registered"
 
 [[crates]]

@@ -3717,7 +3717,17 @@ fn discover_publishable_crates(workspace_root: &Path) -> Result<Vec<WorkspaceCra
 /// weak edge is broken only if both its endpoints still lie inside the same
 /// non-trivial SCC. When unscheduled nodes remain but no non-trivial SCC has a
 /// breakable intra-SCC weak edge, a hard normal-only cycle is reported.
-fn compute_publish_order(crates: Vec<WorkspaceCrate>) -> Result<PublishOrderResult, String> {
+fn compute_publish_order(mut crates: Vec<WorkspaceCrate>) -> Result<PublishOrderResult, String> {
+    // Deterministic order: discovery walks the filesystem in readdir
+    // order, which differs across machines (fresh CI checkout vs a
+    // long-lived dev clone). Kahn's FIFO tie-breaking inherits that
+    // order, so the "authoritative" publish order — and therefore
+    // lint-publish-registration — was machine-dependent (rc-w36r4:
+    // 11 findings on CI, 0 on the dev host, same commit). Sorting by
+    // crate name makes the seed order and every FIFO tie-break
+    // reproducible on any filesystem.
+    crates.sort_by(|a, b| a.name.cmp(&b.name));
+
     let name_map: std::collections::HashMap<String, usize> = crates
         .iter()
         .enumerate()
