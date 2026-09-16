@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
-# T3 smoke test: builds (if needed) and smoke-tests all 4 T3
-# artifacts. NOT a substitute for the full M1/M2 harness
-# (which is the Task 5 concern); this is a quick
-# bring-up smoke that verifies the marker + 200/pong
-# contract end-to-end for each fixture.
+# T3 smoke test: builds (if needed) and smoke-tests the T3 artifacts.
+# NOT a substitute for the full M1/M2 harness (which is the Task 5
+# concern); this is a quick bring-up smoke that verifies the marker +
+# 200/pong contract end-to-end for each fixture.
+#
+# Assertion policy (e_opus ruling D2, 2026-09-16; bd rc-h42s6): the
+# HARD assertions are the BENCH_ROUTE_READY marker and the 200/pong
+# response body. The per-request `id=1` check is WARN-only
+# observability: the fixtures are minimal-bare (e_opus ruling D1) and
+# no longer emit per-request stdout lines at all. The previously
+# committed smoke logs were deleted for exactly this reason — they
+# showed `received`/`id=1` lines the aligned fixtures can no longer
+# produce; fresh smoke evidence is regenerated against live cells as
+# part of the era-3 gate.
 #
 # Usage: bash benchmarks/scenarios/http-server/smoke/run.sh [artifact]
 #   [artifact]  optional filter — run ONLY the matching artifact's
@@ -170,32 +179,24 @@ post_smoke_port() {
     return 0
 }
 
-# Verify per-request id emission in the smoke log. Task 3
-# review (Important finding) mandates BENCH_HTTP_REQUEST id=<n>
-# on 7/8 artifacts — all except rust-camel-cli (BLOCKED on
-# YAML DSL — see bd rc-5gcu). Asserts id=1 because the smoke
-# sends exactly 1 request per artifact.
+# Per-request id observability (e_opus ruling D2, 2026-09-16; bd
+# rc-h42s6): under the minimal-bare fixture shape (D1) NO fixture
+# emits per-request stdout lines, so this check is WARN-only for
+# every artifact — a missing `id=1` never increments FAIL or
+# FAILED_ARTIFACTS; a present `id=1` gets an informational PASS line.
+# (The old per-artifact distinction — rust-camel-cli partial pass on
+# the static `received` line — is moot: nothing emits `received`
+# anymore.) The HARD assertions stay in post_smoke: marker presence +
+# the 200/pong body.
 verify_request_id() {
     local label="$1"
     local log="$SCRIPT_DIR/${label}.log"
 
-    # rust-camel-cli is BLOCKED — skip the id check, but the
-    # static `BENCH_HTTP_REQUEST received` line should still
-    # be present (the YAML DSL emits it).
-    if [[ "$label" == "rust-camel-cli" ]]; then
-        if ! grep -qF "BENCH_HTTP_REQUEST received" "$log" 2>/dev/null; then
-            echo "  WARN: $label did not emit 'BENCH_HTTP_REQUEST received' (expected — YAML DSL cannot emit id=<n>, bd rc-5gcu)"
-            return 0
-        fi
-        echo "  PASS (partial): $label emitted static 'received' line (id=<n> BLOCKED per bd rc-5gcu)"
+    if ! grep -qE "BENCH_HTTP_REQUEST id=1\$" "$log" 2>/dev/null; then
+        echo "  WARN: $label log has no 'BENCH_HTTP_REQUEST id=1' (expected under minimal-bare fixtures, e_opus D2 — observability only)"
         return 0
     fi
-
-    if ! grep -qE "BENCH_HTTP_REQUEST id=1\$" "$log" 2>/dev/null; then
-        echo "  FAIL: $label did not emit 'BENCH_HTTP_REQUEST id=1' (Task 3 Important finding)"
-        return 1
-    fi
-    echo "  PASS: $label emitted 'BENCH_HTTP_REQUEST id=1'"
+    echo "  PASS: $label log contains 'BENCH_HTTP_REQUEST id=1'"
     return 0
 }
 
@@ -293,14 +294,10 @@ smoke_artifact() {
     if post_smoke "$label" "$pid"; then
         PASS=$((PASS+1))
     fi
-    # Verify the per-request id emission (Task 3 Important finding).
-    # Runs after post_smoke so the request has actually been
-    # processed and the log line is on disk.
-    verify_request_id "$label" || {
-        # Failure already printed by verify_request_id; count it.
-        FAIL=$((FAIL+1))
-        FAILED_ARTIFACTS+=("$label:id-missing")
-    }
+    # Per-request id observability (e_opus ruling D2): WARN-only,
+    # never fails. Runs after post_smoke so any emitted line would
+    # already be on disk.
+    verify_request_id "$label"
     # Aggressive cleanup: kill all processes whose cmdline
     # matches the artifact binary, then the original pid,
     # then anything left on 8080. The JVM and Quarkus
@@ -391,16 +388,15 @@ smoke_axum_bare() {
         PASS=$((PASS+1))
     fi
 
-    # Per-request stdout markers (Task 3 Important finding; the shared
-    # path gets this via verify_request_id — asserted inline here
-    # because the axum-bare case bypasses post_smoke).
+    # Per-request stdout lines: WARN-only observability (e_opus
+    # ruling D2) — the minimal-bare fixture (D1) emits none. Same
+    # policy as verify_request_id; inline because the axum-bare case
+    # bypasses post_smoke.
     if grep -qF "BENCH_HTTP_REQUEST received" "$log" \
         && grep -qE "BENCH_HTTP_REQUEST id=1\$" "$log"; then
         echo "  PASS: axum-bare emitted 'BENCH_HTTP_REQUEST received' + 'id=1'"
     else
-        echo "  FAIL: axum-bare stdout missing 'BENCH_HTTP_REQUEST received'/'id=1'"
-        FAIL=$((FAIL+1))
-        FAILED_ARTIFACTS+=("axum-bare:marker-missing")
+        echo "  WARN: axum-bare emitted no per-request lines (expected under minimal-bare, e_opus D2 — observability only)"
     fi
 
     kill -9 "$pid" 2>/dev/null || true

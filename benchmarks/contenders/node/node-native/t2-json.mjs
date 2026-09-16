@@ -15,19 +15,23 @@
 //   pipeline fires IMMEDIATELY at t0, then every 10 ms (10000
 //   exchanges total), then the fixture idles until killed:
 //   set_body (canonical JSON document, exactly SIZE bytes)
+//     -> WINDOW START     (t0 — AFTER the body supply, which is
+//                          EXCLUDED from the window, e_opus ruling D3)
 //     -> unmarshal json   (JSON.parse: the body IS the parsed value)
 //     -> filter           (id == "bench")
 //     -> transform        (insert "bench": true into the PARSED map)
 //     -> marshal json     (the SINGLE serialization: JSON.stringify)
+//     -> WINDOW CLOSE     (duration = now − t0; BENCH_LATENCY append)
 //     -> output assert    (exact SIZE+13 length AND parsed semantic
-//                          equality) — failure exits BEFORE marker
-//                          AND before the tick's latency record
+//                          equality) — OUTSIDE the window (e_opus
+//                          ruling D4); failure exits non-zero BEFORE
+//                          the marker (after that tick's record)
 //     -> marker           BENCH_ROUTE_READY bytes=<len>, latched to
 //                          the FIRST completed exchange
-// - Tick mode protocol B: every tick brackets the WHOLE per-tick body
-//   (t0 before set_body, record after the assert) and appends
-//   `BENCH_LATENCY <tick> <duration_ns>` to the latency file — one
-//   record per tick = one full pipeline. The file path comes from
+// - Tick mode protocol B: every tick brackets the CORE pipeline (t0
+//   after the body supply, record immediately after marshal) and
+//   appends `BENCH_LATENCY <tick> <duration_ns>` to the latency file —
+//   one record per tick = one full pipeline. The file path comes from
 //   `BENCH_LATENCY_FILE` (set EXPLICITLY per cell by the harness node
 //   wiring; the canonical path below is only a standalone-run
 //   fallback) and is truncated at startup.
@@ -44,12 +48,12 @@
 //   order; the scenario README documents the caveat).
 // - The marker line is printed exactly once — latched to the FIRST
 //   completed exchange, at its original code-path position (after the
-//   output assert) and BEFORE that tick's latency record, so the
-//   first record strictly follows the marker (the cross-runtime
-//   idiom). After repeatCount the script idles like the rust fixture
-//   (`ctrl_c().await`) — the smoke/harness kills it externally;
-//   everything here is ASCII so JS string length equals the UTF-8
-//   byte length throughout.
+//   output assert; both are OUTSIDE the measured window, so the first
+//   tick's latency record precedes the marker — the marker is a
+//   trailing-log concern per e_opus ruling D3). After repeatCount the
+//   script idles like the rust fixture (`ctrl_c().await`) — the
+//   smoke/harness kills it externally; everything here is ASCII so JS
+//   string length equals the UTF-8 byte length throughout.
 
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -161,10 +165,10 @@ function assertBenchOutput(size, text) {
   return expected;
 }
 
-// One exchange through the route: set_body (the startup-built canonical
-// document — frozen seq) -> unmarshal json -> filter -> transform ->
-// marshal json -> output assert. Returns the asserted output length;
-// throws on any violation.
+// One exchange through the CORE pipeline (everything INSIDE the
+// measured window): unmarshal json -> filter -> transform -> marshal
+// json. Returns the marshaled output string; the assert runs OUTSIDE
+// the window (e_opus ruling D4). Throws on any pipeline violation.
 function runTickPipeline(body) {
 
   // unmarshal json: the body IS the parsed value from here on.
@@ -180,16 +184,12 @@ function runTickPipeline(body) {
   parsed.bench = true;
 
   // marshal json: the SINGLE serialization (JSON.stringify).
-  const out = JSON.stringify(parsed);
-
-  // output assert — the marker's code-path position is right here,
-  // latched below to the FIRST completed exchange.
-  return assertBenchOutput(size, out);
+  return JSON.stringify(parsed);
 }
 
 // Marker latch — the FIRST completed exchange prints the marker at its
-// original code-path position (after the assert), before that tick's
-// latency record; later exchanges are silent.
+// original code-path position (after the post-window assert, itself
+// after the window-close latency record); later exchanges are silent.
 let markerFired = false;
 function emitReadyMarker(len) {
   if (markerFired) {
@@ -226,23 +226,35 @@ try {
   process.exit(1);
 }
 
-// Per-tick work: t0 before the FULL pipeline, BENCH_LATENCY record
-// after it — one record per tick = one full per-tick pipeline. A
-// pipeline failure aborts the process non-zero (no record, no marker).
+// Per-tick work: body supply FIRST (outside the window), t0, core
+// pipeline, window CLOSE (BENCH_LATENCY record), THEN the post-window
+// assert + marker. A pipeline or assert failure aborts the process
+// non-zero (assert failure: after that tick's record, before the
+// marker — same order as the Java peers).
 let tick = 0;
 function fireTick() {
   tick += 1;
+  // Body supply — set_body equivalent (prebuilt tickBody; the build
+  // stays outside the measured window, e_opus ruling D3).
+  const body = tickBody;
   const t0 = process.hrtime.bigint();
-  let len;
+  let out;
   try {
-    len = runTickPipeline(tickBody);
+    out = runTickPipeline(body);
   } catch (err) {
     console.error(`error: t2-json tick ${tick} failed: ${err.message}`);
     process.exit(1);
   }
   const durationNs = Number(process.hrtime.bigint() - t0);
-  emitReadyMarker(len);
   appendFileSync(latencyFile, `BENCH_LATENCY ${tick} ${durationNs}\n`);
+  let len;
+  try {
+    len = assertBenchOutput(size, out);
+  } catch (err) {
+    console.error(`error: t2-json tick ${tick} assert failed: ${err.message}`);
+    process.exit(1);
+  }
+  emitReadyMarker(len);
   if (tick < REPEAT_COUNT) {
     setTimeout(fireTick, PERIOD_MS);
   }

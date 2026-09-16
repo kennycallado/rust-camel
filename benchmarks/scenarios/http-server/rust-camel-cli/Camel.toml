@@ -7,7 +7,8 @@
 # T3 Pair B comparison (YAML) is language-subsystem-equivalent to
 # Apache Camel (both use Simple `${...}` interpolation and bare-string
 # log messages). The route shape is `from(http://0.0.0.0:8080/bench)
-# -> log -> set_body(pong)`, parsed at runtime by `camel run --config
+# -> set_body(pong)` — minimal-bare, NO log step (e_opus ruling D1,
+# 2026-09-16; bd rc-h42s6) — parsed at runtime by `camel run --config
 # Camel.toml --routes http-server.yaml`. The marker
 # `BENCH_ROUTE_READY <unix_ms>` is emitted by the wrapper script by
 # detecting the child's `CamelContext started` stdout line (rc-w1u9

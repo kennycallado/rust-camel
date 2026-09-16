@@ -5,7 +5,7 @@
 //! `direct:agg-in`.
 //!
 //! ```text
-//! timer:bench?period=10&repeatCount=10000
+//! timer:bench?period=10&repeatCount=10000&delay=0
 //!   -> set_body(canonical array)                    Body::Text, 591 bytes
 //!   -> split(json array items, SEQUENTIAL)          100 fragments "b0".."b99"
 //!      -> to("direct:agg-in")                       per-fragment dispatch
@@ -66,26 +66,29 @@
 //! # Tick mode (OpenSpec change `bench-consol-tick` task 2.2)
 //!
 //! The timer is the repeating warm-tick form
-//! `timer:bench?period=10&repeatCount=10000` (verbatim, matching the
-//! `xsd-validation-bridge` reference): every tick runs the full
+//! `timer:bench?period=10&repeatCount=10000&delay=0` (matching the
+//! seven peers — `delay=0` makes the first tick fire immediately, not
+//! ~1 s late): every tick runs the full
 //! split→aggregate pipeline, so each tick completes one 100-item
 //! bucket. The marker keeps its exact code-path position (the
 //! completion path of the agg route) but is gated to the FIRST
 //! completed bucket — exactly one marker line per process lifetime.
-//! The tick start timestamp is carried route-locally (AtomicU64 epoch
-//! nanos — the post-split exchange is the aggregator's rebuilt
-//! completion exchange, so exchange state does not survive the
-//! boundary); the trailing split-route step appends
+//! The tick start timestamp is carried route-locally (`Mutex<Instant>`
+//! — a MONOTONIC clock, matching Java's `System.nanoTime` and the
+//! module's `Instant`; the post-split exchange is the aggregator's
+//! rebuilt completion exchange, so exchange state does not survive the
+//! boundary); the split-route window-CLOSE step appends
 //! `BENCH_LATENCY <id> <duration_ns>` to `$BENCH_LATENCY_FILE` per
 //! exchange (env read ONCE at branch start; when unset the canonical
 //! harness path is used, exactly like the reference — the lib cell
-//! argv is bare, so the default is what makes the M2 protocol B
-//! reader find the log). Pattern mirrors
+//! argv is bare, so the default is what makes the M2
+//! protocol B reader find the log). Pattern mirrors
 //! `xsd-validation-bridge.rs:58,111`.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use camel_api::aggregator::{AggregationStrategy, AggregatorConfig};
 use camel_api::splitter::SplitterConfig;
@@ -296,7 +299,11 @@ async fn main_async() -> Result<(), CamelError> {
     let tick_counter = Arc::new(AtomicU64::new(0));
     let marker_fired = Arc::new(AtomicBool::new(false));
     let latency_file_arc = Arc::new(latency_file);
-    let tick_start_ns = Arc::new(AtomicU64::new(0));
+    // Route-local MONOTONIC tick-start clock (Instant, matching Java's
+    // System.nanoTime and the bench_instrument module's Instant; the
+    // previous SystemTime epoch clock was NTP-step-exposed —
+    // fixture-fairness audit clock note).
+    let tick_start_clock = Arc::new(Mutex::new(Instant::now()));
 
     // The agg route first: its direct consumer must exist before the
     // timer route dispatches the first fragment. The marker is gated
@@ -307,34 +314,30 @@ async fn main_async() -> Result<(), CamelError> {
 
     let rc_for_route = Arc::clone(&tick_counter);
     let lf_for_route = Arc::clone(&latency_file_arc);
-    let tick_start = Arc::clone(&tick_start_ns);
+    let tick_start = Arc::clone(&tick_start_clock);
 
-    let split_route = RouteBuilder::from("timer:bench?period=10&repeatCount=10000")
+    let split_route = RouteBuilder::from("timer:bench?period=10&repeatCount=10000&delay=0")
         .route_id("bench-split-route")
         .set_body(array)
         // Bracket the per-exchange pipeline (unmarshal → split →
         // aggregate) with the tick start timestamp. The bracket step
-        // sits AFTER set_body (same as t2-json + the
-        // xsd-validation-bridge reference) — with a moved/closure body,
-        // a process step ahead of set_body broke the body swap in
-        // testing. NOT a general rule: t2-realistic-eip places the same
-        // bracket BEFORE its `&'static str` set_body and works.
+        // sits AFTER set_body (body supply is EXCLUDED from the
+        // window, e_opus ruling D3 — same position as t2-json, the
+        // Java peers, and the xsd-validation-bridge reference); with a
+        // moved/closure body, a process step ahead of set_body broke
+        // the body swap in testing.
         //
-        // The start is carried ROUTE-LOCALLY (AtomicU64 epoch nanos),
-        // NOT on the exchange: the post-split exchange is the
-        // aggregator's rebuilt completion exchange — neither
-        // extensions nor properties survive the split+aggregate
-        // boundary (verified empirically, task 2.2). Ticks are
-        // sequential (10 ms period vs ~ms pipeline), so the shared
-        // slot cannot straddle ticks in practice.
+        // The start is carried ROUTE-LOCALLY (`Mutex<Instant>`), NOT
+        // on the exchange: the post-split exchange is the aggregator's
+        // rebuilt completion exchange — neither extensions nor
+        // properties survive the split+aggregate boundary (verified
+        // empirically, task 2.2). Ticks are sequential (10 ms period
+        // vs ~ms pipeline), so the shared slot cannot straddle ticks
+        // in practice.
         .process(move |exchange| {
-            let ts = Arc::clone(&tick_start_ns);
+            let ts = Arc::clone(&tick_start_clock);
             async move {
-                let now_ns = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0);
-                ts.store(now_ns, Ordering::Relaxed);
+                *ts.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
                 Ok(exchange)
             }
         })
@@ -347,17 +350,21 @@ async fn main_async() -> Result<(), CamelError> {
         .split(SplitterConfig::new(split_body_json_array()).parallel(false))
         .to("direct:agg-in")
         .end_split()
+        // Window CLOSE (e_opus ruling D3): duration = now − tick start
+        // on the monotonic route-local clock. The agg route's
+        // assert + marker ran INSIDE the window via the synchronous
+        // direct: dispatch above (uniform across cells).
         .process(move |exchange| {
             let rc = Arc::clone(&rc_for_route);
             let lf = Arc::clone(&lf_for_route);
             let ts = Arc::clone(&tick_start);
             async move {
                 let id = rc.fetch_add(1, Ordering::Relaxed) + 1;
-                let duration_ns = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0)
-                    .saturating_sub(ts.load(Ordering::Relaxed));
+                let duration_ns = ts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .elapsed()
+                    .as_nanos() as u64;
                 let line = format!("BENCH_LATENCY {id} {duration_ns}\n");
                 if let Ok(mut f) = OpenOptions::new().append(true).open(lf.as_str()).await {
                     let _ = f.write_all(line.as_bytes()).await;

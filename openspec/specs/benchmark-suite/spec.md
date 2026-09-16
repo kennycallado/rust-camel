@@ -587,8 +587,11 @@ canonical run.
 - **AND** the second request succeeds on the SAME connection — successful
   keep-alive reuse is the mechanical proof the first request's body (and
   EOS) was fully consumed before its response completed
-- **AND** stdout carries `BENCH_HTTP_REQUEST received` and
-  `BENCH_HTTP_REQUEST id=1` then `id=2` (smoke contract, rc-am22)
+- **AND** stdout carries NO per-request trace lines (`BENCH_HTTP_REQUEST`
+  is absent) — the minimal-bare fixture shape (e_opus ruling D1,
+  2026-09-16, bd rc-h42s6) removed the rc-am22 smoke-trace contract from
+  the measured route; per-request observability is asserted nowhere in
+  the smoke (id checks are WARN-only, ruling D2)
 
 #### Scenario: roster registration is http-server-only
 
@@ -622,8 +625,11 @@ canonical run.
   (runnable standalone via an artifact filter, launched on a free port via
   the env override)
 - **WHEN** the smoke runs
-- **THEN** it asserts the marker, `200`/`pong`, and `id=1`, and commits the
-  resulting `axum-bare.log` containing no timing-like numbers
+- **THEN** it asserts the marker and `200`/`pong` as HARD requirements
+  (minimal-bare shape, e_opus ruling D2, 2026-09-16: the fixture emits no
+  per-request trace lines), while `id=1` verification is WARN-only
+  observability; the resulting transcript log carries no timing-like
+  numbers
 
 #### Scenario: published records stay byte-identical
 

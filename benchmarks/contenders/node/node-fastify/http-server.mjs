@@ -6,11 +6,21 @@
 // - Any method on the bench path -> 200 body `pong` (Fastify renders a
 //   returned string as text/plain; charset=utf-8).
 // - `BENCH_ROUTE_READY <unix_ms>` once, from the listen callback.
-// - `BENCH_HTTP_REQUEST received` + `BENCH_HTTP_REQUEST id=<n>` per
-//   bench-path request, logged from the route handler (counter starts
-//   at 1; non-bench paths emit nothing and consume no id).
+// - Minimal-bare per e_opus ruling D1 (2026-09-16; bd rc-h42s6): the
+//   fixture emits NO per-request stdout lines (no `received` line, no
+//   `id=<n>` counter) — the smoke's id check is WARN-only
+//   observability (e_opus ruling D2).
 // - BENCH_LATENCY_FILE only honored by creating the empty file (no
 //   server-side latency record exists in protocol A).
+//
+// D5 ruling outcome (e_opus, 2026-09-16; bd rc-h42s6): the catch-all
+// content-type parser below is RETAINED. The bench clients (loadgen,
+// smoke's raw nc POST) send bodies with NO Content-Type header, and
+// Fastify v5 answers 415 to a body with no/unknown Content-Type — so
+// removing the parser (drain-neither) is IMPOSSIBLE without breaking
+// the fixture against those clients. Consequence: the node family
+// does NOT enter m3/m4 this era; the residual confound is DECLARED
+// for m2 protocol-A latency. The route ignores the body anyway.
 
 import Fastify from "fastify";
 import fs from "node:fs";
@@ -26,24 +36,14 @@ if (process.env.BENCH_LATENCY_FILE) {
 const app = Fastify();
 
 // Fastify v5 answers 415 to a body with no/unknown Content-Type; the
-// JVM + rust fixtures accept any body (the smoke's raw nc request
-// carries none). Catch-all parser restores identical semantics — the
-// route ignores the body anyway.
+// bench clients (loadgen, smoke nc) send none. RETAINED per e_opus
+// ruling D5 (2026-09-16) — see the header comment for the full
+// decision record.
 app.addContentTypeParser("*", { parseAs: "string" }, (_req, body, done) =>
   done(null, body),
 );
 
-let requestId = 0;
-
-// Logged inside the route handler only, like the JVM contenders whose
-// per-request lines live inside the route processor: non-bench paths
-// (fastify default 404) must not emit lines or consume ids.
-app.all(benchPath, async () => {
-  requestId += 1;
-  console.log("BENCH_HTTP_REQUEST received");
-  console.log(`BENCH_HTTP_REQUEST id=${requestId}`);
-  return "pong";
-});
+app.all(benchPath, async () => "pong");
 
 await app.listen({ port, host: "0.0.0.0" });
 console.log(`BENCH_ROUTE_READY ${Date.now()}`);

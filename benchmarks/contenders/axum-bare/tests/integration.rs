@@ -3,8 +3,9 @@
 //! Contract under test:
 //! - Marker: exactly one `BENCH_ROUTE_READY` stdout line after listener bind.
 //! - Route: POST /bench returns 200 `text/plain; charset=utf-8` body `pong`,
-//!   fully drains the request body (keep-alive reuse proves the drain), and
-//!   logs `BENCH_HTTP_REQUEST received` + `BENCH_HTTP_REQUEST id=<n>`.
+//!   fully drains the request body (keep-alive reuse proves the drain).
+//!   Minimal-bare per e_opus ruling D1 (2026-09-16; bd rc-h42s6): the
+//!   fixture emits NO per-request stdout lines.
 //! - Bind failure: occupied port → nonzero exit with `error` on stderr.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -129,14 +130,6 @@ fn read_response(stream: &mut TcpStream) -> (String, Vec<u8>) {
     (head, body)
 }
 
-/// Both handler-log lines for both requests arrived.
-fn logs_complete(lines: &[String]) -> bool {
-    let c = lines.join("\n");
-    c.matches("BENCH_HTTP_REQUEST received").count() >= 2
-        && c.contains("id=1")
-        && c.contains("id=2")
-}
-
 #[test]
 fn marker_then_two_keepalive_requests_succeed() {
     let port = free_port();
@@ -185,23 +178,9 @@ fn marker_then_two_keepalive_requests_succeed() {
         assert_eq!(body, b"pong");
     }
 
-    let log_deadline = Instant::now() + Duration::from_secs(5);
-    while !logs_complete(&lines) {
-        match next_line(&rx, log_deadline) {
-            Some(line) => lines.push(line),
-            None => panic!(
-                "deadline exceeded waiting for request logs; saw: {:?}",
-                lines.join("\n")
-            ),
-        }
-    }
-    let collected = lines.join("\n");
-    assert!(
-        collected.matches("BENCH_HTTP_REQUEST received").count() >= 2,
-        "expected >=2 received lines: {collected}"
-    );
-    assert!(collected.contains("id=1"), "missing id=1: {collected}");
-    assert!(collected.contains("id=2"), "missing id=2: {collected}");
+    // No per-request stdout assertions: minimal-bare fixture (e_opus
+    // ruling D1) emits nothing per request — the keep-alive exchanges
+    // above already prove the drain.
     let ready_lines = lines.iter().filter(|l| *l == "BENCH_ROUTE_READY").count();
     assert_eq!(ready_lines, 1, "exactly one BENCH_ROUTE_READY expected");
     // Child killed+waited by ChildGuard::drop on every path.

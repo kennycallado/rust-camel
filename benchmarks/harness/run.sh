@@ -1361,12 +1361,15 @@ resolve_bridge_scenario_cells() {
         "$marker"
 
     # -- 4. rust-camel-cli (Pair B) --
-    # Invoked via the per-scenario wrapper script (sets bridge env vars
-    # + extracts BENCH_LATENCY from child stdout + writes the PID file
-    # before exec'ing the real `camel run` binary). Wrapper convention
-    # is `${scenario}-cli-wrapper.sh`; route file globbed (T4a uses
-    # xslt-bench.yaml, T4b uses xsd-bench.yaml — name doesn't match
-    # scenario exactly).
+    # Invoked via the per-scenario wrapper script (exports
+    # BENCH_LATENCY_FILE + the bridge PID-file env vars before
+    # exec'ing the real `camel run` binary — the CLI's bench_instrument
+    # runtime module appends BENCH_LATENCY records DIRECTLY to the
+    # latency file; the wrapper's stdout handling is marker detection
+    # + pass-through tailing only, never latency extraction). Wrapper
+    # convention is `${scenario}-cli-wrapper.sh`; route file globbed
+    # (T4a uses xslt-bench.yaml, T4b uses xsd-bench.yaml — name
+    # doesn't match scenario exactly).
     local rust_cli_wrapper="$scenario_dir/rust-camel-cli/${scenario}-cli-wrapper.sh"
     if [[ ! -x "$rust_cli_wrapper" ]]; then
         rust_cli_wrapper="$(ls "$scenario_dir/rust-camel-cli/"*-cli-wrapper.sh 2>/dev/null | head -1 || true)"
@@ -1699,12 +1702,17 @@ resolve_all_cells() {
                 # a positional arg; the path matches the ${cell//\//_}
                 # cell_safe the M2 protocol-B reader derives).
                 # BENCH_LATENCY_MODE=route selects the module's
-                # route-bracket mode: these yamls have no top-level To
-                # to wrap, so the mode brackets each whole route
-                # (route entry → last step — the window the lib crate
-                # and the JVM latency-writer bean measure). The
-                # xsd-validation-bridge cli cell sets NO mode and keeps
-                # the default pair-mode wrapping.
+                # SENTINEL-ANCHORED route mode (e_opus ruling D3; see
+                # the bench_instrument module doc): these yamls have no
+                # top-level To to wrap, so each timer route carries
+                # BENCH_WINDOW_START/BENCH_WINDOW_END Log sentinels —
+                # the module REPLACES them with the timing processors
+                # (window = body supply EXCLUDED, core pipeline
+                # INCLUDED, trailing log EXCLUDED — the Java/lib anchor
+                # set). The xsd-validation-bridge and xslt-bridge cli
+                # cells set NO mode and keep the default pair-mode
+                # wrapping of their top-level to(validator:...)/
+                # to(xslt:...) step — the same anchor set.
                 case "$scenario" in
                     t2-json|split-aggregate|t2-realistic-eip)
                         local rcli_cell_safe="${scenario}_rust-camel-cli"
@@ -2749,6 +2757,16 @@ m2_measure_protocol_a() {
 # rss-sample trace and the per-round throughput aggregation.
 # =====================================================================
 
+# Era-3 m3/m4 contender exclusion (e_opus ruling D5, bd rc-h42s6,
+# benchmarks/audits/era3-rerun-manifest-2026-09.md gate 6): the node
+# family does NOT enter m3/m4 this era — the D1 parser fixture is a
+# declared confound for m2 protocol-A ONLY. Space-separated roster
+# contender names, applied ONLY in m3_measure below (the m3/m4
+# measured-set population); m1/m2 keep the node cells. Mirrored in
+# summarize.py M3_M4_EXCLUDED_CONTENDERS — the equality is
+# drift-guarded by test_summarize.py::test_roster_mirror_no_drift.
+M3_EXCLUDED_CONTENDERS="node-fastify node-native"
+
 m3_measure() {
     if [[ ${#PROTOCOL_A_CELLS[@]} -eq 0 ]]; then
         echo "m3: skipped (no Protocol A cells registered; M3 only targets T3 http-server)" >&2
@@ -2765,18 +2783,34 @@ m3_measure() {
     BENCH_SEED="${BENCH_SEED:-$(date +%s)}"
     echo "m3: randomized-block seed = $BENCH_SEED"
 
-    # Per-cell failure state (C4: surface silent failures instead of
-    # silently producing a median over partial / HTTP-errored data).
-    local -A m3_cell_failed=()
-    local -A m3_cell_reasons=()
+    # m3/m4 measured set: PROTOCOL_A_CELLS minus the era-3 D5
+    # exclusion. Filtered HERE — not at PROTOCOL_A_CELLS registration —
+    # because the node cells must keep flowing into m1/m2 protocol A
+    # (calibration + measurement); only the m3/m4 arms drop them. This
+    # is also the mutable copy the per-round shuffle operates on.
+    local -a proto_cells=()
     local cell
     for cell in "${PROTOCOL_A_CELLS[@]}"; do
+        # Padded both sides + wildcards on BOTH ends: matches the
+        # contender as a whole word anywhere in the set (a missing
+        # trailing * would only ever match the LAST set entry).
+        if [[ " $M3_EXCLUDED_CONTENDERS " == *" ${cell##*/} "* ]]; then
+            echo "m3/m4: skipping $cell (D5 exclusion — node family out of m3/m4 this era)" >&2
+            continue
+        fi
+        proto_cells+=("$cell")
+    done
+
+    # Per-cell failure state (C4: surface silent failures instead of
+    # silently producing a median over partial / HTTP-errored data).
+    # Initialized over the FILTERED set: an excluded cell must never
+    # enter the aggregation either.
+    local -A m3_cell_failed=()
+    local -A m3_cell_reasons=()
+    for cell in "${proto_cells[@]}"; do
         m3_cell_failed[$cell]=0
         m3_cell_reasons[$cell]=""
     done
-
-    # Mutable copy of the cell list (shuffle is in-place on this copy).
-    local -a proto_cells=("${PROTOCOL_A_CELLS[@]}")
     # round_orders[r] → space-separated cell order (for the order JSON).
     local -a round_orders=()
 
@@ -2906,8 +2940,13 @@ m3_measure() {
 
     # ===================================================================
     # Phase 2: per-cell aggregation (M3 throughput + M4 memory growth).
+    # Iterates the FILTERED measured set: an excluded cell has no
+    # round files, and an unfiltered PROTOCOL_A_CELLS read here would
+    # abort mid-aggregation under `set -u` (unbound m3_cell_failed for
+    # the excluded cell) — or, if failure-init also stayed unfiltered,
+    # emit a bogus all-zero status=ok summary for it.
     # ===================================================================
-    for cell in "${PROTOCOL_A_CELLS[@]}"; do
+    for cell in "${proto_cells[@]}"; do
         local cell_safe="${cell//\//_}"
         local samples_dir="$RUN_DIR/$cell_safe"
         mkdir -p "$samples_dir"

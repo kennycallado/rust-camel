@@ -2,8 +2,9 @@
 //!
 //! Mirrors the v1 rust-camel-lib (`benchmarks/scenarios/startup-minimal/
 //! rust-camel-lib/src/main.rs`) but implements the spec §4.1 T2 route:
-//! timer -> set_body -> set_header -> filter -> choice.when/otherwise ->
-//! marker. The marker `BENCH_ROUTE_READY body=pong-bench` is the harness's
+//! timer -> set_body -> stamp -> set_header -> filter ->
+//! choice.when/otherwise -> latency append (window close) -> marker.
+//! The marker `BENCH_ROUTE_READY body=pong-bench` is the harness's
 //! exact grep target — the `body=pong-bench` suffix proves the choice/when
 //! branch executed (vs `pong-other` if otherwise was wrongly taken).
 //!
@@ -43,15 +44,18 @@
 //! # Tick mode (OpenSpec change `bench-consol-tick` task 2.2)
 //!
 //! The timer is the repeating warm-tick form
-//! `timer:bench?period=10&repeatCount=10000` (verbatim, matching the
-//! `xsd-validation-bridge` reference): the SAME EIP pipeline runs per
-//! exchange. The static `.log` marker step is GONE — `LogProcessor`
-//! is static-only and would repeat the bare line on every one of the
-//! 10000 ticks. Both marker lines (bare `BENCH_ROUTE_READY`, then
-//! `BENCH_ROUTE_READY body=<body>`, same order as the old pair) are
-//! now emitted by one `process` step gated to the FIRST completed
-//! exchange — exactly one marker pair per process lifetime. A
-//! `BENCH_START` extension brackets each exchange; the trailing step
+//! `timer:bench?period=10&repeatCount=10000&delay=0` (matching the
+//! seven peers — `delay=0` makes the first tick fire immediately, not
+//! ~1 s late): the SAME EIP pipeline runs per exchange. The static
+//! `.log` marker step is GONE — `LogProcessor` is static-only and would
+//! repeat the bare line on every one of the 10000 ticks. The single
+//! marker line `BENCH_ROUTE_READY body=<body>` (the `body=` form only,
+//! matching every peer — single-line fix per the fixture-fairness
+//! audit F1) is emitted by one `process` step gated to the FIRST
+//! completed exchange. A `BENCH_START` extension brackets each
+//! exchange (stamped AFTER `set_body` — body supply is EXCLUDED from
+//! the window, e_opus ruling D3); the window-CLOSE step — immediately
+//! after the choice, BEFORE the marker gate (trailing log EXCLUDED) —
 //! appends `BENCH_LATENCY <id> <duration_ns>` to `$BENCH_LATENCY_FILE`
 //! per exchange (env read ONCE at branch start; when unset the
 //! canonical harness path is used, exactly like the reference — the
@@ -126,17 +130,19 @@ async fn main_async() -> Result<(), CamelError> {
     // 3. Build the T2 route programmatically (Pair A — no YAML/DSL
     //    parsing). See file-level comment for the Pair A predicate
     //    deviation rationale (closure predicates, not Simple).
-    let route = RouteBuilder::from("timer:bench?period=10&repeatCount=10000")
+    let route = RouteBuilder::from("timer:bench?period=10&repeatCount=10000&delay=0")
         .route_id("bench-route")
-        // Bracket the per-exchange EIP pipeline (filter →
-        // choice/when → marker) with Instant t_start.
+        .set_body("ping")
+        // Bracket the per-exchange core EIP pipeline (filter →
+        // choice/when) with Instant t_start — AFTER set_body (body
+        // supply is EXCLUDED from the window, e_opus ruling D3; same
+        // position as the Java peers and the split-aggregate fixture).
         // Extension-stored because Instant is not serializable; read
-        // back in the trailing latency step.
+        // back in the window-close latency step.
         .process(|mut exchange| async move {
             exchange.set_extension(BENCH_START, Arc::new(Instant::now()));
             Ok(exchange)
         })
-        .set_body("ping")
         .set_header("source", "bench")
         // Filter predicate: closure form (NOT Simple). Body has just been
         // set to the literal `"ping"` above, so this is always true and
@@ -164,24 +170,9 @@ async fn main_async() -> Result<(), CamelError> {
         .set_body("pong-other")
         .end_otherwise()
         .end_choice()
-        // Marker pair, gated to the FIRST completed exchange: the
-        // static line first (same order as the old `.log` + `process`
-        // pair — the static line is identical across T1/T2/Pair-A/
-        // Pair-B), followed by the dynamic body-suffixed line that
-        // proves T2 semantic correctness (body=pong-bench). Tick mode
-        // repeats this step per tick; the marker contract is exactly
-        // one pair.
-        .process(move |ex| {
-            let mf = Arc::clone(&mf_for_route);
-            async move {
-                if !mf.swap(true, Ordering::Relaxed) {
-                    tracing::info!("BENCH_ROUTE_READY");
-                    let body = ex.input.body.as_text().unwrap_or("").to_string();
-                    tracing::info!("BENCH_ROUTE_READY body={}", body);
-                }
-                Ok(ex)
-            }
-        })
+        // Window CLOSE (e_opus ruling D3): the latency append fires
+        // here — duration = now − BenchStart. The marker gate below
+        // (trailing log) runs OUTSIDE the measured window.
         .process(move |exchange| {
             let rc = Arc::clone(&rc_for_route);
             let lf = Arc::clone(&lf_for_route);
@@ -196,6 +187,22 @@ async fn main_async() -> Result<(), CamelError> {
                     let _ = f.write_all(line.as_bytes()).await;
                 }
                 Ok(exchange)
+            }
+        })
+        // Marker gate, gated to the FIRST completed exchange: the
+        // dynamic body-suffixed line proves T2 semantic correctness
+        // (body=pong-bench). Tick mode repeats this step per tick; the
+        // marker contract is exactly one line — the `body=` form only,
+        // matching every peer (single-line fix, fixture-fairness audit
+        // F1).
+        .process(move |ex| {
+            let mf = Arc::clone(&mf_for_route);
+            async move {
+                if !mf.swap(true, Ordering::Relaxed) {
+                    let body = ex.input.body.as_text().unwrap_or("").to_string();
+                    tracing::info!("BENCH_ROUTE_READY body={}", body);
+                }
+                Ok(ex)
             }
         })
         .build()?;

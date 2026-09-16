@@ -23,7 +23,9 @@
 // code-path position (right after the output assert) but is latched to
 // the FIRST completed exchange — exactly one marker line per process
 // lifetime. A BenchStart exchange property brackets each exchange (set
-// AFTER setBody, mirroring the lib crate); the trailing step appends
+// AFTER setBody, mirroring the lib crate); the window-close step —
+// immediately after marshal, BEFORE the assert and marker, which stay
+// outside the measured window (e_opus ruling D3/D4) — appends
 // `BENCH_LATENCY <id> <duration_ns>` to the BENCH_LATENCY_FILE path
 // (env read once at startup; the canonical fallback matches the M2
 // protocol-B reader's ${cell//\//_} path, so the -D-property harness
@@ -90,16 +92,10 @@ public class BenchRoute extends RouteBuilder {
                 .process(insertBenchMember())
                 .end()
                 .marshal().json(JsonLibrary.Jackson)
-                .process(assertOutput(size))
-                // Marker fires on the FIRST completed exchange only —
-                // tick mode repeats this step per tick, the marker
-                // contract is exactly one line.
-                .process(exchange -> {
-                    if (markerEmitted.compareAndSet(false, true)) {
-                        System.out.println("BENCH_ROUTE_READY bytes="
-                                + exchange.getMessage().getHeader("benchOutLen"));
-                    }
-                })
+                // Window CLOSE (e_opus ruling D3/D4): the latency
+                // append fires immediately after the pipeline output
+                // exists — duration = tEnd − BenchStart. The assert
+                // and the marker below run OUTSIDE the measured window.
                 .process(exchange -> {
                     long id = tickCounter.incrementAndGet();
                     long tEnd = System.nanoTime();
@@ -112,6 +108,16 @@ public class BenchRoute extends RouteBuilder {
                                 StandardOpenOption.APPEND);
                     } catch (Exception e) {
                         // Swallow — harness detects missing records.
+                    }
+                })
+                .process(assertOutput(size))
+                // Marker fires on the FIRST completed exchange only —
+                // tick mode repeats this step per tick, the marker
+                // contract is exactly one line.
+                .process(exchange -> {
+                    if (markerEmitted.compareAndSet(false, true)) {
+                        System.out.println("BENCH_ROUTE_READY bytes="
+                                + exchange.getMessage().getHeader("benchOutLen"));
                     }
                 });
     }

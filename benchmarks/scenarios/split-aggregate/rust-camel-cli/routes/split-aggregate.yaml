@@ -19,10 +19,17 @@
 #        constant-key idempotent_consumer (same DSL-native once-gate
 #        as the marker — task 3.1 hoists the digest log out of the
 #        per-tick window)
+#     -> BENCH_WINDOW_START sentinel (route-mode window OPEN — the
+#        body supply + input validation above are OUTSIDE the window,
+#        e_opus ruling D3)
 #     -> unmarshal json (body becomes the parsed Body::Json array)
 #     -> split (expression json_array, sequential — NO parallel)
 #        -> to direct:agg-in (per fragment)
-#   route bench-agg-route:
+#     -> BENCH_WINDOW_END sentinel (window CLOSE — the LAST step of
+#        the timer route; the agg route's work ran INSIDE the window
+#        via the synchronous direct dispatch)
+#   route bench-agg-route (direct: consumer — passes through route
+#   mode UNINSTRUMENTED; its work is inside the main record's window):
 #     direct:agg-in -> set_header (constant correlation key)
 #     -> aggregate (header correlation, strategy collect_all,
 #        completion_size 100, force_completion_on_stop false)
@@ -33,9 +40,10 @@
 #        empty body) of an incomplete bucket flows through the SAME
 #        subsequent steps — the filter is what keeps the completion
 #        steps completion-only.
-#     -> assert (script, js: the aggregated Body::Json array has
-#        length exactly 100 — rhai cannot read structured bodies)
-#     -> set_property bench.aggregated.size = 100
+#     -> assert (script, js: the aggregator-reported CamelAggregatedSize
+#        must equal 100 AND the actual collected Body::Json array
+#        length — the Java/lib consistency check, F2 upgrade) -> the
+#        actual length is stamped as bench.aggregated.size
 #     -> marker log (simple: reads the completion property)
 #
 # Language notes (recorded per task 2.3):
@@ -84,6 +92,12 @@ routes:
           expression: "bench-sha-once"
           steps:
             - log: "BENCH_INPUT_SHA256=123444b475c48473309ed966eb69896c6725429021a5a5d2e0eaa0a77a159316"
+      # Route-mode window OPEN (e_opus ruling D3): the body supply and
+      # the input validation above are OUTSIDE the measured window; in
+      # route mode the bench_instrument module REPLACES this Log step
+      # with the start-stamp processor — the sentinel never prints in
+      # a measured run.
+      - log: "BENCH_WINDOW_START"
       # Body::Text -> Body::Json (the parsed 100-item array).
       - unmarshal: json
       # Sequential split (parallel defaults to false): each fragment
@@ -92,6 +106,12 @@ routes:
           expression: json_array
           steps:
             - to: "direct:agg-in"
+      # Route-mode window CLOSE — the LAST step of the timer route:
+      # replaced by the end-write processor (duration = close −
+      # start). The agg route's assert + marker ran INSIDE the window
+      # via the synchronous direct dispatch above (uniform across
+      # cells). NOTHING may follow this sentinel in the timer route.
+      - log: "BENCH_WINDOW_END"
 
   - id: "bench-agg-route"
     from: "direct:agg-in"
@@ -111,18 +131,33 @@ routes:
       - filter:
           rhai: 'property("CamelAggregatedSize") == 100'
           steps:
-            # Payload assert on the aggregated collection (the
-            # CollectAll JSON array): length exactly 100.
+            # Completion assert (F2 upgrade — the Java/lib consistency
+            # check): the aggregator-reported CamelAggregatedSize must
+            # equal 100 AND equal the ACTUAL collected list length
+            # (mirror of Java App.java assertCompletion and lib
+            # split.rs completion_assert; rhai cannot read the
+            # structured body, hence js — `camel.body` exposes the
+            # CollectAll JSON array, `camel.property` the reported
+            # size). On success the ACTUAL length is stamped as
+            # bench.aggregated.size for the marker — no hardcoded
+            # value. Ends with `camel.body` (script-step idiom) so the
+            # body passes through unchanged.
             - script:
                 language: js
                 source: |
-                  if (camel.body.length !== 100) {
-                    throw "aggregated collection length != 100: " + camel.body.length;
+                  const reported = camel.property("CamelAggregatedSize");
+                  const actual = camel.body.length;
+                  if (reported !== 100) {
+                    throw "split-aggregate CamelAggregatedSize " + reported + " != expected 100";
                   }
+                  if (actual !== 100) {
+                    throw "split-aggregate aggregated collection length " + actual + " != expected 100";
+                  }
+                  if (reported !== actual) {
+                    throw "split-aggregate CamelAggregatedSize " + reported + " != collection length " + actual;
+                  }
+                  camel.set_property("bench.aggregated.size", actual);
                   camel.body
-            - set_property:
-                name: "bench.aggregated.size"
-                value: 100
             # Marker gate (tick mode, bench-consol-tick task 2.3): same
             # mechanism as the t2-json gate — constant-key
             # idempotent_consumer over the built-in "memory" repository

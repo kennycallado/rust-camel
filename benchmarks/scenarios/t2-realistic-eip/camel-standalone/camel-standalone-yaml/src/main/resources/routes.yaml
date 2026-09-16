@@ -3,8 +3,11 @@
 #
 # Same logical route as App.java (Pair A hardcoded Java-DSL) but
 # authored in Apache Camel YAML DSL. Implements spec §4.1 T2 route:
-# timer -> set_body -> set_header -> filter(simple) -> choice ->
-# process(emitMarker) -> process(writeLatency). The marker
+# timer -> set_body -> process(markStart) -> set_header ->
+# filter(simple) -> choice -> process(writeLatency) ->
+# process(emitMarker). markStart sits AFTER set_body and writeLatency
+# BEFORE emitMarker — the e_opus ruling D3 anchor set (body supply
+# EXCLUDED from the window, trailing log EXCLUDED). The marker
 # `BENCH_ROUTE_READY body=pong-bench` carries the post-choice body —
 # a wrong-branch run (otherwise -> `pong-other`) is observable, not
 # silent.
@@ -34,10 +37,10 @@
         repeatCount: 10000
         delay: 0
       steps:
-        - process:
-            ref: "markStart"
         - setBody:
             constant: "ping"
+        - process:
+            ref: "markStart"
         - setHeader:
             name: "source"
             constant: "bench"
@@ -53,8 +56,8 @@
                   otherwise:
                     steps:
                       - setBody:
-                          constant: "pong-other"
-        - process:
-            ref: "emitMarker"
+                            constant: "pong-other"
         - process:
             ref: "writeLatency"
+        - process:
+            ref: "emitMarker"

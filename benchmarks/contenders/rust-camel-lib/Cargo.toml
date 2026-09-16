@@ -46,6 +46,12 @@ mimalloc = { version = "0.1", optional = true }
 
 [features]
 alloc-mimalloc = ["dep:mimalloc"]
+# Smoke-trace route shape (log received + process id=<n> + set_body),
+# behind a provable build boundary per e_opus ruling D1 (2026-09-16,
+# bd rc-h42s6): harness M1-M4 builds NEVER enable this feature — the
+# measured fixture is minimal-bare and the default binary must contain
+# no trace path (verify with benchmarks/harness/checks/trace-absent.sh).
+bench-trace = []
 
 # Test-only (ported from the split-aggregate fixture): drive 99 fragments
 # through the real `direct:agg-in` route for the incomplete-bucket test.

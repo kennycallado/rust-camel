@@ -31,11 +31,13 @@ import org.apache.camel.Processor;
  * <p>Tick mode (OpenSpec change {@code bench-consol-tick} task 2.5,
  * mirroring the standalone fixtures' task 2.4): the repeating warm
  * timer URI lives in camel/routes.yaml; the {@code markStart} bean
- * records t_start at route entry, BEFORE set_body (same bracket
- * position as the lib crate's t2-realistic-eip branch), the {@code
+ * records t_start immediately AFTER set_body (body supply EXCLUDED
+ * from the window, e_opus ruling D3 — same bracket position as the lib
+ * crate's t2-realistic-eip branch), the {@code
  * emitMarker} bean is latched to the FIRST completed exchange (exactly
  * one marker line per process lifetime), and the {@code writeLatency}
- * bean appends {@code BENCH_LATENCY <id> <duration_ns>} per exchange
+ * bean (window CLOSE — before the marker, trailing log EXCLUDED)
+ * appends {@code BENCH_LATENCY <id> <duration_ns>} per exchange
  * to the {@code BENCH_LATENCY_FILE} path (env read once at startup;
  * the canonical fallback matches the M2 protocol-B reader's path — the
  * sink is truncated at producer time, i.e. before any tick, so no
@@ -78,10 +80,12 @@ public class LatencyBean {
         return writeLatencyBean(latencyFile, tickCounter);
     }
 
-    /// Bracket step: records t_start at route entry, BEFORE set_body
-    /// (same position as the dsl module and the lib crate's
-    /// t2-realistic-eip branch). Long (boxed) so it round-trips through
-    /// exchange property type erasure.
+    /// Bracket step: records t_start immediately AFTER set_body (body
+    /// supply EXCLUDED from the window, e_opus ruling D3 — same
+    /// position as the dsl module and the lib crate's t2-realistic-eip
+    /// branch; the routes.yaml places this bean right after setBody).
+    /// Long (boxed) so it round-trips through exchange property type
+    /// erasure.
     static Processor markStartBean() {
         return exchange ->
                 exchange.setProperty("BenchStart", System.nanoTime());
@@ -100,10 +104,11 @@ public class LatencyBean {
         };
     }
 
-    /// Trailing latency step — appends `BENCH_LATENCY <id> <duration_ns>`
-    /// to the sink file per exchange (the Protocol-B warm record).
-    /// Write failures are swallowed — the harness detects missing
-    /// records.
+    /// Window-close latency step — fires right after the choice, BEFORE
+    /// the marker (trailing log EXCLUDED, e_opus ruling D3) and appends
+    /// `BENCH_LATENCY <id> <duration_ns>` to the sink file per exchange
+    /// (the Protocol-B warm record). Write failures are swallowed — the
+    /// harness detects missing records.
     static Processor writeLatencyBean(Path latencyFile, AtomicLong tickCounter) {
         return exchange -> {
             long id = tickCounter.incrementAndGet();

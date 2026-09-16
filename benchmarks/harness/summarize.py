@@ -186,6 +186,22 @@ BRIDGE_CONTENDERS = (
     "rust-camel-lib",
 )
 
+# Pairing model (benchmarks/harness/CONTEXT.md §3): Pair A = embedded
+# runtime, no route-file parsing; Pair B = YAML route parsed at
+# runtime. Comparisons are valid WITHIN a pair only. DEGENERATE-PAIR
+# RULE (e_opus fixture-shape ruling, mission 98 item 3): a pair
+# reduced to one measured cell in a scenario is reported
+# unpaired/context-only — the cell is excluded from ratio computation
+# as numerator AND denominator, never promoted to a cross-pair
+# comparison. Bridge scenarios (BRIDGE_CONTENDERS above) measure Pair
+# A's three cells but Pair B's rust-camel-cli ONLY (the YAML JVM
+# variants add no bridge-tax signal), which makes the bridge cli cell
+# the canonical degenerate case.
+PAIR_A = ("camel-quarkus-dsl-native", "camel-standalone-dsl", "rust-camel-lib")
+PAIR_B = ("camel-quarkus-yaml-native", "camel-standalone-yaml", "rust-camel-cli")
+PAIR_OF = {contender: "A" for contender in PAIR_A}
+PAIR_OF.update({contender: "B" for contender in PAIR_B})
+
 # rc-u034 reference contender (http-server only): one extra axum-bare
 # cell per reference scenario, registered OUTSIDE the Pair A/B roster
 # (run.sh resolves it in resolve_all_cells, never in
@@ -194,6 +210,23 @@ BRIDGE_CONTENDERS = (
 # projection of this mapping; test_roster_mirror_no_drift guards
 # equality between them.
 HTTP_REFERENCE_CONTENDERS = {"http-server": ("axum-bare",)}
+
+# Era-3 m3/m4 contender exclusion (e_opus ruling D5, bd rc-h42s6,
+# benchmarks/audits/era3-rerun-manifest-2026-09.md gate 6): the node
+# family does NOT enter m3/m4 this era — the D1 parser fixture is a
+# declared confound for m2 protocol-A ONLY. For http-server cells,
+# NEW records' m3/m4 evidence therefore carries no node-fastify /
+# node-native summaries. The m1/m2 roster (FULL_CONTENDERS /
+# BRIDGE_CONTENDERS above, persisted as `expected_cells`) KEEPS the
+# node identities: completeness gates m1 (+ m2) only, so no node
+# m3/m4 absence can ever gap a NEW record, and era-2 records — whose
+# persisted expected_cells governs validation — stay valid untouched.
+# The roster/completeness machinery never derives per-metric m3/m4
+# expectations, so this constant needs no consumer there; it exists as
+# the python projection paired with run.sh M3_EXCLUDED_CONTENDERS
+# (applied in m3_measure only), equality drift-guarded by
+# test_summarize.py::test_roster_mirror_no_drift.
+M3_M4_EXCLUDED_CONTENDERS = ("node-fastify", "node-native")
 
 # run.sh m2_measure_protocol_b writes one dir per round:
 # <run>/m2-round-<r>/<scenario>/<contender>/{m2-summary.json,.txt}
@@ -980,6 +1013,32 @@ def _aggregate_ratios_argv():
     return shlex.split(spec)
 
 
+def degenerate_pair_contenders(contenders):
+    """Contenders excluded from ratios by the DEGENERATE-PAIR RULE.
+
+    `contenders` are the ratio-eligible contender names of ONE
+    scenario (the m3 cells compute_ratios enumerates). A contender is
+    degenerate when it belongs to Pair A/B (PAIR_OF) and its pair
+    contributes fewer than two cells there: it is reported
+    unpaired/context-only and never enters a ratio as numerator or
+    denominator. Contenders outside the A/B roster (node family,
+    axum-bare reference) are never degenerate — the rule governs pair
+    membership, not roster size.
+    """
+    names = set(contenders)
+    pair_counts = {}
+    for contender in names:
+        pair = PAIR_OF.get(contender)
+        if pair is not None:
+            pair_counts[pair] = pair_counts.get(pair, 0) + 1
+    return {
+        contender
+        for contender in names
+        if PAIR_OF.get(contender) is not None
+        and pair_counts[PAIR_OF[contender]] < 2
+    }
+
+
 def _ratio_row(row, scenario, numerator, denominator):
     """One aggregate-ratios JSON row normalized to SCHEMA vocabulary.
 
@@ -1018,7 +1077,10 @@ def compute_ratios(record, run_dir=None):
     Per scenario, the numerator is `rust-camel-lib` when that contender
     was measured (pairing rule pinned in SCHEMA.md), else the
     alphabetically first contender; it is paired against each remaining
-    contender in alphabetical order. The binary receives the FLAT cell
+    contender in alphabetical order — after DEGENERATE-PAIR-RULE
+    exclusion (`degenerate_pair_contenders`: a contender whose pair has
+    no other measured cell in the scenario is context-only and never
+    enters a ratio). The binary receives the FLAT cell
     dirs (`<run_dir>/<scenario>_<contender>/m3-summary.json`); it
     needs `measurement_order.json` at the run root (provenance
     validation) and prints a single JSON object per invocation whose
@@ -1035,12 +1097,21 @@ def compute_ratios(record, run_dir=None):
         contenders = sorted(
             c["contender"] for c in cells if c["scenario"] == scenario
         )
+        # DEGENERATE-PAIR RULE (see PAIR_OF): a lone-pair cell is
+        # context-only — never numerator, never denominator. Hoisted
+        # once per scenario (same set emit_summary labels unpaired).
+        degenerate = degenerate_pair_contenders(contenders)
+        pairable = [c for c in contenders if c not in degenerate]
+        if not pairable:
+            # Every measured cell of this scenario is a lone-pair cell:
+            # no valid ratio exists — context-only, skip the scenario.
+            continue
         numerator = (
             PREFERRED_NUMERATOR
-            if PREFERRED_NUMERATOR in contenders
-            else contenders[0]
+            if PREFERRED_NUMERATOR in pairable
+            else pairable[0]
         )
-        for denominator in contenders:
+        for denominator in pairable:
             if denominator == numerator:
                 continue
             argv = base_argv + [
@@ -1136,6 +1207,37 @@ def emit_summary(record, out_dir):
                     f" | {c.get('reason', '')} |"
                 )
             lines.append("")
+    # DEGENERATE-PAIR RULE (e_opus fixture-shape ruling item 3; see
+    # PAIR_OF): a measured cell whose pair has no other measured cell
+    # in the scenario is reported unpaired (context-only) so no reader
+    # mistakes it for a ratio participant. Same m3 enumeration as
+    # compute_ratios, so the label set matches the exclusion set.
+    unpaired = []
+    for scenario in sorted({
+        c["scenario"] for c in record["cells"] if c["metric"] == "m3"
+    }):
+        contenders = sorted(
+            c["contender"]
+            for c in record["cells"]
+            if c["metric"] == "m3" and c["scenario"] == scenario
+        )
+        for contender in sorted(degenerate_pair_contenders(contenders)):
+            unpaired.append((scenario, contender, PAIR_OF[contender]))
+    if unpaired:
+        lines += [
+            "## Unpaired (context-only)",
+            "",
+            "Sole measured cell of its pair in the scenario"
+            " (DEGENERATE-PAIR RULE): excluded from every ratio.",
+            "",
+            "| scenario | contender | pair |",
+            "| --- | --- | --- |",
+        ]
+        lines += [
+            f"| {scenario} | {contender} | {pair} |"
+            for scenario, contender, pair in unpaired
+        ]
+        lines.append("")
     if record["ratios"]:
         lines.append("## Ratios")
         lines.append("")

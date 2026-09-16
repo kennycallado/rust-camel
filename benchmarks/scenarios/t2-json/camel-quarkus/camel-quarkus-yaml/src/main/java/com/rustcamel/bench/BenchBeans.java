@@ -198,10 +198,11 @@ public class BenchBeans {
         };
     }
 
-    /// Trailing latency step — appends `BENCH_LATENCY <id> <duration_ns>`
-    /// to the sink file per exchange (the Protocol-B warm record).
-    /// Write failures are swallowed — the harness detects missing
-    /// records.
+    /// Window-close latency step — fires immediately after marshal
+    /// (before the post-window assert/marker, e_opus ruling D3/D4) and
+    /// appends `BENCH_LATENCY <id> <duration_ns>` to the sink file per
+    /// exchange (the Protocol-B warm record). Write failures are
+    /// swallowed — the harness detects missing records.
     static Processor writeLatencyBean(Path latencyFile, AtomicLong tickCounter) {
         return exchange -> {
             long id = tickCounter.incrementAndGet();

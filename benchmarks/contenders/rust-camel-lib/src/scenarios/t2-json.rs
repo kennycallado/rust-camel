@@ -49,14 +49,17 @@
 //! # Tick mode (OpenSpec change `bench-consol-tick` task 2.2)
 //!
 //! The timer is the repeating warm-tick form
-//! `timer:bench?period=10&repeatCount=10000` (verbatim, matching the
-//! `xsd-validation-bridge` reference): the SAME body-building/parity
-//! pipeline runs per exchange. The marker keeps its exact code-path
-//! position (the assert step) but is gated to the FIRST completed
-//! exchange — exactly one marker line per process lifetime. A
-//! `BENCH_START` extension brackets each exchange; the trailing step
-//! appends `BENCH_LATENCY <id> <duration_ns>` to `$BENCH_LATENCY_FILE`
-//! per exchange (env read ONCE at branch start; when unset the
+//! `timer:bench?period=10&repeatCount=10000&delay=0` (matching the
+//! seven peers — `delay=0` makes the first tick fire immediately, not
+//! ~1 s late): the SAME body-building/parity pipeline runs per
+//! exchange. The marker keeps its exact code-path position (the assert
+//! step) but is gated to the FIRST completed exchange — exactly one
+//! marker line per process lifetime. A `BENCH_START` extension brackets
+//! each exchange; the window-CLOSE step — immediately after `marshal`,
+//! BEFORE the assert and marker, which stay outside the measured
+//! window (e_opus ruling D3/D4) — appends `BENCH_LATENCY <id>
+//! <duration_ns>` to `$BENCH_LATENCY_FILE` per exchange (env read ONCE
+//! at branch start; when unset the
 //! canonical harness path is used, exactly like the reference — the
 //! lib cell argv is bare, so the default is what makes the M2
 //! protocol B reader find the log). Pattern mirrors
@@ -201,13 +204,14 @@ async fn main_async() -> Result<(), CamelError> {
     let mf_for_route = Arc::clone(&marker_fired);
     let lf_for_route = Arc::clone(&latency_file_arc);
 
-    let route = RouteBuilder::from("timer:bench?period=10&repeatCount=10000")
+    let route = RouteBuilder::from("timer:bench?period=10&repeatCount=10000&delay=0")
         .route_id("bench-route")
         .set_body(body)
-        // Bracket the per-exchange pipeline (unmarshal → filter →
-        // transform → marshal → assert) with Instant t_start.
+        // Bracket the per-exchange core pipeline (unmarshal → filter →
+        // transform → marshal) with Instant t_start — AFTER set_body
+        // (body supply is EXCLUDED from the window, e_opus ruling D3).
         // Extension-stored because Instant is not serializable; read
-        // back in the trailing latency step.
+        // back in the window-close latency step.
         .process(|mut exchange| async move {
             exchange.set_extension(BENCH_START, Arc::new(Instant::now()));
             Ok(exchange)
@@ -225,21 +229,10 @@ async fn main_async() -> Result<(), CamelError> {
         .map_body(insert_bench_member)
         .end_filter()
         .marshal("json")?
-        .process(move |ex| {
-            let size = size;
-            let mf = Arc::clone(&mf_for_route);
-            async move {
-                let text = ex.input.body.as_text().unwrap_or("").to_string();
-                let len = assert_bench_output(size, &text).map_err(CamelError::ProcessorError)?;
-                // Marker fires on the FIRST completed exchange only —
-                // tick mode repeats this step per tick, the marker
-                // contract is exactly one line.
-                if !mf.swap(true, Ordering::Relaxed) {
-                    tracing::info!("BENCH_ROUTE_READY bytes={len}");
-                }
-                Ok(ex)
-            }
-        })
+        // Window CLOSE (e_opus ruling D3/D4): the latency append fires
+        // immediately after the pipeline output exists — duration =
+        // now − BenchStart. The assert and the marker below run OUTSIDE
+        // the measured window.
         .process(move |exchange| {
             let rc = Arc::clone(&rc_for_route);
             let lf = Arc::clone(&lf_for_route);
@@ -254,6 +247,24 @@ async fn main_async() -> Result<(), CamelError> {
                     let _ = f.write_all(line.as_bytes()).await;
                 }
                 Ok(exchange)
+            }
+        })
+        .process(move |mut ex| {
+            let size = size;
+            let mf = Arc::clone(&mf_for_route);
+            async move {
+                let text = ex.input.body.as_text().unwrap_or("").to_string();
+                let len = assert_bench_output(size, &text).map_err(CamelError::ProcessorError)?;
+                // Post-window header (F1 alignment): the JVM peers set
+                // `benchOutLen` after the window close — mirror it here.
+                ex.input.set_header("benchOutLen", len as u64);
+                // Marker fires on the FIRST completed exchange only —
+                // tick mode repeats this step per tick, the marker
+                // contract is exactly one line.
+                if !mf.swap(true, Ordering::Relaxed) {
+                    tracing::info!("BENCH_ROUTE_READY bytes={len}");
+                }
+                Ok(ex)
             }
         })
         .build()?;

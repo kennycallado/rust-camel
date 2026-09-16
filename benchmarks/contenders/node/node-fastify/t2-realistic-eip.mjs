@@ -1,10 +1,13 @@
 // T2 t2-realistic-eip fixture — node-fastify contender (bench-node
 // task 2.4). Same protocol-B contract as ../node-native/t2-realistic-eip.mjs
 // (see its header for the full extraction — no env contract, no
-// payload: the fixture sets its own body; set_body "ping" ->
-// set_header source=bench -> filter "${body} == 'ping'" { choice:
+// payload: the fixture sets its own body; exchange build + set_body
+// "ping" OUTSIDE the window, then set_header source=bench ->
+// filter "${body} == 'ping'" { choice:
 // when "${header.source} == 'bench'" -> "pong-bench", otherwise ->
-// "pong-other" } -> log "BENCH_ROUTE_READY body=${body}"; the
+// "pong-other" } -> BENCH_LATENCY append (window CLOSE) ->
+// log "BENCH_ROUTE_READY body=${body}" (trailing log, outside the
+// window — e_opus ruling D3); the
 // warm-tick timer:bench?period=10&repeatCount=10000&delay=0 shape
 // (immediate first fire), BENCH_LATENCY
 // records on the BENCH_LATENCY_FILE sink, marker latched to the FIRST
@@ -20,10 +23,11 @@
 //   cell measures. The boot lands BEFORE the marker, like the rust
 //   fixture's ctx.start() before the timer fires.
 // - Then the same warm-tick route (period=10, repeatCount=10000,
-//   delay=0 — immediate first fire): per tick the FULL EIP pipeline on
-//   a fresh exchange, bracketed t0 → record, one
+//   delay=0 — immediate first fire): per tick the CORE EIP pipeline
+//   (set_header → filter → choice) on a fresh pre-supplied exchange,
+//   bracketed t0 → record, one
 //   `BENCH_LATENCY <tick> <duration_ns>` per tick — marker exactly
-//   once on the first completed tick, before its record — followed by
+//   once on the first completed tick, AFTER its record — followed by
 //   the same idle-until-killed lifecycle.
 
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -45,7 +49,7 @@ const latencyFile =
   "/tmp/v3-protocol-b-t2-realistic-eip_node-fastify.log";
 
 // Marker latch — the FIRST completed exchange prints the marker at its
-// original code-path position (the log step), before that tick's
+// original code-path position (the log step), AFTER the window-close
 // latency record; later exchanges are silent.
 let markerFired = false;
 function logStep(ex) {
@@ -56,15 +60,12 @@ function logStep(ex) {
   console.log(`BENCH_ROUTE_READY body=${ex.body}`);
 }
 
-// One exchange through the route: the timer trigger creates the
-// exchange (empty body, no headers), then set_body -> set_header ->
-// filter -> choice -> log.
-function runTickPipeline() {
-  const ex = { body: "", headers: {} };
-
-  // set_body: constant "ping".
-  ex.body = "ping";
-
+// One exchange through the CORE pipeline (everything INSIDE the
+// measured window): set_header -> filter -> choice. The exchange —
+// built with the body already set (timer trigger + set_body, OUTSIDE
+// the window) — is passed in; the trailing log (marker) is ALSO
+// outside the window and runs after the BENCH_LATENCY record.
+function runTickPipeline(ex) {
   // set_header: source = "bench".
   ex.headers["source"] = "bench";
 
@@ -77,11 +78,6 @@ function runTickPipeline() {
       ex.body = "pong-other";
     }
   }
-
-  // log: "BENCH_ROUTE_READY body=${body}" — the single dynamic line
-  // carrying the post-choice final body. Latched to the FIRST
-  // completed exchange.
-  logStep(ex);
 }
 
 // Route start: the Fastify boot FIRST (framework tax before the
@@ -108,15 +104,23 @@ try {
   process.exit(1);
 }
 
-// Per-tick work: t0 before the FULL pipeline, BENCH_LATENCY record
-// after it — one record per tick = one full per-tick pipeline.
+// Per-tick work: exchange build + body supply FIRST (outside the
+// window), t0, core pipeline, window CLOSE (BENCH_LATENCY record),
+// THEN the trailing-log marker — one record per tick.
 let tick = 0;
 function fireTick() {
   tick += 1;
+  // Timer-trigger exchange build + set_body: constant "ping" — body
+  // supply, OUTSIDE the measured window (e_opus ruling D3).
+  const ex = { body: "ping", headers: {} };
   const t0 = process.hrtime.bigint();
-  runTickPipeline();
+  runTickPipeline(ex);
   const durationNs = Number(process.hrtime.bigint() - t0);
   appendFileSync(latencyFile, `BENCH_LATENCY ${tick} ${durationNs}\n`);
+  // log: "BENCH_ROUTE_READY body=${body}" — the single dynamic line
+  // carrying the post-choice final body. Latched to the FIRST
+  // completed exchange.
+  logStep(ex);
   if (tick < REPEAT_COUNT) {
     setTimeout(fireTick, PERIOD_MS);
   }

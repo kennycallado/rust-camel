@@ -82,7 +82,11 @@ $ bash benchmarks/bench run-all
 - **Coverage**: EVERY active scenario × every contender
   (auto-discovery of `benchmarks/scenarios/` minus `spike-*` and
   unregistered dirs like `multi-step`). No subsets, no env vars —
-  `--scenarios=` stays a harness-level developer knob only.
+  `--scenarios=` stays a harness-level developer knob only. m3/m4
+  exception this era: the node family (`node-fastify`, `node-native`)
+  is excluded from the http-server m3/m4 arms per e_opus ruling D5
+  (bd rc-h42s6, `era3-rerun-manifest-2026-09.md` gate 6) — it still
+  runs m1/m2.
 - **Wall-clock**: ~4-6 h for the full matrix. Keep the host quiet for
   the whole window.
 - **Artifacts** under `benchmarks/harness/out/<ts>/`:

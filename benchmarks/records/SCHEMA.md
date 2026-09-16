@@ -140,7 +140,13 @@ Pairing rule (pinned): within a scenario, the numerator contender is
 the alphabetically first contender. The numerator is paired against
 each remaining contender in alphabetical order. `rust-camel-lib` is
 pinned as numerator so the headline row always reads
-`rust-camel-lib / <baseline>` regardless of lexical order.
+`rust-camel-lib / <baseline>` regardless of lexical order — subject to
+the degenerate-pair rule below.
+DEGENERATE-PAIR RULE: a contender whose pair (Pair A/B, see
+`benchmarks/harness/CONTEXT.md` §3) has no other measured contender in
+the scenario is excluded from `ratios` as numerator and denominator
+and reported unpaired (context-only) — never promoted to a cross-pair
+comparison.
 
 ## Forward compatibility
 

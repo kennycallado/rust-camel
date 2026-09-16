@@ -2,8 +2,9 @@
 // Mirrors the v1 BenchRoute (at
 // benchmarks/scenarios/startup-minimal/camel-quarkus/camel-quarkus-dsl/
 // src/main/java/com/rustcamel/bench/BenchRoute.java) but implements
-// the spec §4.1 T2 route: timer -> setBody -> setHeader -> filter ->
-// choice.when/otherwise -> log. The marker `BENCH_ROUTE_READY
+// the spec §4.1 T2 route: timer -> setBody -> stamp -> setHeader ->
+// filter -> choice.when/otherwise -> latency append (window close) ->
+// log. The marker `BENCH_ROUTE_READY
 // body=pong-bench` carries the post-choice body so a wrong-branch
 // run (otherwise -> `pong-other`) is observable, not silent.
 //
@@ -14,8 +15,10 @@
 // code-path position (right after the choice) but is latched to the
 // FIRST completed exchange — exactly one marker line per process
 // lifetime. A BenchStart exchange property brackets each exchange (set
-// at route entry, BEFORE set_body — same bracket position as the lib
-// crate's t2-realistic-eip branch); the trailing step appends
+// AFTER set_body — body supply EXCLUDED from the window, e_opus ruling
+// D3 — same bracket position as the lib crate's t2-realistic-eip
+// branch); the window-close step — right after the choice, BEFORE the
+// marker (trailing log EXCLUDED) — appends
 // `BENCH_LATENCY <id> <duration_ns>` to the BENCH_LATENCY_FILE path
 // (env read once at startup; the canonical fallback matches the M2
 // protocol-B reader's ${cell//\//_} path).
@@ -49,14 +52,15 @@ public class BenchRoute extends RouteBuilder {
         final AtomicLong tickCounter = new AtomicLong(0);
 
         from("timer:bench?period=10&repeatCount=10000&delay=0")
-                // Records t_start at route entry, BEFORE set_body (same
-                // bracket position as the lib crate's t2-realistic-eip
-                // branch and the standalone dsl sibling). Long (boxed)
-                // so it round-trips through exchange property type
-                // erasure.
+                .setBody(constant("ping"))
+                // Records t_start immediately AFTER the body is set
+                // (body supply EXCLUDED from the window, e_opus ruling
+                // D3 — same bracket position as the lib crate's
+                // t2-realistic-eip branch and the standalone dsl
+                // sibling). Long (boxed) so it round-trips through
+                // exchange property type erasure.
                 .process(exchange ->
                         exchange.setProperty("BenchStart", System.nanoTime()))
-                .setBody(constant("ping"))
                 .setHeader("source", constant("bench"))
                 .filter(simple("${body} == 'ping'"))
                 .choice()
@@ -66,17 +70,9 @@ public class BenchRoute extends RouteBuilder {
                         .setBody(constant("pong-other"))
                 .endChoice()
                 .end()
-                // Marker fires on the FIRST completed exchange only —
-                // tick mode repeats this step per tick, the marker
-                // contract is exactly one line. The printed body is the
-                // post-choice body, so a wrong-branch run stays
-                // observable.
-                .process(exchange -> {
-                    if (markerEmitted.compareAndSet(false, true)) {
-                        System.out.println("BENCH_ROUTE_READY body="
-                                + exchange.getMessage().getBody(String.class));
-                    }
-                })
+                // Window CLOSE (e_opus ruling D3): the latency append
+                // fires right after the choice — the marker below is
+                // the trailing log, OUTSIDE the measured window.
                 .process(exchange -> {
                     long id = tickCounter.incrementAndGet();
                     long tEnd = System.nanoTime();
@@ -89,6 +85,17 @@ public class BenchRoute extends RouteBuilder {
                                 StandardOpenOption.APPEND);
                     } catch (Exception e) {
                         // Swallow — harness detects missing records.
+                    }
+                })
+                // Marker fires on the FIRST completed exchange only —
+                // tick mode repeats this step per tick, the marker
+                // contract is exactly one line. The printed body is the
+                // post-choice body, so a wrong-branch run stays
+                // observable.
+                .process(exchange -> {
+                    if (markerEmitted.compareAndSet(false, true)) {
+                        System.out.println("BENCH_ROUTE_READY body="
+                                + exchange.getMessage().getBody(String.class));
                     }
                 });
     }

@@ -406,7 +406,9 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
                     }
                     // Benchmark instrumentation: when BENCH_LATENCY_FILE is
                     // set, wrap every top-level `To` step with timing
-                    // processors (default), or bracket each whole route when
+                    // processors (default), or replace the
+                    // BENCH_WINDOW_START/BENCH_WINDOW_END sentinel Log
+                    // steps of timer routes with timing processors when
                     // BENCH_LATENCY_MODE=route (bench_instrument module).
                     crate::commands::bench_instrument::maybe_instrument_routes(defs)
                 }

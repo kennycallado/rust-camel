@@ -41,6 +41,13 @@ fn main() {
     // construction. Non-selected route builders never execute.
     let code = match std::env::args().nth(1).as_deref() {
         Some("startup-minimal") => scenarios::startup_minimal::run(),
+        // http-server: minimal-bare by default (e_opus ruling D1, bd
+        // rc-h42s6). The smoke-trace variant exists ONLY under the
+        // `bench-trace` feature; the default binary contains no trace
+        // path at all (benchmarks/harness/checks/trace-absent.sh).
+        #[cfg(feature = "bench-trace")]
+        Some("http-server") => scenarios::http_server_trace::run(),
+        #[cfg(not(feature = "bench-trace"))]
         Some("http-server") => scenarios::http_server::run(),
         Some("t2-json") => scenarios::t2_json::run(),
         Some("split-aggregate") => scenarios::split_aggregate::run(),

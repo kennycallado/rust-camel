@@ -11,13 +11,19 @@
 #
 # Flow (mirrors the lib fixture): frozen-body latch (cache: the
 # canonical document is built ONCE per process and reused per tick —
-# see the latch comment at the first step) -> unmarshal json (body
-# becomes Body::Json, the parsed structured value) -> filter
+# see the latch comment at the first step) -> BENCH_WINDOW_START
+# sentinel (route-mode window OPEN — body supply EXCLUDED from the
+# window, e_opus ruling D3; the bench_instrument route mode replaces
+# this Log step with the start-stamp processor) -> unmarshal json
+# (body becomes Body::Json, the parsed structured value) -> filter
 # (jsonpath) -> transform (js operates on the PARSED structured body,
 # inserts "bench": true, returns the MAP — never a string;
-# marshal("json") is the single serializer) -> marshal json -> output
-# assert (script, rhai: exact SIZE+13 length AND substring
-# "bench":true) -> header with the output length -> marker.
+# marshal("json") is the single serializer) -> marshal json ->
+# BENCH_WINDOW_END sentinel (window CLOSE — replaced by the end-write
+# processor; duration = close − start) -> output assert (script, js:
+# FULL semantic re-parse — exact SIZE+13 length AND id/seq/fill/bench
+# semantics, mirroring the Java/lib/node cells; OUTSIDE the window,
+# e_opus ruling D4) -> header with the output length -> marker.
 #
 # Frozen-body latch (bench-consol-tick task 3.1, bd rc-sgmk): the
 # yaml DSL has no lifecycle hook for startup-time construction, so the
@@ -104,6 +110,12 @@ routes:
                     throw "t2-json input not byte-identical to canonical doc";
                   }
             - log: "BENCH_INPUT_SHA256=GOLDEN"
+      # Route-mode window OPEN (e_opus ruling D3): in route mode the
+      # bench_instrument module REPLACES this Log step with the
+      # start-stamp processor — the sentinel itself never prints in a
+      # measured run. Everything above (the cache latch = body supply)
+      # is OUTSIDE the measured window.
+      - log: "BENCH_WINDOW_START"
       # Body::Text -> Body::Json (parsed structured value).
       - unmarshal: json
       - filter:
@@ -115,16 +127,39 @@ routes:
                 source: "camel.body.bench = true; camel.body"
       # Single serialization: Value::Object -> text (serde_json).
       - marshal: json
-      # Output assert: exact SIZE+13 length AND the inserted member.
+      # Route-mode window CLOSE (e_opus ruling D3): replaced by the
+      # end-write processor in route mode — duration = close − start.
+      # The assert, the header and the marker below run OUTSIDE the
+      # measured window.
+      - log: "BENCH_WINDOW_END"
+      # Output assert (D4 — FULL semantic re-parse, mirroring the
+      # Java/lib/node cells): js because the marshaled body is TEXT
+      # (rhai cannot re-parse JSON); `camel.body` binds Body::Text as
+      # a JS string. Checks exact SIZE+13 length AND parsed semantics
+      # (id == "bench", seq present, fill all 'b', bench === true) —
+      # catches fill corruption and seq regressions the old
+      # len+contains assert could not. Ends with `camel.body` (the
+      # script-step idiom) so the body passes through unchanged.
       - script:
-          language: rhai
+          language: js
           source: |
-            if body.len() != SIZE + 13 {
-              throw "t2-json output length mismatch: got " + body.len();
+            const out = JSON.parse(camel.body);
+            if (camel.body.length !== SIZE + 13) {
+              throw "t2-json output length mismatch: got " + camel.body.length;
             }
-            if !body.contains("\"bench\":true") {
-              throw "t2-json output missing bench member";
+            if (out.id !== "bench") {
+              throw 't2-json output id != "bench"';
             }
+            if (!("seq" in out)) {
+              throw "t2-json output seq member missing";
+            }
+            if (!/^b+$/.test(out.fill)) {
+              throw "t2-json output fill is not all 'b'";
+            }
+            if (out.bench !== true) {
+              throw "t2-json output bench != true";
+            }
+            camel.body
       - set_header:
           key: "benchOutLen"
           rhai: "body.len()"

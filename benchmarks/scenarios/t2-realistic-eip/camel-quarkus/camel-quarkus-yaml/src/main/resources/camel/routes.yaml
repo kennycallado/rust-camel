@@ -1,8 +1,11 @@
 # T2 scenario route for camel-quarkus-yaml (JVM, Pair B).
 # Same logical route as the camel-quarkus-dsl BenchRoute (Pair A) but
-# authored in Apache Camel YAML DSL: timer -> process(markStart) ->
-# setBody -> setHeader -> filter(simple) -> choice.when(simple)/
-# otherwise -> process(emitMarker) -> process(writeLatency). The marker
+# authored in Apache Camel YAML DSL: timer -> setBody ->
+# process(markStart) -> setHeader -> filter(simple) ->
+# choice.when(simple)/otherwise -> process(writeLatency) ->
+# process(emitMarker). markStart sits AFTER setBody and writeLatency
+# BEFORE emitMarker — the e_opus ruling D3 anchor set (body supply
+# EXCLUDED from the window, trailing log EXCLUDED). The marker
 # `BENCH_ROUTE_READY body=pong-bench` is the exact grep target.
 #
 # Tick mode (OpenSpec change bench-consol-tick task 2.5, mirroring the
@@ -26,10 +29,10 @@
         repeatCount: 10000
         delay: 0
       steps:
-        - process:
-            ref: "markStart"
         - setBody:
             constant: "ping"
+        - process:
+            ref: "markStart"
         - setHeader:
             name: "source"
             constant: "bench"
@@ -45,8 +48,8 @@
                   otherwise:
                     steps:
                       - setBody:
-                          constant: "pong-other"
-        - process:
-            ref: "emitMarker"
+                            constant: "pong-other"
         - process:
             ref: "writeLatency"
+        - process:
+            ref: "emitMarker"

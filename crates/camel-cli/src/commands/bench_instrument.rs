@@ -21,22 +21,41 @@
 //! `Split`, `Filter` etc. are left untouched (wrapping those would measure
 //! per-sub-message latency, not per-tick bridge tax).
 //!
-//! **Route mode (`BENCH_LATENCY_MODE=route`, bench-consol-tick task
-//! 2.3).** For each TIMER-SOURCED route (`from` URI starts with
-//! `timer:`), the WHOLE route body is bracketed: a start processor
-//! before the first step stamps the clock, and an end processor after
-//! the last step appends one record per pass — one record per tick.
-//! Route defs from any other source pass through UNCHANGED: their work
-//! is already inside the main record's window (the timer route reaches
-//! them by synchronous `direct:` dispatch), and bracketing a consumer
-//! route (e.g. split-aggregate's per-fragment `direct:agg-in`) would
-//! emit ~100 records per tick and break cross-runtime parity with the
-//! lib crate and the JVM latency-writer bean. The window is the full
-//! per-tick pipeline (route entry → last step) — the same span the
-//! rust-camel-lib fixture and the JVM latency-writer bean measure.
-//! This mode exists because the T2 scenario yamls have no top-level
-//! `To` (their `to:` steps are nested inside `split`), so pair mode
-//! would write zero records for them.
+//! **Route mode (`BENCH_LATENCY_MODE=route`, sentinel-anchored).**
+//! Per the e_opus ruling D3 (2026-09-16, bd rc-h42s6), the normative
+//! Protocol-B window is the Java/lib anchor set: body supply EXCLUDED,
+//! core pipeline INCLUDED, trailing log EXCLUDED. For each TIMER-SOURCED
+//! route (`from` URI starts with `timer:`), the window runs from a
+//! `Log` step whose message is exactly `BENCH_WINDOW_START` to a `Log`
+//! step whose message is exactly `BENCH_WINDOW_END`; each sentinel step
+//! is REPLACED in place by its timing processor (start-stamp / end-write,
+//! route-local slot below — one record per pass, i.e. per tick). Fixture
+//! YAMLs place the sentinels per the anchor set: body supply before
+//! `START`, trailing log after `END`. Route defs from any other source
+//! pass through UNCHANGED: their work is already inside the main
+//! record's window (the timer route reaches them by synchronous
+//! `direct:` dispatch), and instrumenting a consumer route (e.g.
+//! split-aggregate's per-fragment `direct:agg-in`) would emit ~100
+//! records per tick and break cross-runtime parity with the lib crate
+//! and the JVM latency-writer bean. This mode exists because the T2
+//! scenario yamls have no top-level `To` (their `to:` steps are nested
+//! inside `split`), so pair mode would write zero records for them.
+//!
+//! Fail-closed validation: a timer route must carry EXACTLY one `START`
+//! before exactly one `END`. Any violation (missing, duplicated, or
+//! misordered sentinels), a sentinel in a non-timer route, or any
+//! sentinel while route mode is NOT selected (pair mode, or
+//! `BENCH_LATENCY_FILE` unset) logs an error and leaves that route
+//! UNINSTRUMENTED — zero `BENCH_LATENCY` records downstream make the
+//! bench harness fail the cell. Sentinels must never print as literal
+//! log lines in a measured run. Non-sentinel `Log` steps pass through
+//! untouched.
+//!
+//! History: era-2 route mode EDGE-BRACKETED the whole route (a start
+//! processor before the first step, an end processor after the last).
+//! That behavior is REMOVED — D3 re-anchors the window to the anchor
+//! set and invalidates the prior cli Protocol-B numbers: those arms are
+//! re-run for era-3, not carried forward.
 //!
 //! The start timestamp is carried ROUTE-LOCALLY, not on the exchange:
 //! a split + aggregate boundary rebuilds the exchange, so an extension
@@ -68,27 +87,130 @@ const BENCH_URI_SAFE: &AsciiSet = &CONTROLS.add(b' ');
 /// Extension key under which the pre-`.to()` `Instant` is stored.
 const BENCH_START: &str = "BenchStart";
 
-/// `BENCH_LATENCY_MODE` value that selects route-bracket mode.
+/// `BENCH_LATENCY_MODE` value that selects sentinel-anchored route mode.
 const BENCH_MODE_ROUTE: &str = "route";
 
-/// Route-bracket mode is opt-in via `BENCH_LATENCY_MODE=route`
+/// Sentinel-anchored route mode is opt-in via `BENCH_LATENCY_MODE=route`
 /// (case-insensitive, surrounding whitespace tolerated). Any other
 /// value — including unset — selects the default pair mode, which
-/// stays bit-identical for its existing consumer (the
-/// xsd-validation-bridge cli cell wires `BENCH_LATENCY_FILE` only).
+/// stays bit-identical for its existing consumers (bridge cells wire
+/// pair mode — `BENCH_LATENCY_FILE` only).
 /// A set, non-empty value that is not `route` additionally logs a
 /// warning (fail-open: pair mode is still selected).
 fn is_route_mode(mode: &str) -> bool {
     mode.trim().eq_ignore_ascii_case(BENCH_MODE_ROUTE)
 }
 
+/// Sentinel `Log` message marking the window start in route mode:
+/// matched by EXACT string equality (any log level). Fixture YAMLs
+/// place it after body supply, per the e_opus ruling D3 anchor set.
+const BENCH_WINDOW_START: &str = "BENCH_WINDOW_START";
+
+/// Sentinel `Log` message marking the window end in route mode:
+/// matched by EXACT string equality (any log level). Fixture YAMLs
+/// place it before any trailing log step.
+const BENCH_WINDOW_END: &str = "BENCH_WINDOW_END";
+
+/// Structural sentinel detection: a `Log` step's message, if any.
+fn log_message(step: &BuilderStep) -> Option<&str> {
+    match step {
+        BuilderStep::Log { message, .. } => Some(message.as_str()),
+        _ => None,
+    }
+}
+
+/// True for the window-START sentinel `Log` step (exact message match).
+fn is_window_start_sentinel(step: &BuilderStep) -> bool {
+    log_message(step) == Some(BENCH_WINDOW_START)
+}
+
+/// True for the window-END sentinel `Log` step (exact message match).
+fn is_window_end_sentinel(step: &BuilderStep) -> bool {
+    log_message(step) == Some(BENCH_WINDOW_END)
+}
+
+/// True if the step list carries any BENCH_WINDOW sentinel — at the
+/// top level OR at any depth inside container steps (Split/Filter/
+/// Choice/Multicast). Depth-aware by design: a sentinel nested inside
+/// a container is a fixture bug in EVERY mode (it would print as a
+/// literal log line per inner pass — per-fragment under a split), so
+/// every sentinel guard rejects it, not just the route-mode layout
+/// check.
+fn has_sentinels(steps: &[BuilderStep]) -> bool {
+    count_sentinels_anywhere(steps) > 0
+}
+
+/// Count BENCH_WINDOW sentinels at every depth of the step tree,
+/// including the given level (callers pass a route's top-level step
+/// list; container-nested sentinels are reached by recursion).
+///
+/// r_glm finding on the e_opus D3 review (2026-09-16): a nested
+/// sentinel paired with a VALID top-level layout would not trip the
+/// zero-record fail-closed — the stray `Log` would print per inner
+/// pass INSIDE the measured window (~100x/tick under split-aggregate),
+/// silently corrupting Protocol-B. Any sentinel below the top level is
+/// therefore a hard fixture bug; `inject_sentinel_anchored` rejects
+/// the route when `count_sentinels_anywhere(top) > top-level
+/// starts + ends`.
+fn count_sentinels_anywhere(steps: &[BuilderStep]) -> usize {
+    let mut count = 0usize;
+    for step in steps {
+        if is_window_start_sentinel(step) || is_window_end_sentinel(step) {
+            count += 1;
+            continue;
+        }
+        match step {
+            BuilderStep::DeclarativeFilter { steps, .. }
+            | BuilderStep::DeclarativeSplit { steps, .. }
+            | BuilderStep::DeclarativeStreamSplit { steps, .. }
+            | BuilderStep::Split { steps, .. }
+            | BuilderStep::Filter { steps, .. }
+            | BuilderStep::Multicast { steps, .. } => {
+                count += count_sentinels_anywhere(steps);
+            }
+            BuilderStep::DeclarativeChoice { whens, otherwise } => {
+                for when in whens {
+                    count += count_sentinels_anywhere(&when.steps);
+                }
+                if let Some(steps) = otherwise {
+                    count += count_sentinels_anywhere(steps);
+                }
+            }
+            BuilderStep::Choice { whens, otherwise } => {
+                for when in whens {
+                    count += count_sentinels_anywhere(&when.steps);
+                }
+                if let Some(steps) = otherwise {
+                    count += count_sentinels_anywhere(steps);
+                }
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
 /// If `BENCH_LATENCY_FILE` is set, instrument each route — either the
 /// default pair mode (wrap top-level `To` steps) or, when
-/// `BENCH_LATENCY_MODE=route`, the route-bracket mode (wrap the whole
-/// route body of every timer-sourced route). Returns defs unchanged
-/// when the env var is absent (zero-cost no-op).
+/// `BENCH_LATENCY_MODE=route`, the sentinel-anchored route mode
+/// (replace the `BENCH_WINDOW_START`/`BENCH_WINDOW_END` sentinel `Log`
+/// steps of every timer-sourced route with timing processors). Returns
+/// defs unchanged when the env var is absent (zero-cost no-op, except
+/// an error log if any route still carries sentinels — they are
+/// route-mode-only markers and must not run unmeasured).
 pub fn maybe_instrument_routes(defs: Vec<RouteDefinition>) -> Vec<RouteDefinition> {
     let Ok(path) = std::env::var("BENCH_LATENCY_FILE") else {
+        for def in &defs {
+            if has_sentinels(def.steps()) {
+                // log-policy: system-broken
+                tracing::error!(
+                    "bench_instrument: route '{}' carries BENCH_WINDOW sentinel Log steps \
+                     but BENCH_LATENCY_FILE is unset; sentinels are route-mode-only markers \
+                     and must not run unmeasured — leaving the route unchanged",
+                    def.route_id()
+                );
+            }
+        }
         return defs;
     };
 
@@ -118,37 +240,71 @@ pub fn maybe_instrument_routes(defs: Vec<RouteDefinition>) -> Vec<RouteDefinitio
 
     if route_mode {
         tracing::info!(
-            "bench_instrument: route-bracket mode, timer-sourced routes only (file={path})"
+            "bench_instrument: route mode (sentinel-anchored), timer-sourced routes \
+             only (file={path})"
         );
-        route_bracket_defs(defs, &shared_file)
+        route_anchor_defs(defs, &shared_file)
     } else {
         tracing::info!("bench_instrument: wrapping top-level To steps (file={path})");
-        defs.into_iter()
-            .map(|def| {
-                let sf = Arc::clone(&shared_file);
-                let route_id = def.route_id().to_string();
-                def.map_steps(|steps| inject_timing(steps, route_id, sf))
-            })
-            .collect()
+        pair_wrap_defs(defs, &shared_file)
     }
 }
 
-/// Route-bracket mode applies to TIMER-SOURCED routes only (`from` URI
-/// starts with `timer:`). Every other route def passes through
-/// unchanged: a consumer route's work is already inside the main
-/// record's window (the timer route reaches it by synchronous `direct:`
-/// dispatch), so bracketing it would emit per-fragment records and
-/// break the one-record-per-tick cross-runtime contract.
-fn route_bracket_defs(defs: Vec<RouteDefinition>, file: &Arc<Mutex<File>>) -> Vec<RouteDefinition> {
+/// Pair mode: wrap every top-level `To` of each route (bit-identical to
+/// the pre-sentinel behavior for sentinel-free routes). A route that
+/// carries BENCH_WINDOW sentinels fails closed: error + full pass-through
+/// with NO `To` wrapping — sentinels are route-mode-only markers, and
+/// leaving them half-instrumented would print them as literal log lines
+/// in a measured run.
+fn pair_wrap_defs(defs: Vec<RouteDefinition>, file: &Arc<Mutex<File>>) -> Vec<RouteDefinition> {
+    defs.into_iter()
+        .map(|def| {
+            if has_sentinels(def.steps()) {
+                // log-policy: system-broken
+                tracing::error!(
+                    "bench_instrument: route '{}' carries BENCH_WINDOW sentinel Log steps \
+                     but BENCH_LATENCY_MODE=route is not selected; sentinels are \
+                     route-mode-only markers — leaving the route uninstrumented",
+                    def.route_id()
+                );
+                return def;
+            }
+            let sf = Arc::clone(file);
+            let route_id = def.route_id().to_string();
+            def.map_steps(|steps| inject_timing(steps, route_id, sf))
+        })
+        .collect()
+}
+
+/// Route mode applies to TIMER-SOURCED routes only (`from` URI starts
+/// with `timer:`), anchored at the BENCH_WINDOW sentinel steps. Every
+/// other route def passes through unchanged: a consumer route's work is
+/// already inside the main record's window (the timer route reaches it
+/// by synchronous `direct:` dispatch), so instrumenting it would emit
+/// per-fragment records and break the one-record-per-tick cross-runtime
+/// contract. A non-timer route that carries sentinels is a fixture bug:
+/// error + unchanged pass-through (fail-closed).
+fn route_anchor_defs(defs: Vec<RouteDefinition>, file: &Arc<Mutex<File>>) -> Vec<RouteDefinition> {
     defs.into_iter()
         .map(|def| {
             if !def.from_uri().starts_with("timer:") {
+                if has_sentinels(def.steps()) {
+                    // log-policy: system-broken
+                    tracing::error!(
+                        "bench_instrument: non-timer route '{}' (from '{}') carries \
+                         BENCH_WINDOW sentinel Log steps; sentinels are only valid in \
+                         timer-sourced routes under BENCH_LATENCY_MODE=route — leaving \
+                         the route unchanged",
+                        def.route_id(),
+                        def.from_uri()
+                    );
+                }
                 return def;
             }
             let sf = Arc::clone(file);
             let route_id = def.route_id().to_string();
             let from_uri = def.from_uri().to_string();
-            def.map_steps(|steps| inject_route_bracket(steps, route_id, from_uri, sf))
+            def.map_steps(|steps| inject_sentinel_anchored(steps, route_id, from_uri, sf))
         })
         .collect()
 }
@@ -178,32 +334,94 @@ fn inject_timing(
     result
 }
 
-/// Route-bracket mode: wrap the WHOLE step list in a timing pair — one
-/// start processor before the first step, one end processor after the
-/// last. The emitted record covers the full per-tick pipeline (route
-/// entry → last step); the `from` URI takes the attribution field the
-/// pair mode fills with the `to` URI. Unlike pair mode this also times
-/// routes with no top-level `To` (filter/choice/split pipelines).
+/// Route mode: validate the sentinel layout, then REPLACE each sentinel
+/// `Log` step in place with its timing processor — the window is
+/// `BENCH_WINDOW_START` step → `BENCH_WINDOW_END` step (e_opus ruling
+/// D3 anchor set: body supply and trailing log excluded). Unlike the
+/// era-2 edge bracket there is NO insertion before the first step or
+/// after the last. The `from` URI takes the attribution field the pair
+/// mode fills with the `to` URI; routes with no top-level `To`
+/// (filter/choice/split pipelines) are timed fine.
 ///
-/// The start timestamp lives in a route-local
-/// `Arc<Mutex<Option<Instant>>>` (see the module doc: exchange state
-/// does not survive a split + aggregate rebuild). The slot is shared
-/// between exactly this pair of processors — a nested `to direct:`
-/// into another instrumented route cannot clobber it.
-fn inject_route_bracket(
+/// Fail-closed validation: EXACTLY one START before exactly one END. On
+/// any violation the ORIGINAL step list is returned untouched (no
+/// processors injected at all) after an error log — zero `BENCH_LATENCY`
+/// records downstream make the bench harness fail the cell rather than
+/// silently measure a wrong window.
+fn inject_sentinel_anchored(
     steps: Vec<BuilderStep>,
     route_id: String,
     from_uri: String,
     file: Arc<Mutex<File>>,
 ) -> Vec<BuilderStep> {
+    let mut starts = 0usize;
+    let mut ends = 0usize;
+    let mut last_start = None;
+    let mut first_end = None;
+    for (i, step) in steps.iter().enumerate() {
+        if is_window_start_sentinel(step) {
+            starts += 1;
+            last_start = Some(i);
+        } else if is_window_end_sentinel(step) {
+            ends += 1;
+            first_end = first_end.or(Some(i));
+        }
+    }
+    // Nested sentinels are rejected even when the top-level layout is
+    // valid: they print as literal log lines per inner pass inside the
+    // measured window (see count_sentinels_anywhere).
+    let nested = count_sentinels_anywhere(&steps) - starts - ends;
+    if nested > 0 {
+        // log-policy: system-broken
+        tracing::error!(
+            "bench_instrument: timer route '{route_id}' (from '{from_uri}') carries {nested} \
+             BENCH_WINDOW sentinel Log step(s) NESTED inside container steps; sentinels are \
+             valid only at the top level of a timer route — leaving the route uninstrumented \
+             (zero BENCH_LATENCY records — the bench cell will fail)"
+        );
+        return steps;
+    }
+    let ordered = matches!((last_start, first_end), (Some(s), Some(e)) if s < e);
+    if starts != 1 || ends != 1 || !ordered {
+        let order_note = if starts == 1 && ends == 1 {
+            " with END before START"
+        } else {
+            ""
+        };
+        // log-policy: system-broken
+        tracing::error!(
+            "bench_instrument: timer route '{route_id}' (from '{from_uri}') has an invalid \
+             BENCH_WINDOW sentinel layout: expected exactly one Log('{BENCH_WINDOW_START}') \
+             before exactly one Log('{BENCH_WINDOW_END}'), found {starts} start(s) and {ends} \
+             end(s){order_note}; leaving the route uninstrumented (zero BENCH_LATENCY \
+             records — the bench cell will fail)"
+        );
+        return steps;
+    }
+
+    // The start timestamp lives in a route-local
+    // `Arc<Mutex<Option<Instant>>>` (see the module doc: exchange state
+    // does not survive a split + aggregate rebuild). The slot is shared
+    // between exactly this pair of processors — a nested `to direct:`
+    // into another instrumented route cannot clobber it.
     let start_slot = Arc::new(Mutex::new(None::<Instant>));
-    let mut result = Vec::with_capacity(steps.len() + 2);
-    result.push(make_route_start_processor(Arc::clone(&start_slot)));
-    result.extend(steps);
-    result.push(make_route_end_processor(
-        route_id, from_uri, start_slot, file,
-    ));
-    result
+    steps
+        .into_iter()
+        .map(|step| {
+            if is_window_start_sentinel(&step) {
+                make_route_start_processor(Arc::clone(&start_slot))
+            } else if is_window_end_sentinel(&step) {
+                make_route_end_processor(
+                    route_id.clone(),
+                    from_uri.clone(),
+                    Arc::clone(&start_slot),
+                    Arc::clone(&file),
+                )
+            } else {
+                step
+            }
+        })
+        .collect()
 }
 
 /// Create a processor that stamps `Instant::now()` into the route-local
@@ -326,6 +544,15 @@ mod tests {
     use super::*;
     use std::fs::File;
 
+    /// Test fixture: a `Log` step with the given message (any level —
+    /// sentinel detection matches on message only).
+    fn log_step(message: &str) -> BuilderStep {
+        BuilderStep::Log {
+            level: camel_processor::LogLevel::Info,
+            message: message.to_string(),
+        }
+    }
+
     #[test]
     fn inject_timing_wraps_each_top_level_to() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -402,7 +629,8 @@ mod tests {
         assert!(is_route_mode(" Route "));
         assert!(is_route_mode("ROUTE"));
         // Anything else — including unset (empty) — selects the default
-        // pair mode (xsd-validation-bridge cli cell relies on this).
+        // pair mode (bridge cells rely on this: they wire
+        // BENCH_LATENCY_FILE only).
         assert!(!is_route_mode(""));
         assert!(!is_route_mode("to"));
         assert!(!is_route_mode("pair"));
@@ -410,72 +638,307 @@ mod tests {
     }
 
     #[test]
-    fn route_bracket_defs_brackets_only_timer_sourced_routes() {
+    fn route_anchor_defs_passes_timer_route_without_sentinels_through() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
 
+        // Timer route with NO sentinels: fail-closed pass-through — no
+        // timing processors anywhere (missing_sentinels case, at the
+        // route-definition level).
         let timer = camel_core::RouteDefinition::new(
             "timer:bench?period=10&repeatCount=10000".to_string(),
-            vec![BuilderStep::Stop],
+            vec![BuilderStep::Stop, BuilderStep::To("mock:a".into())],
         );
-        // split-aggregate's consumer route: reached by synchronous direct
-        // dispatch from the timer route; must NOT get its own bracket.
-        let consumer = camel_core::RouteDefinition::new(
-            "direct:agg-in".to_string(),
-            vec![BuilderStep::To("mock:a".into())],
+        let out = route_anchor_defs(vec![timer], &file);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].steps().len(), 2);
+        assert!(
+            !out[0]
+                .steps()
+                .iter()
+                .any(|s| matches!(s, BuilderStep::Processor(_)))
         );
-
-        let out = route_bracket_defs(vec![timer, consumer], &file);
-        assert_eq!(out.len(), 2);
-
-        // Timer-sourced route: bracketed (1 prepended processor + steps
-        // + 1 appended processor).
-        assert_eq!(out[0].steps().len(), 3);
-        assert!(matches!(
-            out[0].steps().first(),
-            Some(BuilderStep::Processor(_))
-        ));
-        assert!(matches!(
-            out[0].steps().last(),
-            Some(BuilderStep::Processor(_))
-        ));
-
-        // Non-timer-sourced route def: steps pass through UNCHANGED.
-        assert_eq!(out[1].steps().len(), 1);
-        assert!(matches!(out[1].steps().first(), Some(BuilderStep::To(_))));
     }
 
     #[test]
-    fn inject_route_bracket_wraps_whole_step_list() {
+    fn sentinel_replacement() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
 
-        // The T2 yaml shapes have NO top-level To — the bracket must
-        // still land: 1 prepended processor + steps + 1 appended.
-        let steps = vec![BuilderStep::Stop, BuilderStep::Stop];
-        let out = inject_route_bracket(
-            steps,
-            "bench-route".to_string(),
-            "timer:bench".to_string(),
-            file,
-        );
-        assert_eq!(out.len(), 4);
-        assert!(matches!(out[0], BuilderStep::Processor(_)));
-        assert!(matches!(out[1], BuilderStep::Stop));
+        let steps = vec![
+            BuilderStep::Stop,
+            log_step(BENCH_WINDOW_START),
+            BuilderStep::Stop,
+            log_step(BENCH_WINDOW_END),
+            log_step("real"),
+        ];
+        let out = inject_sentinel_anchored(steps, "r".to_string(), "timer:bench".to_string(), file);
+
+        // In-place replacement: same length, processors exactly at the
+        // sentinel positions, NO edge processors (era-2 bracket removed).
+        assert_eq!(out.len(), 5);
+        assert!(matches!(out[0], BuilderStep::Stop));
+        assert!(matches!(out[1], BuilderStep::Processor(_)));
         assert!(matches!(out[2], BuilderStep::Stop));
+        assert!(matches!(out[3], BuilderStep::Processor(_)));
+        match &out[4] {
+            BuilderStep::Log { message, .. } => assert_eq!(message, "real"),
+            other => panic!("expected untouched Log step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_sentinel_with_valid_top_level_fails_closed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
+
+        // Valid top-level layout PLUS a sentinel nested inside a
+        // Multicast container: must reject (the nested Log would print
+        // per inner pass inside the measured window — r_glm finding on
+        // the e_opus D3 review).
+        let steps = vec![
+            log_step(BENCH_WINDOW_START),
+            BuilderStep::Multicast {
+                steps: vec![log_step(BENCH_WINDOW_END)],
+                config: camel_api::MulticastConfig::new(),
+            },
+            log_step(BENCH_WINDOW_END),
+        ];
+        let out = inject_sentinel_anchored(steps, "r".to_string(), "timer:bench".to_string(), file);
+
+        // Pass-through: no processor injected anywhere, sentinels kept
+        // as-is (zero BENCH_LATENCY records — the harness trips).
+        assert_eq!(out.len(), 3);
+        assert!(!out.iter().any(|s| matches!(s, BuilderStep::Processor(_))));
+        match &out[1] {
+            BuilderStep::Multicast { steps, .. } => {
+                assert!(matches!(steps[0], BuilderStep::Log { .. }));
+            }
+            other => panic!("expected untouched Multicast, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pair_mode_nested_sentinel_fails_closed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
+
+        // The route's ONLY sentinel is nested: pair mode must treat the
+        // route as sentinel-carrying and leave it entirely unwrapped.
+        let def = camel_core::RouteDefinition::new(
+            "timer:bench".to_string(),
+            vec![
+                BuilderStep::Multicast {
+                    steps: vec![log_step(BENCH_WINDOW_START)],
+                    config: camel_api::MulticastConfig::new(),
+                },
+                BuilderStep::To("mock:a".into()),
+            ],
+        );
+        let out = pair_wrap_defs(vec![def], &file);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].steps().len(),
+            2,
+            "no To-wrapping on a sentinel-carrying route"
+        );
+        assert!(
+            !out[0]
+                .steps()
+                .iter()
+                .any(|s| matches!(s, BuilderStep::Processor(_)))
+        );
+    }
+
+    #[test]
+    fn route_mode_sentinel_free_non_timer_passthrough() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
+
+        // Non-timer route without sentinels: the fast path — route mode
+        // never pair-wraps and never injects into consumer routes.
+        let consumer = camel_core::RouteDefinition::new(
+            "direct:agg-in".to_string(),
+            vec![BuilderStep::To("mock:a".into()), BuilderStep::Stop],
+        );
+        let out = route_anchor_defs(vec![consumer], &file);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].steps().len(), 2);
+        assert!(matches!(out[0].steps()[0], BuilderStep::To(_)));
+        assert!(matches!(out[0].steps()[1], BuilderStep::Stop));
+    }
+
+    #[test]
+    fn non_sentinel_log_preserved() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
+
+        let steps = vec![
+            log_step("hello"),
+            log_step(BENCH_WINDOW_START),
+            log_step("world"),
+            log_step(BENCH_WINDOW_END),
+        ];
+        let out = inject_sentinel_anchored(steps, "r".to_string(), "timer:bench".to_string(), file);
+        assert_eq!(out.len(), 4);
+        for (idx, expected) in [(0usize, "hello"), (2, "world")] {
+            match &out[idx] {
+                BuilderStep::Log { message, .. } => assert_eq!(message, expected),
+                other => panic!("step {idx}: expected Log('{expected}'), got {other:?}"),
+            }
+        }
+        assert!(matches!(out[1], BuilderStep::Processor(_)));
         assert!(matches!(out[3], BuilderStep::Processor(_)));
     }
 
+    #[test]
+    fn missing_sentinels_fail_closed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
+
+        // Timer route with NO sentinels at all: uninstrumented
+        // pass-through, all original steps intact.
+        let steps = vec![
+            BuilderStep::Stop,
+            BuilderStep::To("mock:a".into()),
+            log_step("ordinary"),
+        ];
+        let out = inject_sentinel_anchored(steps, "r".to_string(), "timer:bench".to_string(), file);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[0], BuilderStep::Stop));
+        assert!(matches!(out[1], BuilderStep::To(_)));
+        assert!(matches!(out[2], BuilderStep::Log { .. }));
+        assert!(!out.iter().any(|s| matches!(s, BuilderStep::Processor(_))));
+    }
+
+    #[test]
+    fn duplicate_or_misordered_sentinels_fail_closed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
+
+        // Duplicate START: pass-through, all steps stay Log.
+        let out = inject_sentinel_anchored(
+            vec![
+                log_step(BENCH_WINDOW_START),
+                log_step(BENCH_WINDOW_START),
+                log_step(BENCH_WINDOW_END),
+            ],
+            "r".to_string(),
+            "timer:bench".to_string(),
+            Arc::clone(&file),
+        );
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|s| matches!(s, BuilderStep::Log { .. })));
+
+        // END before START: same fail-closed pass-through.
+        let out = inject_sentinel_anchored(
+            vec![log_step(BENCH_WINDOW_END), log_step(BENCH_WINDOW_START)],
+            "r".to_string(),
+            "timer:bench".to_string(),
+            file,
+        );
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|s| matches!(s, BuilderStep::Log { .. })));
+    }
+
+    #[test]
+    fn end_without_start_fail_closed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
+
+        let out = inject_sentinel_anchored(
+            vec![log_step(BENCH_WINDOW_END)],
+            "r".to_string(),
+            "timer:bench".to_string(),
+            file,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], BuilderStep::Log { .. }));
+    }
+
+    #[test]
+    fn non_timer_route_with_sentinels_fail_closed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
+
+        // Sentinels in a non-timer route are a fixture bug: error +
+        // unchanged steps (assertable via the unchanged output).
+        let direct = camel_core::RouteDefinition::new(
+            "direct:in".to_string(),
+            vec![
+                log_step(BENCH_WINDOW_START),
+                BuilderStep::Stop,
+                log_step(BENCH_WINDOW_END),
+            ],
+        );
+        let out = route_anchor_defs(vec![direct], &file);
+        assert_eq!(out.len(), 1);
+        let steps = out[0].steps();
+        assert_eq!(steps.len(), 3);
+        assert!(matches!(steps[0], BuilderStep::Log { .. }));
+        assert!(matches!(steps[1], BuilderStep::Stop));
+        assert!(matches!(steps[2], BuilderStep::Log { .. }));
+    }
+
+    #[test]
+    fn pair_mode_untouched_by_sentinels() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
+
+        // Route WITH sentinels: fail-closed passthrough — no To
+        // wrapping, sentinel Log left as-is.
+        let marked = camel_core::RouteDefinition::new(
+            "direct:marked".to_string(),
+            vec![
+                BuilderStep::To("mock:a".into()),
+                log_step(BENCH_WINDOW_START),
+            ],
+        );
+        // Route WITHOUT sentinels: wrapped exactly as before
+        // (2 To × 3 + 1 Stop = 7, same shape as the pair-mode test).
+        let plain = camel_core::RouteDefinition::new(
+            "direct:plain".to_string(),
+            vec![
+                BuilderStep::To("xslt:a".into()),
+                BuilderStep::Stop,
+                BuilderStep::To("xslt:b".into()),
+            ],
+        );
+
+        let out = pair_wrap_defs(vec![marked, plain], &file);
+        assert_eq!(out.len(), 2);
+
+        assert_eq!(out[0].steps().len(), 2);
+        assert!(matches!(out[0].steps()[0], BuilderStep::To(_)));
+        assert!(matches!(out[0].steps()[1], BuilderStep::Log { .. }));
+
+        assert_eq!(out[1].steps().len(), 7);
+        assert!(matches!(out[1].steps()[0], BuilderStep::Processor(_)));
+        assert!(matches!(out[1].steps()[1], BuilderStep::To(_)));
+        assert!(matches!(out[1].steps()[2], BuilderStep::Processor(_)));
+        assert!(matches!(out[1].steps()[3], BuilderStep::Stop));
+        assert!(matches!(out[1].steps()[4], BuilderStep::Processor(_)));
+        assert!(matches!(out[1].steps()[5], BuilderStep::To(_)));
+        assert!(matches!(out[1].steps()[6], BuilderStep::Processor(_)));
+    }
+
     #[tokio::test]
-    async fn route_bracket_emits_one_record_per_pass() {
+    async fn one_record_per_pass_through_sentinels() {
         use tower::Service as _;
         use tower::ServiceExt as _;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let file = Arc::new(Mutex::new(File::create(tmp.path()).unwrap()));
 
-        let steps = vec![BuilderStep::Stop];
-        let out = inject_route_bracket(
+        // Bracket via sentinels — the D3 window. The sentinel Log steps
+        // are replaced by the processor pair; the Stop between them is
+        // the (tiny) measured pipeline.
+        let steps = vec![
+            log_step(BENCH_WINDOW_START),
+            BuilderStep::Stop,
+            log_step(BENCH_WINDOW_END),
+        ];
+        let out = inject_sentinel_anchored(
             steps,
             "bench-route".to_string(),
             "timer:bench?period=10&repeatCount=10000".to_string(),
@@ -485,10 +948,11 @@ mod tests {
             (Some(BuilderStep::Processor(s)), Some(BuilderStep::Processor(e))) => {
                 (s.0.clone(), e.0.clone())
             }
-            _ => panic!("expected processor bracket, got {out:?}"),
+            _ => panic!("expected sentinel-anchored processor pair, got {out:?}"),
         };
+        assert!(matches!(out[1], BuilderStep::Stop));
 
-        // n passes through the bracket pair → n records, ids 1..=n,
+        // n passes through the sentinel pair → n records, ids 1..=n,
         // positive nanosecond durations, exact 5-field format.
         for _pass in 1..=3u64 {
             let ex = Exchange::new(camel_api::Message::default());

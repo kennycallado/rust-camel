@@ -10,20 +10,18 @@
 //! line is written to stdout and explicitly flushed.
 //!
 //! Route contract (T3): any-method `/bench` returns 200
-//! `text/plain; charset=utf-8` with body `pong`, fully draining the request
-//! body so keep-alive reuse works. Each request logs
-//! `BENCH_HTTP_REQUEST received` and `BENCH_HTTP_REQUEST id=<n>` (1-based)
-//! to stdout.
+//! `text/plain; charset=utf-8` with body `pong`, fully draining the
+//! request body so keep-alive reuse works. Minimal-bare per e_opus
+//! ruling D1 (2026-09-16; bd rc-h42s6): NO per-request stdout lines —
+//! the drain is inherent keep-alive stack work, not observable work,
+//! and is retained.
 //!
 //! Port: 8080 by default, overridable via `BENCH_AXUM_BARE_PORT`.
 
 use std::io::Write;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::any;
@@ -50,9 +48,7 @@ async fn main() -> ExitCode {
         })
         .unwrap_or(DEFAULT_PORT);
 
-    let app = Router::new()
-        .route("/bench", any(handle))
-        .with_state(Arc::new(AtomicU64::new(0)));
+    let app = Router::new().route("/bench", any(handle));
 
     match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
         Ok(listener) => {
@@ -83,12 +79,10 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn handle(State(counter): State<Arc<AtomicU64>>, body: Body) -> impl IntoResponse {
-    println!("BENCH_HTTP_REQUEST received");
-    // Drain the request body so keep-alive connection reuse works.
+async fn handle(body: Body) -> impl IntoResponse {
+    // Drain the request body so keep-alive connection reuse works
+    // (inherent keep-alive stack work — no observable side effects).
     let _drained = axum::body::to_bytes(body, MAX_BODY).await;
-    let id = counter.fetch_add(1, Ordering::Relaxed) + 1;
-    println!("BENCH_HTTP_REQUEST id={id}");
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],

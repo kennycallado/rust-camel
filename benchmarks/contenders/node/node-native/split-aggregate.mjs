@@ -46,8 +46,9 @@
 //                                 -> marker ONLY from that path
 //     -> marker                   BENCH_ROUTE_READY items=100, latched
 //                                 to the FIRST completed bucket
-// - Tick mode protocol B: every tick brackets the WHOLE per-tick body
-//   (t0 before set_body, record after the split loop) and appends
+// - Tick mode protocol B: every tick brackets the CORE pipeline (t0
+//   AFTER the body supply, right before JSON.parse; record after the
+//   split loop) and appends
 //   `BENCH_LATENCY <tick> <duration_ns>` to the latency file — one
 //   record per tick = one full split+aggregate pipeline. The file path
 //   comes from `BENCH_LATENCY_FILE` (set EXPLICITLY per cell by the
@@ -210,15 +211,15 @@ function emitReadyMarker(ex) {
   }
 }
 
-// One exchange through the route: set_body (the startup-built
-// canonical array) -> unmarshal json -> split SEQUENTIAL
+// One exchange through the CORE pipeline (everything INSIDE the
+// measured window): unmarshal json -> split SEQUENTIAL
 // (parallel: false): fragment i is dispatched to
 // direct:agg-in and its response fully processed (aggregate ->
 // completion assert -> marker guard) before fragment i+1 is
-// dispatched — the await in this loop IS the split scope.
-async function runTickPipeline() {
-  const array = tickBody;
-
+// dispatched — the await in this loop IS the split scope. The body
+// (the startup-built canonical array) is supplied by the caller,
+// OUTSIDE the window (e_opus ruling D3).
+async function runTickPipeline(array) {
   // unmarshal json: the body IS the parsed value from here on. A split
   // on a text body is a silent no-op (zero fragments), so the parsed
   // body MUST be an array — enforced, not assumed.
@@ -258,14 +259,18 @@ try {
   process.exit(1);
 }
 
-// Per-tick work: t0 before the FULL pipeline, BENCH_LATENCY record
-// after it — one record per tick = one full per-tick pipeline. A
-// pipeline failure aborts the process non-zero (no record, no marker).
+// Per-tick work: body supply FIRST (outside the window), t0 right
+// before the JSON.parse, full split+aggregate pipeline, window CLOSE
+// (BENCH_LATENCY record). A pipeline failure aborts the process
+// non-zero (no record, no marker).
 let tick = 0;
 function fireTick() {
   tick += 1;
+  // Body supply — set_body equivalent (prebuilt tickBody): OUTSIDE the
+  // measured window, e_opus ruling D3.
+  const array = tickBody;
   const t0 = process.hrtime.bigint();
-  runTickPipeline().then(
+  runTickPipeline(array).then(
     () => {
       const durationNs = Number(process.hrtime.bigint() - t0);
       appendFileSync(latencyFile, `BENCH_LATENCY ${tick} ${durationNs}\n`);

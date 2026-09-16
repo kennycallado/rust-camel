@@ -2,13 +2,21 @@
 #
 # Mirrors the v1 `routes/startup-minimal.yaml` structure (`routes:` array
 # of route objects with `from` / `steps` keys) but exercises the full T2
-# EIP shape from spec §4.1: timer -> set_body -> set_header -> filter ->
-# choice.when/otherwise -> log. Same logical route as the Apache Camel
+# EIP shape from spec §4.1: timer -> set_body -> BENCH_WINDOW_START
+# (route-mode window OPEN — body supply EXCLUDED, e_opus ruling D3) ->
+# set_header -> filter -> choice.when/otherwise -> BENCH_WINDOW_END
+# (window CLOSE) -> log. Same logical route as the Apache Camel
 # YAML subproject's `camel/routes.yaml`; only the field names differ
 # (rust-camel uses `key:` / `value:` for set_header and `value:` for
 # set_body literal, NOT Apache Camel's `name:` / `constant:` — see
 # spike `benchmarks/attic/spikes/spike-yaml-predicate/routes/spike-t2.yaml`
 # for the proven rust-camel shape).
+#
+# The two BENCH_WINDOW sentinel `log` steps are REPLACED by the
+# bench_instrument route-mode timing processors in a measured run
+# (start-stamp / end-write, one BENCH_LATENCY record per tick); they
+# never print as literal lines. The marker gate below sits AFTER the
+# END sentinel — the trailing log is OUTSIDE the measured window.
 #
 # The `log` step uses the bare-string form which is always evaluated as
 # Simple language (yaml.rs L588-593: LogMessageData::Literal wraps the
@@ -28,6 +36,10 @@ routes:
     steps:
       - set_body:
           value: "ping"
+      # Route-mode window OPEN (e_opus ruling D3): body supply above is
+      # OUTSIDE the measured window; replaced by the start-stamp
+      # processor in route mode.
+      - log: "BENCH_WINDOW_START"
       - set_header:
           key: "source"
           value: "bench"
@@ -43,6 +55,10 @@ routes:
                 otherwise:
                   - set_body:
                       value: "pong-other"
+      # Route-mode window CLOSE: replaced by the end-write processor
+      # (duration = close − start). The marker gate below is the
+      # trailing log — OUTSIDE the measured window.
+      - log: "BENCH_WINDOW_END"
       # Marker gate (tick mode, bench-consol-tick task 2.3): the
       # repeating timer completes this route once per tick, so the
       # marker log is gated by a constant-key idempotent_consumer over

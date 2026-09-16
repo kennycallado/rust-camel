@@ -1440,6 +1440,22 @@ class SummarizeTest(unittest.TestCase):
              summarize.HTTP_REFERENCE_CONTENDERS.items()},
         )
 
+        # Era-3 m3/m4 exclusion (e_opus ruling D5, bd rc-h42s6,
+        # era3-rerun-manifest gate 6): run.sh's plain scalar
+        # M3_EXCLUDED_CONTENDERS (applied in m3_measure only) mirrors
+        # summarize.M3_M4_EXCLUDED_CONTENDERS — the m3/m4-scoped
+        # projection pair guarded here.
+        excl = re.search(
+            r'^M3_EXCLUDED_CONTENDERS="([^"]*)"', run_sh, re.MULTILINE
+        )
+        self.assertIsNotNone(
+            excl, "run.sh: M3_EXCLUDED_CONTENDERS not found"
+        )
+        self.assertEqual(
+            tuple(sorted(excl.group(1).split())),
+            tuple(sorted(summarize.M3_M4_EXCLUDED_CONTENDERS)),
+        )
+
         # The 53-cell arithmetic itself: the SCENARIO_M2_PROTOCOL keys
         # enumerate the 7 registered scenarios (5 full-set + 2 bridge,
         # per SCENARIO_ARTIFACT_SET); 5 × 8 + 2 × 6 = 52 expected
@@ -1509,6 +1525,63 @@ class SummarizeTest(unittest.TestCase):
         self.assertIsNotNone(resolver, "run.sh: bridge resolver not found")
         self.assertEqual(
             re.findall("REFERENCE_CONTENDERS", resolver.group(1)), []
+        )
+
+    def test_m3_exclusion_application_site_pinned(self):
+        # Era-3 D5 exclusion (bd rc-h42s6, era3-rerun-manifest gate 6):
+        # M3_EXCLUDED_CONTENDERS is defined ONCE and applied ONLY inside
+        # m3_measure — the function that owns the m3/m4 measured set
+        # (proto_cells). PROTOCOL_A_CELLS registration
+        # (resolve_all_cells) must keep the node cells: m1/m2 protocol
+        # A still measures them. Source-grep technique, same as the
+        # reference-registration pin above.
+        run_sh = (Path(__file__).resolve().parent / "run.sh").read_text(
+            encoding="utf-8"
+        )
+        # Defined exactly once, as a plain scalar.
+        self.assertEqual(
+            len(re.findall(
+                r'^M3_EXCLUDED_CONTENDERS="', run_sh, re.MULTILINE
+            )),
+            1,
+        )
+        # Referenced inside m3_measure, and the measured set is the
+        # FILTERED proto_cells. PROTOCOL_A_CELLS is read exactly once
+        # in the body — the filter itself — while every measurement /
+        # aggregation loop iterates proto_cells (a PROTOCOL_A_CELLS
+        # aggregation would emit bogus all-zero status=ok summaries
+        # for excluded cells).
+        start = run_sh.index("m3_measure() {")
+        end = run_sh.index("run_m3_with_validation() {")
+        m3_body = run_sh[start:end]
+        self.assertGreaterEqual(
+            len(re.findall(r"\bM3_EXCLUDED_CONTENDERS\b", m3_body)), 1
+        )
+        # The membership test must be wildcard-padded on BOTH ends —
+        # a missing trailing * matches only the LAST set entry and
+        # silently lets the others run m3/m4.
+        self.assertIn(
+            '[[ " $M3_EXCLUDED_CONTENDERS " == *" ${cell##*/} "* ]]',
+            m3_body,
+        )
+        self.assertIn('"${proto_cells[@]}"', m3_body)
+        # Raw-literal pin (spelling-independent): exactly ONE
+        # PROTOCOL_A_CELLS array read may exist in the m3 body — the
+        # filter. Any second read (different loop var, array copy)
+        # escapes m3/m4 exclusion and fails this count.
+        self.assertEqual(
+            m3_body.count('"${PROTOCOL_A_CELLS[@]}"'), 1
+        )
+        self.assertEqual(
+            m3_body.count('for cell in "${proto_cells[@]}"'), 3
+        )
+        # Cell registration never references the exclusion set.
+        resolver = re.search(
+            r"resolve_all_cells\(\) \{(.*?)\n\}", run_sh, re.DOTALL
+        )
+        self.assertIsNotNone(resolver, "run.sh: resolve_all_cells not found")
+        self.assertEqual(
+            re.findall(r"\bM3_EXCLUDED_CONTENDERS\b", resolver.group(1)), []
         )
 
     def test_full_roster_zero_gaps_with_flat_protocol_a_m2(self):
@@ -1598,6 +1671,161 @@ class SummarizeTest(unittest.TestCase):
                 ])
         self.assertEqual(rc, 0)
         self.assertEqual(err.getvalue(), "")
+
+    def _http_m3m4_run(self, run_id, node_m3m4):
+        """http-server run dir: m1 + flat protocol-A m2 for the full
+        roster (8 contenders + the axum-bare reference cell), plus
+        m3/m4 summaries — for the node family too when `node_m3m4`
+        (the era-2 shape), only for the D5-allowed cells otherwise
+        (the era-3 NEW-record shape run.sh m3_measure produces)."""
+        run = self.root / run_id
+        http_full = (
+            tuple(summarize.FULL_CONTENDERS)
+            + summarize.HTTP_REFERENCE_CONTENDERS["http-server"]
+        )
+        for contender in http_full:
+            cell = run / f"http-server_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "samples.txt").write_text(
+                "startup-ms rss-kb\n12 900\n14 950\n", encoding="utf-8"
+            )
+            flat = run / "m2-round-0" / f"http-server_{contender}"
+            flat.mkdir(parents=True)
+            (flat / "protocol-a-summary.txt").write_text(
+                _protocol_a_summary(500), encoding="utf-8"
+            )
+            if (
+                contender in summarize.M3_M4_EXCLUDED_CONTENDERS
+                and not node_m3m4
+            ):
+                continue
+            (cell / "m3-summary.json").write_text(
+                json.dumps({
+                    "cell": f"http-server/{contender}",
+                    "status": "ok",
+                    "median_mean_msgs_per_sec": 1000.0,
+                    "min_mean": 900.0,
+                    "max_mean": 1100.0,
+                    "per_round_means": [900.0, 1100.0],
+                    "rounds": 2,
+                    "duration_secs": 10.0,
+                    "warmup_secs": 2.0,
+                }),
+                encoding="utf-8",
+            )
+            (cell / "m4-summary.json").write_text(
+                json.dumps({
+                    "cell": f"http-server/{contender}",
+                    "status": "ok",
+                    "rss_initial_kib": 9000,
+                    "rss_final_kib": 9012,
+                    "rss_delta_kib": 12,
+                    "rss_max_kib": 9100,
+                    "representative_round": 0,
+                    "measurement_window_secs": 10.0,
+                    "interval_ms": 2000,
+                    "delta_median": 12.0,
+                    "delta_min": 10.0,
+                    "delta_max": 14.0,
+                    "delta_p25": 11.0,
+                    "delta_p75": 13.0,
+                    "delta_distribution": [10.0, 12.0, 14.0],
+                    "rss_samples": [],
+                }),
+                encoding="utf-8",
+            )
+        return run
+
+    def _m3m4_identities(self, record):
+        return {
+            (c["contender"], c["metric"])
+            for c in record["cells"]
+            if c["metric"] in ("m3", "m4")
+        }
+
+    def test_era3_new_record_node_m3_m4_absent_publishes_clean(self):
+        # Era-3 D5 exclusion (bd rc-h42s6, era3-rerun-manifest gate 6):
+        # a NEW http-server record's m3/m4 evidence carries NO
+        # node-fastify/node-native cells (run.sh m3_measure filters
+        # them), while m1/m2 keep the node cells. The completeness
+        # machinery must publish that shape clean — no node m3/m4 gap
+        # exists to demand — and must STILL demand node m1/m2: the
+        # roster identities stay.
+        run = self._http_m3m4_run("20260916T000000Z", node_m3m4=False)
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(
+                run,
+                dict(META, era="3", scenarios="http-server",
+                     run_id="20260916T000000Z"),
+            )
+        # The m1/m2-governed roster KEEPS the node identities.
+        self.assertIn("http-server/node-fastify",
+                      record["expected_cells"])
+        self.assertIn("http-server/node-native",
+                      record["expected_cells"])
+        # Observed m3/m4 carry no node cells.
+        m3m4 = self._m3m4_identities(record)
+        self.assertNotIn(("node-fastify", "m3"), m3m4)
+        self.assertNotIn(("node-native", "m4"), m3m4)
+        self.assertNotIn(("node-fastify", "m4"), m3m4)
+        self.assertNotIn(("node-native", "m3"), m3m4)
+        # ZERO gaps: the machinery does not expect node m3/m4.
+        self.assertEqual(summarize.completeness_gaps(record), [])
+        # End-to-end: the record publishes clean (exit 0).
+        records = self.root / "records-era3"
+        records.mkdir()
+        (records / "index.json").write_text(
+            json.dumps({"index_schema_version": 1, "runs": []}) + "\n",
+            encoding="utf-8",
+        )
+        source = self.root / "summarized-20260916T000000Z"
+        summarize.emit_json(record, source)
+        summarize.emit_summary(record, source)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = summarize.main([
+                    "--publish",
+                    "--run-dir", str(source),
+                    "--records-dir", str(records),
+                ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(err.getvalue(), "")
+        # Control: strip a node m1 cell from the record and the gap IS
+        # named — the m1/m2 expectation keeps the node identities.
+        stripped = dict(
+            record,
+            cells=[
+                c for c in record["cells"]
+                if not (c["contender"] == "node-fastify"
+                        and c["metric"] == "m1")
+            ],
+        )
+        self.assertEqual(
+            summarize.completeness_gaps(stripped),
+            ["http-server/node-fastify/m1"],
+        )
+
+    def test_era2_record_with_node_m3_m4_still_validates(self):
+        # Era-2 sealed-record contract: era-2 MEASURED the node family
+        # on m3/m4, and its persisted expected_cells governs validation
+        # — the era-3 D5 exclusion must NOT retroactively invalidate
+        # that shape. Completeness never derives per-metric m3/m4
+        # expectations, so a record carrying node m3/m4 evidence stays
+        # a clean, publishable record.
+        run = self._http_m3m4_run("20260915T000000Z", node_m3m4=True)
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(
+                run,
+                dict(META, era="2", scenarios="http-server",
+                     run_id="20260915T000000Z"),
+            )
+        m3m4 = self._m3m4_identities(record)
+        self.assertIn(("node-fastify", "m3"), m3m4)
+        self.assertIn(("node-native", "m4"), m3m4)
+        self.assertEqual(summarize.completeness_gaps(record), [])
 
     def test_m2_presence_state_verdicts(self):
         # bd rc-u047: the shared identity→measured|attempted|None
@@ -1785,6 +2013,246 @@ class SummarizeTest(unittest.TestCase):
             "| rust-camel-lib | camel-standalone-dsl | m3"
             " | 1.0 | 1.0 | 1.0 | bootstrap-paired |",
             summary,
+        )
+
+    # ---- DEGENERATE-PAIR RULE (e_opus fixture-shape ruling item 3;
+    # CONTEXT.md §3: comparisons are valid WITHIN Pair A/B only) ----
+
+    def _bridge_m3_run(self, scenario="xsd-validation-bridge"):
+        r"""Run dir measuring the six BRIDGE_CONTENDERS under one
+        bridge scenario (m3 only): Pair A's three cells plus Pair B's
+        LONE rust-camel-cli — the asymmetric matrix from the ruling."""
+        run = self.root / "20260907T010000Z"
+        for contender in summarize.BRIDGE_CONTENDERS:
+            cell = run / f"{scenario}_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "m3-summary.json").write_text(
+                json.dumps({
+                    "cell": f"{scenario}/{contender}",
+                    "status": "ok",
+                    "per_round_means": [100.0, 100.0],
+                    "rounds": 2,
+                }),
+                encoding="utf-8",
+            )
+        return run
+
+    def _ratio_record(self, run, scenarios):
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            return summarize.build_record(
+                run, dict(META, scenarios=scenarios)
+            )
+
+    def test_bridge_lone_cli_cell_never_enters_ratios(self):
+        # Bridge scenarios reduce Pair B to rust-camel-cli
+        # (BRIDGE_CONTENDERS omits the YAML JVM variants). The
+        # DEGENERATE-PAIR RULE bans its promotion into a ratio against
+        # the Pair A numerator: excluded as numerator AND denominator,
+        # in bare-name AND cell-dir form. Pair A and node-family rows
+        # (both ≥2 cells) survive.
+        run = self._bridge_m3_run()
+        stub = self._ratio_stub("stub-ratios-bridge.sh")
+        record = self._ratio_record(run, "xsd-validation-bridge")
+        with mock.patch.dict(
+            os.environ, {"BENCH_AGGREGATE_RATIOS_BIN": str(stub)}
+        ):
+            ratios = summarize.compute_ratios(record, run_dir=run)
+        # Not a ratio participant under EITHER vocabulary.
+        self.assertNotIn("rust-camel-cli", json.dumps(ratios))
+        self.assertEqual(
+            [(r["numerator"], r["denominator"]) for r in ratios],
+            [
+                ("rust-camel-lib", "camel-quarkus-dsl-native"),
+                ("rust-camel-lib", "camel-standalone-dsl"),
+                ("rust-camel-lib", "node-fastify"),
+                ("rust-camel-lib", "node-native"),
+            ],
+        )
+
+    def test_bridge_pair_a_ratios_still_computed(self):
+        # Pair A keeps its WITHIN-pair comparisons for bridges: lib vs
+        # standalone-dsl and lib vs quarkus-dsl-native must survive the
+        # degenerate exclusion untouched.
+        run = self._bridge_m3_run("xslt-bridge")
+        stub = self._ratio_stub("stub-ratios-pair-a.sh")
+        record = self._ratio_record(run, "xslt-bridge")
+        with mock.patch.dict(
+            os.environ, {"BENCH_AGGREGATE_RATIOS_BIN": str(stub)}
+        ):
+            ratios = summarize.compute_ratios(record, run_dir=run)
+        pairs = {(r["numerator"], r["denominator"]) for r in ratios}
+        self.assertTrue({
+            ("rust-camel-lib", "camel-standalone-dsl"),
+            ("rust-camel-lib", "camel-quarkus-dsl-native"),
+        } <= pairs)
+
+    def test_bridge_cli_labeled_unpaired_context_only(self):
+        # The renderer flags the degenerate cell as unpaired
+        # (context-only) so no reader mistakes it for a ratio
+        # participant.
+        run = self._bridge_m3_run()
+        record = self._ratio_record(run, "xsd-validation-bridge")
+        out = self.root / "out-unpaired"
+        summarize.emit_summary(record, out)
+        summary = (out / "summary.md").read_text(encoding="utf-8")
+        self.assertIn("## Unpaired (context-only)", summary)
+        self.assertIn(
+            "| xsd-validation-bridge | rust-camel-cli | B |", summary
+        )
+
+    def test_degenerate_pair_function_lone_cells(self):
+        # The pairing function, constructed directly: a lone Pair B
+        # cell degenerates among Pair A company; one lone cell PER pair
+        # means BOTH degenerate; non-roster contenders (node family,
+        # reference cells) are never degenerate.
+        self.assertEqual(
+            summarize.degenerate_pair_contenders([
+                "camel-standalone-dsl", "rust-camel-lib", "rust-camel-cli",
+            ]),
+            {"rust-camel-cli"},
+        )
+        self.assertEqual(
+            summarize.degenerate_pair_contenders(
+                ["rust-camel-lib", "rust-camel-cli"]
+            ),
+            {"rust-camel-lib", "rust-camel-cli"},
+        )
+        self.assertEqual(
+            summarize.degenerate_pair_contenders(["rust-camel-cli"]),
+            {"rust-camel-cli"},
+        )
+        self.assertEqual(
+            summarize.degenerate_pair_contenders(
+                ["node-fastify", "axum-bare"]
+            ),
+            set(),
+        )
+
+    def test_synthetic_lone_pair_cell_excluded_and_labeled(self):
+        # NON-bridge scenario with a synthetic single-cell pair:
+        # t2-json measuring {rust-camel-cli, node-fastify, node-native}
+        # — the cli is Pair B's only cell, so it is context-only while
+        # the non-roster node pair still ratios. The numerator
+        # fallback must also skip the degenerate cell (it would have
+        # been a denominator of the alphabetically-first numerator
+        # pre-rule).
+        run = self.root / "20260907T020000Z"
+        for contender in ("rust-camel-cli", "node-fastify", "node-native"):
+            cell = run / f"t2-json_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "m3-summary.json").write_text(
+                json.dumps({
+                    "cell": f"t2-json/{contender}",
+                    "status": "ok",
+                    "per_round_means": [100.0, 100.0],
+                    "rounds": 2,
+                }),
+                encoding="utf-8",
+            )
+        stub = self._ratio_stub("stub-ratios-lone.sh")
+        record = self._ratio_record(run, "t2-json")
+        with mock.patch.dict(
+            os.environ, {"BENCH_AGGREGATE_RATIOS_BIN": str(stub)}
+        ):
+            ratios = summarize.compute_ratios(record, run_dir=run)
+        self.assertNotIn("rust-camel-cli", json.dumps(ratios))
+        self.assertEqual(
+            [(r["numerator"], r["denominator"]) for r in ratios],
+            [("node-fastify", "node-native")],
+        )
+        out = self.root / "out-lone"
+        summarize.emit_summary(record, out)
+        summary = (out / "summary.md").read_text(encoding="utf-8")
+        self.assertIn("## Unpaired (context-only)", summary)
+        self.assertIn("| t2-json | rust-camel-cli | B |", summary)
+
+    def test_non_bridge_roster_never_degenerate(self):
+        # Regression pin: in the full roster every pair contributes
+        # >=2 cells, so the rule is a no-op — the full 7-denominator
+        # ratio set (cli INCLUDED: Pair B has all three members there)
+        # is identical to the pre-rule behavior. The bridge roster is
+        # where the rule bites.
+        self.assertEqual(
+            summarize.degenerate_pair_contenders(
+                summarize.FULL_CONTENDERS
+            ),
+            set(),
+        )
+        self.assertEqual(
+            summarize.degenerate_pair_contenders(
+                summarize.BRIDGE_CONTENDERS
+            ),
+            {"rust-camel-cli"},
+        )
+        run = self.root / "20260907T030000Z"
+        for contender in summarize.FULL_CONTENDERS:
+            cell = run / f"http-server_{contender}"
+            cell.mkdir(parents=True)
+            (cell / "m3-summary.json").write_text(
+                json.dumps({
+                    "cell": f"http-server/{contender}",
+                    "status": "ok",
+                    "per_round_means": [100.0, 100.0],
+                    "rounds": 2,
+                }),
+                encoding="utf-8",
+            )
+        stub = self._ratio_stub("stub-ratios-full.sh")
+        record = self._ratio_record(run, "http-server")
+        with mock.patch.dict(
+            os.environ, {"BENCH_AGGREGATE_RATIOS_BIN": str(stub)}
+        ):
+            ratios = summarize.compute_ratios(record, run_dir=run)
+        self.assertEqual(
+            [(r["numerator"], r["denominator"]) for r in ratios],
+            [
+                ("rust-camel-lib", name)
+                for name in sorted(
+                    set(summarize.FULL_CONTENDERS) - {"rust-camel-lib"}
+                )
+            ],
+        )
+        # Absence pin: a non-degenerate summary renders NO unpaired
+        # section (the rule is a strict no-op on the full roster).
+        out = self.root / "out-full"
+        summarize.emit_summary(record, out)
+        summary = (out / "summary.md").read_text(encoding="utf-8")
+        self.assertNotIn(
+            "## Unpaired", summary,
+            "full-roster summary must not render an unpaired section",
+        )
+
+    def test_all_lone_pair_scenario_no_ratios_no_crash(self):
+        # Scenario whose ONLY measured m3 cell is a lone-pair cell:
+        # no pairable contender exists — compute_ratios must return []
+        # (not IndexError on the numerator fallback) and emit_summary
+        # labels the cell unpaired.
+        run = self.root / "20260907T040000Z"
+        cell = run / "xsd-validation-bridge_rust-camel-cli"
+        cell.mkdir(parents=True)
+        (cell / "m3-summary.json").write_text(
+            json.dumps({
+                "cell": "xsd-validation-bridge/rust-camel-cli",
+                "status": "ok",
+                "per_round_means": [100.0, 100.0],
+                "rounds": 2,
+            }),
+            encoding="utf-8",
+        )
+        stub = self._ratio_stub("stub-ratios-all-lone.sh")
+        record = self._ratio_record(run, "xsd-validation-bridge")
+        with mock.patch.dict(
+            os.environ, {"BENCH_AGGREGATE_RATIOS_BIN": str(stub)}
+        ):
+            ratios = summarize.compute_ratios(record, run_dir=run)
+        self.assertEqual(ratios, [])
+        out = self.root / "out-all-lone"
+        summarize.emit_summary(record, out)
+        summary = (out / "summary.md").read_text(encoding="utf-8")
+        self.assertIn("## Unpaired (context-only)", summary)
+        self.assertIn(
+            "| xsd-validation-bridge | rust-camel-cli | B |", summary
         )
 
 

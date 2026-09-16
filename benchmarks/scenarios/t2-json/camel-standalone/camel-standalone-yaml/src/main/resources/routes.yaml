@@ -5,8 +5,10 @@
 # Java-DSL) but authored in Apache Camel YAML DSL and parsed at runtime
 # via camel-yaml-dsl: timer -> process(benchBody) -> process(markStart)
 # -> unmarshal(json) -> filter(jsonpath) -> process(insertBench) ->
-# marshal(json) -> process(assertOutput) -> process(emitMarker) ->
-# process(writeLatency).
+# marshal(json) -> process(writeLatency) -> process(assertOutput) ->
+# process(emitMarker). writeLatency is the window CLOSE — it fires
+# immediately after marshal; the assert and the marker run OUTSIDE the
+# measured window (e_opus ruling D3/D4).
 #
 # The `process` steps resolve named beans bound by AppYaml.java
 # (benchBody / markStart / insertBench / assertOutput / emitMarker /
@@ -45,8 +47,8 @@
             json:
               library: "Jackson"
         - process:
+            ref: "writeLatency"
+        - process:
             ref: "assertOutput"
         - process:
             ref: "emitMarker"
-        - process:
-            ref: "writeLatency"

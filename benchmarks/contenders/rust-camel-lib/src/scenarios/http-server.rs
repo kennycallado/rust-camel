@@ -34,25 +34,30 @@
 //!
 //! # Per-request work
 //!
-//! Canonical minimal pipeline with the smoke-trace steps restored
-//! (bd rc-am22): `log("BENCH_HTTP_REQUEST received")` →
-//! `process(id++)` → `setBody("pong")`. Every other http-server
-//! contender emits `BENCH_HTTP_REQUEST received` plus a per-request
-//! `BENCH_HTTP_REQUEST id=<n>` line, and the smoke
-//! (`scenarios/http-server/smoke/run.sh`) asserts `id=1` on each
-//! artifact — the smoke sends exactly one POST. The id counter is a
-//! relaxed `AtomicU64` starting at 1, matching the other scenarios'
-//! counter idiom (t2-json latency step).
+//! Blessed minimal-bare shape (e_opus ruling D1, 2026-09-16; bd
+//! rc-h42s6): `from(http://0.0.0.0:8080/bench)` → `set_body("pong")`
+//! and NOTHING else — no per-request log step, no id counter, no
+//! per-request stdout lines. The earlier family-symmetry claim (audit
+//! contradiction C1 — "every other http-server contender emits
+//! `BENCH_HTTP_REQUEST received` plus a per-request `id=<n>` line")
+//! was FALSE: the Java cells and the cli were already bare, and the
+//! node/axum per-request lines were removed by this same alignment.
+//!
+//! The smoke-trace shape (`log("BENCH_HTTP_REQUEST received")` →
+//! `process(id++)` → `set_body("pong")`) survives only behind the
+//! `bench-trace` build feature (`scenarios/http-server-trace.rs`);
+//! the harness M1–M4 builds NEVER enable it, and the default binary
+//! provably contains no trace path (see
+//! `benchmarks/harness/checks/trace-absent.sh`). The smoke's `id=1`
+//! check is WARN-only observability under this shape (e_opus ruling
+//! D2).
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_http::HttpComponent;
 use camel_core::context::CamelContext;
-use camel_processor::LogLevel;
 
 const LISTEN_PORT: u16 = 8080;
 
@@ -81,32 +86,21 @@ async fn main_async() -> Result<(), CamelError> {
     ctx.register_component(HttpComponent::new());
 
     // 3. Build the T3 route programmatically (Pair A — no YAML/DSL
-    //    parsing). Canonical shape: `from(http).log(received).process(
-    //    id++).set_body(pong)`. The `.set_body("pong")` form is a
-    //    literal string step — equivalent to the spec's
-    //    `respond(200, body=pong)`. camel-http's reply finaliser
-    //    (camel-http/CONTEXT.md "Accepted — reply body") maps
-    //    Body::Text → text/plain; charset=utf-8 + 200 status (default
-    //    per ADR-0024). The smoke-trace steps (received + id=<n>) are
-    //    part of the artifact contract — the smoke asserts `id=1`
-    //    (bd rc-am22).
+    //    parsing). Blessed minimal-bare shape (e_opus ruling D1,
+    //    2026-09-16; bd rc-h42s6): `from(http) → set_body("pong")` —
+    //    no log step, no id counter, no per-request stdout lines.
+    //    The `.set_body("pong")` form is a literal string step —
+    //    equivalent to the spec's `respond(200, body=pong)`.
+    //    camel-http's reply finaliser (camel-http/CONTEXT.md
+    //    "Accepted — reply body") maps Body::Text →
+    //    text/plain; charset=utf-8 + 200 status (default per
+    //    ADR-0024).
     //
     //    No `httpMethod` URI parameter — the consumer accepts any
     //    method (including POST, which is what the spec requires for
     //    the body-bearing `/bench` endpoint).
-    let request_counter = Arc::new(AtomicU64::new(0));
-    let counter_for_route = Arc::clone(&request_counter);
     let route = RouteBuilder::from(format!("http://0.0.0.0:{LISTEN_PORT}/bench").as_str())
         .route_id("bench-http")
-        .log("BENCH_HTTP_REQUEST received", LogLevel::Info)
-        .process(move |exchange| {
-            let counter = Arc::clone(&counter_for_route);
-            async move {
-                let id = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                tracing::info!("BENCH_HTTP_REQUEST id={id}");
-                Ok(exchange)
-            }
-        })
         .set_body("pong")
         .build()?;
 

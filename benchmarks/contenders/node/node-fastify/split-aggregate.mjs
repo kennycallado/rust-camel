@@ -19,12 +19,13 @@
 //   measures. The boot lands BEFORE the marker, like the rust
 //   fixture's ctx.start() before the timer fires.
 // - Then the same warm-tick route (period=10, repeatCount=10000,
-//   delay=0 — immediate first fire): per tick the pipeline (set_body:
-//   the startup-built array → unmarshal → sequential split →
-//   aggregate → completion assert), bracketed t0 → record, one
+//   delay=0 — immediate first fire): per tick the body supply (the
+//   startup-built array, OUTSIDE the window — e_opus ruling D3), then
+//   the core pipeline bracketed t0 → record (unmarshal → sequential
+//   split → aggregate → completion assert → BENCH_LATENCY append), one
 //   `BENCH_LATENCY <tick> <duration_ns>` per tick — marker exactly
 //   once from the first completed bucket (tick 1, fragment 100),
-//   before its record — followed by the same idle-until-killed
+//   inside the window — followed by the same idle-until-killed
 //   lifecycle.
 
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -144,14 +145,14 @@ function emitReadyMarker(ex) {
   }
 }
 
-// One exchange through the route: set_body (the startup-built
-// canonical array) -> unmarshal json -> split SEQUENTIAL
+// One exchange through the CORE pipeline (everything INSIDE the
+// measured window): unmarshal json -> split SEQUENTIAL
 // (parallel: false): the await in this loop IS the split
 // scope — one fragment after another, each response fully processed
-// before the next dispatch.
-async function runTickPipeline() {
-  const array = tickBody;
-
+// before the next dispatch. The body (the startup-built canonical
+// array) is supplied by the caller, OUTSIDE the window (e_opus
+// ruling D3).
+async function runTickPipeline(array) {
   // unmarshal json: the body IS the parsed value from here on.
   const items = JSON.parse(array);
   if (!Array.isArray(items)) {
@@ -195,14 +196,18 @@ try {
   process.exit(1);
 }
 
-// Per-tick work: t0 before the FULL pipeline, BENCH_LATENCY record
-// after it — one record per tick = one full per-tick pipeline. A
-// pipeline failure aborts the process non-zero (no record, no marker).
+// Per-tick work: body supply FIRST (outside the window), t0 right
+// before the JSON.parse, full split+aggregate pipeline, window CLOSE
+// (BENCH_LATENCY record). A pipeline failure aborts the process
+// non-zero (no record, no marker).
 let tick = 0;
 function fireTick() {
   tick += 1;
+  // Body supply — set_body equivalent (prebuilt tickBody): OUTSIDE the
+  // measured window, e_opus ruling D3.
+  const array = tickBody;
   const t0 = process.hrtime.bigint();
-  runTickPipeline().then(
+  runTickPipeline(array).then(
     () => {
       const durationNs = Number(process.hrtime.bigint() - t0);
       appendFileSync(latencyFile, `BENCH_LATENCY ${tick} ${durationNs}\n`);

@@ -18,11 +18,12 @@
 //   measures. The boot lands BEFORE the marker, like the rust
 //   fixture's ctx.start() before the timer fires.
 // - Then the same warm-tick route (period=10, repeatCount=10000,
-//   delay=0 — immediate first fire): per tick the pipeline (set_body:
-//   the startup-built body → unmarshal → filter → transform → marshal
-//   → output assert), bracketed t0 → record, one
-//   `BENCH_LATENCY <tick> <duration_ns>` per tick — marker exactly
-//   once on the first completed tick, before its record — followed by
+//   delay=0 — immediate first fire): per tick the body supply (the
+//   startup-built body, OUTSIDE the window — e_opus ruling D3), then
+//   the core pipeline bracketed t0 → record (unmarshal → filter →
+//   transform → marshal → BENCH_LATENCY append), then the post-window
+//   output assert and the marker (exactly once on the first completed
+//   tick, AFTER its record), followed by
 //   the same idle-until-killed lifecycle.
 
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -104,8 +105,9 @@ function benchPayloadBytes() {
 }
 
 // Output assert — exact `size + 13` length AND parsed semantic
-// equality; throws BEFORE the marker and the tick's latency record on
-// any violation.
+// equality; runs OUTSIDE the measured window (e_opus ruling D4) and
+// throws BEFORE the marker (after that tick's latency record) on any
+// violation.
 function assertBenchOutput(size, text) {
   const expected = size + BENCH_MEMBER_DELTA;
   if (text.length !== expected) {
@@ -133,10 +135,10 @@ function assertBenchOutput(size, text) {
   return expected;
 }
 
-// One exchange through the route: set_body (the startup-built canonical
-// document — frozen seq) -> unmarshal json -> filter -> transform ->
-// marshal json -> output assert. Returns the asserted output length;
-// throws on any violation.
+// One exchange through the CORE pipeline (everything INSIDE the
+// measured window): unmarshal json -> filter -> transform -> marshal
+// json. Returns the marshaled output string; the assert runs OUTSIDE
+// the window (e_opus ruling D4). Throws on any pipeline violation.
 function runTickPipeline(body) {
 
   // unmarshal json: the body IS the parsed value from here on.
@@ -151,16 +153,12 @@ function runTickPipeline(body) {
   parsed.bench = true;
 
   // marshal json: the SINGLE serialization (JSON.stringify).
-  const out = JSON.stringify(parsed);
-
-  // output assert — the marker's code-path position is right here,
-  // latched below to the FIRST completed exchange.
-  return assertBenchOutput(size, out);
+  return JSON.stringify(parsed);
 }
 
 // Marker latch — the FIRST completed exchange prints the marker at its
-// original code-path position (after the assert), before that tick's
-// latency record; later exchanges are silent.
+// original code-path position (after the post-window assert, itself
+// after the window-close latency record); later exchanges are silent.
 let markerFired = false;
 function emitReadyMarker(len) {
   if (markerFired) {
@@ -209,23 +207,35 @@ try {
   process.exit(1);
 }
 
-// Per-tick work: t0 before the FULL pipeline, BENCH_LATENCY record
-// after it — one record per tick = one full per-tick pipeline. A
-// pipeline failure aborts the process non-zero (no record, no marker).
+// Per-tick work: body supply FIRST (outside the window), t0, core
+// pipeline, window CLOSE (BENCH_LATENCY record), THEN the post-window
+// assert + marker. A pipeline or assert failure aborts the process
+// non-zero (assert failure: after that tick's record, before the
+// marker — same order as the Java peers).
 let tick = 0;
 function fireTick() {
   tick += 1;
+  // Body supply — set_body equivalent (prebuilt tickBody; the build
+  // stays outside the measured window, e_opus ruling D3).
+  const body = tickBody;
   const t0 = process.hrtime.bigint();
-  let len;
+  let out;
   try {
-    len = runTickPipeline(tickBody);
+    out = runTickPipeline(body);
   } catch (err) {
     console.error(`error: t2-json tick ${tick} failed: ${err.message}`);
     process.exit(1);
   }
   const durationNs = Number(process.hrtime.bigint() - t0);
-  emitReadyMarker(len);
   appendFileSync(latencyFile, `BENCH_LATENCY ${tick} ${durationNs}\n`);
+  let len;
+  try {
+    len = assertBenchOutput(size, out);
+  } catch (err) {
+    console.error(`error: t2-json tick ${tick} assert failed: ${err.message}`);
+    process.exit(1);
+  }
+  emitReadyMarker(len);
   if (tick < REPEAT_COUNT) {
     setTimeout(fireTick, PERIOD_MS);
   }

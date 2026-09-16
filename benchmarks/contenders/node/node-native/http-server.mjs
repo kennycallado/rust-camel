@@ -14,9 +14,10 @@
 //   path-registered consumers of the other fixtures.
 // - `BENCH_ROUTE_READY <unix_ms>` on stdout ONCE, from the listen
 //   callback — listener-bound, not first-request (spec §4.10).
-// - Per request: `BENCH_HTTP_REQUEST received` then
-//   `BENCH_HTTP_REQUEST id=<n>` on stdout (smoke asserts id=1; the
-//   counter starts at 1 like every other contender).
+// - Minimal-bare per e_opus ruling D1 (2026-09-16; bd rc-h42s6): the
+//   fixture emits NO per-request stdout lines (no `received` line, no
+//   `id=<n>` counter) — the smoke's id check is WARN-only
+//   observability (e_opus ruling D2).
 // - No server-side latency record: protocol A measures client-side
 //   via bench-loadgen; no existing T3 fixture writes latency lines.
 //   BENCH_LATENCY_FILE is only honored by creating the (empty) file
@@ -34,20 +35,12 @@ if (process.env.BENCH_LATENCY_FILE) {
   fs.writeFileSync(process.env.BENCH_LATENCY_FILE, "");
 }
 
-let requestId = 0;
-
 const server = createServer((req, res) => {
   if (req.url !== benchPath) {
     res.statusCode = 404;
     res.end();
     return;
   }
-  // Logged only for bench-path requests, like the JVM contenders whose
-  // per-request lines live inside the route processor: 404s must not
-  // emit lines or consume ids.
-  requestId += 1;
-  console.log("BENCH_HTTP_REQUEST received");
-  console.log(`BENCH_HTTP_REQUEST id=${requestId}`);
   // Explicit Content-Length: without it node sends the body chunked,
   // which diverges from every other contender (single framing) and
   // breaks raw-client parsing that reads the last response line.

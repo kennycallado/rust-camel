@@ -4,8 +4,11 @@
 # Same logical route as the camel-quarkus-dsl BenchRoute (Pair A) but
 # authored in Apache Camel YAML DSL: timer -> process(benchBody) ->
 # process(markStart) -> unmarshal(json) -> filter(jsonpath) ->
-# process(insertBench) -> marshal(json) -> process(assertOutput) ->
-# process(emitMarker) -> process(writeLatency). Discovered via the
+# process(insertBench) -> marshal(json) -> process(writeLatency) ->
+# process(assertOutput) -> process(emitMarker). writeLatency is the
+# window CLOSE — it fires immediately after marshal; the assert and the
+# marker run OUTSIDE the measured window (e_opus ruling D3/D4).
+# Discovered via the
 # default classpath:camel/* scan (native mode uses the pinned
 # camel.main.routesIncludePattern from the -native sibling's
 # application.properties — Substrate VM cannot enumerate `camel/*`).
@@ -52,8 +55,8 @@
             json:
               library: "Jackson"
         - process:
+            ref: "writeLatency"
+        - process:
             ref: "assertOutput"
         - process:
             ref: "emitMarker"
-        - process:
-            ref: "writeLatency"

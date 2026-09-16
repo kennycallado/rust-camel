@@ -113,6 +113,9 @@ mimalloc = { version = "0.1", optional = true }
 [dev-dependencies]
 # camel-auth is test-only here (run_tests.rs / test/scenario.rs mod
 # tests exercise the shared security builder's provider registry).
+# camel-processor is test-only here (bench_instrument tests construct
+# BuilderStep::Log fixtures, whose level field is camel_processor::LogLevel).
+camel-processor.workspace = true
 camel-auth.workspace = true
 tempfile = { workspace = true }
 serde_json.workspace = true

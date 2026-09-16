@@ -1395,6 +1395,7 @@ dependencies = [
  "camel-lsp",
  "camel-master",
  "camel-matchers",
+ "camel-processor",
  "camel-proto-compiler",
  "camel-template",
  "camel-wit",

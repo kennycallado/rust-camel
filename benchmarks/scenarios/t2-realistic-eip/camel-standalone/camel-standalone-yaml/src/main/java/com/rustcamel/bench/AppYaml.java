@@ -63,10 +63,12 @@ public final class AppYaml {
         main.run(args);
     }
 
-    /// Bracket step: records t_start at route entry, BEFORE set_body
-    /// (same bracket position as the dsl module and the lib crate's
-    /// t2-realistic-eip branch). Long (boxed) so it round-trips
-    /// through exchange property type erasure.
+    /// Bracket step: records t_start immediately AFTER set_body (body
+    /// supply EXCLUDED from the window, e_opus ruling D3 — same bracket
+    /// position as the dsl module and the lib crate's t2-realistic-eip
+    /// branch; the routes.yaml places this bean right after setBody).
+    /// Long (boxed) so it round-trips through exchange property type
+    /// erasure.
     static Processor markStart() {
         return exchange ->
                 exchange.setProperty("BenchStart", System.nanoTime());
@@ -85,10 +87,11 @@ public final class AppYaml {
         };
     }
 
-    /// Trailing latency step — appends `BENCH_LATENCY <id> <duration_ns>`
-    /// to the sink file per exchange (the Protocol-B warm record).
-    /// Write failures are swallowed — the harness detects missing
-    /// records.
+    /// Window-close latency step — fires right after the choice, BEFORE
+    /// the marker (trailing log EXCLUDED, e_opus ruling D3) and appends
+    /// `BENCH_LATENCY <id> <duration_ns>` to the sink file per exchange
+    /// (the Protocol-B warm record). Write failures are swallowed — the
+    /// harness detects missing records.
     static Processor writeLatency(Path latencyFile, AtomicLong tickCounter) {
         return exchange -> {
             long id = tickCounter.incrementAndGet();

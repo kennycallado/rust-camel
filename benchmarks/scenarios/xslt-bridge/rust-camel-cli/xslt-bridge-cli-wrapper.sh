@@ -168,13 +168,12 @@ child_stderr="$work_dir/child.stderr"
 
 # Export BENCH_LATENCY_FILE so the CLI's bench_instrument module opens
 # this file and writes BENCH_LATENCY <id> <ns> records directly (no awk).
+# NO BENCH_LATENCY_MODE export: the module's default PAIR mode brackets
+# exactly the top-level `to(xslt:...)` step of xslt-bench.yaml —
+# the blessed anchor set (e_opus ruling D3; see the bench_instrument
+# module doc). Route mode's sentinel anchoring is for the T2 tick
+# scenarios, not bridge cells.
 export BENCH_LATENCY_FILE="$latency_file"
-# Route-bracket tick mode (bench-consol-tick 2.3): without this the CLI
-# child runs pair-mode default, which emits no BENCH_LATENCY records for
-# bridge routes — the m2 probe then times out on a healthy cell (found
-# 2026-09-03; core CLI cells got the explicit env at run.sh:1779, wrapper
-# cells missed it).
-export BENCH_LATENCY_MODE=route
 # The fixture routes use scenario-relative component URIs
 # (validator:shared/schema.xsd, xslt:shared/identity-transform.xsl):
 # the 2026-08-31 audit traversal ban rejects any `..` component, so
