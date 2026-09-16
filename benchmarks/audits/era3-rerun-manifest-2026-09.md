@@ -38,6 +38,19 @@ scenario re-runs (m1-only, trivial). If the WRAPPER-ASYM ruling (item
 4) additionally lands node fixture changes before era-3, nothing
 changes here — the scenario is already re-run.
 
+**WRAPPER-ASYM RULING (e_opus, 2026-09-16): RULE-A-MODIFIED.** The
+idle-park is adopted for RSS-window symmetry only; the proposal's
+clock-asymmetry premise was wrong (the M1 wall clock already ends at
+marker observation for every cell — run.sh L1904). R2 implemented:
+both node startup fixtures park after the marker (`stdin.resume()` +
+never-resolving promise) so `time -v` peaks terminate on the harness
+KILL, identical-by-construction with every peer. Node startup cells
+are ADMITTED to era-3 m1 (same table, same columns) with a
+per-cell provenance annotation (V8/libuv heap model differs —
+same-mechanism RSS, not same-allocator). A node startup cell without
+the park would be RSS-column-barred (m1_ms only). Full ruling:
+fleet inbox `e_opus-wrapper-asym-ruling-2026-09-16.md`.
+
 **Every cli Protocol-B arm (t2-json, split-aggregate,
 t2-realistic-eip, xsd, xslt — m2) is invalidated BY CONSTRUCTION**
 (ruling parenthetical): era-2 cli m2 values must never be cited as

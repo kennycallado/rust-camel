@@ -17,10 +17,16 @@
 //   and RSS are captured by the harness from OUTSIDE the process
 //   (single clock, GNU time -v); there is no latency file and no
 //   canonical payload — the marker timing IS the scenario's output.
-// - Exits 0 after the marker. The framework fixtures idle after the
-//   marker until the harness kills them externally; a plain script
-//   has no runtime to keep alive, so it exits — the harness's
-//   post-marker kill is a no-op either way and time-to-marker is
-//   unaffected.
+// - Parks after the marker (wrapper-asym ruling R2, e_opus
+//   2026-09-16): the process stays alive until the harness's
+//   post-marker KILL, so `time -v` sees the same peak-RSS
+//   termination cause (external SIGKILL) as every idle fixture in
+//   the family. Self-exiting handed time -v a different physical
+//   instant (V8/libuv teardown) — a directional RSS bias and a
+//   stdout-flush/exit race. Marker position is unchanged; the M1
+//   wall clock (marker observation) is untouched.
 
 console.log("BENCH_ROUTE_READY");
+
+process.stdin.resume();
+await new Promise(() => {});

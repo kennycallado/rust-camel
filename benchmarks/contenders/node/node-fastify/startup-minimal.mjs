@@ -12,10 +12,14 @@
 //   would skip exactly the framework tax this cell measures.
 // - Then the same route semantics as every contender: the one-shot
 //   route ("timer fires once, immediately") reduced to a single
-//   `BENCH_ROUTE_READY` line on stdout, exactly once, then exit 0.
+// `BENCH_ROUTE_READY` line on stdout, exactly once.
 // - No env contract: this scenario reads no BENCH_* variables —
 //   timing/RSS are captured externally; the marker timing IS the
 //   output.
+// - Parks after the marker (wrapper-asym ruling R2, e_opus
+//   2026-09-16): stay alive until the harness KILL so `time -v`
+//   peaks over the same marker-live window as every peer; see
+//   ../node-native/startup-minimal.mjs header for the rationale.
 
 import Fastify from "fastify";
 
@@ -31,3 +35,6 @@ app.all("/bench", async () => "BENCH_ROUTE_READY");
 await app.ready();
 
 console.log("BENCH_ROUTE_READY");
+
+process.stdin.resume();
+await new Promise(() => {});
