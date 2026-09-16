@@ -22,7 +22,9 @@ use tonic::transport::Channel;
 use tower::Service;
 use tracing::{info, warn};
 
-use crate::config::{BrokerConfig, JmsEndpointConfig, JmsPoolConfig};
+use crate::config::{
+    BrokerConfig, JmsEndpointConfig, JmsPoolConfig, mask_authority_windows, truncate_utf8_safe,
+};
 use crate::consumer::JmsConsumer;
 use crate::health::JmsHealthCheck;
 use crate::producer::JmsProducer;
@@ -935,19 +937,44 @@ impl Service<Exchange> for LazyJmsProducer {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Redact userinfo (username:password@) from a broker URL for safe logging.
-/// Handles URLs like `tcp://user:pass@host:61616` → `tcp://***@host:61616`.
+/// Redact credentials from a broker URL for safe logging. String-based
+/// surgery aligned with the camel-http reference semantics (bd rc-eh49):
+/// [`mask_authority_windows`] masks userinfo in every `//`-window, then
+/// everything from the earliest `?` or `#` is dropped. The sentinels
+/// compose: each distinct introducer character (`?` and/or `#`) that
+/// occurs anywhere in the raw URL appends its matching `?[redacted]` /
+/// `#[redacted]` sentinel in first-occurrence order. The result is capped
+/// at 256 bytes on a UTF-8 char boundary. No URL parser in this
+/// component, so in-place windowed masking is the strictest feasible
+/// handling.
 fn redact_url(url: &str) -> String {
-    // Find the scheme separator (://)
-    if let Some(pos) = url.find("://") {
-        let scheme = &url[..pos + 3]; // includes "://"
-        let rest = &url[pos + 3..];
-        // Find @ in the remainder — everything before @ is userinfo
-        if let Some(at_pos) = rest.find('@') {
-            return format!("{}***@{}", scheme, &rest[at_pos + 1..]);
+    let mut out = mask_authority_windows(url);
+    if let Some(i) = out.find(['?', '#']) {
+        // Compose-both: one sentinel per distinct introducer found in the
+        // raw URL, in first-occurrence order.
+        let query_pos = out.find('?');
+        let fragment_pos = out.find('#');
+        out.truncate(i);
+        // Reserve the sentinel bytes before truncating so the cap never
+        // splits an appended sentinel (e_gpt stage-4).
+        let sentinel_total = match (query_pos, fragment_pos) {
+            (Some(_), Some(_)) => 22,
+            (Some(_), None) | (None, Some(_)) => 11,
+            (None, None) => 0,
+        };
+        if sentinel_total > 0 {
+            truncate_utf8_safe(&mut out, 256 - sentinel_total);
+        }
+        match (query_pos, fragment_pos) {
+            (Some(q), Some(f)) if f < q => out.push_str("#[redacted]?[redacted]"),
+            (Some(_), Some(_)) => out.push_str("?[redacted]#[redacted]"),
+            (Some(_), None) => out.push_str("?[redacted]"),
+            (None, Some(_)) => out.push_str("#[redacted]"),
+            (None, None) => {}
         }
     }
-    url.to_string()
+    truncate_utf8_safe(&mut out, 256);
+    out
 }
 
 pub fn is_bridge_transport_error(err: &CamelError) -> bool {
@@ -971,7 +998,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::config::{BrokerConfig, JmsPoolConfig};
+    use crate::config::{BrokerConfig, JmsPoolConfig, redact_broker_url};
     use std::collections::HashMap;
 
     #[test]
@@ -1848,6 +1875,103 @@ mod tests {
         assert_eq!(
             redact_url("ssl://user:pass@secure-broker:61617"),
             "ssl://***@secure-broker:61617"
+        );
+    }
+
+    /// bd rc-eh49: the earliest `?`/`#` introducer wins; both sentinels
+    /// compose in first-occurrence order when the raw URL carries both
+    /// introducers, and fragment bytes after the cut are dropped with it.
+    #[test]
+    fn redact_url_drops_query_and_fragment() {
+        assert_eq!(
+            redact_url("tcp://broker:61616?user=a#tok=x"),
+            "tcp://broker:61616?[redacted]#[redacted]"
+        );
+    }
+
+    /// bd rc-eh49 compose-both rule: a `#` before `?` flips the sentinel
+    /// order accordingly.
+    #[test]
+    fn redact_url_sentinels_compose_fragment_first() {
+        assert_eq!(
+            redact_url("tcp://broker:61616#tok=x?user=a"),
+            "tcp://broker:61616#[redacted]?[redacted]"
+        );
+    }
+
+    /// bd rc-eh49: a `//` window after the first is scanned too —
+    /// credentials cannot hide behind a benign first window.
+    #[test]
+    fn redact_url_later_window_masked() {
+        assert_eq!(redact_url("tcp://h//user:pass@x/"), "tcp://h//***@x/");
+    }
+
+    /// bd rc-eh49: a slash run after `//` cannot hide userinfo from the
+    /// window scan.
+    #[test]
+    fn redact_url_slash_run_masked() {
+        let redacted = redact_url("tcp:////user:pass@broker:61616");
+        assert!(!redacted.contains("user:pass"), "leaked: {redacted}");
+        assert!(
+            redacted.contains("***@broker:61616"),
+            "masked in place: {redacted}"
+        );
+    }
+
+    /// bd rc-eh49: the old first-`@`-anywhere scan masked through an `@`
+    /// riding the query (`tcp://***@b`); only a window `@` is userinfo.
+    #[test]
+    fn redact_url_at_in_query_not_userinfo_mask() {
+        assert_eq!(
+            redact_url("tcp://broker:61616?q=a@b"),
+            "tcp://broker:61616?[redacted]"
+        );
+    }
+
+    /// bd rc-eh49: the 256-byte cap cuts on a char boundary — a multibyte
+    /// character straddling byte 256 is dropped whole, never split
+    /// mid-encode.
+    #[test]
+    fn redact_url_truncate_multibyte_boundary() {
+        let mut url = String::from("tcp://broker:61616/");
+        url.push_str(&"x".repeat(236)); // 255 ASCII bytes before the multibyte char
+        url.push('日'); // 3 bytes straddling the 256-byte cap
+        url.push_str(&"y".repeat(50)); // push the total past 300 bytes
+        assert!(url.len() > 300);
+        let redacted = redact_url(&url);
+        assert!(redacted.len() <= 256, "len={}", redacted.len());
+        assert!(std::str::from_utf8(redacted.as_bytes()).is_ok());
+        assert!(
+            !redacted.contains('日'),
+            "straddling char dropped whole: {redacted}"
+        );
+    }
+
+    /// e_gpt stage-4: the 256-byte cap must not split an appended sentinel.
+    /// The base is truncated at `256 - sentinel_len` BEFORE the sentinel is
+    /// appended, so the sentinel always renders intact and the total stays
+    /// ≤ 256. Covers both jms redactors: `redact_url` (compose sentinels)
+    /// and `redact_broker_url` (fragment sentinel over kept query content).
+    #[test]
+    fn redact_url_keeps_sentinels_intact_under_256_cap() {
+        // `redact_url`: base (masked, cut at the `?`) is 255 bytes, so byte
+        // 256 lands inside the appended `?[redacted]` (starts at 255) pre-fix.
+        let url = format!("tcp://{}?x=1", "a".repeat(250));
+        let redacted = redact_url(&url);
+        assert!(redacted.len() <= 256, "len={}", redacted.len());
+        assert!(
+            redacted.ends_with("?[redacted]"),
+            "redact_url sentinel must render intact: {redacted}"
+        );
+
+        // `redact_broker_url`: base + kept query is 252 bytes, so byte 256
+        // lands inside the appended `#[redacted]` (starts at 252) pre-fix.
+        let broker = format!("tcp://{}?keep=1#frag", "a".repeat(240));
+        let redacted = redact_broker_url(&broker);
+        assert!(redacted.len() <= 256, "len={}", redacted.len());
+        assert!(
+            redacted.ends_with("#[redacted]"),
+            "redact_broker_url sentinel must render intact: {redacted}"
         );
     }
 

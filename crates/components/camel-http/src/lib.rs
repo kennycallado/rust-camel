@@ -2885,32 +2885,70 @@ fn mask_base_url_userinfo(raw: &str) -> String {
 }
 
 /// Redact credentials from a URL before it reaches logs or error values
-/// (ADR-0051 redact-by-construction). Masks userinfo (`user:pass@`) and the
-/// query string (which commonly carries API keys/tokens). Host and path stay
-/// visible for diagnosability. Fail-closed: when the parse fails and the
-/// `//`-authority window contains `@`, only the `[redacted]` sentinel is
-/// returned; otherwise the raw string stays visible with the query dropped
-/// and the result capped at 256 bytes on a UTF-8 char boundary.
+/// (ADR-0051 redact-by-construction). Masks userinfo (`user:pass@`) and
+/// the query string (which commonly carries API keys/tokens). Host and
+/// path stay visible for diagnosability. Fragments are never echoed: a
+/// fragment (OAuth2 callback tokens such as `#access_token=...`) is
+/// dropped and replaced with the `#[redacted]` sentinel in both the
+/// parsed arm and the unparseable arm. Fail-closed: when the parse fails
+/// and the `//`-authority window contains `@`, only the `[redacted]`
+/// sentinel is returned. Every `//` window is scanned: each window starts
+/// after the `//` plus any run of extra slashes (so evaders like
+/// `scheme:////user:pass@evil/` cannot hide a `@` behind a slash run) and
+/// ends at the next `/`, `?`, or `#`; scanning all windows keeps later
+/// `//user:pass@` substrings from hiding behind a benign first window.
+/// The same window mask is applied to the parsed arm's rendered string
+/// (`mask_rendered_windows`), because rust-url can park later-window
+/// userinfo bytes in the path (`https://h//user:pass@evil/`).
+/// Everything from the earliest `?` or `#` is dropped; the sentinels
+/// compose: each distinct introducer character (`?` and/or `#`) that
+/// occurs anywhere in the raw string appends its matching
+/// `?[redacted]` / `#[redacted]` sentinel in first-occurrence order, in
+/// both arms. Otherwise the raw string stays visible, and the result is
+/// capped at 256 bytes on a UTF-8 char boundary.
 pub(crate) fn redact_url_for_diagnostics(raw: &str) -> String {
     const MAX_URL_LOG_LEN: usize = 256;
     match url::Url::parse(raw) {
         Ok(mut u) => {
+            // Fail closed when an authority marker was accepted but no
+            // host was stored: userinfo-shaped bytes can hide in the path
+            // behind the marker, and empty-host schemes (`file:///us@r/x`,
+            // `unix:///@socket`) can put a `@` in that window too. Such
+            // inputs are sentineled wholesale — deliberate fail-closed
+            // over-redaction per ADR-0051.
+            if !u.cannot_be_a_base() && u.host_str().is_none() && window_has_at_sign(raw) {
+                return "[redacted]".to_string();
+            }
             if !u.username().is_empty() || u.password().is_some() {
                 let _ = u.set_username("***");
                 let _ = u.set_password(None);
             }
-            if u.query().is_some() {
-                u.set_query(None);
-                // Mark that a query was present without echoing it.
-                let mut s = u.to_string();
-                if let Some(stripped) = s.strip_suffix('?') {
-                    s = stripped.to_string();
-                }
-                s.push_str("?[redacted]");
-                truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN);
-                return s;
-            }
+            let had_query = u.query().is_some();
+            let had_fragment = u.fragment().is_some();
+            u.set_query(None);
+            u.set_fragment(None);
             let mut s = u.to_string();
+            while s.ends_with('?') || s.ends_with('#') {
+                s.pop();
+            }
+            // The parser can park later-window userinfo bytes in the path
+            // (`https://h//user:pass@evil/`); the accessor mask above only
+            // covers the real authority. Apply the same window surgery the
+            // string-based redactors use, before the sentinels are
+            // appended.
+            let mut s = mask_rendered_windows(&s);
+            // Reserve the sentinel bytes before truncating so the cap never
+            // splits an appended sentinel (e_gpt stage-4).
+            let sentinel_total = usize::from(had_query) * 11 + usize::from(had_fragment) * 11;
+            if sentinel_total > 0 {
+                truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN - sentinel_total);
+            }
+            if had_query {
+                s.push_str("?[redacted]");
+            }
+            if had_fragment {
+                s.push_str("#[redacted]");
+            }
             truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN);
             s
         }
@@ -2918,23 +2956,92 @@ pub(crate) fn redact_url_for_diagnostics(raw: &str) -> String {
             // Fail closed: an unparseable string with `@` inside its
             // authority window may carry credentials the parser never
             // validated, so nothing of it is rendered.
-            if let Some(start) = raw.find("//").map(|idx| idx + 2) {
-                let end = raw[start..]
-                    .find(['/', '?', '#'])
-                    .map_or(raw.len(), |offset| start + offset);
-                if raw[start..end].contains('@') {
-                    return "[redacted]".to_string();
-                }
+            if window_has_at_sign(raw) {
+                return "[redacted]".to_string();
             }
             let mut s = raw.to_string();
-            if let Some(query_start) = raw.find('?') {
-                s.truncate(query_start);
-                s.push_str("?[redacted]");
+            if let Some(i) = raw.find(['?', '#']) {
+                // Compose-both: one sentinel per distinct introducer found
+                // in the raw string, in first-occurrence order.
+                let query_pos = raw.find('?');
+                let fragment_pos = raw.find('#');
+                s.truncate(i);
+                // Reserve the sentinel bytes before truncating so the cap
+                // never splits an appended sentinel (e_gpt stage-4).
+                let sentinel_total = match (query_pos, fragment_pos) {
+                    (Some(_), Some(_)) => 22,
+                    (Some(_), None) | (None, Some(_)) => 11,
+                    (None, None) => 0,
+                };
+                if sentinel_total > 0 {
+                    truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN - sentinel_total);
+                }
+                match (query_pos, fragment_pos) {
+                    (Some(q), Some(f)) if f < q => s.push_str("#[redacted]?[redacted]"),
+                    (Some(_), Some(_)) => s.push_str("?[redacted]#[redacted]"),
+                    (Some(_), None) => s.push_str("?[redacted]"),
+                    (None, Some(_)) => s.push_str("#[redacted]"),
+                    (None, None) => {}
+                }
             }
             truncate_utf8_safe(&mut s, MAX_URL_LOG_LEN);
             s
         }
     }
+}
+
+/// Window-masking surgery on an already-rendered URL string, mirroring the
+/// string-based redactors in camel-config and camel-jms (cross-crate
+/// sharing is deliberately avoided): collect every `//` window — each
+/// starts after the `//` plus any run of extra slashes and ends at the
+/// next `/`, `?`, or `#` — dedup windows that share one slash run, and
+/// replace the bytes from window start through the LAST `@` with `***`, in
+/// reverse offset order (over-masking is safe, under-masking is not).
+/// Idempotent: an already-masked `***@host` window rewrites to itself.
+fn mask_rendered_windows(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = s.to_string();
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    for (idx, _) in s.match_indices("//") {
+        let mut start = idx + 2;
+        while bytes.get(start) == Some(&b'/') {
+            start += 1;
+        }
+        let end = s[start..]
+            .find(['/', '?', '#'])
+            .map_or(s.len(), |offset| start + offset);
+        windows.push((start, end));
+    }
+    windows.sort_unstable();
+    windows.dedup();
+    for (start, end) in windows.into_iter().rev() {
+        if let Some(at) = out[start..end].rfind('@') {
+            out.replace_range(start..start + at, "***");
+        }
+    }
+    out
+}
+
+/// Whether a `@` appears in any `//`-authority-style window of `raw`.
+/// Each window starts after a `//` plus any run of extra slashes (evaders
+/// hide a `@` behind `scheme:////...`) and ends at the next `/`, `?`, or
+/// `#`. Every `//` occurrence is scanned, so credentials cannot hide in a
+/// later window behind a benign first one (`http://h/a//user:pass@e/`).
+fn window_has_at_sign(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    for (idx, _) in raw.match_indices("//") {
+        let mut start = idx + 2;
+        while bytes.get(start) == Some(&b'/') {
+            start += 1;
+        }
+        let end = raw[start..]
+            .find(['/', '?', '#'])
+            .map_or(raw.len(), |offset| start + offset);
+        if raw[start..end].contains('@') {
+            return true;
+        }
+    }
+    false
 }
 
 /// Truncate `s` to at most `max` bytes, walking the cut down to the nearest
@@ -3707,6 +3814,234 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn redact_url_drops_oauth2_fragment_access_token() {
+        let redacted =
+            redact_url_for_diagnostics("https://app.example/cb#access_token=SECRET&state=x");
+        assert!(
+            !redacted.contains("SECRET"),
+            "fragment access token leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("access_token"),
+            "fragment key leaked: {redacted}"
+        );
+        assert!(
+            redacted.ends_with("#[redacted]"),
+            "fragment must be replaced with the sentinel: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_drops_oauth2_fragment_id_token() {
+        let redacted =
+            redact_url_for_diagnostics("https://app.example/cb#id_token=eyJhbG.SECRET.SIG&state=y");
+        assert!(
+            !redacted.contains("eyJhbG"),
+            "id token payload leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("id_token"),
+            "id token key leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("SECRET"),
+            "id token signature leaked: {redacted}"
+        );
+        assert!(
+            redacted.ends_with("#[redacted]"),
+            "fragment must be replaced with the sentinel: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_drops_generic_fragment_kv() {
+        let redacted = redact_url_for_diagnostics("https://h.example/p/session#session=abc123");
+        assert!(
+            !redacted.contains("abc123"),
+            "fragment value leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("session="),
+            "fragment key leaked: {redacted}"
+        );
+        assert!(
+            redacted.contains("#[redacted]"),
+            "fragment must be replaced with the sentinel: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_query_and_fragment_sentinels_compose() {
+        let redacted = redact_url_for_diagnostics("https://h.example/p?a=1#access_token=x");
+        assert_eq!(
+            redacted, "https://h.example/p?[redacted]#[redacted]",
+            "query and fragment sentinels must compose: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_drops_benign_fragment_too() {
+        // Fragments never reach the wire, so nothing in them is diagnostic:
+        // strictest-wins drops benign fragments too.
+        let redacted = redact_url_for_diagnostics("https://h.example/docs#section-3");
+        assert_eq!(
+            redacted, "https://h.example/docs#[redacted]",
+            "benign fragment must still be dropped: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_unparseable_fragment_credentials_dropped() {
+        let raw = "ht tps://app.example/cb#access_token=SECRET";
+        assert!(
+            url::Url::parse(raw).is_err(),
+            "fixture must be unparseable: {raw}"
+        );
+        let redacted = redact_url_for_diagnostics(raw);
+        assert!(
+            !redacted.contains("SECRET"),
+            "unparseable fragment token leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("access_token"),
+            "unparseable fragment bytes leaked: {redacted}"
+        );
+        assert!(
+            redacted.contains("#[redacted]"),
+            "unparseable fragment must end in the sentinel: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_double_slash_evader_sentinel() {
+        // url::Url::parse accepts this (empty host allowed for non-special
+        // schemes), parking userinfo-shaped bytes in the opaque path.
+        let redacted = redact_url_for_diagnostics("scheme:////user:pass@evil/");
+        assert_eq!(
+            redacted, "[redacted]",
+            "double-slash evader must fail closed: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_triple_slash_evader_sentinel() {
+        let redacted = redact_url_for_diagnostics("scheme:///user:pass@evil/");
+        assert_eq!(
+            redacted, "[redacted]",
+            "triple-slash evader must fail closed: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_bare_protocol_relative_userinfo_sentinel() {
+        let redacted = redact_url_for_diagnostics("//user:pass@evil");
+        assert_eq!(
+            redacted, "[redacted]",
+            "protocol-relative userinfo must fail closed: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_empty_host_userinfo_sentinel() {
+        // url::Url::parse rejects this with EmptyHost; the failure arm must
+        // fail closed without panicking on the empty host.
+        let redacted = redact_url_for_diagnostics("scheme://user@");
+        assert_eq!(
+            redacted, "[redacted]",
+            "empty-host userinfo must fail closed: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_unparseable_slash_run_evader_sentinel() {
+        // Unlike `scheme:////user:pass@evil/` (parses Ok, host=None, and
+        // hits the parsed-arm guard), the space in the scheme forces the
+        // parse to fail, driving the failure arm's slash-run skip directly.
+        let raw = "schem e:////user:pass@evil/";
+        assert!(
+            url::Url::parse(raw).is_err(),
+            "fixture must be unparseable: {raw}"
+        );
+        let redacted = redact_url_for_diagnostics(raw);
+        assert_eq!(
+            redacted, "[redacted]",
+            "unparseable slash-run evader must fail closed: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_unparseable_later_window_userinfo_sentinel() {
+        // The first `//` window ("ho st") carries no `@`, but a later
+        // `//user:pass@evil/` window does. The scan must consider every
+        // `//` window, not just the first, or the credentials echo.
+        let raw = "http://ho st/a//user:pass@evil/";
+        assert!(
+            url::Url::parse(raw).is_err(),
+            "fixture must be unparseable: {raw}"
+        );
+        let redacted = redact_url_for_diagnostics(raw);
+        assert_eq!(
+            redacted, "[redacted]",
+            "userinfo in a later // window must fail closed: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_parsed_later_window_userinfo_masked() {
+        // rust-url accepts this with host `h` and parks the userinfo bytes
+        // in the path, so the accessor mask never fires. The parsed arm
+        // must apply the same window-masking surgery as the string-based
+        // redactors or the later window renders verbatim.
+        let redacted = redact_url_for_diagnostics("https://h//user:pass@evil/");
+        assert!(
+            !redacted.contains("user:pass"),
+            "parsed later-window userinfo leaked: {redacted}"
+        );
+        assert!(
+            redacted.contains("h//***@evil/"),
+            "later window must be masked in place: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_parsed_window_mask_idempotent_with_real_userinfo() {
+        // Real userinfo is masked by the accessor step; the window surgery
+        // on the rendered string must not double-mask it (`***@h` stays),
+        // and the later `x@y` path window must still be masked.
+        let redacted = redact_url_for_diagnostics("https://user:pass@h//x@y/");
+        assert!(
+            redacted.contains("***@h"),
+            "accessor mask must survive the window surgery: {redacted}"
+        );
+        assert!(
+            !redacted.contains("user:pass"),
+            "real userinfo leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("x@y"),
+            "later path window leaked: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_backslash_authority_ruling() {
+        // Probe outcome: url::Url::parse accepts this input. http is a
+        // special scheme, so backslashes normalize to slashes and the
+        // credentials land in real userinfo
+        // (`http://user:pass@evil/path`). The parsed arm must mask them
+        // like any other userinfo.
+        let redacted = redact_url_for_diagnostics("http:\\\\user:pass@evil\\path");
+        assert!(
+            redacted.contains("***@"),
+            "backslash authority must be userinfo-masked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("user:pass"),
+            "backslash authority must not leak credentials: {redacted}"
+        );
+    }
+
+    #[test]
     fn redact_url_masks_userinfo_and_query() {
         let redacted =
             redact_url_for_diagnostics("http://user:secretpass@internal.example/api?token=abc123");
@@ -3757,6 +4092,41 @@ mod tests {
         let long = "x".repeat(1000);
         let redacted = redact_url_for_diagnostics(&long);
         assert_eq!(redacted.len(), 256, "unparseable URL must be truncated");
+    }
+
+    /// e_gpt stage-4: the 256-byte cap must not split an appended sentinel.
+    /// The base is truncated at `256 - sentinel_len` BEFORE the sentinel is
+    /// appended, so the sentinel always renders intact and the total stays
+    /// ≤ 256. Both arms (parsed and unparseable) are exercised.
+    #[test]
+    fn redact_url_keeps_sentinels_intact_under_256_cap() {
+        // Parsed arm: base (scheme+host+path) is 250 bytes, so byte 256
+        // lands inside the appended `?[redacted]` (starts at 250) pre-fix.
+        let parsed = format!("https://example.com/{}?x=1", "a".repeat(230));
+        assert!(
+            url::Url::parse(&parsed).is_ok(),
+            "fixture must parse: {parsed}"
+        );
+        let redacted = redact_url_for_diagnostics(&parsed);
+        assert!(redacted.len() <= 256, "len={}", redacted.len());
+        assert!(
+            redacted.ends_with("?[redacted]"),
+            "parsed-arm sentinel must render intact: {redacted}"
+        );
+
+        // Unparseable arm: base is 249 bytes, so byte 256 lands inside the
+        // appended `?[redacted]` (starts at 249) pre-fix.
+        let unparseable = format!("http://{} ?x=1", "a".repeat(240));
+        assert!(
+            url::Url::parse(&unparseable).is_err(),
+            "fixture must not parse: {unparseable}"
+        );
+        let redacted = redact_url_for_diagnostics(&unparseable);
+        assert!(redacted.len() <= 256, "len={}", redacted.len());
+        assert!(
+            redacted.ends_with("?[redacted]"),
+            "unparseable-arm sentinel must render intact: {redacted}"
+        );
     }
 
     #[test]
@@ -3822,6 +4192,36 @@ mod tests {
             redacted.len() <= 256,
             "long unparseable query must be capped: {} bytes",
             redacted.len()
+        );
+    }
+
+    #[test]
+    fn redact_url_unparseable_sentinels_compose_both() {
+        // Compose-both rule: one sentinel per distinct introducer found in
+        // the raw string, in first-occurrence order.
+        let raw = "ht tp://h.example/p?a=1#tok=x";
+        assert!(
+            url::Url::parse(raw).is_err(),
+            "fixture must be unparseable: {raw}"
+        );
+        assert_eq!(
+            redact_url_for_diagnostics(raw),
+            "ht tp://h.example/p?[redacted]#[redacted]",
+            "query and fragment sentinels must compose: {raw}"
+        );
+    }
+
+    #[test]
+    fn redact_url_unparseable_sentinels_compose_fragment_first() {
+        let raw = "ht tp://h.example/p#tok=x?a=1";
+        assert!(
+            url::Url::parse(raw).is_err(),
+            "fixture must be unparseable: {raw}"
+        );
+        assert_eq!(
+            redact_url_for_diagnostics(raw),
+            "ht tp://h.example/p#[redacted]?[redacted]",
+            "sentinels must follow the introducers' first-occurrence order: {raw}"
         );
     }
 

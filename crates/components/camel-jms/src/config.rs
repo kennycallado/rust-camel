@@ -392,11 +392,21 @@ pub struct BrokerConfig {
 }
 
 /// Redact credentials embedded in a JMS broker URL (audit 2026-08-31,
-/// F5-3). ActiveMQ-style URLs routinely carry credentials:
+/// F5-3; windowed alignment bd rc-eh49). ActiveMQ-style URLs routinely
+/// carry credentials:
 /// `failover:(tcp://host:61616)?jms.userName=admin&jms.password=secret` or
-/// `tcp://user:pass@host`. Masks userinfo before '@' and drops query
-/// parameters whose key mentions user/password/secret/credential/token.
-/// String-based (no url crate dep in this component).
+/// `tcp://user:pass@host`. Userinfo is masked in place as `***@` through
+/// the LAST `@` of every `//`-window (a window starts after the `//` plus
+/// any run of extra slashes and ends at the next `/`, `?`, or `#`) — the
+/// old whole-string `split_once('@')` misfired when an `@` rode the query
+/// or fragment. BrokerConfig Debug retains per-key query redaction (not
+/// whole-query drop) because ActiveMQ failover URIs encode non-secret
+/// transport policy in query params that are the sole diagnostic value of
+/// logging the broker URL; secret keys are redacted by the substring
+/// allowlist. Fragments are never echoed: everything from the first `#`
+/// is dropped and replaced with the `#[redacted]` sentinel. The result is
+/// capped at 256 bytes on a UTF-8 char boundary. String-based (no url
+/// crate dep in this component).
 pub(crate) fn redact_broker_url(raw: &str) -> String {
     let sensitive = [
         "password",
@@ -407,22 +417,10 @@ pub(crate) fn redact_broker_url(raw: &str) -> String {
         "username",
         "user",
     ];
-    // 1) Mask userinfo in scheme://user:pass@host positions.
-    let after_userinfo = match raw.split_once('@') {
-        Some((before, after)) => {
-            // Only mask when the '@' is in an authority position (after "://").
-            match before.rfind("://") {
-                Some(idx) => {
-                    let scheme_end = idx + 3;
-                    format!("{}***@{}", &raw[..scheme_end], after)
-                }
-                None => raw.to_string(),
-            }
-        }
-        None => raw.to_string(),
-    };
+    // 1) Mask userinfo in every `//`-window (see [`mask_authority_windows`]).
+    let after_userinfo = mask_authority_windows(raw);
     // 2) Redact sensitive query params, keep the rest for diagnosability.
-    match after_userinfo.split_once('?') {
+    let mut out = match after_userinfo.split_once('?') {
         Some((base, query)) => {
             let redacted: Vec<String> = query
                 .split('&')
@@ -439,7 +437,68 @@ pub(crate) fn redact_broker_url(raw: &str) -> String {
             format!("{base}?{}", redacted.join("&"))
         }
         None => after_userinfo,
+    };
+    // 3) Fragments are never echoed. Reserve the sentinel bytes before
+    // truncating so the cap never splits the appended `#[redacted]`
+    // (e_gpt stage-4); the kept query content is part of the base.
+    if let Some(i) = out.find('#') {
+        out.truncate(i);
+        truncate_utf8_safe(&mut out, 256 - 11);
+        out.push_str("#[redacted]");
     }
+    truncate_utf8_safe(&mut out, 256);
+    out
+}
+
+/// Shared with `component.rs` (`redact_url`): return `input` with userinfo
+/// masked in every `//` window. A window starts after a `//` plus any run
+/// of extra slashes and ends at the next `/`, `?`, or `#`; a window
+/// containing `@` carries userinfo, and the bytes from window start
+/// through the LAST `@` are replaced with `***` (over-masking is safe,
+/// under-masking is not). Windows are collected on the input and masked in
+/// reverse offset order (with duplicates from one slash run deduped) so an
+/// edit never shifts a yet-to-be-processed window. Idempotent: an
+/// already-masked `***@host` window rewrites to itself. `pub(crate)` lets
+/// both redaction call sites share one implementation without exposing
+/// anything outside the crate.
+pub(crate) fn mask_authority_windows(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = input.to_string();
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    for (idx, _) in input.match_indices("//") {
+        let mut start = idx + 2;
+        while bytes.get(start) == Some(&b'/') {
+            start += 1;
+        }
+        let end = input[start..]
+            .find(['/', '?', '#'])
+            .map_or(input.len(), |offset| start + offset);
+        windows.push((start, end));
+    }
+    windows.sort_unstable();
+    windows.dedup();
+    for (start, end) in windows.into_iter().rev() {
+        if let Some(at) = out[start..end].rfind('@') {
+            out.replace_range(start..start + at, "***");
+        }
+    }
+    out
+}
+
+/// Shared with `component.rs` (`redact_url`): truncate `s` to at most `max`
+/// bytes, walking the cut down to the nearest UTF-8 char boundary so a
+/// multibyte character straddling the cap cannot panic. `pub(crate)` lets
+/// both redaction call sites share one implementation without exposing
+/// anything outside the crate.
+pub(crate) fn truncate_utf8_safe(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut cut = max;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
 }
 
 impl std::fmt::Debug for BrokerConfig {
@@ -675,6 +734,93 @@ mod tests {
             query,
             "jms.userName=<redacted>&jms.password=<redacted>&keepAlive=true"
         );
+    }
+
+    /// bd rc-eh49 exact pin: an `@` riding the query is NOT userinfo — the
+    /// URL must pass through byte-for-byte. The old whole-string
+    /// `split_once('@')` mangled this to `failover:(tcp://***@b`.
+    #[test]
+    fn redact_broker_url_query_at_no_misfire() {
+        assert_eq!(
+            redact_broker_url("failover:(tcp://h:61616)?x=a@b"),
+            "failover:(tcp://h:61616)?x=a@b"
+        );
+    }
+
+    /// bd rc-eh49 exact pin: a slash run after `//` is preserved
+    /// byte-for-byte and the windowed mask composes with the per-key query
+    /// allowlist. The old whole-string scan rewrote from the scheme's own
+    /// `://` and swallowed the extra slashes.
+    #[test]
+    fn redact_exact_slash_run_window_composition() {
+        assert_eq!(
+            redact_broker_url("tcp:////user:pass@h:61616?keepAlive=true"),
+            "tcp:////***@h:61616?keepAlive=true"
+        );
+    }
+
+    /// bd rc-eh49 exact pin: the window mask consumes through the LAST `@`
+    /// of the window, so an `@` embedded in the userinfo cannot keep a
+    /// spoofable prefix alive (the old first-`@` scan left `a@` visible).
+    #[test]
+    fn redact_exact_last_at_in_window() {
+        assert_eq!(
+            redact_broker_url("tcp://u:p@a@h:61616"),
+            "tcp://***@h:61616"
+        );
+    }
+
+    /// bd rc-eh49: the 256-byte cap cuts on a char boundary — a multibyte
+    /// character straddling byte 256 is dropped whole, never split
+    /// mid-encode.
+    #[test]
+    fn redact_broker_url_truncate_multibyte_boundary() {
+        let mut url = String::from("tcp://broker:61616/");
+        url.push_str(&"x".repeat(236)); // 255 ASCII bytes before the multibyte char
+        url.push('日'); // 3 bytes straddling the 256-byte cap
+        url.push_str(&"y".repeat(50)); // push the total past 300 bytes
+        assert!(url.len() > 300);
+        let redacted = redact_broker_url(&url);
+        assert!(redacted.len() <= 256, "len={}", redacted.len());
+        assert!(std::str::from_utf8(redacted.as_bytes()).is_ok());
+        assert!(
+            !redacted.contains('日'),
+            "straddling char dropped whole: {redacted}"
+        );
+    }
+
+    /// bd rc-eh49: a `//` window after the first is scanned too; the
+    /// benign query stays visible per the broker allowlist exception.
+    #[test]
+    fn redact_broker_url_later_window_masked() {
+        assert_eq!(
+            redact_broker_url("tcp://h//user:pass@x/?keepAlive=true"),
+            "tcp://h//***@x/?keepAlive=true"
+        );
+    }
+
+    /// bd rc-eh49: fragments are never echoed — everything from the first
+    /// `#` is dropped and the `#[redacted]` sentinel appended; processed
+    /// query params stay visible.
+    #[test]
+    fn redact_broker_url_drops_fragment() {
+        assert_eq!(
+            redact_broker_url("tcp://h:61616?keepAlive=true#tok=x"),
+            "tcp://h:61616?keepAlive=true#[redacted]"
+        );
+    }
+
+    /// bd rc-eh49: broker URLs are capped at 256 bytes on a UTF-8 char
+    /// boundary.
+    #[test]
+    fn redact_broker_url_truncates() {
+        let mut url = format!("tcp://broker:61616/{}", "x".repeat(300));
+        url.push('日');
+        url.push_str(&"tail".repeat(20));
+        assert!(url.len() > 300);
+        let redacted = redact_broker_url(&url);
+        assert!(redacted.len() <= 256, "len={}", redacted.len());
+        assert!(redacted.starts_with("tcp://broker:61616/"));
     }
 
     #[test]

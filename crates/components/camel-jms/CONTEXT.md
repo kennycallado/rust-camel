@@ -50,7 +50,9 @@ directory.
 `<redacted>`. `BridgeSlot` also implements `Debug` manually and omits its
 `credentials` field. `LazyJmsProducer` does not implement `Debug`. The bridge
 process receives the username as plain text and the password through
-`Redacted::new`. `redact_url` removes URL user information before logging.
+`Redacted::new`. `redact_url` masks URL user information as `***@`, drops
+the query and fragment behind `?[redacted]` / `#[redacted]` sentinels, and
+caps the output at 256 bytes before logging.
 Tests `broker_config_debug_redacts_password` and
 `redact_url_strips_userinfo_with_password` verify these properties.
 

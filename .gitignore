@@ -11,10 +11,13 @@ docs/*
 !docs/testing
 !docs/testing/*.md
 !docs/AGENTS.md
+!docs/audits
 !docs/src/
 !docs/src/**
 docs/adr/*
 !docs/adr/*.md
+docs/audits/*
+!docs/audits/*.md
 bridges/*/build/
 bridges/*/.gradle/
 bridges/*/.gradle-docker-cache/

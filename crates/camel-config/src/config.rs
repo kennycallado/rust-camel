@@ -1355,6 +1355,13 @@ mod virtual_store_config_tests;
 #[cfg(test)]
 #[path = "config_tests/virtual_store_file_parity_tests.rs"]
 mod virtual_store_file_parity_tests;
+
+/// bd rc-eh49 redaction alignment: `redact_url` string surgery must match
+/// the camel-http reference semantics — every-`//`-window userinfo mask,
+/// earliest `?`/`#` sentinel drop, 256-byte UTF-8-safe cap.
+#[cfg(test)]
+#[path = "config_tests/url_redaction_tests.rs"]
+mod url_redaction_tests;
 impl Default for CacheRepoConfig {
     fn default() -> Self {
         Self {
@@ -1383,18 +1390,86 @@ impl Default for CacheRepoConfig {
     }
 }
 
-/// Replace URL userinfo with the literal `***`, keeping scheme, host, port,
-/// path, and query verbatim (`redis://user:secret@h:6379/0` →
-/// `redis://***@h:6379/0`). URLs without userinfo pass through unchanged.
-/// An `@` after the first `/` (path or query data) is not userinfo and stays.
+/// Redact credentials from a URL string for the `CacheRepoConfig` Debug
+/// surface. String-based surgery aligned with the camel-http reference
+/// (`redact_url_for_diagnostics`, bd rc-eh49): every `//` occurrence opens
+/// a window that starts after the `//` plus any run of extra slashes and
+/// ends at the next `/`, `?`, or `#`; a window containing `@` carries
+/// userinfo, and the bytes from window start through the LAST `@` are
+/// masked in place as `***@` (over-masking is safe, under-masking is not).
+/// Every window is scanned, so credentials cannot hide in a later window
+/// behind a benign first one. Everything from the earliest `?` or `#` is
+/// dropped; the sentinels compose: each distinct introducer character
+/// (`?` and/or `#`) that occurs anywhere in the URL appends its matching
+/// `?[redacted]` / `#[redacted]` sentinel in first-occurrence order —
+/// queries and fragments routinely carry tokens. The result is capped at
+/// 256 bytes on a UTF-8 char boundary. Unlike the http path there is no
+/// URL parser here, so in-place windowed masking is the strictest feasible
+/// handling.
 fn redact_url(url: &str) -> String {
-    if let Some((scheme, rest)) = url.split_once("://")
-        && let Some(at) = rest.find('@')
-        && !rest[..at].contains('/')
-    {
-        return format!("{scheme}://***@{}", &rest[at + 1..]);
+    let mut out = url.to_string();
+    let bytes = url.as_bytes();
+    // Collect windows on the input, then mask in reverse offset order so an
+    // edit never shifts a yet-to-be-processed window. `//` occurrences inside
+    // one slash run yield equal ranges — dedup so each region is masked once.
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    for (idx, _) in url.match_indices("//") {
+        let mut start = idx + 2;
+        while bytes.get(start) == Some(&b'/') {
+            start += 1;
+        }
+        let end = url[start..]
+            .find(['/', '?', '#'])
+            .map_or(url.len(), |offset| start + offset);
+        windows.push((start, end));
     }
-    url.to_string()
+    windows.sort_unstable();
+    windows.dedup();
+    for (start, end) in windows.into_iter().rev() {
+        if let Some(at) = out[start..end].rfind('@') {
+            out.replace_range(start..start + at, "***");
+        }
+    }
+    if let Some(i) = out.find(['?', '#']) {
+        // Compose-both: one sentinel per distinct introducer found in the
+        // raw URL, in first-occurrence order.
+        let query_pos = out.find('?');
+        let fragment_pos = out.find('#');
+        out.truncate(i);
+        // Reserve the sentinel bytes before truncating so the cap never
+        // splits an appended sentinel (e_gpt stage-4).
+        let sentinel_total = match (query_pos, fragment_pos) {
+            (Some(_), Some(_)) => 22,
+            (Some(_), None) | (None, Some(_)) => 11,
+            (None, None) => 0,
+        };
+        if sentinel_total > 0 {
+            truncate_utf8_safe(&mut out, 256 - sentinel_total);
+        }
+        match (query_pos, fragment_pos) {
+            (Some(q), Some(f)) if f < q => out.push_str("#[redacted]?[redacted]"),
+            (Some(_), Some(_)) => out.push_str("?[redacted]#[redacted]"),
+            (Some(_), None) => out.push_str("?[redacted]"),
+            (None, Some(_)) => out.push_str("#[redacted]"),
+            (None, None) => {}
+        }
+    }
+    truncate_utf8_safe(&mut out, 256);
+    out
+}
+
+/// Truncate `s` to at most `max` bytes, walking the cut down to the nearest
+/// UTF-8 char boundary so a multibyte character straddling the cap cannot
+/// panic.
+fn truncate_utf8_safe(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut cut = max;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
 }
 
 /// Hand-written redacting `Debug`: URL userinfo is replaced by `***` and the
