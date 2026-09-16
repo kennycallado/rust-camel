@@ -1,5 +1,9 @@
 //! Tests for the disk-payload offload decorator, split from
 //! `disk_offload.rs` to keep the production file focused.
+//!
+//! Owns the shared fixtures (tuning constants, builders, WARN capture);
+//! the sibling [`super::disk_offload_reclaim_tests`] module reuses them
+//! for the eager-reclaim behavior tests.
 
 use super::*;
 use crate::cache::MemoryCacheRepository;
@@ -9,11 +13,11 @@ use std::path::Path;
 use tempfile::tempdir;
 
 /// Standard test tuning: 168h retention, 1h sweep, 24h fabricated TTL.
-const RETENTION: Duration = Duration::from_secs(168 * 3600);
-const SWEEP: Duration = Duration::from_secs(3600);
-const MAX_TTL: Duration = Duration::from_secs(24 * 3600);
+pub(super) const RETENTION: Duration = Duration::from_secs(168 * 3600);
+pub(super) const SWEEP: Duration = Duration::from_secs(3600);
+pub(super) const MAX_TTL: Duration = Duration::from_secs(24 * 3600);
 
-fn entry(bytes: Vec<u8>, content_type: ContentType) -> CacheEntry {
+pub(super) fn entry(bytes: Vec<u8>, content_type: ContentType) -> CacheEntry {
     CacheEntry {
         bytes,
         payload_path: None,
@@ -22,15 +26,15 @@ fn entry(bytes: Vec<u8>, content_type: ContentType) -> CacheEntry {
     }
 }
 
-fn inner_repo() -> Arc<MemoryCacheRepository> {
+pub(super) fn inner_repo() -> Arc<MemoryCacheRepository> {
     Arc::new(MemoryCacheRepository::new("test", 100))
 }
 
-fn fixed_clock(at: SystemTime) -> OffloadClock {
+pub(super) fn fixed_clock(at: SystemTime) -> OffloadClock {
     Arc::new(move || at)
 }
 
-fn new_repo(
+pub(super) fn new_repo(
     inner: Arc<MemoryCacheRepository>,
     dir: PathBuf,
     clock: OffloadClock,
@@ -39,7 +43,7 @@ fn new_repo(
 }
 
 /// [`new_repo`] over any backend (redb stands in for prefix tests).
-fn new_repo_dyn(
+pub(super) fn new_repo_dyn(
     inner: Arc<dyn CacheRepository>,
     dir: PathBuf,
     clock: OffloadClock,
@@ -56,7 +60,7 @@ fn new_repo_dyn(
 }
 
 /// All file names currently in `dir`.
-fn dir_names(dir: &Path) -> Vec<String> {
+pub(super) fn dir_names(dir: &Path) -> Vec<String> {
     std::fs::read_dir(dir)
         .expect("read_dir")
         .map(|e| {
@@ -112,7 +116,7 @@ where
 /// Uses `set_default` (guard-scoped, same thread-local mechanism as
 /// `tracing::subscriber::with_default`) because a `with_default` sync
 /// closure cannot span the `.await` points of an async test body.
-fn capture_warns() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
+pub(super) fn capture_warns() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
     use tracing_subscriber::prelude::*;
     let events = Arc::new(Mutex::new(Vec::new()));
     let layer = CaptureLayer {
@@ -631,6 +635,10 @@ async fn stats_and_name_delegate() {
 
 // ── fingerprinting ───────────────────────────────────────────────────────
 
+/// Two sequential awaited writes to the same key (not actually
+/// concurrent): the second write's pre-swap `get` observes the first
+/// writer's row as the current predecessor, so that blob is eagerly
+/// reclaimed and only the fresh blob survives.
 #[tokio::test]
 async fn concurrent_same_key_different_payload_no_cross_pair() {
     let dir = tempdir().expect("tempdir");
@@ -651,9 +659,12 @@ async fn concurrent_same_key_different_payload_no_cross_pair() {
     .await
     .expect("set J");
 
-    // Two blob files: same key hash + epoch, different fingerprints.
+    // ADDED requirement "Eager predecessor reclaim on overwrite", scenario
+    // "overwrite reclaims the predecessor immediately" — the second sequential
+    // set reclaims the first writer's blob (its pre-swap get observed that
+    // row); the no-cross-pair contract below is unchanged.
     let names = dir_names(dir.path());
-    assert_eq!(names.len(), 2, "two blobs expected, got {names:?}");
+    assert_eq!(names.len(), 1, "one blob expected, got {names:?}");
     let got = repo.get("k").await.expect("get").expect("present");
     assert_eq!(got.bytes, payload_j, "last writer must win");
     assert_eq!(got.content_type, ContentType::Json);

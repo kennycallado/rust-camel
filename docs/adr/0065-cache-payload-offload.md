@@ -115,7 +115,8 @@ keeps the full dataset in backend RAM. It also does not unlock `replicas >
 
 ### Trait widening (`keys(prefix)`) and directory-per-prefix layout
 
-Rejected: self-die filenames make eager file deletion unnecessary. Purge is
+Rejected: self-die filenames make eager file deletion unnecessary (superseded
+for hot keys by the amendment below — bd rc-uteoa). Purge is
 index purge plus asynchronous reclaim.
 
 ### `payload_min_size` threshold
@@ -185,8 +186,67 @@ directory (`crates/camel-config/src/context_ext.rs:296`).
 
 With the redis backend, the index is shared and the blobs live on one RWX
 volume. Concurrent writers to the same key are last-index-wins. The
-surviving row references its own blob, and the loser reclaims at its death
-epoch.
+surviving row references its own blob. A losing writer's blob is a stray
+that only the sweeper reclaims, at its death epoch: the next overwrite
+reads the current row and cannot discover it (see the amendment below).
+
+### Amendment (bd rc-uteoa): eager predecessor reclaim on overwrite
+
+Field report bd rc-uteoa (camel-cache demo team) showed that the claim
+"self-die filenames make eager file deletion unnecessary" (Rejected
+alternatives, trait-widening bullet) held only under cold-key assumptions. A
+hot-overwritten key on NFS accumulates one grace-window blob per write. The
+sweeper `readdir` cost then grows with the directory.
+
+Decision: `set()` reclaims the predecessor blob eagerly, inside the same
+call. The reclaim is row-guided. Before the write, `set()` reads the current
+index row and records its `payload_path`. After the decorated backend
+accepts the overwrite, `set()` unlinks that one file. No directory scan
+runs: an NFS `readdir` costs one metadata round-trip per directory entry,
+and a scan would hurt most when the directory is largest. The row-guided
+unlink costs one index GET plus one unlink, whatever the directory size.
+
+The bound holds for keys written by one writer at a time: after the
+overwrite, one blob remains when the unlink succeeds or the predecessor is
+already gone (ENOENT). A failed unlink leaves the predecessor on disk until
+its death epoch; the sweeper then reclaims it. Under concurrent same-key
+writes, a losing writer's blob is a stray beyond the row's reach. Only the
+sweeper reclaims it, at its death epoch.
+
+Ordering and guards:
+
+- The unlink runs only after the inner `set` returns `Ok`. On an inner
+  error the row may still reference the predecessor, so the reclaim is
+  skipped.
+- A failed pre-swap row read (`get` returns `Err`) WARNs and skips the
+  reclaim. The write proceeds unchanged. The reclaim never adds a failure
+  mode.
+- The unlink also runs when the blob write degrades to inline storage. The
+  new row no longer references the predecessor. The equal-name guard below
+  does not apply on this path: the failed write left no fresh file owning
+  that name.
+- The target name must pass `sanitize_blob_name` and carry a parseable
+  death epoch. It must also start with the current key's blake3-128
+  filename prefix: a corrupt row naming another key's blob never causes
+  that blob's deletion. Foreign files are never unlinked. This tightens
+  the sweeper's discipline.
+- A same-second identical rewrite produces the same file name. On the
+  successful-blob path, the guard `old_name != dest_name` keeps the fresh
+  blob alive.
+- The unlink is best-effort. A failure WARNs and never fails the write. The
+  filename-encoded death epoch and the sweeper stay the backstop for every
+  stray: crash-window orphans, losing concurrent writers' blobs, and
+  unlink failures.
+
+The reader race contract is unchanged (Decision 5). A reader that holds a
+pre-swap row while the writer reclaims hydrates to `Ok(None)` with WARN.
+Eager reclaim only widens that documented window for the overwritten key.
+It never turns a read into an `Err`.
+
+Cost: each `set()` issues one extra index GET, including first writes where
+the GET returns a miss. On redis this is one sub-millisecond round-trip.
+Durability: the eager unlink is not directory-fsynced. A crash in that
+window leaves a stray that the sweeper collects at its epoch.
 
 ### Retention and TTL changes apply to future writes only
 

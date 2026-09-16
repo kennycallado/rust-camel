@@ -321,6 +321,57 @@ impl DiskOffloadRepository {
             }
         }
     }
+
+    /// Best-effort eager unlink of a key's predecessor blob after a
+    /// successful overwrite (ADR-0065, amendment "bd rc-uteoa").
+    ///
+    /// Row-guided, no directory scan: only the name the pre-swap index
+    /// row carried is eligible, and only when it passes
+    /// [`sanitize_blob_name`], carries a parseable death epoch, and starts
+    /// with the current key's blake3-128 filename prefix — a corrupt row
+    /// naming another key's blob (or a foreign file) is never unlinked.
+    /// `keep_name` is the fresh blob's name on the successful-blob path:
+    /// a same-second identical rewrite reuses the name, and only the
+    /// fresh file owns it, so an equal name skips the reclaim. On the
+    /// inline-fallback path no fresh file owns any name; callers pass
+    /// `None` to disable the equal-name guard. `NotFound` counts as
+    /// reclaimed by someone else; any other unlink failure WARNs once and
+    /// leaves the blob to the sweeper at its death epoch. The function
+    /// never returns `Err`: the reclaim adds no failure mode to `set`.
+    async fn reclaim_predecessor(
+        &self,
+        key: &str,
+        old_name: Option<&str>,
+        keep_name: Option<&str>,
+    ) {
+        let Some(old_name) = old_name else {
+            return;
+        };
+        if keep_name == Some(old_name) {
+            return;
+        }
+        let key_prefix = format!("{}.", blake3_128hex(key.as_bytes()));
+        let eligible = sanitize_blob_name(old_name).is_some()
+            && parse_death_epoch(old_name).is_some()
+            && old_name.starts_with(&key_prefix);
+        if !eligible {
+            return;
+        }
+        match tokio::fs::remove_file(self.dir.join(old_name)).await {
+            Ok(()) => {}
+            // NotFound = a concurrent sweeper or replica won the race.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                warn!(
+                    key = key,
+                    backend = self.inner.name(),
+                    dir = %self.dir.display(),
+                    error = %e,
+                    "eager reclaim of predecessor blob failed; sweeper reclaims it at its death epoch"
+                );
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -343,6 +394,23 @@ impl CacheRepository for DiskOffloadRepository {
         ttl: Option<Duration>,
     ) -> Result<(), CamelError> {
         let effective_ttl = ttl.unwrap_or(self.payload_max_ttl);
+        // Capture the predecessor's blob name before the index swap so a
+        // successful overwrite can reclaim it eagerly (ADR-0065 amendment,
+        // "bd rc-uteoa"). A failed read only skips the reclaim — the write
+        // proceeds unchanged in every case.
+        let old_name = match self.inner.get(key).await {
+            Ok(Some(row)) => row.payload_path,
+            Ok(None) => None,
+            Err(e) => {
+                warn!(
+                    key = key,
+                    backend = self.inner.name(),
+                    error = %e,
+                    "pre-swap row read failed; skipping eager reclaim"
+                );
+                None
+            }
+        };
         // Death epoch = expiry + retention + sweep grace, saturating in
         // Duration space (a pre-epoch clock clamps to the Unix epoch),
         // truncated to whole seconds for the blob filename.
@@ -357,13 +425,24 @@ impl CacheRepository for DiskOffloadRepository {
         match self.write_blob(key, &entry, death_epoch).await {
             Ok(dest_name) => {
                 entry.bytes = Vec::new();
-                entry.payload_path = Some(dest_name);
+                // Clone: `dest_name` is still needed for the equal-name
+                // guard after `entry` (carrying the same name) moves into
+                // the inner set.
+                entry.payload_path = Some(dest_name.clone());
                 // The ttl MUST be Some: every inner overwrites
                 // `expires_at` from the ttl argument, so None would wipe
                 // the fabricated expiry. The inner recomputes `expires_at`
                 // from its own clock; the sub-second skew is absorbed by
                 // the death-epoch grace.
-                self.inner.set(key, entry, Some(effective_ttl)).await
+                let result = self.inner.set(key, entry, Some(effective_ttl)).await;
+                // Reclaim only after the inner accepted the swap: on an
+                // error the surviving row may still reference the
+                // predecessor blob.
+                if result.is_ok() {
+                    self.reclaim_predecessor(key, old_name.as_deref(), Some(&dest_name))
+                        .await;
+                }
+                result
             }
             Err(e) => {
                 warn!(
@@ -377,8 +456,16 @@ impl CacheRepository for DiskOffloadRepository {
                 // decorator never converts its own file-write failure into
                 // a cache-write error. The CAPPED ttl keeps the spec's
                 // no-TTL semantic (payload_max_ttl) even for degraded rows
-                // — an uncapped inline row would never be reclaimed.
-                self.inner.set(key, entry, Some(effective_ttl)).await
+                // — an uncapped inline row would never be reclaimed. The
+                // new row no longer references the predecessor, so the
+                // reclaim runs with the equal-name guard disabled (the
+                // failed write left no fresh file owning that name).
+                let result = self.inner.set(key, entry, Some(effective_ttl)).await;
+                if result.is_ok() {
+                    self.reclaim_predecessor(key, old_name.as_deref(), None)
+                        .await;
+                }
+                result
             }
         }
     }
@@ -673,3 +760,7 @@ fn spawn_sweeper(
 #[cfg(test)]
 #[path = "disk_offload_tests.rs"]
 mod disk_offload_tests;
+
+#[cfg(test)]
+#[path = "disk_offload_reclaim_tests.rs"]
+mod disk_offload_reclaim_tests;
