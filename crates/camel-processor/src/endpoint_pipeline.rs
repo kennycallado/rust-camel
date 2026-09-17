@@ -72,12 +72,15 @@ impl EndpointPipelineService {
             }
             None => {
                 if self.config.ignore_invalid_endpoints {
-                    tracing::debug!(uri = uri, "Skipping invalid endpoint");
+                    tracing::debug!(
+                        uri = %camel_api::redact::redact_url_fail_closed(uri),
+                        "Skipping invalid endpoint"
+                    );
                     Ok(None)
                 } else {
                     Err(CamelError::ProcessorError(format!(
                         "Invalid endpoint: {}",
-                        uri
+                        camel_api::redact::redact_url_fail_closed(uri)
                     )))
                 }
             }

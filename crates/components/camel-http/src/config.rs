@@ -56,6 +56,19 @@ pub struct TlsConfig {
     /// If true, skips certificate verification (discouraged).
     #[serde(default)]
     pub insecure: bool,
+    /// Fail closed on CA/mTLS material load failures (audit 2026-08-31 R3 /
+    /// rc-ayrwk). Default `false` keeps the back-compat behavior: a failed
+    /// CA read/parse falls back to system roots and a failed mTLS identity
+    /// load drops the client certificate, each with a loud `warn!` (F2-7).
+    /// When `true`, any failure to read or parse the configured CA bundle or
+    /// mTLS cert/key pair fails endpoint creation instead of degrading —
+    /// no silent downgrade path. Material is validated eagerly at endpoint
+    /// creation; file drift after creation still surfaces through the F2-7
+    /// warns. The CA bundle must be PEM with at least one parseable
+    /// CERTIFICATE section (the rustls backend does not enforce lone-DER
+    /// bundles); mTLS requires BOTH cert and key paths.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 fn default_verify_peer() -> bool {
@@ -71,6 +84,7 @@ impl Default for TlsConfig {
             client_cert_path: None,
             client_key_path: None,
             insecure: false,
+            strict: false,
         }
     }
 }
@@ -87,6 +101,7 @@ impl std::fmt::Debug for TlsConfig {
             .field("client_cert_path", &"[REDACTED]")
             .field("client_key_path", &"[REDACTED]")
             .field("insecure", &self.insecure)
+            .field("strict", &self.strict)
             .finish()
     }
 }
@@ -428,6 +443,7 @@ mod tests {
             client_cert_path: Some("/secret/cert.pem".to_string()),
             client_key_path: Some("/secret/key.pem".to_string()),
             insecure: false,
+            strict: false,
         };
         let debug = format!("{:?}", cfg);
         assert!(

@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use camel_api::redact::redact_url_fail_closed;
 use camel_api::{BoxProcessor, CamelError, StepLifecycle};
 use camel_component_api::{Consumer, Endpoint, ProducerContext, RuntimeObservability};
 
@@ -35,6 +36,15 @@ use crate::config::{McpDeclaredServer, McpRemoteConfig, McpServerConfig};
 use crate::consumer::McpConsumer;
 use crate::error::McpError;
 use crate::producer::{McpProducer, McpProducerLifecycle};
+
+/// Render an endpoint URI for an error message through the string-layer
+/// canonical redactor (audit 2026-08-31 F5-4 / rc-a67at). Raw URI bytes
+/// never enter an error unmasked — an authority window carrying `@` fails
+/// closed to `[redacted]`, and query/fragment material is truncated behind
+/// a sentinel.
+fn masked(uri: &str) -> String {
+    redact_url_fail_closed(uri)
+}
 
 /// The parsed operation from an `mcp:` endpoint URI.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,7 +90,10 @@ impl McpEndpointUri {
     /// naming the URI.
     pub fn parse(uri: &str) -> Result<Self, McpError> {
         let components = camel_component_api::parse_uri(uri).map_err(|error| {
-            McpError::Endpoint(format!("invalid MCP endpoint URI '{uri}': {error}"))
+            McpError::Endpoint(format!(
+                "invalid MCP endpoint URI '{}': {error}",
+                masked(uri)
+            ))
         })?;
 
         match components.path.as_str() {
@@ -113,9 +126,10 @@ impl McpEndpointUri {
     ) -> Result<Self, McpError> {
         let reject = || {
             McpError::Endpoint(format!(
-                "unknown MCP endpoint path '{path}' in URI '{uri}' (expected producer \
+                "unknown MCP endpoint path '{path}' in URI '{}' (expected producer \
                  'call'/'read' or consumer '<server>/tool/<name>' / \
-                 '<server>/resource/<name>')"
+                 '<server>/resource/<name>')",
+                masked(uri)
             ))
         };
 
@@ -141,21 +155,24 @@ impl McpEndpointUri {
             "tool" => {
                 let raw_schema = params.get("schema").ok_or_else(|| {
                     McpError::Endpoint(format!(
-                        "MCP endpoint URI '{uri}' is missing required parameter 'schema' \
-                         (URL-encoded tool input JSON Schema)"
+                        "MCP endpoint URI '{}' is missing required parameter 'schema' \
+                         (URL-encoded tool input JSON Schema)",
+                        masked(uri)
                     ))
                 })?;
                 let input_schema: serde_json::Value =
                     serde_json::from_str(raw_schema).map_err(|error| {
                         McpError::Endpoint(format!(
-                            "MCP endpoint URI '{uri}' carries an undecodable 'schema' \
-                             parameter: {error}"
+                            "MCP endpoint URI '{}' carries an undecodable 'schema' \
+                             parameter: {error}",
+                            masked(uri)
                         ))
                     })?;
                 if !input_schema.is_object() {
                     return Err(McpError::Endpoint(format!(
-                        "MCP endpoint URI '{uri}' carries a 'schema' parameter that is \
-                         not a JSON object"
+                        "MCP endpoint URI '{}' carries a 'schema' parameter that is \
+                         not a JSON object",
+                        masked(uri)
                     )));
                 }
                 Ok(McpEndpointUri::Tool {
@@ -210,7 +227,8 @@ fn required_param(
 ) -> Result<String, McpError> {
     params.get(key).cloned().ok_or_else(|| {
         McpError::Endpoint(format!(
-            "MCP endpoint URI '{uri}' is missing required parameter '{key}'"
+            "MCP endpoint URI '{}' is missing required parameter '{key}'",
+            masked(uri)
         ))
     })
 }
@@ -264,7 +282,7 @@ impl Endpoint for McpEndpoint {
                 Err(CamelError::EndpointCreationFailed(format!(
                     "MCP endpoint URI '{}' is producer-shaped; only \
                      '<server>/tool/<name>' and '<server>/resource/<name>' create consumers",
-                    self.uri
+                    masked(&self.uri)
                 )))
             }
         }
@@ -279,7 +297,7 @@ impl Endpoint for McpEndpoint {
             return Err(CamelError::EndpointCreationFailed(format!(
                 "MCP endpoint URI '{}' is consumer-shaped; only 'call' and 'read' create \
                  producers",
-                self.uri
+                masked(&self.uri)
             )));
         }
         Ok(BoxProcessor::new(McpProducer::new(
@@ -305,5 +323,68 @@ impl Endpoint for McpEndpoint {
             remote.clone(),
             Arc::clone(&self.live_servers),
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Audit 2026-08-31 F5-4 (rc-a67at): every URI-echoing error path in
+    // this module routes the raw URI through `masked` — query credentials
+    // never survive into an error message.
+
+    #[test]
+    fn parse_error_masks_query_secrets() {
+        // Undecodable percent-escape fails `parse_uri`; the echo must not
+        // carry the sibling `password` value.
+        let err = McpEndpointUri::parse("mcp:call?server=s&password=hunter2&x=%zz")
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("hunter2"), "secret leaked: {err}");
+        assert!(err.contains("?[redacted]"), "sentinel missing: {err}");
+    }
+
+    #[test]
+    fn unknown_path_error_masks_query_secrets() {
+        let err = McpEndpointUri::parse("mcp:bad/path?password=hunter2")
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("hunter2"), "secret leaked: {err}");
+        assert!(err.contains("?[redacted]"), "sentinel missing: {err}");
+    }
+
+    #[test]
+    fn missing_schema_param_error_masks_query_secrets() {
+        let err = McpEndpointUri::parse("mcp:myserver/tool/myname?password=hunter2")
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("hunter2"), "secret leaked: {err}");
+        assert!(
+            err.contains("schema"),
+            "must still name the parameter: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_required_param_error_masks_query_secrets() {
+        // `call` without `tool`: `required_param` echoes the URI.
+        let err = McpEndpointUri::parse("mcp:call?server=s&password=hunter2")
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("hunter2"), "secret leaked: {err}");
+        assert!(err.contains("tool"), "must still name the parameter: {err}");
+    }
+
+    #[test]
+    fn masked_fails_closed_on_authority_userinfo() {
+        // An authority-shaped remainder carrying `@` renders wholesale as
+        // `[redacted]` — nothing of it leaks.
+        let rendered = masked("mcp:read?server=s&uri=http://user:pass@h/x");
+        assert!(
+            !rendered.contains("user:pass@"),
+            "userinfo leaked: {rendered}"
+        );
+        assert_eq!(rendered, "[redacted]");
     }
 }

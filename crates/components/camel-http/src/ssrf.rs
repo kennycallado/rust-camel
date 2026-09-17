@@ -281,7 +281,10 @@ pub(crate) async fn resolve_initial_url_for_ssrf(
     };
 
     let port = parsed.port_or_known_default().ok_or_else(|| {
-        CamelError::ProcessorError(format!("URL '{}' has no recognizable port", url))
+        CamelError::ProcessorError(format!(
+            "URL '{}' has no recognizable port",
+            redact_url_for_diagnostics(url)
+        ))
     })?;
 
     let host_str_clone = host_str.clone();
@@ -504,6 +507,24 @@ mod tests {
         ));
         assert!(!is_sensitive_redirect_header(&h("content-type"), false));
         assert!(!is_sensitive_redirect_header(&h("x-request-id"), false));
+    }
+
+    /// Audit 2026-08-31 F5-4 (rc-a67at): the no-port error echoes the URL
+    /// through `redact_url_for_diagnostics` — userinfo never leaks.
+    #[tokio::test]
+    async fn resolve_initial_url_no_port_error_masks_userinfo() {
+        // A non-special scheme has no default port in
+        // `Url::port_or_known_default`, so the URL reaches the no-port
+        // error carrying userinfo.
+        let err = resolve_initial_url_for_ssrf("xyz://user:pass@host/mcp", false)
+            .await
+            .unwrap_err();
+        let msg = match &err {
+            camel_component_api::CamelError::ProcessorError(m) => m.clone(),
+            other => panic!("expected ProcessorError, got: {other:?}"),
+        };
+        assert!(msg.contains("no recognizable port"), "msg: {msg}");
+        assert!(!msg.contains("user:pass@"), "userinfo leaked: {msg}");
     }
 
     #[test]

@@ -58,6 +58,8 @@
     cargo xtask changelog --check --from FETCH_HEAD --to HEAD
 - name: lint-log-levels
   run: cargo xtask lint-log-levels
+- name: lint-log-redaction
+  run: cargo xtask lint-log-redaction
 - name: lint-ignore
   run: cargo xtask lint-ignore
 - name: lint-publish-cycles

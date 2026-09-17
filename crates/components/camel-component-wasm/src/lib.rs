@@ -134,7 +134,11 @@ impl Component for WasmComponent {
         ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let uri_without_scheme = uri.strip_prefix("wasm:").ok_or_else(|| {
-            CamelError::InvalidUri(format!("WASM URI must start with 'wasm:': {uri}"))
+            // Audit 2026-08-31 F5-4: echo through the canonical redactor.
+            CamelError::InvalidUri(format!(
+                "WASM URI must start with 'wasm:': '{}'",
+                camel_api::redact::redact_url_fail_closed(uri)
+            ))
         })?;
 
         let (path_part, wasm_config) = crate::config::WasmConfig::from_uri(uri_without_scheme);

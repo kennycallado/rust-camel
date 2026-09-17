@@ -76,7 +76,7 @@ mod tests {
     /// file reporting len 0) must be rejected, not read unbounded.
     #[test]
     fn filesystem_resolver_rejects_file_past_cap_on_read() {
-        let mut f = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        let f = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
         // Extend past the cap without materializing content in the test body.
         f.as_file().set_len(super::MAX_SCHEMA_BYTES + 1).unwrap();
         let resolver = FilesystemResolver;

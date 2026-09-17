@@ -2186,6 +2186,10 @@ pub struct HttpComponent {
     config: HttpConfig,
     pinned_cache: std::sync::Arc<PinnedClientCache>,
     client: reqwest::Client,
+    /// Set at construction when `tls.strict` is on and the configured
+    /// material fails to load; surfaced as an endpoint-creation failure
+    /// (rc-ayrwk).
+    strict_tls_error: Option<CamelError>,
 }
 
 #[cfg(test)]
@@ -2231,6 +2235,21 @@ pub(crate) fn build_client(
             // fallback; the warning is the operator signal).
             match std::fs::read(ca_path) {
                 Ok(ca_bytes) => {
+                    // Under the rustls backend `Certificate::from_pem`
+                    // never fails (it defers parsing), so the parse-error
+                    // warn below is effectively dead and a file with zero
+                    // parseable PEM CERTIFICATE sections would silently
+                    // contribute no roots. Warn on that case explicitly
+                    // (e_glm stage-4 finding 1).
+                    let pem_sections = rustls_pemfile::certs(&mut std::io::Cursor::new(&ca_bytes))
+                        .filter(|r| r.is_ok())
+                        .count();
+                    if pem_sections == 0 {
+                        // log-policy: handler-owned
+                        tracing::warn!(
+                            "configured CA certificate contains no parseable PEM CERTIFICATE section — falling back to system roots"
+                        );
+                    }
                     match reqwest::Certificate::from_pem(&ca_bytes)
                         .or_else(|_| reqwest::Certificate::from_der(&ca_bytes))
                     {
@@ -2294,6 +2313,79 @@ pub(crate) fn build_client(
         .expect("reqwest::Client::build() with valid config should not fail") // allow-unwrap
 }
 
+/// Eagerly load and parse the configured TLS material when strict mode is
+/// on (audit 2026-08-31 R3 / rc-ayrwk). Returns the first failure as an
+/// `EndpointCreationFailed` error; `None` when the material loads, or when
+/// strict mode is off (the permissive F2-7 fallback with its loud warns
+/// stays the default for back-compat).
+///
+/// Mirrors the four load sites in [`build_client`]: CA unreadable, CA
+/// unparseable, mTLS cert/key unreadable, mTLS identity unparseable.
+fn strict_tls_error(config: &HttpConfig) -> Option<CamelError> {
+    let tls = config.tls.as_ref()?;
+    if !tls.enabled || !tls.strict {
+        return None;
+    }
+    if let Some(ca_path) = &tls.ca_cert_path {
+        match std::fs::read(ca_path) {
+            Ok(ca_bytes) => {
+                // `reqwest::Certificate::{from_pem,from_der}` defer parsing
+                // under rustls, and unparseable entries are silently
+                // skipped at client build — so strict validation must be
+                // eager AND match what the backend actually enforces:
+                // a PEM bundle with at least one parseable CERTIFICATE
+                // section (rustls-pemfile). A raw-DER file is rejected
+                // outright: the rustls backend never honors lone-DER
+                // bytes here (they wrap unvalidated and are dropped at
+                // root-store insertion), so certifying one under strict
+                // would certify an unenforced config (e_glm stage-4
+                // finding 1). Operators convert DER bundles to PEM.
+                let pem_sections = rustls_pemfile::certs(&mut std::io::Cursor::new(&ca_bytes))
+                    .filter(|r| r.is_ok())
+                    .count();
+                if pem_sections == 0 {
+                    return Some(CamelError::EndpointCreationFailed(format!(
+                        "tls.strict: configured CA certificate '{ca_path}' has no \
+                         parseable PEM CERTIFICATE section (DER bundles are not \
+                         enforced by the TLS backend — convert to PEM)"
+                    )));
+                }
+            }
+            Err(e) => {
+                return Some(CamelError::EndpointCreationFailed(format!(
+                    "tls.strict: configured CA certificate '{ca_path}' is unreadable: {e}"
+                )));
+            }
+        }
+    }
+    // A half-configured mTLS pair (cert XOR key) previously degraded
+    // silently to non-mTLS even under strict — reject it (e_glm stage-4
+    // finding 2).
+    if tls.client_cert_path.is_some() != tls.client_key_path.is_some() {
+        return Some(CamelError::EndpointCreationFailed(
+            "tls.strict: mTLS requires BOTH client_cert_path and client_key_path".to_string(),
+        ));
+    }
+    if let (Some(cert_path), Some(key_path)) = (&tls.client_cert_path, &tls.client_key_path) {
+        match (std::fs::read(cert_path), std::fs::read(key_path)) {
+            (Ok(mut cert_bytes), Ok(key_bytes)) => {
+                cert_bytes.extend_from_slice(&key_bytes);
+                if reqwest::Identity::from_pem(&cert_bytes).is_err() {
+                    return Some(CamelError::EndpointCreationFailed(
+                        "tls.strict: configured mTLS identity failed to parse".to_string(),
+                    ));
+                }
+            }
+            _ => {
+                return Some(CamelError::EndpointCreationFailed(
+                    "tls.strict: configured mTLS cert/key files are unreadable".to_string(),
+                ));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 pub(crate) fn build_client_call_count() -> u64 {
     BUILD_CLIENT_CALLS.with(|c| c.get())
@@ -2302,6 +2394,7 @@ pub(crate) fn build_client_call_count() -> u64 {
 impl HttpComponent {
     pub fn new() -> Self {
         let config = HttpConfig::default();
+        let strict_err = strict_tls_error(&config);
         Self {
             client: build_client(&config, None),
             config,
@@ -2309,10 +2402,12 @@ impl HttpComponent {
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
             )),
+            strict_tls_error: strict_err,
         }
     }
 
     pub fn with_config(config: HttpConfig) -> Self {
+        let strict_err = strict_tls_error(&config);
         Self {
             client: build_client(&config, None),
             config,
@@ -2320,6 +2415,7 @@ impl HttpComponent {
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
             )),
+            strict_tls_error: strict_err,
         }
     }
 
@@ -2351,6 +2447,9 @@ impl Component for HttpComponent {
         uri: &str,
         ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
+        if let Some(err) = &self.strict_tls_error {
+            return Err(err.clone());
+        }
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
@@ -2375,11 +2474,16 @@ pub struct HttpsComponent {
     config: HttpConfig,
     pinned_cache: std::sync::Arc<PinnedClientCache>,
     client: reqwest::Client,
+    /// Set at construction when `tls.strict` is on and the configured
+    /// material fails to load; surfaced as an endpoint-creation failure
+    /// (rc-ayrwk).
+    strict_tls_error: Option<CamelError>,
 }
 
 impl HttpsComponent {
     pub fn new() -> Self {
         let config = HttpConfig::default();
+        let strict_err = strict_tls_error(&config);
         Self {
             client: build_client(&config, None),
             config,
@@ -2387,10 +2491,12 @@ impl HttpsComponent {
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
             )),
+            strict_tls_error: strict_err,
         }
     }
 
     pub fn with_config(config: HttpConfig) -> Self {
+        let strict_err = strict_tls_error(&config);
         Self {
             client: build_client(&config, None),
             config,
@@ -2398,6 +2504,7 @@ impl HttpsComponent {
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
             )),
+            strict_tls_error: strict_err,
         }
     }
 
@@ -2434,6 +2541,9 @@ impl Component for HttpsComponent {
         uri: &str,
         ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
+        if let Some(err) = &self.strict_tls_error {
+            return Err(err.clone());
+        }
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
@@ -3710,6 +3820,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::config::TlsConfig;
     use crate::rest_match::PathSegment;
     use camel_component_api::{Message, NoOpComponentContext};
     use std::sync::Arc;
@@ -4452,6 +4563,193 @@ mod tests {
     fn test_http_component_scheme() {
         let component = HttpComponent::new();
         assert_eq!(component.scheme(), "http");
+    }
+
+    // -----------------------------------------------------------------------
+    // tls.strict — fail-closed knob (audit 2026-08-31 R3 / rc-ayrwk).
+    // Default stays permissive (F2-7 warns); strict fails endpoint creation
+    // on any CA/mTLS load failure.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tls_strict_defaults_false_on_deserialize() {
+        let tls: TlsConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true
+        }))
+        .unwrap();
+        assert!(!tls.strict, "absent strict must default to false");
+    }
+
+    fn strict_config(ca_path: Option<&str>, strict: bool) -> HttpConfig {
+        HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict,
+                ca_cert_path: ca_path.map(|p| p.to_string()),
+                ..TlsConfig::default()
+            }),
+            ..HttpConfig::default()
+        }
+    }
+
+    #[test]
+    fn strict_tls_missing_ca_fails_endpoint_creation() {
+        let component =
+            HttpComponent::with_config(strict_config(Some("/nonexistent/ca.pem"), true));
+        let err = component
+            .create_endpoint("http://localhost/api", &NoOpComponentContext)
+            .err()
+            .expect("strict + missing CA must fail endpoint creation");
+        assert!(
+            err.to_string().contains("tls.strict"),
+            "must name the strict knob: {err}"
+        );
+        assert!(
+            err.to_string().contains("unreadable"),
+            "must name the failure class: {err}"
+        );
+    }
+
+    #[test]
+    fn strict_tls_unparseable_ca_fails_endpoint_creation() {
+        let path = camel_component_api::test_support::tls::write_pem_tmp(
+            "strict-bad-ca.pem",
+            "not a certificate",
+        );
+        let component =
+            HttpComponent::with_config(strict_config(Some(path.to_str().unwrap()), true));
+        let err = component
+            .create_endpoint("http://localhost/api", &NoOpComponentContext)
+            .err()
+            .expect("strict + unparseable CA must fail endpoint creation");
+        assert!(
+            err.to_string()
+                .contains("no parseable PEM CERTIFICATE section"),
+            "must name the failure class: {err}"
+        );
+    }
+
+    #[test]
+    fn strict_tls_der_file_rejected_not_certified() {
+        // e_glm stage-4 finding 1: a DER-looking file (first byte 0x30 =
+        // ASCII '0') must NOT pass strict — the rustls backend never
+        // enforces lone-DER bundles, so certifying one would certify an
+        // unenforced config.
+        let path = camel_component_api::test_support::tls::write_pem_tmp(
+            "strict-der-ca.pem",
+            "00garbage-bytes",
+        );
+        let component =
+            HttpComponent::with_config(strict_config(Some(path.to_str().unwrap()), true));
+        let err = component
+            .create_endpoint("http://localhost/api", &NoOpComponentContext)
+            .err()
+            .expect("strict + DER file must fail endpoint creation");
+        assert!(
+            err.to_string().contains("convert to PEM"),
+            "must tell the operator to convert: {err}"
+        );
+    }
+
+    #[test]
+    fn strict_tls_half_mtls_pair_rejected() {
+        // e_glm stage-4 finding 2: cert XOR key must fail under strict,
+        // not silently degrade to non-mTLS.
+        let cfg = strict_mtls_config(Some("/any/cert.pem"), None);
+        let component = HttpComponent::with_config(cfg);
+        let err = component
+            .create_endpoint("http://localhost/api", &NoOpComponentContext)
+            .err()
+            .expect("strict + half mTLS pair must fail endpoint creation");
+        assert!(
+            err.to_string().contains("BOTH"),
+            "must name the pair requirement: {err}"
+        );
+    }
+
+    #[test]
+    fn strict_tls_valid_material_allows_endpoint_creation() {
+        let (ca, _cert, _key) = camel_component_api::test_support::tls::gen_server_cert();
+        let path = camel_component_api::test_support::tls::write_pem_tmp("strict-ok-ca.pem", &ca);
+        let component =
+            HttpComponent::with_config(strict_config(Some(path.to_str().unwrap()), true));
+        assert!(
+            component
+                .create_endpoint("http://localhost/api", &NoOpComponentContext)
+                .is_ok(),
+            "valid CA under strict must create the endpoint"
+        );
+    }
+
+    #[test]
+    fn permissive_missing_ca_keeps_back_compat() {
+        // strict absent (false): the F2-7 warn-and-fallback behavior stays;
+        // endpoint creation succeeds.
+        let component =
+            HttpComponent::with_config(strict_config(Some("/nonexistent/ca.pem"), false));
+        assert!(
+            component
+                .create_endpoint("http://localhost/api", &NoOpComponentContext)
+                .is_ok(),
+            "permissive mode must keep the back-compat fallback"
+        );
+    }
+
+    fn strict_mtls_config(cert_path: Option<&str>, key_path: Option<&str>) -> HttpConfig {
+        HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                client_cert_path: cert_path.map(|p| p.to_string()),
+                client_key_path: key_path.map(|p| p.to_string()),
+                ..TlsConfig::default()
+            }),
+            ..HttpConfig::default()
+        }
+    }
+
+    #[test]
+    fn strict_tls_missing_mtls_cert_fails_endpoint_creation() {
+        // Key present, cert file missing: a half-readable mTLS pair must
+        // fail creation under strict, not silently drop the identity.
+        let (_ca, _cert, key) = camel_component_api::test_support::tls::gen_server_cert();
+        let key_path =
+            camel_component_api::test_support::tls::write_pem_tmp("strict-mtls-key.pem", &key);
+        let component = HttpComponent::with_config(strict_mtls_config(
+            Some("/nonexistent/cert.pem"),
+            Some(key_path.to_str().unwrap()),
+        ));
+        let err = component
+            .create_endpoint("http://localhost/api", &NoOpComponentContext)
+            .err()
+            .expect("strict + unreadable mTLS pair must fail endpoint creation");
+        assert!(
+            err.to_string().contains("tls.strict"),
+            "must name the strict knob: {err}"
+        );
+        assert!(
+            err.to_string().contains("unreadable"),
+            "must name the failure class: {err}"
+        );
+    }
+
+    #[test]
+    fn strict_tls_valid_mtls_pair_allows_endpoint_creation() {
+        let (_ca, cert, key) = camel_component_api::test_support::tls::gen_server_cert();
+        let cert_path =
+            camel_component_api::test_support::tls::write_pem_tmp("strict-mtls-cert.pem", &cert);
+        let key_path =
+            camel_component_api::test_support::tls::write_pem_tmp("strict-mtls-key2.pem", &key);
+        let component = HttpComponent::with_config(strict_mtls_config(
+            Some(cert_path.to_str().unwrap()),
+            Some(key_path.to_str().unwrap()),
+        ));
+        assert!(
+            component
+                .create_endpoint("http://localhost/api", &NoOpComponentContext)
+                .is_ok(),
+            "valid mTLS pair under strict must create the endpoint"
+        );
     }
 
     #[test]

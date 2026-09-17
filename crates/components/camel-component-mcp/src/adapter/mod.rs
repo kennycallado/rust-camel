@@ -5,6 +5,7 @@
 //! client/server wiring is confined here so the SDK stays swappable.
 
 pub mod client;
+pub(crate) mod dns_pin;
 pub mod server;
 
 pub use client::RmcpClient;

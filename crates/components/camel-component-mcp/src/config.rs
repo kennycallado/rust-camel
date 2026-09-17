@@ -322,8 +322,9 @@ pub struct McpRemoteConfig {
     /// private/loopback/link-local ranges are rejected at config load, and
     /// cleartext `http://` is rejected unless the target is internal or this
     /// flag is set. Hostname-based URLs are resolution-independent at this
-    /// layer — operators must trust their DNS (no DNS pinning here, unlike
-    /// the http component).
+    /// layer — their DNS resolution is validated and pinned at connect time
+    /// (audit 2026-08-31 R4 / rc-juqrd, `adapter::dns_pin`): resolve once,
+    /// validate every IP, connect to the validated addresses only.
     #[serde(default)]
     pub allow_internal: bool,
 }

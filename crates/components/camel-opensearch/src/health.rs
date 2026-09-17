@@ -62,7 +62,7 @@ impl AsyncHealthCheck for OpenSearchHealthCheck {
         };
         let url = self.config.base_url();
 
-        debug!(endpoint = %url, "probing OpenSearch cluster health");
+        debug!(endpoint = %camel_api::redact::redact_url_fail_closed(&url), "probing OpenSearch cluster health");
 
         let result = tokio::time::timeout(
             PROBE_TIMEOUT,
@@ -74,7 +74,7 @@ impl AsyncHealthCheck for OpenSearchHealthCheck {
             Ok(Ok(response)) => {
                 let status = response.status_code().as_u16();
                 if status >= 400 {
-                    warn!(endpoint = %url, status, "OpenSearch cluster health returned error status");
+                    warn!(endpoint = %camel_api::redact::redact_url_fail_closed(&url), status, "OpenSearch cluster health returned error status");
                     return CheckResult::unhealthy(
                         self.name(),
                         &format!("OpenSearch cluster health returned HTTP {}", status),
@@ -100,15 +100,15 @@ impl AsyncHealthCheck for OpenSearchHealthCheck {
 
                 match cluster_status {
                     "green" | "yellow" => {
-                        debug!(endpoint = %url, status = cluster_status, "OpenSearch cluster is healthy");
+                        debug!(endpoint = %camel_api::redact::redact_url_fail_closed(&url), status = cluster_status, "OpenSearch cluster is healthy");
                         CheckResult::healthy(self.name())
                     }
                     "red" => {
-                        warn!(endpoint = %url, status = cluster_status, "OpenSearch cluster is red");
+                        warn!(endpoint = %camel_api::redact::redact_url_fail_closed(&url), status = cluster_status, "OpenSearch cluster is red");
                         CheckResult::unhealthy(self.name(), "OpenSearch cluster status is red")
                     }
                     other => {
-                        warn!(endpoint = %url, status = other, "OpenSearch cluster has unknown status");
+                        warn!(endpoint = %camel_api::redact::redact_url_fail_closed(&url), status = other, "OpenSearch cluster has unknown status");
                         CheckResult::unhealthy(
                             self.name(),
                             &format!("OpenSearch cluster has unknown status: {}", other),
@@ -117,14 +117,14 @@ impl AsyncHealthCheck for OpenSearchHealthCheck {
                 }
             }
             Ok(Err(e)) => {
-                warn!(endpoint = %url, error = %e, "OpenSearch cluster health probe failed");
+                warn!(endpoint = %camel_api::redact::redact_url_fail_closed(&url), error = %e, "OpenSearch cluster health probe failed");
                 CheckResult::unhealthy(
                     self.name(),
                     &format!("OpenSearch cluster health probe failed: {}", e),
                 )
             }
             Err(_) => {
-                warn!(endpoint = %url, "OpenSearch cluster health probe timed out");
+                warn!(endpoint = %camel_api::redact::redact_url_fail_closed(&url), "OpenSearch cluster health probe timed out");
                 CheckResult::unhealthy(self.name(), "OpenSearch cluster health probe timed out")
             }
         }

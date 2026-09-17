@@ -51,8 +51,12 @@ pub fn validate_llm_url_pinned(
     url: &str,
     policy: SsrfPolicy,
 ) -> Result<(String, Vec<SocketAddr>), LlmError> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| LlmError::InvalidRequest(format!("invalid llm base_url '{url}': {e}")))?;
+    let parsed = url::Url::parse(url).map_err(|e| {
+        LlmError::InvalidRequest(format!(
+            "invalid llm base_url '{}': {e}",
+            camel_api::redact::redact_url_fail_closed(url)
+        ))
+    })?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(LlmError::InvalidRequest(format!(
             "llm base_url must use http/https, got: {}",
@@ -108,8 +112,12 @@ pub fn validate_llm_url_pinned(
 /// error — silently passing would let typos, hijacked DNS, or
 /// firewalled-internal names reach the outbound client.
 pub fn validate_llm_url(url: &str, policy: SsrfPolicy) -> Result<(), LlmError> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| LlmError::InvalidRequest(format!("invalid llm base_url '{url}': {e}")))?;
+    let parsed = url::Url::parse(url).map_err(|e| {
+        LlmError::InvalidRequest(format!(
+            "invalid llm base_url '{}': {e}",
+            camel_api::redact::redact_url_fail_closed(url)
+        ))
+    })?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(LlmError::InvalidRequest(format!(
             "llm base_url must use http/https, got: {}",
@@ -312,6 +320,21 @@ mod tests {
     fn validate_llm_url_rejects_unparseable() {
         let err = validate_llm_url("not a url", SsrfPolicy::PublicHttpsOnly).unwrap_err();
         assert!(err.to_string().contains("invalid"), "msg: {err}");
+    }
+
+    // Audit 2026-08-31 F5-4 (rc-a67at): the parse-failure echo routes the
+    // base_url through the canonical redactor — userinfo never leaks.
+    #[test]
+    fn validate_llm_url_error_masks_userinfo() {
+        // Port 99999 fails `Url::parse`; the echo must not carry userinfo.
+        let err = validate_llm_url(
+            "https://user:pass@host:99999/v1",
+            SsrfPolicy::PublicHttpsOnly,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.contains("user:pass@"), "userinfo leaked: {msg}");
+        assert!(msg.contains("[redacted]"), "fail-closed marker: {msg}");
     }
 
     #[cfg(any(feature = "openai", feature = "all-providers"))]

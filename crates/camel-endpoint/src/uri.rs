@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use camel_api::CamelError;
+use camel_api::redact::redact_url_fail_closed;
 
 /// Parsed components of a Camel URI.
 ///
@@ -103,12 +104,21 @@ impl std::fmt::Debug for UriComponents {
 ///
 /// Format: `scheme:path?key1=value1&key2=value2`
 pub fn parse_uri(uri: &str) -> Result<UriComponents, CamelError> {
+    // Audit 2026-08-31 F5-4: error paths echo the URI through the
+    // string-layer canonical redactor — the raw bytes never leave this
+    // function unmasked.
     let (scheme, rest) = uri.split_once(':').ok_or_else(|| {
-        CamelError::InvalidUri(format!("missing scheme separator ':' in '{uri}'"))
+        CamelError::InvalidUri(format!(
+            "missing scheme separator ':' in '{}'",
+            redact_url_fail_closed(uri)
+        ))
     })?;
 
     if scheme.is_empty() {
-        return Err(CamelError::InvalidUri(format!("empty scheme in '{uri}'")));
+        return Err(CamelError::InvalidUri(format!(
+            "empty scheme in '{}'",
+            redact_url_fail_closed(uri)
+        )));
     }
 
     // EP-005: Validate scheme characters — only alphanumeric and hyphens allowed.
@@ -298,6 +308,43 @@ mod tests {
     fn test_parse_uri_no_scheme() {
         let result = parse_uri("noscheme");
         assert!(result.is_err());
+    }
+
+    // Audit 2026-08-31 F5-4 (rc-a67at): URI-echoing parse errors route the
+    // raw URI through the string-layer canonical redactor
+    // (`camel_api::redact::redact_url_fail_closed`) so query credentials
+    // never reach logs or operator-facing error surfaces.
+
+    #[test]
+    fn parse_uri_error_masks_query_secrets() {
+        let err = parse_uri("noscheme?password=hunter2").unwrap_err();
+        match &err {
+            CamelError::InvalidUri(msg) => {
+                assert!(!msg.contains("hunter2"), "raw secret leaked: {msg}");
+                assert!(
+                    msg.contains("?[redacted]"),
+                    "redaction sentinel missing: {msg}"
+                );
+            }
+            _ => panic!("Expected InvalidUri"),
+        }
+    }
+
+    #[test]
+    fn parse_uri_empty_scheme_error_masks_userinfo_and_query() {
+        // ':' scheme separator present but empty: the whole URI — including
+        // an authority-shaped remainder and its query — is echoed. Fail
+        // closed: an authority window carrying `@` replaces the whole
+        // rendering with `[redacted]`.
+        let err = parse_uri(":http://user:pass@host?token=abc").unwrap_err();
+        match &err {
+            CamelError::InvalidUri(msg) => {
+                assert!(!msg.contains("user:pass@"), "userinfo leaked: {msg}");
+                assert!(!msg.contains("token=abc"), "query leaked: {msg}");
+                assert!(msg.contains("[redacted]"), "fail-closed marker: {msg}");
+            }
+            _ => panic!("Expected InvalidUri"),
+        }
     }
 
     #[test]

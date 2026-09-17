@@ -91,6 +91,13 @@ enum Commands {
     /// or list `<relative path>:<line>` in
     /// `scripts/xtask/allowlist-log-levels.txt`.
     LintLogLevels,
+    /// Enforce ADR-0076 log redaction (audit 2026-08-31 R2 / rc-sn7i5):
+    /// tracing/log calls embedding url/uri/config values must pass them
+    /// through a `redact*` helper. Exits non-zero on violations.
+    /// Escape hatches: append `// allow-log-redaction` to the line, or
+    /// list `<relative path>:<line>` in
+    /// `scripts/xtask/allowlist-log-redaction.txt`.
+    LintLogRedaction,
     /// Enforce ADR-0049: pub enums in the contract crates must be
     /// `#[non_exhaustive]` or carry a `/// exhaustive-by-contract: <rationale>`
     /// rustdoc note. Exits non-zero on violations.
@@ -306,6 +313,29 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-log-levels error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintLogRedaction => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_log_redaction(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-log-redaction: OK (0 violations)");
+                }
+                Ok(violations) => {
+                    println!("LOG-REDACTION VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                        println!(
+                            "    remedy: wrap the value in a redact_* helper (ADR-0076), e.g. url = %redact_url(&u)"
+                        );
+                    }
+                    eprintln!("\nlint-log-redaction: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-log-redaction error: {e}");
                     std::process::exit(1);
                 }
             }
@@ -2950,6 +2980,234 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
 /// lost: a raw match is accepted only when its keyword position falls inside
 /// a collected macro span. Files that fail to parse fall back entirely to
 /// the raw regex (behaviour unchanged for them).
+/// Sensitive value identifiers for [`lint_log_redaction`]: a tracing/log
+/// macro field, shorthand (`?ident`/`%ident`), bare argument, or inline
+/// `{ident}` message capture named one of these must pass through a
+/// `redact*` helper (e.g. `camel_api::redact::redact_url`,
+/// `redact_url_for_diagnostics`, `to_redacted_string`) before it reaches a
+/// log sink (audit 2026-08-31 R2 / rc-sn7i5). Credential keywords
+/// (password/token/...) stay owned by `lint-secrets`.
+const LOG_REDACTION_SENSITIVE: &[&str] = &[
+    "url",
+    "uri",
+    "base_url",
+    "db_url",
+    "jdbc_url",
+    "broker_url",
+    "connection_string",
+    "dsn",
+    "config",
+];
+
+/// Log/tracing macros whose spans [`lint_log_redaction`] checks.
+const LOG_REDACTION_MACROS: &[&str] = &["error", "warn", "info", "debug", "trace", "event"];
+
+/// Scan all workspace `src/**/*.rs` files for tracing/log calls that embed
+/// a url/uri/config value without routing it through a `redact*` helper
+/// (audit 2026-08-31 R2 / rc-sn7i5; complements `lint-secrets` and
+/// `lint-log-levels`).
+///
+/// Detection is span-bounded like `lint-secrets`: the file is parsed with
+/// `syn`, every macro's argument span collected, and each top-level
+/// comma-separated argument of a log macro tokenized. An argument is a
+/// violation when it references a sensitive identifier (as field name,
+/// shorthand, bare value, member access, or `{ident}` capture inside a
+/// message literal) and the argument's own tokens contain no identifier
+/// with `redact` in its name. Message-literal captures additionally accept
+/// a `redact*` identifier anywhere in the same macro invocation (the
+/// captured value is a separate argument).
+///
+/// Escape hatches: append `// allow-log-redaction` to the line (for a
+/// multi-line invocation the marker goes on the macro's START line), or
+/// list `<relative path>:<line>` in
+/// `scripts/xtask/allowlist-log-redaction.txt`. `scripts/xtask/` itself is
+/// skipped (the lint would self-flag on its own patterns and fixtures).
+/// Known blind spots (out of scope by design): `span!`/`*_span!` field
+/// sets, aliased macro imports (`use tracing::warn as w;`), and
+/// non-tracing sinks (`println!`/`format!` into errors — the latter is
+/// covered per-site by hand, see rc-a67at).
+pub fn lint_log_redaction(workspace_root: &Path) -> Result<Vec<Violation>, String> {
+    use regex::Regex;
+    use std::path::Component;
+    use walkdir::WalkDir;
+
+    let capture_re = Regex::new(r"\{\s*[?#!]?(?:url|uri|base_url|db_url|jdbc_url|broker_url|connection_string|dsn|config)(?::[^}]*)?\}")
+        .expect("valid regex"); // allow-unwrap
+
+    let allowlist_path = workspace_root
+        .join("scripts")
+        .join("xtask")
+        .join("allowlist-log-redaction.txt");
+    let allowlist: std::collections::HashSet<String> = std::fs::read_to_string(&allowlist_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+        .map(|l| l.trim().to_string())
+        .collect();
+
+    let mut violations = Vec::new();
+    for entry in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if is_test_file(path) {
+            continue;
+        }
+        if !path
+            .components()
+            .any(|c| c == Component::Normal("src".as_ref()))
+        {
+            continue;
+        }
+        let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+        if rel.components().any(|c| {
+            c == Component::Normal("target".as_ref())
+                || c == Component::Normal(".worktrees".as_ref())
+                || c == Component::Normal("xtask".as_ref())
+        }) {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        let file_rel = rel.to_string_lossy().to_string();
+
+        let parsed = match syn::parse_file(&content) {
+            Ok(f) => f,
+            // Unparseable files are outside this lint's contract; other
+            // gates (clippy, build) own parse failures.
+            Err(_) => continue,
+        };
+        let mut collector = MacroSpanCollector::new(&content);
+        syn::visit::visit_file(&mut collector, &parsed);
+
+        for (name, start, end) in collector.finish() {
+            if !LOG_REDACTION_MACROS.contains(&name.as_str()) {
+                continue;
+            }
+            let span = &content[start..end];
+            if let Some(reason) = redaction_violation_reason(span, &capture_re) {
+                let line = content[..start].matches('\n').count() + 1;
+                let key = format!("{file_rel}:{line}");
+                if allowlist.contains(&key) {
+                    continue;
+                }
+                let line_text = content.lines().nth(line - 1).unwrap_or("");
+                if line_text.contains("// allow-log-redaction") {
+                    continue;
+                }
+                violations.push(Violation {
+                    file: file_rel.clone(),
+                    line,
+                    snippet: format!("{}  ({reason})", span.split('\n').next().unwrap_or(span)),
+                });
+            }
+        }
+    }
+    Ok(violations)
+}
+
+/// Inspect one log-macro token span; return the violation reason or `None`.
+fn redaction_violation_reason(span: &str, capture_re: &regex::Regex) -> Option<&'static str> {
+    let tokens: Vec<proc_macro2::TokenTree> = match span.parse::<proc_macro2::TokenStream>() {
+        Ok(ts) => ts.into_iter().collect(),
+        // `event!(Level::DEBUG, ...)`-style spans still tokenize; a
+        // failure here means something exotic — skip rather than
+        // false-positive.
+        Err(_) => return None,
+    };
+    if tokens.is_empty() {
+        return None;
+    }
+    let macro_has_redact = tokens
+        .iter()
+        .any(|t| matches!(t, proc_macro2::TokenTree::Ident(i) if i.to_string().to_lowercase().contains("redact")));
+
+    // Split into top-level comma-separated arguments (nested Groups keep
+    // their commas internal — they are single TokenTrees).
+    let mut segments: Vec<Vec<&proc_macro2::TokenTree>> = vec![Vec::new()];
+    for t in &tokens {
+        match t {
+            proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => {
+                segments.push(Vec::new());
+            }
+            other => segments.last_mut().expect("non-empty").push(other), // allow-unwrap
+        }
+    }
+
+    for seg in &segments {
+        let idents: Vec<String> = seg
+            .iter()
+            .filter_map(|t| match t {
+                proc_macro2::TokenTree::Ident(i) => Some(i.to_string()),
+                _ => None,
+            })
+            .collect();
+        let seg_has_redact = idents.iter().any(|i| i.to_lowercase().contains("redact"));
+
+        // 1. Identifier references, leaf-or-standalone only:
+        //    - field name (`url = ...`), shorthand (`?config`/`%url`),
+        //      bare value (`debug!("{}", url)`) — standalone;
+        //    - member chains ENDING in a sensitive name (`config.uri`,
+        //      `self.base_url`) — leaf.
+        //    Object position (`config.topic`, `producer.config.operation`)
+        //    is NOT a hit: the sensitive object merely qualifies a benign
+        //    leaf, and flagging it would fire on every config-sourced
+        //    number/name in the tree.
+        let is_punct_dot = |t: Option<&&proc_macro2::TokenTree>| matches!(t, Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '.');
+        let mut sensitive_use = false;
+        for (idx, t) in seg.iter().enumerate() {
+            if let proc_macro2::TokenTree::Ident(i) = t
+                && LOG_REDACTION_SENSITIVE.contains(&i.to_string().as_str())
+            {
+                let object_position = is_punct_dot(seg.get(idx + 1));
+                if !object_position {
+                    sensitive_use = true;
+                    break;
+                }
+            }
+        }
+        if sensitive_use && !seg_has_redact {
+            return Some(
+                "sensitive url/uri/config value not wrapped in a redact_* helper — see ADR-0076",
+            );
+        }
+
+        // 2. Inline message captures (`"... {url} ..."`): redeemed by a
+        //    redact* identifier anywhere in the macro (the captured value
+        //    is bound as a separate argument).
+        if !seg_has_redact && !macro_has_redact {
+            for t in seg {
+                if let proc_macro2::TokenTree::Literal(l) = t
+                    && let Ok(s) = unquote_string_literal(&l.to_string())
+                    && capture_re.is_match(&s)
+                {
+                    return Some(
+                        "message captures a url/uri/config value not wrapped in a redact_* helper — see ADR-0076",
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Strip the surrounding quotes (and `r#`/raw prefixes) from a literal's
+/// token rendering; best-effort for the capture scan.
+fn unquote_string_literal(tok: &str) -> Result<String, ()> {
+    let s = tok.trim();
+    let s = s.strip_prefix('r').unwrap_or(s);
+    let s = s.strip_prefix('#').unwrap_or(s);
+    let s = s.strip_prefix('"').ok_or(())?;
+    let s = s.strip_suffix('"').ok_or(())?;
+    Ok(s.to_string())
+}
+
 pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, String> {
     use regex::Regex;
     use std::path::Component;
@@ -6971,5 +7229,150 @@ mod bridge_wipe_tests {
         wipe_gradle_build_dir(&root);
         assert!(root.exists());
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod lint_log_redaction_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn tmp_workspace_redaction(files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xtask-log-redaction-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        for (rel_path, content) in files {
+            let full = dir.join(rel_path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(&full, content).unwrap();
+        }
+        fs::create_dir_all(dir.join("bridges")).unwrap();
+        fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+        dir
+    }
+
+    fn violations_for(files: &[(&str, &str)]) -> Vec<Violation> {
+        let ws = tmp_workspace_redaction(files);
+        let violations = lint_log_redaction(&ws).unwrap();
+        fs::remove_dir_all(&ws).unwrap();
+        violations
+    }
+
+    #[test]
+    fn flags_bare_shorthand_config_dump() {
+        // Audit F3-1 shape: debug!(?config) is a cleartext config dump.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(config: &Cfg) { tracing::debug!(?config, \"cfg\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+        assert!(vs[0].file.contains("foo/src/lib.rs"), "{vs:?}");
+    }
+
+    #[test]
+    fn flags_unredacted_url_field() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) { tracing::debug!(url = url, \"req\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn flags_member_chain_ending_in_sensitive_leaf() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(c: &Cfg) { tracing::debug!(uri = c.uri, \"req\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn allows_object_position_config_member() {
+        // config.topic: sensitive object qualifying a benign leaf — no hit.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(config: &Cfg) { tracing::debug!(topic = config.topic, \"sub\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn allows_redacted_url_field() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(u: &str) { tracing::debug!(url = %redact_url(u), \"req\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn allows_to_redacted_string_helper() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(uri: &Uri) { tracing::warn!(uri = %uri.to_redacted_string(&cat), \"bad\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn flags_inline_message_capture() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) { tracing::warn!(\"failed {}\", url); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn allows_inline_capture_with_redacted_binding() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(u: &str) { tracing::warn!(\"failed {url}\", url = redact_url(u)); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn inline_marker_escapes() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) { tracing::debug!(url = url, \"req\"); } // allow-log-redaction",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn allowlist_file_escapes() {
+        let ws = tmp_workspace_redaction(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) { tracing::debug!(url = url, \"req\"); }\n",
+        )]);
+        fs::create_dir_all(ws.join("scripts/xtask")).unwrap();
+        fs::write(
+            ws.join("scripts/xtask/allowlist-log-redaction.txt"),
+            "crates/foo/src/lib.rs:1\n",
+        )
+        .unwrap();
+        let vs = lint_log_redaction(&ws).unwrap();
+        fs::remove_dir_all(&ws).unwrap();
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn skips_test_files_and_non_log_macros() {
+        let vs = violations_for(&[
+            ("crates/foo/src/lib.rs", "fn g() { println!(\"{url}\"); }"),
+            (
+                "crates/foo/tests/t.rs",
+                "fn h(url: &str) { tracing::debug!(url = url); }",
+            ),
+        ]);
+        assert!(vs.is_empty(), "{vs:?}");
     }
 }

@@ -1,0 +1,4 @@
+# Allowlist for `cargo xtask lint-log-redaction`.
+# Format: <relative path>:<line>  (one entry per line; `#` comments ignored)
+# Inline alternative: append `// allow-log-redaction` to the offending line.
+# Use sparingly — each entry is an accepted unredacted url/uri/config log.

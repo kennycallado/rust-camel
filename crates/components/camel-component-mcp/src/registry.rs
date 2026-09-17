@@ -903,7 +903,7 @@ impl McpResourceRegistry {
             }
             // ADR-0068: replace-dead-on-conflict
             tracing::warn!(
-                uri = %uri,
+                uri = %camel_api::redact::redact_url_fail_closed(&uri),
                 dead_route_id = %existing.route_id,
                 "replacing a dead owner's resource registration"
             );

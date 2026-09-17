@@ -154,7 +154,10 @@ impl Service<Exchange> for ValidatorProducer {
         let uri = self.uri.clone();
         let config = self.config.clone();
         Box::pin(async move {
-            debug!(uri = uri, "validating exchange body");
+            debug!(
+                uri = %camel_api::redact::redact_url_fail_closed(&uri),
+                "validating exchange body"
+            );
 
             // VAL-003: header_name mode — validate header value instead of body
             if let Some(ref header_name) = config.header_name {

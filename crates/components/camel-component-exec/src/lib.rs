@@ -57,7 +57,11 @@ impl Component for ExecComponent {
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         // URI form: exec:{profile-name}
         let profile_name = uri.strip_prefix("exec:").ok_or_else(|| {
-            CamelError::InvalidUri(format!("exec uri must start with 'exec:': {uri}"))
+            // Audit 2026-08-31 F5-4: echo through the canonical redactor.
+            CamelError::InvalidUri(format!(
+                "exec uri must start with 'exec:': '{}'",
+                camel_api::redact::redact_url_fail_closed(uri)
+            ))
         })?;
 
         // Strip optional query string

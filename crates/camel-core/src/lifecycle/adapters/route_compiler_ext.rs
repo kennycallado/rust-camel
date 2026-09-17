@@ -129,7 +129,10 @@ pub(super) fn resolve_uow_layer(
         endpoint
             .create_producer(Arc::clone(&rt), producer_ctx)
             .map_err(|e| {
-                CamelError::RouteError(format!("UoW hook URI '{uri}' could not be resolved: {e}"))
+                CamelError::RouteError(format!(
+                    "UoW hook URI '{}' could not be resolved: {e}",
+                    camel_api::redact::redact_url_fail_closed(uri)
+                ))
             })
     };
 

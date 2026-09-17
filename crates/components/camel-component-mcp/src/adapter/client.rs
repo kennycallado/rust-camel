@@ -48,9 +48,26 @@ impl RmcpClient {
     /// returns [`McpError::IncompatibleRemote`] (after a `warn!`) instead of
     /// falling back to the legacy `initialize` handshake.
     pub async fn connect(name: &str, config: &McpRemoteConfig) -> Result<Self, McpError> {
-        // rmcp's built-in reqwest backend (hardened defaults: no connection
-        // pooling, redirects disabled so custom headers are never replayed).
-        let transport = StreamableHttpClientTransport::from_config(
+        // DNS pinning (audit 2026-08-31 R4 / rc-juqrd): resolve the remote
+        // once, validate every resolved IP against the SSRF blocklist, and
+        // hand rmcp a reqwest client pinned to those addresses
+        // (`resolve_to_addrs`) — parity with the camel-http component. The
+        // builder keeps rmcp's hardened defaults (no connection pooling,
+        // redirects disabled so custom headers are never replayed) and adds
+        // `.no_proxy()` (environment proxies bypass `resolve_to_addrs`).
+        let http_client =
+            super::dns_pin::build_pinned_http_client(&config.url, config.allow_internal)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        server = %name,
+                        error = %e,
+                        "MCP remote '{name}' failed DNS pinning validation"
+                    );
+                    e
+                })?;
+        let transport = StreamableHttpClientTransport::with_client(
+            http_client,
             StreamableHttpClientTransportConfig::with_uri(config.url.clone()),
         );
         let service = ()
