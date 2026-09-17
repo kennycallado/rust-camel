@@ -630,6 +630,49 @@ mod tests {
         );
     }
 
+    /// bd rc-tfugr, jms spec scenario "credential-shaped key never
+    /// echoes": a denylist-matched key whose single-pass minimal decode
+    /// carries `@` AND (`:` OR `//`) renders as a bare `<redacted>` —
+    /// the key bytes may themselves embed the credential (ADR-0076
+    /// appendix, key-position credential-shape symmetry).
+    #[test]
+    fn redact_broker_url_suppresses_credential_shaped_key() {
+        for fixture in [
+            "tcp://h:61616?user%3Asecret%40host=1",
+            "tcp://h:61616?user%3asecret%40host=1",
+            "tcp://h:61616?user:pass@host=1",
+        ] {
+            let redacted = redact_broker_url(fixture);
+            assert_eq!(redacted, "tcp://h:61616?<redacted>");
+            assert!(
+                !redacted.contains("secret")
+                    && !redacted.contains("user%3Asecret%40")
+                    && !redacted.contains("user:pass"),
+                "credential must not echo in any position: {redacted}"
+            );
+        }
+    }
+
+    /// bd rc-tfugr, jms spec scenario "non-shaped sensitive keys keep
+    /// their key names": a denylist-matched key that does not decode to
+    /// the credential shape renders as `{raw_key}=<redacted>` — the
+    /// authored key bytes survive for transport-policy diagnosis.
+    #[test]
+    fn redact_broker_url_keeps_non_shaped_sensitive_keys() {
+        assert_eq!(
+            redact_broker_url("tcp://h:61616?password=p&jms.userName=admin&user=u&keepAlive=true"),
+            "tcp://h:61616?password=<redacted>&jms.userName=<redacted>&user=<redacted>&keepAlive=true"
+        );
+        assert_eq!(
+            redact_broker_url("tcp://h:61616?user@host=1"),
+            "tcp://h:61616?user@host=<redacted>"
+        );
+        assert_eq!(
+            redact_broker_url("tcp://h:61616?pass%77ord=p"),
+            "tcp://h:61616?pass%77ord=<redacted>"
+        );
+    }
+
     /// Exact-output pin: userinfo is fully masked by `***`, never partially
     /// truncated, in scheme://...@ authority position.
     #[test]

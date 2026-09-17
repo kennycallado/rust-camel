@@ -99,3 +99,5 @@ Spec note: `openspec/specs/jms/spec.md` still carries the sentence
 qualifier. That canon edit requires an OpenSpec change; it is deferred
 to the master. The code is spec-compatible meanwhile because the new
 branch only over-masks, and over-masking is safe (ADR-0051).
+Landed: openspec change jmscredkey (bd rc-tfugr) amended the jms spec
+canon with this qualifier.
