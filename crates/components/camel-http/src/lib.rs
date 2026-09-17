@@ -852,6 +852,13 @@ struct ServerHandle {
     /// JoinHandle for the monitor_axum_task wrapper. `is_finished()` is the
     /// dead-server eviction signal in `get_or_spawn`.
     monitor_task: tokio::task::JoinHandle<()>,
+    /// Abort handle for the Axum server task itself. The JoinHandle is
+    /// consumed by `monitor_axum_task`; this survives on the handle so
+    /// crashed-server tests (and future ops tooling) can deterministically
+    /// kill the shared transport to exercise the death path.
+    /// Test-only today — no production reader yet (rc-szmob).
+    #[allow(dead_code)]
+    server_abort: tokio::task::AbortHandle,
     // Retained so the reload handler (Task 7) can call reload_from_config()
     // to hot-swap certs without restarting the server.
     tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
@@ -1213,7 +1220,8 @@ async fn spawn_entry(
     let bound_addr = listener
         .local_addr()
         .map_err(|e| CamelError::EndpointCreationFailed(format!("listener local_addr: {e}")))?;
-    let registry = HttpRouteRegistry::new();
+    let server_exited = tokio_util::sync::CancellationToken::new();
+    let registry = HttpRouteRegistry::new_with_server_exited(server_exited.clone());
     let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
     // Constructed once in the TLS branch so they can be retained
     // on ServerHandle for the reload handler (Task 7).
@@ -1261,11 +1269,13 @@ async fn spawn_entry(
         ))
     };
     let addr_for_monitor = format!("{host_owned}:{port}");
+    let server_abort = server_task.abort_handle();
     let monitor_task = tokio::spawn(monitor_axum_task(
         server_task,
         addr_for_monitor,
         Arc::clone(&rt),
         rid,
+        server_exited,
     ));
     let handle = ServerHandle {
         registry,
@@ -1277,6 +1287,7 @@ async fn spawn_entry(
         tls_cert_path: tls_config.as_ref().map(|t| t.cert_path.clone()),
         tls_key_path: tls_config.as_ref().map(|t| t.key_path.clone()),
         monitor_task,
+        server_abort,
         tls_config: tls_rustls_cfg,
         tls_source,
     };
@@ -1410,18 +1421,21 @@ async fn run_axum_server_tls(
         });
 }
 
-/// Monitors an Axum server task and emits a structured error event if it
-/// exits unexpectedly.
+/// Monitors the shared Axum server task of one (host, port).
 ///
-/// # Limitations
-/// The HTTP server is shared across all routes on a port. Full per-route
-/// CrashNotification propagation is deferred — this provides observable
-/// structured logging as a first guard.
+/// On unexpected exit (panic or abort) it records the structured error
+/// event and cancels the server's `server_exited` token. Every
+/// `HttpConsumer` hosted on that server observes the cancellation in its
+/// `start()` loop and returns `Err`, which camel-core's consumer watcher
+/// turns into a per-route `CrashNotification` → `FailRoute` → supervision
+/// backoff restart (ADR-0007). A clean exit (`Ok(())` — process shutdown)
+/// cancels nothing: route stops own their termination.
 async fn monitor_axum_task(
     handle: tokio::task::JoinHandle<()>,
     addr: String,
     runtime: Arc<dyn RuntimeObservability>,
     route_id: String,
+    server_exited: tokio_util::sync::CancellationToken,
 ) {
     match handle.await {
         Ok(()) => {
@@ -1437,6 +1451,10 @@ async fn monitor_axum_task(
                 error = %join_err,
                 "Axum server task exited unexpectedly — all routes on this port are now dead"
             );
+            // Fail every hosted route's consumer: each `start()` returns Err
+            // and camel-core emits one CrashNotification per route (ADR-0007
+            // parity with per-route transport death).
+            server_exited.cancel();
         }
     }
 }
@@ -1804,11 +1822,25 @@ impl Consumer for HttpConsumer {
 
         let path = self.config.path.clone();
         let registry_for_cleanup = registry.clone();
+        let server_exited = registry.server_exited.clone();
         let cancel_token = ctx.cancel_token();
         let kernel = self.kernel.clone();
+        // Set when the loop exits because the shared server died. The
+        // post-loop cleanup still runs, then `start()` returns Err so
+        // camel-core's consumer watcher emits a CrashNotification for THIS
+        // route and supervision backoff engages (ADR-0007).
+        let mut server_died = false;
         loop {
             tokio::select! {
                 _ = ctx.cancelled() => {
+                    break;
+                }
+                _ = server_exited.cancelled() => {
+                    // Shared transport death: this route's consumer cannot
+                    // continue. Fail (do NOT hang in Running) — parity with
+                    // per-route transport death, which also surfaces as a
+                    // consumer-task error.
+                    server_died = true;
                     break;
                 }
                 envelope = env_rx.recv() => {
@@ -2088,12 +2120,28 @@ impl Consumer for HttpConsumer {
             registry_for_cleanup.unregister_api_route(&path).await;
         }
 
-        // D-L10: decrement the shared server's refcount. When the last
-        // consumer on this (host, port) leaves, the server + monitor tasks
-        // are aborted and the registry entry is removed.
+        // Leave the shared-server entry: `unregister` is a no-op today (no
+        // refcount exists — stale D-L10 wording removed, rc-szmob review).
+        // Dead servers are evicted lazily by `get_or_spawn_internal`, which
+        // checks `monitor_task.is_finished()` and rebinds on the next spawn
+        // (e.g. a supervision restart after this consumer's Err).
         ServerRegistry::global()
             .unregister(&self.config.host, self.config.port)
             .await;
+
+        if server_died {
+            // log-policy: system-broken
+            tracing::error!(
+                host = %self.config.host,
+                port = self.config.port,
+                path = %path,
+                "Shared HTTP server exited — failing consumer to engage route supervision (ADR-0007)"
+            );
+            return Err(CamelError::RouteError(format!(
+                "shared HTTP server for {}:{} exited unexpectedly; route transport is dead",
+                self.config.host, self.config.port
+            )));
+        }
 
         Ok(())
     }
@@ -6634,7 +6682,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // D-L10: HTTP monitor_axum_task refcounted shutdown
+    // D-L10: HTTP server is process-lifetime — it survives consumer
+    // unregister (no refcount; dead servers are evicted on next spawn)
     // -----------------------------------------------------------------------
 
     #[allow(clippy::await_holding_lock)]
@@ -7426,6 +7475,167 @@ mod tests {
 
         // Cancellation tears down the spawned start() loop.
         token.cancel();
+    }
+
+    // -----------------------------------------------------------------------
+    // Shared-server death supervision (rc-szmob / ADR-0007)
+    // -----------------------------------------------------------------------
+
+    /// RuntimeObservability stub that records every `increment_errors`
+    /// `(route_id, label)` pair so tests can assert error counters.
+    #[derive(Default, Clone)]
+    struct ErrorRecordingRuntime {
+        errors: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl camel_api::MetricsCollector for ErrorRecordingRuntime {
+        fn record_exchange_duration(&self, _route_id: &str, _duration: std::time::Duration) {}
+        fn increment_errors(&self, route_id: &str, error_type: &str) {
+            self.errors
+                .lock()
+                .expect("error recorder lock")
+                .push((route_id.to_string(), error_type.to_string()));
+        }
+        fn increment_exchanges(&self, _route_id: &str) {}
+        fn set_queue_depth(&self, _queue: &str, _depth: usize) {}
+        fn record_circuit_breaker_change(&self, _route_id: &str, _from: &str, _to: &str) {}
+    }
+
+    impl camel_component_api::HealthCheckRegistry for ErrorRecordingRuntime {
+        fn force_unhealthy_for_route(&self, _route_id: &str, _name: &str, _reason: &str) {}
+    }
+
+    impl camel_component_api::RuntimeObservability for ErrorRecordingRuntime {
+        fn metrics(&self) -> std::sync::Arc<dyn camel_api::MetricsCollector> {
+            std::sync::Arc::new(self.clone())
+        }
+        fn health(&self) -> std::sync::Arc<dyn camel_component_api::HealthCheckRegistry> {
+            std::sync::Arc::new(self.clone())
+        }
+    }
+
+    /// rc-szmob (ADR-0007 parity): when the shared Axum server task for a
+    /// host:port dies, EVERY HttpConsumer hosted on that port must fail its
+    /// `start()` with an Err — that Err is the signal camel-core's consumer
+    /// watcher turns into a per-route CrashNotification → FailRoute →
+    /// supervision backoff restart. Before the fix the consumers hung in
+    /// `Running` forever (zombie routes): neither `ctx.cancelled()` nor
+    /// `env_rx.recv()` fires when the server task dies, because the envelope
+    /// senders live in the (still-alive) registry, not in the dead task.
+    ///
+    /// Deterministic by construction: readiness is awaited via the injected
+    /// StartupSignal (no sleeps), the server is killed via its AbortHandle
+    /// (real JoinError → monitor's unexpected-exit branch), and consumer
+    /// resolution is bounded by a timeout — on unmodified behavior the
+    /// timeout trips, which is exactly the zombie this test pins down.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn shared_server_death_fails_every_hosted_consumer() {
+        use camel_component_api::{ConsumerContext, StartupSignal};
+
+        let _guard = lock_registry_test_mutex();
+        ServerRegistry::reset();
+
+        // Reserve a port, release it, let get_or_spawn bind it.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let rt = ErrorRecordingRuntime::default();
+
+        let make_consumer = |path: &str| {
+            HttpConsumer::new(
+                HttpServerConfig {
+                    scheme: "http".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port,
+                    path: path.to_string(),
+                    max_request_body: 2 * 1024 * 1024,
+                    max_response_body: 10 * 1024 * 1024,
+                    max_inflight_requests: 16,
+                    method: None,
+                    tls_config: None,
+                },
+                std::sync::Arc::new(rt.clone()),
+            )
+        };
+
+        let spawn_consumer = |path: &str, route_id: &str| {
+            let mut consumer = make_consumer(path);
+            let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+            let token = tokio_util::sync::CancellationToken::new();
+            let ctx = ConsumerContext::new(tx, token, route_id.to_string());
+            let (signal, startup_rx) = StartupSignal::pair();
+            let ctx = ctx.with_startup(signal);
+            let task = tokio::spawn(async move { consumer.start(ctx).await });
+            (task, startup_rx)
+        };
+
+        // Two routes hosted on the SAME shared server (same host:port).
+        let (task_a, ready_a) = spawn_consumer("/zombie-a", "zombie-route-a");
+        let (task_b, ready_b) = spawn_consumer("/zombie-b", "zombie-route-b");
+
+        // Both consumers registered and the server is up (bounded, no sleeps).
+        for (name, ready) in [("a", ready_a), ("b", ready_b)] {
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(2), ready.await_ready())
+                    .await
+                    .unwrap_or_else(|_| panic!("consumer {name} never became ready"));
+            assert!(
+                result.is_ok(),
+                "consumer {name} readiness must resolve Ok (bind + registration complete)"
+            );
+        }
+
+        // Kill the shared server task: abort → JoinError → the monitor's
+        // unexpected-exit branch. This is the real crash path (no mock).
+        {
+            let registry = ServerRegistry::global();
+            let guard = registry.inner.lock().expect("ServerRegistry lock");
+            let cell = guard
+                .entries
+                .get(&("127.0.0.1".to_string(), port))
+                .expect("shared server entry must exist");
+            let handle = cell.get().expect("server handle must be initialized");
+            handle.server_abort.abort();
+        }
+
+        // THE assertion: both hosted consumers must fail (bounded). On the
+        // zombie bug they never resolve and this timeout trips.
+        let outcome_a = tokio::time::timeout(std::time::Duration::from_secs(2), task_a)
+            .await
+            .expect("ZOMBIE: consumer-a still running after shared server death (rc-szmob)");
+        let outcome_b = tokio::time::timeout(std::time::Duration::from_secs(2), task_b)
+            .await
+            .expect("ZOMBIE: consumer-b still running after shared server death (rc-szmob)");
+
+        let err_a = outcome_a
+            .expect("consumer-a task must join")
+            .expect_err("consumer-a start() must return Err when the shared server dies");
+        let err_b = outcome_b
+            .expect("consumer-b task must join")
+            .expect_err("consumer-b start() must return Err when the shared server dies");
+
+        // The error must identify the dead shared transport (it flows into the
+        // CrashNotification message camel-core records against the route).
+        for (name, err) in [("a", &err_a), ("b", &err_b)] {
+            assert!(
+                err.to_string().contains("127.0.0.1")
+                    && err.to_string().contains(&port.to_string()),
+                "consumer-{name} error must name the dead shared server, got: {err}"
+            );
+        }
+
+        // Error counter regression guard: the monitor still records
+        // `e:http:server-task-exited` for the route that spawned the server.
+        let recorded = rt.errors.lock().expect("error recorder lock").clone();
+        assert!(
+            recorded
+                .iter()
+                .any(|(route, label)| label == "e:http:server-task-exited"
+                    && route == "zombie-route-a"),
+            "expected e:http:server-task-exited for the spawning route, got: {recorded:?}"
+        );
     }
 
     #[tokio::test]
@@ -10037,14 +10247,23 @@ mod tests {
     #[tokio::test]
     async fn monitor_task_silent_on_clean_exit() {
         let handle: tokio::task::JoinHandle<()> = tokio::spawn(async {});
+        let server_exited = tokio_util::sync::CancellationToken::new();
         // Clean exit should complete without panicking or logging errors
         monitor_axum_task(
             handle,
             "127.0.0.1:0".to_string(),
             noop_rt(),
             "test-monitor".into(),
+            server_exited.clone(),
         )
         .await;
+        // rc-szmob: a clean exit must NOT fail hosted consumers — route
+        // stops own their termination (no CrashNotification storm on
+        // graceful process shutdown).
+        assert!(
+            !server_exited.is_cancelled(),
+            "clean server exit must not cancel server_exited"
+        );
     }
 
     #[tokio::test]
@@ -10052,14 +10271,22 @@ mod tests {
         let handle: tokio::task::JoinHandle<()> = tokio::spawn(async {
             panic!("simulated server crash");
         });
+        let server_exited = tokio_util::sync::CancellationToken::new();
         // Should complete without panicking even though the inner task panicked
         monitor_axum_task(
             handle,
             "127.0.0.1:9999".to_string(),
             noop_rt(),
             "test-monitor".into(),
+            server_exited.clone(),
         )
         .await;
+        // rc-szmob: unexpected exit must cancel the token so every hosted
+        // consumer fails and supervision engages (ADR-0007).
+        assert!(
+            server_exited.is_cancelled(),
+            "crashed server must cancel server_exited"
+        );
     }
 
     // -----------------------------------------------------------------------

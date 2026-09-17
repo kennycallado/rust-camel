@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use camel_component_api::CamelError;
 use tokio::sync::{RwLock, mpsc};
+use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
 
 use crate::RequestEnvelope;
@@ -65,6 +66,19 @@ impl std::fmt::Debug for HttpRouteRegistryInner {
 #[derive(Clone)]
 pub struct HttpRouteRegistry {
     pub(crate) inner: Arc<RwLock<HttpRouteRegistryInner>>,
+    /// Cancelled by `monitor_axum_task` when the shared Axum server task
+    /// backing this registry exits unexpectedly (panic or abort). Every
+    /// `HttpConsumer` hosted on that server selects on this token in its
+    /// `start()` loop; on cancellation the consumer returns `Err`, which
+    /// camel-core's consumer watcher converts into a per-route
+    /// `CrashNotification` → `FailRoute` → supervision backoff restart
+    /// (ADR-0007 route-supervised contract — shared transports must fail
+    /// their hosted routes like per-route transports do).
+    ///
+    /// Registries constructed directly via [`HttpRouteRegistry::new`]
+    /// (tests, embedding) carry a token that is never cancelled — their
+    /// consumers keep the pre-fix semantics.
+    pub(crate) server_exited: CancellationToken,
 }
 
 impl std::fmt::Debug for HttpRouteRegistry {
@@ -81,12 +95,19 @@ impl Default for HttpRouteRegistry {
 
 impl HttpRouteRegistry {
     pub fn new() -> Self {
+        Self::new_with_server_exited(CancellationToken::new())
+    }
+
+    /// Crate-private constructor used by `spawn_entry`: binds the registry
+    /// to the death signal of the shared server that serves it.
+    pub(crate) fn new_with_server_exited(server_exited: CancellationToken) -> Self {
         Self {
             inner: Arc::new(RwLock::new(HttpRouteRegistryInner {
                 api_routes: HashMap::new(),
                 rest_endpoints: Vec::new(),
                 mounts: Vec::new(),
             })),
+            server_exited,
         }
     }
 

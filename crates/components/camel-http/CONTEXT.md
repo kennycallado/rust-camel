@@ -107,7 +107,7 @@ Per ADR-0012, this component's `error!` sites are categorized as:
 
 - **(e) outside-contract** (lib.rs L748, L774):
   - L748 = accept-loop error in `run_axum_server`. Calls `runtime.metrics().increment_errors(route_id, "e:http:accept")` BEFORE the `error!`. The metric is the operator signal; `error!` provides loud log visibility.
-  - L774 = server task exited unexpectedly in `monitor_axum_task`. Calls `runtime.metrics().increment_errors(route_id, "e:http:server-task-exited")` BEFORE the `error!`. Same pattern.
+  - L774 = server task exited unexpectedly in `monitor_axum_task`. Calls `runtime.metrics().increment_errors(route_id, "e:http:server-task-exited")` BEFORE the `error!`. Same pattern. It also cancels the server's `server_exited` token: every `HttpConsumer` hosted on that port observes it, its `start()` returns `Err`, and camel-core's consumer watcher turns that into a per-route `CrashNotification` → `FailRoute` → supervision backoff restart (ADR-0007, rc-szmob). Clean exits cancel nothing.
   Both sites keep `error!` with `// log-policy: outside-contract`.
 
 - **(c) system-broken** (lib.rs L1108): `Body::Stream` already consumed before HTTP reply — programming-contract violation in `dispatch_handler`. Keeps `error!` with `// log-policy: system-broken`. No metric call (operator alert via error! is the signal).
