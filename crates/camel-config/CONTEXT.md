@@ -144,7 +144,7 @@ cross-loader tests in `config_tests/virtual_store_file_parity_tests.rs`
 and `config_tests/virtual_store_config_tests.rs`.
 
 **Switching cache backend between profiles requires a complete section.**
-Profile merges are additive: overlay scalars replace while omitted base keys survive, and TOML offers no remove-key sentinel (`fn merge_toml_values`, `config.rs:1623`).
+Profile merges are additive: overlay scalars replace while omitted base keys survive, and TOML offers no remove-key sentinel (`camel_dsl::config_semantics::merge_toml_values`).
 `CamelConfig::validate` rejects every cross-backend key — the redis branch rejects `path`, `cache_size`, `sweep_interval`, `max_entries`, `max_capacity` (`config.rs:2056`), while the redb branch rejects `url` and its siblings (`config.rs:1977`) — so a partial profile overlay cannot switch backends.
 It fails validation instead, e.g. `cache_repo.path does not apply to the "redis" backend`.
 The supported pattern: define the complete `[<profile>.cache_repo]` table inside each profile and keep `cache_repo` out of `[default]`.

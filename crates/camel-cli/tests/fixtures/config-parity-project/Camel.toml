@@ -1,0 +1,21 @@
+# Config-parity fixture (openspec change `configunify`, Task 1.3).
+# Compiled through the real `camel compile --config Camel.toml
+# --profile <name>`; the embedded store's runtime-resolved merged
+# configuration is locked byte-for-byte by tests/config_compile_parity.rs.
+# `Camel-partial.toml` is the `[qa]`-less variant used by the partial
+# multi-profile absence error golden.
+include = ["includes/common.toml"]
+routes = ["routes/*.yaml"]
+
+[default]
+include = ["includes/extra.toml"]
+log_level = "info"
+timeout_ms = 30000
+
+[production]
+log_level = "warn"
+routes = ["routes/*.yaml"]
+
+[qa]
+log_level = "${env:CONFIG_PARITY_QA_LOG:-debug}"
+watch = true

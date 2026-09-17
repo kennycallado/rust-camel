@@ -1,0 +1,6 @@
+# Secondary include, pulled in through `[default].include`: carries a
+# `[default]` fragment, so profile-section selection drops the flat key.
+extra_flag = true
+
+[default]
+extra_layer = "from-extra-include"

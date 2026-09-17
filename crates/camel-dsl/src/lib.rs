@@ -5,6 +5,7 @@
 
 pub mod canonical;
 pub mod compile;
+pub mod config_semantics;
 pub mod contract;
 pub mod discovery;
 pub mod embedded_store;
@@ -22,6 +23,7 @@ pub mod rest;
 pub mod route_ast;
 pub mod template;
 mod util;
+pub(crate) mod virtual_config;
 pub mod yaml;
 
 pub use canonical::{parse_canonical_json, parse_canonical_route};

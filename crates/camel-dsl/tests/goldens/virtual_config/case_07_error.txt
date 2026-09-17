@@ -1,0 +1,1 @@
+Malformed embedded configuration in Camel.toml: unknown profile: none of the selected profiles (staging) exist in the configuration

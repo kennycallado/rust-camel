@@ -1,0 +1,10 @@
+extra_layer = "from-extra-include"
+log_level = "${env:CONFIG_PARITY_QA_LOG:-debug}"
+platform = "config-parity"
+tags = ["common"]
+timeout_ms = 30000
+watch = true
+
+[production]
+tags = ["common-production"]
+timeout_ms = 9000

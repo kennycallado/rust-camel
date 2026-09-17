@@ -3,10 +3,10 @@
 //!
 //! The compiler embeds `Camel.toml`, includes, and selected profile
 //! fragments as store entries, and `camel_dsl::discover_virtual_store`
-//! re-assembles them into one merged TOML tree — a deliberate mirror of
-//! camel-config's `load_includes` + `build_from_toml_value_inner`
-//! ordering (see the SYNC notes in `camel-dsl/src/discovery.rs`). These
-//! tests pin that mirror to the real filesystem loader: one fixture
+//! re-assembles them into one merged TOML tree — the ordering semantics
+//! are canonical in `camel_dsl::config_semantics` (bd rc-io2zl),
+//! consumed by both loaders; these tests pin the two consumers to each
+//! other: one fixture
 //! tree is loaded once through `CamelConfig::from_file_sealed` and once
 //! through the virtual store (`discover_virtual_store` +
 //! `CamelConfig::from_toml_value_with_env`), and the resulting typed

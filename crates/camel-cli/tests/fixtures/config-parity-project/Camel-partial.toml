@@ -1,0 +1,15 @@
+# `[qa]`-less variant of `Camel.toml` for the partial multi-profile
+# absence error golden: `--profile production --profile qa` must fail
+# because `qa` exists nowhere in the configuration chain (this config
+# nor any include declares it).
+include = ["includes/common.toml"]
+routes = ["routes/*.yaml"]
+
+[default]
+include = ["includes/extra.toml"]
+log_level = "info"
+timeout_ms = 30000
+
+[production]
+log_level = "warn"
+routes = ["routes/*.yaml"]

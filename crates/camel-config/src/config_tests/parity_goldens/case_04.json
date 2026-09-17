@@ -1,0 +1,8 @@
+{
+  "components_http_base_url": "http://from-b",
+  "components_http_max_connections": 30,
+  "routes": [
+    "routes/config.yaml"
+  ],
+  "timeout_ms": 1000
+}

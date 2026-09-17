@@ -1,0 +1,5 @@
+log_level = "info"
+timeout_ms = 1000
+
+[components.http]
+base_url = "http://from-base"

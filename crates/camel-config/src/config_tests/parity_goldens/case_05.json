@@ -1,0 +1,7 @@
+{
+  "components_http_base_url": "http://from-base",
+  "log_level": "info",
+  "routes": [],
+  "timeout_ms": 1000,
+  "watch": false
+}

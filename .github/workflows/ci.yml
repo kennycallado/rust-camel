@@ -158,6 +158,15 @@ jobs:
         run: |
           docker system prune -af --volumes || true
           df -h /
+      - name: Compile-gate gated integration test set
+        # Compile-only gate for the integration-tests-gated test binaries
+        # (e.g. master_kubernetes_test). bd rc-8g35d: a compile-broken
+        # master_kubernetes_test stayed invisible to CI because plain
+        # `cargo test --workspace` skips files gated behind
+        # #![cfg(feature = "integration-tests")]. rc-khjnb: this step
+        # makes gated-test compile drift fail CI. No Docker or runtime
+        # required — cargo check only.
+        run: cargo check -p camel-test --features integration-tests --tests
       - name: Test (full workspace)
         run: cargo test --workspace
 

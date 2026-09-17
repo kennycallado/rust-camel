@@ -17,6 +17,7 @@ use crate::env_interpolation::{
 use crate::json::parse_json_with_threshold_and_security;
 use crate::model::SecurityCompileContext;
 use crate::template::materializer::materialize_and_compile;
+use crate::virtual_config::build_virtual_config;
 use crate::yaml::parse_yaml_with_threshold_and_security;
 
 /// Errors that can occur during route discovery.
@@ -529,234 +530,6 @@ pub fn discover_virtual_store(
     materialize_templated_routes(&mut routes, &templates, &templated_specs, None, None)?;
 
     Ok(VirtualStoreDiscovery { config, routes })
-}
-
-/// Classified configuration references of a store (in index order).
-struct VirtualConfigRefs {
-    /// The `Camel.toml` document path, when the store embeds one.
-    config: Option<String>,
-    /// Include fragment paths in declaration order.
-    includes: Vec<String>,
-    /// Selected profile names in selection order, from the synthesized
-    /// `<name>.profile.toml` fragment paths.
-    profiles: Vec<String>,
-}
-
-/// Classify `config_references` by document kind. Every reference must
-/// name a config, include, or profile entry; violations surface as the
-/// named store errors (missing reference, kind mismatch) and structural
-/// breakage (duplicate config document, malformed profile fragment
-/// path) as `MalformedVirtualConfig`.
-fn classify_virtual_config(
-    store: &VirtualDocumentStore,
-) -> Result<VirtualConfigRefs, DiscoveryError> {
-    let mut refs = VirtualConfigRefs {
-        config: None,
-        includes: Vec::new(),
-        profiles: Vec::new(),
-    };
-    for path in &store.index.config_references {
-        let entry = store
-            .index
-            .entry(path)
-            .ok_or_else(|| StoreError::MissingReference(path.clone()))?;
-        match entry.kind {
-            StoreEntryKind::Config => {
-                if refs.config.replace(path.clone()).is_some() {
-                    return Err(DiscoveryError::MalformedVirtualConfig {
-                        path: path.clone(),
-                        error: "duplicate configuration document".to_string(),
-                    });
-                }
-            }
-            StoreEntryKind::Include => refs.includes.push(path.clone()),
-            StoreEntryKind::Profile => {
-                let Some(name) = path.strip_suffix(".profile.toml").filter(|n| !n.is_empty())
-                else {
-                    return Err(DiscoveryError::MalformedVirtualConfig {
-                        path: path.clone(),
-                        error: "profile entry path must be `<name>.profile.toml`".to_string(),
-                    });
-                };
-                refs.profiles.push(name.to_string());
-            }
-            kind => {
-                return Err(StoreError::KindMismatch {
-                    path: path.clone(),
-                    expected: "config, include, or profile",
-                    got: kind.as_str(),
-                }
-                .into());
-            }
-        }
-    }
-    Ok(refs)
-}
-
-/// Build the merged configuration value from the indexed
-/// config/include/profile texts, mirroring camel-config's
-/// `load_includes` + `build_from_toml_value_inner` ordering: includes
-/// are pre-sources in declaration order (lowest priority), the
-/// configuration document sits above them, and profile-section
-/// selection applies per document before merging.
-///
-/// SYNC: the mirror lives here because the dependency direction
-/// (camel-config depends on camel-dsl) forbids sharing the camel-config
-/// `pub(crate)` helpers; behavioral changes there must be reflected
-/// here and in the compiler's `camel-cli` `compile::sources`.
-fn build_virtual_config(store: &VirtualDocumentStore) -> Result<toml::Value, DiscoveryError> {
-    let refs = classify_virtual_config(store)?;
-
-    // Includes (lowest priority), in declaration order. Each fragment
-    // drops any `include` key (recursive includes are unsupported, as
-    // in camel-config's loader) and applies lenient profile-section
-    // selection before merging.
-    let mut merged = toml::Value::Table(toml::Table::new());
-    for path in &refs.includes {
-        let text = virtual_config_text(store, path)?;
-        let mut value = parse_virtual_config_toml(path, &text)?;
-        if let toml::Value::Table(table) = &mut value
-            && table.remove("include").is_some()
-        {
-            tracing::warn!(
-                path,
-                "embedded include declares 'include'; recursive includes are unsupported — ignoring"
-            );
-        }
-        select_profile_sections(&mut value, &refs.profiles);
-        merge_toml_values(&mut merged, &value);
-    }
-
-    // The configuration document above the includes: strip `include`
-    // keys from every declaring location (top-level, `[default]`, and
-    // the selected profile sections), enforce the strict unknown-profile
-    // rule (a configuration with `[default]` must carry every selected
-    // profile section — the filesystem loader's error), then apply the
-    // profile-section selection and merge.
-    if let Some(path) = &refs.config {
-        let text = virtual_config_text(store, path)?;
-        let mut value = parse_virtual_config_toml(path, &text)?;
-        strip_include_keys(&mut value, &refs.profiles);
-        if let toml::Value::Table(table) = &value {
-            let has_structure = table.contains_key("default")
-                || refs.profiles.iter().any(|p| table.contains_key(p));
-            let selected_present = refs.profiles.iter().any(|p| table.contains_key(p));
-            if has_structure
-                && !refs.profiles.is_empty()
-                && table.contains_key("default")
-                && !selected_present
-            {
-                return Err(DiscoveryError::MalformedVirtualConfig {
-                    path: path.clone(),
-                    error: format!(
-                        "unknown profile: none of the selected profiles ({}) exist in the \
-                         configuration",
-                        refs.profiles.join(", ")
-                    ),
-                });
-            }
-        }
-        select_profile_sections(&mut value, &refs.profiles);
-        merge_toml_values(&mut merged, &value);
-    }
-
-    Ok(merged)
-}
-
-/// Read one configuration document as UTF-8 text (named failure for
-/// missing-validity).
-fn virtual_config_text(store: &VirtualDocumentStore, path: &str) -> Result<String, DiscoveryError> {
-    store.read_text(path).map(str::to_string).ok_or_else(|| {
-        DiscoveryError::MalformedVirtualConfig {
-            path: path.to_string(),
-            error: "configuration document is not valid UTF-8".to_string(),
-        }
-    })
-}
-
-/// Parse one configuration document as TOML (named failure).
-fn parse_virtual_config_toml(path: &str, text: &str) -> Result<toml::Value, DiscoveryError> {
-    toml::from_str(text).map_err(|e| DiscoveryError::MalformedVirtualConfig {
-        path: path.to_string(),
-        error: e.to_string(),
-    })
-}
-
-/// Remove `include` keys from the top-level table and from the
-/// `[default]` plus selected profile sections, mirroring camel-config's
-/// `extract_includes` stripping (the embedded include order already
-/// encodes the same walk).
-fn strip_include_keys(value: &mut toml::Value, profiles: &[String]) {
-    let Some(table) = value.as_table_mut() else {
-        return;
-    };
-    table.remove("include");
-    let mut sections: Vec<&str> = vec!["default"];
-    sections.extend(profiles.iter().map(String::as_str));
-    for section in sections {
-        if let Some(toml::Value::Table(section_table)) = table.get_mut(section) {
-            section_table.remove("include");
-        }
-    }
-}
-
-/// Apply the filesystem profile-section selection to one document,
-/// generalized to the store's ordered selected profiles: the
-/// `[default]` section forms the base when present (else the first
-/// selected section), every selected profile section overlays it in
-/// selection order, and the selected content REPLACES the document
-/// root. A document with neither `[default]` nor any selected section
-/// stays as-is (flat config).
-///
-/// SYNC: mirrors camel-config's `apply_profile` and
-/// `apply_profile_lenient` (`config.rs`, `pub(crate)`); with exactly one
-/// selected profile the selection is byte-for-byte the filesystem
-/// behavior.
-fn select_profile_sections(value: &mut toml::Value, profiles: &[String]) {
-    let Some(table) = value.as_table_mut() else {
-        return;
-    };
-    let mut base = match table.get("default").cloned() {
-        Some(default) => default,
-        None => match profiles.iter().find(|p| table.contains_key(p.as_str())) {
-            Some(first) => match table.get(first.as_str()) {
-                Some(section) => section.clone(),
-                // `find` proved presence; unreachable in practice.
-                None => return,
-            },
-            // Flat document with no profile structure: keep as-is.
-            None => return,
-        },
-    };
-    for profile in profiles {
-        if let Some(section) = table.get(profile.as_str()) {
-            merge_toml_values(&mut base, section);
-        }
-    }
-    *value = base;
-}
-
-/// Deep-merge `overlay` into `base`: tables merge recursively, every
-/// other value (arrays included) is replaced by the overlay — array
-/// replacement is what gives profile overlays such as `routes` their
-/// replace, never concatenate, semantics.
-///
-/// SYNC: mirrors camel-config's `merge_toml_values` (`config.rs`,
-/// `pub(crate)`); the dependency direction forbids sharing the
-/// implementation, so behavioral changes there must be mirrored here.
-fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
-    match (base, overlay) {
-        (toml::Value::Table(base_table), toml::Value::Table(overlay_table)) => {
-            for (key, value) in overlay_table {
-                if let Some(base_value) = base_table.get_mut(key) {
-                    merge_toml_values(base_value, value);
-                } else {
-                    base_table.insert(key.clone(), value.clone());
-                }
-            }
-        }
-        (base, overlay) => *base = overlay.clone(),
-    }
 }
 
 /// Parse a `TemplateError::InvalidParameter` Display string
@@ -2646,5 +2419,560 @@ templated_routes:
             }
             other => panic!("expected DiscoveryError::Json, got: {other:?}"),
         }
+    }
+
+    // ── Virtual-store config parity goldens (openspec change
+    //    `configunify`, Task 1.2) ───────────────────────────────────────
+    //
+    // These tests lock the PRE-refactor behavior of the virtual-store
+    // config assembly over a representative matrix: `build_virtual_config`
+    // output serialized with `toml::to_string_pretty` is compared
+    // byte-for-byte against committed goldens under
+    // `tests/goldens/virtual_config/`, as are the recursive-include WARN
+    // transcript and the unknown-profile error `Display` string (error
+    // message strings are observable behavior). Regenerate after an
+    // intentional behavior change:
+    // `UPDATE_GOLDENS=1 cargo test -p camel-dsl virtual_config_`.
+
+    use crate::StoreDocument;
+    use std::sync::{Arc, Mutex};
+
+    /// Regeneration switch: when `UPDATE_GOLDENS=1` is set, write the
+    /// golden files instead of comparing them.
+    fn update_goldens() -> bool {
+        std::env::var("UPDATE_GOLDENS").is_ok_and(|v| v == "1")
+    }
+
+    fn golden_path(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/goldens/virtual_config")
+            .join(name)
+    }
+
+    /// Byte-for-byte golden lock for text artifacts (pretty-printed
+    /// merged TOML, warn and error transcripts).
+    fn lock_text_golden(name: &str, actual: &str) {
+        let path = golden_path(name);
+        if update_goldens() {
+            std::fs::create_dir_all(path.parent().expect("golden parent dir"))
+                .expect("create goldens dir");
+            std::fs::write(&path, actual).unwrap_or_else(|e| panic!("write golden {name}: {e}"));
+        } else {
+            let expected = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read golden {name}: {e} (capture: UPDATE_GOLDENS=1)"));
+            assert_eq!(expected, actual, "golden {name} drifted");
+        }
+    }
+
+    /// Serialize one merged configuration value exactly as the goldens
+    /// store it.
+    fn lock_toml_golden(name: &str, merged: &toml::Value) {
+        let text = toml::to_string_pretty(merged).expect("serialize merged config");
+        lock_text_golden(name, &text);
+    }
+
+    // ── store fixtures ───────────────────────────────────────────────
+
+    /// Inert route document every fixture store carries as entry point
+    /// and sole source-plan reference (config assembly never reads it).
+    const PARITY_ROUTE_TEXT: &str =
+        "routes:\n  - id: parity-store\n    from: \"direct:start\"\n    steps: []\n";
+
+    fn store_doc(path: &str, kind: StoreEntryKind, text: &str) -> StoreDocument {
+        StoreDocument {
+            path: path.to_string(),
+            kind,
+            bytes: text.as_bytes().to_vec(),
+        }
+    }
+
+    /// Pack fixture documents as a virtual store the way the compiler
+    /// embeds them: the same inert route document serves as entry point
+    /// and sole source-plan reference, and `config_references` encodes
+    /// the config/include/profile declaration order under test.
+    fn fixture_store(
+        config_references: &[&str],
+        mut documents: Vec<StoreDocument>,
+    ) -> VirtualDocumentStore {
+        documents.push(store_doc(
+            "routes/main.yaml",
+            StoreEntryKind::Route,
+            PARITY_ROUTE_TEXT,
+        ));
+        VirtualDocumentStore::build(
+            "routes/main.yaml",
+            &documents,
+            &config_references
+                .iter()
+                .map(|path| (*path).to_string())
+                .collect::<Vec<_>>(),
+            &["routes/main.yaml".to_string()],
+        )
+        .expect("fixture store must build")
+    }
+
+    // ── WARN capture (recursive-include case) ─────────────────────────
+
+    struct WarnMessageVisitor<'a>(&'a mut Option<String>);
+
+    impl tracing::field::Visit for WarnMessageVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                *self.0 = Some(format!("{value:?}"));
+            }
+        }
+    }
+
+    /// `tracing_subscriber` layer recording every WARN event message
+    /// emitted under the installing thread's default subscriber.
+    struct WarnCaptureLayer {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for WarnCaptureLayer
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            let mut slot = None;
+            event.record(&mut WarnMessageVisitor(&mut slot));
+            if let Some(message) = slot {
+                self.events
+                    .lock()
+                    .expect("capture lock")
+                    .push(format!("{}: {message}", event.metadata().level()));
+            }
+        }
+    }
+
+    /// Run `body` under a thread-local subscriber recording WARN
+    /// messages. `set_default` is thread-local, so concurrent tests
+    /// neither pollute this capture nor observe it.
+    fn capture_warns<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
+        use tracing_subscriber::prelude::*;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let guard = tracing_subscriber::registry()
+            .with(WarnCaptureLayer {
+                events: Arc::clone(&events),
+            })
+            .set_default();
+        let out = body();
+        drop(guard);
+        let captured = events.lock().expect("capture lock").clone();
+        (out, captured)
+    }
+
+    // ── the matrix ───────────────────────────────────────────────────
+
+    /// Case (a): one flat config document assembles as-is.
+    #[test]
+    fn virtual_config_flat_matches_golden() {
+        let store = fixture_store(
+            &["Camel.toml"],
+            vec![store_doc(
+                "Camel.toml",
+                StoreEntryKind::Config,
+                r#"
+timeout_ms = 15000
+log_level = "debug"
+watch = true
+routes = ["routes/a.yaml"]
+
+[components.http]
+max_connections = 25
+"#,
+            )],
+        );
+        let merged = build_virtual_config(&store).expect("flat store config assembles");
+        lock_toml_golden("case_01.toml", &merged);
+    }
+
+    /// Case (b): `[default]` + `[production]` with `production` selected
+    /// deep-merges tables recursively and REPLACES the routes array.
+    #[test]
+    fn virtual_config_profile_selection_merges_and_replaces() {
+        let store = fixture_store(
+            &["Camel.toml", "production.profile.toml"],
+            vec![
+                store_doc(
+                    "Camel.toml",
+                    StoreEntryKind::Config,
+                    r#"
+[default]
+timeout_ms = 30000
+log_level = "info"
+watch = false
+routes = ["routes/base.yaml"]
+
+[default.components.http]
+max_connections = 10
+
+[production]
+timeout_ms = 5000
+routes = ["routes/prod-main.yaml", "routes/prod-orders.yaml"]
+
+[production.components.http]
+max_connections = 99
+"#,
+                ),
+                // The compiler synthesizes the fragment from the selected
+                // section; assembly reads only the profile NAME from the
+                // fragment path.
+                store_doc(
+                    "production.profile.toml",
+                    StoreEntryKind::Profile,
+                    r#"
+[production]
+timeout_ms = 5000
+routes = ["routes/prod-main.yaml", "routes/prod-orders.yaml"]
+
+[production.components.http]
+max_connections = 99
+"#,
+                ),
+            ],
+        );
+        let merged = build_virtual_config(&store).expect("profiled store config assembles");
+        assert_eq!(
+            merged
+                .get("routes")
+                .and_then(toml::Value::as_array)
+                .map(Vec::len),
+            Some(2),
+            "the [production] routes array must REPLACE the [default] array"
+        );
+        lock_toml_golden("case_02.toml", &merged);
+    }
+
+    /// Case (c): two includes in declaration order sit below the config
+    /// document; the config wins conflicts and the later include wins
+    /// over the earlier one.
+    #[test]
+    fn virtual_config_includes_below_config() {
+        let store = fixture_store(
+            &["conf/a.toml", "conf/b.toml", "Camel.toml"],
+            vec![
+                store_doc(
+                    "Camel.toml",
+                    StoreEntryKind::Config,
+                    r#"
+include = ["conf/a.toml", "conf/b.toml"]
+
+[default]
+timeout_ms = 1000
+routes = ["routes/config.yaml"]
+
+[default.components.http]
+max_connections = 30
+"#,
+                ),
+                store_doc(
+                    "conf/a.toml",
+                    StoreEntryKind::Include,
+                    r#"
+[default]
+timeout_ms = 111
+routes = ["routes/a.yaml"]
+
+[default.components.http]
+max_connections = 11
+base_url = "http://from-a"
+"#,
+                ),
+                store_doc(
+                    "conf/b.toml",
+                    StoreEntryKind::Include,
+                    r#"
+[default]
+timeout_ms = 222
+routes = ["routes/b.yaml"]
+
+[default.components.http]
+max_connections = 22
+base_url = "http://from-b"
+"#,
+                ),
+            ],
+        );
+        let merged = build_virtual_config(&store).expect("include store config assembles");
+        assert_eq!(
+            merged.get("timeout_ms").and_then(toml::Value::as_integer),
+            Some(1000),
+            "the configuration document must outrank both includes"
+        );
+        assert_eq!(
+            merged
+                .get("components")
+                .and_then(|c| c.get("http"))
+                .and_then(|h| h.get("base_url"))
+                .and_then(toml::Value::as_str),
+            Some("http://from-b"),
+            "the later include must win over the earlier one"
+        );
+        assert!(
+            merged.get("include").is_none(),
+            "config-declared include keys are stripped before merging"
+        );
+        lock_toml_golden("case_03.toml", &merged);
+    }
+
+    /// Case (d): a fragment declaring `include` has the key stripped
+    /// (recursive includes are unsupported — the declared document is
+    /// not even embedded) and the loader emits exactly one WARN
+    /// diagnostic, locked in `case_04_warn.txt`.
+    #[test]
+    fn virtual_config_recursive_include_warns_and_strips() {
+        let store = fixture_store(
+            &["conf/base.toml", "Camel.toml"],
+            vec![
+                store_doc(
+                    "Camel.toml",
+                    StoreEntryKind::Config,
+                    r#"
+[default]
+timeout_ms = 1000
+log_level = "info"
+"#,
+                ),
+                store_doc(
+                    "conf/base.toml",
+                    StoreEntryKind::Include,
+                    r#"
+include = ["conf/nested.toml"]
+
+[default]
+log_level = "debug"
+
+[default.components.http]
+base_url = "http://from-base"
+"#,
+                ),
+            ],
+        );
+        let (merged, warns) = capture_warns(|| build_virtual_config(&store));
+        let merged = merged.expect("assembly succeeds despite the recursive declaration");
+        assert!(
+            merged.get("include").is_none(),
+            "the recursive include declaration must be stripped from the merged output"
+        );
+        assert_eq!(warns.len(), 1, "exactly one WARN expected, got: {warns:?}");
+        assert!(
+            warns[0].contains("recursive includes are unsupported"),
+            "unexpected diagnostic: {}",
+            warns[0]
+        );
+        lock_toml_golden("case_04.toml", &merged);
+        lock_text_golden("case_04_warn.txt", &warns.join("\n"));
+    }
+
+    /// Case (e): ordered selection `profiles=["production","qa"]` with
+    /// both sections present — `qa` overlays `production` in selection
+    /// order and wins conflicts.
+    #[test]
+    fn virtual_config_multi_profile_ordered_overlay() {
+        let store = fixture_store(
+            &["Camel.toml", "production.profile.toml", "qa.profile.toml"],
+            vec![
+                store_doc(
+                    "Camel.toml",
+                    StoreEntryKind::Config,
+                    r#"
+[default]
+timeout_ms = 30000
+log_level = "info"
+watch = false
+routes = ["routes/base.yaml"]
+
+[default.components.http]
+max_connections = 10
+
+[production]
+timeout_ms = 5000
+routes = ["routes/prod.yaml"]
+
+[production.components.http]
+max_connections = 50
+
+[qa]
+timeout_ms = 7000
+watch = true
+routes = ["routes/qa.yaml", "routes/qa-extra.yaml"]
+
+[qa.components.http]
+base_url = "http://qa"
+"#,
+                ),
+                store_doc(
+                    "production.profile.toml",
+                    StoreEntryKind::Profile,
+                    r#"
+[production]
+timeout_ms = 5000
+routes = ["routes/prod.yaml"]
+
+[production.components.http]
+max_connections = 50
+"#,
+                ),
+                store_doc(
+                    "qa.profile.toml",
+                    StoreEntryKind::Profile,
+                    r#"
+[qa]
+timeout_ms = 7000
+watch = true
+routes = ["routes/qa.yaml", "routes/qa-extra.yaml"]
+
+[qa.components.http]
+base_url = "http://qa"
+"#,
+                ),
+            ],
+        );
+        let merged = build_virtual_config(&store).expect("multi-profile store config assembles");
+        assert_eq!(
+            merged.get("timeout_ms").and_then(toml::Value::as_integer),
+            Some(7000),
+            "the later-selected qa section must win the conflict"
+        );
+        assert_eq!(
+            merged.get("log_level").and_then(toml::Value::as_str),
+            Some("info"),
+            "values only [default] speaks must survive"
+        );
+        lock_toml_golden("case_05.toml", &merged);
+    }
+
+    /// Case (f): partial absence `profiles=["production","qa"]` with only
+    /// `production` present merges `production` and does NOT error — the
+    /// store backstop fires only when NO selected section exists.
+    #[test]
+    fn virtual_config_partial_absence_merges_present() {
+        let store = fixture_store(
+            &["Camel.toml", "production.profile.toml", "qa.profile.toml"],
+            vec![
+                store_doc(
+                    "Camel.toml",
+                    StoreEntryKind::Config,
+                    r#"
+[default]
+timeout_ms = 30000
+log_level = "info"
+watch = false
+routes = ["routes/base.yaml"]
+
+[default.components.http]
+max_connections = 10
+
+[production]
+timeout_ms = 5000
+routes = ["routes/prod.yaml"]
+
+[production.components.http]
+max_connections = 50
+"#,
+                ),
+                store_doc(
+                    "production.profile.toml",
+                    StoreEntryKind::Profile,
+                    r#"
+[production]
+timeout_ms = 5000
+routes = ["routes/prod.yaml"]
+
+[production.components.http]
+max_connections = 50
+"#,
+                ),
+                store_doc(
+                    "qa.profile.toml",
+                    StoreEntryKind::Profile,
+                    r#"
+[qa]
+timeout_ms = 7000
+"#,
+                ),
+            ],
+        );
+        let merged = build_virtual_config(&store).expect("partial absence must merge, not fail");
+        assert_eq!(
+            merged.get("timeout_ms").and_then(toml::Value::as_integer),
+            Some(5000),
+            "the present production section must apply"
+        );
+        lock_toml_golden("case_06.toml", &merged);
+    }
+
+    /// Case (g): `[default]` present with every selected section absent
+    /// fails with the strict unknown-profile backstop; the full
+    /// `MalformedVirtualConfig` Display string is locked.
+    #[test]
+    fn virtual_config_unknown_profile_backstop_error_locked() {
+        let store = fixture_store(
+            &["Camel.toml", "staging.profile.toml"],
+            vec![
+                store_doc(
+                    "Camel.toml",
+                    StoreEntryKind::Config,
+                    r#"
+[default]
+timeout_ms = 1000
+watch = false
+"#,
+                ),
+                store_doc(
+                    "staging.profile.toml",
+                    StoreEntryKind::Profile,
+                    r#"
+[staging]
+timeout_ms = 9000
+"#,
+                ),
+            ],
+        );
+        let err =
+            build_virtual_config(&store).expect_err("unknown profile must fail the store backstop");
+        match &err {
+            DiscoveryError::MalformedVirtualConfig { .. } => {}
+            other => panic!("expected MalformedVirtualConfig, got: {other:?}"),
+        }
+        let display = err.to_string();
+        assert!(
+            display.contains("unknown profile: none of the selected profiles (staging)"),
+            "unexpected error spelling: {display}"
+        );
+        lock_text_golden("case_07_error.txt", &display);
+    }
+
+    /// Case (h): `${env:PARITY_STORE_VAR:-fallback}` passes through
+    /// unresolved into the merged value — assembly never resolves env
+    /// placeholders (that happens at typed-load time).
+    #[test]
+    fn virtual_config_env_placeholder_passes_through() {
+        let store = fixture_store(
+            &["Camel.toml"],
+            vec![store_doc(
+                "Camel.toml",
+                StoreEntryKind::Config,
+                r#"
+log_level = "${env:PARITY_STORE_VAR:-fallback}"
+timeout_ms = 1000
+"#,
+            )],
+        );
+        let merged = build_virtual_config(&store).expect("env placeholder store config assembles");
+        assert_eq!(
+            merged.get("log_level").and_then(toml::Value::as_str),
+            Some("${env:PARITY_STORE_VAR:-fallback}"),
+            "assembly must leave env placeholders raw"
+        );
+        lock_toml_golden("case_08.toml", &merged);
     }
 }

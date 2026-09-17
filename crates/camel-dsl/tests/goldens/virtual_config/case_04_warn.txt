@@ -1,0 +1,1 @@
+WARN: embedded include declares 'include'; recursive includes are unsupported — ignoring

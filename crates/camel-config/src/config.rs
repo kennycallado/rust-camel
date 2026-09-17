@@ -1358,6 +1358,14 @@ mod virtual_store_config_tests;
 #[cfg(test)]
 #[path = "config_tests/virtual_store_file_parity_tests.rs"]
 mod virtual_store_file_parity_tests;
+
+/// Parity goldens for the filesystem loader (openspec change
+/// `configunify` Task 1.1): byte-locked resolved projections and error
+/// strings for the representative resolution matrix.
+#[cfg(test)]
+#[path = "config_tests/parity_golden_tests.rs"]
+mod parity_golden_tests;
+
 impl Default for CacheRepoConfig {
     fn default() -> Self {
         Self {
@@ -1923,28 +1931,6 @@ async fn read_capped_async(path: &str, max_bytes: u64) -> Result<String, ConfigE
     tokio::task::spawn_blocking(move || read_capped(&path, max_bytes))
         .await
         .map_err(|e| ConfigError::Message(format!("spawn_blocking join error: {e}")))?
-}
-
-/// Deep merge two TOML values
-/// Tables are merged recursively, with overlay values taking precedence
-pub(crate) fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
-    match (base, overlay) {
-        (toml::Value::Table(base_table), toml::Value::Table(overlay_table)) => {
-            for (key, value) in overlay_table {
-                if let Some(base_value) = base_table.get_mut(key) {
-                    // Both have this key - merge recursively
-                    merge_toml_values(base_value, value);
-                } else {
-                    // Only overlay has this key - insert it
-                    base_table.insert(key.clone(), value.clone());
-                }
-            }
-        }
-        // For non-table values, overlay replaces base entirely
-        (base, overlay) => {
-            *base = overlay.clone();
-        }
-    }
 }
 
 impl CamelConfig {
@@ -2644,27 +2630,23 @@ impl CamelConfig {
         raw_value: &mut toml::Value,
         profile: Option<&str>,
     ) -> Result<Vec<String>, ConfigError> {
+        let profiles: Vec<String> = profile.map(|p| vec![p.to_string()]).unwrap_or_default();
+
         let mut paths = Vec::new();
-
-        let Some(table) = raw_value.as_table_mut() else {
-            return Ok(paths);
-        };
-
-        if let Some(value) = table.remove("include") {
-            paths.extend(parse_include_list(&value, "include")?);
+        let declarations = camel_dsl::config_semantics::include_declarations(raw_value, &profiles);
+        for (section, value) in declarations {
+            // An empty section name (pathological: empty CAMEL_PROFILE + [""] table)
+            // maps to the top-level "include" wording; the pre-refactor code emitted
+            // ".include" there — intentional divergence, artifact of the original
+            // (reviewer-adjudicated, rc-io2zl).
+            let where_ = if section.is_empty() {
+                "include".to_string()
+            } else {
+                format!("{section}.include")
+            };
+            paths.extend(parse_include_list(value, &where_)?);
         }
-
-        let mut sections = vec!["default"];
-        if let Some(p) = profile.filter(|p| *p != "default") {
-            sections.push(p);
-        }
-        for section in sections {
-            if let Some(toml::Value::Table(section_table)) = table.get_mut(section)
-                && let Some(value) = section_table.remove("include")
-            {
-                paths.extend(parse_include_list(&value, &format!("{section}.include"))?);
-            }
-        }
+        camel_dsl::config_semantics::strip_include_keys(raw_value, &profiles);
 
         Ok(paths)
     }
@@ -2980,11 +2962,10 @@ fn build_from_toml_value_inner(
     // Detect whether the root file has profile sections (e.g. [default], [production]).
     // If it does, use strict profile handling (unknown profile → error).
     // If it doesn't (flat config), use lenient handling (keep as-is).
-    let has_profile_structure = if let toml::Value::Table(ref table) = config_value {
-        table.contains_key("default") || profile.is_some_and(|p| table.contains_key(p))
-    } else {
-        false
-    };
+    let has_profile_structure = camel_dsl::config_semantics::has_profile_structure(
+        &config_value,
+        &profile.map(|p| vec![p.to_string()]).unwrap_or_default(),
+    );
 
     if has_profile_structure {
         apply_profile(&mut config_value, profile)?;
@@ -3561,19 +3542,14 @@ pub(crate) fn apply_profile(
     profile: Option<&str>,
 ) -> Result<(), ConfigError> {
     if let Some(p) = profile {
-        let default_value = config_value.get("default").cloned();
-        let profile_value = config_value.get(p).cloned();
-
-        if let (Some(mut base), Some(overlay)) = (default_value, profile_value) {
-            merge_toml_values(&mut base, &overlay);
-            *config_value = base;
-        } else if let Some(profile_val) = config_value.get(p).cloned() {
-            *config_value = profile_val;
+        let profiles = vec![p.to_string()];
+        if camel_dsl::config_semantics::has_selected_profile(config_value, &profiles) {
+            camel_dsl::config_semantics::select_profile_sections(config_value, &profiles);
         } else {
             return Err(ConfigError::Message(format!("Unknown profile: {}", p)));
         }
-    } else if let Some(default_val) = config_value.get("default").cloned() {
-        *config_value = default_val;
+    } else {
+        camel_dsl::config_semantics::select_profile_sections(config_value, &[]);
     }
     // If no profile active and no [default] → keep as-is
     Ok(())
@@ -3583,29 +3559,8 @@ pub(crate) fn apply_profile(
 /// keep it as-is rather than returning an error. Use for included files that may be
 /// written as flat config without profile sections.
 pub(crate) fn apply_profile_lenient(value: &mut toml::Value, profile: Option<&str>) {
-    if let Some(p) = profile {
-        let default_value = value.get("default").cloned();
-        let profile_value = value.get(p).cloned();
-        match (default_value, profile_value) {
-            (Some(mut base), Some(overlay)) => {
-                merge_toml_values(&mut base, &overlay);
-                *value = base;
-            }
-            (None, Some(profile_val)) => {
-                *value = profile_val;
-            }
-            (Some(default_val), None) => {
-                // Has [default] but not this profile → use default
-                *value = default_val;
-            }
-            (None, None) => {
-                // No profile structure → use file as-is (flat config without profiles)
-            }
-        }
-    } else if let Some(default_val) = value.get("default").cloned() {
-        *value = default_val;
-    }
-    // If no profile active and no [default] → keep as-is
+    let profiles = profile.map(|p| vec![p.to_string()]).unwrap_or_default();
+    camel_dsl::config_semantics::select_profile_sections(value, &profiles);
 }
 
 /// Serializes tests that touch `CAMEL_TIMEOUT_MS` / `CAMEL_PROFILE` env vars.

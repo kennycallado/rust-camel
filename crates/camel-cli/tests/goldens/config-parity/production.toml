@@ -1,0 +1,5 @@
+extra_layer = "from-extra-include"
+log_level = "warn"
+routes = ["routes/*.yaml"]
+tags = ["common-production"]
+timeout_ms = 30000

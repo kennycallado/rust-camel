@@ -1,0 +1,11 @@
+log_level = "info"
+routes = [
+    "routes/qa.yaml",
+    "routes/qa-extra.yaml",
+]
+timeout_ms = 7000
+watch = true
+
+[components.http]
+base_url = "http://qa"
+max_connections = 50

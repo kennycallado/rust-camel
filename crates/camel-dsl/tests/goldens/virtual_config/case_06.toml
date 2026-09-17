@@ -1,0 +1,7 @@
+log_level = "info"
+routes = ["routes/prod.yaml"]
+timeout_ms = 5000
+watch = false
+
+[components.http]
+max_connections = 50

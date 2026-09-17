@@ -1,0 +1,6 @@
+routes = ["routes/config.yaml"]
+timeout_ms = 1000
+
+[components.http]
+base_url = "http://from-b"
+max_connections = 30

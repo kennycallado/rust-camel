@@ -8,9 +8,9 @@
 //!
 //! - the primary document (the logical entry point),
 //! - the explicit `Camel.toml`, its ordered includes (top-level,
-//!   `[default]`, then each selected profile section — mirroring
-//!   `camel-config`'s ordered include walk), and the selected profile
-//!   sections as `Profile` fragments in flag order,
+//!   `[default]`, then each selected profile section — walk order
+//!   defined by `camel_dsl::config_semantics`), and the selected
+//!   profile sections as `Profile` fragments in flag order,
 //! - route-file patterns resolved from the document's
 //!   `routeFiles`/`routeFilesFromRoot` fields and the config's `routes`
 //!   patterns, in declared order with each pattern's matches sorted by
@@ -547,36 +547,36 @@ pub fn resolve(
             SourceError::InvalidConfig(format!("{}: {e}", config_canonical.display()))
         })?;
 
-        // Ordered include walk, mirroring camel-config's
-        // `extract_includes`: top-level, `[default]`, then each selected
-        // non-default profile section (in flag order, deduplicated).
+        // Ordered include walk in canonical order, collected by
+        // `camel_dsl::config_semantics::include_declarations`: top-level,
+        // `[default]`, then each selected non-default profile section
+        // (in flag order, deduplicated).
         let mut include_decls: Vec<String> = Vec::new();
-        if let Some(value) = config.get("include") {
-            include_decls.extend(toml_string_list("include", value)?);
-        }
-        let mut sections: Vec<String> = vec!["default".to_string()];
-        for profile in &selection.profiles {
-            if profile != "default" && !sections.iter().any(|s| s == profile) {
-                sections.push(profile.clone());
-            }
-        }
-        for section in &sections {
-            if let Some(toml::Value::Table(table)) = config.get(section)
-                && let Some(value) = table.get("include")
-            {
-                include_decls.extend(toml_string_list(&format!("{section}.include"), value)?);
-            }
+        for (label, value) in
+            camel_dsl::config_semantics::include_declarations(&config, &selection.profiles)
+        {
+            // Empty section name (pathological empty profile + [""] table)
+            // maps to top-level "include" wording; pre-refactor emitted
+            // ".include" — intentional divergence (rc-io2zl).
+            let owner = if label.is_empty() {
+                "include".to_string()
+            } else {
+                format!("{label}.include")
+            };
+            include_decls.extend(toml_string_list(&owner, value)?);
         }
 
         // Route patterns from the config, with camel-config overlay
         // semantics: top-level `routes`, then each declaring section
         // ([default], selected profiles) replaces the accumulated list.
+        // The section order is the canonical
+        // `camel_dsl::config_semantics::section_walk`.
         let mut route_patterns: Option<Vec<String>> = None;
         if let Some(value) = config.get("routes") {
             route_patterns = Some(toml_string_list("routes", value)?);
         }
-        for section in &sections {
-            if let Some(toml::Value::Table(table)) = config.get(section)
+        for section in camel_dsl::config_semantics::section_walk(&selection.profiles) {
+            if let Some(toml::Value::Table(table)) = config.get(section.as_str())
                 && let Some(value) = table.get("routes")
             {
                 route_patterns = Some(toml_string_list(&format!("{section}.routes"), value)?);

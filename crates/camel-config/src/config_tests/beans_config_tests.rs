@@ -66,7 +66,7 @@ base_url = "https://prod.example.com"
     let default_val = config_value.get("default").cloned().unwrap();
     let prod_overlay = config_value.get("production").cloned().unwrap();
     let mut merged = default_val;
-    super::merge_toml_values(&mut merged, &prod_overlay);
+    camel_dsl::config_semantics::merge_toml_values(&mut merged, &prod_overlay);
     let config: CamelConfig = merged.try_into().unwrap();
     let auth = config.beans.get("auth").unwrap();
     assert_eq!(

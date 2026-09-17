@@ -1,0 +1,8 @@
+# Shared include: flat values plus its own `[production]` fragment, so
+# include-level profile sections participate in the merge.
+platform = "config-parity"
+tags = ["common"]
+
+[production]
+timeout_ms = 9000
+tags = ["common-production"]

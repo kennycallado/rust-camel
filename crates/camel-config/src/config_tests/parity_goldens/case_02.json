@@ -1,0 +1,10 @@
+{
+  "components_http_max_connections": 99,
+  "log_level": "info",
+  "routes": [
+    "routes/prod-main.yaml",
+    "routes/prod-orders.yaml"
+  ],
+  "timeout_ms": 5000,
+  "watch": false
+}

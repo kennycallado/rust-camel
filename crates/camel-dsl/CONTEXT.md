@@ -137,7 +137,7 @@ configuration tree plus route definitions in plan order. Configuration
 assembly is typed and ordered: the indexed `Camel.toml`, include, and
 selected-profile texts merge in index order (includes lowest, then the
 configuration document, profile-section selection per document), mirroring
-camel-config's loader ordering (see the SYNC note in `discovery.rs`).
+the canonical ordering in `camel_dsl::config_semantics` (bd rc-io2zl).
 Only source-plan references resolve, strictly by index lookup, through
 the shared interpolation, typed env probing, template materialization,
 reserved-document validation, parsing, and lowering paths — the same

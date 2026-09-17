@@ -1,0 +1,10 @@
+{
+  "components_http_max_connections": 42,
+  "log_level": "debug",
+  "routes": [
+    "routes/frag-prod-main.yaml",
+    "routes/frag-prod-extra.yaml"
+  ],
+  "timeout_ms": 1000,
+  "watch": true
+}

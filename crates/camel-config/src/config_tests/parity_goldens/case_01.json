@@ -1,0 +1,10 @@
+{
+  "components_http_max_connections": 25,
+  "log_level": "debug",
+  "routes": [
+    "routes/a.yaml",
+    "routes/b.yaml"
+  ],
+  "timeout_ms": 15000,
+  "watch": true
+}

@@ -27,7 +27,7 @@ pool_max_idle_per_host = 99
     )
     .unwrap();
 
-    merge_toml_values(&mut base, &overlay);
+    camel_dsl::config_semantics::merge_toml_values(&mut base, &overlay);
 
     let http = base
         .get("components")

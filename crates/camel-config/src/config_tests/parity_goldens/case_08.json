@@ -1,0 +1,7 @@
+{
+  "routes": [
+    "routes/section.yaml"
+  ],
+  "timeout_ms": 6000,
+  "watch": false
+}

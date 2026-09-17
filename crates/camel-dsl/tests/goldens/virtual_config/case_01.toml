@@ -1,0 +1,7 @@
+log_level = "debug"
+routes = ["routes/a.yaml"]
+timeout_ms = 15000
+watch = true
+
+[components.http]
+max_connections = 25
