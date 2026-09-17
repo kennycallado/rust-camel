@@ -194,6 +194,15 @@ fn minimal_decode_pair(pair: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
+/// Credential-shape test shared by both query-pair positions (ADR-0076
+/// appendix, bd rc-yvjp3): an input whose minimal decode carries `@` and
+/// also `:` or `//` is treated as an embedded `user:pass@host` credential
+/// wherever it rides — key position or value position. One predicate, one
+/// invariant; a lone `@` (an email address) is not credential-shaped.
+fn is_credential_shaped(decoded: &str) -> bool {
+    decoded.contains('@') && (decoded.contains(':') || decoded.contains("//"))
+}
+
 /// Match key for the sensitive-substring check: a single left-to-right
 /// `%HH` decode over the raw key bytes (ANY two hex digits after `%`,
 /// case-insensitive; invalid sequences copied verbatim), then lowercased.
@@ -280,8 +289,17 @@ pub fn redact_url_fail_closed(raw: &str) -> String {
 /// redact sensitive query params per key while keeping benign ones. A pair
 /// whose match key — the raw key single-pass `%HH`-decoded then lowercased
 /// (bd rc-r7v8s) — contains any of `sensitive_key_substrings` renders as
-/// `{raw_key}=<redacted>` (the key keeps its original encoded bytes).
-/// Otherwise, if the pair's `minimal_decode_pair` output is
+/// `{raw_key}=<redacted>` (the key keeps its original encoded bytes),
+/// EXCEPT when the raw key's own single-pass minimal decode
+/// (see [`minimal_decode_pair`]) is credential-shaped — contains `@` and
+/// also `:` or `//`: then the pair renders as a bare `<redacted>` and the
+/// key never echoes (bd rc-yvjp3, ADR-0076 appendix: key-position
+/// credential-shape symmetry — the same predicate the benign-key branch
+/// applies to the whole pair; a key such as `user%3Asecret%40host` embeds
+/// the credential `user:secret@host` and must not render). Well-known
+/// broker parameter names never decode to that shape, so the
+/// transport-policy diagnostic value below is preserved. Otherwise, if the
+/// pair's `minimal_decode_pair` output is
 /// credential-shaped (contains `@` and also `:` or `//`), the whole pair is
 /// replaced with a bare `<redacted>`: encoded or literal
 /// `user:secret@host` values must not survive under a benign key, while a
@@ -307,16 +325,18 @@ pub fn redact_url_with_query_allowlist(raw: &str, sensitive_key_substrings: &[&s
                         .iter()
                         .any(|s| match_key.contains(s))
                     {
-                        format!("{raw_key}=<redacted>")
-                    } else {
-                        let decoded = minimal_decode_pair(pair);
-                        if decoded.contains('@')
-                            && (decoded.contains(':') || decoded.contains("//"))
-                        {
+                        // Key-position symmetry (bd rc-yvjp3): a
+                        // credential-shaped key is fully suppressed — the
+                        // key bytes may themselves be the credential.
+                        if is_credential_shaped(&minimal_decode_pair(raw_key)) {
                             "<redacted>".to_string()
                         } else {
-                            pair.to_string()
+                            format!("{raw_key}=<redacted>")
                         }
+                    } else if is_credential_shaped(&minimal_decode_pair(pair)) {
+                        "<redacted>".to_string()
+                    } else {
+                        pair.to_string()
                     }
                 })
                 .collect();
@@ -468,6 +488,82 @@ mod tests {
             !redacted.contains("secret"),
             "percent-encoded credential leaked: {redacted}"
         );
+    }
+
+    /// bd rc-yvjp3 (ADR-0076 appendix, key-position symmetry): a pair
+    /// whose KEY embeds credentials (`user%3Asecret%40host` decodes to
+    /// `user:secret@host`) renders as a bare `<redacted>` — the key bytes
+    /// never echo, in either hex case.
+    #[test]
+    fn allowlist_suppresses_credential_shaped_key_uppercase() {
+        let redacted =
+            redact_url_with_query_allowlist("tcp://h:61616?user%3Asecret%40host=1", JMS_KEYS);
+        assert_eq!(redacted, "tcp://h:61616?<redacted>");
+        assert!(
+            !redacted.contains("user%3Asecret%40"),
+            "credential-shaped key leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("secret"),
+            "key credential bytes leaked: {redacted}"
+        );
+    }
+
+    /// Fully-lowercase hex variant of the key-position shape.
+    #[test]
+    fn allowlist_suppresses_credential_shaped_key_lowercase() {
+        let redacted =
+            redact_url_with_query_allowlist("tcp://h:61616?user%3asecret%40host=1", JMS_KEYS);
+        assert_eq!(redacted, "tcp://h:61616?<redacted>");
+    }
+
+    /// Key-position symmetry, literal form: a fully literal
+    /// `user:pass@host` key is suppressed whole.
+    #[test]
+    fn allowlist_suppresses_literal_credential_shaped_key() {
+        let redacted = redact_url_with_query_allowlist("tcp://h:61616?user:pass@host=1", JMS_KEYS);
+        assert_eq!(redacted, "tcp://h:61616?<redacted>");
+        assert!(
+            !redacted.contains("user:pass"),
+            "literal key credentials leaked: {redacted}"
+        );
+    }
+
+    /// bd rc-yvjp3 non-regression: well-known sensitive keys that are NOT
+    /// credential-shaped keep echoing their names — the ADR-0076 exception
+    /// names transport-policy parameter visibility as the sole diagnostic
+    /// value of the broker URL, and no real parameter name decodes to an
+    /// `@`+`:`/`//` shape.
+    #[test]
+    fn allowlist_keeps_well_known_key_names_visible() {
+        let redacted = redact_url_with_query_allowlist(
+            "tcp://h:61616?password=p&jms.userName=admin&user=u&keepAlive=true",
+            JMS_KEYS,
+        );
+        assert_eq!(
+            redacted,
+            "tcp://h:61616?password=<redacted>&jms.userName=<redacted>&user=<redacted>&keepAlive=true"
+        );
+    }
+
+    /// bd rc-yvjp3 boundary pin: a denylist-matching key with a lone `@`
+    /// (no `:`, no `//`) is NOT credential-shaped — it renders
+    /// `user@host=<redacted>` and the key echoes, mirroring the lone-`@`
+    /// email rule of the benign-key branch.
+    #[test]
+    fn allowlist_keeps_lone_at_key_visible() {
+        let redacted = redact_url_with_query_allowlist("tcp://h:61616?user@host=1", JMS_KEYS);
+        assert_eq!(redacted, "tcp://h:61616?user@host=<redacted>");
+    }
+
+    /// bd rc-yvjp3 non-regression: an encoded-but-not-credential-shaped
+    /// key (`%77` is outside the minimal-decode triple) still echoes its
+    /// authored bytes when the decoded name hits the denylist — the
+    /// `pass%77ord` match rule (bd rc-r7v8s) is unchanged.
+    #[test]
+    fn allowlist_keeps_encoded_but_benign_shaped_key_visible() {
+        let redacted = redact_url_with_query_allowlist("tcp://h:61616?pass%77ord=p", JMS_KEYS);
+        assert_eq!(redacted, "tcp://h:61616?pass%77ord=<redacted>");
     }
 
     /// Encoded slashes plus a literal `@` decode to a `//`-bearing

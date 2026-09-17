@@ -60,3 +60,42 @@ converge:
 - Audit evidence (surface maps, adversarial batteries) lives in the
   fleet inbox, not in the repository — decisions go to ADRs,
   behavior to specs, evidence stays fleet-internal.
+
+## Appendix (2026-09-17, mission redactconv, bd rc-yvjp3)
+
+### 1. Fourth-variant convergence
+
+The `camel-http` `mask_base_url_userinfo` surface named under
+"Adjacent surfaces" above is now converged and removed. The
+`HttpEndpointConfig` Debug `base_url` field routes through the canonical
+`camel_api::redact::redact_url`. The canonical helper is string surgery:
+no `url::Url` roundtrip occurs, so the original byte-preservation
+rationale (WHATWG normalization of authored base URLs) does not apply to
+it. Output changes, strictest-wins intentional: query bytes now drop
+behind `?[redacted]`, fragment bytes behind `#[redacted]`, later
+`//user:pass@` authority windows mask, and the result caps at 256 bytes.
+The adjacent-surfaces bullet above is superseded by this appendix. The
+other two adjacent surfaces are unchanged.
+
+### 2. Key-position credential-shape symmetry (e_opus ruling)
+
+A query pair matched by the sensitive-key denylist SHALL render as a
+bare `<redacted>` (the key never echoes) when the raw key's single-pass
+minimal decode — `%40`→`@`, `%3a`→`:`, `%2f`→`/`, hex case-insensitive —
+contains `@` AND (`:` OR `//`); otherwise it renders as
+`{raw_key}=<redacted>`. This applies the same credential-shape predicate
+to the key position that the benign-key branch already applies to the
+whole pair, closing the operator-authored-key echo channel preemptively
+rather than at the reopen trigger (user-supplied broker URLs). Reasoning:
+the denylist branch rendered the raw key verbatim, so a key such as
+`user%3Asecret%40host` echoed the credential `user:secret@host` while a
+benign-keyed pair with the same shape was fully suppressed — the
+stricter treatment sat on the less suspicious position. Well-known
+JMS/ActiveMQ parameter names do not decode to this shape, so the
+exception's transport-policy diagnostic value is preserved intact.
+
+Spec note: `openspec/specs/jms/spec.md` still carries the sentence
+"the rendered key keeps its original encoded bytes" without this
+qualifier. That canon edit requires an OpenSpec change; it is deferred
+to the master. The code is spec-compatible meanwhile because the new
+branch only over-masks, and over-masking is safe (ADR-0051).

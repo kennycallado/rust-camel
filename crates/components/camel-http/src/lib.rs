@@ -144,15 +144,22 @@ pub struct HttpEndpointConfig {
     pub allowed_uri_hosts: Option<Vec<AllowedUriHost>>,
 }
 
-/// ADR-0051 redact-by-construction: query bytes (authored `raw_query` and
-/// programmatic `query_params`) may carry credentials. The display-surface
-/// Debug renders the raw view blanket-masked (mirroring
-/// `redact_url_for_diagnostics`) and programmatic values masked, mirroring
-/// `UriComponents`' sensitive-value masking. Wire fidelity is unaffected.
+/// ADR-0051 redact-by-construction, ADR-0076 strictest-wins: query bytes
+/// (authored `raw_query` and programmatic `query_params`) may carry
+/// credentials. The display-surface Debug renders the raw view
+/// blanket-masked (mirroring `redact_url_for_diagnostics`) and programmatic
+/// values masked, mirroring `UriComponents`' sensitive-value masking.
+/// `base_url` routes through the canonical
+/// [`camel_api::redact::redact_url`] (string surgery, no `url::Url`
+/// roundtrip, so authored bytes are never WHATWG-normalized): userinfo is
+/// masked in every authority window, query and fragment bytes are dropped
+/// behind their sentinels, and the result is capped at 256 bytes (rc-yvjp3
+/// converged the former byte-preserving local variant). Wire fidelity is
+/// unaffected.
 impl std::fmt::Debug for HttpEndpointConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpEndpointConfig")
-            .field("base_url", &mask_base_url_userinfo(&self.base_url))
+            .field("base_url", &camel_api::redact::redact_url(&self.base_url))
             .field("http_method", &self.http_method)
             .field(
                 "throw_exception_on_failure",
@@ -2899,36 +2906,6 @@ fn encode_query_component(component: &str) -> String {
             }
         }
     }
-    out
-}
-
-/// Mask `user:pass@` userinfo in a base-URL string for the
-/// `HttpEndpointConfig` Debug surface (rc-dhkeo, ADR-0051
-/// redact-by-construction): byte-preserving string surgery — a
-/// `url::Url` roundtrip would WHATWG-normalize the rendered bytes. The
-/// camel grammar path may carry userinfo-style bytes
-/// (`http://user:pass@h/p`); they must never render in diagnostics.
-/// Returns the input unchanged when the authority carries no `@`.
-fn mask_base_url_userinfo(raw: &str) -> String {
-    let Some(scheme_end) = raw.find("://") else {
-        return raw.to_string();
-    };
-    let after_scheme = &raw[scheme_end + 3..];
-    // The authority ends at the first path/query/fragment introducer.
-    let authority_end = after_scheme
-        .find(['/', '?', '#'])
-        .unwrap_or(after_scheme.len());
-    let authority = &after_scheme[..authority_end];
-    // rfind: when multiple `@` ride the authority, mask through the last —
-    // over-masking is safe, under-masking is not.
-    let Some(at) = authority.rfind('@') else {
-        return raw.to_string();
-    };
-    let mut out = String::with_capacity(raw.len());
-    out.push_str(&raw[..scheme_end + 3]);
-    out.push_str("***@");
-    out.push_str(&authority[at + 1..]);
-    out.push_str(&after_scheme[authority_end..]);
     out
 }
 
@@ -9431,6 +9408,10 @@ mod tests {
 
     /// rc-dhkeo: the Debug surface masks userinfo-style bytes in
     /// `base_url` and leaves a userinfo-free base untouched, byte-for-byte.
+    /// rc-yvjp3 (ADR-0076 strictest-wins): `base_url` routes through the
+    /// canonical `camel_api::redact::redact_url` — query and fragment bytes
+    /// now drop behind their sentinels and later `//user:pass@` windows
+    /// mask too, dimensions the former byte-preserving local variant kept.
     #[test]
     fn endpoint_config_debug_masks_base_url_userinfo() {
         let mut config = HttpEndpointConfig::from_uri("http://h.example/p").unwrap();
@@ -9450,6 +9431,48 @@ mod tests {
         assert!(
             rendered_plain.contains("http://h.example/p"),
             "a base without userinfo renders unchanged: {rendered_plain}"
+        );
+    }
+
+    /// rc-yvjp3 convergence: an authored query and fragment on `base_url`
+    /// render as sentinels, never as raw bytes (strictest-wins over the
+    /// former byte-preserving variant), and the rendered value is
+    /// byte-identical to the canonical helper.
+    #[test]
+    fn endpoint_config_debug_base_url_converges_on_canonical_redact() {
+        let mut config = HttpEndpointConfig::from_uri("http://h.example/p").unwrap();
+
+        config.base_url = "http://h.example/p?token=secret#access_token=x".to_string();
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("base_url: \"http://h.example/p?[redacted]#[redacted]\""),
+            "query and fragment must render as composed sentinels: {rendered}"
+        );
+        assert!(
+            !rendered.contains("token=secret") && !rendered.contains("access_token"),
+            "query/fragment credential bytes must not render: {rendered}"
+        );
+
+        config.base_url = "http://h.example//u2:p2@evil/".to_string();
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("base_url: \"http://h.example//***@evil/\""),
+            "later //window userinfo must mask (canonical window rule): {rendered}"
+        );
+        assert!(
+            !rendered.contains("u2:p2"),
+            "later-window credentials must not render: {rendered}"
+        );
+
+        // Cross-surface identity: the Debug field is byte-identical to the
+        // canonical helper output for the same input.
+        config.base_url = "http://user:pass@h.example/p?token=x".to_string();
+        let canonical = camel_api::redact::redact_url(&config.base_url);
+        assert_eq!(canonical, "http://***@h.example/p?[redacted]");
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains(&format!("base_url: \"{canonical}\"")),
+            "Debug base_url must equal canonical redact_url output: {rendered}"
         );
     }
 
