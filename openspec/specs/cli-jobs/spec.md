@@ -345,8 +345,12 @@ When both `dir` and `dirs` are present, `dirs` SHALL take precedence and `dir` S
 
 ### Requirement: one-shot send with load-gated route startup
 
-`camel job` SHALL boot the real composition root (the `camel run` seams),
-SHALL force `auto_startup = true` on every discovered route in the job
+`camel job` SHALL boot the real composition root (the `camel run` seams)
+except the process-scoped diagnostic surfaces: before context
+configuration the job boot projection SHALL remove the durable runtime
+journal and SHALL replace the ambient observability configuration with
+defaults, for every job form including compiled artifacts. The job SHALL
+force `auto_startup = true` on every discovered route in the job
 document (including routes configured `autoStartup: false`), and SHALL
 reject a send target with no matching consumer route at load, as well as a
 send target whose base is ambiguous across multiple consumer routes. Route
@@ -394,6 +398,17 @@ regardless of exchange pattern.
 - **WHEN** the deadline expires
 - **THEN** the JSON report carries outcome `Timeout` with a
   drain-timeout-class error and the process exits with code 2
+
+#### Scenario: ambient diagnostics are projected away
+
+- **GIVEN** an ambient `Camel.toml` enabling `[runtime_journal]`,
+  `[observability.otel]`, `[observability.prometheus]`, and
+  `[observability.health]`
+- **WHEN** `camel job` boots
+- **THEN** the job opens no journal, initializes no OTel providers, and
+  registers no Prometheus or health listener, while component, security,
+  repository, platform, bean, supervision, timeout, and log-level
+  configuration still applies
 
 ### Requirement: supported job execution modes
 
@@ -458,10 +473,11 @@ execution modes on the legacy path.
 
 ### Requirement: batch mode drains until empty
 
-A `mode: batch` job SHALL boot the same composition root, apply the same
-send-target validation, start all document routes, and send one trigger
-exchange. It SHALL retain the same declared-argument validation, defaulting,
-interpolation, and legacy no-`args:` header behavior as one-shot execution.
+A `mode: batch` job SHALL boot the same composition root (including the
+job boot projection), apply the same send-target validation, start all
+document routes, and send one trigger exchange. It SHALL retain the same
+declared-argument validation, defaulting, interpolation, and legacy
+no-`args:` header behavior as one-shot execution.
 For a `seda:` target it SHALL rewrite `waitForTaskToComplete` to `Always` so
 the send is synchronous.
 After the trigger send it SHALL drain every `seda:` consumer queue until empty,
@@ -959,4 +975,57 @@ typed defaults through the same rules at startup.
 - **GIVEN** one job document declaring `count: {type: int, default: "007"}` with `${arg:count}` in its `to`, compiled into an artifact and run normally
 - **WHEN** both runs resolve `${arg:count}`
 - **THEN** both interpolate `7`; and compiling an otherwise identical document whose `default` fails coercion (for example `abc`) exits 2 at compile time and produces no artifact
+
+### Requirement: job boot coexistence (isolated one-shot operator path)
+
+The argv `camel job` path is the isolated one-shot operator path: a job
+SHALL coexist with any process sharing its ambient configuration on the
+projected process-scoped diagnostic surfaces — durable runtime journal,
+OTel providers, Prometheus and health listeners. The job boot projection
+SHALL apply after ambient configuration is parsed and validated, so
+malformed configuration still fails loud with exit 2 before any boot. The
+projection SHALL modify exactly two fields — `runtime_journal` (removed)
+and `observability` (replaced with defaults) — and SHALL NOT remove or
+alter components, repositories, security, platform, beans, supervision,
+timeouts, or log level. No flag or environment variable SHALL re-enable
+the suppressed surfaces on the job path. Ambient repository backends
+(`idempotent_repo`, `cache_repo`) remain config-driven shared-file
+surfaces: they are NOT projected, and concurrent processes configuring
+persistent repository backends may still contend for those files.
+
+#### Scenario: job coexists with a live server on shared ambient config
+
+- **GIVEN** a live `camel run` holding the shared runtime journal lock and
+  the shared Prometheus and health ports from an ambient config, and a
+  `camel job` run in the same directory with that same config
+- **WHEN** the job executes
+- **THEN** it exits 0 with a JSON report, starts no second diagnostic
+  listener, and writes nothing to the shared journal
+
+#### Scenario: two concurrent jobs on one pod contend on nothing projected
+
+- **GIVEN** two `camel job` processes running concurrently — their
+  overlapping executions forced by a route that holds each exchange for a
+  bounded delay — against the same ambient config whose repositories use
+  in-memory defaults
+- **WHEN** both execute
+- **THEN** both exit 0 with reports and neither opens a journal or binds a
+  diagnostic listener
+
+#### Scenario: malformed ambient config still fails loud
+
+- **GIVEN** an ambient `Camel.toml` with malformed journal or observability
+  configuration
+- **WHEN** `camel job` loads it
+- **THEN** loading fails with the existing configuration diagnostic and
+  exit 2; projection never masks a configuration defect
+
+#### Scenario: projection allowlist is exact
+
+- **GIVEN** a fully populated configuration with every field set away from
+  its default, including components, repositories, security, platform,
+  beans, supervision, timeouts, and log level
+- **WHEN** the job boot projection runs
+- **THEN** only `runtime_journal` and `observability` change; every other
+  field is identical to the input
 
