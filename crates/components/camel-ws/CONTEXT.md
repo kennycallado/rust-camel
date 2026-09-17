@@ -116,19 +116,31 @@ Per ADR-0012, this component's `error!` sites are outside the handler contract:
   `force_unhealthy_for_route` with `g:ws:bind-tls`. The health pin is the operator signal.
 - **Class (g)** (`spawn_server`, plain-bind arm): the code first calls
   `force_unhealthy_for_route` with `g:ws:bind-plain`. The health pin is the operator signal.
+- **Class (e)** (`monitor_ws_server_task`): the shared server task exiting
+  unexpectedly (panic or abort) increments `e:ws:server-task-exited` and cancels
+  the per-server `server_exited` token. Every `WsConsumer` hosted on that server
+  observes the cancellation in its `forward_task` select loop and returns `Err`,
+  which camel-core's background-task watcher turns into a per-route
+  `CrashNotification` → `FailRoute` → supervision backoff restart (ADR-0007,
+  rc-nxml4 — port of the camel-http rc-szmob pattern). A clean exit cancels
+  nothing; a serve-error exit cancels without the metric (the bind-arm health pin
+  above is its operator signal). A finished monitor also drives lazy eviction in
+  `get_or_spawn*`: the next spawn on that port rebinds a fresh server instead of
+  rejoining the dead one, so supervision restarts actually recover.
 
 Kernel authentication rejections in `dispatch_handler` log at `warn!` and increment
 `e:ws:authn` first; the metric is the operator signal.
 
 Client-consumer oversized-frame drops log at `warn!` and increment
-`increment_errors(route_id, "ws_client_consumer")` first; the metric is the operator signal.
-Dispatch failure (route channel closed) increments the same metric and the task returns
-`Err` — no log, the error return is the signal.
+`increment_errors(route_id, "e:ws:client-frame-drop")` first; the metric is the operator signal.
+Client dispatch failure (route channel closed) increments
+`b-prime:ws:client-dispatch` and the task returns `Err` — no log, the error return
+is the signal.
 
-- **Class (b′)** (`WsConsumer::finish_start`, `src/lib.rs:1428`): the server-side
-  forward loop's pipeline send failure (route channel closed) increments
+- **Class (b′)** (`WsConsumer::finish_start`): the server-side forward loop's
+  pipeline send failure (route channel closed) increments
   `b-prime:ws:message-dispatch` and the loop exits — no log, the metric is the
   only signal. Distinct from the client-consumer dispatch failure above, which
-  uses `ws_client_consumer` and returns `Err`.
+  uses `b-prime:ws:client-dispatch` and returns `Err`.
 
 Each `error!` site keeps the level for loud log visibility and carries `// log-policy: outside-contract`.

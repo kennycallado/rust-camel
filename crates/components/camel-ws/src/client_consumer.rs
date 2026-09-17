@@ -429,7 +429,7 @@ async fn receive_until_disconnect(
                     runtime.component_metrics().observe("ws", "frame", true);
                     runtime
                         .metrics()
-                        .increment_errors(route_id, "ws_client_consumer");
+                        .increment_errors(route_id, "b-prime:ws:client-dispatch");
                     return Err(CamelError::ChannelClosed);
                 }
             },
@@ -465,7 +465,7 @@ async fn receive_until_disconnect(
                         );
                         runtime
                             .metrics()
-                            .increment_errors(route_id, "ws_client_consumer");
+                            .increment_errors(route_id, "e:ws:client-frame-drop");
                         continue;
                     }
                     let mut message = CamelMessage::new(body);

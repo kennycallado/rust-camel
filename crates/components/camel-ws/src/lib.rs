@@ -47,6 +47,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Message as ClientWsMessage;
+use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 use client_consumer::{ClientConnState, WsClientConsumer};
@@ -85,7 +86,28 @@ type DispatchTable = Arc<RwLock<HashMap<String, mpsc::Sender<ExchangeEnvelope>>>
 struct ServerHandle {
     state: WsAppState,
     is_tls: bool,
-    _task: JoinHandle<()>,
+    /// Monitor for the shared server task (consumes the server
+    /// JoinHandle). Its completion doubles as the server-death check for
+    /// lazy eviction in `get_or_spawn*`: a finished monitor means the
+    /// server task (panic/abort/serve-error) is gone and the next spawn
+    /// must rebind instead of rejoining a dead transport.
+    monitor_task: JoinHandle<()>,
+    /// Abort handle for the WebSocket server task itself. The JoinHandle
+    /// is consumed by `monitor_ws_server_task`; this survives on the
+    /// handle so crashed-server tests (and future ops tooling) can
+    /// deterministically kill the shared transport to exercise the death
+    /// path. Test-only today — no production reader yet (rc-nxml4).
+    #[allow(dead_code)]
+    server_abort: tokio::task::AbortHandle,
+    /// Cancelled by `monitor_ws_server_task` when the shared server task
+    /// backing this handle exits unexpectedly (panic, abort, or serve
+    /// error). Every `WsConsumer` hosted on that server selects on this
+    /// token in its `forward_task` loop; on cancellation the task returns
+    /// `Err`, which camel-core's background-task watcher converts into a
+    /// per-route `CrashNotification` → `FailRoute` → supervision backoff
+    /// restart (ADR-0007 route-supervised contract — shared transports
+    /// must fail their hosted routes like per-route transports do).
+    server_exited: CancellationToken,
     tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
     tls_source: Option<ServerTlsSource>,
     /// Actual bound address, captured from the served listener at spawn
@@ -164,6 +186,7 @@ impl ServerRegistry {
         (
             WsAppState,
             Option<axum_server::Handle<std::net::SocketAddr>>,
+            CancellationToken,
         ),
         CamelError,
     > {
@@ -174,6 +197,9 @@ impl ServerRegistry {
             let mut guard = self.inner.lock().map_err(|_| {
                 CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
             })?;
+            // rc-nxml4: lazily evict dead shared servers so a supervision
+            // restart rebinds instead of rejoining a dead transport.
+            evict_dead_server_if_any(&mut guard, port);
             let entry = guard.entry(port).or_insert_with(|| ServerRegistryInner {
                 cell: Arc::new(OnceCell::new()),
                 ref_count: 0,
@@ -265,7 +291,11 @@ impl ServerRegistry {
             )));
         }
 
-        Ok((handle.state.clone(), handle.listening_handle.clone()))
+        Ok((
+            handle.state.clone(),
+            handle.listening_handle.clone(),
+            handle.server_exited.clone(),
+        ))
     }
 
     /// Decrement the ref count for `port`, removing the entry when it
@@ -303,6 +333,7 @@ impl ServerRegistry {
             WsAppState,
             std::net::SocketAddr,
             Option<axum_server::Handle<std::net::SocketAddr>>,
+            CancellationToken,
         ),
         CamelError,
     > {
@@ -318,6 +349,10 @@ impl ServerRegistry {
             let mut guard = self.inner.lock().map_err(|_| {
                 CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
             })?;
+            // rc-nxml4: lazy dead-server eviction — same rationale as
+            // `get_or_spawn`: a finished monitor means the shared server
+            // task is gone; the next spawn must rebind.
+            evict_dead_server_if_any(&mut guard, port);
             let entry = guard.entry(port).or_insert_with(|| ServerRegistryInner {
                 cell: Arc::new(OnceCell::new()),
                 ref_count: 0,
@@ -369,6 +404,7 @@ impl ServerRegistry {
             handle.state.clone(),
             handle.bound_addr,
             handle.listening_handle.clone(),
+            handle.server_exited.clone(),
         ))
     }
 
@@ -386,7 +422,10 @@ impl ServerRegistry {
             let mut guard = Self::global().inner.lock().expect("ServerRegistry lock");
             for entry in guard.values() {
                 if let Some(handle) = entry.cell.get() {
-                    handle._task.abort();
+                    // Monitor first: an aborted monitor cannot observe the
+                    // server abort, so resets stay log-quiet.
+                    handle.monitor_task.abort();
+                    handle.server_abort.abort();
                 }
             }
             guard.clear();
@@ -418,6 +457,20 @@ impl ServerRegistry {
     }
 }
 
+/// Lazy dead-server eviction shared by both `get_or_spawn*` entry
+/// points (rc-nxml4): when the entry on `port` holds an initialized
+/// server whose monitor task has finished, remove the entry so the next
+/// spawn rebinds. The monitor ends with — or immediately after — the
+/// server task, so `is_finished()` covers panic, abort and serve-error
+/// exits alike; init-in-flight cells are left alone.
+fn evict_dead_server_if_any(guard: &mut HashMap<u16, ServerRegistryInner>, port: u16) {
+    if let Some(handle) = guard.get(&port).and_then(|e| e.cell.get())
+        && handle.monitor_task.is_finished()
+    {
+        guard.remove(&port);
+    }
+}
+
 async fn spawn_server(
     listener: tokio::net::TcpListener,
     tls_config: Option<WsTlsConfig>,
@@ -431,6 +484,9 @@ async fn spawn_server(
     let path_configs = Arc::new(DashMap::new());
     let path_policies = Arc::new(DashMap::new());
     let server_error = new_atomic_false();
+    // Per-server death signal, cancelled by `monitor_ws_server_task`
+    // (rc-nxml4): shared-transport death must fail every hosted route.
+    let server_exited = CancellationToken::new();
     let state = WsAppState {
         dispatch: Arc::clone(&dispatch),
         path_configs: Arc::clone(&path_configs),
@@ -521,15 +577,86 @@ async fn spawn_server(
         "WebSocket server started"
     );
 
+    // rc-nxml4 (ADR-0007 parity with camel-http rc-szmob): the server
+    // JoinHandle is consumed by a monitor task. On unexpected exit the
+    // monitor cancels `server_exited`; every hosted consumer's
+    // `forward_task` observes it and fails, so camel-core restarts the
+    // routes instead of leaving them zombie.
+    let server_abort = task.abort_handle();
+    let monitor_task = tokio::spawn(monitor_ws_server_task(
+        task,
+        bound_addr,
+        Arc::clone(&runtime),
+        route_id,
+        Arc::clone(&server_error),
+        server_exited.clone(),
+    ));
+
     Ok(ServerHandle {
         state,
         is_tls,
-        _task: task,
+        monitor_task,
+        server_abort,
+        server_exited,
         tls_config: retained_tls_cfg,
         tls_source: retained_source,
         bound_addr,
         listening_handle,
     })
+}
+
+/// Monitors the shared WebSocket server task of one port.
+///
+/// On unexpected exit (panic or abort — `Err(join_err)`) it records the
+/// structured error event (`e:ws:server-task-exited`, ADR-0012 category
+/// (e) outside-contract) and cancels the server's `server_exited` token.
+/// On a serve-error exit (`Ok(())` with `server_error` set) the server
+/// task body has already recorded the health failure and error log; the
+/// monitor still cancels the token because the transport is dead either
+/// way — camel-ws's `serve()` is terminal, unlike a transient accept
+/// error. Every `WsConsumer` hosted on that server observes the
+/// cancellation in its `forward_task` select loop and returns `Err`,
+/// which camel-core's background-task watcher turns into a per-route
+/// `CrashNotification` → `FailRoute` → supervision backoff restart
+/// (ADR-0007, rc-nxml4 — parity with camel-http rc-szmob). A clean exit
+/// (`Ok(())` with no serve error) cancels nothing: route stops own their
+/// termination.
+async fn monitor_ws_server_task(
+    handle: JoinHandle<()>,
+    addr: std::net::SocketAddr,
+    runtime: Arc<dyn RuntimeObservability>,
+    route_id: String,
+    server_error: Arc<AtomicBool>,
+    server_exited: CancellationToken,
+) {
+    match handle.await {
+        Ok(()) => {
+            if server_error.load(Ordering::Relaxed) {
+                // serve() returned Err: the task body already recorded the
+                // health failure and the error log; the hosted routes must
+                // still fail on the dead transport.
+                server_exited.cancel();
+            }
+        }
+        Err(join_err) => {
+            // Fail every hosted route's consumer FIRST — supervision must
+            // engage even if the observability calls below fail — then
+            // record the structured error event: each `forward_task`
+            // returns Err and camel-core emits one CrashNotification per
+            // route (ADR-0007 parity with per-route transport death).
+            server_exited.cancel();
+            runtime
+                .metrics()
+                .increment_errors(&route_id, "e:ws:server-task-exited");
+            // log-policy: outside-contract
+            tracing::error!(
+                host = %addr.ip(),
+                port = addr.port(),
+                error = %join_err,
+                "WebSocket server task exited unexpectedly — all routes on this port are now dead"
+            );
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1353,7 +1480,7 @@ impl WsConsumer {
 
         let tls_config = self.tls_config()?;
 
-        let (state, bound_addr, listening_handle) = ServerRegistry::global()
+        let (state, bound_addr, listening_handle, server_exited) = ServerRegistry::global()
             .get_or_spawn_with_listener(
                 listener,
                 tls_config,
@@ -1377,7 +1504,8 @@ impl WsConsumer {
             bound_addr.port(),
             self.cfg.inner.path.clone(),
         );
-        self.finish_start(&ctx, state, registry_key).await
+        self.finish_start(&ctx, state, registry_key, server_exited)
+            .await
     }
 
     /// Shared tail of `start` and `start_with_listener`: publish the
@@ -1389,6 +1517,7 @@ impl WsConsumer {
         ctx: &ConsumerContext,
         state: WsAppState,
         registry_key: (String, u16, String),
+        server_exited: CancellationToken,
     ) -> Result<(), CamelError> {
         let (env_tx, mut env_rx) = mpsc::channel::<ExchangeEnvelope>(64);
         {
@@ -1417,16 +1546,36 @@ impl WsConsumer {
         let sender = ctx.sender();
         let route_id = ctx.route_id().to_string();
         let runtime = Arc::clone(&self.runtime);
+        let (registry_host, registry_port, _) = registry_key.clone();
         let forward_task: JoinHandle<Result<(), CamelError>> = tokio::spawn(async move {
-            while let Some(envelope) = env_rx.recv().await {
-                if sender.send(envelope).await.is_err() {
-                    // (category b′ per ADR-0012: locally terminal message
-                    // dispatch — the pipeline receiver is gone and the loop
-                    // exits, so this is the only signal.)
-                    runtime
-                        .metrics()
-                        .increment_errors(&route_id, "b-prime:ws:message-dispatch");
-                    break;
+            loop {
+                tokio::select! {
+                    _ = server_exited.cancelled() => {
+                        // Shared transport death: this route's consumer
+                        // cannot continue. Fail (do NOT hang in Running) —
+                        // parity with per-route transport death, which also
+                        // surfaces as a consumer-task error. The Err flows
+                        // through `background_task_handle()` into
+                        // camel-core's background-task watcher, which emits
+                        // a CrashNotification for THIS route and
+                        // supervision backoff engages (ADR-0007, rc-nxml4).
+                        return Err(CamelError::RouteError(format!(
+                            "shared WebSocket server for {registry_host}:{registry_port} exited unexpectedly; route transport is dead"
+                        )));
+                    }
+                    envelope = env_rx.recv() => {
+                        let Some(envelope) = envelope else { break };
+                        if sender.send(envelope).await.is_err() {
+                            // (category b′ per ADR-0012: locally terminal
+                            // message dispatch — the pipeline receiver is
+                            // gone and the loop exits, so this is the only
+                            // signal.)
+                            runtime
+                                .metrics()
+                                .increment_errors(&route_id, "b-prime:ws:message-dispatch");
+                            break;
+                        }
+                    }
                 }
             }
             Ok(())
@@ -1534,7 +1683,7 @@ impl Consumer for WsConsumer {
 
         let tls_config = self.tls_config()?;
 
-        let (state, listening_handle) = ServerRegistry::global()
+        let (state, listening_handle, server_exited) = ServerRegistry::global()
             .get_or_spawn(
                 &self.cfg.inner.host,
                 self.cfg.inner.port,
@@ -1551,7 +1700,8 @@ impl Consumer for WsConsumer {
             self.cfg.inner.port,
             self.cfg.inner.path.clone(),
         );
-        self.finish_start(&ctx, state, registry_key).await
+        self.finish_start(&ctx, state, registry_key, server_exited)
+            .await
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
@@ -2718,11 +2868,11 @@ mod tests {
         let std_clone = std_listener.try_clone().unwrap();
         let listener1 = tokio_listener_from_std(std_listener);
         let listener2 = tokio_listener_from_std(std_clone);
-        let (state1, _addr1, _) = ServerRegistry::global()
+        let (state1, _addr1, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(listener1, None, test_rt(), "test-route".into())
             .await
             .unwrap();
-        let (state2, _addr2, _) = ServerRegistry::global()
+        let (state2, _addr2, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(listener2, None, test_rt(), "test-route".into())
             .await
             .unwrap();
@@ -2762,7 +2912,7 @@ mod tests {
         let expected_port = listener.local_addr().unwrap().port();
         assert_ne!(expected_port, 0, "probe port must be real");
 
-        let (_state, bound_addr, listening) = ServerRegistry::global()
+        let (_state, bound_addr, listening, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-p0".into())
             .await
             .expect("injected listener spawn must succeed");
@@ -2789,13 +2939,13 @@ mod tests {
         let listener1 = tokio_listener_from_std(std_listener);
         let port = listener1.local_addr().unwrap().port();
 
-        let (_s1, addr1, _) = ServerRegistry::global()
+        let (_s1, addr1, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(listener1, None, test_rt(), "ws-injected-r1".into())
             .await
             .expect("first injected spawn must succeed");
 
         let listener2 = tokio_listener_from_std(std_clone);
-        let (_s2, addr2, _) = ServerRegistry::global()
+        let (_s2, addr2, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(listener2, None, test_rt(), "ws-injected-r2".into())
             .await
             .expect("second injected call must reuse the entry, not rebind");
@@ -2821,12 +2971,12 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (_s1, addr, _) = ServerRegistry::global()
+        let (_s1, addr, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-mix".into())
             .await
             .expect("injected spawn must succeed");
 
-        let (_s2, _) = ServerRegistry::global()
+        let (_s2, _, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("legacy call on injected entry must reuse it, not rebind");
@@ -2854,7 +3004,7 @@ mod tests {
 
         // Plain legacy spawn: pre-refactor return shape `(WsAppState, Option<Handle>)`,
         // binds so a TCP connect succeeds, ref count 1.
-        let (_state, listening) = ServerRegistry::global()
+        let (_state, listening, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("plain legacy spawn must succeed");
@@ -2919,7 +3069,7 @@ mod tests {
         let listener = tokio_listener_from_std(std_listener);
         let port = listener.local_addr().unwrap().port();
 
-        let (_state, addr, _) = ServerRegistry::global()
+        let (_state, addr, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-plain".into())
             .await
             .expect("plain injected spawn must succeed");
@@ -2967,7 +3117,7 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (_state, _addr, _) = ServerRegistry::global()
+        let (_state, _addr, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-reset".into())
             .await
             .expect("injected spawn must succeed");
@@ -2996,7 +3146,7 @@ mod tests {
         }
         let fresh = fresh.expect("port must be rebindable after reset (no listener leak)");
 
-        let (_state2, addr2, _) = ServerRegistry::global()
+        let (_state2, addr2, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(fresh, None, test_rt(), "ws-injected-rebind".into())
             .await
             .expect("re-spawn on the fresh listener must succeed");
@@ -3024,7 +3174,7 @@ mod tests {
             .await
             .expect("staging a fresh (host, port) key must succeed");
 
-        let (_state, _) = ServerRegistry::global()
+        let (_state, _, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("vacant-entry spawn must consume the staged listener");
@@ -3056,7 +3206,7 @@ mod tests {
 
         // Create the entry via the injected-listener path (a second bind on
         // this port is impossible).
-        let (_s, addr, _) = ServerRegistry::global()
+        let (_s, addr, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(
                 tokio_listener_from_std(std_listener),
                 None,
@@ -3073,7 +3223,7 @@ mod tests {
             .await
             .expect("staging on an existing entry must succeed (slot empty)");
 
-        let (_s2, _) = ServerRegistry::global()
+        let (_s2, _, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("existing entry must be reused, not rebind");
@@ -3124,7 +3274,7 @@ mod tests {
 
         // The conflicting call left the staged slot untouched: the exact-key
         // call consumes it and serves the staged socket.
-        let (_state, _) = ServerRegistry::global()
+        let (_state, _, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("exact-key spawn must serve the staged listener");
@@ -3160,7 +3310,7 @@ mod tests {
 
         // The first staged listener is retained: get_or_spawn serves its
         // socket, not a fresh bind.
-        let (_state, _) = ServerRegistry::global()
+        let (_state, _, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("spawn must consume the first staged listener");
@@ -3194,7 +3344,7 @@ mod tests {
             .await
             .expect("stage P2");
 
-        let (_s1, _) = ServerRegistry::global()
+        let (_s1, _, _) = ServerRegistry::global()
             .get_or_spawn(
                 "127.0.0.1",
                 addr1.port(),
@@ -3204,7 +3354,7 @@ mod tests {
             )
             .await
             .expect("P1 spawn must consume staged P1");
-        let (_s2, _) = ServerRegistry::global()
+        let (_s2, _, _) = ServerRegistry::global()
             .get_or_spawn(
                 "127.0.0.1",
                 addr2.port(),
@@ -3235,7 +3385,7 @@ mod tests {
     async fn dispatch_handler_returns_404_for_unregistered_path() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let (state, _addr, _) = ServerRegistry::global()
+        let (state, _addr, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(listener, None, test_rt(), "test-route".into())
             .await
             .unwrap();
@@ -3420,7 +3570,7 @@ mod tests {
         );
         consumer.start_with_listener(ctx, listener).await.unwrap();
 
-        let (state, _) = ServerRegistry::global()
+        let (state, _, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .unwrap();
@@ -3546,7 +3696,7 @@ mod tests {
         for listener in [listener0, listener1, listener2, listener3] {
             let results = results.clone();
             handles.push(tokio::spawn(async move {
-                let (state, _addr, _) = ServerRegistry::global()
+                let (state, _addr, _, _) = ServerRegistry::global()
                     .get_or_spawn_with_listener(listener, None, test_rt(), "test-route".into())
                     .await
                     .unwrap();
@@ -4067,6 +4217,280 @@ mod tests {
         );
     }
 
+    // -------------------------------------------------------------------
+    // Shared-server death supervision (rc-nxml4 / ADR-0007) — port of the
+    // camel-http rc-szmob pattern (5be04091) to camel-ws's forward_task
+    // architecture.
+    // -------------------------------------------------------------------
+
+    /// rc-nxml4 (ADR-0007 parity): when the shared WebSocket server task
+    /// for a port dies, EVERY WsConsumer hosted on that port must fail —
+    /// its `forward_task` returns Err via `background_task_handle()`,
+    /// which camel-core's consumer watcher turns into a per-route
+    /// CrashNotification → FailRoute → supervision backoff restart.
+    /// Before the fix the forward tasks hung forever (zombie routes):
+    /// `env_rx.recv()` never fires when the server task dies, because the
+    /// envelope senders live in the (still-alive) shared dispatch table,
+    /// not in the dead task.
+    ///
+    /// Deterministic by construction: the two routes share one bound
+    /// socket (std try_clone), the server is killed via its AbortHandle
+    /// (real JoinError → monitor's unexpected-exit branch), and forward
+    /// task resolution is bounded by a timeout — on unmodified behavior
+    /// the timeout trips, which is exactly the zombie this test pins
+    /// down.
+    #[tokio::test]
+    async fn shared_server_death_fails_every_hosted_consumer() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        // One socket, two handles: both consumers host on the same port.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let std_clone = std_listener.try_clone().unwrap();
+        let port = std_listener.local_addr().unwrap().port();
+        let listener1 = tokio_listener_from_std(std_listener);
+        let listener2 = tokio_listener_from_std(std_clone);
+
+        let errors: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let rt: Arc<dyn camel_component_api::RuntimeObservability> =
+            Arc::new(RecordingRuntime::new(Arc::clone(&errors)));
+
+        let start_hosted = |path: &str, route_id: &str, listener: tokio::net::TcpListener| {
+            let uri = format!("ws://127.0.0.1:{port}/{path}");
+            let cfg = WsEndpointConfig::from_uri(&uri).unwrap();
+            let mut consumer = WsConsumer::new(cfg.server_config(), Arc::clone(&rt));
+            let (tx, rx) = mpsc::channel(16);
+            let ctx = ConsumerContext::new(tx, CancellationToken::new(), route_id.to_string());
+            async move {
+                consumer
+                    .start_with_listener(ctx, listener)
+                    .await
+                    .expect("consumer start must succeed");
+                let bg = consumer
+                    .background_task_handle()
+                    .expect("forward task handle must exist after start");
+                (consumer, rx, bg)
+            }
+        };
+
+        // Two routes hosted on the SAME shared server (same bound port).
+        let (consumer_a, _rx_a, bg_a) = start_hosted("zombie-a", "zombie-route-a", listener1).await;
+        let (consumer_b, _rx_b, bg_b) = start_hosted("zombie-b", "zombie-route-b", listener2).await;
+        // Drop the consumers — the forward tasks are independent; the
+        // `_rx` receivers stay alive so the pipeline sender never errors
+        // (mirrors a live route holding its receiver).
+        drop(consumer_a);
+        drop(consumer_b);
+
+        // Kill the shared server task: abort → JoinError → the monitor's
+        // unexpected-exit branch. This is the real crash path (no mock).
+        {
+            let guard = ServerRegistry::global()
+                .inner
+                .lock()
+                .expect("ServerRegistry lock");
+            let handle = guard
+                .get(&port)
+                .and_then(|entry| entry.cell.get())
+                .expect("shared server entry must exist");
+            handle.server_abort.abort();
+        }
+
+        // THE assertion: both hosted routes' forward tasks must fail
+        // (bounded). On the zombie bug they never resolve and this
+        // timeout trips.
+        let outcome_a = tokio::time::timeout(Duration::from_secs(2), bg_a)
+            .await
+            .expect("ZOMBIE: consumer-a forward task still running after shared server death (rc-nxml4)");
+        let outcome_b = tokio::time::timeout(Duration::from_secs(2), bg_b)
+            .await
+            .expect("ZOMBIE: consumer-b forward task still running after shared server death (rc-nxml4)");
+
+        let err_a = outcome_a
+            .expect("consumer-a forward task must join")
+            .expect_err("consumer-a forward task must return Err when the shared server dies");
+        let err_b = outcome_b
+            .expect("consumer-b forward task must join")
+            .expect_err("consumer-b forward task must return Err when the shared server dies");
+
+        // The error must identify the dead shared transport (it flows into
+        // the CrashNotification message camel-core records against the
+        // route).
+        for (name, err) in [("a", &err_a), ("b", &err_b)] {
+            assert!(
+                err.to_string().contains("127.0.0.1")
+                    && err.to_string().contains(&port.to_string()),
+                "consumer-{name} error must name the dead shared server, got: {err}"
+            );
+        }
+
+        // Error counter regression guard: the monitor still records
+        // `e:ws:server-task-exited` for the route that spawned the server.
+        let recorded = errors.lock().expect("error recorder lock").clone();
+        assert!(
+            recorded
+                .iter()
+                .any(|(route, label)| label == "e:ws:server-task-exited"
+                    && route == "zombie-route-a"),
+            "expected e:ws:server-task-exited for the spawning route, got: {recorded:?}"
+        );
+    }
+
+    /// Clean server exit must NOT cancel `server_exited` — route stops own
+    /// their termination (no CrashNotification storm on graceful
+    /// teardown). Monitor-level unit test, mirroring camel-http's
+    /// `monitor_task_silent_on_clean_exit`.
+    #[tokio::test]
+    async fn monitor_silent_on_clean_exit_does_not_cancel() {
+        let handle: JoinHandle<()> = tokio::spawn(async {});
+        let server_error = new_atomic_false();
+        let server_exited = CancellationToken::new();
+        monitor_ws_server_task(
+            handle,
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(RecordingRuntime::new(Arc::new(Mutex::new(Vec::new())))),
+            "test-monitor".into(),
+            Arc::clone(&server_error),
+            server_exited.clone(),
+        )
+        .await;
+        assert!(
+            !server_exited.is_cancelled(),
+            "clean server exit must not cancel server_exited"
+        );
+    }
+
+    /// Unexpected exit (panic) must cancel `server_exited` so every hosted
+    /// consumer fails and supervision engages (ADR-0007).
+    #[tokio::test]
+    async fn monitor_cancels_on_server_panic() {
+        let handle: JoinHandle<()> = tokio::spawn(async {
+            panic!("simulated server crash");
+        });
+        let server_error = new_atomic_false();
+        let server_exited = CancellationToken::new();
+        let errors: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        monitor_ws_server_task(
+            handle,
+            "127.0.0.1:9999".parse().unwrap(),
+            Arc::new(RecordingRuntime::new(Arc::clone(&errors))),
+            "test-monitor".into(),
+            Arc::clone(&server_error),
+            server_exited.clone(),
+        )
+        .await;
+        assert!(
+            server_exited.is_cancelled(),
+            "crashed server must cancel server_exited"
+        );
+        let recorded = errors.lock().expect("error recorder lock").clone();
+        assert!(
+            recorded
+                .iter()
+                .any(|(route, label)| route == "test-monitor" && label == "e:ws:server-task-exited"),
+            "crashed server must record e:ws:server-task-exited, got: {recorded:?}"
+        );
+    }
+
+    /// camel-ws-specific third death shape: `serve()` returning Err exits
+    /// the task body with `Ok(())` after setting `server_error`. The
+    /// transport is dead, so the monitor must cancel `server_exited` even
+    /// though the JoinHandle resolved cleanly.
+    #[tokio::test]
+    async fn monitor_cancels_on_serve_error_exit() {
+        let server_error = new_atomic_false();
+        let flag = Arc::clone(&server_error);
+        let handle: JoinHandle<()> = tokio::spawn(async move {
+            // Simulates the serve task body's error path: record the flag,
+            // then let the task end (the body returns ()).
+            flag.store(true, Ordering::Relaxed);
+        });
+        let server_exited = CancellationToken::new();
+        monitor_ws_server_task(
+            handle,
+            "127.0.0.1:9998".parse().unwrap(),
+            Arc::new(RecordingRuntime::new(Arc::new(Mutex::new(Vec::new())))),
+            "test-monitor".into(),
+            server_error,
+            server_exited.clone(),
+        )
+        .await;
+        assert!(
+            server_exited.is_cancelled(),
+            "serve-error exit must cancel server_exited (dead transport)"
+        );
+    }
+
+    /// Dead shared servers are evicted lazily: after the server task dies,
+    /// the next `get_or_spawn_with_listener` on the same port must spawn a
+    /// FRESH server (new dispatch table, uncancelled token) instead of
+    /// rejoining the dead one — this is what makes a supervision restart
+    /// actually rebind (parity with camel-http's eviction).
+    #[tokio::test]
+    async fn dead_shared_server_is_evicted_and_rebinds() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        // Two handles on one socket: first spawns, second is kept for the
+        // post-death rebind (same port by construction, no rebind race).
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let std_clone = std_listener.try_clone().unwrap();
+        let port = std_listener.local_addr().unwrap().port();
+        let listener1 = tokio_listener_from_std(std_listener);
+        let listener2 = tokio_listener_from_std(std_clone);
+
+        let evict_rt: Arc<dyn camel_component_api::RuntimeObservability> =
+            Arc::new(RecordingRuntime::new(Arc::new(Mutex::new(Vec::new()))));
+        let (state1, _addr1, _listen1, token1) = ServerRegistry::global()
+            .get_or_spawn_with_listener(
+                listener1,
+                None,
+                Arc::clone(&evict_rt),
+                "evict-route-1".into(),
+            )
+            .await
+            .unwrap();
+
+        // Kill the shared server task and wait until the monitor has
+        // cancelled the death token (bounded, no sleeps).
+        {
+            let guard = ServerRegistry::global()
+                .inner
+                .lock()
+                .expect("ServerRegistry lock");
+            let handle = guard
+                .get(&port)
+                .and_then(|entry| entry.cell.get())
+                .expect("shared server entry must exist");
+            handle.server_abort.abort();
+        }
+        tokio::time::timeout(Duration::from_secs(2), token1.cancelled())
+            .await
+            .expect("server death token must cancel after abort");
+        // Ordering dependency: eviction checks `monitor_task.is_finished()`
+        // and the monitor has no awaits after `cancel()`, so under this
+        // current-thread test runtime the finished monitor is observed by
+        // the next spawn below. The rebinding assertion would flake on a
+        // multi-thread runtime if the monitor ever gained a trailing await.
+
+        // The next spawn on the same port must rebind: fresh state, fresh
+        // (uncancelled) death token.
+        let (state2, _addr2, _listen2, token2) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener2, None, evict_rt, "evict-route-2".into())
+            .await
+            .unwrap();
+
+        assert!(
+            !token2.is_cancelled(),
+            "rebind must produce a live server with an uncancelled death token"
+        );
+        assert!(
+            !Arc::ptr_eq(&state1.dispatch, &state2.dispatch),
+            "rebind must produce a NEW server entry, not the dead one"
+        );
+        assert!(token1.is_cancelled());
+    }
+
     // === H-10 Finding Tests ===
 
     // WS-007: subprotocol negotiation support
@@ -4356,7 +4780,7 @@ mod tests {
         };
 
         // Spawn a single WSS server.
-        let (_state, _addr, _) = ServerRegistry::global()
+        let (_state, _addr, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(
                 listener,
                 Some(tls_cfg),
@@ -4417,7 +4841,7 @@ mod tests {
         };
 
         // Acquire TWO references to the same port.
-        let (_s1, _addr1, _) = ServerRegistry::global()
+        let (_s1, _addr1, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(
                 listener1,
                 Some(tls_cfg.clone()),
@@ -4426,7 +4850,7 @@ mod tests {
             )
             .await
             .expect("WSS server should spawn (ref 1)");
-        let (_s2, _addr2, _) = ServerRegistry::global()
+        let (_s2, _addr2, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(
                 listener2,
                 Some(tls_cfg),
@@ -4468,7 +4892,7 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (_state, _addr, _) = ServerRegistry::global()
+        let (_state, _addr, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(
                 listener,
                 None,
@@ -4571,6 +4995,9 @@ mod tests {
     //
     // Phase 1 reproduces the leftover entry deterministically on an owned
     // runtime; phase 2 joins it through the production `start()` path.
+    // rc-nxml4 evolution: the join now lands in lazy dead-server eviction
+    // (fresh rebind), so phase 2 asserts bounded recovery rather than the
+    // bounded failure it originally pinned.
     #[tokio::test]
     async fn wss_start_does_not_park_on_dead_registry_handle() {
         use camel_component_api::test_support::{NoopRuntimeObservability, tls};
@@ -4606,7 +5033,7 @@ mod tests {
                     .await
                     .expect("owner bind");
                 let port = listener.local_addr().unwrap().port();
-                let (_state, _addr, _handle) = ServerRegistry::global()
+                let (_state, _addr, _handle, _) = ServerRegistry::global()
                     .get_or_spawn_with_listener(
                         listener,
                         Some(owner_tls_cfg),
@@ -4633,8 +5060,14 @@ mod tests {
         .expect("owner thread");
 
         // Phase 2 — join the leftover entry via the production path (what
-        // an ephemeral-port reuse does). The gate must fail within a
-        // bound, not park on the dead handle.
+        // an ephemeral-port reuse does). rc-nxml4 changed the outcome:
+        // the dead entry (its monitor finished with the dropped runtime)
+        // is evicted lazily and `start()` rebinds a FRESH server on the
+        // port, so the gate resolves Ok instead of failing. Recovery is
+        // strictly better than the bounded readiness failure rc-oo0c
+        // originally pinned; the "never park" contract is still asserted
+        // by the timeout below. A stalled-but-alive serve task (monitor
+        // unfinished) still takes gate_ready's bounded timeout path.
         let uri = format!("wss://127.0.0.1:{port}/secure?tlsCert={cert_str}&tlsKey={key_str}");
         let component_ctx = NoOpComponentContext;
         let endpoint = WssComponent::new()
@@ -4656,10 +5089,10 @@ mod tests {
             "rc-oo0c: start() parked on a dead registry handle (serve task cancelled unpolled)"
         );
         let result = outcome.expect("bounded start");
-        let err = result.expect_err("start() must fail on a listener whose serve task is dead");
         assert!(
-            err.to_string().contains("did not become ready"),
-            "expected readiness-timeout error, got: {err}"
+            result.is_ok(),
+            "rc-nxml4: start() must recover by evicting the dead entry and rebinding, got: {:?}",
+            result.err()
         );
 
         ServerRegistry::reset();

@@ -643,7 +643,7 @@ async fn oversized_frame_dropped_flow_continues() {
 
     assert_eq!(
         *metrics.errors.lock().unwrap(),
-        vec![("r".to_string(), "ws_client_consumer".to_string())],
+        vec![("r".to_string(), "e:ws:client-frame-drop".to_string())],
         "oversized drop must record exactly one error metric"
     );
     server.abort();
@@ -805,7 +805,7 @@ async fn dispatch_failure_emits_both() {
             // camel-api ComponentMetrics::observe) plus the loop's own
             // category-(b′) error-family entry.
             ("ws".to_string(), "e:ws:frame".to_string()),
-            ("r9".to_string(), "ws_client_consumer".to_string()),
+            ("r9".to_string(), "b-prime:ws:client-dispatch".to_string()),
         ],
         "exactly one facade error emission and one dispatch-failure metric"
     );
