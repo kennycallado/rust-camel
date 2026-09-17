@@ -145,10 +145,11 @@ otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # the security builder available (runtime-boot "feature forwarding with
 # default enablement").
 security = ["camel-bundles/security"]
-# kafka activates the kafka component code only — linking strategy is orthogonal.
-# Use `kafka` alone (rdkafka will build from source via cmake by default),
-# `kafka,dynamic-linking` to link against a system librdkafka, or
-# `kafka-static` to force a cmake source build explicitly.
+# kafka is the capability feature: activates the kafka component and
+# its registration in the lint registry and the boot cascade.
+# librdkafka builds from source via cmake (the rdkafka-sys default).
+# dynamic-linking selects a system librdkafka instead and implies
+# kafka.
 kafka = ["dep:camel-component-kafka", "camel-bundles/kafka"]
 grpc = [
   "dep:camel-component-grpc",
@@ -165,9 +166,7 @@ llm = ["dep:camel-component-llm", "camel-component-llm/all-providers", "camel-bu
 # tool/resource routes + Producer (client) call/read dispatch.
 mcp = ["dep:camel-component-mcp", "camel-bundles/mcp"]
 http-static = ["camel-bundles/http-static"]
-cmake-build = ["camel-component-kafka/cmake-build"]
-dynamic-linking = ["camel-component-kafka/dynamic-linking"]
-kafka-static = ["dep:camel-component-kafka", "cmake-build"]
+dynamic-linking = ["kafka", "camel-component-kafka/dynamic-linking"]
 # mqtt activates the MQTT component (rumqttc, no TLS by default).
 # Use mqtt-tls to enable TLS support (mqtts:// URIs).
 mqtt = ["dep:camel-component-mqtt", "camel-bundles/mqtt"]

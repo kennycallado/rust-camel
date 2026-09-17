@@ -23,13 +23,14 @@ jobs:
             target: x86_64-unknown-linux-gnu
             use-cross: false
             bin-suffix: ""
-            kafka-features: "cmake-build"
+            kafka-features: "kafka"
+            kafka-probe: true
             install-librdkafka: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             use-cross: true
             bin-suffix: ""
-            kafka-features: "cmake-build"
+            kafka-features: "kafka"
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             use-cross: false
@@ -45,17 +46,20 @@ jobs:
             target: x86_64-apple-darwin
             use-cross: false
             bin-suffix: ""
-            kafka-features: "cmake-build"
+            kafka-features: "kafka"
+            kafka-probe: true
           - os: macos-latest
             target: aarch64-apple-darwin
             use-cross: false
             bin-suffix: ""
-            kafka-features: "cmake-build"
+            kafka-features: "kafka"
+            kafka-probe: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             use-cross: false
             bin-suffix: ".exe"
-            kafka-features: "cmake-build"
+            kafka-features: "kafka"
+            kafka-probe: true
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -89,10 +93,11 @@ jobs:
           KAFKA_FEATURES: ${{ matrix.kafka-features }}
           ALLOC_FEATURES: ${{ matrix.alloc-features }}
         run: |
-          # Compose the feature set from both matrix keys. Empty/absent keys
-          # must yield no empty elements — "--features ,jemalloc" is a cargo
-          # error, and a silently-dropped feature ships a mallocng binary
-          # that looks green (rc-vnm8).
+          # Compose the feature set from both matrix keys. kafka-features
+          # carries the kafka capability feature on kafka legs; empty/absent
+          # keys must yield no empty elements — "--features ,jemalloc" is a
+          # cargo error, and a silently-dropped feature ships a mallocng
+          # binary that looks green (rc-vnm8).
           FEATURES=$(echo "${KAFKA_FEATURES},${ALLOC_FEATURES}" | sed 's/^,//; s/,$//; s/,,/,/g')
           FEATURE_FLAG=""
           [ -n "$FEATURES" ] && FEATURE_FLAG="--features $FEATURES"
@@ -103,6 +108,36 @@ jobs:
             cargo build -p camel-cli --release --target ${{ matrix.target }} $FEATURE_FLAG
           fi
         shell: bash
+
+      - name: Assert kafka capability (release probe)
+        if: matrix.kafka-probe == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          FIXTURE="$RUNNER_TEMP/kafka-probe-route.yaml"
+          printf '%s\n' \
+            'routes:' \
+            '  - id: "kafka-capability-probe"' \
+            '    from: "kafka:orders?brokers=localhost:9092"' \
+            '    steps:' \
+            '      - to: "log:out"' \
+            > "$FIXTURE"
+          BIN="target/${{ matrix.target }}/release/camel${{ matrix.bin-suffix }}"
+          set +e
+          OUT="$("$BIN" lint "$FIXTURE" 2>&1)"
+          RC=$?
+          set -e
+          if [ "$RC" -ne 0 ]; then
+            echo "FAIL: kafka capability probe exited $RC"
+            printf '%s\n' "$OUT"
+            exit 1
+          fi
+          if printf '%s\n' "$OUT" | grep -iq 'unverified-scheme'; then
+            echo "FAIL: unverified-scheme diagnostic in a kafka-capability build"
+            printf '%s\n' "$OUT"
+            exit 1
+          fi
+          echo "OK: kafka capability verified on ${{ matrix.target }}"
 
       - name: Assert jemalloc linked (musl only)
         if: contains(matrix.alloc-features, 'jemalloc')

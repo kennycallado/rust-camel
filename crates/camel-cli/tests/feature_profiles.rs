@@ -32,34 +32,48 @@ fn workspace_root() -> PathBuf {
     workspace.to_path_buf()
 }
 
-/// Run `cargo tree -p camel-cli -e features,no-dev --prefix none --locked`
-/// (plus `extra_args`) from the workspace root and return the normalized,
-/// sorted, deduplicated output lines.
-fn tree_lines(extra_args: &[&str]) -> Vec<String> {
+/// Shared `cargo tree` argument list used by [`tree_command`].
+const TREE_BASE_ARGS: &[&str] = &[
+    "tree",
+    "-p",
+    "camel-cli",
+    "-e",
+    "features,no-dev",
+    "--prefix",
+    "none",
+    "--locked",
+];
+
+/// Build the `cargo tree -p camel-cli -e features,no-dev --prefix none
+/// --locked` command (plus `extra_args`) with the shared spawn plumbing:
+/// hoisted so the "exact same invocation" property between
+/// [`tree_lines`] and [`tree_fails_with`] is structural, not disciplinary.
+fn tree_command(extra_args: &[&str]) -> Command {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let output = Command::new(&cargo)
-        .args([
-            "tree",
-            "-p",
-            "camel-cli",
-            "-e",
-            "features,no-dev",
-            "--prefix",
-            "none",
-            "--locked",
-        ])
+    let mut command = Command::new(&cargo);
+    command
+        .args(TREE_BASE_ARGS)
         .args(extra_args)
         // Force uncolored child output regardless of the inherited
         // environment: CI sets CARGO_TERM_COLOR=always workflow-wide, and
         // a colored tree styles the `(*)` repeat marker so the
-        // plain-text normalization below cannot strip it (rc-k6dln).
+        // plain-text normalization in `tree_lines` cannot strip it
+        // (rc-k6dln).
         .env("CARGO_TERM_COLOR", "never")
-        .current_dir(workspace_root())
+        .current_dir(workspace_root());
+    command
+}
+
+/// Run `cargo tree -p camel-cli -e features,no-dev --prefix none --locked`
+/// (plus `extra_args`) from the workspace root and return the normalized,
+/// sorted, deduplicated output lines.
+fn tree_lines(extra_args: &[&str]) -> Vec<String> {
+    let output = tree_command(extra_args)
         .output()
-        .unwrap_or_else(|error| panic!("failed to spawn `{cargo} tree`: {error}"));
+        .unwrap_or_else(|error| panic!("failed to spawn `cargo tree`: {error}"));
     if !output.status.success() {
         panic!(
-            "`{cargo} tree` failed with {}:\n{}",
+            "`cargo tree` failed with {}:\n{}",
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
@@ -69,6 +83,29 @@ fn tree_lines(extra_args: &[&str]) -> Vec<String> {
     lines.sort();
     lines.dedup();
     lines
+}
+
+/// Assert that `cargo tree` — the exact invocation [`tree_lines`] uses,
+/// plus `extra_args` — exits non-zero and its stderr contains `fragment`:
+/// a removed feature name must be rejected by cargo itself.
+fn tree_fails_with(extra_args: &[&str], fragment: &str) {
+    let output = tree_command(extra_args)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to spawn `cargo tree`: {error}"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        panic!(
+            "`cargo tree` unexpectedly succeeded (expected failure naming \
+             `{fragment}`); status {}, stderr:\n{stderr}",
+            output.status
+        );
+    }
+    assert!(
+        stderr.contains(fragment),
+        "`cargo tree` failed with status {} but its stderr does not name \
+         `{fragment}`; stderr:\n{stderr}",
+        output.status
+    );
 }
 
 /// Rust port of the fixture pipeline
@@ -314,4 +351,68 @@ fn slim_plus_grpc_resolves_grpc_only() {
         &other_thirteen,
         "slim-http,grpc closure must still exclude the other thirteen forbidden prefixes",
     );
+}
+
+#[test]
+fn kafka_feature_table_implies_capability() {
+    // The `dynamic-linking => kafka` implication is asserted at the
+    // feature-table level: feature-forwarding edges never render in
+    // cargo tree (see `default_closure_matches_golden`), so a
+    // closure-based implication test would be vacuous.
+    let manifest = fs::read_to_string(workspace_root().join("crates/camel-cli/Cargo.toml"))
+        .expect("failed to read crates/camel-cli/Cargo.toml");
+    const DYNAMIC_LINKING_LINE: &str =
+        r#"dynamic-linking = ["kafka", "camel-component-kafka/dynamic-linking"]"#;
+    // The `[features]` section stretches from its header to the next
+    // section header (a line starting with `[`). The kafka surface is
+    // exactly two features — `kafka` and `dynamic-linking` — so the
+    // section must contain precisely those two lines and no other
+    // `kafka`- or `dynamic-linking`-prefixed line (a reappearing
+    // removed name would break the exact-set assertion).
+    let mut in_features = false;
+    let mut kafka_lines: Vec<&str> = Vec::new();
+    for line in manifest.lines() {
+        if line.starts_with('[') {
+            in_features = line == "[features]";
+            continue;
+        }
+        if in_features && (line.starts_with("kafka") || line.starts_with("dynamic-linking")) {
+            kafka_lines.push(line);
+        }
+    }
+    assert_eq!(
+        kafka_lines,
+        vec![
+            r#"kafka = ["dep:camel-component-kafka", "camel-bundles/kafka"]"#,
+            DYNAMIC_LINKING_LINE,
+        ],
+        "the kafka feature surface must be exactly `kafka` and `dynamic-linking`"
+    );
+}
+
+#[test]
+fn dynamic_linking_closure_resolves_kafka() {
+    let lines = tree_lines(&["--no-default-features", "--features", "dynamic-linking"]);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("camel-component-kafka")),
+        "dynamic-linking closure must contain `camel-component-kafka`"
+    );
+    let remaining: Vec<&str> = SLIM_FORBIDDEN_PREFIXES
+        .iter()
+        .copied()
+        .filter(|prefix| *prefix != "camel-component-kafka v")
+        .collect();
+    assert_absent(
+        &lines,
+        &remaining,
+        "dynamic-linking closure must still exclude the remaining controllable set",
+    );
+}
+
+#[test]
+fn removed_kafka_feature_names_rejected() {
+    tree_fails_with(&["--features", "cmake-build"], "cmake-build");
+    tree_fails_with(&["--features", "kafka-static"], "kafka-static");
 }
