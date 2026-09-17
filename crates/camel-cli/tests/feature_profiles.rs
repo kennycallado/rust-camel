@@ -5,10 +5,16 @@
 //! `--all-features` mimalloc check was planted red; task 1.2's mimalloc
 //! feature removal turned it green.
 //!
-//! Regenerate the golden fixture from a clean tree at the base commit:
+//! Regenerate the golden fixture from a clean tree at the base commit.
+//! The `CARGO_TERM_COLOR=never` prefix is load-bearing: a colored
+//! `cargo tree` styles the `(*)` repeat marker with ANSI sequences, which
+//! the plain-text normalization cannot strip (rc-k6dln — CI exports
+//! `CARGO_TERM_COLOR=always` workflow-wide and the test used to inherit
+//! it, producing 1200 spurious extras).
 //!
 //! ```text
-//! cargo tree -p camel-cli -e features,no-dev --prefix none --locked \
+//! CARGO_TERM_COLOR=never cargo tree -p camel-cli -e features,no-dev \
+//!   --prefix none --locked \
 //!   | sed -E 's| \(/[^)]*\)||g; s| \(\*\)||g; s| \[\*\]||g' | LC_ALL=C sort -u \
 //!   > crates/camel-cli/tests/fixtures/default-deptree.txt
 //! ```
@@ -43,6 +49,11 @@ fn tree_lines(extra_args: &[&str]) -> Vec<String> {
             "--locked",
         ])
         .args(extra_args)
+        // Force uncolored child output regardless of the inherited
+        // environment: CI sets CARGO_TERM_COLOR=always workflow-wide, and
+        // a colored tree styles the `(*)` repeat marker so the
+        // plain-text normalization below cannot strip it (rc-k6dln).
+        .env("CARGO_TERM_COLOR", "never")
         .current_dir(workspace_root())
         .output()
         .unwrap_or_else(|error| panic!("failed to spawn `{cargo} tree`: {error}"));
@@ -61,11 +72,44 @@ fn tree_lines(extra_args: &[&str]) -> Vec<String> {
 }
 
 /// Rust port of the fixture pipeline
-/// `sed -E 's| \(/[^)]*\)||g; s| \(\*\)||g; s| \[\*\]||g'`.
+/// `sed -E 's| \(/[^)]*\)||g; s| \(\*\)||g; s| \[\*\]||g'`, preceded by an
+/// ANSI-escape strip: colored `cargo tree` output wraps the `(*)` marker
+/// in escape sequences, and stripping them first lets the plain-text
+/// `" (*)"` removal still collapse those lines onto their clean twins.
 fn normalize_tree_line(line: &str) -> String {
-    strip_paren_paths(line)
+    strip_ansi_escapes(&strip_paren_paths(line))
         .replace(" (*)", "")
         .replace(" [*]", "")
+}
+
+/// Remove ANSI escape sequences (defense in depth for environments that
+/// force color despite the `CARGO_TERM_COLOR=never` pin on the child).
+/// Escape sequences never occur in legitimate `cargo tree` text: package
+/// names, versions, and feature names cannot contain the ESC byte.
+fn strip_ansi_escapes(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            // CSI sequence: parameter/intermediate bytes, then a final
+            // byte in 0x40..=0x7E (e.g. `\x1b[33m\x1b[2m(*)\x1b[39m\x1b[22m`).
+            Some('[') => {
+                for final_byte in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&final_byte) {
+                        break;
+                    }
+                }
+            }
+            // Two-byte escape: the byte after ESC is consumed with it.
+            Some(_) => {}
+            None => break,
+        }
+    }
+    out
 }
 
 /// Remove every ` (/<path>)` group: one space, an open paren, a path that
