@@ -1267,13 +1267,29 @@ impl DefaultRouteController {
         // Extend the stored consumer handle through aggregate force-completion.
         // While this monitor drains pending buckets, handle_is_running still reports
         // the Route as running because forced exchanges may still be in post-pipeline.
+        //
+        // bd rc-iioeq: a natural consumer exit (e.g. timer repeatCount
+        // exhausted) must NOT destroy buckets whose inactivity timeout is
+        // armed. With `force_completion_on_stop=false` (the default),
+        // `force_complete_all` CANCELS the armed timeout task and silently
+        // discards the bucket, so the inactivity emission never happens.
+        // The forward loop stays up (the stored channel sender keeps the
+        // input channel open), so an armed bucket still emits downstream
+        // when its timeout fires. Buckets with no armed timeout task —
+        // size/predicate-only, or timeout-configured but over the
+        // `max_timeout_tasks` cap — can never complete after the consumer
+        // exits; `release_unarmed_buckets` discards them eagerly so they
+        // are not orphaned (the bucket_ttl sweep only runs inside the
+        // pipeline's next exchange, which never arrives).
         let force_on_stop = agg_for_monitor.config().force_completion_on_stop;
         let consumer_handle = tokio::spawn(async move {
             let _ = consumer_handle.await;
             if !pipeline_cancel_for_monitor.is_cancelled() {
-                agg_for_monitor.force_complete_all();
                 if force_on_stop {
+                    agg_for_monitor.force_complete_all();
                     pipeline_cancel_for_monitor.cancel();
+                } else {
+                    agg_for_monitor.release_unarmed_buckets();
                 }
             }
         });

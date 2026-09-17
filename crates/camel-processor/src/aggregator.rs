@@ -271,6 +271,37 @@ impl AggregatorService {
         }
     }
 
+    /// Consumer-exit release (bd rc-iioeq): discard buckets with NO armed
+    /// timeout task, leave armed buckets untouched.
+    ///
+    /// After a natural consumer exit no further exchanges arrive, so a
+    /// bucket without an armed timeout task can never complete on its
+    /// own — its buffered exchanges are released eagerly (the same
+    /// discard semantics `force_complete_all` applies with
+    /// `force_completion_on_stop=false`). A bucket WITH an armed timeout
+    /// task is left alone: that task owns its completion and emits
+    /// through the late channel when the timeout fires.
+    ///
+    /// Arming is decided per bucket in `call`: when the
+    /// `max_timeout_tasks` cap is reached, a timeout-configured bucket
+    /// stays unarmed. Without this release such a bucket would be
+    /// orphaned forever — the `bucket_ttl` sweep only runs inside `call`
+    /// on the next exchange, which never arrives after consumer exit.
+    pub fn release_unarmed_buckets(&self) {
+        let mut buckets_guard = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let timeout_guard = self.timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let before = buckets_guard.len();
+        buckets_guard.retain(|key, _| timeout_guard.contains_key(key));
+        let released = before - buckets_guard.len();
+        if released > 0 {
+            tracing::debug!(
+                released,
+                armed = buckets_guard.len(),
+                "aggregator released unarmed buckets on consumer exit"
+            );
+        }
+    }
+
     /// Graceful shutdown: cancel all outstanding timeout tasks and await their
     /// JoinHandles (with a 5s deadline) so that no tasks are leaked.
     pub(crate) async fn shutdown_inner(&self) {
@@ -2131,6 +2162,81 @@ mod tests {
         }
         // Drain any late emissions to avoid blocking the channel.
         let _ = late_rx.try_recv();
+    }
+
+    /// bd rc-iioeq: consumer-exit release is decided PER BUCKET, not from
+    /// config-global `has_timeout()`. With the timeout-task cap reached, a
+    /// timeout-configured bucket stays unarmed; after the consumer exits
+    /// it can never complete on its own (no task owns it, the bucket_ttl
+    /// sweep only runs inside the next `call`, which never arrives).
+    /// `release_unarmed_buckets` must discard exactly those buckets while
+    /// leaving armed ones to their timeout tasks.
+    #[tokio::test]
+    async fn test_release_unarmed_buckets_discards_cap_exceeded_keeps_armed() {
+        let config = AggregatorConfig::correlate_by("k")
+            .complete_on_timeout(Duration::from_millis(400))
+            .max_timeout_tasks(1)
+            .build()
+            .unwrap();
+        let (late_tx, mut late_rx) = mpsc::channel(8);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let svc = AggregatorService::new(config, late_tx, registry, cancel);
+
+        // Key "a" arms the only timeout slot; key "b" hits the cap and
+        // stays unarmed.
+        let a = make_exchange("k", "a", "body-a");
+        let mut sa = svc.clone();
+        let _ = sa.ready().await.unwrap().call(a).await.unwrap();
+        let b = make_exchange("k", "b", "body-b");
+        let mut sb = svc.clone();
+        let _ = sb.ready().await.unwrap().call(b).await.unwrap();
+
+        {
+            let armed = svc.timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(armed.len(), 1, "cap=1 must arm exactly one timeout task");
+            assert!(
+                armed.contains_key("\"a\""),
+                "first key must hold the armed slot, got {armed:?}"
+            );
+        }
+
+        // Consumer-exit release: unarmed bucket discarded, armed kept.
+        svc.release_unarmed_buckets();
+        {
+            let buckets = svc.buckets.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                buckets.contains_key("\"a\""),
+                "armed bucket must survive the release"
+            );
+            assert!(
+                !buckets.contains_key("\"b\""),
+                "cap-exceeded (unarmed) bucket must be released, not orphaned"
+            );
+        }
+
+        // The armed bucket's timeout still owns completion: it emits
+        // reason=timeout through the late channel.
+        let emitted = tokio::time::timeout(Duration::from_secs(2), late_rx.recv())
+            .await
+            .expect("armed bucket must emit on its timeout")
+            .expect("late channel must stay open");
+        assert_eq!(
+            emitted.properties.get(CAMEL_AGGREGATED_COMPLETION_REASON),
+            Some(&serde_json::json!("timeout"))
+        );
+
+        // The released bucket must never emit: both keys were sent within
+        // milliseconds of each other, so 600 ms after "a"'s emission is
+        // past "b"'s would-be deadline (400 ms) with margin.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(600), late_rx.recv())
+                .await
+                .is_err(),
+            "released unarmed bucket must not emit"
+        );
+
+        svc.shutdown(StepShutdownReason::RouteStop).await.unwrap();
     }
 
     #[tokio::test]

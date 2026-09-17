@@ -1909,6 +1909,176 @@ async fn aggregate_force_completion_on_natural_consumer_completion_emits_pending
     );
 }
 
+/// bd rc-iioeq regression: natural consumer completion must NOT destroy a
+/// bucket whose inactivity timeout is armed. The consumer-exit monitor used
+/// to run `force_complete_all` unconditionally; with
+/// `force_completion_on_stop=false` (the default) that CANCELS the armed
+/// timeout task and silently discards the bucket, so the inactivity
+/// emission never happens — under CI load the consumer task's exit can be
+/// preempted past the arming point, which is exactly how
+/// `aggregator_agg_timeout_emits_after_inactivity` hung for 10 s on main.
+///
+/// Determinism: the consumer sends its single exchange via `send_and_wait`;
+/// the reply (the pending marker) is only delivered after the forward loop
+/// armed the 200 ms timeout task, so "armed" is observed, not assumed. The
+/// consumer then parks on a gate the test controls and completes AFTER the
+/// bucket is armed, guaranteeing the monitor observes an armed bucket —
+/// the interleaving CI produced by scheduler preemption. Pre-fix, the
+/// monitor cancels the timeout and the mock stays empty; post-fix the
+/// timeout fires and the mock receives the aggregate with
+/// CompletionReason=timeout.
+#[tokio::test]
+async fn aggregate_natural_consumer_completion_keeps_timeout_armed_bucket() {
+    let mock = Arc::new(camel_component_mock::MockComponent::new());
+    let (armed_tx, armed_rx) = tokio::sync::watch::channel(false);
+    let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+    let gate = Arc::new(RcIioeqExitGateComponent {
+        armed_tx,
+        release_rx: release_rx.clone(),
+    });
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    {
+        let mut guard = registry.lock().expect("registry lock");
+        guard.register(Arc::clone(&gate) as Arc<dyn camel_component_api::Component>);
+        guard.register(Arc::clone(&mock) as Arc<dyn camel_component_api::Component>);
+    }
+    let mut controller = DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+
+    let agg_config = camel_api::AggregatorConfig::correlate_by("key")
+        .complete_on_timeout(Duration::from_millis(200))
+        .build()
+        .unwrap();
+
+    let route = RouteDefinition::new(
+        "rciioeqgate:src",
+        vec![
+            BuilderStep::Aggregate { config: agg_config },
+            BuilderStep::To("mock:rc-iioeq-sink".into()),
+        ],
+    )
+    .with_route_id("rc-iioeq-agg");
+    controller.add_route(route).await.unwrap();
+    controller.start_route("rc-iioeq-agg").await.unwrap();
+    // rc-jxkj: fresh controller → cohort gate closed; open for dispatch.
+    controller.cohort.open();
+
+    // Wait for the arming barrier: the consumer's send_and_wait reply
+    // proves the forward loop processed the exchange and spawned the
+    // timeout task. Bounded so the test fails fast if arming breaks.
+    let mut armed = armed_rx.clone();
+    tokio::time::timeout(Duration::from_secs(2), armed.changed())
+        .await
+        .expect("armed signal must arrive within 2s (arming broke)")
+        .expect("armed signal channel alive");
+
+    // Release the consumer: it returns Ok (natural completion), the
+    // consumer task exits, and the consumer-exit monitor fires against an
+    // ARMED bucket.
+    release_tx.send(true).expect("release channel alive");
+
+    let sink = mock
+        .get_endpoint("rc-iioeq-sink")
+        .expect("mock sink endpoint");
+    sink.await_exchanges(1, Duration::from_secs(1)).await;
+    let received = sink.get_received_exchanges().await;
+    assert_eq!(
+        received.len(),
+        1,
+        "inactivity timeout must emit after natural consumer completion, got {}",
+        received.len()
+    );
+    assert_eq!(
+        received[0].property("CamelAggregatedCompletionReason"),
+        Some(&serde_json::json!("timeout"))
+    );
+}
+
+/// Immediate consumer whose `start()` emits exactly one exchange (header
+/// key=A) via `send_and_wait`, signals `armed_tx`, then parks on the
+/// release gate before returning Ok — natural completion under the test's
+/// control (see `aggregate_natural_consumer_completion_keeps_timeout_armed_bucket`).
+struct RcIioeqExitGateConsumer {
+    release_rx: tokio::sync::watch::Receiver<bool>,
+    armed_tx: tokio::sync::watch::Sender<bool>,
+}
+
+#[async_trait::async_trait]
+impl Consumer for RcIioeqExitGateConsumer {
+    async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        let mut exchange = Exchange::new(camel_api::Message::new("rc-iioeq tick"));
+        exchange
+            .input
+            .set_header("key", camel_api::Value::String("A".into()));
+        // Reply arrives only after the forward loop finished processing —
+        // for a timeout-only aggregator that means the timeout task is armed.
+        let _pending = ctx.send_and_wait(exchange).await?;
+        let _ = self.armed_tx.send(true);
+        let mut release = self.release_rx.clone();
+        while !*release.borrow_and_update() {
+            if release.changed().await.is_err() {
+                break;
+            }
+        }
+        Ok(())
+    }
+    async fn stop(&mut self) -> Result<(), CamelError> {
+        Ok(())
+    }
+}
+
+struct RcIioeqExitGateEndpoint {
+    release_rx: tokio::sync::watch::Receiver<bool>,
+    armed_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl Endpoint for RcIioeqExitGateEndpoint {
+    fn uri(&self) -> &str {
+        "rciioeqgate:src"
+    }
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(RcIioeqExitGateConsumer {
+            release_rx: self.release_rx.clone(),
+            armed_tx: self.armed_tx.clone(),
+        }))
+    }
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
+        Err(CamelError::ProcessorError(
+            "rciioeqgate does not support producers".into(),
+        ))
+    }
+}
+
+struct RcIioeqExitGateComponent {
+    armed_tx: tokio::sync::watch::Sender<bool>,
+    release_rx: tokio::sync::watch::Receiver<bool>,
+}
+
+impl Component for RcIioeqExitGateComponent {
+    fn scheme(&self) -> &str {
+        "rciioeqgate"
+    }
+    fn create_endpoint(
+        &self,
+        _uri: &str,
+        _ctx: &dyn ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        Ok(Box::new(RcIioeqExitGateEndpoint {
+            release_rx: self.release_rx.clone(),
+            armed_tx: self.armed_tx.clone(),
+        }))
+    }
+}
+
 /// rc-z5qz regression: an OPEN cohort gate must win over a concurrently
 /// cancelled pipeline token in the forward loop's inner gate select.
 /// Unbiased, tokio picks randomly among ready branches and the cancel arm
