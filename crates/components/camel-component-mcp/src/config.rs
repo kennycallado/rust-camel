@@ -318,13 +318,18 @@ pub struct McpRemoteConfig {
     pub transport: McpTransport,
 
     /// Allow this remote to point at internal/private addresses (SSRF
-    /// policy, audit 2026-08-31 F2-4). Default `false`: IP-literal URLs in
-    /// private/loopback/link-local ranges are rejected at config load, and
-    /// cleartext `http://` is rejected unless the target is internal or this
-    /// flag is set. Hostname-based URLs are resolution-independent at this
-    /// layer — their DNS resolution is validated and pinned at connect time
-    /// (audit 2026-08-31 R4 / rc-juqrd, `adapter::dns_pin`): resolve once,
-    /// validate every IP, connect to the validated addresses only.
+    /// policy, audit 2026-08-31 F2-4, aligned with camel-http by
+    /// ADR-0079). Default `false`: IP-literal URLs in
+    /// private/loopback/link-local ranges are rejected at config load;
+    /// cleartext `http://` to a public IP literal is permitted (plain
+    /// HTTP egress, same as camel-http's default). With this flag the
+    /// posture becomes internal-network only: internal literals are
+    /// allowed, but cleartext to a public literal is rejected — no
+    /// cleartext to the internet. Hostname-based URLs are
+    /// resolution-independent at this layer — their DNS resolution is
+    /// validated and pinned at connect time (audit 2026-08-31 R4 /
+    /// rc-juqrd, `adapter::dns_pin`): resolve once, validate every IP,
+    /// connect to the validated addresses only.
     #[serde(default)]
     pub allow_internal: bool,
 }
@@ -368,11 +373,13 @@ impl McpRemoteConfig {
                      set allow_internal=true to override"
                 )));
             }
-            // Cleartext to a public address is forbidden even when the IP is
-            // not blocked (mirrors the http component's no-cleartext rule).
-            if !blocked && lower.starts_with("http://") && !self.allow_internal {
+            // Cleartext to a public address is rejected under
+            // allow_internal (internal-network posture; exact parity with
+            // camel-http ssrf.rs and dns_pin's hostname rule, ADR-0079).
+            if !blocked && lower.starts_with("http://") && self.allow_internal {
                 return Err(McpError::Endpoint(format!(
-                    "remote '{name}' uses cleartext http:// to a public address; use https://"
+                    "remote '{name}' uses cleartext http:// to a public address; \
+                     allow_internal is internal-network only — use https://"
                 )));
             }
         }
@@ -451,22 +458,63 @@ mod tests {
     }
 
     #[test]
-    fn remote_url_rejects_cleartext_to_public_ip() {
-        let err = remote("http://93.184.216.34/mcp", false)
-            .validate_url("r")
-            .unwrap_err();
-        assert!(err.to_string().contains("cleartext"), "{err}");
+    fn remote_url_permits_cleartext_public_ip_by_default() {
+        // ADR-0079 (e_gpt ruling 2026-09-17, exact camel-http parity):
+        // the default policy permits plain cleartext HTTP egress to a
+        // public target, matching camel-http's literal branch (no rule
+        // fires when allow_internal=false).
+        assert!(
+            remote("http://93.184.216.34/mcp", false)
+                .validate_url("r")
+                .is_ok(),
+            "public IP literal over http:// is permitted by default"
+        );
         // https to public is fine.
         assert!(
             remote("https://93.184.216.34/mcp", false)
                 .validate_url("r")
                 .is_ok()
         );
-        // Hostname-based URLs pass this layer (no DNS pinning here).
+        // Hostname-based URLs pass this layer (dns_pin owns them).
         assert!(
             remote("https://mcp.example.com/mcp", false)
                 .validate_url("r")
                 .is_ok()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // rc-lztp2 pins after ADR-0079 (accepted, e_gpt ruling 2026-09-17:
+    // exact camel-http alignment). The literal-branch public-cleartext
+    // rule now fires under allow_internal=true (internal-network
+    // posture; no cleartext to the public internet), matching
+    // camel-http ssrf.rs and adapter::dns_pin::validate_resolution on
+    // every path. The default (allow_internal=false) permits public
+    // cleartext literals, same as camel-http's default egress policy.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remote_url_rejects_public_cleartext_literal_when_allow_internal() {
+        // The formerly asymmetric cell (rc-lztp2): allow_internal=true now
+        // rejects cleartext to a public IP literal at config load, the
+        // same verdict a hostname resolving to that IP gets at connect
+        // time (adapter::dns_pin::validate_resolution).
+        let err = remote("http://93.184.216.34/mcp", true)
+            .validate_url("r")
+            .unwrap_err();
+        assert!(err.to_string().contains("cleartext"), "{err}");
+    }
+
+    #[test]
+    fn remote_url_hostname_cleartext_passes_config_layer() {
+        // Hostnames skip the literal branch entirely: cleartext policy for
+        // them is decided at connect time by adapter::dns_pin, not here.
+        assert!(
+            remote("http://mcp.example.com/mcp", true)
+                .validate_url("r")
+                .is_ok(),
+            "hostname remotes pass config load; dns_pin owns their \
+             cleartext policy at connect time"
         );
     }
 
