@@ -466,9 +466,15 @@ pub fn derive_for_store(
                 components.push(name);
             }
         }
-        for listener in entry_listeners {
-            if !listeners.contains(&listener) {
-                listeners.push(listener);
+        // Config-declared listeners report the artifact kind's effective
+        // runtime listeners: the job boot projection suppresses the
+        // observability endpoints, so a job artifact manifest omits them;
+        // route artifacts bind them and keep them.
+        if kind == TrailerKind::Route {
+            for listener in entry_listeners {
+                if !listeners.contains(&listener) {
+                    listeners.push(listener);
+                }
             }
         }
     }
@@ -965,6 +971,119 @@ port = \"${env:HEALTH_PORT}\"
     // Components: endpoint schemes keep source order; the
     // config-declared block name merges sorted and deduped.
     assert_eq!(manifest.components, vec!["timer", "direct", "kafka"]);
+}
+
+/// Shared fixture for the config-listener kind tests: a store whose
+/// embedded configuration enables the health (8081) and prometheus
+/// (9090) observability listeners, plus the entry-point source name.
+/// The embedded document text and its store kind follow the artifact
+/// kind under test, so each test embeds a document of its own shape.
+#[cfg(test)]
+fn observability_store(
+    doc_text: &str,
+    kind: TrailerKind,
+) -> (super::store::VirtualDocumentStore, String) {
+    use super::store::{StoreDocument, VirtualDocumentStore};
+
+    let config_text = "\
+[observability.health]
+enabled = true
+port = 8081
+
+[observability.prometheus]
+enabled = true
+port = 9090
+";
+    let store = VirtualDocumentStore::build(
+        "app.yaml",
+        &[
+            StoreDocument {
+                path: "Camel.toml".to_string(),
+                kind: StoreEntryKind::Config,
+                bytes: config_text.as_bytes().to_vec(),
+            },
+            StoreDocument {
+                path: "app.yaml".to_string(),
+                kind: StoreEntryKind::from(kind),
+                bytes: doc_text.as_bytes().to_vec(),
+            },
+        ],
+        &["Camel.toml".to_string()],
+        &["app.yaml".to_string()],
+    )
+    .expect("valid store builds");
+    (store, "app.yaml".to_string())
+}
+
+/// The job boot projection suppresses the configuration-declared
+/// observability listeners at runtime, so the job artifact manifest must
+/// omit them too: the manifest reports the artifact kind's effective
+/// runtime listeners, not the raw configuration chain.
+#[test]
+fn job_artifact_manifest_omits_config_listeners() {
+    let job_text = "\
+args:
+  value:
+    default: hello
+execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: direct:transform
+    body: \"hello\"
+routes:
+  - id: job-arg
+    from: direct:lit
+    steps:
+      - set_body:
+          value: \"lit\"
+";
+    let (store, source_name) = observability_store(job_text, TrailerKind::Job);
+    let manifest = derive_for_store(
+        &store,
+        TrailerKind::Job,
+        &[(source_name, job_text.to_string())],
+    )
+    .expect("store manifest must derive");
+
+    assert!(
+        !manifest.listeners.iter().any(|l| l == "0.0.0.0:8081"),
+        "job artifact manifest must omit the suppressed health listener"
+    );
+    assert!(
+        !manifest.listeners.iter().any(|l| l == "0.0.0.0:9090"),
+        "job artifact manifest must omit the suppressed prometheus listener"
+    );
+}
+
+/// Route artifacts bind the configuration-declared observability
+/// listeners at runtime, so the route artifact manifest keeps them:
+/// the config-entry listener merge is unchanged for route kind.
+#[test]
+fn route_artifact_manifest_keeps_config_listeners() {
+    let route_text = "\
+routes:
+  - id: a
+    from: timer:a
+    steps:
+      - to: direct:a
+";
+    let (store, source_name) = observability_store(route_text, TrailerKind::Route);
+    let manifest = derive_for_store(
+        &store,
+        TrailerKind::Route,
+        &[(source_name, route_text.to_string())],
+    )
+    .expect("store manifest must derive");
+
+    assert!(
+        manifest.listeners.iter().any(|l| l == "0.0.0.0:8081"),
+        "route artifact manifest must keep the health listener"
+    );
+    assert!(
+        manifest.listeners.iter().any(|l| l == "0.0.0.0:9090"),
+        "route artifact manifest must keep the prometheus listener"
+    );
 }
 
 #[cfg(test)]

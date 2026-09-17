@@ -39,6 +39,9 @@ mod document_tests;
 mod help_tests;
 
 #[cfg(test)]
+mod job_effective_config_tests;
+
+#[cfg(test)]
 mod tests;
 
 use std::collections::HashSet;
@@ -941,6 +944,22 @@ async fn await_job_operation<T>(
     }
 }
 
+/// Project the boot config for a one-shot `camel job` run: the runtime
+/// journal and the whole observability stack are neutralized so a job
+/// coexisting with a long-running server never opens the server's
+/// journal file nor re-binds its metrics/health/OTel listeners. The
+/// allowlist is exact — only those two fields are assigned; everything
+/// else is carried through the clone untouched.
+/// Spec: openspec/changes/jobcoexist (projection allowlist is exact).
+fn job_effective_config(
+    config: &camel_config::config::CamelConfig,
+) -> camel_config::config::CamelConfig {
+    let mut projected = config.clone();
+    projected.runtime_journal = None;
+    projected.observability = camel_config::config::ObservabilityConfig::default();
+    projected
+}
+
 /// The single-document job execution/report lifecycle, shared by the
 /// CLI argv path and embedded artifacts: boot composition (mirrors
 /// `camel run` steps 1-5), the post-boot setup behind the teardown
@@ -962,6 +981,12 @@ async fn execute_job(
         report_path,
         cli_args,
     } = run;
+
+    // Job boot projection (jobcoexist): every downstream consumer — the
+    // beans registry emptiness check, `configure_context_with_beans`, the
+    // security compile context, bind acks, and the component cascade —
+    // sees the projected config, never the ambient caller's.
+    let camel_config = job_effective_config(&camel_config);
 
     // ---- Boot composition: mirrors `camel run` steps 1-5 ---------------
     let beans_registry = {

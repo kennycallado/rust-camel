@@ -22,6 +22,7 @@
 
 mod common;
 
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1416,6 +1417,234 @@ fn artifact_manifest_lists_virtual_store_without_boot() {
 
     let all = format!("{stdout}{stderr}");
     assert!(!all.contains("context started"), "no route boot: {all}");
+}
+
+// ---------------------------------------------------------------------------
+// jobcoexist Task 5: job artifacts project the ambient runtime journal
+// and observability stack away (boot projection), while route artifacts
+// keep the config-declared diagnostic listeners. The manifest reports
+// the effective runtime; the runtime proof holds both diagnostic ports
+// for the artifact's whole life, so exit 0 with a Completed report
+// proves the artifact never even tried to bind (ADR-0070: no
+// release/re-bind window).
+// ---------------------------------------------------------------------------
+
+/// A one-shot job document for the observability-enabled fixture
+/// (self-contained inline routes, placed beside its config at the
+/// subtree root).
+const OBS_JOB_DOC: &str = "\
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: ping
+routes:
+  - id: obs-job-transform
+    from: direct:transform
+    steps:
+      - set_body:
+          value: obs-job-done
+";
+
+/// A route document compiled with the SAME observability-enabled config.
+/// Manifest only — never booted.
+const OBS_ROUTE_DOC: &str = "\
+routes:
+  - id: obs-route
+    from: direct:start
+    steps:
+      - to: log:obs-route
+";
+
+/// The compiled observability fixtures: a job artifact and a route
+/// artifact, both built from one `Camel.toml` that enables the
+/// Prometheus and health listeners on two ephemeral ports and points
+/// the runtime journal at the fixture directory. Both listeners are
+/// bound BEFORE the config is written and the artifacts are compiled,
+/// and they are held for this test process's whole life — the
+/// runtime-proof test then executes the job artifact with zero
+/// release/re-bind window.
+struct ObsFixture {
+    job: PathBuf,
+    route: PathBuf,
+    prom_port: u16,
+    health_port: u16,
+    /// The `[default.runtime_journal]` path written into the embedded
+    /// config: absolute into the fixture dir, never created by compile —
+    /// its post-run absence witnesses that the job opened no journal.
+    journal: PathBuf,
+    /// The pre-bound diagnostic listeners, held until process exit.
+    _held: (TcpListener, TcpListener),
+}
+
+static OBS_FIXTURE: OnceLock<ObsFixture> = OnceLock::new();
+
+fn obs_fixture() -> &'static ObsFixture {
+    OBS_FIXTURE.get_or_init(|| {
+        // Same process-keyed fixture directory as `fixture()`: the
+        // shared sweep/reaper then clean the extra compiled artifacts.
+        sweep_stale_fixtures();
+        let dir = fixture_dir();
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        spawn_reaper(&dir);
+
+        // Bind both diagnostic listeners first and never release them;
+        // writing their ports into the config afterwards leaves no
+        // window in which another process could take the endpoints.
+        let prom = TcpListener::bind("127.0.0.1:0").expect("bind prometheus listener");
+        let health = TcpListener::bind("127.0.0.1:0").expect("bind health listener");
+        let prom_port = prom.local_addr().expect("prometheus addr").port();
+        let health_port = health.local_addr().expect("health addr").port();
+        let journal = dir.join("obs-job").join("journal.db");
+        let config = format!(
+            r#"[default]
+log_level = "off"
+
+[default.runtime_journal]
+path = "{}"
+durability = "immediate"
+
+[default.observability.prometheus]
+enabled = true
+host = "127.0.0.1"
+port = {prom_port}
+
+[default.observability.health]
+enabled = true
+host = "127.0.0.1"
+port = {health_port}
+"#,
+            journal.display(),
+        );
+
+        // Each compile gets its own subtree so the two embedded
+        // configs never capture each other's sources.
+        let compile_obs = |subdir: &str, entry: &str, entry_doc: &str, artifact: &str| -> PathBuf {
+            let root = dir.join(subdir);
+            std::fs::create_dir_all(&root).expect("mkdir obs subtree");
+            std::fs::write(root.join("Camel.toml"), &config).expect("write obs config");
+            std::fs::write(root.join(entry), entry_doc).expect("write obs entry document");
+            let output = compile_full(&root, entry, artifact, &[], Some("Camel.toml"), &[]);
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "observability fixture must compile: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            root.join(artifact)
+        };
+        let job = compile_obs("obs-job", "ingest-obs.job.yaml", OBS_JOB_DOC, "obs-job.bin");
+        let route = compile_obs("obs-route", "app-obs.yaml", OBS_ROUTE_DOC, "obs-route.bin");
+        ObsFixture {
+            job,
+            route,
+            prom_port,
+            health_port,
+            journal,
+            _held: (prom, health),
+        }
+    })
+}
+
+/// The job artifact's manifest omits the config-declared Prometheus and
+/// health listeners: the boot projection suppresses both at runtime, so
+/// the manifest reports the effective runtime — neither reserved
+/// endpoint may appear.
+#[test]
+fn job_artifact_manifest_omits_suppressed_listeners() {
+    let obs = obs_fixture();
+    let prom = format!("127.0.0.1:{}", obs.prom_port);
+    let health = format!("127.0.0.1:{}", obs.health_port);
+    let (deploy, artifact) = deploy_artifact(&obs.job);
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &["--manifest"], &[]);
+    assert_eq!(
+        code, 0,
+        "--manifest exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is manifest JSON");
+    assert_eq!(manifest["kind"], "job", "manifest: {manifest}");
+    let listeners: Vec<String> = manifest["listeners"]
+        .as_array()
+        .expect("listeners array")
+        .iter()
+        .map(|v| v.as_str().expect("listener string").to_string())
+        .collect();
+    assert!(
+        !listeners.contains(&prom),
+        "job manifest must omit the suppressed Prometheus listener {prom}: {listeners:?}"
+    );
+    assert!(
+        !listeners.contains(&health),
+        "job manifest must omit the suppressed health listener {health}: {listeners:?}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(!all.contains("context started"), "no job boot: {all}");
+}
+
+/// The runtime proof, with no release/re-bind window (ADR-0070): both
+/// diagnostic ports were bound before the config was written and stay
+/// held by this test process through the entire artifact execution — so
+/// exit 0 with a Completed report proves the embedded job never tried
+/// to bind a listener (any bind attempt would fail the boot with exit
+/// 2), and the post-run absence of the journal file is the direct
+/// witness that the projected-away runtime journal was never opened.
+#[test]
+fn job_artifact_binds_no_listeners_with_ports_prebound() {
+    let obs = obs_fixture();
+    let (deploy, artifact) = deploy_artifact(&obs.job);
+    let (code, stdout, stderr) =
+        common::run_binary(deploy.path(), &artifact, &["--report", "report.json"], &[]);
+    assert_eq!(
+        code, 0,
+        "job artifact must complete with both diagnostic ports held;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(deploy.path().join("report.json"))
+            .expect("job report must be written"),
+    )
+    .expect("job report is JSON");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert!(
+        !obs.journal.exists(),
+        "job artifact must not open the runtime journal: {}",
+        obs.journal.display()
+    );
+}
+
+/// The route artifact compiled from the SAME config keeps both
+/// config-declared listeners in its manifest — existing behavior pinned
+/// (route boots really do bind them).
+#[test]
+fn route_artifact_manifest_keeps_config_declared_listeners() {
+    let obs = obs_fixture();
+    let prom = format!("127.0.0.1:{}", obs.prom_port);
+    let health = format!("127.0.0.1:{}", obs.health_port);
+    let (deploy, artifact) = deploy_artifact(&obs.route);
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &["--manifest"], &[]);
+    assert_eq!(
+        code, 0,
+        "--manifest exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is manifest JSON");
+    assert_eq!(manifest["kind"], "route", "manifest: {manifest}");
+    let listeners: Vec<String> = manifest["listeners"]
+        .as_array()
+        .expect("listeners array")
+        .iter()
+        .map(|v| v.as_str().expect("listener string").to_string())
+        .collect();
+    assert!(
+        listeners.contains(&prom),
+        "route manifest must keep the Prometheus listener {prom}: {listeners:?}"
+    );
+    assert!(
+        listeners.contains(&health),
+        "route manifest must keep the health listener {health}: {listeners:?}"
+    );
 }
 
 /// Duplicate/exclusive flags, a missing `--report` value, an unknown
