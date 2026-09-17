@@ -5,7 +5,6 @@
 /pages-artifact/
 docs/*
 !docs/adr
-!docs/benchmarks
 !docs/book.toml
 !docs/scripts
 !docs/testing
