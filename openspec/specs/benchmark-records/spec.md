@@ -30,6 +30,21 @@ is identical to schema_version 1 — the extension is additive and
 one-way compatible: v2-reading tooling SHALL read v1 and v2 records;
 older tooling is not required to read v2.
 
+CAVEATS prose SHALL attribute a gap only to a mechanism that a
+measurement isolates. When a cell composes several mechanisms (bridge,
+engine, container environment), the CAVEATS text SHALL name the
+composition and cite the isolation evidence available.
+
+#### Scenario: CAVEATS attributes only the isolated mechanism
+
+- **GIVEN** a run whose bridge-backed cells compose bridge transport,
+  engine work, and the container environment
+- **WHEN** the author writes CAVEATS for a cross-cell gap
+- **THEN** the text names the composed mechanisms and cites the
+  isolation measurement
+- **AND** it does not attribute the full gap to one mechanism without
+  a decomposition
+
 #### Scenario: Record generated from per-cell JSON
 
 - **GIVEN** a finished run directory with per-cell JSON outputs
