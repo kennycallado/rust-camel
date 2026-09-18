@@ -79,13 +79,32 @@ fn copy_seeds(seeds_dir: &Path, corpus_dir: &Path) -> std::io::Result<usize> {
     Ok(written)
 }
 
-/// Entries of `after` absent from `before` (path-equality diff).
-fn new_artifacts(before: &[PathBuf], after: &[PathBuf]) -> Vec<PathBuf> {
+/// Entries of `after` absent from `before` (path-equality diff), plus
+/// pre-existing names rewritten during the run window. libFuzzer names
+/// crash artifacts after the input's hash (`crash-<sha1>`), so a re-crash
+/// on the same input rewrites the existing file; the rewrite keeps the
+/// inode's birth time, so a path diff or birth-time check alone misses
+/// it. A modification at or after `since` is evidence the run just
+/// crashed again — even when the bytes are identical (e.g. the empty
+/// input, `crash-da39a3ee`): the run crashed and libFuzzer reported
+/// `Test unit written`, so it is a new crash event and minimization
+/// must run. A pre-existing name that was NOT rewritten during the
+/// window stays excluded.
+fn new_artifacts(before: &[PathBuf], after: &[PathBuf], since: SystemTime) -> Vec<PathBuf> {
     after
         .iter()
-        .filter(|p| !before.contains(p))
+        .filter(|p| !before.contains(p) || rewritten_since(p, since))
         .cloned()
         .collect()
+}
+
+/// True when `path` stat'ed shows creation-or-modification evidence at
+/// or after `since` (a rewrite during the run window). A path that
+/// cannot be stat'ed provides no evidence and is not fresh.
+fn rewritten_since(path: &Path, since: SystemTime) -> bool {
+    fs::metadata(path)
+        .map(|m| ts_of(&m) >= since)
+        .unwrap_or(false)
 }
 
 /// Run one cargo-fuzz target inside this worktree. Refuses the main
@@ -147,6 +166,7 @@ pub(crate) fn run(root: &Path, target: &str, time: u64) -> Result<(), String> {
     })?;
     let before = list_files(&artifacts)?;
 
+    let started = SystemTime::now();
     let target_dir = root.join("target-fuzz");
     let status = Command::new("cargo")
         .args(["+nightly", "fuzz", "run", target])
@@ -163,7 +183,7 @@ pub(crate) fn run(root: &Path, target: &str, time: u64) -> Result<(), String> {
 
     let exit_code = status.code().unwrap_or(-1);
     let after = list_files(&artifacts)?;
-    let fresh = new_artifacts(&before, &after);
+    let fresh = new_artifacts(&before, &after, started);
     if fresh.is_empty() {
         return Err(format!(
             "fuzz target `{target}` failed with exit code: {exit_code} (no new artifacts)"
@@ -228,18 +248,28 @@ fn list_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-/// Timestamp of `path`: creation time with modification-time fallback,
-/// epoch as last resort.
+/// Timestamp of `path`: the newer of creation and modification time,
+/// epoch as last resort. An overwritten artifact keeps its inode birth
+/// time, so creation alone would hide a re-crash; the max of both
+/// covers freshly created and rewritten files alike.
 fn file_ts(path: &Path) -> SystemTime {
     fs::metadata(path)
-        .and_then(|m| m.created().or_else(|_| m.modified()))
+        .map(|m| ts_of(&m))
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-/// Regular files in `dir` whose creation (fallback: modification) time is
-/// at or after `since`. cargo-fuzz's tmin output naming is not hardcoded —
-/// the timestamp window is the contract.
-fn entries_created_after(dir: &Path, since: SystemTime) -> Result<Vec<PathBuf>, String> {
+/// The newer of creation and modification time from `m`; epoch when a
+/// timestamp is unavailable on the filesystem.
+fn ts_of(m: &fs::Metadata) -> SystemTime {
+    let created = m.created().unwrap_or(SystemTime::UNIX_EPOCH);
+    let modified = m.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    created.max(modified)
+}
+
+/// Regular files in `dir` whose creation-or-modification evidence (the
+/// newer of the two) is at or after `since`. cargo-fuzz's tmin output
+/// naming is not hardcoded — the timestamp window is the contract.
+fn entries_fresh_after(dir: &Path, since: SystemTime) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     for path in list_files(dir)? {
         if file_ts(&path) >= since {
@@ -249,7 +279,7 @@ fn entries_created_after(dir: &Path, since: SystemTime) -> Result<Vec<PathBuf>, 
     Ok(files)
 }
 
-/// The newest entry of `paths` by creation (fallback: modification) time;
+/// The newest entry of `paths` by creation-or-modification time;
 /// entries with unreadable timestamps sort as epoch.
 fn newest_file(paths: &[PathBuf]) -> Option<PathBuf> {
     paths.iter().max_by_key(|p| file_ts(p)).cloned()
@@ -287,7 +317,7 @@ fn minimize(
         .env("CARGO_TARGET_DIR", target_dir)
         .output()
         .map_err(|e| format!("fuzz minimization failed to launch: {e}"))?;
-    let fresh = entries_created_after(artifacts, started)?;
+    let fresh = entries_fresh_after(artifacts, started)?;
     if let Some(minimized) = newest_file(&fresh) {
         if !output.status.success() {
             eprintln!(
@@ -423,9 +453,93 @@ mod tests {
     fn new_artifacts_diff() {
         let before = vec![PathBuf::from("/a/crash-1")];
         let after = vec![PathBuf::from("/a/crash-1"), PathBuf::from("/a/oom-2")];
+        // /a paths do not exist: no rewrite evidence, so freshness rides
+        // on the path diff alone
         assert_eq!(
-            new_artifacts(&before, &after),
+            new_artifacts(&before, &after, SystemTime::UNIX_EPOCH),
             vec![PathBuf::from("/a/oom-2")]
+        );
+    }
+
+    #[test]
+    fn new_artifacts_includes_rewritten_preexisting_name() {
+        let temp = tempfile::tempdir().unwrap(); // allow-unwrap
+        let artifacts = temp.path().join("artifacts");
+        fs::create_dir_all(&artifacts).unwrap(); // allow-unwrap
+        let artifact = artifacts.join("crash-da39a3ee");
+        fs::write(&artifact, b"prev").unwrap(); // allow-unwrap
+        let before = list_files(&artifacts).unwrap(); // allow-unwrap
+        let started = SystemTime::now();
+        // same clock-skew margin as the other rewrite tests
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        // re-crash on the same input: same filename, same inode, fresh mtime
+        fs::write(&artifact, b"prev").unwrap(); // allow-unwrap
+        let after = list_files(&artifacts).unwrap(); // allow-unwrap
+        assert_eq!(
+            new_artifacts(&before, &after, started),
+            vec![artifact],
+            "a re-crash that rewrites a pre-existing artifact name must be \
+             detected so minimization runs"
+        );
+    }
+
+    #[test]
+    fn new_artifacts_excludes_untouched_preexisting_name() {
+        let temp = tempfile::tempdir().unwrap(); // allow-unwrap
+        let artifacts = temp.path().join("artifacts");
+        fs::create_dir_all(&artifacts).unwrap(); // allow-unwrap
+        let artifact = artifacts.join("crash-old");
+        fs::write(&artifact, b"stale").unwrap(); // allow-unwrap
+        let before = list_files(&artifacts).unwrap(); // allow-unwrap
+        let started = SystemTime::now();
+        // run window passes with no rewrite of the stale artifact
+        let after = list_files(&artifacts).unwrap(); // allow-unwrap
+        assert!(
+            new_artifacts(&before, &after, started).is_empty(),
+            "a pre-existing artifact untouched during the run window is not a \
+             new crash"
+        );
+    }
+
+    #[test]
+    fn file_ts_reports_rewrite_evidence_over_stale_birth() {
+        let temp = tempfile::tempdir().unwrap(); // allow-unwrap
+        let path = temp.path().join("crash-da39a3ee");
+        fs::write(&path, b"").unwrap(); // allow-unwrap
+        let started = SystemTime::now();
+        // Inode timestamps can lag CLOCK_REALTIME by a few ms on some
+        // hosts (VM clock skew); real fuzz runs span seconds, so the
+        // sleep only closes that gap for the unit-tier window.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        // libFuzzer re-crash: same inode rewritten, birth time unchanged
+        fs::write(&path, b"").unwrap(); // allow-unwrap
+        assert!(
+            file_ts(&path) >= started,
+            "a rewritten artifact must look fresh: inode birth time stays at first \
+             creation, so only modification time carries the rewrite evidence"
+        );
+    }
+
+    #[test]
+    fn recrash_empty_input_rewrite_detected_after_start() {
+        let temp = tempfile::tempdir().unwrap(); // allow-unwrap
+        let artifacts = temp.path().join("artifacts");
+        fs::create_dir_all(&artifacts).unwrap(); // allow-unwrap
+        // crash-da39a3ee = SHA1 of the empty input: same name every run
+        let artifact = artifacts.join("crash-da39a3ee");
+        fs::write(&artifact, b"").unwrap(); // allow-unwrap
+        let started = SystemTime::now();
+        // same clock-skew margin as above
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        // this run crashed on the same empty input and rewrote the file
+        // byte-identically — still a new crash event, still fresh evidence
+        fs::write(&artifact, b"").unwrap(); // allow-unwrap
+        let fresh = entries_fresh_after(&artifacts, started).unwrap(); // allow-unwrap
+        assert_eq!(
+            fresh,
+            vec![artifact],
+            "a byte-identical rewrite of a pre-existing artifact name must count as \
+             fresh: libFuzzer reported the crash, minimization must run"
         );
     }
 
