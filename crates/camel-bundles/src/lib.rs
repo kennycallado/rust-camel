@@ -34,7 +34,11 @@ pub mod security_boot;
 pub use security_boot::build_security_compile_context_from_config;
 
 struct BridgeCleanup {
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
     xslt: Arc<camel_xslt::XsltBridgeRuntime>,
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
     xj: Arc<camel_xj::XjBridgeRuntime>,
     validator: Option<Arc<camel_component_validator::xsd_bridge::XsdBridgeBackend>>,
 }
@@ -50,7 +54,11 @@ impl camel_api::lifecycle::Lifecycle for BridgeCleanup {
     }
 
     async fn stop(&mut self) -> Result<(), camel_api::CamelError> {
+        // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+        #[cfg(feature = "http-static")]
         self.xslt.shutdown().await;
+        // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+        #[cfg(feature = "http-static")]
         self.xj.shutdown().await;
         if let Some(validator) = &self.validator {
             validator.shutdown().await;
@@ -64,12 +72,17 @@ const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Teardown sequencer returned by [`boot`].
 ///
-/// Owns the shutdown ordering for the JMS/CXF bridge pools and drives the
+/// Owns the shutdown ordering for the JMS/CXF bridge pools (present only
+/// under the http-static bridge carrier) and drives the
 /// context stop that drains the context-registered lifecycles
 /// (`BridgeCleanup` included). The context itself stays owned by the caller;
 /// the handle borrows nothing from it.
 pub struct BootHandle {
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
     jms_pool: Arc<camel_component_jms::JmsBridgePool>,
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
     cxf_pool: Arc<camel_component_cxf::CxfBridgePool>,
     datasource_catalog: Arc<dyn DatasourceCatalog>,
 }
@@ -102,6 +115,10 @@ impl BootHandle {
     ///    datasource pools drain here, so a shared-cache sqlite in-memory
     ///    database dies with its boot (bd rc-25lup.4).
     ///
+    /// Pool steps 1 and 3 are cfg-conditional on the `http-static` feature
+    /// (the transitional bridge carrier, rc-9720m); steps 2 and 4 run in
+    /// every feature combination.
+    ///
     /// Every step runs even when an earlier one fails; the first failure is
     /// returned after the sequence completes. Failures are logged by the
     /// handle (`system-broken` per ADR-0012) with the message `camel run`
@@ -113,8 +130,12 @@ impl BootHandle {
         deadline: Duration,
     ) -> Result<(), CamelError> {
         // Signal pools to stop restarting BEFORE context shutdown
-        self.jms_pool.begin_shutdown();
-        self.cxf_pool.begin_shutdown();
+        // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+        #[cfg(feature = "http-static")]
+        {
+            self.jms_pool.begin_shutdown();
+            self.cxf_pool.begin_shutdown();
+        }
 
         // Stop context (routes + lifecycle services)
         let mut failure = ctx.stop().await.err();
@@ -124,28 +145,36 @@ impl BootHandle {
         }
 
         // Tear down bridge pools with timeouts
-        match tokio::time::timeout(deadline, self.jms_pool.shutdown()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                // log-policy: system-broken
-                tracing::error!("JMS pool shutdown failed: {}", e);
-                if failure.is_none() {
-                    failure = Some(e);
+        // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+        #[cfg(feature = "http-static")]
+        {
+            match tokio::time::timeout(deadline, self.jms_pool.shutdown()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    // log-policy: system-broken
+                    tracing::error!("JMS pool shutdown failed: {}", e);
+                    if failure.is_none() {
+                        failure = Some(e);
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!("JMS pool shutdown timed out after {}s", deadline.as_secs())
                 }
             }
-            Err(_) => tracing::warn!("JMS pool shutdown timed out after {}s", deadline.as_secs()),
-        }
 
-        match tokio::time::timeout(deadline, self.cxf_pool.shutdown()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                // log-policy: system-broken
-                tracing::error!("CXF pool shutdown failed: {}", e);
-                if failure.is_none() {
-                    failure = Some(e);
+            match tokio::time::timeout(deadline, self.cxf_pool.shutdown()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    // log-policy: system-broken
+                    tracing::error!("CXF pool shutdown failed: {}", e);
+                    if failure.is_none() {
+                        failure = Some(e);
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!("CXF pool shutdown timed out after {}s", deadline.as_secs())
                 }
             }
-            Err(_) => tracing::warn!("CXF pool shutdown timed out after {}s", deadline.as_secs()),
         }
 
         // Drain the boot's datasource pools: without this step a sqlx pool
@@ -289,24 +318,42 @@ pub async fn boot(
     let validator_backend = validator_component.xsd_bridge_backend();
     ctx.register_component(validator_component);
 
-    let xslt_component = camel_xslt::XsltComponent::default();
-    let xslt_runtime = xslt_component.bridge_runtime();
-    ctx.register_component(xslt_component);
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
+    let xslt_runtime = {
+        let xslt_component = camel_xslt::XsltComponent::default();
+        let runtime = xslt_component.bridge_runtime();
+        ctx.register_component(xslt_component);
+        runtime
+    };
 
-    let xj_component = camel_xj::XjComponent::default();
-    let xj_runtime = xj_component.bridge_runtime();
-    ctx.register_component(xj_component);
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
+    let xj_runtime = {
+        let xj_component = camel_xj::XjComponent::default();
+        let runtime = xj_component.bridge_runtime();
+        ctx.register_component(xj_component);
+        runtime
+    };
 
     ctx.add_lifecycle(BridgeCleanup {
+        // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+        #[cfg(feature = "http-static")]
         xslt: xslt_runtime,
+        // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+        #[cfg(feature = "http-static")]
         xj: xj_runtime,
         validator: validator_backend,
     });
 
-    // Register HTTP, WS, File, Container (always-on in the cascade, no feature flag)
+    // Register HTTP, File, Container, Template (always-on in the cascade).
+    // WS rides http-static transitionally with the legacy bridge set
+    // (rc-9720m): the gate below is that carrier, not an http-static switch.
     register_bundle::<camel_component_http::HttpBundle>(ctx, config)?;
     #[cfg(feature = "http-static")]
     register_bundle::<camel_component_http::HttpStaticBundle>(ctx, config)?;
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
     register_bundle::<camel_component_ws::WsBundle>(ctx, config)?;
     register_bundle::<camel_component_file::FileBundle>(ctx, config)?;
     register_bundle::<camel_component_container::ContainerBundle>(ctx, config)?;
@@ -314,9 +361,13 @@ pub async fn boot(
     register_bundle::<camel_template::TemplateBundle>(ctx, config)?;
 
     // Register optional/feature-gated bundles
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
     let jms_pool =
         register_bundle_with(ctx, config, |b: &camel_component_jms::JmsBundle| b.pool())?;
 
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
     let cxf_pool =
         register_bundle_with(ctx, config, |b: &camel_component_cxf::CxfBundle| b.pool())?;
 
@@ -325,8 +376,14 @@ pub async fn boot(
     #[cfg(feature = "mqtt")]
     register_bundle::<camel_component_mqtt::MqttBundle>(ctx, config)?;
     register_bundle::<camel_master::MasterBundle>(ctx, config)?;
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
     register_bundle::<camel_component_opensearch::OpenSearchBundle>(ctx, config)?;
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
     register_bundle::<camel_component_redis::RedisBundle>(ctx, config)?;
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
     {
         match bundle_from_config::<camel_component_sql::SqlBundle>(config) {
             Ok(bundle) => {
@@ -386,7 +443,11 @@ pub async fn boot(
     // caller gets `LanguagesConfig::default()` (rust-camel runtime defaults).
 
     Ok(BootHandle {
+        // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+        #[cfg(feature = "http-static")]
         jms_pool,
+        // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+        #[cfg(feature = "http-static")]
         cxf_pool,
         datasource_catalog: Arc::clone(&datasource_catalog),
     })
@@ -414,6 +475,11 @@ mod tests {
         (ctx, handle, config)
     }
 
+    /// All eight bridges register on the bundles-present fixture — the
+    /// runtime regression probe for every boot-registration gate on this
+    /// page (one scheme per gated bundle site).
+    // Transitional gate: rides http-static until per-bridge features land (rc-9720m).
+    #[cfg(feature = "http-static")]
     #[tokio::test]
     async fn boot_registers_all_bundles_from_fixture_config() {
         let (ctx, _handle, _config) = booted_context("bundles-present/Camel.toml").await;
@@ -426,12 +492,43 @@ mod tests {
             "container",
             "template",
             "jms",
+            "xslt",
+            "xj",
+            "cxf",
+            "sql",
+            "redis",
+            "opensearch",
         ] {
             assert!(
                 ctx.registry().get(scheme).is_some(),
                 "scheme '{scheme}' must resolve after boot"
             );
         }
+    }
+
+    /// Slim polarity of the boot cascade: without `http-static` the eight
+    /// bridges are not compiled in, so boot registers the core components
+    /// only, no bridge scheme resolves, and shutdown drains without the
+    /// gated pools. Companion to the gated bundles-present test above.
+    #[cfg(not(feature = "http-static"))]
+    #[tokio::test]
+    async fn boot_slim_registers_core_without_bridges() {
+        let (mut ctx, handle, _config) = booted_context("no-http/Camel.toml").await;
+
+        for scheme in ["timer", "log", "direct", "seda", "mock", "controlbus"] {
+            assert!(
+                ctx.registry().get(scheme).is_some(),
+                "core scheme '{scheme}' must resolve after slim boot"
+            );
+        }
+        assert!(
+            ctx.registry().get("jms").is_none(),
+            "bridge scheme 'jms' must be absent without http-static"
+        );
+        handle
+            .shutdown(&mut ctx)
+            .await
+            .expect("slim shutdown must drain without the gated pools");
     }
 
     /// Disabled-feature half of the gating probe: without the `kafka` cargo

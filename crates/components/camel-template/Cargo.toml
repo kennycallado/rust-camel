@@ -9,8 +9,8 @@ description = "External template component for rust-camel (ADR-0047 Stage 2)"
 camel-api = { workspace = true }
 camel-component-api = { workspace = true }
 camel-language-api = { workspace = true }
-camel-language-minijinja = { workspace = true }
-minijinja = { workspace = true }
+camel-language-minijinja = { workspace = true, optional = true }
+minijinja = { workspace = true, optional = true }
 arc-swap = { workspace = true }
 blake3 = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
@@ -39,6 +39,25 @@ tempfile = { workspace = true }
 bytes = { workspace = true }
 serde_json = { workspace = true }
 tower = { workspace = true }
+
+# Engine-coupled integration tests: they exercise the full component surface,
+# which only exists under the all-or-nothing `default` engine gate.
+[[test]]
+name = "template_reload_integration"
+required-features = ["default"]
+
+[[test]]
+name = "template_render_integration"
+required-features = ["default"]
+
+[features]
+# All-or-nothing engine gate (rc-wcs3v, mission 115): dep: entries keep
+# default builds byte-identical (dep: activation renders no cargo-tree
+# feature lines) but set no named feature, so engine modules gate on
+# cfg(feature = "default"). The named lang-minijinja feature, the cfg-key
+# rename, and the in-workspace default-features flip ride the next
+# camel-cli mission (it owns the consumer manifests and the golden regen).
+default = ["dep:camel-language-minijinja", "dep:minijinja"]
 
 [lints]
 workspace = true

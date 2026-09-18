@@ -25,7 +25,9 @@ handle.shutdown(&mut ctx).await?;
 `config`, falling back to an empty table so every bundle registers with its
 serde defaults. Feature gates mirror the `camel run` cfg lines: `grpc`,
 `wasm`, `http-static`, `llm`, `surrealdb`, `mqtt`, and `mcp` are default-on;
-`kafka` is opt-in.
+`kafka` is opt-in. Since mission 115 the `http-static` gate is also the
+transitional carrier for the eight optional bridge deps (see CONTEXT.md,
+rc-9720m).
 
 ## Related crates
 

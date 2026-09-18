@@ -23,24 +23,24 @@ tracing.workspace = true
 camel-component-container.workspace = true
 camel-component-controlbus.workspace = true
 camel-component-cron.workspace = true
-camel-component-cxf.workspace = true
+camel-component-cxf = { workspace = true, optional = true }
 camel-component-direct.workspace = true
 camel-component-file.workspace = true
 camel-component-http.workspace = true
-camel-component-jms.workspace = true
+camel-component-jms = { workspace = true, optional = true }
 camel-component-log.workspace = true
 camel-component-mock.workspace = true
-camel-component-opensearch.workspace = true
-camel-component-redis.workspace = true
+camel-component-opensearch = { workspace = true, optional = true }
+camel-component-redis = { workspace = true, optional = true }
 camel-component-seda.workspace = true
-camel-component-sql.workspace = true
+camel-component-sql = { workspace = true, optional = true }
 camel-component-timer.workspace = true
 camel-component-validator.workspace = true
-camel-component-ws.workspace = true
+camel-component-ws = { workspace = true, optional = true }
 camel-master.workspace = true
 camel-template.workspace = true
-camel-xj.workspace = true
-camel-xslt.workspace = true
+camel-xj = { workspace = true, optional = true }
+camel-xslt = { workspace = true, optional = true }
 # Feature-gated bundles; gates mirror the `camel run` cfg lines 1:1
 # (ADR-0069 section 10). `kafka` and `security` stay opt-in; the rest are
 # default-on.
@@ -68,7 +68,8 @@ jsonwebtoken.workspace = true
 
 [features]
 default = ["grpc", "wasm", "http-static", "llm", "surrealdb", "mqtt", "mcp"]
-http-static = []
+# Transitional legacy-bridge carrier (rc-9720m, mission 115): the eight bridge deps ride the existing http-static gate because lint-gate-forwarding Rule 2 requires boot consumers to forward every [features] key and camel-cli's dependency wiring is out of zone (design-time exclusion; the resume grant covers only the slim-benchmarks rename). Remove and split into per-bridge features when the next camel-cli mission adds the consumer forwards (it also renames the src cfg keys).
+http-static = ["dep:camel-component-cxf", "dep:camel-component-jms", "dep:camel-component-opensearch", "dep:camel-component-redis", "dep:camel-component-sql", "dep:camel-component-ws", "dep:camel-xj", "dep:camel-xslt"]
 kafka = ["dep:camel-component-kafka"]
 mqtt = ["dep:camel-component-mqtt"]
 surrealdb = ["dep:camel-component-surrealdb"]

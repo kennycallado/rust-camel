@@ -234,7 +234,7 @@ unreachable whenever jemalloc was enabled and no build path enabled it
 pre-change default set plus the language adapters and the LSP server
 (those were previously unconditional dependencies, so the union
 reproduces the historical default closure — golden-fixture proof in
-`tests/feature_profiles.rs`). `slim-http` is the named
+`tests/feature_profiles.rs`). `slim-benchmarks` is the named
 `--no-default-features` baseline: an http-only deployment that links the
 non-optional core plumbing and excludes the controllable optional set
 (kafka, grpc, wasm, llm, mcp, mqtt, surrealdb, exec, the lsp stack, and
@@ -248,13 +248,16 @@ targets, bd rc-2ii8l) and
 `kafka`). The historical `cmake-build` and `kafka-static` names were
 removed (bd rc-5t5fo.1): they activated the dependency without enabling
 registration. `lsp` and each `lang-*` feature are individually
-selectable and compose additively with `slim-http`.
-`camel-language-minijinja` stays linked in every profile — camel-template
-hard-depends on it (non-optional out-of-lease paths; the `lang-minijinja`
-forward feature stays for full parity). The bundles-unconditional bridges
-(jms, sql, redis, opensearch, ws, cxf, xslt, xj) remain linked in every
-profile until the deferred camel-bundles-side optionalization lands (bd
-follow-up by the master).
+selectable and compose additively with `slim-benchmarks`. The `slim-http`
+alias lives for one release (drop at 0.50).
+`camel-language-minijinja` stays linked in every profile: the workspace
+consumes camel-template with default features (the engine is optional at
+the source since mission 115; the in-workspace flip rides the camel-cli
+bridge-forward mission). The eight bridges (jms, sql, redis, opensearch,
+ws, cxf, xslt, xj) stay linked in every camel-cli profile through
+camel-cli's OWN unconditional dependencies — camel-bundles' side is
+optional since mission 115 (http-static carrier); making camel-cli's own
+edges optional is the deferred camel-cli bridge-forward diet.
 
 The integration-sql CI profile
 (`cargo test -p camel-cli --no-default-features --features

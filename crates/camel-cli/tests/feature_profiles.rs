@@ -334,11 +334,15 @@ fn slim_closure_excludes_controllable_set() {
 
 #[test]
 fn slim_plus_grpc_resolves_grpc_only() {
-    let lines = tree_lines(&["--no-default-features", "--features", "slim-http,grpc"]);
+    let lines = tree_lines(&[
+        "--no-default-features",
+        "--features",
+        "slim-benchmarks,grpc",
+    ]);
     for prefix in [GRPC_PREFIX, "tonic v"] {
         assert!(
             lines.iter().any(|line| line.starts_with(prefix)),
-            "slim-http,grpc closure must contain `{prefix}`"
+            "slim-benchmarks,grpc closure must contain `{prefix}`"
         );
     }
     let other_thirteen: Vec<&str> = SLIM_FORBIDDEN_PREFIXES
@@ -349,7 +353,24 @@ fn slim_plus_grpc_resolves_grpc_only() {
     assert_absent(
         &lines,
         &other_thirteen,
-        "slim-http,grpc closure must still exclude the other thirteen forbidden prefixes",
+        "slim-benchmarks,grpc closure must still exclude the other thirteen forbidden prefixes",
+    );
+}
+
+#[test]
+fn slim_alias_resolves_identically() {
+    let alias_lines = tree_lines(&["--no-default-features", "--features", "slim-http"]);
+    let canonical_lines = tree_lines(&["--no-default-features", "--features", "slim-benchmarks"]);
+    let alias_set: HashSet<&str> = alias_lines.iter().map(String::as_str).collect();
+    let canonical_set: HashSet<&str> = canonical_lines.iter().map(String::as_str).collect();
+    assert_eq!(
+        alias_set, canonical_set,
+        "slim-http alias closure must resolve identically to slim-benchmarks"
+    );
+    assert_absent(
+        &alias_lines,
+        SLIM_FORBIDDEN_PREFIXES,
+        "slim-http alias closure must exclude the controllable set",
     );
 }
 

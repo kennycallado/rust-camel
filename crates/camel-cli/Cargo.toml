@@ -136,9 +136,12 @@ lang-rhai = ["camel-core/lang-rhai"]
 lang-jsonpath = ["camel-core/lang-jsonpath"]
 lang-xpath = ["camel-core/lang-xpath"]
 lang-minijinja = ["camel-core/lang-minijinja"]
-# Named marker for the `--no-default-features` http-only baseline. Enables
-# nothing itself: the slim closure is whatever is left when defaults are off.
-slim-http = []
+# slim-benchmarks is the renamed slim-http (owner ruling 2026-09-17:
+# benchmark-oriented baseline); the alias below keeps existing legs
+# building for one release.
+slim-benchmarks = []
+# One-release alias (drop at 0.50).
+slim-http = ["slim-benchmarks"]
 otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # security forwards to the shared security-boot builder in camel-bundles
 # (scenario-shared-boot): default-on so `camel run` default builds keep

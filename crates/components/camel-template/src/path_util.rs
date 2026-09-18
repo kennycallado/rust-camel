@@ -167,8 +167,9 @@ mod imp {
 
         /// Read up to `max_bytes` from this handle in 8 KiB chunks, failing
         /// closed the instant the limit is exceeded (no whole-file allocation
-        /// first). Used by the production [`crate::closure::FilesystemTemplateReader`]
-        /// (Task 2.4) to enforce the per-template `max_template_size` bound.
+        /// first). Used by the production `FilesystemTemplateReader` (the
+        /// feature-gated `closure` module, Task 2.4) to enforce the
+        /// per-template `max_template_size` bound.
         ///
         /// The chunk size matches the test-local helper in `closure.rs` so the
         /// production and test code paths exercise the same read geometry.

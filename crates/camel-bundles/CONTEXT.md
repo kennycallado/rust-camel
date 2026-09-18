@@ -55,6 +55,14 @@ stack (`camel-auth`, `camel-component-keycloak`, `camel-dsl`, `serde_json`)
 for the shared security builder. `camel-cli` forwards each of its gates into
 this crate. The `exec` gate stays with the CLI because its registration rule
 is conditional on route content.
+
+The `http-static` gate is the transitional carrier for the eight bridge
+deps: cxf, jms, opensearch, redis, sql, ws, xj, and xslt. They are optional
+deps that ride this gate. The per-bridge split is deferred to the camel-cli
+bridge-forward mission. The `BootHandle` JMS and CXF pool fields are
+cfg-gated on the same carrier. Redis is a slim-survivor: it stays in the
+featureless closure via `camel-config` → `camel-redis-repo` (out-of-zone
+deferral).
 _Avoid_: bundle flags, component toggles
 
 **security boot wiring**:
