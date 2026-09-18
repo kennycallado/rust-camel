@@ -2986,7 +2986,12 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
 /// `redact*` helper (e.g. `camel_api::redact::redact_url`,
 /// `redact_url_for_diagnostics`, `to_redacted_string`) before it reaches a
 /// log sink (audit 2026-08-31 R2 / rc-sn7i5). Credential keywords
-/// (password/token/...) stay owned by `lint-secrets`.
+/// (password/token/...) stay owned by `lint-secrets`. Matching is
+/// exact-identifier and leaf-or-standalone: object position
+/// (`config.topic`) is not a hit; field name, shorthand, standalone value,
+/// member leaf, and `{ident}` capture are. The rc-redactstrict change
+/// extended the original url/uri-config set with the network-locator
+/// names `endpoint`, `address`, `host`, and `remote`.
 const LOG_REDACTION_SENSITIVE: &[&str] = &[
     "url",
     "uri",
@@ -2997,13 +3002,25 @@ const LOG_REDACTION_SENSITIVE: &[&str] = &[
     "connection_string",
     "dsn",
     "config",
+    "endpoint",
+    "address",
+    "host",
+    "remote",
 ];
 
 /// Log/tracing macros whose spans [`lint_log_redaction`] checks.
 const LOG_REDACTION_MACROS: &[&str] = &["error", "warn", "info", "debug", "trace", "event"];
 
+/// Message-capture pattern for [`lint_log_redaction`]: `{url}`-style
+/// captures inside a log message literal. Capture group 1 is the optional
+/// format-sign prefix (`[?#!]?`), group 2 the captured identifier name —
+/// the binding key resolved against the macro's argument segments.
+const LOG_REDACTION_CAPTURE_PATTERN: &str = r"\{\s*([?#!]?)((?:url|uri|base_url|db_url|jdbc_url|broker_url|connection_string|dsn|config|endpoint|address|host|remote))(?::[^}]*)?\}";
+
 /// Scan all workspace `src/**/*.rs` files for tracing/log calls that embed
-/// a url/uri/config value without routing it through a `redact*` helper
+/// a sensitive identifier value — the url/uri/config set plus the
+/// network-locator names `endpoint`, `address`, `host`, `remote` — without
+/// routing it through a `redact*` helper
 /// (audit 2026-08-31 R2 / rc-sn7i5; complements `lint-secrets` and
 /// `lint-log-levels`).
 ///
@@ -3012,27 +3029,36 @@ const LOG_REDACTION_MACROS: &[&str] = &["error", "warn", "info", "debug", "trace
 /// comma-separated argument of a log macro tokenized. An argument is a
 /// violation when it references a sensitive identifier (as field name,
 /// shorthand, bare value, member access, or `{ident}` capture inside a
-/// message literal) and the argument's own tokens contain no identifier
-/// with `redact` in its name. Message-literal captures additionally accept
-/// a `redact*` identifier anywhere in the same macro invocation (the
-/// captured value is a separate argument).
+/// message literal) and is not redeemed. Redemption is call-shape and
+/// span-local: the segment must invoke a redact-named helper with a
+/// parenthesized argument list (free fn, path-qualified fn, or method
+/// call). Message-literal captures are redeemed only by their own binding
+/// segment (`url = <expr>` with a redact call); implicit captures (no
+/// binding segment) are unredeemable. A pre-redacted local bound outside
+/// the macro must be wrapped at the call site (`%redact_url(&u)`) or
+/// logged via an escape hatch.
 ///
 /// Escape hatches: append `// allow-log-redaction` to the line (for a
-/// multi-line invocation the marker goes on the macro's START line), or
-/// list `<relative path>:<line>` in
+/// multi-line invocation the marker goes on the macro's first-argument
+/// line — the same line the lint reports in violations and the allowlist
+/// key uses), or list `<relative path>:<line>` in
 /// `scripts/xtask/allowlist-log-redaction.txt`. `scripts/xtask/` itself is
 /// skipped (the lint would self-flag on its own patterns and fixtures).
 /// Known blind spots (out of scope by design): `span!`/`*_span!` field
 /// sets, aliased macro imports (`use tracing::warn as w;`), and
 /// non-tracing sinks (`println!`/`format!` into errors — the latter is
-/// covered per-site by hand, see rc-a67at).
+/// covered per-site by hand, see rc-a67at). Also documented, not detected:
+/// sensitive idents in object position of value-transforming method chains
+/// (`self.url.clone()`, `url.to_string()`, `url.as_str()`); values nested in
+/// parenthesized groups; `{ident}` captures nested in `format!` args; dotted
+/// captures (`{conn.url}`); and redemption breadth — any redact-named call
+/// (e.g. `should_redact(x)`) redeems its segment (see bd rc-cgen3).
 pub fn lint_log_redaction(workspace_root: &Path) -> Result<Vec<Violation>, String> {
     use regex::Regex;
     use std::path::Component;
     use walkdir::WalkDir;
 
-    let capture_re = Regex::new(r"\{\s*[?#!]?(?:url|uri|base_url|db_url|jdbc_url|broker_url|connection_string|dsn|config)(?::[^}]*)?\}")
-        .expect("valid regex"); // allow-unwrap
+    let capture_re = Regex::new(LOG_REDACTION_CAPTURE_PATTERN).expect("valid regex"); // allow-unwrap
 
     let allowlist_path = workspace_root
         .join("scripts")
@@ -3113,6 +3139,24 @@ pub fn lint_log_redaction(workspace_root: &Path) -> Result<Vec<Violation>, Strin
 }
 
 /// Inspect one log-macro token span; return the violation reason or `None`.
+///
+/// Redemption is **call-shape and span-local**: an argument segment is
+/// redeemed only when it contains a redact-named identifier immediately
+/// followed by its parenthesized argument group — a free function
+/// (`redact_url(&u)`), path-qualified function
+/// (`camel_api::redact::redact_url(&u)`), or method call
+/// (`u.to_redacted_string()`). A bare identifier merely named like a
+/// helper (`%redacted_url`), a function-pointer reference
+/// (`map(redact_url)`), a call in a different argument segment, or a
+/// pre-redacted local bound outside the macro are NOT redemption.
+///
+/// Message captures (`"... {url} ..."`) are redeemed only by the argument
+/// segment that binds the captured identifier (`url = <expr>`) itself
+/// satisfying the call-shape predicate; each capture resolves against its
+/// own binding independently. A sensitive capture with no binding segment
+/// (implicit capture of a local) is unredeemable. To log an already
+/// redacted local, wrap at the call site (`%redact_url(&u)`) or use one of
+/// the escape hatches.
 fn redaction_violation_reason(span: &str, capture_re: &regex::Regex) -> Option<&'static str> {
     let tokens: Vec<proc_macro2::TokenTree> = match span.parse::<proc_macro2::TokenStream>() {
         Ok(ts) => ts.into_iter().collect(),
@@ -3124,9 +3168,6 @@ fn redaction_violation_reason(span: &str, capture_re: &regex::Regex) -> Option<&
     if tokens.is_empty() {
         return None;
     }
-    let macro_has_redact = tokens
-        .iter()
-        .any(|t| matches!(t, proc_macro2::TokenTree::Ident(i) if i.to_string().to_lowercase().contains("redact")));
 
     // Split into top-level comma-separated arguments (nested Groups keep
     // their commas internal — they are single TokenTrees).
@@ -3141,14 +3182,7 @@ fn redaction_violation_reason(span: &str, capture_re: &regex::Regex) -> Option<&
     }
 
     for seg in &segments {
-        let idents: Vec<String> = seg
-            .iter()
-            .filter_map(|t| match t {
-                proc_macro2::TokenTree::Ident(i) => Some(i.to_string()),
-                _ => None,
-            })
-            .collect();
-        let seg_has_redact = idents.iter().any(|i| i.to_lowercase().contains("redact"));
+        let seg_has_redact_call = has_redact_call(seg);
 
         // 1. Identifier references, leaf-or-standalone only:
         //    - field name (`url = ...`), shorthand (`?config`/`%url`),
@@ -3172,29 +3206,65 @@ fn redaction_violation_reason(span: &str, capture_re: &regex::Regex) -> Option<&
                 }
             }
         }
-        if sensitive_use && !seg_has_redact {
+        if sensitive_use && !seg_has_redact_call {
             return Some(
                 "sensitive url/uri/config value not wrapped in a redact_* helper — see ADR-0076",
             );
         }
 
-        // 2. Inline message captures (`"... {url} ..."`): redeemed by a
-        //    redact* identifier anywhere in the macro (the captured value
-        //    is bound as a separate argument).
-        if !seg_has_redact && !macro_has_redact {
-            for t in seg {
-                if let proc_macro2::TokenTree::Literal(l) = t
-                    && let Ok(s) = unquote_string_literal(&l.to_string())
-                    && capture_re.is_match(&s)
-                {
-                    return Some(
-                        "message captures a url/uri/config value not wrapped in a redact_* helper — see ADR-0076",
-                    );
+        // 2. Inline message captures (`"... {url} ..."`): redeemed only by
+        //    the argument segment binding the captured identifier
+        //    (`url = <expr>`) itself satisfying the call-shape predicate;
+        //    each capture resolves independently. Implicit captures (no
+        //    binding segment) are unredeemable.
+        for t in seg {
+            if let proc_macro2::TokenTree::Literal(l) = t
+                && let Ok(s) = unquote_string_literal(&l.to_string())
+            {
+                for cap in capture_re.captures_iter(&s) {
+                    let Some(bound) = cap.get(2).map(|m| m.as_str()) else {
+                        continue;
+                    };
+                    let redeemed = segments.iter().any(|binding| {
+                        matches!(
+                            (binding.first(), binding.get(1)),
+                            (
+                                Some(proc_macro2::TokenTree::Ident(i)),
+                                Some(proc_macro2::TokenTree::Punct(p))
+                            ) if *i == *bound && p.as_char() == '='
+                        ) && has_redact_call(binding)
+                    });
+                    if !redeemed {
+                        return Some(
+                            "message captures a url/uri/config value not wrapped in a redact_* helper — see ADR-0076",
+                        );
+                    }
                 }
             }
         }
     }
     None
+}
+
+/// True when the segment contains a redact-named identifier immediately
+/// followed by a parenthesized argument group (call shape: free fn,
+/// path-qualified fn, or method call). A bare redact-named identifier or
+/// one passed as a value inside a group (`map(redact_url)`) does not
+/// match — nested tokens are invisible to the top-level segment scan.
+fn has_redact_call(seg: &[&proc_macro2::TokenTree]) -> bool {
+    seg.iter().enumerate().any(|(idx, t)| {
+        let proc_macro2::TokenTree::Ident(i) = t else {
+            return false;
+        };
+        if !i.to_string().to_lowercase().contains("redact") {
+            return false;
+        }
+        matches!(
+            seg.get(idx + 1),
+            Some(proc_macro2::TokenTree::Group(g))
+                if g.delimiter() == proc_macro2::Delimiter::Parenthesis
+        )
+    })
 }
 
 /// Strip the surrounding quotes (and `r#`/raw prefixes) from a literal's
@@ -7348,6 +7418,25 @@ mod lint_log_redaction_tests {
     }
 
     #[test]
+    fn multiline_marker_on_first_arg_line_escapes() {
+        // The lint reports the macro's first-argument line
+        // (MacroSpanCollector records the argument-token span), so the
+        // inline marker must sit on that line; a marker on the
+        // `tracing::debug!(` start line does NOT escape.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) {\n    tracing::debug!(\n        url = url, // allow-log-redaction\n        \"req\"\n    );\n}\n",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) {\n    tracing::debug!( // allow-log-redaction\n        url = url,\n        \"req\"\n    );\n}\n",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
     fn allowlist_file_escapes() {
         let ws = tmp_workspace_redaction(&[(
             "crates/foo/src/lib.rs",
@@ -7374,5 +7463,197 @@ mod lint_log_redaction_tests {
             ),
         ]);
         assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn redact_named_ident_no_longer_redeems() {
+        // Bare ident named like a helper is NOT call shape (spec: call-shape
+        // redemption is span-local).
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(redacted_url: &str) { tracing::debug!(url = %redacted_url, \"req\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn fn_pointer_does_not_redeem() {
+        // Regression guard: nested tokens inside a parenthesized Group are
+        // invisible to the top-level segment scan, so `map(redact_url)` is
+        // already flagged; this pins that against a future recursive-
+        // redemption regression.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(u: &[String]) { tracing::debug!(url = %u.iter().map(redact_url).count(), \"req\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn binding_with_redact_named_ident_no_longer_redeems_capture() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(redacted_url: &str) { tracing::warn!(\"failed {url}\", url = redacted_url); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn implicit_capture_not_redeemed_by_unrelated_call() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(x: i32) { tracing::debug!(\"at {url}\", other = redact_seed(x)); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn pre_redacted_local_outside_macro_flagged() {
+        // Span-local contract: `let url = redact_url(u)` outside the macro
+        // is invisible; the call site must wrap or use an escape hatch.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(u: &str) { let url = redact_url(u); tracing::debug!(url = %url, \"req\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn path_qualified_call_redeems() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(u: &str) { tracing::debug!(url = %camel_api::redact::redact_url(u), \"req\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn captures_resolve_independently() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(u: &str, r: &str) { tracing::debug!(\"{url} {uri}\", url = redact_url(u), uri = r); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn bound_raw_not_redeemed_by_unrelated_call() {
+        // Verbatim spec scenario: raw binding AND an unrelated redact call.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(r: &str, x: i32) { tracing::debug!(\"at {url}\", url = r, other = redact_seed(x)); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn event_level_segment_survives() {
+        let flagged = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(u: &str) { tracing::event!(tracing::Level::DEBUG, url = %u); }",
+        )]);
+        assert_eq!(flagged.len(), 1, "{flagged:?}");
+        let redeemed = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(u: &str) { tracing::event!(tracing::Level::DEBUG, url = %redact_url(u)); }",
+        )]);
+        assert!(redeemed.is_empty(), "{redeemed:?}");
+    }
+
+    #[test]
+    fn flags_endpoint_field_name() {
+        // Extended sensitive set (spec "Sensitive identifier set").
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(v: &str) { tracing::debug!(endpoint = %v, \"req\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn flags_host_leaf_access() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(s: &Srv) { tracing::debug!(host = %s.host, \"req\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn flags_address_capture_without_binding() {
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f() { tracing::warn!(\"bound to {address}\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn flags_qualified_sensitive_leaf() {
+        // `config.host`-shape: `host` is the sensitive leaf; the object
+        // merely qualifies it.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(c: &Cfg) { tracing::debug!(host = %c.host, \"req\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn suffixed_variants_not_caught() {
+        // Exact-identifier matching: remote_addr/host_name/endpoint_id are
+        // distinct identifiers, not sensitive hits.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(a: &str, n: &str, e: &str) { tracing::debug!(remote_addr = %a, host_name = %n, endpoint_id = %e, \"req\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn prose_words_do_not_fire() {
+        // Message-literal detection is `{ident}`-capture-regex only, never
+        // substring word matching — English prose mentioning the words is
+        // not a hit.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(n: &str) { tracing::info!(\"direct endpoint created\"); tracing::debug!(\"MCP remote '{name}' rejected\", name = n); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn object_position_not_caught() {
+        // Sensitive object qualifying a benign leaf stays a non-hit.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(config: &Cfg) { tracing::debug!(topic = config.topic, \"sub\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn sensitive_set_and_capture_re_parity() {
+        // The capture-regex alternation must equal the sensitive set as
+        // whole tokens in BOTH directions — a plain `contains(name)`
+        // substring check would false-pass (`url` is a substring of
+        // `base_url`).
+        let pat = LOG_REDACTION_CAPTURE_PATTERN;
+        let start = pat.find("(?:").expect("alternation group present") + "(?:".len();
+        let rest = &pat[start..];
+        let end = rest.find(')').expect("alternation group closed");
+        let tokens: Vec<&str> = rest[..end].split('|').collect();
+        let alt: std::collections::HashSet<&str> = tokens.iter().copied().collect();
+        assert_eq!(
+            tokens.len(),
+            alt.len(),
+            "duplicate alternation tokens: {tokens:?}"
+        );
+        let sensitive: std::collections::HashSet<&str> =
+            LOG_REDACTION_SENSITIVE.iter().copied().collect();
+        assert_eq!(
+            alt, sensitive,
+            "capture-regex alternation must equal the sensitive set"
+        );
     }
 }

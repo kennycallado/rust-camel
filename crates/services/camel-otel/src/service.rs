@@ -22,6 +22,7 @@
 //! ```
 
 use async_trait::async_trait;
+use camel_api::redact::redact_url;
 use camel_api::{CamelError, Lifecycle, MetricsCollector, ServiceStatus};
 use opentelemetry::KeyValue;
 use opentelemetry::global;
@@ -291,7 +292,7 @@ impl OtelService {
         global::set_tracer_provider(tracer_provider.clone());
         self.tracer_provider = Some(tracer_provider);
         info!(
-            endpoint = %self.config.endpoint,
+            endpoint = %redact_url(&self.config.endpoint),
             service_name = %self.config.service_name,
             "OTel TracerProvider initialized"
         );
@@ -420,7 +421,7 @@ impl Lifecycle for OtelService {
             }
             self.meter_provider = Some(meter_provider);
             info!(
-                endpoint = %self.config.endpoint,
+                endpoint = %redact_url(&self.config.endpoint),
                 interval_ms = self.config.metrics_interval_ms,
                 "OTel MeterProvider initialized"
             );

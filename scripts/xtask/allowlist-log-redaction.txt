@@ -2,3 +2,89 @@
 # Format: <relative path>:<line>  (one entry per line; `#` comments ignored)
 # Inline alternative: append `// allow-log-redaction` to the offending line.
 # Use sparingly — each entry is an accepted unredacted url/uri/config log.
+
+# ── camel-component-grpc (rc-redactstrict task 2.2) ─────────────────────
+# consumer.rs:488 — macro logs `host = %host` (clone of self.host): bare gRPC
+#   consumer hostname from config, no URL and no credential substrate.
+crates/components/camel-component-grpc/src/consumer.rs:488
+# consumer.rs:618 — `host = %self.host`: bare gRPC consumer hostname from
+#   config, no URL and no credential substrate.
+crates/components/camel-component-grpc/src/consumer.rs:618
+# consumer.rs:641 — `host = %self.host`: bare gRPC consumer hostname from
+#   config, no URL and no credential substrate.
+crates/components/camel-component-grpc/src/consumer.rs:641
+# tls_reload.rs:47 — macro logs `host = %self.host`: bare TLS listener
+#   hostname from config, no URL and no credential substrate.
+crates/components/camel-component-grpc/src/tls_reload.rs:47
+# tls_reload.rs:56 — macro logs `host = %self.host`: bare TLS listener
+#   hostname from config, no URL and no credential substrate.
+crates/components/camel-component-grpc/src/tls_reload.rs:56
+
+# ── camel-cxf (rc-redactstrict task 2.2) ────────────────────────────────
+# producer.rs:245 — `address = %address.as_deref().unwrap_or("")`: URL-shaped
+#   SOAP address; redact_url wrap DEFERRED because camel-cxf has no camel-api
+#   dependency and dependency additions were out of change scope — tracked as
+#   bd rc-emsvi.
+crates/components/camel-cxf/src/producer.rs:245
+
+# ── camel-http (rc-redactstrict task 2.2) ───────────────────────────────
+# lib.rs:1193 — `host = host`: bare HTTP server hostname parameter
+#   (&str), no URL and no credential substrate.
+crates/components/camel-http/src/lib.rs:1193
+# lib.rs:2166 — `host = %self.config.host`: bare configured HTTP bind
+#   hostname, no URL and no credential substrate.
+crates/components/camel-http/src/lib.rs:2166
+# tls_reload.rs:60 — macro logs `host = %self.host`: bare HTTP TLS server
+#   hostname from config, no URL and no credential substrate.
+crates/components/camel-http/src/tls_reload.rs:60
+# tls_reload.rs:69 — macro logs `host = %self.host`: bare HTTP TLS server
+#   hostname from config, no URL and no credential substrate.
+crates/components/camel-http/src/tls_reload.rs:69
+
+# ── camel-redis (rc-redactstrict task 2.2) ──────────────────────────────
+# config.rs:400 — `host = %self.host`: bare Redis hostname from config
+#   (hostname only; credentials ride the separate password field), no URL
+#   and no credential substrate.
+crates/components/camel-redis/src/config.rs:400
+# config.rs:840 — `host = %self.host.as_deref().unwrap_or("")`: bare Redis
+#   hostname from config (hostname only; credentials ride the separate
+#   password field), no URL and no credential substrate.
+crates/components/camel-redis/src/config.rs:840
+
+# ── camel-ws (rc-redactstrict task 2.2) ─────────────────────────────────
+# lib.rs:537 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
+#   provably credential-free; wrapping a non-URL IP in redact_url is
+#   semantically wrong (disposition b).
+crates/components/camel-ws/src/lib.rs:537
+# lib.rs:562 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
+#   provably credential-free; wrapping a non-URL IP in redact_url is
+#   semantically wrong (disposition b).
+crates/components/camel-ws/src/lib.rs:562
+# lib.rs:574 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
+#   provably credential-free; wrapping a non-URL IP in redact_url is
+#   semantically wrong (disposition b).
+crates/components/camel-ws/src/lib.rs:574
+# lib.rs:653 — `host = %addr.ip()`: bare listener IP from SocketAddr,
+#   provably credential-free; wrapping a non-URL IP in redact_url is
+#   semantically wrong (disposition b).
+crates/components/camel-ws/src/lib.rs:653
+# lib.rs:1677 — `host = self.cfg.inner.host`: bare configured WebSocket
+#   hostname, no URL and no credential substrate.
+crates/components/camel-ws/src/lib.rs:1677
+# lib.rs:1709 — `host = self.cfg.inner.host`: bare configured WebSocket
+#   hostname, no URL and no credential substrate.
+crates/components/camel-ws/src/lib.rs:1709
+# lib.rs:1743 — `host = self.cfg.inner.host`: bare configured WebSocket
+#   hostname, no URL and no credential substrate.
+crates/components/camel-ws/src/lib.rs:1743
+# lib.rs:1751 — `host = self.cfg.inner.host`: bare configured WebSocket
+#   hostname, no URL and no credential substrate.
+crates/components/camel-ws/src/lib.rs:1751
+# lib.rs:1910 — `host = canonical_host`: canonical host derived from config
+#   (hostname/IP only, see WsUriConfig::canonical_host), no credential
+#   substrate.
+crates/components/camel-ws/src/lib.rs:1910
+# lib.rs:1931 — `host = canonical_host`: canonical host derived from config
+#   (hostname/IP only, see WsUriConfig::canonical_host), no credential
+#   substrate.
+crates/components/camel-ws/src/lib.rs:1931

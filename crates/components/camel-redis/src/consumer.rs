@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use camel_api::redact::redact_url;
 use camel_component_api::{Body, CamelError, Exchange, Message};
 use camel_component_api::{
     ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, RuntimeObservability,
@@ -160,7 +161,7 @@ impl Consumer for RedisConsumer {
         let mode = self.mode.clone();
 
         info!(
-            endpoint = %config.safe_endpoint(),
+            endpoint = %redact_url(&config.safe_endpoint()),
             mode = ?mode,
             "Starting Redis consumer"
         );
@@ -275,7 +276,7 @@ async fn run_pubsub_consumer(
     runtime: Arc<dyn RuntimeObservability>,
     topology: Arc<dyn RedisTopology>,
 ) -> Result<(), CamelError> {
-    info!(endpoint = %config.safe_endpoint(), "PubSub consumer connecting");
+    info!(endpoint = %redact_url(&config.safe_endpoint()), "PubSub consumer connecting");
 
     let mut io: Box<dyn PubSubIo> = Box::new(RedisPubSubIo::new(config.connection_timeout_secs));
 
@@ -391,7 +392,7 @@ async fn run_queue_consumer(
     let pop_command = params.pop_command;
     let queue_cmd = queue_command_name(pop_command);
     info!(
-        endpoint = %config.safe_endpoint(),
+        endpoint = %redact_url(&config.safe_endpoint()),
         key = %key,
         command = %queue_cmd,
         timeout_s = timeout,
