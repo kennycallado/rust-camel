@@ -3,6 +3,9 @@
 - Status: Accepted (decided 2026-09-17: owner delegated to e_gpt, ruling
   certainty HIGH — exact alignment; implemented same day, mission 117
   phase 2)
+- Superseded (default row): ADR-0081 rejects what this ADR's default row
+  allowed — public cleartext with no flags now requires
+  allow_cleartext/allowCleartext; the allow_internal=true cell stands
 - Source: bd rc-lztp2, filed from r_glm holistic + e_glm concurrence on mission 112
 - Provenance: literal rule is F2-4 (audit 2026-08-31); hostname DNS-pinning
   landed in 6c4b81a6 (rc-juqrd, 2026-09-17). Git evidence before the

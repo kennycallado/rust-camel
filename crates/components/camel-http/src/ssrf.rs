@@ -81,10 +81,11 @@ pub(crate) fn validate_url_for_ssrf(
                         ip
                     )));
                 }
-                // Under allow_internal: reject public IPs with HTTP (no cleartext to internet)
-                if config.allow_internal && !is_blocked && parsed.scheme() == "http" {
+                // ADR-0081: cleartext http:// to a public target requires
+                // per-endpoint consent — independent of allow_internal.
+                if !is_blocked && parsed.scheme() == "http" && !config.allow_cleartext {
                     return Err(CamelError::ProcessorError(format!(
-                        "Public IP '{}' not allowed over HTTP (use HTTPS for public IPs)",
+                        "Public IP '{}' not allowed over cleartext HTTP (set allowCleartext=true or use HTTPS)",
                         ip
                     )));
                 }
@@ -98,9 +99,10 @@ pub(crate) fn validate_url_for_ssrf(
                         ip
                     )));
                 }
-                if config.allow_internal && !is_blocked && parsed.scheme() == "http" {
+                // ADR-0081: same public-cleartext consent rule for IPv6.
+                if !is_blocked && parsed.scheme() == "http" && !config.allow_cleartext {
                     return Err(CamelError::ProcessorError(format!(
-                        "Public IP '{}' not allowed over HTTP (use HTTPS for public IPs)",
+                        "Public IP '{}' not allowed over cleartext HTTP (set allowCleartext=true or use HTTPS)",
                         ip
                     )));
                 }
@@ -191,6 +193,7 @@ fn classify_host(url: &url::Url) -> Option<ClassifiedHost> {
 pub(crate) async fn validate_redirect_target_for_ssrf(
     url: &url::Url,
     allow_internal: bool,
+    allow_cleartext: bool,
 ) -> Result<Vec<std::net::SocketAddr>, CamelError> {
     let host = classify_host(url)
         .ok_or_else(|| CamelError::ProcessorError("Redirect URL has no host".to_string()))?;
@@ -209,10 +212,11 @@ pub(crate) async fn validate_redirect_target_for_ssrf(
                     ip
                 )));
             }
-            // Under allow_internal: reject public IPs with HTTP
-            if allow_internal && !is_blocked && url.scheme() == "http" {
+            // ADR-0081: cleartext redirect to a public target requires
+            // per-endpoint consent — independent of allow_internal.
+            if !is_blocked && url.scheme() == "http" && !allow_cleartext {
                 return Err(CamelError::ProcessorError(format!(
-                    "Redirect to public IP '{}' not allowed over HTTP (use HTTPS)",
+                    "Redirect to public IP '{}' not allowed over HTTP (set allowCleartext=true or use HTTPS)",
                     ip
                 )));
             }
@@ -229,14 +233,14 @@ pub(crate) async fn validate_redirect_target_for_ssrf(
                     ))
                 })?;
 
-            // Under allow_internal with HTTP: reject if any resolved IP is
-            // public
-            if allow_internal
-                && url.scheme() == "http"
+            // ADR-0081: cleartext redirect to a host that resolves to a
+            // public IP requires per-endpoint consent.
+            if url.scheme() == "http"
+                && !allow_cleartext
                 && let Some(public_addr) = addrs.iter().find(|sa| !is_ssrf_blocked_ip(&sa.ip()))
             {
                 return Err(CamelError::ProcessorError(format!(
-                    "Redirect host '{host_str}' resolves to public IP {} — not allowed over HTTP (use HTTPS)",
+                    "Redirect host '{host_str}' resolves to public IP {} — not allowed over HTTP (set allowCleartext=true or use HTTPS)",
                     public_addr.ip()
                 )));
             }
@@ -258,8 +262,9 @@ pub(crate) async fn validate_redirect_target_for_ssrf(
 /// - Host is an IP literal (already validated directly in `validate_url_for_ssrf`)
 /// - URL has no host
 ///
-/// Under `allow_internal=true`, resolution STILL happens for DNS pinning, but:
-/// - If scheme is HTTP and any resolved IP is public → reject
+/// Under `allow_internal=true`, resolution STILL happens for DNS pinning, and:
+/// - If scheme is HTTP and any resolved IP is public → rejected unless
+///   `allow_cleartext` consent is set (ADR-0081)
 /// - If all resolved IPs are internal → return `Some((host, addrs))` for pinning
 ///
 /// Returns `Some((host, addrs))` with validated addresses + extracted host string
@@ -268,6 +273,7 @@ pub(crate) async fn validate_redirect_target_for_ssrf(
 pub(crate) async fn resolve_initial_url_for_ssrf(
     url: &str,
     allow_internal: bool,
+    allow_cleartext: bool,
 ) -> Result<Option<(String, Vec<std::net::SocketAddr>)>, CamelError> {
     let parsed = url::Url::parse(url)
         .map_err(|e| CamelError::ProcessorError(format!("Invalid URL: {}", e)))?;
@@ -295,13 +301,14 @@ pub(crate) async fn resolve_initial_url_for_ssrf(
             CamelError::ProcessorError(format!("Failed to resolve host '{host_str_clone}': {e}"))
         })?;
 
-    // Under allow_internal with HTTP: reject if any resolved IP is public
-    if allow_internal
-        && parsed.scheme() == "http"
+    // ADR-0081: cleartext http:// to a host that resolves to a public IP
+    // requires per-endpoint consent.
+    if parsed.scheme() == "http"
+        && !allow_cleartext
         && let Some(public_addr) = addrs.iter().find(|sa| !is_ssrf_blocked_ip(&sa.ip()))
     {
         return Err(CamelError::ProcessorError(format!(
-            "Host '{host_str_clone}' resolves to public IP {} — not allowed over HTTP (use HTTPS)",
+            "Host '{host_str_clone}' resolves to public IP {} — not allowed over HTTP (set allowCleartext=true or use HTTPS)",
             public_addr.ip()
         )));
     }
@@ -448,9 +455,12 @@ pub(crate) async fn send_with_ssrf_safe_redirects(
         }
 
         // SSRF validation: resolve and validate the redirect target
-        let resolved_addrs =
-            validate_redirect_target_for_ssrf(&redirect_url, endpoint_config.allow_internal)
-                .await?;
+        let resolved_addrs = validate_redirect_target_for_ssrf(
+            &redirect_url,
+            endpoint_config.allow_internal,
+            endpoint_config.allow_cleartext,
+        )
+        .await?;
 
         // Build the per-hop client with DNS pinning: hostname targets build
         // through the endpoint's pinned-client cache; IP-literal targets
@@ -516,7 +526,7 @@ mod tests {
         // A non-special scheme has no default port in
         // `Url::port_or_known_default`, so the URL reaches the no-port
         // error carrying userinfo.
-        let err = resolve_initial_url_for_ssrf("xyz://user:pass@host/mcp", false)
+        let err = resolve_initial_url_for_ssrf("xyz://user:pass@host/mcp", false, false)
             .await
             .unwrap_err();
         let msg = match &err {
@@ -572,11 +582,15 @@ mod tests {
         );
     }
 
-    /// Under allow_internal=true, public IPs over HTTP are rejected
+    /// Public-IP cleartext rejection is governed by `allow_cleartext`
+    /// (ADR-0081), not `allow_internal`: with allow_internal=true and
+    /// allow_cleartext=false, public cleartext stays rejected while
+    /// private cleartext stays allowed.
     #[test]
     fn test_validate_url_rejects_public_http_under_allow_internal() {
         let mut cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap();
         cfg.allow_internal = true;
+        cfg.allow_cleartext = false;
 
         // Public IP over HTTP should be rejected
         let result = validate_url_for_ssrf("http://1.1.1.1/api", &cfg);
@@ -598,6 +612,61 @@ mod tests {
         );
     }
 
+    /// Regression: HTTPS public-IP literals are unaffected by the
+    /// cleartext rule (ADR-0081 gates cleartext transport only).
+    #[test]
+    fn test_validate_url_public_https_literals_ok() {
+        let cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap();
+        assert!(
+            validate_url_for_ssrf("https://1.1.1.1/api", &cfg).is_ok(),
+            "HTTPS to a public IP literal must stay allowed by default"
+        );
+    }
+
+    /// `allow_cleartext=true` admits cleartext to public targets — with or
+    /// without `allow_internal` (the two consents are independent,
+    /// ADR-0081).
+    #[test]
+    fn test_validate_url_allows_public_http_with_allow_cleartext() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap();
+        cfg.allow_cleartext = true;
+        cfg.allow_internal = false;
+        assert!(
+            validate_url_for_ssrf("http://1.1.1.1/api", &cfg).is_ok(),
+            "allow_cleartext must admit public cleartext without allow_internal"
+        );
+        cfg.allow_internal = true;
+        assert!(
+            validate_url_for_ssrf("http://1.1.1.1/api", &cfg).is_ok(),
+            "allow_cleartext must admit public cleartext under allow_internal"
+        );
+    }
+
+    /// ADR-0081: cleartext `http://` to a PUBLIC target is rejected by
+    /// default — independent of `allow_internal`. Error messages must name
+    /// the remedy and must not leak query secrets or userinfo.
+    #[test]
+    fn test_validate_url_rejects_public_http_by_default() {
+        let cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap();
+        for url in [
+            "http://1.1.1.1/api",
+            "http://1.1.1.1/api?token=sekrit99",
+            "http://user:pass@1.1.1.1/api",
+        ] {
+            let err = validate_url_for_ssrf(url, &cfg).err().unwrap_or_else(|| {
+                panic!("cleartext public target must be rejected by default: {url}")
+            });
+            let msg = err.to_string();
+            assert!(msg.contains("allowCleartext"), "msg: {msg}");
+            assert!(msg.contains("1.1.1.1"), "msg: {msg}");
+            assert!(!msg.contains("sekrit99"), "query secret leaked: {msg}");
+            assert!(
+                !msg.contains("user") && !msg.contains("pass"),
+                "userinfo leaked: {msg}"
+            );
+        }
+    }
+
     /// Non-http(s) schemes are rejected under both policies
     #[test]
     fn test_validate_url_rejects_non_http_schemes() {
@@ -612,7 +681,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_redirect_target_blocks_private_ip() {
         let url = url::Url::parse("http://127.0.0.1:8080/internal").unwrap();
-        let result = validate_redirect_target_for_ssrf(&url, false).await;
+        let result = validate_redirect_target_for_ssrf(&url, false, false).await;
         assert!(result.is_err(), "Should block redirect to 127.0.0.1");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -625,7 +694,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_redirect_target_allows_private_ip_when_configured() {
         let url = url::Url::parse("http://127.0.0.1:8080/internal").unwrap();
-        let result = validate_redirect_target_for_ssrf(&url, true).await;
+        let result = validate_redirect_target_for_ssrf(&url, true, false).await;
         assert!(
             result.is_ok(),
             "Should allow redirect to 127.0.0.1 when allow_internal=true"
@@ -639,7 +708,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_redirect_target_ipv6_literal_treated_as_literal() {
         let url = url::Url::parse("http://[::1]:8080/internal").unwrap();
-        let addrs = validate_redirect_target_for_ssrf(&url, true)
+        let addrs = validate_redirect_target_for_ssrf(&url, true, false)
             .await
             .expect("IPv6 literal must validate as a literal, not via DNS");
         assert_eq!(
@@ -654,7 +723,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_redirect_target_ipv6_literal_blocked_when_not_internal() {
         let url = url::Url::parse("http://[::1]:8080/internal").unwrap();
-        let err = validate_redirect_target_for_ssrf(&url, false)
+        let err = validate_redirect_target_for_ssrf(&url, false, false)
             .await
             .expect_err("blocked IPv6 literal must be rejected without allow_internal");
         assert!(
@@ -667,17 +736,77 @@ mod tests {
     #[tokio::test]
     async fn test_validate_redirect_target_ipv4_literal_unchanged() {
         let url = url::Url::parse("http://127.0.0.1:9000/internal").unwrap();
-        let addrs = validate_redirect_target_for_ssrf(&url, true).await.unwrap();
+        let addrs = validate_redirect_target_for_ssrf(&url, true, false)
+            .await
+            .unwrap();
         assert_eq!(addrs.len(), 1);
         assert_eq!(addrs[0].ip().to_string(), "127.0.0.1");
         assert_eq!(addrs[0].port(), 9000);
+    }
+
+    /// ADR-0081: a cleartext redirect to a public IP literal is rejected
+    /// by default and under allow_internal; `allow_cleartext` admits it.
+    #[tokio::test]
+    async fn test_validate_redirect_target_rejects_public_http_by_default() {
+        let url = url::Url::parse("http://1.1.1.1:80/x").unwrap();
+        for allow_internal in [false, true] {
+            let err = validate_redirect_target_for_ssrf(&url, allow_internal, false)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("allowCleartext"),
+                "error must name the remedy, got: {err}"
+            );
+        }
+        let addrs = validate_redirect_target_for_ssrf(&url, false, true)
+            .await
+            .expect("allow_cleartext must admit a public cleartext redirect");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].ip().to_string(), "1.1.1.1");
+        assert_eq!(addrs[0].port(), 80);
+    }
+
+    /// ADR-0081: a cleartext redirect to a hostname resolving to a public
+    /// IP is rejected by default and under allow_internal;
+    /// `allow_cleartext` admits it.
+    #[tokio::test]
+    async fn test_validate_redirect_target_public_domain_http_rule() {
+        let url = url::Url::parse("http://example.com/x").unwrap();
+        for allow_internal in [false, true] {
+            let err = validate_redirect_target_for_ssrf(&url, allow_internal, false)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("allowCleartext"),
+                "error must name the remedy, got: {err}"
+            );
+        }
+        assert!(
+            validate_redirect_target_for_ssrf(&url, false, true)
+                .await
+                .is_ok(),
+            "allow_cleartext must admit a public-domain cleartext redirect"
+        );
+    }
+
+    /// Regression: HTTPS public-IP redirect targets stay allowed by
+    /// default (ADR-0081 gates cleartext transport only).
+    #[tokio::test]
+    async fn test_validate_redirect_target_public_https_ok() {
+        let url = url::Url::parse("https://1.1.1.1:443/x").unwrap();
+        let addrs = validate_redirect_target_for_ssrf(&url, false, false)
+            .await
+            .expect("HTTPS public-IP redirect must stay allowed");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].ip().to_string(), "1.1.1.1");
+        assert_eq!(addrs[0].port(), 443);
     }
 
     /// rc-uwaj: IPv6-literal initial URLs return None (no pinning), same as
     /// IPv4 literals — not a resolver round-trip on a bracketed string.
     #[tokio::test]
     async fn test_resolve_initial_url_ipv6_literal_returns_none() {
-        let out = resolve_initial_url_for_ssrf("http://[::1]:8080/internal", true).await;
+        let out = resolve_initial_url_for_ssrf("http://[::1]:8080/internal", true, false).await;
         assert_eq!(
             out.expect("IPv6 literal initial URL must not error"),
             None,
@@ -691,7 +820,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_initial_url_for_ssrf_blocks_private_ip() {
         // localhost → 127.0.0.1 → blocked
-        let err = resolve_initial_url_for_ssrf("http://localhost:8080/path", false)
+        let err = resolve_initial_url_for_ssrf("http://localhost:8080/path", false, false)
             .await
             .expect_err("localhost must resolve to loopback and be blocked");
         assert!(
@@ -709,7 +838,7 @@ mod tests {
     /// localhost resolves to 127.0.0.1 (internal), so it returns Some for pinning.
     #[tokio::test]
     async fn test_resolve_initial_url_allow_internal_still_pins() {
-        let result = resolve_initial_url_for_ssrf("http://localhost:8080/path", true)
+        let result = resolve_initial_url_for_ssrf("http://localhost:8080/path", true, false)
             .await
             .expect("should succeed when allow_internal=true");
         assert!(
@@ -727,16 +856,18 @@ mod tests {
     /// IP-literal URLs don't need DNS pinning (validated directly).
     #[tokio::test]
     async fn test_resolve_initial_url_ip_literal_returns_none() {
-        let result = resolve_initial_url_for_ssrf("http://127.0.0.1:8080/path", false)
+        let result = resolve_initial_url_for_ssrf("http://127.0.0.1:8080/path", false, false)
             .await
             .expect("IP literal should return Ok(None)");
         assert!(result.is_none(), "IP literal should return None");
     }
 
-    /// Public hostname resolves to non-blocked IPs and returns Some for pinning.
+    /// Public hostname over HTTPS resolves to non-blocked IPs and returns
+    /// Some for pinning — the ADR-0081 cleartext rule never fires for
+    /// `https://` URLs.
     #[tokio::test]
-    async fn test_resolve_initial_url_public_host_returns_addrs() {
-        let result = resolve_initial_url_for_ssrf("http://example.com:80/", false)
+    async fn test_resolve_initial_url_public_https_host_returns_addrs() {
+        let result = resolve_initial_url_for_ssrf("https://example.com/", false, false)
             .await
             .expect("example.com should resolve and not be blocked");
         let (host, addrs) = result.expect("example.com should return Some for pinning");
@@ -745,6 +876,38 @@ mod tests {
             "example.com should resolve to at least one addr for pinning"
         );
         assert_eq!(host, "example.com", "should return the hostname unchanged");
+    }
+
+    /// ADR-0081: cleartext http:// to a hostname resolving to a public IP
+    /// is rejected by default AND under allow_internal — the remedy names
+    /// `allowCleartext`.
+    #[tokio::test]
+    async fn test_resolve_initial_url_rejects_public_http_by_default() {
+        for allow_internal in [false, true] {
+            let err = resolve_initial_url_for_ssrf("http://example.com/", allow_internal, false)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("allowCleartext"),
+                "error must name the remedy, got: {err}"
+            );
+        }
+    }
+
+    /// `allow_cleartext=true` admits cleartext to a public hostname — with
+    /// or without `allow_internal` — and still pins the resolved
+    /// addresses.
+    #[tokio::test]
+    async fn test_resolve_initial_url_allows_public_http_with_allow_cleartext() {
+        for allow_internal in [false, true] {
+            let result = resolve_initial_url_for_ssrf("http://example.com/", allow_internal, true)
+                .await
+                .expect("allow_cleartext must admit cleartext to a public host");
+            assert!(
+                result.is_some(),
+                "should return Some for DNS pinning with allow_cleartext"
+            );
+        }
     }
 
     /// Local responder that accepts any number of HTTP/1.1 connections on an
@@ -969,5 +1132,124 @@ mod tests {
         .expect("redirect to an allowed host must be followed");
 
         assert_eq!(response.status(), 200);
+    }
+
+    /// Header-recording variant of `spawn_200_responder`: answers each
+    /// connection with a fixed 200 OK and records the (name, value) pairs
+    /// of every received request header.
+    async fn spawn_200_responder_capturing_headers() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral 127.0.0.1 listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let base_url = format!("http://localhost:{port}");
+        let captured: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_for_task = std::sync::Arc::clone(&captured);
+        let handle = tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                // Read the request head (up to the blank line) — that is
+                // all we need for header capture.
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 1024];
+                loop {
+                    match conn.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if let Ok(text) = std::str::from_utf8(&buf) {
+                    let mut records = captured_for_task.lock().unwrap();
+                    for line in text.split("\r\n").skip(1) {
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some((name, value)) = line.split_once(':') {
+                            records.push((name.trim().to_string(), value.trim().to_string()));
+                        }
+                    }
+                }
+                let _ = conn
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await;
+                let _ = conn.shutdown().await;
+            }
+        });
+        (base_url, captured, handle)
+    }
+
+    /// ADR-0081 companion: credential stripping at a cross-origin redirect
+    /// hop is unaffected by `allow_cleartext` — transport consent never
+    /// widens which headers ride the hop.
+    #[tokio::test]
+    async fn test_redirect_followed_hop_strips_credentials_unaffected_by_allow_cleartext() {
+        let (hop_base, hop_captured, _hop_handle) = spawn_200_responder_capturing_headers().await;
+        let hop_port = responder_port(&hop_base);
+        let (entry_base, _entry_handle) =
+            spawn_302_responder(format!("http://127.0.0.1:{hop_port}/hop")).await;
+        let entry_port = responder_port(&entry_base);
+
+        let cache = PinnedClientCache::new(PINNED_CLIENT_TTL, PINNED_CLIENT_MAX_ENTRIES);
+        let shared = build_client(&HttpConfig::default(), None);
+        let endpoint_config = HttpEndpointConfig::from_uri(
+            "http://localhost/?allowInternal=true&allowCleartext=true",
+        )
+        .expect("endpoint config parses");
+
+        let headers: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)> = [
+            ("authorization", "Bearer hop-secret"),
+            ("cookie", "session=hop-secret"),
+            ("x-api-key", "hop-secret"),
+        ]
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                reqwest::header::HeaderValue::from_str(value).unwrap(),
+            )
+        })
+        .collect();
+
+        let response = send_with_ssrf_safe_redirects(
+            &shared,
+            &shared,
+            &cache,
+            &HttpConfig::default(),
+            &endpoint_config,
+            reqwest::Method::GET,
+            &format!("http://localhost:{entry_port}/start"),
+            headers,
+            None,
+            3,
+            None,
+        )
+        .await
+        .expect("redirect-following request succeeds");
+        assert_eq!(response.status(), 200);
+
+        let captured = hop_captured.lock().unwrap();
+        assert!(
+            !captured.is_empty(),
+            "the hop responder must have seen the request"
+        );
+        for (name, _) in captured.iter() {
+            let lower = name.to_ascii_lowercase();
+            assert!(
+                lower != "authorization" && lower != "cookie" && lower != "x-api-key",
+                "credential header '{name}' must be stripped at the cross-origin hop"
+            );
+        }
     }
 }

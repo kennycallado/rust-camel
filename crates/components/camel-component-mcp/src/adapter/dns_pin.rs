@@ -15,8 +15,9 @@
 //!
 //! - default (`allow_internal = false`): any resolved blocked IP rejects
 //!   the whole resolution (fail closed, not filter-and-continue);
-//! - `allow_internal = true` + cleartext `http://`: any resolved public IP
-//!   rejects (no cleartext to public targets);
+//! - cleartext `http://` with any resolved public IP rejects unless
+//!   `allow_cleartext=true` (uniform rule, ADR-0081; independent of
+//!   `allow_internal`);
 //! - IP-literal URLs are NOT resolved here — they were already validated
 //!   as literals at config load ([`crate::config::McpRemoteConfig::validate_url`]).
 
@@ -112,13 +113,15 @@ fn default_port(scheme: &str) -> u16 {
 /// Validate a DNS resolution against the SSRF policy (pure; TDD surface).
 ///
 /// - `!allow_internal`: any blocked IP rejects the whole resolution.
-/// - `allow_internal` + `http`: any public IP rejects (cleartext rule).
+/// - `http` + `!allow_cleartext`: any public IP rejects (uniform cleartext
+///   rule, ADR-0081; independent of `allow_internal`).
 /// - Empty resolution rejects (fail closed — an unresolvable host is a
 ///   configuration error, not a pass).
 pub(super) fn validate_resolution(
     addrs: &[SocketAddr],
     scheme: &str,
     allow_internal: bool,
+    allow_cleartext: bool,
 ) -> Result<(), McpError> {
     if addrs.is_empty() {
         return Err(McpError::Endpoint(
@@ -132,13 +135,13 @@ pub(super) fn validate_resolution(
             blocked.ip()
         )));
     }
-    if allow_internal
-        && scheme == "http"
+    if scheme == "http"
+        && !allow_cleartext
         && let Some(public) = addrs.iter().find(|sa| !is_ssrf_blocked_ip(&sa.ip()))
     {
         return Err(McpError::Endpoint(format!(
             "remote host resolves to public address {} — not allowed over \
-             cleartext http:// (use https://)",
+             cleartext http:// (set allow_cleartext=true or use https://)",
             public.ip()
         )));
     }
@@ -154,6 +157,7 @@ pub(super) fn validate_resolution(
 pub(super) async fn build_pinned_http_client(
     url: &str,
     allow_internal: bool,
+    allow_cleartext: bool,
 ) -> Result<reqwest::Client, McpError> {
     let (scheme, host, port) = split_authority(url)?;
 
@@ -174,7 +178,7 @@ pub(super) async fn build_pinned_http_client(
         .map_err(|_| McpError::Endpoint(format!("timed out resolving remote host '{host}'")))?
         .map_err(|e| McpError::Endpoint(format!("failed to resolve remote host '{host}': {e}")))?
         .collect();
-    validate_resolution(&addrs, &scheme, allow_internal)?;
+    validate_resolution(&addrs, &scheme, allow_internal, allow_cleartext)?;
 
     // Key the DNS override on the lowercased host: the `url` crate (used
     // inside reqwest/rmcp to parse the remote URL) normalizes
@@ -269,32 +273,65 @@ mod tests {
     #[test]
     fn resolution_with_blocked_ip_rejected_by_default() {
         let addrs = [addr("93.184.216.34", 443), addr("10.0.0.5", 443)];
-        let err = validate_resolution(&addrs, "https", false).unwrap_err();
+        let err = validate_resolution(&addrs, "https", false, false).unwrap_err();
         assert!(err.to_string().contains("blocked"), "msg: {err}");
     }
 
     #[test]
-    fn resolution_all_public_ok_by_default() {
+    fn resolution_https_public_ok_by_default_both_flags() {
         let addrs = [addr("93.184.216.34", 443)];
-        assert!(validate_resolution(&addrs, "https", false).is_ok());
+        assert!(validate_resolution(&addrs, "https", false, false).is_ok());
     }
 
     #[test]
     fn resolution_blocked_ok_when_allow_internal_https() {
         let addrs = [addr("10.0.0.5", 443), addr("127.0.0.1", 443)];
-        assert!(validate_resolution(&addrs, "https", true).is_ok());
+        assert!(validate_resolution(&addrs, "https", true, false).is_ok());
     }
 
     #[test]
+    fn resolution_public_over_http_rejected_by_default() {
+        let addrs = [addr("93.184.216.34", 80)];
+        let err = validate_resolution(&addrs, "http", false, false).unwrap_err();
+        assert!(err.to_string().contains("cleartext"), "msg: {err}");
+        assert!(
+            err.to_string().contains("allow_cleartext"),
+            "remedy missing: {err}"
+        );
+    }
+
+    #[test]
+    fn resolution_public_over_http_allowed_with_allow_cleartext() {
+        let addrs = [addr("93.184.216.34", 80)];
+        assert!(validate_resolution(&addrs, "http", false, true).is_ok());
+        assert!(validate_resolution(&addrs, "http", true, true).is_ok());
+    }
+
+    // Regression pin (ADR-0079 cell): allow_internal=true + public cleartext
+    // http still rejects.
+    #[test]
     fn resolution_public_over_http_rejected_when_allow_internal() {
         let addrs = [addr("93.184.216.34", 80)];
-        let err = validate_resolution(&addrs, "http", true).unwrap_err();
+        let err = validate_resolution(&addrs, "http", true, false).unwrap_err();
         assert!(err.to_string().contains("cleartext"), "msg: {err}");
+        assert!(
+            err.to_string().contains("allow_cleartext"),
+            "remedy missing: {err}"
+        );
+    }
+
+    // Internal cleartext is NOT governed by the new rule: with
+    // allow_internal=true, a resolution of only internal addresses over
+    // http:// stays allowed when allow_cleartext=false.
+    #[test]
+    fn resolution_internal_http_ok_when_allow_internal() {
+        let addrs = [addr("10.0.0.5", 80), addr("127.0.0.1", 80)];
+        assert!(validate_resolution(&addrs, "http", true, false).is_ok());
     }
 
     #[test]
     fn empty_resolution_rejected() {
-        let err = validate_resolution(&[], "https", true).unwrap_err();
+        let err = validate_resolution(&[], "https", true, false).unwrap_err();
         assert!(err.to_string().contains("did not resolve"), "msg: {err}");
     }
 
@@ -302,7 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn bad_scheme_url_rejected_before_any_resolution() {
-        let err = build_pinned_http_client("ftp://host/x", false)
+        let err = build_pinned_http_client("ftp://host/x", false, false)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("http"), "msg: {err}");
@@ -322,7 +359,7 @@ mod tests {
     #[tokio::test]
     async fn ip_literal_url_builds_client_without_dns() {
         // IP literals skip resolution entirely — no DNS, no pinning.
-        let client = build_pinned_http_client("http://127.0.0.1:8000/mcp", true)
+        let client = build_pinned_http_client("http://127.0.0.1:8000/mcp", true, false)
             .await
             .expect("IP-literal URL must not need DNS");
         drop(client);

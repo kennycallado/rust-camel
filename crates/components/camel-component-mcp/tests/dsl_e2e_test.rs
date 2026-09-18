@@ -140,6 +140,7 @@ async fn component_client(addr: SocketAddr) -> RmcpClient {
             url: format!("http://{addr}/mcp"),
             transport: McpTransport::StreamableHttp,
             allow_internal: true, // tests bind loopback
+            allow_cleartext: false,
         },
     )
     .await

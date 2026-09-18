@@ -32,8 +32,10 @@ its `tls` field, so its `Debug` output is safe.
 The Producer validates each outbound URL and redirect hop. By default,
 `allow_internal=false` rejects internal addresses. DNS resolution pins validated
 addresses with `resolve_to_addrs` to prevent DNS rebinding. Cross-origin
-redirects remove `Authorization` and `Cookie` headers. When
-`allow_internal=true`, cleartext HTTP to public addresses remains forbidden.
+redirects remove `Authorization` and `Cookie` headers. Cleartext HTTP to
+public addresses is rejected by default and under `allow_internal=true`;
+the `allowCleartext` endpoint option is the per-endpoint consent that
+permits it (ADR-0081).
 
 `TlsConfig` verifies peer certificates by default. The Producer disables
 verification only when an operator sets `tls.insecure=true` or

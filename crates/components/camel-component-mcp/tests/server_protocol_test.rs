@@ -369,6 +369,7 @@ async fn session_header_not_required() {
             url: format!("http://{addr}/mcp"),
             transport: McpTransport::StreamableHttp,
             allow_internal: true, // tests bind loopback
+            allow_cleartext: false,
         },
     )
     .await

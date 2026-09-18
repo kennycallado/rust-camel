@@ -55,6 +55,7 @@ https://host:port/path[?options]
 | `okStatusCodeRange` | `200-299` | Success status code range |
 | `responseTimeout` | Global default | Response timeout (ms) |
 | `allowInternal` | Global default | Allow requests to private IPs |
+| `allowCleartext` | `false` | Allow cleartext `http://` to public targets (ADR-0081 transport consent) |
 | `blockedHosts` | Global default | Comma-separated blocked hosts |
 | `maxBodySize` | Global default | Max response body size (bytes) |
 
@@ -87,13 +88,13 @@ let route = RouteBuilder::from("http://0.0.0.0:8080/hello")
 ```rust
 // GET request
 let route = RouteBuilder::from("timer:tick?period=60000")
-    .to("http://api.example.com/data?allowInternal=false")
+    .to("https://api.example.com/data")
     .log("Response received", camel_processor::LogLevel::Info)
     .build()?;
 
 // POST request (body becomes request body)
 let route = RouteBuilder::from("direct:submit")
-    .to("http://api.example.com/submit?httpMethod=POST")
+    .to("https://api.example.com/submit?httpMethod=POST")
     .build()?;
 ```
 
@@ -103,7 +104,7 @@ let route = RouteBuilder::from("direct:submit")
 // Method from header
 let route = RouteBuilder::from("direct:api")
     .set_header("CamelHttpMethod", Value::String("DELETE".into()))
-    .to("http://api.example.com/resource")
+    .to("https://api.example.com/resource")
     .build()?;
 ```
 
@@ -205,13 +206,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 let route = RouteBuilder::from("direct:api-call")
-    .to("http://api.service.com/endpoint?throwExceptionOnFailure=true&responseTimeout=5000")
+    .to("https://api.service.com/endpoint?throwExceptionOnFailure=true&responseTimeout=5000")
     .build()?;
 
 // With custom error handling
 let route = RouteBuilder::from("direct:resilient")
     .error_handler(ErrorHandlerConfig::log_only())
-    .to("http://api.service.com/endpoint?throwExceptionOnFailure=false")
+    .to("https://api.service.com/endpoint?throwExceptionOnFailure=false")
     .process(|ex| async move {
         let status = ex.input.header("CamelHttpResponseCode")
             .and_then(|v| v.as_u64())
@@ -271,7 +272,7 @@ By default, the HTTP client blocks requests to private IP addresses for security
 To block specific hosts:
 
 ```rust
-.to("http://api.example.com?blockedHosts=localhost,127.0.0.1,internal.local")
+.to("https://api.example.com?blockedHosts=localhost,127.0.0.1,internal.local")
 ```
 
 ## Streaming & Memory Management

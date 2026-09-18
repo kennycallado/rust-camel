@@ -43,7 +43,12 @@ Global TOML key: `mcp` (`McpBundle`).
 
 - `mcp.servers.<name>` (`McpServerConfig`): `bind`, `tls`, `security_policy`,
   `max_tools`, `max_resources`, `allowed_hosts`.
-- `mcp.remotes.<name>` (`McpRemoteConfig`): `url`, `transport`.
+- `mcp.remotes.<name>` (`McpRemoteConfig`): `url`, `transport`,
+  `allow_internal`, `allow_cleartext`.
+
+Cleartext `http://` remotes to public targets are rejected (IP literals
+at config load, hostnames at connect) unless
+`allow_cleartext = true` (ADR-0081).
 
 Server config merges by ownership (ADR-0061 Rule 9): when a route
 originates from a DSL `mcp:` block, the block's `bind`/`tls`/`max_tools`/

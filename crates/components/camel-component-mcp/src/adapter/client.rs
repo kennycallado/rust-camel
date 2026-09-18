@@ -55,17 +55,20 @@ impl RmcpClient {
         // builder keeps rmcp's hardened defaults (no connection pooling,
         // redirects disabled so custom headers are never replayed) and adds
         // `.no_proxy()` (environment proxies bypass `resolve_to_addrs`).
-        let http_client =
-            super::dns_pin::build_pinned_http_client(&config.url, config.allow_internal)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(
-                        server = %name,
-                        error = %e,
-                        "MCP remote '{name}' failed DNS pinning validation"
-                    );
-                    e
-                })?;
+        let http_client = super::dns_pin::build_pinned_http_client(
+            &config.url,
+            config.allow_internal,
+            config.allow_cleartext,
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                server = %name,
+                error = %e,
+                "MCP remote '{name}' failed DNS pinning validation"
+            );
+            e
+        })?;
         let transport = StreamableHttpClientTransport::with_client(
             http_client,
             StreamableHttpClientTransportConfig::with_uri(config.url.clone()),

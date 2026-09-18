@@ -124,6 +124,12 @@ pub struct HttpEndpointConfig {
     /// keys are filtered out at serialization time.
     pub raw_query: Option<String>,
     pub allow_internal: bool,
+    /// Public-cleartext transport consent (ADR-0081): when `false` (the
+    /// default), cleartext `http://` requests to PUBLIC targets are
+    /// rejected. Independent of `allow_internal` — internal-network
+    /// consent and cleartext-transport consent are separate decisions, and
+    /// there is deliberately no global cleartext lever.
+    pub allow_cleartext: bool,
     pub blocked_hosts: Vec<String>,
     pub max_body_size: usize,
     pub read_timeout_ms: u64,
@@ -177,6 +183,7 @@ impl std::fmt::Debug for HttpEndpointConfig {
             )
             .field("raw_query", &self.raw_query.as_ref().map(|_| "?[redacted]"))
             .field("allow_internal", &self.allow_internal)
+            .field("allow_cleartext", &self.allow_cleartext)
             .field("blocked_hosts", &self.blocked_hosts)
             .field("max_body_size", &self.max_body_size)
             .field("read_timeout_ms", &self.read_timeout_ms)
@@ -282,6 +289,15 @@ impl UriConfig for HttpEndpointConfig {
                 CamelError::InvalidUri(format!("invalid value for allowInternal: {e}"))
             })?,
             None => false, // Default: block private IPs
+        };
+
+        // Public-cleartext transport consent (ADR-0081) — per-endpoint
+        // only, deliberately never inherited from the global HttpConfig.
+        let allow_cleartext = match parts.params.get("allowCleartext") {
+            Some(v) => parse_bool_param_http(v).map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for allowCleartext: {e}"))
+            })?,
+            None => false, // Default: reject cleartext http:// to public targets
         };
 
         // Parse comma-separated blocked hosts
@@ -396,6 +412,7 @@ impl UriConfig for HttpEndpointConfig {
             query_params: Vec::new(),
             raw_query,
             allow_internal,
+            allow_cleartext,
             blocked_hosts,
             max_body_size,
             read_timeout_ms,
@@ -473,6 +490,13 @@ struct HttpEndpointUriConfig {
         desc = "Allow private/internal network destinations (SSRF)"
     )]
     allow_internal: bool,
+
+    #[uri_param(
+        name = "allowCleartext",
+        default = "false",
+        desc = "Allow cleartext http:// to public targets (transport consent; ADR-0081)"
+    )]
+    allow_cleartext: bool,
 
     #[uri_param(name = "blockedHosts", desc = "Comma-separated blocked host list")]
     blocked_hosts: Option<String>,
@@ -3137,8 +3161,12 @@ impl Service<Exchange> for HttpProducer {
                 // repeated requests keep one connection pool without re-resolving DNS.
                 // Per-request SSRF validation and DNS pinning are unchanged. IP-literal
                 // URLs use the endpoint's unpinned shared client.
-                let resolved =
-                    ssrf::resolve_initial_url_for_ssrf(&url, config.allow_internal).await?;
+                let resolved = ssrf::resolve_initial_url_for_ssrf(
+                    &url,
+                    config.allow_internal,
+                    config.allow_cleartext,
+                )
+                .await?;
                 let client: reqwest::Client = if let Some((ref host, ref addrs)) = resolved {
                     pinned_cache
                         .get_or_build(host.as_str(), addrs, || {
@@ -6576,6 +6604,51 @@ mod tests {
         assert!(
             config.allow_internal,
             "Private IPs should be allowed when explicitly set"
+        );
+    }
+
+    #[test]
+    fn test_uri_option_allow_cleartext_parses() {
+        let config =
+            HttpEndpointConfig::from_uri("http://example.com/?allowCleartext=true").unwrap();
+        assert!(
+            config.allow_cleartext,
+            "allowCleartext=true must parse into the endpoint config"
+        );
+
+        let plain = HttpEndpointConfig::from_uri("http://example.com/").unwrap();
+        assert!(
+            !plain.allow_cleartext,
+            "cleartext consent must default to false"
+        );
+
+        let err =
+            HttpEndpointConfig::from_uri("http://example.com/?allowCleartext=banana").unwrap_err();
+        assert!(
+            matches!(&err, CamelError::InvalidUri(msg) if msg.contains("allowCleartext")),
+            "bad allowCleartext value must yield InvalidUri naming the option, got: {err:?}"
+        );
+    }
+
+    /// ADR-0081: a CamelHttpUri override to a public cleartext target is
+    /// gated by the endpoint's `allowCleartext` consent — override URLs go
+    /// through the same `validate_url_for_ssrf` as the base URL.
+    #[test]
+    fn test_camel_http_uri_override_public_cleartext_follows_endpoint_flags() {
+        let endpoint =
+            HttpEndpointConfig::from_uri("http://localhost/?allowCleartext=false").unwrap();
+        let err = crate::ssrf::validate_url_for_ssrf("http://93.184.216.34/exfil", &endpoint)
+            .expect_err("public cleartext override must be rejected without consent");
+        assert!(
+            err.to_string().contains("allowCleartext"),
+            "error must name the remedy, got: {err}"
+        );
+
+        let endpoint =
+            HttpEndpointConfig::from_uri("http://localhost/?allowCleartext=true").unwrap();
+        assert!(
+            crate::ssrf::validate_url_for_ssrf("http://93.184.216.34/exfil", &endpoint).is_ok(),
+            "endpoint consent must admit a public cleartext override"
         );
     }
 
@@ -10675,6 +10748,7 @@ mod tests {
             "query_params",
             "raw_query",
             "allow_internal",
+            "allow_cleartext",
             "blocked_hosts",
             "max_body_size",
             "read_timeout_ms",
@@ -12016,7 +12090,7 @@ mod tests {
         // Mirror struct must stay in sync with bespoke from_components parser.
         assert_eq!(
             HttpEndpointConfig::uri_options().len(),
-            22,
+            23,
             "HttpEndpointUriConfig #[uri_param] count drifted from parser"
         );
     }

@@ -26,6 +26,7 @@ fn remote_config(url: String) -> McpRemoteConfig {
         url,
         transport: McpTransport::StreamableHttp,
         allow_internal: true, // tests bind loopback
+        allow_cleartext: false,
     }
 }
 
