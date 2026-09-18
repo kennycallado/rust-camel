@@ -10,6 +10,15 @@ concurrency:
   group: release-dev
   cancel-in-progress: true
 
+# Ceiling for the nested jobs' permission REQUESTS — GitHub validates
+# these at workflow load, even for jobs gated by `if: inputs.publish`
+# that never run in dev mode. The elevated GITHUB_TOKEN is unused:
+# no gated step executes and no secrets are inherited.
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
 jobs:
   call-release-matrix:
     uses: ./.github/workflows/release-matrix.yml
