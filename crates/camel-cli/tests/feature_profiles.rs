@@ -383,7 +383,7 @@ fn kafka_feature_table_implies_capability() {
     assert_eq!(
         kafka_lines,
         vec![
-            r#"kafka = ["dep:camel-component-kafka", "camel-bundles/kafka"]"#,
+            r#"kafka = ["dep:camel-component-kafka", "camel-bundles/kafka", "camel-component-kafka/cmake-build"]"#,
             DYNAMIC_LINKING_LINE,
         ],
         "the kafka feature surface must be exactly `kafka` and `dynamic-linking`"

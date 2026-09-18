@@ -240,7 +240,10 @@ non-optional core plumbing and excludes the controllable optional set
 (kafka, grpc, wasm, llm, mcp, mqtt, surrealdb, exec, the lsp stack, and
 the `lang-*` runtimes). The kafka surface is exactly two features:
 `kafka` (capability — component activation plus registration in the lint
-registry and the boot cascade; librdkafka source build) and
+registry and the boot cascade; librdkafka source build via cmake — the
+feature forwards `camel-component-kafka/cmake-build`, because the
+rdkafka-sys default build (mklove/sh) cannot build on Windows or cross
+targets, bd rc-2ii8l) and
 `dynamic-linking` (capability plus system-librdkafka linking; it implies
 `kafka`). The historical `cmake-build` and `kafka-static` names were
 removed (bd rc-5t5fo.1): they activated the dependency without enabling

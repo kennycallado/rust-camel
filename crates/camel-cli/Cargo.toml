@@ -146,11 +146,13 @@ otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # default enablement").
 security = ["camel-bundles/security"]
 # kafka is the capability feature: activates the kafka component and
-# its registration in the lint registry and the boot cascade.
-# librdkafka builds from source via cmake (the rdkafka-sys default).
+# its registration in the lint registry and the boot cascade. It
+# forwards camel-component-kafka/cmake-build so librdkafka builds
+# from source via cmake: cmake is portable across Windows and cross
+# targets, the rdkafka-sys default (mklove/sh) is not (rc-2ii8l).
 # dynamic-linking selects a system librdkafka instead and implies
 # kafka.
-kafka = ["dep:camel-component-kafka", "camel-bundles/kafka"]
+kafka = ["dep:camel-component-kafka", "camel-bundles/kafka", "camel-component-kafka/cmake-build"]
 grpc = [
   "dep:camel-component-grpc",
   "dep:camel-dataformat-protobuf",
