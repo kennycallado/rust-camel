@@ -31,8 +31,8 @@ SHALL be pinned with `-artifact_prefix` so libFuzzer never writes to
 - **GIVEN** a fuzz run in a linked worktree that finds a crash
 - **WHEN** libFuzzer writes the crash artifact
 - **THEN** the artifact lands under `<worktree>/target-fuzz/artifacts/<target>/`
-  because the wrapper passed `-artifact_prefix`, and no `fuzz/artifacts/`
-  directory is created
+  because the wrapper passed `-artifact_prefix`, and no crash files exist
+  under `fuzz/artifacts/`
 
 ### Requirement: dsl_yaml fuzz harness
 
@@ -132,7 +132,7 @@ committed, and minimization SHALL NOT write to cargo-fuzz's default
 
 - **GIVEN** a crash artifact under `target-fuzz/artifacts/<target>/`
 - **WHEN** the wrapper runs `tmin` on it
-- **THEN** the minimized file appears under `target-fuzz/artifacts/<target>/` and no `fuzz/artifacts/` directory is created
+- **THEN** the minimized file appears under `target-fuzz/artifacts/<target>/` and no crash files exist under `fuzz/artifacts/`
 
 ### Requirement: Toolchain presence guards
 
