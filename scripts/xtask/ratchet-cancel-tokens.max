@@ -1,0 +1,25 @@
+# Monotone ratchet ceiling for `cargo xtask lint-cancel-tokens` (bd rc-pu2s,
+# from rc-ibwa / ADR-0043 pipeline cancellation tree).
+#
+# The integer below is the maximum allowed count of production
+# CancellationToken::new() sites under crates/components/*/src/**
+# (test files and #[cfg(test)] scope excluded). The number may only
+# DECREASE — never raise it without review justification; the diff on this
+# file is the regression signal.
+#
+# To lower it: fix sites (run `cargo xtask lint-cancel-tokens` for per-site
+# remedies), then edit the number down to the new count.
+#
+# Accepted inventory at seed (2026-09-18):
+# - camel-component-wasm/src/bean.rs — stream watchdog root (fan-out via child_token)
+# - camel-component-wasm/src/producer.rs — producer cancel root (fan-out via child_token)
+# - camel-component-wasm/src/source_consumer.rs — new() placeholder, overwritten
+#   by ctx.cancel_token() in start()
+# - camel-http/src/registry.rs — HttpRouteRegistry default server_exited
+# - camel-http/src/lib.rs — shared-server death signal (spawn_entry)
+# - camel-master/src/supervision.rs — master supervision dual-select (rc-ibwa accepted)
+# - camel-mqtt/src/producer.rs — producer Drop teardown (rc-ibwa accepted)
+# - camel-component-seda/src/lib.rs — SedaConsumer::new consumer-lifetime
+#   (rc-ibwa residue; target-0 class: must migrate to ctx.cancel_token())
+# - camel-ws/src/lib.rs — server death signal (same class as http spawn_entry)
+9

@@ -1,5 +1,6 @@
 mod changelog;
 mod fuzz;
+mod lint_cancel_tokens;
 mod lint_component_deps;
 mod lint_context_citations;
 mod lint_gate_forwarding;
@@ -84,6 +85,13 @@ enum Commands {
     /// Exits non-zero if any violations are found.
     /// Escape hatch: append `// allow-secret` to the line.
     LintSecrets,
+    /// Ratchet-count production `CancellationToken::new()` under
+    /// `crates/components/*/src/**` against a monotone ceiling in
+    /// `scripts/xtask/ratchet-cancel-tokens.max` (bd rc-pu2s, rc-ibwa).
+    /// Consumer-lifetime tokens must come from `ConsumerContext::cancel_token()`;
+    /// per-request work derives via `.child_token()`. Exits non-zero only
+    /// when the count exceeds the ratchet ceiling.
+    LintCancelTokens,
     /// Scan source files for error!() calls without a required
     /// `// log-policy:` annotation on the preceding line.
     /// See ADR-0012 for the convention.
@@ -289,6 +297,51 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-secrets error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintCancelTokens => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_cancel_tokens::lint_cancel_tokens(&workspace_root) {
+                Ok(report) if report.sites.len() > report.max => {
+                    println!(
+                        "CANCEL-TOKENS RATCHET EXCEEDED ({} sites > max {}):",
+                        report.sites.len(),
+                        report.max
+                    );
+                    for site in &report.sites {
+                        println!("  {}:{}  {}", site.file, site.line, site.snippet);
+                        println!("    remedy: {}", site.remedy);
+                    }
+                    println!(
+                        "  fix the sites above, or lower scripts/xtask/{} — never raise it without review justification.",
+                        lint_cancel_tokens::RATCHET_FILE
+                    );
+                    eprintln!("\nlint-cancel-tokens: FAILED");
+                    std::process::exit(1);
+                }
+                Ok(report) if report.sites.len() < report.max => {
+                    println!(
+                        "lint-cancel-tokens: OK ({} sites < max {})",
+                        report.sites.len(),
+                        report.max
+                    );
+                    println!(
+                        "  ratchet headroom: lower scripts/xtask/{} to {}.",
+                        lint_cancel_tokens::RATCHET_FILE,
+                        report.sites.len()
+                    );
+                }
+                Ok(report) => {
+                    println!(
+                        "lint-cancel-tokens: OK ({} sites = max {})",
+                        report.sites.len(),
+                        report.max
+                    );
+                }
+                Err(e) => {
+                    eprintln!("lint-cancel-tokens error: {e}");
                     std::process::exit(1);
                 }
             }

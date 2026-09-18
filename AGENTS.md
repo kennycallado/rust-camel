@@ -60,6 +60,8 @@
   run: cargo xtask lint-log-levels
 - name: lint-log-redaction
   run: cargo xtask lint-log-redaction
+- name: lint-cancel-tokens
+  run: cargo xtask lint-cancel-tokens
 - name: lint-ignore
   run: cargo xtask lint-ignore
 - name: lint-publish-cycles
