@@ -1240,6 +1240,7 @@ name = "camel-bench"
 version = "0.49.0"
 dependencies = [
  "camel-api",
+ "camel-bridge",
  "camel-component-api",
  "camel-component-direct",
  "camel-core",
@@ -1247,9 +1248,18 @@ dependencies = [
  "camel-language-simple",
  "camel-processor",
  "criterion",
+ "prost",
+ "protoc-bin-vendored",
+ "rustls",
  "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
  "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
  "tower 0.5.3",
+ "tracing-subscriber",
 ]
 
 [[package]]

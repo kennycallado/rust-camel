@@ -21,6 +21,18 @@ camel-language-simple.workspace = true
 camel-language-api.workspace = true
 camel-component-direct.workspace = true
 camel-component-api.workspace = true
+camel-bridge.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+rustls.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+sha2.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true
 
 [[bench]]
 name = "direct"
@@ -28,6 +40,10 @@ harness = false
 
 [[bench]]
 name = "direct_decompose"
+harness = false
+
+[[bench]]
+name = "xml_bridge_decompose"
 harness = false
 
 [[bench]]
