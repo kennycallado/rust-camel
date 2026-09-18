@@ -118,6 +118,8 @@ load run).
 
 Each cell shows state + version + report link (if measured).
 
+Note: the docs/benchmarks/ reports referenced below are untracked (ef337c0f, bd rc-mq1sh); on-disk copies exist in the owner checkout, and in any clone every report is retrievable from the tag bench/era-1-final (e.g. git show bench/era-1-final:docs/benchmarks/history/2026-07-21-benchmark-v3.md).
+
 | | M1 cold-start + RSS | M2 warm p99 | M3 sustained throughput | M4 memory growth |
 |---|---|---|---|---|
 | **T1** timer+log | ✓ v1+v2 — [v1 report](../../docs/benchmarks/history/2026-07-18-startup-minimal-benchmark.md), [v2 report](../../docs/benchmarks/history/2026-07-18-benchmark-v2.md) | ✓ [v3](../../docs/benchmarks/history/2026-07-21-benchmark-v3.md) — baseline warm | ✗ won't-measure: timer-driven, fixed throughput (100 msgs/sec at 10ms period) | ✗ won't-measure: same |
@@ -221,8 +223,7 @@ point), the cell transitions to `measured` via the standard process.
 
 ## Versioning
 
-Each coverage release (v1, v2, v3, ...) corresponds to a published report at
-`docs/benchmarks/YYYY-MM-DD-benchmark-vN.md`. Reports are immutable once published. The
+Each coverage release (v1, v2, v3, ...) corresponds to a published report; the reports were untracked by owner ruling ef337c0f (bd rc-mq1sh) and are immutable once published and retrievable via tag `bench/era-1-final` (on-disk copies remain in the owner checkout). The
 matrix is the **index** across all reports — it shows the cumulative state of the program,
 not any single report.
 
@@ -240,6 +241,9 @@ bump the coverage release and adds no measured cells; a cell reaches
 ## Cross-references
 
 - Methodology + domain language: `benchmarks/harness/CONTEXT.md`
+
+Note: the docs/benchmarks/ reports referenced below are untracked (ef337c0f, bd rc-mq1sh); on-disk copies exist in the owner checkout, and in any clone every report is retrievable from the tag bench/era-1-final (e.g. git show bench/era-1-final:docs/benchmarks/history/2026-07-21-benchmark-v3.md).
+
 - v1 report: `docs/benchmarks/history/2026-07-18-startup-minimal-benchmark.md`
 - v2 report: `docs/benchmarks/history/2026-07-18-benchmark-v2.md`
 - v2 spec: `docs/superpowers/specs/2026-07-18-rc-p9ki-benchmark-v2-design.md`

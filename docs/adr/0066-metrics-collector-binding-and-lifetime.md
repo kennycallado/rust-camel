@@ -239,4 +239,4 @@ ratio 0.9890, 95% CI [0.9785, 1.0126], UNPAIRED cross-run arms —
 cost unresolved from zero, at most about 1% at this resolution.
 Canonical benchmark runs therefore keep gauges ON. Full protocol,
 quiet-host gates, and interpretation:
-`docs/benchmarks/history/2026-08-29-benchmark-v4-addendum.md`.
+`docs/benchmarks/history/2026-08-29-benchmark-v4-addendum.md` (untracked; retrievable via tag `bench/era-1-final`).

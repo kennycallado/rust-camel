@@ -171,8 +171,10 @@ run — per ADR-0066
 lever study measured ratio 0.9890, 95% CI [0.9785, 1.0126], UNPAIRED
 — cost unresolved from zero, ≤~1% at this resolution (full protocol
 and interpretation:
-`docs/benchmarks/history/2026-08-29-benchmark-v4-addendum.md`). Do not
-disable gauges for the v1 record.
+`docs/benchmarks/history/2026-08-29-benchmark-v4-addendum.md`; untracked
+— retrieve via
+`git show bench/era-1-final:docs/benchmarks/history/2026-08-29-benchmark-v4-addendum.md`).
+Do not disable gauges for the v1 record.
 
 ## 7. COMPANION: payload axis (optional, not a gate)
 

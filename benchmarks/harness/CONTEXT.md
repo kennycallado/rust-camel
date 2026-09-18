@@ -15,6 +15,12 @@
 > full 6-round methodology arbitration history; this doc synthesizes the
 > load-bearing conclusions.
 >
+> The `docs/benchmarks/` report paths cited in this document are untracked
+> (ef337c0f, bd rc-mq1sh) and retrievable in any clone via the tag
+> `bench/era-1-final`
+> (`git show bench/era-1-final:docs/benchmarks/history/2026-07-18-startup-minimal-benchmark.md`
+> shows one).
+>
 > **Scope boundary:** "benchmark domain" here means the *comparative,
 > published, ICP-anchored* suite under `benchmarks/`. It is distinct from the
 > in-repo criterion micro-benchmarks at `crates/camel-bench/` (`pipeline.rs`,
