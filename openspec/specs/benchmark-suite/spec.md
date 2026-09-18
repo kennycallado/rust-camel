@@ -7,9 +7,13 @@ TBD - created by archiving change bench-missing-cells. Update Purpose after arch
 
 The benchmark harness SHALL support selecting a transport-body size class
 (1024, 32768, 262144, or 1048576 bytes — other values rejected) for
-load-driven measurements (Protocol A and M3 throughput), and timer-driven
-fixtures (Protocol B) SHALL honor a `BENCH_PAYLOAD_BYTES` environment
-variable constructing a byte-identical canonical body in every artifact.
+load-driven measurements (Protocol A and M3 throughput). Among
+timer-driven fixtures (Protocol B), a `BENCH_PAYLOAD_BYTES` environment
+variable constructing a byte-identical canonical body applies to the
+payload-carrying fixture family — today `t2-json`, in every artifact;
+`split-aggregate` (a fixed 100-item canonical JSON array) and
+`t2-realistic-eip` (no canonical byte payload) are outside the payload
+axis by design.
 Fixture-count references below mean the completeness-declaring fixture
 set of the scenario (registered contenders; eight with the node family).
 
@@ -110,8 +114,12 @@ item count.
 The harness SHALL compute paired bootstrap confidence intervals for M3
 throughput ratios between two cells from the same run (identical
 measurement-order provenance, equal round count, round indices 0..n−1),
-reusing the existing BCa/PRNG machinery, exposed as an `aggregate-ratios`
-loadgen subcommand that hard-errors on any validation mismatch.
+reusing the existing PRNG machinery (a single `SplitMix64` stream per
+invocation, controlled by `--seed`); the CI method for ratios is the
+percentile bootstrap — BCa is deliberately not applied to a ratio of
+two medians (undefined for that statistic; rationale recorded in the
+loadgen ratios module) — exposed as an `aggregate-ratios` loadgen
+subcommand that hard-errors on any validation mismatch.
 
 #### Scenario: Ratio CI on published data
 
@@ -180,22 +188,33 @@ near 3 minutes.
 ### Requirement: Zone contract
 
 The `benchmarks/` directory SHALL contain exactly one README, the
-`bench` facade, and the zones `contenders/`, `harness/`, `scenarios/`,
-`runner/`, `records/`, `attic/` at level 1, with no loose spike
-directories, reports, or results trees outside their zone. The
-`contenders/` zone holds consolidated contender builds and their
-shared runtime assets only (today: `rust-camel-lib/` single crate,
-`node/` shared runtime dir); per-scenario data never lives there.
+`bench` facade, the zones `attic/`, `audits/`, `contenders/`,
+`harness/`, `records/`, `runner/`, `scenarios/`, and the pinned
+level-1 investigation doc `docs-investigation-strategy.md` (the
+live-defect link for the warmup policy, referenced from
+`harness/CONTEXT.md` §2 and required by
+`harness/test_warmup_policy.py`), with no loose spike directories,
+reports, or results trees outside their zone. The `contenders/` zone
+holds consolidated contender builds and their shared runtime assets
+only (today: `rust-camel-lib/` single crate, `node/` shared runtime
+dir); per-scenario data never lives there. The `audits/` zone holds
+the bench program's tracked decision artifacts (fixture-fairness
+audit, canonical-shape proposal, re-run manifest, ruling proposals);
+bench artifacts under `benchmarks/` stay tracked — it is only the
+`docs/benchmarks/` period memos that the owner's untracking ruling
+(ef337c0f, bd rc-mq1sh, 2026-09-17) removes from version control.
 
 #### Scenario: Level-1 audit
 
-- **GIVEN** the repository after consolidation
+- **GIVEN** the repository after consolidation and the audits-zone
+  addition (rc-h42s6, 2026-09-16)
 - **WHEN** listing `benchmarks/` at level 1
-- **THEN** the listing contains only `README.md`, `bench`,
-  `contenders/`, `harness/`, `scenarios/`, `runner/`, `records/`,
-  `attic/` (and `.gitignore` if needed)
+- **THEN** the listing contains only `README.md`, `.gitignore`,
+  `bench`, `audits/`, `attic/`, `contenders/`, `harness/`,
+  `records/`, `runner/`, `scenarios/`, and
+  `docs-investigation-strategy.md`
 - **AND** no file matching `spike-*`, `results/`, or a historical
-  report remains at level 1
+  report remains at level 1 (audit artifacts live under `audits/`)
 
 #### Scenario: Harness moves without modification
 
@@ -239,31 +258,39 @@ and `publish` subcommands delegating to the records layer.
 
 ### Requirement: Era-1 freeze
 
-The system SHALL preserve era-1 evidence instead of deleting it:
-v2/v3/v4/addendum/consultation reports under
-`docs/benchmarks/history/`, historical results trees under
-`benchmarks/attic/results-era-1/`, and a git tag
-`bench/era-1-final` freezing the last commit where the reports
-lived at `docs/benchmarks/`. The gauge A/B verdict that justifies
-gauges-ON SHALL be cited in ADR-0066 before the addendum moves.
+The system SHALL preserve era-1 evidence without tracking it in the
+working tree: the v2/v3/v4/addendum/consultation reports under
+`docs/benchmarks/` (including `history/`) are untracked by the
+owner's governance ruling (ef337c0f, bd rc-mq1sh, 2026-09-17 — period
+evidence does not belong in version control; on-disk copies remain,
+gitignored, in the owner checkout), the full history stays reachable
+via the git tag `bench/era-1-final` and git history, and historical
+results trees stay tracked under `benchmarks/attic/results-era-1/`.
+The durable numbers behind standing decisions SHALL remain quoted in
+tracked artifacts — the gauges-ON A/B verdict in ADR-0066 and in
+`benchmarks/runner/RUNBOOK.md` — and tracked references to the
+untracked reports SHALL name the tag retrieval so no link is
+presented as live in a fresh clone.
 
 #### Scenario: Reports reachable after freeze
 
-- **GIVEN** the era-1 reports moved to `docs/benchmarks/history/`
-- **WHEN** a reader checks out tag `bench/era-1-final`
+- **GIVEN** the era-1 reports untracked from the working tree
+- **WHEN** a reader checks out tag `bench/era-1-final` (or runs
+  `git show bench/era-1-final:<path>`)
 - **THEN** the reports are present at `docs/benchmarks/` with
   byte-identical content
-- **AND** `docs/benchmarks/` on the restructured main contains no
-  stale era-1 comparative claims outside `history/`
-- **AND** no link in `scenarios/COVERAGE.md` points to a moved
-  report at its pre-move path
+- **AND** tracked references to the untracked reports (e.g.
+  `scenarios/COVERAGE.md`) name the tag retrieval, so no link is
+  presented as live in a fresh clone
 
 #### Scenario: Gauge premise preserved
 
-- **GIVEN** the v4 addendum moved to `docs/benchmarks/history/`
+- **GIVEN** the v4 addendum reachable via tag `bench/era-1-final`
 - **WHEN** a reader traces the gauges-ON decision
 - **THEN** ADR-0066 cites the gauge A/B verdict (point 0.9890,
-  CI [0.9785, 1.0126], interval includes 1.0)
+  CI [0.9785, 1.0126], interval includes 1.0) and
+  `benchmarks/runner/RUNBOOK.md` records the lever-study ratio with
+  the same bounds
 
 ### Requirement: Public terminology confinement
 
@@ -350,9 +377,10 @@ contract.
 
 - **Given** a host without `node` on PATH and `--dry-run`
 - **When** the node cells resolve
-- **Then** fixtures without `package.json` resolve from their committed
-  scripts (no build) and fixtures with `package.json` report a
-  would-build marker without failing the dry-run
+- **Then** the per-scenario entry scripts resolve directly from their
+  committed `.mjs` sources (no build), and the family's single shared
+  `package.json` at `benchmarks/contenders/node/` reports one
+  `<would-build:npm-ci>` marker without failing the dry-run
 
 ### Requirement: Pinned Node runtime
 
@@ -386,17 +414,25 @@ contenders + two bridge scenarios × 6: the 4-artifact core + 2 node, plus
 the `axum-bare` reference contender for `http-server`) — cold +
 warm-where-applicable, with memory gauges ON in every measured cell and
 randomized measurement order (order seed recorded in the record's
-`protocol`), recorded as one run-level record. `--scenarios=` remains a
-harness-level developer knob only. Scenario discovery is automatic and
-ACTIVE-ONLY (registered scenarios; `spike-*` and non-registered dirs like
-`multi-step` excluded — also from the `meta.json` `scenarios` list).
+`protocol`), recorded as one run-level record. The m3/m4 measured set
+excludes the node family (rc-h42s6 phase-2 alignment, e_opus ruling D5,
+2026-09-16: `M3_EXCLUDED_CONTENDERS` in `harness/run.sh`, mirrored as
+`M3_M4_EXCLUDED_CONTENDERS` in `summarize.py`, the equality
+drift-guarded by `test_summarize.py::test_roster_mirror_no_drift`);
+node cells still register and measure m1/m2 — only the m3/m4 arms drop
+them, and any lift of the exclusion lands as its own spec delta.
+`--scenarios=` remains a harness-level developer knob only. Scenario
+discovery is automatic and ACTIVE-ONLY (registered scenarios; `spike-*`
+and non-registered dirs like `multi-step` excluded — also from the
+`meta.json` `scenarios` list).
 
 #### Scenario: one command full coverage
 
 - **Given** the digest-pinned runner image present and a host meeting
   the quiet-host criteria in `benchmarks/harness/CONTEXT.md`
 - **When** `bash benchmarks/bench run-all` executes
-- **Then** the run measures the full 53-cell matrix and writes raw
+- **Then** the run registers the full 53-cell matrix (m1/m2 for every
+  cell; m3/m4 for the non-node measured set) and writes raw
   artifacts plus a launch-time `meta.json` carrying `run_id` (launch
   timestamp) and `scenarios` (the 7 active scenario names, and nothing
   else)
@@ -412,7 +448,9 @@ ACTIVE-ONLY (registered scenarios; `spike-*` and non-registered dirs like
 
 - **Given** the canonical run configuration
 - **When** the run executes
-- **Then** memory gauges are enabled in every measured cell
+- **Then** memory gauges are enabled in every m3/m4 measured cell
+  (the node family is outside the m3/m4 measured set per the D5
+  exclusion; its cells keep m1/m2)
 - **And** measurement order is randomized with the seed recorded in
   the record's `protocol.order_seed`
 
@@ -522,14 +560,19 @@ marker flushed → serve.
 The t2-json, split-aggregate and t2-realistic-eip fixtures in EVERY
 runtime — camel-standalone-dsl, camel-standalone-yaml,
 camel-quarkus-dsl-native, camel-quarkus-yaml-native, rust-camel-lib,
-rust-camel-cli (including its wrapper latency-file plumbing),
-node-native, node-fastify — SHALL run a tick loop AFTER the readiness
-marker, writing `BENCH_LATENCY` records to the cell's latency file
-under the existing Protocol B contract (10 ms timer period,
-saturation escalates via won't-measure, not period adaptation). The
-loop starts strictly after the `SCENARIO_MARKER`. When tick emission
-lands, `t2-realistic-eip` is REMOVED from the Protocol B m2 skip list
-— all 24 warm cells (3 scenarios × 8 runtimes) must measure.
+rust-camel-cli (via the harness's direct argv latency-file plumbing:
+`BENCH_LATENCY_FILE` and `BENCH_LATENCY_MODE=route` injected at cell
+launch), node-native, node-fastify — SHALL run a tick loop as part of
+the measured route, writing `BENCH_LATENCY` records to the cell's
+latency file under the existing Protocol B contract (10 ms timer
+period, first fire immediate, saturation escalates via won't-measure,
+not period adaptation). The readiness marker latches inside the FIRST
+completed tick: the timer starts at route start with zero initial
+delay and the marker fires exactly once on that code-path position —
+pinning the marker to real measured work rather than to a pre-loop
+handshake. When tick emission lands, `t2-realistic-eip` is REMOVED
+from the Protocol B m2 skip list — all 24 warm cells (3 scenarios × 8
+runtimes) must measure.
 
 #### Scenario: protocol B records exist for tick scenarios
 
@@ -552,7 +595,7 @@ lands, `t2-realistic-eip` is REMOVED from the Protocol B m2 skip list
 - **Given** the three tick scenarios
 - **When** their cells register
 - **Then** every runtime of the scenario ticks, including
-  rust-camel-cli via its wrapper latency-file plumbing (a scenario
+  rust-camel-cli via its argv latency-file plumbing (a scenario
   whose fixtures tick asymmetrically across runtimes is a hard error,
   not a partial warm matrix)
 
@@ -619,17 +662,20 @@ canonical run.
   is the fixture's own package entry — every third-party version stays
   pinned at the versions the lock already carries
 
-#### Scenario: smoke case with committed evidence
+#### Scenario: smoke case with owner-run evidence regeneration
 
 - **GIVEN** the http-server smoke harness extended with the axum-bare case
   (runnable standalone via an artifact filter, launched on a free port via
-  the env override)
+  the `BENCH_AXUM_BARE_PORT` env override)
 - **WHEN** the smoke runs
 - **THEN** it asserts the marker and `200`/`pong` as HARD requirements
   (minimal-bare shape, e_opus ruling D2, 2026-09-16: the fixture emits no
   per-request trace lines), while `id=1` verification is WARN-only
   observability; the resulting transcript log carries no timing-like
   numbers
+- **AND** committed transcripts exist only after an owner-run smoke — the
+  pre-alignment transcripts were deleted (585858c6) and benchmark runs,
+  smoke evidence regeneration included, are owner-exclusive
 
 #### Scenario: published records stay byte-identical
 
@@ -639,4 +685,3 @@ canonical run.
 - **THEN** every regenerated summary.md is byte-identical to the committed
   one (completeness validates against each record's persisted
   `expected_cells`, never current harness constants)
-
