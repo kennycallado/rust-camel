@@ -23,42 +23,44 @@ jobs:
             target: x86_64-unknown-linux-gnu
             use-cross: false
             bin-suffix: ""
-            kafka-features: "kafka"
+            flavor: "flavor-full"
             kafka-probe: true
             install-librdkafka: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             use-cross: true
             bin-suffix: ""
-            kafka-features: "kafka"
+            flavor: "flavor-full"
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             use-cross: false
             bin-suffix: ""
             install-musl-tools: true
             alloc-features: "jemalloc"
+            flavor: "flavor-regular"
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             use-cross: true
             bin-suffix: ""
             alloc-features: "jemalloc"
+            flavor: "flavor-regular"
           - os: macos-15-intel
             target: x86_64-apple-darwin
             use-cross: false
             bin-suffix: ""
-            kafka-features: "kafka"
+            flavor: "flavor-full"
             kafka-probe: true
           - os: macos-latest
             target: aarch64-apple-darwin
             use-cross: false
             bin-suffix: ""
-            kafka-features: "kafka"
+            flavor: "flavor-full"
             kafka-probe: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             use-cross: false
             bin-suffix: ".exe"
-            kafka-features: "kafka"
+            flavor: "flavor-full"
             kafka-probe: true
 
     steps:
@@ -90,22 +92,19 @@ jobs:
 
       - name: Build binary
         env:
-          KAFKA_FEATURES: ${{ matrix.kafka-features }}
+          FLAVOR: ${{ matrix.flavor }}
           ALLOC_FEATURES: ${{ matrix.alloc-features }}
         run: |
-          # Compose the feature set from both matrix keys. kafka-features
-          # carries the kafka capability feature on kafka legs; empty/absent
-          # keys must yield no empty elements — "--features ,jemalloc" is a
-          # cargo error, and a silently-dropped feature ships a mallocng
-          # binary that looks green (rc-vnm8).
-          FEATURES=$(echo "${KAFKA_FEATURES},${ALLOC_FEATURES}" | sed 's/^,//; s/,$//; s/,,/,/g')
-          FEATURE_FLAG=""
-          [ -n "$FEATURES" ] && FEATURE_FLAG="--features $FEATURES"
-          echo "Building ${{ matrix.target }} with: ${FEATURE_FLAG:-<no features>}"
+          # Single flavor marker per leg (single source of truth, no
+          # composed feature lists); allocator joins with a plain
+          # conditional expansion — empty ALLOC_FEATURES must not leave
+          # a leading comma (rc-vnm8 class).
+          FEATURES="${FLAVOR}${ALLOC_FEATURES:+,$ALLOC_FEATURES}"
+          echo "Building ${{ matrix.target }} with: --features $FEATURES"
           if [[ "${{ matrix.use-cross }}" == "true" ]]; then
-            cross build -p camel-cli --release --target ${{ matrix.target }} $FEATURE_FLAG
+            cross build -p camel-cli --release --target "${{ matrix.target }}" --features "$FEATURES"
           else
-            cargo build -p camel-cli --release --target ${{ matrix.target }} $FEATURE_FLAG
+            cargo build -p camel-cli --release --target "${{ matrix.target }}" --features "$FEATURES"
           fi
         shell: bash
 
@@ -138,6 +137,21 @@ jobs:
             exit 1
           fi
           echo "OK: kafka capability verified on ${{ matrix.target }}"
+
+      - name: Assert version flavor
+        if: matrix.use-cross != true
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/camel${{ matrix.bin-suffix }}"
+          EXPECTED="${{ matrix.flavor }}"
+          EXPECTED="${EXPECTED#flavor-}"
+          OUT="$("$BIN" --version)"
+          printf '%s\n' "$OUT"
+          case "$OUT" in
+            *" ($EXPECTED)") ;;
+            *) echo "FAIL: expected flavor suffix ($EXPECTED)"; exit 1 ;;
+          esac
 
       - name: Assert jemalloc linked (musl only)
         if: contains(matrix.alloc-features, 'jemalloc')

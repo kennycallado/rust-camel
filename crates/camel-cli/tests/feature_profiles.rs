@@ -412,6 +412,59 @@ fn kafka_feature_table_implies_capability() {
 }
 
 #[test]
+fn flavor_marker_table() {
+    // The flavor markers are the single selection surface for profiles
+    // (see the Cargo.toml comment block above `flavor-slim`). Assert the
+    // exact table — three markers plus the default wiring — so a renamed
+    // or re-bodied marker breaks this test instead of silently changing
+    // the profile surface.
+    let manifest = fs::read_to_string(workspace_root().join("crates/camel-cli/Cargo.toml"))
+        .expect("failed to read crates/camel-cli/Cargo.toml");
+    let mut in_features = false;
+    let mut marker_lines: Vec<&str> = Vec::new();
+    for line in manifest.lines() {
+        if line.starts_with('[') {
+            in_features = line == "[features]";
+            continue;
+        }
+        if in_features && (line.starts_with("flavor-") || line.starts_with("default")) {
+            marker_lines.push(line);
+        }
+    }
+    assert_eq!(
+        marker_lines,
+        vec![
+            r#"default = ["flavor-regular"]"#,
+            r#"flavor-slim = ["slim-http"]"#,
+            r#"flavor-regular = ["full"]"#,
+            r#"flavor-full = ["full", "kafka"]"#,
+        ],
+        "the flavor marker table must be exactly the four declared lines"
+    );
+}
+
+#[test]
+fn flavor_full_closure_equals_full_plus_kafka() {
+    let a = tree_lines(&["--no-default-features", "--features", "flavor-full"]);
+    let b = tree_lines(&["--no-default-features", "--features", "full,kafka"]);
+    assert_eq!(a, b);
+}
+
+#[test]
+fn flavor_regular_closure_equals_full() {
+    let a = tree_lines(&["--no-default-features", "--features", "flavor-regular"]);
+    let b = tree_lines(&["--no-default-features", "--features", "full"]);
+    assert_eq!(a, b);
+}
+
+#[test]
+fn flavor_slim_closure_equals_slim_http() {
+    let a = tree_lines(&["--no-default-features", "--features", "flavor-slim"]);
+    let b = tree_lines(&["--no-default-features", "--features", "slim-http"]);
+    assert_eq!(a, b);
+}
+
+#[test]
 fn dynamic_linking_closure_resolves_kafka() {
     let lines = tree_lines(&["--no-default-features", "--features", "dynamic-linking"]);
     assert!(

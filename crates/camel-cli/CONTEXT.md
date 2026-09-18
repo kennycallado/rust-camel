@@ -230,7 +230,7 @@ ADR-0066) and heap profiling (see below). The alternative backend feature
 unreachable whenever jemalloc was enabled and no build path enabled it
 (bd rc-rrz6a).
 
-**Feature profiles.** `default = ["full"]`, where `full` is exactly the
+**Feature profiles.** `default = ["flavor-regular"]`, where `full` is exactly the
 pre-change default set plus the language adapters and the LSP server
 (those were previously unconditional dependencies, so the union
 reproduces the historical default closure — golden-fixture proof in
@@ -238,7 +238,15 @@ reproduces the historical default closure — golden-fixture proof in
 `--no-default-features` baseline: an http-only deployment that links the
 non-optional core plumbing and excludes the controllable optional set
 (kafka, grpc, wasm, llm, mcp, mqtt, surrealdb, exec, the lsp stack, and
-the `lang-*` runtimes). The kafka surface is exactly two features:
+the `lang-*` runtimes). The flavor markers `flavor-slim`,
+`flavor-regular`, and `flavor-full` are the single selection surface for
+profiles — aliases today (`flavor-slim` → `slim-http`, `flavor-regular`
+→ `full`, `flavor-full` → `full` + `kafka`), with content curation
+deferred to the flavor-matrix change. Overlapping markers report by
+priority full > regular > slim; a raw composition with no marker reports
+`custom`. `camel --version` prints the flavor as a suffix
+(`camel 0.49.0 (regular)`) while the compiled-artifact manifest stays
+semver-only. The kafka surface is exactly two features:
 `kafka` (capability — component activation plus registration in the lint
 registry and the boot cascade; librdkafka source build via cmake — the
 feature forwards `camel-component-kafka/cmake-build`, because the

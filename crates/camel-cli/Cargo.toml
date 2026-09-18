@@ -121,7 +121,7 @@ serde_json.workspace = true
 ron = { workspace = true }
 
 [features]
-default = ["full"]
+default = ["flavor-regular"]
 # `full` = the historical `default` set plus the language adapters and the
 # LSP server. Those were previously unconditional dependencies, so the union
 # reproduces today's default closure exactly (golden fixture proof:
@@ -136,6 +136,13 @@ lang-rhai = ["camel-core/lang-rhai"]
 lang-jsonpath = ["camel-core/lang-jsonpath"]
 lang-xpath = ["camel-core/lang-xpath"]
 lang-minijinja = ["camel-core/lang-minijinja"]
+# Flavor markers are the single selection surface for profiles; priority when
+# several are enabled is full > regular > slim; builds with no marker report
+# `custom`; bodies in this change are aliases only (content curation is the
+# flavor-matrix change).
+flavor-slim = ["slim-http"]
+flavor-regular = ["full"]
+flavor-full = ["full", "kafka"]
 # slim-benchmarks is the renamed slim-http (owner ruling 2026-09-17:
 # benchmark-oriented baseline); the alias below keeps existing legs
 # building for one release.

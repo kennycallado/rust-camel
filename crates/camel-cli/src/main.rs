@@ -9,10 +9,32 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use camel_cli::commands;
 use clap::{Parser, Subcommand};
 
+/// Compile-time flavor from the marker features. Priority:
+/// full > regular > slim; no marker enabled means a raw
+/// composition, reported as `custom`.
+pub const FLAVOR: &str = if cfg!(feature = "flavor-full") {
+    "full"
+} else if cfg!(feature = "flavor-regular") {
+    "regular"
+} else if cfg!(feature = "flavor-slim") {
+    "slim"
+} else {
+    "custom"
+};
+
+fn version_line() -> &'static str {
+    match FLAVOR {
+        "full" => concat!(env!("CARGO_PKG_VERSION"), " (full)"),
+        "regular" => concat!(env!("CARGO_PKG_VERSION"), " (regular)"),
+        "slim" => concat!(env!("CARGO_PKG_VERSION"), " (slim)"),
+        _ => concat!(env!("CARGO_PKG_VERSION"), " (custom)"),
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "camel",
-    version,
+    version = version_line(),
     about = "Command-line interface for Apache Camel in Rust"
 )]
 struct Cli {
@@ -276,5 +298,22 @@ mod run_config_env_tests {
             Some("Camel.toml"),
             "default_value must stay intact when CAMEL_CONFIG_FILE is unset"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FLAVOR, version_line};
+
+    /// rc-5t5fo: the interactive CLI version line must be `<semver> (<flavor>)`
+    /// with the flavor derived from the marker features.
+    #[test]
+    fn version_line_matches_contract() {
+        assert_eq!(
+            version_line(),
+            format!("{} ({})", env!("CARGO_PKG_VERSION"), FLAVOR)
+        );
+        assert!(version_line().ends_with(&format!(" ({FLAVOR})")));
+        assert!(version_line().starts_with(env!("CARGO_PKG_VERSION")));
     }
 }
