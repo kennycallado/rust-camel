@@ -291,7 +291,7 @@ pub fn redact_url_fail_closed(raw: &str) -> String {
 /// (bd rc-r7v8s) — contains any of `sensitive_key_substrings` renders as
 /// `{raw_key}=<redacted>` (the key keeps its original encoded bytes),
 /// EXCEPT when the raw key's own single-pass minimal decode
-/// (see [`minimal_decode_pair`]) is credential-shaped — contains `@` and
+/// (see `minimal_decode_pair`) is credential-shaped — contains `@` and
 /// also `:` or `//`: then the pair renders as a bare `<redacted>` and the
 /// key never echoes (bd rc-yvjp3, ADR-0076 appendix: key-position
 /// credential-shape symmetry — the same predicate the benign-key branch
