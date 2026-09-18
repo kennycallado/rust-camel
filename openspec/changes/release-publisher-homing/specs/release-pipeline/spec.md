@@ -19,7 +19,7 @@ workflow file containing the publish job) against each crate's
 registered entry, and the 60+ published crates are registered
 against `.github/workflows/release.yml`.
 
-#### Scenario: tag wrapper is thin and homes the publisher
+#### Scenario: tag wrapper is thin
 
 - **GIVEN** `.github/workflows/release.yml` and the reusable
   `.github/workflows/release-matrix.yml`
