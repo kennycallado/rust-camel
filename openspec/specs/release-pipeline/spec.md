@@ -9,10 +9,16 @@ The release build matrix (legs, targets, runners, feature
 composition, probes) SHALL live in exactly one reusable workflow
 (`release-matrix.yml`, `on: workflow_call`) invoked by wrappers.
 The tag wrapper (`release.yml`) SHALL contain no inline matrix: it
-only declares the tag trigger, the publish permissions
+declares the tag trigger, the publish permissions
 (`contents: write`, `packages: write`, `id-token: write`), the
 secrets handoff (`secrets: inherit`), and a single call with
-`publish: true`.
+`publish: true`. The tag wrapper SHALL also home the crates.io
+publish job (see Requirement: Publish side effects are gated on the
+publish input) — this homing is a hard constraint: crates.io
+trusted publishing matches the OIDC `job_workflow_ref` (the
+workflow file containing the publish job) against each crate's
+registered entry, and the 60+ published crates are registered
+against `.github/workflows/release.yml`.
 
 #### Scenario: tag wrapper is thin
 
@@ -20,9 +26,11 @@ secrets handoff (`secrets: inherit`), and a single call with
   `.github/workflows/release-matrix.yml`
 - **WHEN** the tag wrapper file is inspected
 - **THEN** it declares the `v*` tag trigger, the three publish
-  permissions, `secrets: inherit`, and exactly one job that calls
-  the reusable workflow with `publish: true`, and contains no
-  build matrix, no probe steps, and no publish steps of its own
+  permissions, `secrets: inherit`, exactly one job that calls the
+  reusable workflow with `publish: true`, and the crates.io
+  publish job (with `environment: crates-io` and
+  `needs: call-release-matrix`), and contains no build matrix and
+  no probe steps
 
 #### Scenario: dev wrapper calls the same matrix
 
@@ -36,12 +44,16 @@ secrets handoff (`secrets: inherit`), and a single call with
 ### Requirement: Publish side effects are gated on the publish input
 
 Every step or job in the reusable workflow whose execution has
-external side effects — credential-provider install, registry
+external side effects — registry
 logins, docker push or `imagetools` manifest creation, GitHub
-release creation, crates.io publishing — SHALL carry
-`if: inputs.publish` (directly or via its parent job). With
-`publish: false`, none of these steps SHALL execute, and no
-credential material SHALL be requested or installed.
+release creation, or any future credential-provider install — SHALL
+carry `if: inputs.publish` (directly or
+via its parent job). With `publish: false`, none of these steps
+SHALL execute, and no credential material SHALL be requested or
+installed. crates.io publishing is NOT gated by the input: it is
+gated structurally — the publish job exists only in the tag
+wrapper, whose sole trigger is the `v*` tag push, and it SHALL NOT
+carry a publish-input conditional.
 
 #### Scenario: dev run stays side-effect-free
 
@@ -59,7 +71,12 @@ credential material SHALL be requested or installed.
 - **WHEN** the run completes
 - **THEN** the publish path behaves equivalently to the
   pre-refactor tag pipeline: same legs built, same probes executed,
-  same artifacts, images, and release outputs produced
+  same artifacts, images, and release outputs produced, and the
+  crates.io publish job (homed in the wrapper) publishes under
+  `job_workflow_ref = .github/workflows/release.yml` — with one
+  accepted difference: the publish job waits for ALL matrix jobs
+  (`needs: call-release-matrix`), so a matrix failure (e.g. docker)
+  blocks crates.io publishing
 
 ### Requirement: Dev harness proves the feature closures
 
