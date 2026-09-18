@@ -15,8 +15,9 @@ default = []
 test-util = []
 
 [dependencies]
+camel-api           = { workspace = true }
 camel-component-api = { workspace = true }
-camel-bridge    = { workspace = true }
+camel-bridge        = { workspace = true }
 tonic           = { workspace = true }
 tonic-prost     = { workspace = true }
 prost           = { workspace = true }

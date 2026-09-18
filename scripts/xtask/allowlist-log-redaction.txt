@@ -20,13 +20,6 @@ crates/components/camel-component-grpc/src/tls_reload.rs:47
 #   hostname from config, no URL and no credential substrate.
 crates/components/camel-component-grpc/src/tls_reload.rs:56
 
-# ── camel-cxf (rc-redactstrict task 2.2) ────────────────────────────────
-# producer.rs:245 — `address = %address.as_deref().unwrap_or("")`: URL-shaped
-#   SOAP address; redact_url wrap DEFERRED because camel-cxf has no camel-api
-#   dependency and dependency additions were out of change scope — tracked as
-#   bd rc-emsvi.
-crates/components/camel-cxf/src/producer.rs:245
-
 # ── camel-http (rc-redactstrict task 2.2) ───────────────────────────────
 # lib.rs:1193 — `host = host`: bare HTTP server hostname parameter
 #   (&str), no URL and no credential substrate.

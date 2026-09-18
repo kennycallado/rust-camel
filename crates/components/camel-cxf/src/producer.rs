@@ -29,6 +29,16 @@ fn is_transport_error(status: &tonic::Status) -> bool {
     }
 }
 
+/// Redacted SOAP service address for logging (bd rc-emsvi): the address is
+/// URL-shaped, so it must go through the canonical
+/// [`camel_api::redact::redact_url`] — userinfo in every authority window
+/// masked, query/fragment replaced by `?[redacted]`/`#[redacted]` sentinels
+/// in first-occurrence order, output capped at 256 bytes. Local delegating
+/// wrapper mirrors camel-jms (bd rc-eh49) for a unit-testable call site.
+fn redact_url(url: &str) -> String {
+    camel_api::redact::redact_url(url)
+}
+
 pub struct CxfProducer {
     pool: Arc<CxfBridgePool>,
     profile_name: String,
@@ -242,7 +252,7 @@ impl Service<Exchange> for CxfProducer {
                 .await
                 .map_err(|_| CamelError::ProcessorError("cxf producer semaphore closed".into()))?;
             debug!(
-                address = %address.as_deref().unwrap_or(""),
+                address = %redact_url(address.as_deref().unwrap_or("")),
                 operation = %configured_operation,
                 correlation_id = %correlation_id,
                 "CXF producer call started"
@@ -593,5 +603,59 @@ mod tests {
     fn is_transport_error_ignores_non_transport_internal() {
         let status = tonic::Status::internal("soap fault");
         assert!(!is_transport_error(&status));
+    }
+
+    // ── bd rc-emsvi: SOAP address redaction for safe logging ────────────────
+
+    #[test]
+    fn redact_url_strips_userinfo_with_password() {
+        assert_eq!(
+            redact_url("http://admin:s3cret@soap.example.com:9000/OrderService"),
+            "http://***@soap.example.com:9000/OrderService"
+        );
+    }
+
+    #[test]
+    fn redact_url_strips_userinfo_without_password() {
+        assert_eq!(
+            redact_url("http://admin@soap.example.com:9000/OrderService"),
+            "http://***@soap.example.com:9000/OrderService"
+        );
+    }
+
+    #[test]
+    fn redact_url_passes_clean_address_unchanged() {
+        assert_eq!(
+            redact_url("http://soap.example.com:9000/OrderService"),
+            "http://soap.example.com:9000/OrderService"
+        );
+    }
+
+    #[test]
+    fn redact_url_drops_query_and_fragment() {
+        assert_eq!(
+            redact_url("http://soap.example.com:9000/Service?user=a&token=t#frag"),
+            "http://soap.example.com:9000/Service?[redacted]#[redacted]"
+        );
+    }
+
+    /// Spec cross-surface identity fixture (cxf surface): the component
+    /// `redact_url` delegates to `camel_api::redact::redact_url`, so both
+    /// surfaces must return the same bytes on the same input.
+    #[test]
+    fn redact_url_shared_fixture_pin() {
+        let raw = "http://soap.example.com:9000/Service?token=secret";
+        assert_eq!(
+            camel_api::redact::redact_url(raw),
+            "http://soap.example.com:9000/Service?[redacted]"
+        );
+        assert_eq!(redact_url(raw), camel_api::redact::redact_url(raw));
+    }
+
+    /// The log site maps an unset address to `""` before redaction; the
+    /// helper must keep the empty string empty (no sentinel noise).
+    #[test]
+    fn redact_url_empty_address_stays_empty() {
+        assert_eq!(redact_url(""), "");
     }
 }
