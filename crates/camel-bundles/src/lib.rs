@@ -456,6 +456,9 @@ pub async fn boot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the not-kafka gating probe builds a route; its cfg-gated
+    // kafka twin asserts registry presence alone.
+    #[cfg(not(feature = "kafka"))]
     use camel_core::{BuilderStep, RouteDefinition};
 
     fn fixture(rel: &str) -> String {
