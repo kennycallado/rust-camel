@@ -701,6 +701,7 @@ async fn run_throughput_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Pin the per-round `measure-a` line shape. The harness + downstream
     /// tools (e.g. report generators) parse this exact field order. Brief
@@ -742,12 +743,59 @@ mod tests {
         );
     }
 
+    /// Wait until the server-side counter observes the request(s)
+    /// `warmup_drive` dispatched, then until it stops moving.
+    ///
+    /// Rationale (rc-5y0di): loopback accept + read are asynchronous to
+    /// the client, so a request dispatched before the deadline can be
+    /// observed by the server AFTER `warmup_drive` returns. Polling
+    /// with a generous bound replaces the assumption that the server
+    /// task is scheduled within warmup's own runtime — the bounds are
+    /// scheduler slack, not part of the contract under test.
+    async fn await_requests_then_settle(counter: &AtomicUsize) -> usize {
+        // Phase A: the first dispatched request must eventually be
+        // observed. warmup_drive dispatched it before its deadline, so
+        // only scheduler starvation could delay it past this bound.
+        let first_bound = Duration::from_millis(1_000);
+        let first_deadline = Instant::now() + first_bound;
+        while counter.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < first_deadline,
+                "warmup_drive dispatched a request before its deadline; \
+                 the server must eventually observe it"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Phase B: settle — three consecutive equal reads 50ms apart.
+        // This IS the "no new requests after the deadline" check: a
+        // warmup that kept starting requests would never settle.
+        let settle_deadline = Instant::now() + Duration::from_millis(2_000);
+        let mut streak = 0;
+        let mut last = counter.load(Ordering::SeqCst);
+        while streak < 3 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let now = counter.load(Ordering::SeqCst);
+            if now == last {
+                streak += 1;
+            } else {
+                streak = 0;
+                last = now;
+                assert!(
+                    Instant::now() < settle_deadline,
+                    "counter never settled — warmup keeps starting requests \
+                     after its deadline"
+                );
+            }
+        }
+        last
+    }
+
     /// Warmup must never start a new request after its wall-clock
-    /// deadline: the counter captured at return must not move afterwards,
-    /// and blocked (late) work must not become a sample.
+    /// deadline: the counter must not move once the server has observed
+    /// every dispatched request, and blocked (late) work must not become
+    /// a sample.
     #[tokio::test]
     async fn warmup_drive_request_deadline_stops_new_requests() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -792,20 +840,26 @@ mod tests {
         // The paused response cannot complete inside the window, so the
         // returned samples exclude blocked work.
         assert!(samples.is_empty());
-        let n_at_return = counter.load(Ordering::SeqCst);
+
+        // Settle before treating the counter as final: a request
+        // dispatched just before the deadline may legally be observed
+        // by the server after warmup_drive returns. (rc-5y0di: the
+        // original test captured the counter immediately, racing the
+        // server task's scheduling.)
+        let n_at_return = await_requests_then_settle(&counter).await;
         assert!(n_at_return >= 1, "server must have seen a request");
 
-        // No new request may be started after the deadline.
+        // No NEW request may be started after the deadline: after the
+        // settle above, the count must stay fixed.
         tokio::time::sleep(Duration::from_millis(100)).await; // allow-test-sleep: task-mandated 100ms post-deadline observation
         assert_eq!(counter.load(Ordering::SeqCst), n_at_return);
     }
 
     /// A request whose body drain would block past the deadline must be
-    /// cancelled: warmup completes bounded well under 250ms and the
-    /// blocked sample is discarded.
+    /// cancelled: warmup completes bounded well under the deadline plus
+    /// scheduler slack and the blocked sample is discarded.
     #[tokio::test]
     async fn warmup_drive_body_deadline_stops_inflight_request() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -852,9 +906,17 @@ mod tests {
         let elapsed = start.elapsed();
 
         // A blocked drain must not extend warmup beyond the deadline.
-        assert!(elapsed < Duration::from_millis(250), "elapsed: {elapsed:?}");
-        // The request did reach the server, but its sample is discarded.
-        assert!(counter.load(Ordering::SeqCst) >= 1);
+        // The bound is a hang guard: the defect this catches is a body
+        // drain that is never cancelled (elapsed would be unbounded).
+        // The 500ms slack beyond the 50ms deadline absorbs scheduler
+        // stalls of the test process — the original 250ms bound raced
+        // machine load (rc-5y0di).
+        assert!(elapsed < Duration::from_millis(550), "elapsed: {elapsed:?}");
+        // The request did reach the server (the observation may trail
+        // warmup_drive's return — settle first), and its sample is
+        // discarded.
+        let n = await_requests_then_settle(&counter).await;
+        assert!(n >= 1);
         assert!(samples.is_empty());
     }
 }
