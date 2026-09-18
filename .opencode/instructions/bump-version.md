@@ -3,6 +3,14 @@
 Verified against the v0.48.0 precedent (`0f67ee5d`) and the v0.49.0 bump
 (`f8eb976a`). Follow EXACTLY; do not improvise steps.
 
+0. **GATE SWEEP FIRST** (born from the v0.49.0 rustdoc miss): a release
+   push must NEVER be the first doc-build. Before the bump commit, in a
+   worktree at the release candidate HEAD run:
+   `RUSTC_WRAPPER= RUSTDOCFLAGS="-D warnings" cargo doc -p camel-api -p
+   camel-core -p camel-builder -p camel-dsl -p camel-endpoint --no-deps`
+   plus `cargo fmt --check --all`. The 7-target release matrix is
+   CI-only; doc-build and fmt are cheap locally — run them.
+
 1. **Version pins**: the workspace ROOT `Cargo.toml` carries ~69 version
    strings (the `[workspace.package]` version AND internal camel-* pins).
    Bump ALL of them: `sed -i 's/0\.X\.0/0.Y.0/g' Cargo.toml`.
