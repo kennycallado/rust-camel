@@ -36,8 +36,9 @@ Verified against the v0.48.0 precedent (`0f67ee5d`) and the v0.49.0 bump
 6. **Tag**: lightweight, `vX.Y.Z` (precedent v0.40-v0.47). Owner decides
    the moment.
 7. **Push** (main + tag) is the OWNER's exclusive action — it triggers
-   `release.yml` (7-target matrix -> GitHub Release -> crates.io ->
-   docker images). Agents never push.
+   `release-matrix.yml` (7-target matrix -> GitHub Release -> crates.io ->
+   docker images), the reusable workflow invoked by both the `release.yml`
+   tag wrapper and the `release-dev.yml` dev wrapper. Agents never push.
 8. Cargo in the MAIN checkout is limited to metadata-only commands
    (`cargo update`, `cargo tree`); builds/tests run in worktrees or by
    the human (pre-push tests are the human's domain).

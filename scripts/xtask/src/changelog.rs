@@ -133,7 +133,7 @@ fn last_core_tag() -> Result<String, String> {
 }
 
 fn is_core_tag(t: &str) -> bool {
-    // Strict three-component form (vX.Y.Z) — matches release.yml's hardened
+    // Strict three-component form (vX.Y.Z) — matches release-matrix.yml's hardened
     // grep. The loose 'v' + digit check let typo aliases like v0.320 win the
     // -v:refname sort and drag newer releases into the default range.
     let rest = t.strip_prefix('v').unwrap_or("");

@@ -1,0 +1,17 @@
+name: Release (dev)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+concurrency:
+  group: release-dev
+  cancel-in-progress: true
+
+jobs:
+  call-release-matrix:
+    uses: ./.github/workflows/release-matrix.yml
+    with:
+      publish: false
