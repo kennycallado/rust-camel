@@ -2,8 +2,8 @@
 
 Bump the rust-camel workspace version. Released via tag `vX.Y.Z` →
 `.github/workflows/release-matrix.yml` (7-target build matrix → GitHub Release →
-`scripts/publish-crates.sh` to crates.io → Docker images ghcr + dockerhub, amd64+arm64),
-invoked by the `release.yml` tag wrapper.
+Docker images ghcr + dockerhub, amd64+arm64); the `release.yml` tag wrapper
+homes the crates.io publish job (`scripts/publish-crates.sh`).
 
 The versioning mechanism is documented as a comment in `Cargo.toml` at the
 top of `[workspace.dependencies]` (search `IMPORTANT: when bumping`): exact pinning (`=X.Y.Z`) of

@@ -1,9 +1,10 @@
 # OIDC publish fallback runbook
 
 Audience: the maintainer on deck when a `v0.45.x` crates.io publish fails
-under OIDC trusted publishing. The release pipeline (tag wrapper
-`.github/workflows/release.yml` → reusable workflow
-`.github/workflows/release-matrix.yml`) publishes with a cargo credential
+under OIDC trusted publishing. The tag wrapper `.github/workflows/release.yml`
+homes the crates.io publish job; the reusable workflow
+`.github/workflows/release-matrix.yml` builds the 7-target matrix, artifacts,
+images, and the GitHub Release. Publishing uses a cargo credential
 provider that exchanges the
 GitHub Actions OIDC token for short-lived crates.io tokens
 (`scripts/trustpub-credential-helper.sh`). The `CARGO_REGISTRY_TOKEN`
@@ -48,7 +49,7 @@ OIDC trusted publishing is the steady-state path for subsequent releases.
    `CARGO_REGISTRY_TOKEN` secret in the release workflow).
 2. Owner registers trustpub for the crate on crates.io (registration
    tuple: owner `kennycallado`, repository `rust-camel`, workflow
-   `release-matrix.yml`, environment `crates-io`).
+   `release.yml`, environment `crates-io`).
 3. Maintainer updates the manifest state
    (`scripts/xtask/trustpub-registrations.toml`) to `registered` after
    first publication or any registration change, preserving publish order.
@@ -63,7 +64,7 @@ be kept current by hand.
    error class:
    - `No Trusted Publishing config found for repository ...` — a crate is
      NOT registered on crates.io (registration tuple: owner
-     `kennycallado`, repository `rust-camel`, workflow `release-matrix.yml`,
+     `kennycallado`, repository `rust-camel`, workflow `release.yml`,
      environment `crates-io`). Register it (owner action, ~1 minute on
      crates.io), then re-run — no fallback needed.
    - OIDC claim/exchange errors (`invalid_claims`, audience mismatch,
@@ -84,14 +85,15 @@ be kept current by hand.
 ## The fallback: revert-commit path (token publish)
 
 `release.yml` (the tag wrapper) triggers ONLY on `v*` tag pushes and
-invokes the `release-matrix.yml` publishing workflow — there is no
+homes the crates.io publish job; the reusable `release-matrix.yml` builds
+artifacts, images, and the GitHub Release — there is no
 `workflow_dispatch` input. The fallback is therefore a temporary revert of
 the OIDC commit on the release line, a moved tag, and a re-run; the pre-OIDC
 workflow publishes with the `CARGO_REGISTRY_TOKEN` secret.
 
 ```bash
 # 0. On the tagged release commit (vX.Y.Z), verify the tree carries OIDC:
-git show vX.Y.Z:.github/workflows/release-matrix.yml | grep -c credential-provider  # > 0
+git show vX.Y.Z:.github/workflows/release.yml | grep -c credential-provider  # > 0
 
 # 1. Create the fallback commit ON TOP of the tagged commit
 #    (version files unchanged — only the workflow swaps back to the token):
@@ -130,10 +132,11 @@ git push origin main                    # human pushes; never automate
 ## Reference
 
 - Registration tuple (identical for every crate): owner `kennycallado`,
-  repository `rust-camel`, workflow `release-matrix.yml`, environment `crates-io`.
-  The tuple names `release-matrix.yml` because crates.io trusted publishing
-  matches the workflow file containing the publish job (`job_workflow_ref`),
-  which after the restructure is the reusable workflow. The machine-generated
+  repository `rust-camel`, workflow `release.yml`, environment `crates-io`.
+  The crates.io publish job MUST remain homed in `release.yml` because
+  trusted publishing matches `job_workflow_ref` (the workflow file
+  containing the publish job) against each crate's registration, and all
+  60+ crates are registered against `release.yml`. The machine-generated
   per-crate list regenerates with `cargo xtask publish-order`.
 - Wire format and protocol evidence: mission `oidc-prep` (bd rc-bpyz),
   CI runs 34630411072 / 34631907359.

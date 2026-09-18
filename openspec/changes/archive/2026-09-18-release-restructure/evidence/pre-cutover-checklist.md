@@ -1,3 +1,5 @@
+> OBSOLETE (2026-09-18): superseded by change release-publisher-homing — the publish job returned to release.yml; NO crates.io re-registration is needed or wanted. Do not follow the steps below.
+
 # Pre-cutover checklist: release-restructure
 
 ## Human action (owner) — BEFORE the next tag push

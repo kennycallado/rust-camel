@@ -16,3 +16,59 @@ jobs:
     with:
       publish: true
     secrets: inherit
+
+  publish:
+    name: Publish crates to crates.io
+    runs-on: ubuntu-latest
+    needs: call-release-matrix
+    # Job-level permissions REPLACE the workflow-level set, so contents: read
+    # must be restated for checkout. id-token: write enables the OIDC token
+    # exchange with crates.io (trusted publishing).
+    permissions:
+      contents: read
+      id-token: write
+    # Trust relationship is scoped to this dedicated environment. Every crate
+    # must be registered on crates.io as a trusted publisher with exactly:
+    # owner kennycallado, repository rust-camel, workflow release.yml,
+    # environment crates-io. Registration must be COMPLETE before the
+    # CARGO_REGISTRY_TOKEN repository secret is deleted — a partially
+    # registered set half-publishes a version (unrecoverable).
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Ensure publish script is executable
+        run: chmod +x ./scripts/publish-crates.sh
+      # Trusted publishing: cargo credential provider. Each per-crate
+      # `cargo publish` process invokes the provider, which mints a fresh
+      # short-lived crates.io token seconds before use — the backend's
+      # hardcoded 30-minute token expiry can never straddle a publish.
+      # Registry wire format mirrors rust-lang/crates-io-auth-action v1.0.5.
+      # Config key is `credential-provider` (the `credential-process` key
+      # was removed from modern cargo).
+      - name: Install cargo credential provider (TrustPub OIDC)
+        run: |
+          chmod +x ./scripts/trustpub-credential-helper.sh
+          helper="$PWD/scripts/trustpub-credential-helper.sh"
+          cfg="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          mkdir -p "$(dirname "$cfg")"
+          # Append-only on a fresh runner; the guard keeps re-runs idempotent
+          # (a duplicate [registry] table would break every later cargo call).
+          # A pre-existing [registry] table WITHOUT our key would collide on
+          # append — fail loudly instead of corrupting the config.
+          if grep -q '^credential-provider' "$cfg" 2>/dev/null; then
+            :
+          elif grep -q '^\[registry\]' "$cfg" 2>/dev/null; then
+            echo "::error::$cfg already has a [registry] table without credential-provider — refusing to append a duplicate table"
+            exit 1
+          else
+            {
+              printf '[registry]\n'
+              printf 'credential-provider = "%s"\n' "$helper"
+            } >> "$cfg"
+          fi
+      - name: Publish workspace crates
+        run: ./scripts/publish-crates.sh
