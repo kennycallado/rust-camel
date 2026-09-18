@@ -95,8 +95,10 @@ http = [
 ]
 # Demand-gated SQL action activation (ADR-0069 §8, mirror of `http`):
 # the `sql:` action executor compiles only when scenarios prepare
-# state through a datasource.
-sql = ["dep:sqlx"]
+# state through a datasource. Forwards camel-bundles' sql gate: the
+# harness is a bundles consumer, so the shadow feature must forward it
+# (lint-gate-forwarding Rule 1).
+sql = ["dep:sqlx", "camel-bundles/sql"]
 
 [lints]
 workspace = true

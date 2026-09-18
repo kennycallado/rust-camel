@@ -3,6 +3,10 @@ pub mod commands;
 pub mod compile;
 pub mod template;
 
+// Arc only feeds the datasource-catalog binding below, which exists solely
+// for the sql/surrealdb bundles; gate the import so slim builds stay
+// warning-free (the workspace lint set elevates warnings).
+#[cfg(any(feature = "sql", feature = "surrealdb"))]
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -39,6 +43,9 @@ macro_rules! register_bundle_empty {
 /// Like [`register_bundle_empty!`], but wires an empty datasource catalog
 /// (sql/surrealdb bundles). An empty catalog is acceptable — metadata is
 /// queryable regardless of configured datasources.
+///
+/// Gated with its only consumers so slim builds stay warning-free.
+#[cfg(any(feature = "sql", feature = "surrealdb"))]
 macro_rules! register_datasource_bundle_empty {
     ($ctx:expr, $Bundle:ty, $catalog:expr) => {{
         let key = <$Bundle as camel_component_api::ComponentBundle>::config_key();
@@ -74,6 +81,13 @@ macro_rules! register_datasource_bundle_empty {
 /// `unverified-scheme` notes in lint output, which is the accepted
 /// graceful-degradation behaviour.
 ///
+/// Bridge schemes (`jms`/`sql`/`redis`/`opensearch`/`ws`/`cxf`/`xj`/
+/// `xslt`, and the pre-existing `surrealdb`) are additionally
+/// feature-gated, like `wasm`/`exec`: slim builds
+/// (`--no-default-features`) omit their bundles entirely, so endpoints on
+/// those schemes surface as `unverified-scheme` lint notes — the same
+/// accepted graceful degradation.
+///
 /// Because `Component::metadata()` has a trait default returning
 /// `ComponentMetadata::minimal(scheme)` and `Registry::register()` harvests
 /// it unconditionally, registering each builtin makes its scheme queryable by
@@ -86,7 +100,9 @@ macro_rules! register_datasource_bundle_empty {
 /// the corpus baseline (`tests/lint_corpus.rs`); unification is tracked by a
 /// bd follow-up.
 pub fn register_builtin_components_for_lint(ctx: &mut camel_core::CamelContext) {
+    #[cfg(any(feature = "sql", feature = "surrealdb"))]
     use camel_api::datasource::DatasourceCatalog;
+    #[cfg(any(feature = "sql", feature = "surrealdb"))]
     use camel_core::datasource::RuntimeDatasourceCatalog;
 
     // --- Config-independent components (handle-free) ---
@@ -103,10 +119,13 @@ pub fn register_builtin_components_for_lint(ctx: &mut camel_core::CamelContext) 
     ctx.register_component(camel_component_validator::ValidatorComponent::new());
     // xslt / xj: bridge_runtime() not captured, no BridgeCleanup installed.
     // Lint is short-lived; no shutdown cleanup needed.
+    #[cfg(feature = "xslt")]
     ctx.register_component(camel_xslt::XsltComponent::default());
+    #[cfg(feature = "xj")]
     ctx.register_component(camel_xj::XjComponent::default());
 
     // --- Empty datasource catalog for sql/surrealdb bundles ---
+    #[cfg(any(feature = "sql", feature = "surrealdb"))]
     let datasource_catalog: Arc<dyn DatasourceCatalog> = Arc::new(RuntimeDatasourceCatalog::new(
         std::collections::HashMap::new(),
     ));
@@ -115,20 +134,27 @@ pub fn register_builtin_components_for_lint(ctx: &mut camel_core::CamelContext) 
     register_bundle_empty!(ctx, camel_component_http::HttpBundle);
     #[cfg(feature = "http-static")]
     register_bundle_empty!(ctx, camel_component_http::HttpStaticBundle);
+    #[cfg(feature = "ws")]
     register_bundle_empty!(ctx, camel_component_ws::WsBundle);
     register_bundle_empty!(ctx, camel_component_file::FileBundle);
     register_bundle_empty!(ctx, camel_component_container::ContainerBundle);
     register_bundle_empty!(ctx, camel_template::TemplateBundle);
     register_bundle_empty!(ctx, camel_master::MasterBundle);
+    #[cfg(feature = "opensearch")]
     register_bundle_empty!(ctx, camel_component_opensearch::OpenSearchBundle);
+    #[cfg(feature = "redis")]
     register_bundle_empty!(ctx, camel_component_redis::RedisBundle);
 
     // jms / cxf: registered without capturing their pool handle (lint has no
     // runtime use for a bridge pool; metadata is harvested at register time).
+    // Feature-gated: slim builds surface both schemes as `unverified-scheme`.
+    #[cfg(feature = "jms")]
     register_bundle_empty!(ctx, camel_component_jms::JmsBundle);
+    #[cfg(feature = "cxf")]
     register_bundle_empty!(ctx, camel_component_cxf::CxfBundle);
 
     // --- Datasource bundles (empty datasource catalog) ---
+    #[cfg(feature = "sql")]
     register_datasource_bundle_empty!(ctx, camel_component_sql::SqlBundle, datasource_catalog);
     #[cfg(feature = "surrealdb")]
     register_datasource_bundle_empty!(

@@ -24,10 +24,10 @@ handle.shutdown(&mut ctx).await?;
 `boot` reads each `[components.<key>]` table from the `Camel.toml` behind
 `config`, falling back to an empty table so every bundle registers with its
 serde defaults. Feature gates mirror the `camel run` cfg lines: `grpc`,
-`wasm`, `http-static`, `llm`, `surrealdb`, `mqtt`, and `mcp` are default-on;
-`kafka` is opt-in. Since mission 115 the `http-static` gate is also the
-transitional carrier for the eight optional bridge deps (see CONTEXT.md,
-rc-9720m).
+`wasm`, `http-static`, `llm`, `surrealdb`, `mqtt`, `mcp`, and the eight
+per-bridge gates `jms`, `sql`, `redis`, `opensearch`, `ws`, `cxf`, `xj`,
+`xslt` are default-on; `kafka` and `security` are opt-in. `http-static`
+gates the `HttpStaticBundle` registration only (see CONTEXT.md).
 
 ## Related crates
 

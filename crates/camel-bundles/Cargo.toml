@@ -67,9 +67,19 @@ chrono.workspace = true
 jsonwebtoken.workspace = true
 
 [features]
-default = ["grpc", "wasm", "http-static", "llm", "surrealdb", "mqtt", "mcp"]
-# Transitional legacy-bridge carrier (rc-9720m, mission 115): the eight bridge deps ride the existing http-static gate because lint-gate-forwarding Rule 2 requires boot consumers to forward every [features] key and camel-cli's dependency wiring is out of zone (design-time exclusion; the resume grant covers only the slim-benchmarks rename). Remove and split into per-bridge features when the next camel-cli mission adds the consumer forwards (it also renames the src cfg keys).
-http-static = ["dep:camel-component-cxf", "dep:camel-component-jms", "dep:camel-component-opensearch", "dep:camel-component-redis", "dep:camel-component-sql", "dep:camel-component-ws", "dep:camel-xj", "dep:camel-xslt"]
+default = ["grpc", "wasm", "http-static", "llm", "surrealdb", "mqtt", "mcp", "jms", "sql", "redis", "opensearch", "ws", "cxf", "xj", "xslt"]
+# http-static gates the HttpStaticBundle registration only (its pre-115
+# meaning); the eight bridges are per-bridge gates forwarded by camel-cli
+# (mission 121, rc-9720m).
+http-static = []
+jms = ["dep:camel-component-jms"]
+sql = ["dep:camel-component-sql"]
+redis = ["dep:camel-component-redis"]
+opensearch = ["dep:camel-component-opensearch"]
+ws = ["dep:camel-component-ws"]
+cxf = ["dep:camel-component-cxf"]
+xj = ["dep:camel-xj"]
+xslt = ["dep:camel-xslt"]
 kafka = ["dep:camel-component-kafka"]
 mqtt = ["dep:camel-component-mqtt"]
 surrealdb = ["dep:camel-component-surrealdb"]

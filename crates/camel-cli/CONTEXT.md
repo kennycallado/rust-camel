@@ -260,12 +260,15 @@ selectable and compose additively with `slim-benchmarks`. The `slim-http`
 alias lives for one release (drop at 0.50).
 `camel-language-minijinja` stays linked in every profile: the workspace
 consumes camel-template with default features (the engine is optional at
-the source since mission 115; the in-workspace flip rides the camel-cli
-bridge-forward mission). The eight bridges (jms, sql, redis, opensearch,
-ws, cxf, xslt, xj) stay linked in every camel-cli profile through
-camel-cli's OWN unconditional dependencies — camel-bundles' side is
-optional since mission 115 (http-static carrier); making camel-cli's own
-edges optional is the deferred camel-cli bridge-forward diet.
+the source since mission 115; the in-workspace flip needs the
+named-feature shape that forces golden regeneration, tracked as bd
+rc-gcs5d, discovered from rc-9720m). The eight bridges (jms, sql, redis,
+opensearch, ws, cxf, xslt, xj) are optional via same-named camel-cli
+features, each activating the own dependency and forwarding the
+camel-bundles gate. `full` enables all eight. Slim drops seven of them;
+redis remains via the unconditional camel-config → camel-redis-repo path
+(out of zone). `redis-tls` implies `redis`. camel-cli's `http-static`
+feature forwards camel-bundles' HttpStaticBundle gate only.
 
 The integration-sql CI profile
 (`cargo test -p camel-cli --no-default-features --features

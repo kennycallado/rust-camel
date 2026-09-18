@@ -313,7 +313,10 @@ are rejected fail-closed with a configuration error naming the v1 tier
 limitation. The remaining `[security.*]` sections (native) build through
 the shared `camel_bundles::security_boot` builder behind the `security`
 feature; without the feature, `ensure_security_supported` rejects any
-configured section before a route compiles.
+configured section before a route compiles. Like `security`, the `sql`
+feature forwards `camel-bundles/sql` (the harness is a camel-bundles
+consumer, and the gate-forwarding lint requires a shadow-named feature
+to forward its gate).
 
 ### Partner receives resolve the wire role by dispatch state
 

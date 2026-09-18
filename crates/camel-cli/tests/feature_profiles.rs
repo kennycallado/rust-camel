@@ -44,15 +44,16 @@ const TREE_BASE_ARGS: &[&str] = &[
     "--locked",
 ];
 
-/// Build the `cargo tree -p camel-cli -e features,no-dev --prefix none
-/// --locked` command (plus `extra_args`) with the shared spawn plumbing:
-/// hoisted so the "exact same invocation" property between
-/// [`tree_lines`] and [`tree_fails_with`] is structural, not disciplinary.
-fn tree_command(extra_args: &[&str]) -> Command {
+/// Build a `cargo tree` command from `base_args` (which pin the root
+/// package, edge filter, and presentation) plus `extra_args`, with the
+/// shared spawn plumbing: hoisted so the "exact same invocation" property
+/// between [`tree_lines`], [`tree_lines_for`], and [`tree_fails_with`] is
+/// structural, not disciplinary.
+fn tree_command(base_args: &[&str], extra_args: &[&str]) -> Command {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut command = Command::new(&cargo);
     command
-        .args(TREE_BASE_ARGS)
+        .args(base_args)
         .args(extra_args)
         // Force uncolored child output regardless of the inherited
         // environment: CI sets CARGO_TERM_COLOR=always workflow-wide, and
@@ -64,11 +65,11 @@ fn tree_command(extra_args: &[&str]) -> Command {
     command
 }
 
-/// Run `cargo tree -p camel-cli -e features,no-dev --prefix none --locked`
-/// (plus `extra_args`) from the workspace root and return the normalized,
-/// sorted, deduplicated output lines.
-fn tree_lines(extra_args: &[&str]) -> Vec<String> {
-    let output = tree_command(extra_args)
+/// Spawn `command`, panic with the captured stderr on non-zero exit, and
+/// return the normalized, sorted, deduplicated stdout lines — the
+/// pipeline shared by [`tree_lines`] and [`tree_lines_for`].
+fn run_tree(mut command: Command) -> Vec<String> {
+    let output = command
         .output()
         .unwrap_or_else(|error| panic!("failed to spawn `cargo tree`: {error}"));
     if !output.status.success() {
@@ -85,11 +86,37 @@ fn tree_lines(extra_args: &[&str]) -> Vec<String> {
     lines
 }
 
+/// Run `cargo tree -p camel-cli -e features,no-dev --prefix none --locked`
+/// (plus `extra_args`) from the workspace root and return the normalized,
+/// sorted, deduplicated output lines.
+fn tree_lines(extra_args: &[&str]) -> Vec<String> {
+    run_tree(tree_command(TREE_BASE_ARGS, extra_args))
+}
+
+/// Run `cargo tree -p <package> -e no-dev --prefix none --locked` (plus
+/// `extra_args`) from the workspace root and return the same normalized,
+/// sorted, deduplicated lines as [`tree_lines`].
+///
+/// A sibling of [`tree_lines`] rather than an option of it: appending a
+/// second `-p` would UNION the roots instead of retargeting (cargo
+/// accumulates `-p`), so probes against other workspace crates (the
+/// camel-bundles bundles-side bridge assertions) get their own root pin
+/// here — same presentation, plain `-e no-dev` edges because those probes
+/// assert package presence/absence and feature edges would only be noise.
+fn tree_lines_for(package: &str, extra_args: &[&str]) -> Vec<String> {
+    run_tree(tree_command(
+        &[
+            "tree", "-p", package, "-e", "no-dev", "--prefix", "none", "--locked",
+        ],
+        extra_args,
+    ))
+}
+
 /// Assert that `cargo tree` — the exact invocation [`tree_lines`] uses,
 /// plus `extra_args` — exits non-zero and its stderr contains `fragment`:
 /// a removed feature name must be rejected by cargo itself.
 fn tree_fails_with(extra_args: &[&str], fragment: &str) {
-    let output = tree_command(extra_args)
+    let output = tree_command(TREE_BASE_ARGS, extra_args)
         .output()
         .unwrap_or_else(|error| panic!("failed to spawn `cargo tree`: {error}"));
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -302,8 +329,14 @@ fn default_build_has_no_allocator_crate() {
 /// The slim profile's controllable exclusion set: crates the `clidiet`
 /// feature-table rework (task 2.2) must be able to drop from the
 /// `--no-default-features` closure. `ariadne` is deliberately absent —
-/// `camel lint` keeps it non-optional.
+/// `camel lint` keeps it non-optional. The bridgeforward bridges join as
+/// their per-bridge gates landed, except `camel-component-redis`: the
+/// unconditional camel-config → camel-redis-repo path keeps it linked
+/// out of zone. `camel-xj` pulls `camel-xslt` transitively, so
+/// slim + `xj` links both; default/full enable all eight bridges via
+/// `full`.
 const GRPC_PREFIX: &str = "camel-component-grpc v";
+const SQL_PREFIX: &str = "camel-component-sql v";
 const SLIM_FORBIDDEN_PREFIXES: &[&str] = &[
     "camel-component-kafka v",
     GRPC_PREFIX,
@@ -313,6 +346,13 @@ const SLIM_FORBIDDEN_PREFIXES: &[&str] = &[
     "camel-component-mqtt v",
     "camel-component-surrealdb v",
     "camel-component-exec v",
+    SQL_PREFIX,
+    "camel-component-jms v",
+    "camel-component-opensearch v",
+    "camel-component-ws v",
+    "camel-component-cxf v",
+    "camel-xj v",
+    "camel-xslt v",
     "camel-lsp v",
     "tower-lsp v",
     "camel-language-js v",
@@ -345,15 +385,41 @@ fn slim_plus_grpc_resolves_grpc_only() {
             "slim-benchmarks,grpc closure must contain `{prefix}`"
         );
     }
-    let other_thirteen: Vec<&str> = SLIM_FORBIDDEN_PREFIXES
+    let other_twenty: Vec<&str> = SLIM_FORBIDDEN_PREFIXES
         .iter()
         .copied()
         .filter(|prefix| *prefix != GRPC_PREFIX)
         .collect();
     assert_absent(
         &lines,
-        &other_thirteen,
-        "slim-benchmarks,grpc closure must still exclude the other thirteen forbidden prefixes",
+        &other_twenty,
+        "slim-benchmarks,grpc closure must still exclude the other twenty forbidden prefixes",
+    );
+}
+
+#[test]
+fn slim_plus_sql_resolves_sql_only() {
+    let lines = tree_lines(&["--no-default-features", "--features", "slim-benchmarks,sql"]);
+    assert!(
+        lines.iter().any(|line| line.starts_with(SQL_PREFIX)),
+        "slim-benchmarks,sql closure must contain `{SQL_PREFIX}`"
+    );
+    // Datasource-stack parity with the grpc test's `tonic v` assertion:
+    // camel-component-sql hard-depends on sqlx, so its presence pins the
+    // stack the scenario text names.
+    assert!(
+        lines.iter().any(|line| line.starts_with("sqlx v")),
+        "slim-benchmarks,sql closure must contain the sqlx datasource stack"
+    );
+    let other_twenty: Vec<&str> = SLIM_FORBIDDEN_PREFIXES
+        .iter()
+        .copied()
+        .filter(|prefix| *prefix != SQL_PREFIX)
+        .collect();
+    assert_absent(
+        &lines,
+        &other_twenty,
+        "slim-benchmarks,sql closure must still exclude the other twenty forbidden prefixes",
     );
 }
 
@@ -408,6 +474,43 @@ fn kafka_feature_table_implies_capability() {
             DYNAMIC_LINKING_LINE,
         ],
         "the kafka feature surface must be exactly `kafka` and `dynamic-linking`"
+    );
+}
+
+#[test]
+fn redis_tls_implies_redis() {
+    // The `redis-tls => redis` implication is asserted at the
+    // feature-table level, mirroring `kafka_feature_table_implies_capability`:
+    // feature-forwarding edges never render in cargo tree, so a
+    // closure-based implication test would be vacuous.
+    let manifest = fs::read_to_string(workspace_root().join("crates/camel-cli/Cargo.toml"))
+        .expect("failed to read crates/camel-cli/Cargo.toml");
+    const REDIS_TLS_LINE: &str = r#"redis-tls = ["redis", "camel-component-redis/tls"]"#;
+    // The `[features]` section stretches from its header to the next
+    // section header (a line starting with `[`). The redis surface is
+    // exactly two features — `redis` and `redis-tls` — so the section
+    // must contain precisely those two lines and no other `redis`-
+    // prefixed line (a reappearing removed name would break the
+    // exact-set assertion).
+    let mut in_features = false;
+    let mut redis_lines: Vec<&str> = Vec::new();
+    for line in manifest.lines() {
+        if line.starts_with('[') {
+            in_features = line == "[features]";
+            continue;
+        }
+        if in_features && line.starts_with("redis") {
+            redis_lines.push(line);
+        }
+    }
+    assert_eq!(
+        redis_lines,
+        vec![
+            r#"redis = ["dep:camel-component-redis", "camel-bundles/redis"]"#,
+            REDIS_TLS_LINE,
+        ],
+        "the redis feature surface must be exactly `redis` and `redis-tls` with \
+         `redis-tls` implying `redis`"
     );
 }
 
@@ -489,4 +592,72 @@ fn dynamic_linking_closure_resolves_kafka() {
 fn removed_kafka_feature_names_rejected() {
     tree_fails_with(&["--features", "cmake-build"], "cmake-build");
     tree_fails_with(&["--features", "kafka-static"], "kafka-static");
+}
+
+/// The seven droppable bridge packages: every bridgeforward bridge except
+/// `camel-component-redis`, which the unconditional camel-config →
+/// camel-redis-repo path keeps linked in every closure (out-of-zone
+/// deferral). The same seven entries also live in
+/// [`SLIM_FORBIDDEN_PREFIXES`] for the camel-cli-side assertions.
+const DROPPABLE_BRIDGE_PREFIXES: &[&str] = &[
+    "camel-component-jms v",
+    "camel-component-sql v",
+    "camel-component-opensearch v",
+    "camel-component-ws v",
+    "camel-component-cxf v",
+    "camel-xj v",
+    "camel-xslt v",
+];
+
+#[test]
+fn bundles_slim_drops_bridges() {
+    // camel-bundles' own slim tree (--no-default-features, no per-bridge
+    // gate selected) must drop every droppable bridge package. The
+    // out-of-zone deferral excepts redis: the camel-config →
+    // camel-redis-repo path is unconditional, so `camel-component-redis`
+    // stays in camel-bundles' tree under any feature set.
+    let lines = tree_lines_for("camel-bundles", &["--no-default-features"]);
+    assert_absent(
+        &lines,
+        DROPPABLE_BRIDGE_PREFIXES,
+        "camel-bundles slim closure must drop the droppable bridges",
+    );
+    // Positive half of the exception: redis IS retained through the
+    // unconditional camel-config → camel-redis-repo path. If camel-config
+    // ever drops that edge, this fails and the spec's exception clause
+    // must be re-anchored (slim gets smaller than the spec allows).
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("camel-component-redis v")),
+        "camel-bundles slim closure must still retain camel-component-redis \
+         (unconditional camel-config → camel-redis-repo path)"
+    );
+}
+
+#[test]
+fn bundles_per_bridge_composes() {
+    // Selecting camel-bundles' `sql` gate must compose exactly one bridge
+    // in: the sql bridge package links and the other six droppable
+    // bridges stay out. redis is excepted — the camel-config path keeps
+    // `camel-component-redis` in camel-bundles' own tree under any
+    // feature set.
+    let lines = tree_lines_for(
+        "camel-bundles",
+        &["--no-default-features", "--features", "sql"],
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with(SQL_PREFIX)),
+        "camel-bundles sql gate closure must contain `{SQL_PREFIX}`"
+    );
+    let other_six: Vec<&str> = DROPPABLE_BRIDGE_PREFIXES
+        .iter()
+        .copied()
+        .filter(|prefix| *prefix != SQL_PREFIX)
+        .collect();
+    assert_absent(
+        &lines,
+        &other_six,
+        "camel-bundles sql gate closure must still exclude the other six droppable bridges",
+    );
 }

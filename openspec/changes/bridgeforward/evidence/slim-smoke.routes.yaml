@@ -1,0 +1,14 @@
+# Slim-profile boot smoke (bridgeforward task 3.1).
+# Two routes: an http consumer (proves camel-http listener bound — its
+# explicit readiness guarantees the `Route started` line comes after bind)
+# and a single-fire timer emitting the smoke marker.
+routes:
+  - id: "slim-smoke-http"
+    from: "http://127.0.0.1:18087/hz"
+    steps:
+      - log: "hz request received: ${body}"
+
+  - id: "slim-smoke-once"
+    from: "timer:smoke?delay=500&repeatCount=1"
+    steps:
+      - log: "slim-smoke-marker"
