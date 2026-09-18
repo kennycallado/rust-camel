@@ -1,0 +1,457 @@
+# Tasks: three-flavor-matrix
+
+Single-phase change. Task order is load-bearing: bodies before tests, tests
+before pipeline, pipeline lockstep (docker/release) after artifacts exist.
+Run all cargo commands from the repo root of the working tree.
+NOTE: after Task 1 lands alone, several closure tests are temporarily red
+(marker-table and slim-body expectations); Task 2 turns them green. That is
+acknowledged mid-phase breakage — do not "fix" Task 1 to avoid it.
+
+## Task 1: Flavor bodies in camel-cli Cargo.toml
+
+Files:
+- `crates/camel-cli/Cargo.toml` (modified)
+
+Steps:
+1. Replace the `flavor-slim` body `["slim-http"]` with `["mqtt", "http-static"]`.
+2. Replace the `flavor-regular` body `["full"]` with the explicit curated
+   list: `["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "mqtt",
+   "mcp", "integration-http", "integration-sql", "security", "redis-tls",
+   "lsp", "lang-jsonpath", "lang-minijinja", "jms", "sql", "redis",
+   "opensearch", "ws", "cxf", "xj", "xslt"]` (= the existing `full` list minus
+   `exec`, `lang-js`, `lang-rhai`, `lang-xpath`).
+3. Replace the `flavor-full` body `["full", "kafka"]` with
+   `["flavor-regular", "exec", "lang-js", "lang-rhai", "lang-xpath", "kafka"]`
+   (regular + deltas; `full` itself stays as the historical closure list).
+4. Delete the `slim-http` and `slim-benchmarks` alias feature entries and
+   their comment block (aliases expire at 0.50; this change lands ≥0.50).
+5. Update the comment above the flavor markers to document the three bodies
+   (slim = edge contract, regular = most-used, full = regular + deltas) and
+   that CI legs pass only `flavor-*` markers.
+
+Tests (run after edit; these are verification commands, not new test files):
+- name: flavor-slim resolves
+  action: `CARGO_TERM_COLOR=never cargo tree -p camel-cli --no-default-features --features flavor-slim -e features,no-dev > /dev/null`
+  assert: exit 0
+- name: flavor-regular resolves
+  action: `CARGO_TERM_COLOR=never cargo tree -p camel-cli --features flavor-regular -e features,no-dev > /dev/null`
+  assert: exit 0
+- name: flavor-full resolves
+  action: `CARGO_TERM_COLOR=never cargo tree -p camel-cli --features flavor-full -e features,no-dev > /dev/null`
+  assert: exit 0
+- name: removed aliases rejected
+  action: `cargo tree -p camel-cli --no-default-features --features slim-http -e features,no-dev > /dev/null 2>&1`
+  assert: exit non-zero, stderr contains `none of the selected packages contains these features: slim-http`
+  (mirror of the existing `removed_kafka_feature_names_rejected` pattern at
+  `crates/camel-cli/tests/feature_profiles.rs:591`)
+
+Acceptance:
+- `cargo tree -p camel-cli --no-default-features --features flavor-slim -e features,no-dev` exits 0
+- all four verification commands hold their asserted outcomes
+- `grep -c 'slim-http\|slim-benchmarks' crates/camel-cli/Cargo.toml` returns 0
+- `cargo fmt --check` and `cargo clippy -p camel-cli -- -D warnings` exit 0
+
+- [ ] 1
+
+## Task 2: Closure contract tests and golden fixture
+
+Files:
+- `crates/camel-cli/tests/feature_profiles.rs` (modified)
+- `crates/camel-bundles/src/lib.rs` (modified — one cfg-gated test)
+- golden fixture file read by `golden_fixture_lines()`
+  (`crates/camel-cli/tests/` directory; path comes from the constant inside
+  `golden_fixture_lines`, do not relocate it) (modified)
+
+Steps:
+1. Extract shared prefix consts: the five entries that today exist only as
+   inline literals in `SLIM_FORBIDDEN_PREFIXES` (lines ~341-361) — kafka,
+   exec, lang-js, lang-rhai, lang-xpath — become named consts
+   (`KAFKA_PREFIX`, `EXEC_PREFIX`, `LANG_JS_PREFIX`, `LANG_RHAI_PREFIX`,
+   `LANG_XPATH_PREFIX`, all `&str` like the existing `GRPC_PREFIX` at :338),
+   and `SLIM_FORBIDDEN_PREFIXES` references them. Do NOT duplicate string
+   literals across arrays.
+2. Remove `camel-component-mqtt v` from `SLIM_FORBIDDEN_PREFIXES` — slim now
+   INCLUDES mqtt by design (spec R1 slim-body scenario; the forbid entry
+   predates the real slim body). Put any rationale comment ABOVE the const
+   declaration, never between the array brackets (the acceptance grep
+   scopes to the bracket range). Also add a `SECURITY_PREFIX` const naming
+   the actual shared security crate observed in the tree (run
+   `cargo tree -p camel-cli --features security -e features,no-dev` and use
+   the real crate name, e.g. `camel-component-keycloak v` if that is what
+   resolves — do not guess) and INCLUDE it in `SLIM_FORBIDDEN_PREFIXES`
+   (slim ships no security features, spec R1).
+3. Add `REGULAR_FORBIDDEN_PREFIXES: &[&str]` referencing `KAFKA_PREFIX`,
+   `EXEC_PREFIX`, `LANG_JS_PREFIX`, `LANG_RHAI_PREFIX`, `LANG_XPATH_PREFIX`
+   (exact subset of SLIM_FORBIDDEN_PREFIXES; mqtt NOT forbidden in regular).
+   Add `FULL_REQUIRED_PREFIXES: &[&str] = &[KAFKA_PREFIX]`.
+4. Add `REGULAR_REQUIRED_PREFIXES: &[&str]` = the scheme components regular
+   must resolve: use the REAL crate names observed from
+   `cargo tree -p camel-cli --features flavor-regular -e features,no-dev`
+   (file, timer, log, direct/seda core crates, `camel-component-mqtt v`,
+   `camel-component-redis v`, existing `SQL_PREFIX`, `camel-component-jms v`,
+   otel instrumentation crate, `camel-language-jsonpath v`,
+   `camel-language-minijinja v`, `SECURITY_PREFIX`). NOTE on http:
+   `camel-component-http` is a NON-OPTIONAL dep (present in every closure
+   including slim — a tree assert on it is vacuous, do not add it), and
+   `http-static` is a registration-level gate with no tree-level crate
+   (already covered by camel-bundles' `http_static_registers_without_bridges`
+   test) — neither gets a REGULAR_REQUIRED entry; http capability is proven
+   by the existing registration test.
+5. Add test `regular_closure_satisfies_contract`:
+   action `tree_lines(&["--features", "flavor-regular"])`; assert every
+   `REGULAR_REQUIRED_PREFIXES` entry present and every
+   `REGULAR_FORBIDDEN_PREFIXES` entry absent (reuse `assert_absent`).
+6. Add test `full_closure_satisfies_contract`:
+   action `tree_lines(&["--features", "flavor-full"])`; assert every
+   `FULL_REQUIRED_PREFIXES` entry present plus `EXEC_PREFIX`, `LANG_JS_PREFIX`,
+   `LANG_RHAI_PREFIX`, `LANG_XPATH_PREFIX` present.
+7. Add test `slim_closure_satisfies_contract`:
+   action `tree_lines(&["--no-default-features", "--features", "flavor-slim"])`;
+   assert `camel-component-mqtt v` present and every
+   `SLIM_FORBIDDEN_PREFIXES` entry absent (now satisfiable — mqtt removed
+   from the forbidden list in step 2; http-static presence is
+   registration-level, not tree-level — see step 4 NOTE).
+8. Update `flavor_regular_closure_equals_full` (line ~556): regular no longer
+   equals `full`. Rewrite as
+   `flavor_regular_closure_equals_full_minus_deltas`: compute both closures,
+   set-difference, assert the diff contains no crate beyond the closures of
+   `exec`, `lang-js`, `lang-rhai`, `lang-xpath`.
+9. Update `flavor_slim_closure_equals_slim_http` (line ~563): rename to
+   `flavor_slim_closure_equals_mqtt_http_static`: the `flavor-slim` closure
+   equals `--no-default-features --features mqtt,http-static` closure.
+10. Delete `slim_alias_resolves_identically` (line ~426) — its subject alias
+    is deleted in Task 1.
+11. Retarget `slim_plus_grpc_resolves_grpc_only` (line ~376) and
+    `slim_plus_sql_resolves_sql_only` (line ~400): replace the deleted
+    `slim-benchmarks` feature with `flavor-slim` in their feature
+    selections (e.g. `--no-default-features --features flavor-slim,grpc`).
+    Their per-feature resolution assertions stay unchanged.
+12. Update `flavor_marker_table` (lines ~515-545) to the new three bodies.
+    Mind the line-collector: format the new multi-entry bodies single-line
+    per marker in Cargo.toml (the whole flavor-regular feature list stays
+    on ONE line) so the table test keeps parsing, or rework its parser for
+    multi-line — prefer single-line Cargo.toml formatting.
+13. Update `default_closure_matches_golden` package-presence loop
+    (lines ~259-271): remove `camel-language-js v`, `camel-language-rhai v`,
+    `camel-language-xpath v` from the asserted-present set; keep
+    `camel-language-jsonpath v` and `camel-language-minijinja v` asserted
+    present; add asserted-ABSENT lines for the three dropped language crates
+    (reuse `assert_absent`).
+14. Regenerate the golden fixture using the procedure documented in the file
+    header comment at `feature_profiles.rs:1-16` — run
+    `CARGO_TERM_COLOR=never cargo tree -p camel-cli -e features,no-dev` from
+    the workspace root and save the normalized output into the fixture file
+    exactly as the header describes — so the fixture matches the new default
+    (flavor-regular) closure.
+15. In `crates/camel-bundles/src/lib.rs`: first VERIFY (read the security
+    boot path) that a configuration requiring the security guard under
+    `not(feature = "security")` is rejected with a descriptive error at the
+    same entry point the kafka rejection test uses (that test lives at
+    `camel-bundles/src/lib.rs:620`; :441-463 is its module header/helpers).
+    If production     does NOT fail closed there, STOP and report
+    `test-design-gap: security omission does not fail closed in camel-bundles`
+    AND file a bd issue for the production gap
+    (`bd create "<title>" -t bug --deps discovered-from:rc-5t5fo.5` from
+    the repo root) — do not fix production behavior in this task. If
+    verified, add test
+    `security_omission_fails_closed` gated `#[cfg(not(feature = "security"))]`
+    following the kafka-test pattern: action — feed the security-requiring
+    configuration to the boot/registry entry point; assert an explicit
+    descriptive error variant (the real existing one — do not invent);
+    assert it does NOT return Ok with an insecure default.
+
+Tests:
+- name: regular_closure_satisfies_contract
+  setup: Task 1 bodies landed
+  command: `cargo test -p camel-cli --test feature_profiles regular_closure_satisfies_contract`
+  assert: passes
+- name: full_closure_satisfies_contract
+  command: `cargo test -p camel-cli --test feature_profiles full_closure_satisfies_contract`
+  assert: passes (kafka present in full)
+- name: slim_closure_satisfies_contract
+  command: `cargo test -p camel-cli --test feature_profiles slim_closure_satisfies_contract`
+  assert: passes (mqtt present, forbidden set absent)
+- name: default_closure_matches_golden (regenerated)
+  command: `cargo test -p camel-cli --test feature_profiles default_closure_matches_golden`
+  assert: passes with regenerated fixture
+- name: security_omission_fails_closed
+  command: `cargo test -p camel-bundles --lib security_omission_fails_closed 2>&1 | tee /dev/stderr | grep -c '1 passed'`
+  assert: output contains `1 passed` (guards against a vacuous 0-matched
+  pass — cargo exits 0 when no test matches the filter); compiled WITHOUT
+  the security feature (camel-bundles default already excludes security —
+  plain invocation suffices; if the default changes, use
+  `--no-default-features`)
+- name: whole suite green
+  command: `cargo test -p camel-cli --test feature_profiles`
+  assert: 0 failures (alias test deleted, marker table + slim_plus_* retargeted)
+
+Acceptance:
+- `cargo test -p camel-cli --test feature_profiles` passes in full
+- `cargo test -p camel-bundles --lib` passes with default features
+- `cargo fmt --check` and `cargo clippy -p camel-cli -p camel-bundles -- -D warnings` exit 0
+- `grep -c 'slim_alias_resolves_identically' crates/camel-cli/tests/feature_profiles.rs` returns 0
+- `sed -n '/^const SLIM_FORBIDDEN_PREFIXES/,/^\]/p' crates/camel-cli/tests/feature_profiles.rs | grep -c mqtt` returns 0 (anchored to the declaration; a rationale comment above the const is outside the range; mqtt may appear elsewhere in the file)
+
+- [ ] 2
+
+## Task 3: 14-leg build matrix, artifact names, dev-profile input
+
+Files:
+- `.github/workflows/release-matrix.yml` (modified)
+- `.github/workflows/release-dev.yml` (modified)
+
+Steps:
+1. In `release-matrix.yml` `on: workflow_call: inputs:`, add
+   `dev-profile: {description: "Trim the build matrix to the 3-leg dev subset", type: boolean, default: false}`.
+2. Restructure the `build` job `strategy.matrix.include` to 14 legs. Each
+   entry carries: `target`, `flavor` (one of `flavor-slim`, `flavor-regular`,
+   `flavor-full`), `artifact-name` (explicit string per leg), and
+   `in-dev-profile` (boolean). AUXILIARY KEYS RULE: each new leg inherits the
+   auxiliary    keys (`os`, `install-librdkafka`, `kafka-probe`, `alloc-features`,
+   `bin-suffix`, `use-cross`, `install-musl-tools`) from
+   the existing same-target leg, EXCEPT: `kafka-probe` and
+   `install-librdkafka` appear on ALL flavor-full LINUX legs — x86_64-gnu
+   AND the new ARM-native aarch64-gnu leg (the apt step "Install build deps
+   (Linux native)" is what provides librdkafka deps on the ARM runner; the
+   old cross image shipped them) — and NEVER on regular/slim legs (a kafka
+   probe on regular/slim legs is red — they lack kafka by design); jemalloc
+   `alloc-features` stays on ALL musl legs including the new slim legs
+   (allocator selection, not closure selection).
+   - slim (in-dev-profile: false): `x86_64-unknown-linux-musl`,
+     `aarch64-unknown-linux-musl` → artifact-name `camel-slim-<target>`.
+   - regular (artifact-name `camel-<target>`, the clean name): all 7
+     targets; `in-dev-profile: true` ONLY for `x86_64-unknown-linux-musl`
+     and `x86_64-apple-darwin`.
+   - full (artifact-name `camel-full-<target>`): `x86_64-unknown-linux-gnu`
+     (in-dev-profile: true), `aarch64-unknown-linux-gnu` with
+     `os: ubuntu-24.04-arm` (native ARM, replaces cross for this leg),
+     `x86_64-apple-darwin`, `aarch64-apple-darwin`,
+     `x86_64-pc-windows-msvc` (all in-dev-profile: false).
+3. Feature selection: the build step's feature argument becomes the single
+   marker. The composed assignment at line ~106 becomes
+   `FEATURES="${{ matrix.flavor }}${ALLOC_FEATURES:+,$ALLOC_FEATURES}"` —
+   the base selection (previously composed `full`/empty sets per leg) is
+   replaced by the marker; the jemalloc append on musl legs STAYS (allocator
+   selection, not closure selection). Verify no leg composes closure
+   features beyond marker + allocator.
+4. Staged FILENAME rename: the binary staging step (line ~178) copies
+   `target/<target>/release/camel${bin-suffix}` — rename the staged file to
+   `${{ matrix.artifact-name }}${{ matrix.bin-suffix }}` (bin-suffix is empty
+   except `.exe` on windows) so the file INSIDE the artifact carries the
+   flavor prefix. `Upload artifact` step: `name: ${{ matrix.artifact-name }}`
+   (was `camel-${{ matrix.target }}`). Without the staged rename, slim and
+   regular musl artifacts collide on merge-multiple download.
+5. Add job-level gate on `build`:
+   `if: ${{ !inputs.dev-profile || matrix.in-dev-profile }}`.
+6. VERIFY (do not rewrite) the existing `--version` flavor-suffix probe
+   (lines ~145-157): it must derive the expected suffix from
+   `matrix.flavor` minus the `flavor-` prefix for all 14 legs; if it
+   hardcodes today's two-flavor mapping, extend it to three flavors.
+7. Add a NEGATIVE kafka probe as a SEPARATE matrix key
+   `kafka-absence-probe: true` (mirrors the positive kafka-probe pattern at
+   lines ~115-143): the step lints a minimal route referencing
+   `kafka:test-topic` and EXPECTS failure (exit non-zero with an
+   unknown/unregistered-scheme error) — proving kafka absence in
+   slim/regular artifacts. Put the key on ALL runnable slim/regular legs:
+   slim x86_64-musl, regular x86_64-musl, regular x86_64-unknown-linux-gnu,
+   regular x86_64-apple-darwin, regular aarch64-apple-darwin,
+   regular x86_64-pc-windows-msvc. EXEMPT the aarch64-musl cross legs
+   (cross-compiled, not runnable on the runner) — the release-job filename
+   assert (Task 4 step 5) is the backstop for those.
+8. Extend `closure-check` (lines ~429-430): after the camel-cli
+   feature-closure invocation, add
+   `cargo test -p camel-bundles --lib security_omission_fails_closed`
+   so every dev run re-validates the slim fail-closed security rejection
+   (canonical spec R3 letter: the dev suite proves the rejection).
+9. In `release-dev.yml`, add `dev-profile: true` to the reusable workflow
+   call's `with:` block.
+10. Verify no other workflow file references the `camel-<target>` artifact
+    names (rg over `.github/workflows/` for `download-artifact` and
+    `camel-`): the three bridge-release workflows release jars, not camel
+    binaries — confirm and leave untouched.
+
+Tests (structural, executed locally — GitHub validates syntax at run time):
+- name: yaml parses
+  action: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release-matrix.yml')); yaml.safe_load(open('.github/workflows/release-dev.yml'))"`
+  assert: exit 0
+- name: 14 legs with flavor + artifact names
+  action: python3 script walking `jobs.build.strategy.matrix.include`
+  assert: exactly 14 entries; each has `flavor` in
+  {flavor-slim, flavor-regular, flavor-full}; `artifact-name` matches
+  `^camel(-slim|-full)?-(x86_64|aarch64)(-[a-z0-9_.]+){2,3}$`; counts
+  per flavor = 2/7/5; exactly 3 entries with `in-dev-profile: true`
+  (musl-regular x86_64, darwin-regular x86_64, gnu-full x86_64); the
+  aarch64-gnu full leg has `os: ubuntu-24.04-arm`; the matrix key
+  `kafka-probe` appears on exactly the 5 full legs; the matrix key
+  `kafka-absence-probe` appears on exactly the 6 runnable slim/regular
+  legs listed in step 7 (exact key match — substring matches collide)
+- name: negative kafka probe present
+  action: python3 walking the build matrix include list
+  assert: the `kafka-absence-probe` key is true on exactly the 6 runnable
+  slim/regular legs named in Task 3 step 7, false/absent elsewhere; and
+  `grep -c 'kafka:test-topic' .github/workflows/release-matrix.yml` ≥ 1
+- name: closure-check runs the security rejection test
+  action: `grep -c 'cargo test -p camel-bundles --lib security_omission_fails_closed' .github/workflows/release-matrix.yml`
+  assert: exactly 1 (the camel-bundles security test wired into
+  closure-check)
+- name: dev wrapper passes dev-profile
+  action: `grep -A5 'release-matrix.yml' .github/workflows/release-dev.yml | grep 'dev-profile: true'`
+  assert: exit 0
+
+Acceptance:
+- all five structural tests above pass
+- `grep -c 'camel-\${{ matrix.target }}' .github/workflows/release-matrix.yml` returns 0
+- release-dev.yml still carries the permissions trio ceiling (rc-myx4r
+  guard — do not touch the permissions block)
+
+- [ ] 3
+
+## Task 4: Docker lockstep and release-job flavor asserts
+
+Files:
+- `.github/workflows/release-matrix.yml` (modified — `docker` and `release` jobs)
+
+Steps:
+1. Docker matrix (`docker:` job) — artifact keys:
+   - production variant: `amd64-artifact: camel-x86_64-unknown-linux-musl`,
+     `arm64-artifact: camel-aarch64-unknown-linux-musl` — UNCHANGED (regular
+     keeps the clean name).
+   - alpine variant: `amd64-artifact: camel-slim-x86_64-unknown-linux-musl`,
+     `arm64-artifact: camel-slim-aarch64-unknown-linux-musl`.
+   - gnu variant: `amd64-artifact: camel-full-x86_64-unknown-linux-gnu`,
+     `arm64-artifact: camel-full-aarch64-unknown-linux-gnu`.
+2. Docker dev-mode gating (prevents red dev runs — only 3 artifacts exist
+   with `dev-profile: true`): add per-variant `in-dev` key to the docker
+   matrix (gnu: `true`; production, alpine: `false`), job-level
+   `if: ${{ !inputs.dev-profile || matrix.in-dev }}` on the docker job, and
+   in dev mode (`inputs.dev-profile == true`) skip the arm64 download step
+   and the arm64 `cp` in `Prepare build context` (there is no separate
+   arm64 dev image build — `Build dev image` is already amd64-only; gate
+   each consumer of the arm64 binary with the dev-profile condition).
+3. Semantic docker tags — the `Docker metadata` (id: meta) output is DEAD
+   (nothing references `steps.meta`); the real tag lists are the explicit
+   `tags:` rows in the per-arch push steps and the
+   `for TAG in "${VERSION}${suffix}" "latest${suffix}"` loop in
+   `Create and push multi-arch manifest`. Semantic tags go to the MANIFEST
+   LOOP ONLY (per-arch push `tags:` rows stay exactly as they are):
+   - production loop: `for TAG in "${VERSION}" "latest" "regular"`.
+   - alpine loop: `for TAG in "${VERSION}-alpine" "latest-alpine" "slim"`.
+   - gnu loop: `for TAG in "${VERSION}-gnu" "latest-gnu" "full"`.
+   Semantic tags are UNSUFFIXED; imagetools create re-tags the combined
+   multi-arch list, so per-arch pushes keep their versioned + latest-arch
+   tags untouched.
+4. Dev smoke assert (`Smoke dev image (assert flavor suffix)`): update the
+   expected-flavor case mapping: `production) EXPECTED="regular"`,
+   `alpine) EXPECTED="slim"`, `gnu) EXPECTED="full"`.
+5. `release` job: between `Download artifacts` and `Create release`, add a
+   step `Assert artifact flavor suffixes` — a bash step over `dist/*`
+   (downloaded with pattern `camel-*`, merge-multiple) using DISJOINT
+   classification (each file matches exactly one class; enumerate the 7
+   regular target names explicitly, including
+   `camel-x86_64-pc-windows-msvc.exe` with its `.exe`):
+   (a) exactly 14 files; (b) 2 matching `camel-slim-<target>`, 5 matching
+   `camel-full-<target>`, 7 matching the enumerated regular names;
+   (c) no file matches any other shape. Filename-based only —
+   cross-compiled binaries are not runnable on the ubuntu runner; runtime
+   smoke already happened as the per-build-leg `--version` probe from
+   Task 3. Fail the job on mismatch.
+6. Leave `files: dist/camel-*` in softprops unchanged (prefix pattern still
+   correct).
+
+Tests (structural):
+- name: docker artifact keys lockstep
+  action: python3 walking `jobs.docker.strategy.matrix.include`
+  assert: alpine keys reference `camel-slim-`, gnu keys reference
+  `camel-full-`, production keys reference bare `camel-` musl names (no
+  slim/full prefix); `in-dev` true on gnu only
+- name: semantic docker tags in the manifest loops
+  action: grep the three `for TAG` loop lines in
+  `Create and push multi-arch manifest`
+  assert: production loop contains `"regular"`, alpine loop contains
+  `"slim"`, gnu loop contains `"full"`; the per-arch push `tags:` blocks
+  are UNCHANGED from their versioned + latest-arch shape
+- name: docker dev gating present
+  action: `grep -c 'dev-profile' .github/workflows/release-matrix.yml`
+  assert: ≥ 3 (docker job if + arm64 skips + build job gate from Task 3)
+- name: smoke case mapping updated
+  action: `grep -A10 'Smoke dev image' .github/workflows/release-matrix.yml`
+  assert: `slim` expected for alpine, `full` for gnu
+- name: release asserts 14 artifacts
+  action: `grep -B2 -A14 'Assert artifact' .github/workflows/release-matrix.yml`
+  assert: step exists between Download artifacts and Create release
+
+Acceptance:
+- all five structural tests pass
+- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release-matrix.yml'))"` exits 0
+- docker job still carries `if:` publish-gating on every push/login/metadata
+  step (unchanged — publish-input gating is canonical spec)
+
+- [ ] 4
+
+## Task 5: Prerelease tag guard on the crates.io publish job
+
+Files:
+- `.github/workflows/release.yml` (modified)
+
+Steps:
+1. On the `publish` job (the crates.io job homed in this file per ADR-0082),
+   add `if: ${{ !contains(github.ref_name, '-rc.') }}` alongside its
+   existing `needs: call-release-matrix` (do not move the job, do not add
+   any inputs.publish conditional — canonical spec forbids it; a tag-name
+   guard is the only allowed gate).
+2. Add a two-line comment above the `if:` explaining: prerelease smoke tags
+   (`v*-rc.*`) exercise matrix/assets/docker but must not publish crates.
+
+Tests (structural):
+- name: guard present on publish job only
+  action: `grep -n "contains(github.ref_name, '-rc.')" .github/workflows/release.yml`
+  assert: exactly 1 hit, inside the `publish:` job block
+- name: job stays homed
+  action: `grep -c 'environment: crates-io' .github/workflows/release.yml`
+  assert: 1 (job still in release.yml — job_workflow_ref constraint)
+
+Acceptance:
+- both structural tests pass
+- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml'))"` exits 0
+- no `inputs.publish` conditional appears anywhere in release.yml
+
+- [ ] 5
+
+## Task 6: Distribution documentation
+
+Files:
+- `docs/src/operations/distribution-flavors.md` (new)
+- `crates/camel-cli/CONTEXT.md` (modified)
+
+Steps:
+1. New `distribution-flavors.md`: table of the three flavors (contents,
+  targets, artifact names), the Docker tag map (`latest`/`:regular`,
+  `-alpine`/`:slim`, `-gnu`/`:full`), install guidance per channel
+  (release download, docker, `cargo install camel-cli` = regular source
+  build, `--features flavor-full` for kafka), and a BREAKING-CHANGE section:
+  `camel-<target>` re-aliases from the historical full-ish closure to
+  regular at 0.50 — one-time; this section is the canonical callout text
+  the 0.50 release notes will reference (release notes are generated by
+  `xtask changelog` at tag time; the release operator links this section).
+2. Update `crates/camel-cli/CONTEXT.md` flavor-markers section: the three
+  bodies as landed (slim = mqtt+http-static on base; regular = curated
+  list; full = regular + exec/lang-js/rhai/xpath/kafka), alias removal
+  note (slim-http/slim-benchmarks dropped at 0.50 per rc-n6iop).
+3. Cross-link from `docs/src/operations/oidc-publish-fallback.md` ONLY if it
+   mentions artifact names (check; it should not — do not add unrelated
+   links).
+
+Tests:
+- name: context citations lint
+  command: `cargo xtask lint-context-citations`
+  assert: exit 0
+- name: docs name all three artifacts
+  action: `grep -c 'camel-slim-\|camel-full-' docs/src/operations/distribution-flavors.md`
+  assert: ≥ 4 (naming table + breaking-change section)
+
+Acceptance:
+- both tests pass
+- the doc is listed in the operations index/summary if one exists (check
+  `docs/src/operations/` neighbors for an index file; add entry if present)
+
+- [ ] 6
