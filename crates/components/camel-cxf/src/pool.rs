@@ -20,6 +20,18 @@ use crate::config::{CxfPoolConfig, validate_profile_name};
 use crate::error::CxfError;
 use crate::proto::{HealthRequest, cxf_bridge_client::CxfBridgeClient};
 
+/// Env var KEY names for trace logging (bd rc-m1qw7). Values never enter the
+/// log: `CXF_ADDRESS` is a URL-shaped consumer bind address, `*_SIG_USERNAME`
+/// and `*_ENC_USERNAME` are credentials, and `CxfProfileEnvVars::to_env_vars`
+/// Deref-unwraps `Redacted` passwords into plain strings, so the flattened
+/// `env_vars` values are not safe to Debug-print at any level. A key-only dump
+/// keeps the ADR-0051 manual-redaction boundary that `BridgeProcessConfig`'s
+/// own `Debug` impl already enforces, without a per-key value policy that one
+/// missed suffix would defeat.
+pub(crate) fn env_var_keys(env_vars: &[(String, String)]) -> Vec<&str> {
+    env_vars.iter().map(|(k, _)| k.as_str()).collect()
+}
+
 // ── Bridge gRPC decode limit ─────────────────────────────────────────────────
 
 /// Maximum inbound gRPC message size accepted when decoding Java CXF bridge
@@ -304,7 +316,7 @@ impl CxfBridgePool {
 
             tracing::trace!(
                 key = %slot.key,
-                env_vars = ?config.env_vars,
+                env_keys = ?env_var_keys(&config.env_vars),
                 "starting CXF bridge process with env vars"
             );
 

@@ -34,6 +34,8 @@ pub const BRIDGE_VERSION: &str = "0.6.1";
 
 #[cfg(test)]
 mod bridge_client_test;
+#[cfg(test)]
+mod pool_env_test;
 
 pub mod proto {
     tonic::include_proto!("cxf_bridge");
