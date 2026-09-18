@@ -1,12 +1,15 @@
 //! Integration tests for compiled-artifact runtime (openspec change
 //! `cli-compile`, Tasks 2.2 and 2.3). The suite compiles each distinct
 //! document ONCE with the real `camel compile` into a shared immutable
-//! fixture — the compile step copies the full ~283 MB `camel` binary into
+//! fixture — the compile step copies the full ~287 MB `camel` binary into
 //! every artifact, so per-test compiles would write gigabytes under
-//! parallel execution and exhaust the disk (ENOSPC). Every test then
-//! deploys the fixture artifact into its own source-free directory and
-//! runs it through `run_embedded_document` — the same entry the binary
-//! self-detect path (Task 2.3) calls.
+//! parallel execution and exhaust the disk (ENOSPC). The fixture and the
+//! per-test deploy directories live on a space-probed [`fixture_root`]:
+//! the OS temp directory when it holds the ~3.5 GiB the suite writes,
+//! otherwise the workspace target directory (bd rc-fdkta). Every test
+//! then deploys the fixture artifact into its own source-free directory
+//! and runs it through `run_embedded_document` — the same entry the
+//! binary self-detect path (Task 2.3) calls.
 //!
 //! The artifact runtime executes in a harness CHILD of this test binary:
 //! the parent re-spawns `current_exe()` with `--exact <test>` and the
@@ -348,18 +351,22 @@ fn compile_full(
 }
 
 /// Distinct documents compiled once per test process. `camel compile`
-/// copies the full ~283 MB `camel` binary into every artifact, so
+/// copies the full ~287 MB `camel` binary into every artifact, so
 /// compiling per test would write gigabytes under parallel execution and
 /// exhaust the disk (ENOSPC). The fixture compiles each document exactly
 /// once — serialized by the `OnceLock` — and tests share the immutable
 /// artifacts; only mutation tests copy (see [`deploy_artifact`]).
 ///
 /// The artifacts live in a single cache directory keyed by this test
-/// process (`camel-compiled-fixture-<pid>` under the OS temp dir, the
-/// repo's `camel-test-*` convention). A detached reaper child removes
-/// that directory once this process dies — normal exit or crash — and
-/// the next run sweeps any leftover, so repeated runs never accumulate
-/// the ~1.13 GB of compiled artifacts.
+/// process (`camel-compiled-fixture-<pid>` under the space-probed
+/// [`fixture_root`], the repo's `camel-test-*` convention): twelve
+/// artifacts at the current binary size total ~3.5 GiB, so the root
+/// needs [`REQUIRED_ROOT_FREE`] free before the suite starts — the OS
+/// temp directory when it has room (CI, unchanged), the workspace
+/// target directory as fallback on small-`/tmp` dev machines. A
+/// detached reaper child removes that directory once this process dies
+/// — normal exit or crash — and the next run sweeps any leftover, so
+/// repeated runs never accumulate the ~3.5 GiB of compiled artifacts.
 struct Fixture {
     /// `ROUTE_DOC` artifact (timer→log route).
     route: PathBuf,
@@ -389,11 +396,147 @@ struct Fixture {
 
 static FIXTURE: OnceLock<Fixture> = OnceLock::new();
 
+/// Free space the fixture root must have before the suite starts
+/// compiling: twelve artifacts at the current ~287 MB binary (~3.4 GiB)
+/// plus the transient whole-artifact copies (the three mutation tests
+/// hold up to one copy each in parallel, and the accepted loose compile
+/// writes one more). Bump this when the suite gains artifacts or the
+/// binary grows past what the headroom covers.
+#[cfg_attr(not(unix), allow(dead_code))]
+const REQUIRED_ROOT_FREE: u64 = 5 << 30;
+
+/// The cargo target directory of this workspace: the fallback fixture
+/// root when the OS temp directory does not have [`REQUIRED_ROOT_FREE`]
+/// bytes free (a small `/tmp` on a shared root partition is the norm on
+/// dev machines). `CARGO_TARGET_DIR` wins when cargo set it; otherwise
+/// the workspace target directory next to this crate's manifest.
+fn cargo_target_dir() -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+    }
+}
+
+/// Free bytes available to an unprivileged process on the filesystem
+/// holding `path` (`statvfs(3)`), or `None` when the query is
+/// unavailable. Non-unix hosts have no probe: the root falls back to the
+/// OS temp directory unprobed there (this suite's CI is Linux).
+#[cfg(unix)]
+fn free_bytes(path: &Path) -> Option<u64> {
+    let c_path = std::ffi::CString::new(path.as_os_str().to_str()?).ok()?;
+    // SAFETY: `c_path` outlives the call; `statvfs` writes only into
+    // `stat`, a plain-old-data struct owned here.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if rc != 0 {
+        return None;
+    }
+    Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+// Unused off unix (`fixture_root` keeps the historic temp-dir path
+// there), but kept so the probe's shape documents the fallback.
+#[allow(dead_code)]
+fn free_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// Pick the first candidate root whose free space (per `free_of`)
+/// reaches `required`; `None` (probe unavailable) counts as
+/// insufficient. When no candidate qualifies, return `Err` naming the
+/// requirement and every candidate, so a misconfigured environment
+/// fails loudly at suite start instead of ENOSPC-ing mid-suite.
+fn pick_root(
+    candidates: &[PathBuf],
+    required: u64,
+    free_of: impl Fn(&Path) -> Option<u64>,
+) -> Result<PathBuf, String> {
+    for candidate in candidates {
+        match free_of(candidate) {
+            Some(free) if free >= required => return Ok(candidate.clone()),
+            _ => continue,
+        }
+    }
+    let listed = candidates
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "no temp root has the required free space: need {required} bytes, candidates [{listed}]"
+    ))
+}
+
+/// `pick_root` prefers the first roomy candidate in order, treats an
+/// unprobeable filesystem as insufficient, and names the requirement
+/// plus every candidate in the failure when nothing qualifies.
+#[test]
+fn fixture_root_picking_prefers_roomy_candidates() {
+    let big = PathBuf::from("/big");
+    let small = PathBuf::from("/small");
+    let unknown = PathBuf::from("/unknown");
+    let free_of = |path: &Path| match path {
+        p if p == big => Some(10),
+        p if p == small => Some(2),
+        _ => None,
+    };
+    // A roomy later candidate is reached past a tight first one.
+    assert_eq!(
+        pick_root(&[small.clone(), big.clone()], 5, free_of),
+        Ok(big.clone())
+    );
+    // Order is respected: the earlier roomy candidate wins.
+    assert_eq!(
+        pick_root(&[big.clone(), small.clone()], 5, free_of),
+        Ok(big.clone())
+    );
+    // Unknown free space never qualifies.
+    assert!(pick_root(std::slice::from_ref(&unknown), 5, free_of).is_err());
+    // The failure names the requirement and every candidate.
+    let err = match pick_root(&[small.clone(), unknown], 5, free_of) {
+        Err(err) => err,
+        Ok(root) => panic!("tight and unprobeable roots must not qualify: {root:?}"),
+    };
+    assert!(err.contains("5 bytes"), "names the requirement: {err}");
+    assert!(
+        err.contains("/small") && err.contains("/unknown"),
+        "names every candidate: {err}"
+    );
+}
+
+/// The root directory for this suite's large writes: the compiled
+/// fixture and the per-test deploy directories (both must sit on the
+/// same filesystem so deploys can hardlink the immutable fixture
+/// artifacts). Prefers the OS temp directory when it has room — the
+/// CI behavior is unchanged — and falls back to the workspace target
+/// directory on machines whose `/tmp` is too small for the ~3.5 GiB
+/// suite footprint (bd rc-fdkta: the fixture alone exhausted a 4 GiB
+/// `/tmp`, ENOSPC-ing the artifact-mutation tests).
+fn fixture_root() -> PathBuf {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        #[cfg(not(unix))]
+        {
+            // No free-space probe off unix: keep the historic temp-dir
+            // behavior rather than refusing to run.
+            return std::env::temp_dir();
+        }
+        #[cfg(unix)]
+        {
+            let candidates = [std::env::temp_dir(), cargo_target_dir()];
+            pick_root(&candidates, REQUIRED_ROOT_FREE, free_bytes)
+                .expect("fixture root with enough free space")
+        }
+    })
+    .clone()
+}
+
 /// The single cache directory for this test process's compiled fixture
-/// (repo convention: `camel-test-*` under the OS temp dir, keyed by the
-/// current test process).
+/// (repo convention: `camel-test-*` under the chosen fixture root,
+/// keyed by the current test process).
 fn fixture_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("camel-compiled-fixture-{}", std::process::id()))
+    fixture_root().join(format!("camel-compiled-fixture-{}", std::process::id()))
 }
 
 /// Spawn a detached reaper that removes `dir` once this test process
@@ -417,9 +560,17 @@ fn spawn_reaper(dir: &Path) {
 
 /// Remove fixture directories left by previous test runs whose process
 /// is no longer alive (crashed runs, or reapers that have not fired
-/// yet). Concurrent runs keep their own PID-keyed directory.
+/// yet). Concurrent runs keep their own PID-keyed directory. Every
+/// candidate root is swept, not just the chosen one: runs from before
+/// the root fallback may have left their fixture on either filesystem.
 fn sweep_stale_fixtures() {
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+    for root in [std::env::temp_dir(), cargo_target_dir()] {
+        sweep_stale_fixtures_in(&root);
+    }
+}
+
+fn sweep_stale_fixtures_in(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     for entry in entries.flatten() {
@@ -562,13 +713,17 @@ fn fixture() -> &'static Fixture {
 
 /// Deploy a shared fixture artifact into a fresh source-free directory
 /// (no source document, no Camel.toml, no routes tree) under the
-/// canonical `app.bin` name. The artifact is hardlinked — zero-copy
-/// sharing of the immutable fixture — with a copy fallback for
-/// filesystems that refuse hard links. The deployed artifact is shared
-/// with the fixture: never mutate it in place. Tests that need to alter
-/// artifact bytes must copy first (see `artifact_rejects_marked_corruption`).
+/// canonical `app.bin` name. The deploy directory sits on the fixture
+/// root — the same filesystem — so the artifact hardlinks zero-copy
+/// into it; the copy fallback stays for filesystems that refuse hard
+/// links. The deployed artifact is shared with the fixture: never
+/// mutate it in place. Tests that need to alter artifact bytes must
+/// copy first (see `artifact_rejects_marked_corruption`).
 fn deploy_artifact(artifact: &Path) -> (tempfile::TempDir, PathBuf) {
-    let deploy_dir = tempfile::tempdir().expect("deploy tempdir");
+    let deploy_dir = tempfile::Builder::new()
+        .prefix("camel-compiled-deploy-")
+        .tempdir_in(fixture_root())
+        .expect("deploy tempdir on the fixture root");
     let target = deploy_dir.path().join("app.bin");
     if std::fs::hard_link(artifact, &target).is_err() {
         std::fs::copy(artifact, &target).expect("copy artifact");
@@ -1172,7 +1327,13 @@ fn compile_rejects_malformed_declaration() {
 /// would swap the seam to the full parser (jobtyped Task 5).
 #[test]
 fn compile_allows_structure_invalid_but_well_declared_job() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    // The accepted compile writes a full ~binary-size artifact, so the
+    // source directory sits on the fixture root with the suite's other
+    // large writes.
+    let dir = tempfile::Builder::new()
+        .prefix("camel-compile-loose-")
+        .tempdir_in(fixture_root())
+        .expect("tempdir on the fixture root");
     std::fs::write(
         dir.path().join("loose.job.yaml"),
         STRUCTURE_INVALID_WELL_DECLARED_DOC,
@@ -1681,19 +1842,19 @@ fn artifact_rejects_unknown_positional_and_duplicate_args() {
 /// integrity diagnostic and no boot. One case mutates the last
 /// embedded-data byte (payload/manifest region, past the executable
 /// image); the other mutates a footer checksum byte. Both break the
-/// BLAKE3 checksum while the terminal magic stays intact.
+/// BLAKE3 checksum while the terminal magic stays intact. Each variant
+/// writes its whole-artifact copy, runs it, and removes it before the
+/// next variant builds — only one ~binary-size copy is on disk at a
+/// time (bd rc-fdkta: holding every copy live ENOSPC'd the suite).
 #[test]
 fn artifact_rejects_marked_corruption() {
     let (deploy, artifact) = deploy_artifact(&fixture().route);
     let valid = std::fs::read(&artifact).expect("artifact bytes");
 
-    let mut corrupt_data = valid.clone();
-    let data_end = corrupt_data.len() - trailer::FOOTER_LEN;
-    corrupt_data[data_end - 1] ^= 0xFF;
-    let mut corrupt_footer = valid.clone();
-    corrupt_footer[data_end + 28] ^= 0xFF;
-
-    for (name, bytes) in [("data", corrupt_data), ("footer", corrupt_footer)] {
+    let data_end = valid.len() - trailer::FOOTER_LEN;
+    for (name, offset) in [("data", data_end - 1), ("footer", data_end + 28)] {
+        let mut bytes = valid.clone();
+        bytes[offset] ^= 0xFF;
         let path = deploy.path().join(format!("corrupt-{name}.bin"));
         std::fs::write(&path, bytes).expect("write corrupt artifact");
         #[cfg(unix)]
@@ -1709,6 +1870,7 @@ fn artifact_rejects_marked_corruption() {
             "corrupt {name} must carry an integrity diagnostic: {combined}"
         );
         assert!(!combined.contains("context started"), "no boot: {combined}");
+        drop(std::fs::remove_file(&path));
     }
 }
 
@@ -1850,7 +2012,9 @@ fn artifact_rejects_v2_corruption_and_unknown_schemas() {
 
 /// Truncation through the terminal magic leaves no recognizable trailer,
 /// so the image is indistinguishable from a plain executable and falls
-/// back to the unchanged Clap path.
+/// back to the unchanged Clap path. Each variant's whole-artifact copy
+/// is removed after its run (bd rc-fdkta: holding both copies live
+/// ENOSPC'd the suite).
 #[test]
 fn artifact_truncated_without_marker_keeps_clap_fallback() {
     let (deploy, artifact) = deploy_artifact(&fixture().route);
@@ -1880,6 +2044,7 @@ fn artifact_truncated_without_marker_keeps_clap_fallback() {
         stderr.starts_with("error:"),
         "unchanged Clap fallback: {stderr}"
     );
+    drop(std::fs::remove_file(&path));
 
     // v2 (multidoc Task 2.3): a virtual-store artifact truncated through
     // the terminal magic is likewise indistinguishable from a plain
@@ -1905,6 +2070,7 @@ fn artifact_truncated_without_marker_keeps_clap_fallback() {
         stderr.starts_with("error:"),
         "unchanged Clap fallback for truncated v2: {stderr}"
     );
+    drop(std::fs::remove_file(&path));
 }
 
 /// `--help` and `--version` each exit 0 without booting.

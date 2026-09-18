@@ -119,6 +119,11 @@ camel-auth.workspace = true
 tempfile = { workspace = true }
 serde_json.workspace = true
 ron = { workspace = true }
+# compiled_artifact_test free-space probe (statvfs) for the fixture-root
+# fallback: the suite writes ~3.5 GiB of compiled artifacts and must pick
+# a temp root with room for them. Already a transitive dependency; the
+# dev-dep adds no new package to the lockfile.
+libc = { workspace = true }
 
 [features]
 default = ["flavor-regular"]
