@@ -1,6 +1,13 @@
 # egress-cleartext-policy Specification
 
-## ADDED Requirements
+## Purpose
+
+Uniform cleartext egress policy for camel-http and the MCP producer.
+Cleartext `http://` to a PUBLIC target is rejected by default on every
+outbound path, with per-endpoint and per-remote escape hatches, independent of the
+allow-internal reachability flag (ADR-0081).
+
+## Requirements
 
 ### Requirement: Public cleartext egress rejected by default
 
