@@ -142,3 +142,14 @@ default-binary behavior.
 - **THEN** the normalized sorted lists are identical; package-level
   presence of every `camel-language-*` crate in the default closure is
   still asserted by the surviving package lines
+
+#### Scenario: default binary shows no regression within stated bands
+
+- **GIVEN** baseline measurements of the pre-change default release
+  binary: marker-mode startup median, help-mode startup median, max-RSS
+  median, and exact byte size (n=30 per mode)
+- **WHEN** the post-change default release binary is measured with the
+  same local method and sample count
+- **THEN** each startup median is within ±5% of its baseline median,
+  each max-RSS median is within ±2 MB of its baseline median, and the
+  byte-size delta is zero or explained in the recorded evidence
