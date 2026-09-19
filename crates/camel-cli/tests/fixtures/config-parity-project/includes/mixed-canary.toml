@@ -1,0 +1,7 @@
+# The only `[canary]` section of the mixed fixture: carried by an
+# include, so `--profile prod --profile canary` exercises the mixed
+# multi-profile selection (config-declared `[prod]` plus an
+# include-only section).
+[canary]
+log_level = "debug"
+watch = true

@@ -1,0 +1,4 @@
+# The only `[prod]` section of the strict-mirror fixture: carried by an
+# include, with no `[default]` and no top-level keys.
+[prod]
+log_level = "warn"

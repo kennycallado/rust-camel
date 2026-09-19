@@ -1,0 +1,15 @@
+# Mixed multi-profile fixture (openspec change `profilestrict`,
+# Task 1.2): `[prod]` is declared by this document while `[canary]`
+# exists only in `includes/mixed-canary.toml`, so the selection keeps
+# at least one config-declared profile and must stay accepted at
+# compile time (regression lock for the unchanged acceptance region;
+# tests/config_compile_parity.rs locks the resolved configuration).
+include = ["includes/mixed-canary.toml"]
+routes = ["routes/*.yaml"]
+
+[default]
+log_level = "info"
+timeout_ms = 30000
+
+[prod]
+log_level = "warn"

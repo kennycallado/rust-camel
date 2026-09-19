@@ -11,6 +11,17 @@
 //! and compared byte-for-byte against committed goldens under
 //! `tests/goldens/config-parity/`. A third golden locks the partial
 //! multi-profile absence error text (stderr is observable behavior).
+//! Three further goldens arrive from openspec change `profilestrict`
+//! (Task 1.1): `include_only_profile_error.txt` locks the include-only
+//! rejection stderr (selected profiles only in includes while the
+//! document carries `[default]`), `include_only_then_absence_error.txt`
+//! locks the chain-wide-absence precedence of the per-profile
+//! `UnknownProfile` error, and `no_profiles_resolved.toml` locks the
+//! no-profile resolved configuration. Two final goldens arrive from
+//! the same change (Task 1.2): `mixed_resolved.toml` locks the
+//! mixed multi-profile selection (config-declared `[prod]` plus an
+//! include-only `[canary]`) and `flat_include_profile_resolved.toml`
+//! locks the lenient include-profile path for a flat configuration.
 //!
 //! Regenerate the goldens from the current tree with:
 //!
@@ -170,4 +181,138 @@ fn compile_partial_profile_absence_error_locked() {
 
     let stderr = stderr_of(&output);
     lock_text_golden("partial_absence_error.txt", &stderr);
+}
+
+/// Include-only profile selection is rejected at compile time (the
+/// strict-at-compile mirror): on the strict fixture, `[prod]` exists
+/// only in `includes/strict-prod.toml` while the configuration document
+/// carries `[default]`, so `--profile prod` must exit non-zero with the
+/// include-only diagnostic and no artifact may be written.
+#[test]
+fn compile_include_only_profile_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = dir.path().join("app.bin");
+
+    let output = compile_with_profiles("Camel-strict.toml", &["prod"], &artifact);
+    assert!(
+        !output.status.success(),
+        "include-only profile selection must fail compilation: {}",
+        stderr_of(&output)
+    );
+    assert!(
+        !artifact.exists(),
+        "a rejected compile must not write an artifact"
+    );
+
+    let stderr = stderr_of(&output);
+    lock_text_golden("include_only_profile_error.txt", &stderr);
+}
+
+/// Include-only selection defers to chain-wide absence: with
+/// `--profile prod --profile qa` on the strict fixture, `[qa]` exists
+/// nowhere in the configuration chain, so the per-profile
+/// `UnknownProfile` rejection keeps precedence over the include-only
+/// gate (the frozen per-profile error form).
+#[test]
+fn compile_include_only_profile_defers_to_total_absence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = dir.path().join("app.bin");
+
+    let output = compile_with_profiles("Camel-strict.toml", &["prod", "qa"], &artifact);
+    assert!(
+        !output.status.success(),
+        "total profile absence must fail compilation: {}",
+        stderr_of(&output)
+    );
+    assert!(
+        !artifact.exists(),
+        "a rejected compile must not write an artifact"
+    );
+
+    let stderr = stderr_of(&output);
+    lock_text_golden("include_only_then_absence_error.txt", &stderr);
+}
+
+/// A profile-less compile of a `[default]`-carrying configuration stays
+/// green: the empty-profiles guard of the strict-at-compile mirror (and
+/// of the runtime mirror in `virtual_config.rs`) keeps the
+/// default-section selection valid.
+#[test]
+fn compile_no_profiles_default_config_accepted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = dir.path().join("app.bin");
+
+    let output = compile_with_profiles("Camel.toml", &[], &artifact);
+    assert!(
+        output.status.success(),
+        "profile-less compile of a [default]-carrying config must succeed: {}",
+        stderr_of(&output)
+    );
+    assert!(
+        artifact.exists(),
+        "an accepted compile must write an artifact"
+    );
+
+    let bytes = std::fs::read(&artifact).expect("read the compiled artifact");
+    let actual = resolved_config_toml(&decoded_store(&bytes));
+    lock_text_golden("no_profiles_resolved.toml", &actual);
+}
+
+/// Mixed multi-profile selection stays accepted: on the mixed fixture,
+/// `[prod]` is declared by the configuration document itself while
+/// `[canary]` exists only in `includes/mixed-canary.toml`, so the
+/// selection keeps at least one config-declared profile and the
+/// strict-at-compile gate must not reject it (regression lock for the
+/// unchanged acceptance region). Layering follows include-below-config
+/// precedence (the same order the frozen `production.toml` golden
+/// locks): the config document merges over includes, so the
+/// config-declared `[prod]` keeps `log_level = "warn"` and canary
+/// survives only with keys the document does not override
+/// (`watch = true`).
+#[test]
+fn compile_mixed_profile_selection_accepted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = dir.path().join("app.bin");
+
+    let output = compile_with_profiles("Camel-mixed.toml", &["prod", "canary"], &artifact);
+    assert!(
+        output.status.success(),
+        "mixed multi-profile selection must compile: {}",
+        stderr_of(&output)
+    );
+    assert!(
+        artifact.exists(),
+        "an accepted compile must write an artifact"
+    );
+
+    let bytes = std::fs::read(&artifact).expect("read the compiled artifact");
+    let actual = resolved_config_toml(&decoded_store(&bytes));
+    lock_text_golden("mixed_resolved.toml", &actual);
+}
+
+/// A flat configuration keeps the lenient include-profile path: the
+/// flat fixture carries no `[default]` and no profile section of its
+/// own, so the include-only `[prod]` selection must stay accepted at
+/// compile time — the strict gate only applies to documents with
+/// profile structure (regression lock for the unchanged acceptance
+/// region).
+#[test]
+fn compile_flat_config_include_profile_accepted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = dir.path().join("app.bin");
+
+    let output = compile_with_profiles("Camel-flat.toml", &["prod"], &artifact);
+    assert!(
+        output.status.success(),
+        "include-profile selection on a flat config must compile: {}",
+        stderr_of(&output)
+    );
+    assert!(
+        artifact.exists(),
+        "an accepted compile must write an artifact"
+    );
+
+    let bytes = std::fs::read(&artifact).expect("read the compiled artifact");
+    let actual = resolved_config_toml(&decoded_store(&bytes));
+    lock_text_golden("flat_include_profile_resolved.toml", &actual);
 }

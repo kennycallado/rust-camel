@@ -1,0 +1,5 @@
+# The only `[prod]` section of the flat fixture: carried by an
+# include and accepted leniently because the configuration document
+# carries no profile structure (no `[default]`, no section).
+[prod]
+log_level = "warn"

@@ -1,0 +1,11 @@
+# Flat-configuration fixture (openspec change `profilestrict`,
+# Task 1.2): no `[default]` and no profile section of its own, so the
+# selection `--profile prod` (declared only in
+# `includes/flat-prod.toml`) must stay accepted at compile time — the
+# lenient include-profile path for documents without profile
+# structure (regression lock; tests/config_compile_parity.rs locks
+# the resolved configuration).
+include = ["includes/flat-prod.toml"]
+routes = ["routes/*.yaml"]
+log_level = "info"
+timeout_ms = 30000

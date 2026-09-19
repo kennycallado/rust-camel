@@ -1,0 +1,9 @@
+extra_layer = "from-extra-include"
+log_level = "info"
+platform = "config-parity"
+tags = ["common"]
+timeout_ms = 30000
+
+[production]
+tags = ["common-production"]
+timeout_ms = 9000

@@ -110,6 +110,12 @@ pub enum SourceError {
     RouteFilesFromRootRequiresConfig,
     /// A selected profile section exists nowhere in the configuration.
     UnknownProfile(String),
+    /// Selected profile sections exist only in includes while the
+    /// configuration document carries `[default]`: the strict mirror of
+    /// camel-config's `apply_profile` and the virtual-store
+    /// `MalformedVirtualConfig` backstop rejects the selection at
+    /// compile time.
+    IncludeOnlyProfiles { names: Vec<String> },
     /// The configuration or an include is not valid TOML (or a required
     /// field has the wrong shape).
     InvalidConfig(String),
@@ -166,6 +172,13 @@ impl fmt::Display for SourceError {
                 f,
                 "unknown profile '{name}': the selected profile section must exist in the \
                  explicit configuration"
+            ),
+            Self::IncludeOnlyProfiles { names } => write!(
+                f,
+                "profiles {} exist only in includes: a configuration with a [default] section \
+                 must declare at least one selected profile itself; move at least one selected \
+                 profile section into the configuration document",
+                names.join(", ")
             ),
             Self::InvalidConfig(reason) => write!(f, "invalid configuration: {reason}"),
             Self::InvalidDocument(reason) => write!(f, "invalid document: {reason}"),
@@ -623,6 +636,7 @@ pub fn resolve(
                 selected_profiles.push(name);
             }
         }
+        let selected_names: Vec<String> = selected_profiles.iter().map(|n| n.to_string()).collect();
         for name in selected_profiles {
             validate_profile_name(name)?;
             let mut found = config
@@ -652,6 +666,25 @@ pub fn resolve(
                 bytes: text.into_bytes(),
             });
             config_references.push(logical);
+        }
+
+        // Strict-at-compile mirror of camel-config's `apply_profile`
+        // and the virtual-store `MalformedVirtualConfig` backstop: when
+        // the configuration document carries profile structure but
+        // declares none of the selected profiles itself, the selection
+        // is rejected here — exactly what the runtime would reject at
+        // boot. The loop above has already errored on chain-wide
+        // absence, so this fires only when every selected profile is
+        // include-only. The empty-profiles guard keeps every
+        // profile-less compile of a `[default]`-carrying configuration
+        // green (the runtime mirror guards the same).
+        if camel_dsl::config_semantics::has_profile_structure(&config, &selection.profiles)
+            && !selection.profiles.is_empty()
+            && !camel_dsl::config_semantics::has_selected_profile(&config, &selection.profiles)
+        {
+            return Err(SourceError::IncludeOnlyProfiles {
+                names: selected_names,
+            });
         }
 
         // Config route patterns, declared order, matches sorted.
@@ -820,5 +853,20 @@ mod tests {
         }
         assert_eq!(validate_profile_name("prod"), Ok(()));
         assert_eq!(validate_profile_name("prod.eu"), Ok(()));
+    }
+
+    /// The include-only diagnostic names the selected profiles, the
+    /// rule, and the remedy.
+    #[test]
+    fn include_only_profiles_display_names_rule_and_remedy() {
+        let err = SourceError::IncludeOnlyProfiles {
+            names: vec!["prod".into(), "canary".into()],
+        };
+        assert_eq!(
+            err.to_string(),
+            "profiles prod, canary exist only in includes: a configuration with a [default] \
+             section must declare at least one selected profile itself; move at least one \
+             selected profile section into the configuration document"
+        );
     }
 }

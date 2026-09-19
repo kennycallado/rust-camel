@@ -1,0 +1,1 @@
+camel compile: profiles prod exist only in includes: a configuration with a [default] section must declare at least one selected profile itself; move at least one selected profile section into the configuration document

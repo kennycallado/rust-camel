@@ -1,0 +1,12 @@
+# Strict-mirror fixture (openspec change `profilestrict`, Task 1.1):
+# `[prod]` exists only in `includes/strict-prod.toml` while this
+# document carries `[default]`. `camel compile --profile prod` must
+# reject the selection at compile time — the strict-at-compile mirror
+# of camel-config's `apply_profile` — exactly as the runtime's
+# `MalformedVirtualConfig` backstop would reject it at boot.
+include = ["includes/strict-prod.toml"]
+routes = ["routes/*.yaml"]
+
+[default]
+log_level = "info"
+timeout_ms = 30000
