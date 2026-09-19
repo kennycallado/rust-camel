@@ -295,12 +295,11 @@ fn sql_validate_e2e_fail_redacts() {
     // matches the URL's distinctive `memdb_cli_e2e_validate` fragment:
     // it appears nowhere in the doc-authored SQL or expectation text,
     // so it can only surface through a db_url leak.
-    for leaked in ["memdb_cli_e2e_validate"] {
-        assert!(
-            !combined.contains(leaked),
-            "output must not leak {leaked:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-    }
+    let leaked = "memdb_cli_e2e_validate";
+    assert!(
+        !combined.contains(leaked),
+        "output must not leak {leaked:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     for leaked in ["alice", "bob", "charlie", "INSERT INTO", "SELECT id, name"] {
         assert!(
             !report.contains(leaked),
