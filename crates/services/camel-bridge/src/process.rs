@@ -202,7 +202,7 @@ impl fmt::Debug for BridgeProcessConfig {
             .field("binary_path", &self.binary_path)
             .field("broker_url", &"[REDACTED]")
             .field("broker_type", &self.broker_type)
-            .field("username", &self.username)
+            .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
             .field("password", &self.password)
             .field("start_timeout_ms", &self.start_timeout_ms)
             .field(
@@ -1005,6 +1005,35 @@ mod tests {
         assert!(
             debug_output.contains("[REDACTED; 1 entries]"),
             "env_vars must show redacted count: {debug_output}"
+        );
+    }
+
+    #[test]
+    fn bridge_process_config_debug_redacts_all_sensitive_fields() {
+        let cfg = BridgeProcessConfig {
+            spec: &JMS_BRIDGE,
+            binary_path: PathBuf::from("/tmp/jms-bridge"),
+            broker_url: "amqp://SENTINEL-BROKER-URL@host:5672".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            username: Some("SENTINEL-USERNAME".to_string()),
+            password: Some(Redacted::new("SENTINEL-PASSWORD".to_string())),
+            start_timeout_ms: 1000,
+            env_vars: vec![(
+                "KEYSTORE_PASSWORD".to_string(),
+                "SENTINEL-ENV-PASS".to_string(),
+            )],
+        };
+        let debug_output = format!("{cfg:?}");
+        assert!(
+            !debug_output.contains("SENTINEL-BROKER-URL")
+                && !debug_output.contains("SENTINEL-USERNAME")
+                && !debug_output.contains("SENTINEL-PASSWORD")
+                && !debug_output.contains("SENTINEL-ENV-PASS"),
+            "No sensitive field may leak in Debug: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("username: Some(\"[REDACTED]\")"),
+            "username must be masked in Debug: {debug_output}"
         );
     }
 
