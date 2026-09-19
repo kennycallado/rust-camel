@@ -464,7 +464,7 @@ Acceptance:
 - docker job still carries `if:` publish-gating on every push/login/metadata
   step (unchanged — publish-input gating is canonical spec)
 
-- [ ] 4
+- [x] 4
 
 ## Task 5: Prerelease tag guard on the crates.io publish job
 

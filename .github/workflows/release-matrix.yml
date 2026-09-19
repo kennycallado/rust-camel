@@ -351,6 +351,59 @@ jobs:
           pattern: camel-*
           merge-multiple: true
 
+      - name: Assert artifact flavor suffixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Disjoint filename classification: each file must match exactly
+          # one class (2 slim + 5 full + 7 enumerated regular names = 14).
+          # Filename-based only — cross-compiled binaries are not runnable
+          # on this runner; the runtime flavor smoke happened per build leg
+          # via the --version probe.
+          REGULAR_NAMES=(
+            camel-x86_64-unknown-linux-gnu
+            camel-aarch64-unknown-linux-gnu
+            camel-x86_64-unknown-linux-musl
+            camel-aarch64-unknown-linux-musl
+            camel-x86_64-apple-darwin
+            camel-aarch64-apple-darwin
+            camel-x86_64-pc-windows-msvc.exe
+          )
+          total=0 slim=0 full=0 regular=0
+          unexpected=()
+          for f in dist/*; do
+            [ -f "$f" ] || continue
+            name="$(basename "$f")"
+            total=$((total + 1))
+            case "$name" in
+              camel-slim-*) slim=$((slim + 1)) ;;
+              camel-full-*) full=$((full + 1)) ;;
+              *)
+                matched=""
+                for r in "${REGULAR_NAMES[@]}"; do
+                  if [ "$name" = "$r" ]; then matched=1; break; fi
+                done
+                if [ -n "$matched" ]; then
+                  regular=$((regular + 1))
+                else
+                  unexpected+=("$name")
+                fi
+                ;;
+            esac
+          done
+          echo "total=$total slim=$slim full=$full regular=$regular"
+          ok=1
+          if [ "$total" -ne 14 ] || [ "$slim" -ne 2 ] \
+             || [ "$full" -ne 5 ] || [ "$regular" -ne 7 ]; then
+            echo "FAIL: expected 14 files = 2 slim + 5 full + 7 regular"
+            ok=""
+          fi
+          if [ "${#unexpected[@]}" -gt 0 ]; then
+            printf 'FAIL: unexpected file: %s\n' "${unexpected[@]}"
+            ok=""
+          fi
+          [ -n "$ok" ] || exit 1
+
       - name: Create release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
@@ -359,6 +412,7 @@ jobs:
 
   docker:
     name: Docker (${{ matrix.variant }})
+    if: ${{ !inputs.dev-profile || matrix.in-dev }}
     runs-on: ubuntu-latest
     needs: build
     permissions:
@@ -374,16 +428,22 @@ jobs:
             target: production
             amd64-artifact: camel-x86_64-unknown-linux-musl
             arm64-artifact: camel-aarch64-unknown-linux-musl
+            in-dev: false
+            semantic-tag: regular
           - variant: alpine
             suffix: "-alpine"
             target: alpine
-            amd64-artifact: camel-x86_64-unknown-linux-musl
-            arm64-artifact: camel-aarch64-unknown-linux-musl
+            amd64-artifact: camel-slim-x86_64-unknown-linux-musl
+            arm64-artifact: camel-slim-aarch64-unknown-linux-musl
+            in-dev: false
+            semantic-tag: slim
           - variant: gnu
             suffix: "-gnu"
             target: gnu
-            amd64-artifact: camel-x86_64-unknown-linux-gnu
-            arm64-artifact: camel-aarch64-unknown-linux-gnu
+            amd64-artifact: camel-full-x86_64-unknown-linux-gnu
+            arm64-artifact: camel-full-aarch64-unknown-linux-gnu
+            in-dev: true
+            semantic-tag: full
     env:
       REGISTRY_GHCR: ghcr.io
       REGISTRY_DOCKERHUB: docker.io
@@ -403,6 +463,7 @@ jobs:
           path: binary-amd64
 
       - name: Download arm64 binary
+        if: ${{ !inputs.dev-profile }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ matrix.arm64-artifact }}
@@ -446,10 +507,15 @@ jobs:
         run: |
           mkdir -p context
           AMD64_BIN=$(find binary-amd64 -type f | head -1)
-          ARM64_BIN=$(find binary-arm64 -type f | head -1)
           cp "$AMD64_BIN" context/camel-amd64
-          cp "$ARM64_BIN" context/camel-arm64
-          chmod +x context/camel-amd64 context/camel-arm64
+          chmod +x context/camel-amd64
+          # Dev runs only carry the amd64 artifact (no separate arm64 dev
+          # image build), so the arm64 binary is only staged for publish.
+          if [ "${{ inputs.dev-profile }}" != "true" ]; then
+            ARM64_BIN=$(find binary-arm64 -type f | head -1)
+            cp "$ARM64_BIN" context/camel-arm64
+            chmod +x context/camel-arm64
+          fi
           cp Dockerfile context/Dockerfile
           docker run --rm alpine:3.21 cat /etc/ssl/certs/ca-certificates.crt > context/ca-certificates.crt
 
@@ -466,8 +532,9 @@ jobs:
           OUT="$(docker run --rm camel:dev-${{ matrix.variant }} --version)"
           printf '%s\n' "$OUT"
           case "${{ matrix.variant }}" in
+            production) EXPECTED="regular" ;;
+            alpine) EXPECTED="slim" ;;
             gnu) EXPECTED="full" ;;
-            *) EXPECTED="regular" ;;
           esac
           case "$OUT" in
             *" ($EXPECTED)") ;;
@@ -532,7 +599,7 @@ jobs:
         if: inputs.publish
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
-          for TAG in "${VERSION}${{ matrix.suffix }}" "latest${{ matrix.suffix }}"; do
+          for TAG in "${VERSION}${{ matrix.suffix }}" "latest${{ matrix.suffix }}" "${{ matrix.semantic-tag }}"; do
             docker buildx imagetools create \
               -t ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${TAG} \
               -t ${{ env.REGISTRY_DOCKERHUB }}/${{ env.IMAGE_NAME }}:${TAG} \
