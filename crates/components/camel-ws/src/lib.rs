@@ -87,11 +87,23 @@ struct ServerHandle {
     state: WsAppState,
     is_tls: bool,
     /// Monitor for the shared server task (consumes the server
-    /// JoinHandle). Its completion doubles as the server-death check for
-    /// lazy eviction in `get_or_spawn*`: a finished monitor means the
-    /// server task (panic/abort/serve-error) is gone and the next spawn
-    /// must rebind instead of rejoining a dead transport.
+    /// JoinHandle). On unexpected exit it cancels `server_exited` so
+    /// hosted routes fail and supervision restarts them. Retained for
+    /// the test-only `reset()` abort; no production reader (rc-onm5b
+    /// removed the last one — eviction reads the serve-future drop
+    /// guard instead of the monitor's completion).
+    #[allow(dead_code)]
     monitor_task: JoinHandle<()>,
+    /// Accept-loop liveness (rc-onm5b): flipped to `false` by a drop guard
+    /// captured into the serve future, so it fires on EVERY death mode —
+    /// normal exit, serve error, abort, and runtime-drop cancellation,
+    /// polled or not — without depending on the monitor task being
+    /// scheduled. `evict_dead_server_if_any` reads this as the eviction
+    /// signal; it is strictly earlier and more reliable than the monitor's
+    /// `is_finished()` (a joiner can arrive after the serve future died
+    /// but before the monitor completed, and a runtime-dropped task's
+    /// JoinHandle state is not observable mid-drop).
+    serve_alive: Arc<AtomicBool>,
     /// Abort handle for the WebSocket server task itself. The JoinHandle
     /// is consumed by `monitor_ws_server_task`; this survives on the
     /// handle so crashed-server tests (and future ops tooling) can
@@ -199,6 +211,9 @@ impl ServerRegistry {
             })?;
             // rc-nxml4: lazily evict dead shared servers so a supervision
             // restart rebinds instead of rejoining a dead transport.
+            // rc-onm5b: the signal is the serve-future drop guard, which
+            // also covers runtime-drop deaths and the monitor-completion
+            // race.
             evict_dead_server_if_any(&mut guard, port);
             let entry = guard.entry(port).or_insert_with(|| ServerRegistryInner {
                 cell: Arc::new(OnceCell::new()),
@@ -350,8 +365,9 @@ impl ServerRegistry {
                 CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
             })?;
             // rc-nxml4: lazy dead-server eviction — same rationale as
-            // `get_or_spawn`: a finished monitor means the shared server
-            // task is gone; the next spawn must rebind.
+            // `get_or_spawn`. rc-onm5b: keyed on the serve-future drop
+            // guard (`serve_alive`), covering runtime-drop deaths and the
+            // monitor-completion race too.
             evict_dead_server_if_any(&mut guard, port);
             let entry = guard.entry(port).or_insert_with(|| ServerRegistryInner {
                 cell: Arc::new(OnceCell::new()),
@@ -458,16 +474,38 @@ impl ServerRegistry {
 }
 
 /// Lazy dead-server eviction shared by both `get_or_spawn*` entry
-/// points (rc-nxml4): when the entry on `port` holds an initialized
-/// server whose monitor task has finished, remove the entry so the next
-/// spawn rebinds. The monitor ends with — or immediately after — the
-/// server task, so `is_finished()` covers panic, abort and serve-error
-/// exits alike; init-in-flight cells are left alone.
+/// points (rc-nxml4, signal hardened in rc-onm5b): when the entry on
+/// `port` holds an initialized server whose serve future is gone
+/// (`serve_alive` flipped by the drop guard), remove the entry so the
+/// next spawn rebinds. The guard fires at serve-future drop — normal
+/// exit, serve error, abort, and runtime-drop cancellation alike, polled
+/// or not — which closes the serve-dead-but-monitor-unfinished window
+/// the previous `monitor_task.is_finished()` signal left open (a joiner
+/// in that window rejoined the corpse); init-in-flight cells are left
+/// alone.
 fn evict_dead_server_if_any(guard: &mut HashMap<u16, ServerRegistryInner>, port: u16) {
     if let Some(handle) = guard.get(&port).and_then(|e| e.cell.get())
-        && handle.monitor_task.is_finished()
+        && !handle.serve_alive.load(Ordering::Acquire)
     {
+        tracing::debug!(
+            port,
+            "evicting dead WebSocket server entry (serve task gone)"
+        );
         guard.remove(&port);
+    }
+}
+
+/// Drop guard that flips `serve_alive` to `false` when the serve future
+/// is gone (rc-onm5b). Captured into the serve future by value — so it is
+/// part of the future's state from construction, before the first poll —
+/// which makes runtime-drop cancellation (the task dropped without ever
+/// being polled, or parked mid-accept at runtime shutdown) flip the flag
+/// just like a normal exit, serve error, or abort does.
+struct ServeAliveGuard(Arc<AtomicBool>);
+
+impl Drop for ServeAliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -487,6 +525,10 @@ async fn spawn_server(
     // Per-server death signal, cancelled by `monitor_ws_server_task`
     // (rc-nxml4): shared-transport death must fail every hosted route.
     let server_exited = CancellationToken::new();
+    // rc-onm5b: accept-loop liveness, flipped false by a guard captured
+    // into the serve future below — the direct eviction signal, see
+    // `evict_dead_server_if_any`.
+    let serve_alive: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
     let state = WsAppState {
         dispatch: Arc::clone(&dispatch),
         path_configs: Arc::clone(&path_configs),
@@ -524,7 +566,11 @@ async fn spawn_server(
             let server = axum_server::from_tcp_rustls(std_listener, tls_cfg).map_err(|e| {
                 CamelError::EndpointCreationFailed(format!("TLS listener setup failed: {e}"))
             })?;
+            let alive_guard = ServeAliveGuard(Arc::clone(&serve_alive));
             let task = tokio::spawn(async move {
+                // rc-onm5b: dropped with this future on every death mode —
+                // flips `serve_alive` for lazy eviction.
+                let _alive = alive_guard;
                 if let Err(e) = server
                     .handle(listen_handle_for_task)
                     .serve(app.into_make_service())
@@ -553,7 +599,11 @@ async fn spawn_server(
             let error_flag = Arc::clone(&server_error);
             let rt = Arc::clone(&runtime);
             let rid = route_id.clone();
+            let alive_guard = ServeAliveGuard(Arc::clone(&serve_alive));
             let task = tokio::spawn(async move {
+                // rc-onm5b: dropped with this future on every death mode —
+                // flips `serve_alive` for lazy eviction.
+                let _alive = alive_guard;
                 if let Err(e) = serve(listener, app).await {
                     rt.health()
                         .force_unhealthy_for_route(&rid, "g:ws:bind-plain", &e.to_string());
@@ -596,6 +646,7 @@ async fn spawn_server(
         state,
         is_tls,
         monitor_task,
+        serve_alive,
         server_abort,
         server_exited,
         tls_config: retained_tls_cfg,
@@ -4467,11 +4518,11 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), token1.cancelled())
             .await
             .expect("server death token must cancel after abort");
-        // Ordering dependency: eviction checks `monitor_task.is_finished()`
-        // and the monitor has no awaits after `cancel()`, so under this
-        // current-thread test runtime the finished monitor is observed by
-        // the next spawn below. The rebinding assertion would flake on a
-        // multi-thread runtime if the monitor ever gained a trailing await.
+        // Eviction signal note (rc-onm5b): eviction reads `serve_alive`,
+        // flipped by the drop guard when the aborted serve future is
+        // dropped — strictly before the monitor observes the abort — so
+        // the rebinding below has no monitor-completion ordering
+        // dependency on any runtime flavor.
 
         // The next spawn on the same port must rebind: fresh state, fresh
         // (uncancelled) death token.
@@ -4489,6 +4540,202 @@ mod tests {
             "rebind must produce a NEW server entry, not the dead one"
         );
         assert!(token1.is_cancelled());
+    }
+
+    /// Leave a listened-then-dead entry in the global registry (rc-onm5b
+    /// harness): spawn a server on a dedicated current-thread runtime, let
+    /// the runtime poll the serve task into its accept park (LISTENED,
+    /// proven by a live TCP connect), then drop the runtime so the parked
+    /// serve task dies mid-park. Returns the corpse entry's dispatch-table
+    /// address and its port.
+    ///
+    /// This is the death mode `#[tokio::test]` runtimes inflict at test
+    /// end: the task is dropped, not run to completion, and its
+    /// `JoinHandle` may never report completion — while the
+    /// process-lifetime registry keeps the initialized entry for the next
+    /// test to join via ephemeral port reuse.
+    fn leave_listened_then_dead_entry(route_id: &str) -> (DispatchTable, String, u16) {
+        let route = route_id.to_string();
+        std::thread::spawn(move || {
+            let owner_rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("owner runtime");
+            let out = owner_rt.block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("owner bind");
+                let port = listener.local_addr().unwrap().port();
+                let (state, _addr, _listen, _token) = ServerRegistry::global()
+                    .get_or_spawn_with_listener(listener, None, test_rt(), route.clone())
+                    .await
+                    .expect("owner server entry should spawn");
+                // Yield so the owner runtime polls the serve task into its
+                // accept park: the entry has now LISTENED before it dies.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                // Liveness proof at the moment of death: the bound socket
+                // accepts a connection into its backlog.
+                tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .expect("owner accept loop must be live before death");
+                (Arc::clone(&state.dispatch), state.route_id.clone(), port)
+            });
+            // Drop the runtime BEFORE returning: the parked serve task and
+            // its monitor are cancelled mid-park while the process-lifetime
+            // registry keeps the initialized entry.
+            drop(owner_rt);
+            out
+        })
+        .join()
+        .expect("owner thread")
+    }
+
+    /// rc-onm5b: an entry whose serve task listened and then died with its
+    /// owner runtime must NOT be joined by a later test that reuses the
+    /// port. A corpse join hands out an instantly-"ready" entry whose
+    /// accept loop is dead: the client's bounded connect loop then fails
+    /// with connection refused (the rare flaky-red under load). The joiner
+    /// must instead receive a FRESH server that actually accepts traffic on
+    /// the reused port.
+    #[tokio::test]
+    async fn listened_then_dead_entry_is_not_joined_on_port_reuse() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        let (corpse_dispatch, corpse_route, port) = leave_listened_then_dead_entry("wsevict-owner");
+
+        // Port reuse: the corpse's socket closed at runtime drop, so the
+        // kernel reissues the port to this joiner, which joins through the
+        // production `get_or_spawn_with_listener` path.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .expect("port reissued for the joiner");
+        let (state, _addr, _listen, _token) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener, None, test_rt(), "wsevict-joiner".into())
+            .await
+            .expect("joiner spawn");
+        // Identity is asserted on `route_id` (the creating consumer's
+        // route): a raw dispatch-table address is NOT sound here — a
+        // correct eviction frees the corpse table and the allocator can
+        // hand the same address to the fresh one. The held `corpse_dispatch`
+        // clone pins the corpse allocation, so the ptr check below is
+        // stable as a second signal.
+        assert_ne!(
+            state.route_id, corpse_route,
+            "joiner joined the listened-then-dead entry (rc-onm5b corpse join)"
+        );
+        assert!(
+            !Arc::ptr_eq(&state.dispatch, &corpse_dispatch),
+            "joiner must receive a fresh dispatch table, not the corpse's"
+        );
+        // The fresh accept loop must serve on the reused port. A corpse
+        // join leaves the port CLOSED (the joiner's injected listener is
+        // dropped unused), so this connect is refused and times out.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        .expect("fresh server must accept on the reused port within 2s")
+        .expect("connect");
+
+        ServerRegistry::reset();
+    }
+
+    /// rc-onm5b coverage: eviction must not over-fire. A LIVE entry is
+    /// joined as-is — same dispatch table, ref count 2 — and keeps
+    /// accepting traffic after the join.
+    #[tokio::test]
+    async fn live_shared_server_is_not_evicted_on_join() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let (state1, _addr, _listen, _token) = ServerRegistry::global()
+            .get_or_spawn_with_listener(listener, None, test_rt(), "wsevict-live-1".into())
+            .await
+            .expect("first spawn");
+
+        let (state2, _listen2, _token2) = ServerRegistry::global()
+            .get_or_spawn("127.0.0.1", port, None, test_rt(), "wsevict-live-2".into())
+            .await
+            .expect("second join");
+
+        assert!(
+            Arc::ptr_eq(&state1.dispatch, &state2.dispatch),
+            "a live entry must be joined, not evicted"
+        );
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            2,
+            "join must take a second reference on the live entry"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        .expect("live server must keep accepting after the join")
+        .expect("connect");
+
+        ServerRegistry::reset();
+    }
+
+    /// rc-onm5b coverage: the itest join path stages a pre-bound listener
+    /// for the reused port before `get_or_spawn` (camel-test support). With
+    /// the dead entry evicted, the init winner must consume the STAGED
+    /// socket and serve on it — not rejoin the corpse, and not bind past
+    /// the staged listener.
+    #[tokio::test]
+    async fn port_reuse_after_eviction_serves_staged_listener() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        ServerRegistry::reset();
+
+        let (corpse_dispatch, corpse_route, port) =
+            leave_listened_then_dead_entry("wsevict-staged-owner");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .expect("port reissued for the staged joiner");
+        ServerRegistry::global()
+            .stage_listener(listener)
+            .await
+            .expect("stage listener");
+        let (state, _listen, _token) = ServerRegistry::global()
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                None,
+                test_rt(),
+                "wsevict-staged-joiner".into(),
+            )
+            .await
+            .expect("staged joiner spawn");
+        // `route_id` identity, not a dispatch-table address: a correct
+        // eviction frees the corpse table and the allocator may reuse its
+        // address for the fresh one (observed as a test false positive
+        // under full-suite load). The held clone pins the corpse
+        // allocation so the ptr check stays stable.
+        assert_ne!(
+            state.route_id, corpse_route,
+            "staged joiner joined the listened-then-dead entry (rc-onm5b corpse join)"
+        );
+        assert!(
+            !Arc::ptr_eq(&state.dispatch, &corpse_dispatch),
+            "staged joiner must receive a fresh dispatch table, not the corpse's"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        .expect("fresh server must serve on the staged listener within 2s")
+        .expect("connect");
+
+        ServerRegistry::reset();
     }
 
     // === H-10 Finding Tests ===

@@ -45,39 +45,40 @@ crates/components/camel-redis/src/config.rs:400
 crates/components/camel-redis/src/config.rs:840
 
 # ── camel-ws (rc-redactstrict task 2.2) ─────────────────────────────────
-# lib.rs:537 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
+# Line refs renumbered by rc-onm5b (ServerRegistry liveness eviction insertions).
+# lib.rs:583 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
 #   provably credential-free; wrapping a non-URL IP in redact_url is
 #   semantically wrong (disposition b).
-crates/components/camel-ws/src/lib.rs:537
-# lib.rs:562 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
+crates/components/camel-ws/src/lib.rs:583
+# lib.rs:612 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
 #   provably credential-free; wrapping a non-URL IP in redact_url is
 #   semantically wrong (disposition b).
-crates/components/camel-ws/src/lib.rs:562
-# lib.rs:574 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
+crates/components/camel-ws/src/lib.rs:612
+# lib.rs:624 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
 #   provably credential-free; wrapping a non-URL IP in redact_url is
 #   semantically wrong (disposition b).
-crates/components/camel-ws/src/lib.rs:574
-# lib.rs:653 — `host = %addr.ip()`: bare listener IP from SocketAddr,
+crates/components/camel-ws/src/lib.rs:624
+# lib.rs:704 — `host = %addr.ip()`: bare listener IP from SocketAddr,
 #   provably credential-free; wrapping a non-URL IP in redact_url is
 #   semantically wrong (disposition b).
-crates/components/camel-ws/src/lib.rs:653
-# lib.rs:1677 — `host = self.cfg.inner.host`: bare configured WebSocket
+crates/components/camel-ws/src/lib.rs:704
+# lib.rs:1728 — `host = self.cfg.inner.host`: bare configured WebSocket
 #   hostname, no URL and no credential substrate.
-crates/components/camel-ws/src/lib.rs:1677
-# lib.rs:1709 — `host = self.cfg.inner.host`: bare configured WebSocket
+crates/components/camel-ws/src/lib.rs:1728
+# lib.rs:1760 — `host = self.cfg.inner.host`: bare configured WebSocket
 #   hostname, no URL and no credential substrate.
-crates/components/camel-ws/src/lib.rs:1709
-# lib.rs:1743 — `host = self.cfg.inner.host`: bare configured WebSocket
+crates/components/camel-ws/src/lib.rs:1760
+# lib.rs:1794 — `host = self.cfg.inner.host`: bare configured WebSocket
 #   hostname, no URL and no credential substrate.
-crates/components/camel-ws/src/lib.rs:1743
-# lib.rs:1751 — `host = self.cfg.inner.host`: bare configured WebSocket
+crates/components/camel-ws/src/lib.rs:1794
+# lib.rs:1802 — `host = self.cfg.inner.host`: bare configured WebSocket
 #   hostname, no URL and no credential substrate.
-crates/components/camel-ws/src/lib.rs:1751
-# lib.rs:1910 — `host = canonical_host`: canonical host derived from config
+crates/components/camel-ws/src/lib.rs:1802
+# lib.rs:1961 — `host = canonical_host`: canonical host derived from config
 #   (hostname/IP only, see WsUriConfig::canonical_host), no credential
 #   substrate.
-crates/components/camel-ws/src/lib.rs:1910
-# lib.rs:1931 — `host = canonical_host`: canonical host derived from config
+crates/components/camel-ws/src/lib.rs:1961
+# lib.rs:1982 — `host = canonical_host`: canonical host derived from config
 #   (hostname/IP only, see WsUriConfig::canonical_host), no credential
 #   substrate.
-crates/components/camel-ws/src/lib.rs:1931
+crates/components/camel-ws/src/lib.rs:1982

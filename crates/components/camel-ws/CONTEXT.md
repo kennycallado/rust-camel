@@ -124,9 +124,13 @@ Per ADR-0012, this component's `error!` sites are outside the handler contract:
   `CrashNotification` → `FailRoute` → supervision backoff restart (ADR-0007,
   rc-nxml4 — port of the camel-http rc-szmob pattern). A clean exit cancels
   nothing; a serve-error exit cancels without the metric (the bind-arm health pin
-  above is its operator signal). A finished monitor also drives lazy eviction in
-  `get_or_spawn*`: the next spawn on that port rebinds a fresh server instead of
-  rejoining the dead one, so supervision restarts actually recover.
+  above is its operator signal). Lazy eviction in `get_or_spawn*` keys on the
+  serve-future drop guard (`serve_alive`, rc-onm5b): the flag flips at
+  serve-task drop on every death mode — exit, serve error, abort, runtime-drop
+  cancellation — strictly before the monitor completes, so the next spawn on
+  that port rebinds a fresh server instead of rejoining a corpse (a dead
+  entry joined via ephemeral port reuse resolves its readiness gate instantly
+  while the accept loop is dead — the rc-onm5b flake).
 
 Kernel authentication rejections in `dispatch_handler` log at `warn!` and increment
 `e:ws:authn` first; the metric is the operator signal.
