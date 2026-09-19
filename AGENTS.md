@@ -50,6 +50,8 @@
   run: cargo xtask lint-unwrap
 - name: lint-secrets
   run: cargo xtask lint-secrets
+- name: lint-single-source
+  run: cargo xtask lint-single-source
 - name: lint-non-exhaustive
   run: cargo xtask lint-non-exhaustive
 - name: lint-commits

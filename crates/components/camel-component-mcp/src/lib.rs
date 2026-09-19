@@ -17,6 +17,7 @@ pub mod consumer;
 pub mod endpoint;
 pub mod error;
 pub mod headers;
+pub(crate) mod metadata;
 pub mod producer;
 pub mod registry;
 pub mod types;

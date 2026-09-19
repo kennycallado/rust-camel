@@ -4,15 +4,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use camel_api::CamelError;
-use camel_api::component_metadata::{
-    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
-};
+use camel_api::component_metadata::ComponentMetadata;
 use camel_component_api::{Component, ComponentContext, Endpoint};
 
 use crate::client::{McpServerMap, McpServerMapHandle};
 use crate::config::McpGlobalConfig;
 use crate::endpoint::{McpEndpoint, McpEndpointUri};
 use crate::error::McpError;
+use crate::metadata::McpMetadataDescriptor;
 
 /// The MCP component — scheme `"mcp"`.
 ///
@@ -69,55 +68,14 @@ impl Component for McpComponent {
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        let mut metadata = ComponentMetadata::minimal("mcp");
+        // Single source of truth (ADR-0041): URI options are macro-derived
+        // from `McpMetadataDescriptor`'s `#[uri_param]` annotations — no
+        // hand-written `UriOption` lists. Version and uri_syntax are
+        // component-level facts the derive cannot express (same hybrid as
+        // the redis sentinel schemes).
+        let mut metadata = McpMetadataDescriptor::metadata();
         metadata.version = env!("CARGO_PKG_VERSION").into();
-        metadata.description =
-            "MCP (Model Context Protocol) tools + resources server and client".into();
         metadata.uri_syntax = "mcp:<server>/tool/<name>?schema=<json> | mcp:<server>/resource/<name>?uri=<mcp-uri> | mcp:call?server=<name>&tool=<name> | mcp:read?server=<name>&uri=<uri>".into();
-        metadata.capabilities = ComponentCapabilities {
-            supports_consumer: true,
-            supports_producer: true,
-            supports_polling_consumer: false,
-            supports_streaming: true,
-        };
-        metadata.uri_options = vec![
-            UriOption::new(
-                "server",
-                "Named MCP server (Consumer bind target) or remote (Producer client target)",
-                OptionKind::String,
-            )
-            .required(),
-            UriOption::new(
-                "tool",
-                "Tool name to invoke on the named server",
-                OptionKind::String,
-            ),
-            UriOption::new(
-                "uri",
-                "MCP resource URI to read (producer) or the declared resource URI (consumer)",
-                OptionKind::String,
-            ),
-            UriOption::new(
-                "schema",
-                "URL-encoded tool input JSON Schema carried on the tool consumer URI — the DSL lowering channel",
-                OptionKind::String,
-            ),
-            UriOption::new(
-                "bind",
-                "Streamable-HTTP listen address for the shared server listener",
-                OptionKind::String,
-            ),
-            UriOption::new(
-                "security_policy",
-                "Route-level authorization policy required for a server bind",
-                OptionKind::String,
-            ),
-            UriOption::new(
-                "transport",
-                "MCP transport (Streamable HTTP only)",
-                OptionKind::String,
-            ),
-        ];
         metadata
     }
 
