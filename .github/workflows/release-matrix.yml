@@ -38,6 +38,7 @@ jobs:
             install-musl-tools: true
             alloc-features: "jemalloc"
             flavor: "flavor-slim"
+            no-default-features: true
             artifact-name: "camel-slim-x86_64-unknown-linux-musl"
             in-dev-profile: false
             kafka-absence-probe: true
@@ -47,6 +48,7 @@ jobs:
             bin-suffix: ""
             alloc-features: "jemalloc"
             flavor: "flavor-slim"
+            no-default-features: true
             artifact-name: "camel-slim-aarch64-unknown-linux-musl"
             in-dev-profile: false
           # ---- regular: keeps the clean legacy name, all 7 targets. Never
@@ -200,11 +202,19 @@ jobs:
           # conditional expansion — empty ALLOC_FEATURES must not leave
           # a leading comma (rc-vnm8 class).
           FEATURES="${FLAVOR}${ALLOC_FEATURES:+,$ALLOC_FEATURES}"
-          echo "Building ${{ matrix.target }} with: --features $FEATURES"
+          # Slim legs MUST drop default features: default = flavor-regular
+          # and marker priority is full > regular > slim, so without this
+          # flag a slim leg silently builds the REGULAR closure (caught by
+          # the version-flavor assert at the rc.1 CI rehearsal).
+          NO_DEFAULT=""
+          if [[ "${{ matrix.no-default-features }}" == "true" ]]; then
+            NO_DEFAULT="--no-default-features"
+          fi
+          echo "Building ${{ matrix.target }} with: $NO_DEFAULT --features $FEATURES"
           if [[ "${{ matrix.use-cross }}" == "true" ]]; then
-            cross build -p camel-cli --release --target "${{ matrix.target }}" --features "$FEATURES"
+            cross build -p camel-cli --release --target "${{ matrix.target }}" $NO_DEFAULT --features "$FEATURES"
           else
-            cargo build -p camel-cli --release --target "${{ matrix.target }}" --features "$FEATURES"
+            cargo build -p camel-cli --release --target "${{ matrix.target }}" $NO_DEFAULT --features "$FEATURES"
           fi
         shell: bash
 
