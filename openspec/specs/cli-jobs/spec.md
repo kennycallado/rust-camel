@@ -59,8 +59,11 @@ string, object, and array forms. A document named `*.test.yaml` /
 
 At load time, `camel job` SHALL reject documents whose discovered route
 definitions consume (`from:` URI) from any scheme outside the job-safe
-allowlist `{direct, seda, log, mock}`. Producer and sink `to:` URIs
-SHALL NOT be restricted.
+allowlist `{direct, seda, log, mock, stream}`, where the `stream` scheme
+is admitted only with path `in` (`from: stream:in`). Job documents
+declaring `from: stream:out` or `from: stream:err` SHALL be rejected at
+load with an error naming `stream:in` as the only accepted stream
+consumer path. Producer and sink `to:` URIs SHALL NOT be restricted.
 
 #### Scenario: non-job-safe consumer scheme is rejected
 
@@ -77,6 +80,20 @@ SHALL NOT be restricted.
   `direct:in` and contains `to: http://...` and `to: log:out` steps
 - **WHEN** `camel job` loads the routes
 - **THEN** the consumer gate passes and the job runs
+
+#### Scenario: from stream:in passes the gate
+
+- **GIVEN** a job document whose route declares `from: stream:in`
+- **WHEN** `camel job` loads the routes
+- **THEN** the consumer gate passes and the job runs
+
+#### Scenario: stream producer path rejected as consumer
+
+- **GIVEN** a job document whose route declares `from: stream:out`
+- **WHEN** `camel job` loads the routes
+- **THEN** the document is rejected with an error naming `stream:in` as
+  the only accepted stream consumer path, and the process exits with
+  code 2
 
 ### Requirement: exit-code taxonomy and JSON report
 
