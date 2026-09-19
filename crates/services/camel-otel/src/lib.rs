@@ -10,6 +10,11 @@ pub mod service;
 
 pub use config::{OtelConfig, OtelProtocol, OtelSampler};
 pub use metrics::OtelMetrics;
+
+/// OpenTelemetry `Context` re-exported through the camel-otel facade, so
+/// dependent crates can build and attach contexts without a direct
+/// `opentelemetry` dependency.
+pub use opentelemetry::Context;
 pub use opentelemetry_sdk::logs::SdkLoggerProvider;
 pub use propagation::{
     TRACE_PARENT_HEADER, TRACE_STATE_HEADER, extract_context, extract_into_exchange,

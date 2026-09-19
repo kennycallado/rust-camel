@@ -76,6 +76,22 @@ Bridge restart stays inside `JmsBridgePool`. Consumer task failure remains
 route-supervised. `JmsConsumer::stop` cancels, joins with a five-second grace,
 and then aborts remaining tasks. This shutdown sequence complies with ADR-0007.
 
+## Trace context propagation
+
+The `otel` cargo feature (optional `camel-otel` dependency, camel-http
+pattern) enables W3C trace-context injection on bridge RPCs. When enabled,
+`bridge_service_client` wraps the channel with `TraceContextInterceptor`
+(`trace_context.rs`), which attaches the ambient camel-otel context as
+`traceparent` (+ `tracestate`) gRPC metadata on every RPC (Send, Subscribe,
+Health). The producer additionally injects the Exchange's `otel_context` on
+Send so real route traces propagate and the exchange-scoped context wins over
+the ambient one. An existing `traceparent` is never overwritten; entries that
+are not valid gRPC metadata are skipped. With no active context the
+interceptor injects nothing and the RPC keeps existing semantics (no-tracing
+fallback). The observability delta spec
+`openspec/changes/bridge-otel-observability/specs/observability/spec.md`
+defines this contract.
+
 ## Log-level policy
 
 Per ADR-0012:

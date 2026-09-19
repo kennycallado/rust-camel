@@ -12,6 +12,16 @@ Language-specific bridge processes for Apache Camel components that require non-
 
 ---
 
+## Logging
+
+All three bridges emit log records as structured JSON lines on stdout via the
+quarkus-logging-json console formatter (`quarkus.log.console.json.enabled:
+true`). The jms bridge additionally logs the `traceparent` gRPC metadata it
+receives on bridge RPCs at info level (TraceparentInterceptor,
+`@GlobalInterceptor`).
+
+---
+
 ## Environment Variables
 
 Each bridge reads its configuration from environment variables at startup. Malformed values fail loud before the bridge accepts traffic (ADR-0033). Per-bridge semantics: [`cxf/`](cxf/README.md), [`jms/`](jms/README.md).

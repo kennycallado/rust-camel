@@ -29,6 +29,7 @@ dependencies {
     implementation("io.quarkus:quarkus-grpc")
     implementation("io.quarkus:quarkus-arc")
     implementation("io.quarkus:quarkus-config-yaml")
+    implementation("io.quarkus:quarkus-logging-json")
 
     // Apache CXF
     implementation("org.apache.cxf:cxf-core:$cxfVersion")

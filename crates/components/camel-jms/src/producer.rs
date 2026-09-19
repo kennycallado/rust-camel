@@ -176,11 +176,20 @@ impl Service<Exchange> for JmsProducer {
             );
 
             let mut client = bridge_service_client(channel);
-            let request = SendRequest {
+            let request = tonic::Request::new(SendRequest {
                 destination,
                 body,
                 headers,
                 content_type,
+            });
+            #[cfg(feature = "otel")]
+            let request = {
+                let mut request = request;
+                crate::trace_context::apply_exchange_trace_context(
+                    &exchange,
+                    request.metadata_mut(),
+                );
+                request
             };
 
             let response = client

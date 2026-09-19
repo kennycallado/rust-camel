@@ -1689,6 +1689,7 @@ dependencies = [
  "camel-api",
  "camel-bridge",
  "camel-component-api",
+ "camel-otel",
  "dashmap 6.2.1",
  "futures",
  "prost",

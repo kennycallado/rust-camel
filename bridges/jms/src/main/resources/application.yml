@@ -14,6 +14,10 @@ quarkus:
     ssl:
       client-auth: REQUIRED
     tls-configuration-name: bridge
+  log:
+    console:
+      json:
+        enabled: true
   tls:
     bridge:
       key-store:

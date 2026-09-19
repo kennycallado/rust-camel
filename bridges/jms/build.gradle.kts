@@ -17,6 +17,7 @@ dependencies {
     implementation("io.quarkus:quarkus-grpc")
     implementation("io.quarkus:quarkus-arc")
     implementation("io.quarkus:quarkus-config-yaml")
+    implementation("io.quarkus:quarkus-logging-json")
 
     // ActiveMQ Classic (OpenWire)
     implementation("org.apache.activemq:activemq-client:5.19.10")

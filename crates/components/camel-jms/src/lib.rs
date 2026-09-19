@@ -21,6 +21,8 @@ pub mod headers;
 pub mod health;
 pub(crate) mod metadata;
 pub mod producer;
+#[cfg(feature = "otel")]
+mod trace_context;
 
 pub use bundle::JmsBundle;
 pub use camel_bridge::process::BrokerType;

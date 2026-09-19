@@ -52,16 +52,35 @@ pub(crate) fn bridge_decode_limit() -> usize {
     BRIDGE_MAX_DECODING_MESSAGE_SIZE
 }
 
+/// Underlying transport type for bridge gRPC clients: the raw channel, or
+/// the same channel wrapped with the otel trace-context interceptor.
+#[cfg(feature = "otel")]
+pub(crate) type BridgeClientChannel = tonic::service::interceptor::InterceptedService<
+    Channel,
+    crate::trace_context::TraceContextInterceptor,
+>;
+#[cfg(not(feature = "otel"))]
+pub(crate) type BridgeClientChannel = Channel;
+
 /// Production-path constructor for bridge gRPC clients.
 ///
 /// Applies [`bridge_decode_limit`] to every RPC issued through this client.
 /// All `BridgeServiceClient` construction sites must go through this helper
 /// rather than calling `BridgeServiceClient::new` directly, so a channel
-/// handed over by the pool always decodes maximal legal messages.
+/// handed over by the pool always decodes maximal legal messages. With the
+/// `otel` feature the client also attaches the ambient W3C trace context to
+/// every RPC; a `traceparent` already present on the request always wins.
 pub(crate) fn bridge_service_client(
     channel: Channel,
-) -> crate::proto::bridge_service_client::BridgeServiceClient<Channel> {
-    BridgeServiceClient::new(channel).max_decoding_message_size(bridge_decode_limit())
+) -> crate::proto::bridge_service_client::BridgeServiceClient<BridgeClientChannel> {
+    #[cfg(feature = "otel")]
+    let client = BridgeServiceClient::with_interceptor(
+        channel,
+        crate::trace_context::TraceContextInterceptor,
+    );
+    #[cfg(not(feature = "otel"))]
+    let client = BridgeServiceClient::new(channel);
+    client.max_decoding_message_size(bridge_decode_limit())
 }
 
 // ── BridgeState ──────────────────────────────────────────────────────────────
