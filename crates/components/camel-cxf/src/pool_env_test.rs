@@ -9,23 +9,22 @@
 //! key names and none of the values.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use camel_bridge::process::{BridgeProcessConfig, CxfProfileEnvVars, Redacted};
 
 use crate::pool::env_var_keys;
 
-/// Realistic `env_vars` payload as built by `start_bridge_inner`: profile
-/// vars from `cxf_profiles` (passwords Deref-unwrapped to plain strings by
-/// `to_env_vars`) plus the pool-level `CXF_ADDRESS` bind URL.
-fn bridge_env_vars_with_secrets() -> Vec<(String, String)> {
-    let profiles = vec![CxfProfileEnvVars {
+/// Realistic profile set as built by `start_bridge_inner`: one profile whose
+/// `to_env_vars` flattening Deref-unwraps `Redacted` passwords into plain
+/// strings (see `CxfProfileEnvVars::to_env_vars`).
+fn secret_profiles() -> Vec<CxfProfileEnvVars> {
+    vec![CxfProfileEnvVars {
         name: "baleares".to_string(),
         wsdl_path: "/etc/cxf/baleares.wsdl".to_string(),
         service_name: "Svc".to_string(),
         port_name: "Port".to_string(),
-        address: Some(
-            "http://admin:s3cret@soap.example.com:9000/OrderService?user=bob".to_string(),
-        ),
+        address: Some("http://admin:s3cret@soap.internal:9443/cxf?tok=abc".to_string()),
         keystore_path: Some("/etc/cxf/keystore.p12".to_string()),
         keystore_password: Some(Redacted::new("kspass-1".to_string())),
         truststore_path: Some("/etc/cxf/truststore.p12".to_string()),
@@ -39,9 +38,18 @@ fn bridge_env_vars_with_secrets() -> Vec<(String, String)> {
         signature_digest_algorithm: None,
         signature_c14n_algorithm: None,
         signature_parts: None,
-    }];
-    let mut config =
-        BridgeProcessConfig::cxf_profiles(PathBuf::from("/tmp/cxf-bridge"), &profiles, 15_000);
+    }]
+}
+
+/// Realistic `env_vars` payload as built by `start_bridge_inner`: profile
+/// vars from `cxf_profiles` (passwords Deref-unwrapped to plain strings by
+/// `to_env_vars`) plus the pool-level `CXF_ADDRESS` bind URL.
+fn bridge_env_vars_with_secrets() -> Vec<(String, String)> {
+    let mut config = BridgeProcessConfig::cxf_profiles(
+        PathBuf::from("/tmp/cxf-bridge"),
+        &secret_profiles(),
+        15_000,
+    );
     config.env_vars.push((
         "CXF_ADDRESS".to_string(),
         "http://admin:s3cret@soap.internal:9443/cxf?tok=abc".to_string(),
@@ -68,9 +76,8 @@ fn env_var_keys_logs_key_names_for_diagnostics() {
 fn env_var_keys_render_never_contains_address_values() {
     let rendered = format!("{:?}", env_var_keys(&bridge_env_vars_with_secrets()));
     assert!(!rendered.contains("s3cret"), "leak: {rendered}");
-    assert!(!rendered.contains("soap.example.com"), "leak: {rendered}");
     assert!(!rendered.contains("soap.internal"), "leak: {rendered}");
-    assert!(!rendered.contains("user=bob"), "leak: {rendered}");
+    assert!(!rendered.contains("tok=abc"), "leak: {rendered}");
 }
 
 #[test]
@@ -99,4 +106,111 @@ fn env_var_keys_preserves_entry_count_and_order() {
     assert_eq!(keys.len(), vars.len());
     assert_eq!(keys.first().copied(), Some("CXF_PROFILES"));
     assert_eq!(keys.last().copied(), Some("CXF_ADDRESS"));
+}
+
+// --- Tracing capture helper for the bridge-spawn trace site ---
+
+/// `MakeWriter` that appends formatted events to a shared `Vec<u8>` sink.
+/// Used by the site-guard test to assert that the bridge-spawn `trace!`
+/// record renders env var KEY names and none of the values (bd rc-2eckt).
+/// The sink collects the ANSI-stripped fmt layer output.
+#[derive(Clone)]
+struct CapturingWriter {
+    sink: Arc<Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for CapturingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.sink.lock().unwrap().extend_from_slice(buf); // allow-unwrap: test-only
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+    type Writer = CapturingWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn capture_sink() -> (Arc<Mutex<Vec<u8>>>, impl tracing::Subscriber) {
+    let sink: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let writer = CapturingWriter {
+        sink: Arc::clone(&sink),
+    };
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    (sink, subscriber)
+}
+
+/// The bridge-spawn trace site itself must render env var KEY names only.
+///
+/// `env_var_keys` is covered by the tests above, but the log SITE was not:
+/// reverting the trace to `env_vars = ?config.env_vars` (a value dump) would
+/// pass all of them. This test drives `bridge_config_with_env_trace` — the
+/// extracted config-build + trace block from `start_bridge_inner` — through a
+/// capture subscriber, so the site itself is guarded (bd rc-2eckt).
+#[test]
+fn bridge_env_trace_site_renders_keys_not_values() {
+    let (sink, subscriber) = capture_sink();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    // Parallel tests race tracing's per-callsite interest cache against this
+    // thread-local subscriber; force a rebuild so the callsite re-evaluates
+    // against it (bd rc-u9hs, same as wire_tap).
+    tracing::callsite::rebuild_interest_cache();
+
+    let config = crate::pool::bridge_config_with_env_trace(
+        "slot-1",
+        PathBuf::from("/tmp/cxf-bridge"),
+        &secret_profiles(),
+        Some("http://admin:s3cret@soap.internal:9443/cxf?tok=abc"),
+        15_000,
+    );
+    drop(_guard);
+
+    let captured = String::from_utf8(sink.lock().unwrap().clone()).unwrap(); // allow-unwrap: test-only
+
+    // KEYS survive — these double as proof the event was actually captured:
+    // a silently-empty capture fails here, never false-passes.
+    assert!(
+        captured.contains("CXF_PROFILES"),
+        "missing key in {captured}"
+    );
+    assert!(
+        captured.contains("CXF_ADDRESS"),
+        "missing key in {captured}"
+    );
+    assert!(
+        captured.contains("CXF_PROFILE_BALEARES_SIG_USERNAME"),
+        "missing key in {captured}"
+    );
+    assert!(
+        captured.contains("CXF_PROFILE_BALEARES_ENC_USERNAME"),
+        "missing key in {captured}"
+    );
+
+    // VALUES absent — a revert to `env_vars = ?config.env_vars` dumps all of
+    // these (address credentials, usernames, Deref-unwrapped passwords).
+    assert!(!captured.contains("s3cret"), "leak: {captured}");
+    assert!(!captured.contains("soap.internal"), "leak: {captured}");
+    assert!(!captured.contains("tok=abc"), "leak: {captured}");
+    assert!(!captured.contains("sig-user-9"), "leak: {captured}");
+    assert!(!captured.contains("enc-user-7"), "leak: {captured}");
+    assert!(!captured.contains("kspass-1"), "leak: {captured}");
+    assert!(!captured.contains("tspass-2"), "leak: {captured}");
+    assert!(!captured.contains("sigpass-3"), "leak: {captured}");
+
+    // Config still built correctly: the pushed CXF_ADDRESS pair is last.
+    let (last_key, last_val) = config.env_vars.last().expect("env_vars non-empty");
+    assert_eq!(last_key, "CXF_ADDRESS");
+    assert_eq!(
+        last_val,
+        "http://admin:s3cret@soap.internal:9443/cxf?tok=abc"
+    );
 }

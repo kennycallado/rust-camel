@@ -32,6 +32,32 @@ pub(crate) fn env_var_keys(env_vars: &[(String, String)]) -> Vec<&str> {
     env_vars.iter().map(|(k, _)| k.as_str()).collect()
 }
 
+/// Build the bridge `BridgeProcessConfig` for a slot and emit the env-var
+/// trace (bd rc-2eckt). Split out of `start_bridge_inner` — which downloads
+/// the bridge binary first — so the log statement is unit-test-drivable
+/// through a capture subscriber; see `pool_env_test`.
+pub(crate) fn bridge_config_with_env_trace(
+    slot_key: &str,
+    binary_path: PathBuf,
+    profiles: &[CxfProfileEnvVars],
+    bind_address: Option<&str>,
+    start_timeout_ms: u64,
+) -> BridgeProcessConfig {
+    let config = BridgeProcessConfig::cxf_profiles(binary_path, profiles, start_timeout_ms);
+    let mut config = config;
+    if let Some(addr) = bind_address {
+        config
+            .env_vars
+            .push(("CXF_ADDRESS".to_string(), addr.to_string()));
+    }
+    tracing::trace!(
+        key = %slot_key,
+        env_keys = ?env_var_keys(&config.env_vars),
+        "starting CXF bridge process with env vars"
+    );
+    config
+}
+
 // ── Bridge gRPC decode limit ─────────────────────────────────────────────────
 
 /// Maximum inbound gRPC message size accepted when decoding Java CXF bridge
@@ -305,19 +331,12 @@ impl CxfBridgePool {
                 })
                 .collect();
 
-            let config =
-                BridgeProcessConfig::cxf_profiles(binary_path, &profile_env_vars, start_timeout_ms);
-            let mut config = config;
-            if let Some(addr) = slot.bind_address.as_ref() {
-                config
-                    .env_vars
-                    .push(("CXF_ADDRESS".to_string(), addr.clone()));
-            }
-
-            tracing::trace!(
-                key = %slot.key,
-                env_keys = ?env_var_keys(&config.env_vars),
-                "starting CXF bridge process with env vars"
+            let config = bridge_config_with_env_trace(
+                &slot.key,
+                binary_path,
+                &profile_env_vars,
+                slot.bind_address.as_deref(),
+                start_timeout_ms,
             );
 
             let (process, channel) =
