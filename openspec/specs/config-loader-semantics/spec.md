@@ -64,6 +64,52 @@ is out of scope and keeps its note).
   form, and a golden test locks this partial multi-profile absence
   case
 
+#### Scenario: Compile enforces the strict unknown-profile mirror
+
+- **GIVEN** `camel compile --config C --profile prod` where `C`
+  carries a `[default]` section and `[prod]` exists only in an
+  include
+- **WHEN** source resolution validates the selected profiles
+- **THEN** compilation fails before any output with a local
+  `compile::sources` error naming `prod` and the strict rule (a
+  configuration with `[default]` must declare at least one selected
+  profile itself; sections supplied only by includes do not satisfy
+  the strict rule), decided through the canonical
+  `has_profile_structure` / `has_selected_profile` predicates, and no
+  artifact is written
+
+#### Scenario: Mixed multi-profile selection stays acceptable
+
+- **GIVEN** `camel compile --config C --profile prod --profile canary`
+  where `C` carries `[default]` and `[prod]`, and `[canary]` exists
+  only in an include
+- **WHEN** source resolution validates the selected profiles and the
+  artifact boots
+- **THEN** compilation succeeds (at least one selected profile is
+  declared in the configuration document) and the virtual-store
+  assembly merges `[canary]` from the include without the
+  strict-profile error, matching the filesystem loader
+
+#### Scenario: Compile strict mirror defers to chain-wide absence
+
+- **GIVEN** `camel compile --config C --profile prod --profile qa`
+  where `C` carries `[default]`, `[prod]` exists only in an include,
+  and `[qa]` exists nowhere in the chain
+- **WHEN** source resolution validates the selected profiles
+- **THEN** the per-profile `UnknownProfile("qa")` error takes
+  precedence over the strict include-only rejection
+
+#### Scenario: Flat configurations keep lenient include profiles at compile time
+
+- **GIVEN** `camel compile --config C --profile prod` where `C` has
+  no profile structure (no `[default]`, no selected section) and
+  `[prod]` exists only in an include
+- **WHEN** source resolution validates the selected profiles
+- **THEN** compilation succeeds, the synthesized fragment and include
+  are embedded, and the artifact's virtual-store assembly selects
+  `[prod]` from the include leniently, matching the filesystem
+  loader's resolved configuration
+
 ### Requirement: Resolution behavior is frozen by parity goldens
 
 The effective resolved configuration SHALL be proven identical before
