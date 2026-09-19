@@ -540,4 +540,4 @@ Acceptance:
 - the doc is listed in the operations index/summary if one exists (check
   `docs/src/operations/` neighbors for an index file; add entry if present)
 
-- [ ] 6
+- [x] 6
