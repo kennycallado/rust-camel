@@ -24,3 +24,4 @@ jobs:
     uses: ./.github/workflows/release-matrix.yml
     with:
       publish: false
+      dev-profile: true

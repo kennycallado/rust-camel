@@ -8,6 +8,11 @@ on:
         type: boolean
         required: false
         default: false
+      dev-profile:
+        description: "Trim the build matrix to the 3-leg dev subset"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -18,23 +23,50 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.target }})
+    if: ${{ !inputs.dev-profile || matrix.in-dev-profile }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # ---- slim: edge pack. Native musl legs carry jemalloc (allocator
+          # selection, not closure selection). x86-musl is runnable on the
+          # runner -> kafka-absence-probe; aarch64-musl is cross -> exempt.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use-cross: false
+            bin-suffix: ""
+            install-musl-tools: true
+            alloc-features: "jemalloc"
+            flavor: "flavor-slim"
+            artifact-name: "camel-slim-x86_64-unknown-linux-musl"
+            in-dev-profile: false
+            kafka-absence-probe: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use-cross: true
+            bin-suffix: ""
+            alloc-features: "jemalloc"
+            flavor: "flavor-slim"
+            artifact-name: "camel-slim-aarch64-unknown-linux-musl"
+            in-dev-profile: false
+          # ---- regular: keeps the clean legacy name, all 7 targets. Never
+          # kafka-probe/install-librdkafka (kafka is absent by design).
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             use-cross: false
             bin-suffix: ""
-            flavor: "flavor-full"
-            kafka-probe: true
-            install-librdkafka: true
+            flavor: "flavor-regular"
+            artifact-name: "camel-x86_64-unknown-linux-gnu"
+            in-dev-profile: false
+            kafka-absence-probe: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             use-cross: true
             bin-suffix: ""
-            flavor: "flavor-full"
+            flavor: "flavor-regular"
+            artifact-name: "camel-aarch64-unknown-linux-gnu"
+            in-dev-profile: false
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             use-cross: false
@@ -42,29 +74,86 @@ jobs:
             install-musl-tools: true
             alloc-features: "jemalloc"
             flavor: "flavor-regular"
+            artifact-name: "camel-x86_64-unknown-linux-musl"
+            in-dev-profile: true
+            kafka-absence-probe: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             use-cross: true
             bin-suffix: ""
             alloc-features: "jemalloc"
             flavor: "flavor-regular"
+            artifact-name: "camel-aarch64-unknown-linux-musl"
+            in-dev-profile: false
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            use-cross: false
+            bin-suffix: ""
+            flavor: "flavor-regular"
+            artifact-name: "camel-x86_64-apple-darwin"
+            in-dev-profile: true
+            kafka-absence-probe: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            use-cross: false
+            bin-suffix: ""
+            flavor: "flavor-regular"
+            artifact-name: "camel-aarch64-apple-darwin"
+            in-dev-profile: false
+            kafka-absence-probe: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            use-cross: false
+            bin-suffix: ".exe"
+            flavor: "flavor-regular"
+            artifact-name: "camel-x86_64-pc-windows-msvc"
+            in-dev-profile: false
+            kafka-absence-probe: true
+          # ---- full: regular plus the principled deltas. kafka-probe on ALL
+          # full legs; install-librdkafka additionally on both Linux legs
+          # (aarch64-gnu runs natively on ubuntu-24.04-arm, where the apt
+          # step provides the librdkafka deps the old cross image shipped).
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use-cross: false
+            bin-suffix: ""
+            flavor: "flavor-full"
+            artifact-name: "camel-full-x86_64-unknown-linux-gnu"
+            in-dev-profile: true
+            kafka-probe: true
+            install-librdkafka: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            use-cross: false
+            bin-suffix: ""
+            flavor: "flavor-full"
+            artifact-name: "camel-full-aarch64-unknown-linux-gnu"
+            in-dev-profile: false
+            kafka-probe: true
+            install-librdkafka: true
           - os: macos-15-intel
             target: x86_64-apple-darwin
             use-cross: false
             bin-suffix: ""
             flavor: "flavor-full"
+            artifact-name: "camel-full-x86_64-apple-darwin"
+            in-dev-profile: false
             kafka-probe: true
           - os: macos-latest
             target: aarch64-apple-darwin
             use-cross: false
             bin-suffix: ""
             flavor: "flavor-full"
+            artifact-name: "camel-full-aarch64-apple-darwin"
+            in-dev-profile: false
             kafka-probe: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             use-cross: false
             bin-suffix: ".exe"
             flavor: "flavor-full"
+            artifact-name: "camel-full-x86_64-pc-windows-msvc"
+            in-dev-profile: false
             kafka-probe: true
 
     steps:
@@ -142,6 +231,40 @@ jobs:
           fi
           echo "OK: kafka capability verified on ${{ matrix.target }}"
 
+      - name: Assert kafka absence (slim/regular probe)
+        if: matrix.kafka-absence-probe == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          FIXTURE="$RUNNER_TEMP/kafka-absence-probe-route.yaml"
+          printf '%s\n' \
+            'routes:' \
+            '  - id: "kafka-absence-probe"' \
+            '    from: "kafka:test-topic"' \
+            '    steps:' \
+            '      - to: "log:out"' \
+            > "$FIXTURE"
+          BIN="target/${{ matrix.target }}/release/camel${{ matrix.bin-suffix }}"
+          set +e
+          OUT="$("$BIN" lint "$FIXTURE" 2>&1)"
+          RC=$?
+          set -e
+          # Absence manifests as an Info `unverified-scheme` note with
+          # exit 0 (camel-lint semantics). Both halves are required:
+          # RC≠0 means the probe itself broke (fixture drift, engine
+          # failure) — a false green if treated as absence.
+          if [ "$RC" -ne 0 ]; then
+            echo "FAIL: probe broken — lint exited $RC (expected exit 0 with an unverified-scheme note)"
+            printf '%s\n' "$OUT"
+            exit 1
+          fi
+          if ! printf '%s\n' "$OUT" | grep -iq 'unverified-scheme'; then
+            echo "FAIL: kafka route accepted by a slim/regular build — closure leaked"
+            printf '%s\n' "$OUT"
+            exit 1
+          fi
+          echo "OK: kafka correctly absent on ${{ matrix.target }}"
+
       - name: Assert version flavor
         if: matrix.use-cross != true
         shell: bash
@@ -172,17 +295,17 @@ jobs:
           fi
         shell: bash
 
-      - name: Rename binary
+      - name: Stage binary
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/camel${{ matrix.bin-suffix }}" "dist/camel-${{ matrix.target }}${{ matrix.bin-suffix }}"
+          cp "target/${{ matrix.target }}/release/camel${{ matrix.bin-suffix }}" "dist/${{ matrix.artifact-name }}${{ matrix.bin-suffix }}"
         shell: bash
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: camel-${{ matrix.target }}
-          path: dist/camel-${{ matrix.target }}${{ matrix.bin-suffix }}
+          name: ${{ matrix.artifact-name }}
+          path: dist/${{ matrix.artifact-name }}${{ matrix.bin-suffix }}
 
   release:
     name: Create GitHub Release
@@ -427,4 +550,15 @@ jobs:
         with:
           toolchain: stable
       - name: Run feature closure tests
-        run: cargo test -p camel-cli --test feature_profiles
+        run: |
+          cargo test -p camel-cli --test feature_profiles
+          # Slim fail-closed security rejection re-validated on every dev
+          # run (distribution-flavors R3). The grep guards against a
+          # vacuous 0-matched pass (cargo exits 0 when no test matches the
+          # filter; a rename would silently disable this gate).
+          OUT="$(cargo test -p camel-bundles --lib security_omission_fails_closed 2>&1)"
+          printf '%s\n' "$OUT"
+          printf '%s\n' "$OUT" | grep -q '1 passed' || {
+            echo "FAIL: security_omission_fails_closed did not run exactly once"
+            exit 1
+          }

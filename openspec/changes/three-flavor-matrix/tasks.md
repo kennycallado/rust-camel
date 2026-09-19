@@ -326,7 +326,10 @@ Steps:
    `kafka-absence-probe: true` (mirrors the positive kafka-probe pattern at
    lines ~115-143): the step lints a minimal route referencing
    `kafka:test-topic` and EXPECTS failure (exit non-zero with an
-   unknown/unregistered-scheme error) — proving kafka absence in
+   unknown/unregistered-scheme error; VERIFIED ACTUAL SEMANTICS at
+   implementation: camel-lint emits an Info `unverified-scheme` note with
+   exit 0 — the probe passes iff RC==0 AND the note is present, so a
+   broken probe can never read as absence) — proving kafka absence in
    slim/regular artifacts. Put the key on ALL runnable slim/regular legs:
    slim x86_64-musl, regular x86_64-musl, regular x86_64-unknown-linux-gnu,
    regular x86_64-apple-darwin, regular aarch64-apple-darwin,
@@ -379,7 +382,7 @@ Acceptance:
 - release-dev.yml still carries the permissions trio ceiling (rc-myx4r
   guard — do not touch the permissions block)
 
-- [ ] 3
+- [x] 3
 
 ## Task 4: Docker lockstep and release-job flavor asserts
 
