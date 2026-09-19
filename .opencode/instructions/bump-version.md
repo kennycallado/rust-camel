@@ -20,26 +20,27 @@ Verified against the v0.48.0 precedent (`0f67ee5d`) and the v0.49.0 bump
    version swap; ZERO dependency-name changes; transitive deps held.
    Verify: `git diff Cargo.lock | grep '^[-+]version' | grep -vc '<old|new>'`
    must print 0.
-4. **Golden deptree fixture** (`crates/camel-cli/tests/fixtures/
-   default-deptree.txt`) pins version strings — regenerate it at the new
-   version or `default_closure_matches_golden` FAILS (63 false extras).
-   Use the EXACT command documented in the test header
-   (`crates/camel-cli/tests/feature_profiles.rs`); the
-   `CARGO_TERM_COLOR=never` prefix is load-bearing (rc-k6dln: CI exports
-   `always` and ANSI-wrapped `(*)` markers broke normalization).
-   Diff must be version-swaps only.
-   NOTE: this step exists only until the fixture becomes version-agnostic
-   (bd filed); after that it is DELETED from this procedure.
+4. **Golden deptree fixture**: DELETED (2026-09-19, v0.50.0 bump). The
+   fixture became version-agnostic in 7904cdd0 (rc-2eal2): the test
+   canonicalizes `vX.Y.Z` on both comparison sides. No regen step, no
+   color-pin hazard. If `default_closure_matches_golden` ever fails after
+   a bump again, the regression is REAL (a crate actually entered/left
+   the closure) — investigate, do not regenerate.
 5. **Commit** (single, canonical shape): `chore(release): bump version to
    X.Y.Z` — body may carry the audit summary + `Bd:` footer. Create the bd
    FIRST; read its id from the create's own output (never grep lists).
 6. **Tag**: lightweight, `vX.Y.Z` (precedent v0.40-v0.47). Owner decides
    the moment.
 7. **Push** (main + tag) is the OWNER's exclusive action — it triggers
-   `release-matrix.yml` (7-target build matrix -> GitHub Release -> docker
-   images) and the `release.yml` tag wrapper, which homes the crates.io
-   publish job. The reusable workflow is invoked by both the `release.yml`
-   tag wrapper and the `release-dev.yml` dev wrapper. Agents never push.
+   `release-matrix.yml` via the `release.yml` tag wrapper. Since dea5c9c7
+   (three-flavor pipeline): 12-entry matrix / 11 uploads (slim/regular/
+   full per target; desktop full-only; ARM-native runner for
+   full-gnu-aarch64), Docker `:slim/:regular/:full` tags, and crates.io
+   via OIDC trusted publishing (all registered crates incl.
+   camel-component-stream). `-rc.*` tags run the same pipeline but SKIP
+   crates.io — use them to rehearse (precedent: v0.50.0-rc.1..rc.3).
+   The reusable workflow is invoked by both the `release.yml` tag wrapper
+   and the `release-dev.yml` dev wrapper. Agents never push.
 8. Cargo in the MAIN checkout is limited to metadata-only commands
    (`cargo update`, `cargo tree`); builds/tests run in worktrees or by
    the human (pre-push tests are the human's domain).
