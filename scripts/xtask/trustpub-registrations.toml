@@ -164,7 +164,7 @@ state = "registered"
 
 [[crates]]
 name = "camel-component-stream"
-state = "new-unpublished"
+state = "published-unregistered"
 
 [[crates]]
 name = "camel-component-timer"
