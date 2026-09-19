@@ -21,9 +21,12 @@ _Avoid_: startup, initialize (use boot for the registration act)
 The ordered registration sequence moved verbatim from
 `crates/camel-cli/src/commands/run.rs`. It registers the built-in components
 (timer, cron, log, direct, seda, mock, controlbus, validator, xslt, xj), the
-always-registered bundles (http, ws, file, container, template, jms, cxf,
+always-registered bundles (http, ws, file, template, jms, cxf,
 master, opensearch, redis, sql), and the feature-gated bundles (http-static,
-kafka, mqtt, surrealdb, grpc, llm, mcp, wasm). Each bundle goes through the
+kafka, mqtt, surrealdb, grpc, llm, mcp, wasm, containers). The `container`
+bundle registers only under the `containers` gate (Tier-2 optionalization,
+one feature with camel-function per ADR-0005); default builds omit it and
+the omission is asserted by both polarity tests. Each bundle goes through the
 `register_bundle` seam: it reads the bundle's `[components.<key>]` table
 from the config, keyed by `config_key()`. A missing key falls back to an
 empty table. The bundle then registers with its serde defaults. Conditional
@@ -51,7 +54,9 @@ _Avoid_: bridge hook, cleanup service
 Cargo features that mirror the `camel run` cfg lines one to one: `grpc`,
 `wasm`, `http-static`, `llm`, `surrealdb`, `mqtt`, and `mcp` are default-on,
 plus the eight per-bridge gates `jms`, `sql`, `redis`, `opensearch`, `ws`,
-`cxf`, `xj`, and `xslt`; `kafka` and `security` are opt-in. The `security`
+`cxf`, `xj`, and `xslt`; `kafka`, `containers`, and `security` are opt-in. `containers` gates the
+`ContainerBundle` registration and pairs with camel-cli's same-named
+feature (camel-function + camel-component-container). The `security`
 feature pulls the auth stack (`camel-auth`, `camel-component-keycloak`,
 `camel-dsl`, `serde_json`) for the shared security builder. `camel-cli`
 forwards each of its gates into this crate. The `exec` gate stays with the

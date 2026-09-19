@@ -469,6 +469,31 @@ jobs:
           name: ${{ matrix.arm64-artifact }}
           path: binary-arm64
 
+      # Runtime flavor check for the downloaded amd64 binary — closes the
+      # seam the dev smoke cannot: dev mode builds only the gnu variant,
+      # and publish mode skips the image smoke entirely. Without this, a
+      # swapped *-artifact key would ship wrong-flavor images with no CI
+      # failure. amd64-only: arm64 binaries are not runnable on this
+      # runner (filename assert in the release job covers them).
+      - name: Assert amd64 binary flavor (variant lockstep)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$(find binary-amd64 -type f | head -1)"
+          chmod +x "$BIN"
+          case "${{ matrix.variant }}" in
+            production) EXPECTED="regular" ;;
+            alpine) EXPECTED="slim" ;;
+            gnu) EXPECTED="full" ;;
+            *) echo "unknown variant"; exit 1 ;;
+          esac
+          OUT="$("$BIN" --version)"
+          printf '%s\n' "$OUT"
+          case "$OUT" in
+            *" ($EXPECTED)") ;;
+            *) echo "FAIL: ${{ matrix.variant }} image expects ($EXPECTED), got: $OUT"; exit 1 ;;
+          esac
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 

@@ -520,8 +520,10 @@ Steps:
   command, (4) update the flavor table in this doc; CI matrix legs never
   change (legs are target×flavor).
 2. Update `crates/camel-cli/CONTEXT.md` flavor-markers section: the three
-  bodies as landed (slim = mqtt+http-static on base; regular = curated
-  list; full = regular + exec/lang-js/rhai/xpath/kafka), alias removal
+  bodies as landed (slim = edge pack
+  mqtt/mqtt-tls/http-static/sql/lang-jsonpath/lang-rhai; regular = slim + all
+  capabilities except the four principled exclusions; full = regular +
+  exec/kafka/surrealdb/containers), alias removal
   note (slim-http/slim-benchmarks dropped at 0.50 per rc-n6iop).
 3. Cross-link from `docs/src/operations/oidc-publish-fallback.md` ONLY if it
    mentions artifact names (check; it should not — do not add unrelated

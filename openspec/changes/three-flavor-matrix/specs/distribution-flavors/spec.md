@@ -80,7 +80,9 @@ artifact before attaching it, extending the existing symbol-assert pattern.
 - **WHEN** a tag run builds and collects artifacts
 - **THEN** each artifact is smoke-probed for its flavor suffix in
   `--version` and its flavor capability set (kafka registered on full;
-  absence asserts on slim/regular) before the release is created
+  absence asserts on slim/regular) before the release is created —
+  cross-compiled legs (aarch64 musl/gnu) are filename-asserted at release
+  collection instead, since their binaries do not run on the build runner
 
 ### Requirement: Shipped artifact names are flavor-prefixed
 

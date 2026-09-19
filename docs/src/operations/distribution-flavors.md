@@ -83,7 +83,7 @@ Flavors are presets, not walls. Additions flow down freely in minor releases. Mo
 ## How to move a feature between flavors
 
 1. Edit the one flavor list in `crates/camel-cli/Cargo.toml` where the feature should start appearing. Bodies are chained, so one edit moves the feature for every flavor above it.
-2. Update the contract prefix sets in `crates/camel-cli/tests/feature_profiles.rs` if a principle boundary is crossed. The sets are `SLIM_FORBIDDEN_PREFIXES`, `REGULAR_FORBIDDEN_PREFIXES`, and `REGULAR_REQUIRED_PREFIXES`.
+2. Update the contract prefix sets in `crates/camel-cli/tests/feature_profiles.rs` if a principle boundary is crossed. The sets are `SLIM_FORBIDDEN_PREFIXES`, `REGULAR_FORBIDDEN_PREFIXES`, `REGULAR_REQUIRED_PREFIXES`, and `FULL_REQUIRED_PREFIXES`.
 3. Regenerate the golden fixture with the command documented in the `feature_profiles.rs` header.
 4. Update the flavor table in this doc.
 
