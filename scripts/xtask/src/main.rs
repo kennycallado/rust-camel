@@ -2961,10 +2961,13 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
 /// log sink (audit 2026-08-31 R2 / rc-sn7i5). Credential keywords
 /// (password/token/...) stay owned by `lint-secrets`. Matching is
 /// exact-identifier and leaf-or-standalone: object position
-/// (`config.topic`) is not a hit; field name, shorthand, standalone value,
-/// member leaf, and `{ident}` capture are. The rc-redactstrict change
-/// extended the original url/uri-config set with the network-locator
-/// names `endpoint`, `address`, `host`, and `remote`.
+/// (`config.topic`) is not a hit unless the chain terminates in a
+/// value-exposing method call (see
+/// [`LOG_REDACTION_VALUE_EXPOSING_METHODS`]); field name, shorthand,
+/// standalone value, member leaf, and `{ident}` capture are. The
+/// rc-redactstrict change extended the original url/uri-config set with
+/// the network-locator names `endpoint`, `address`, `host`, and
+/// `remote`.
 const LOG_REDACTION_SENSITIVE: &[&str] = &[
     "url",
     "uri",
@@ -2989,6 +2992,31 @@ const LOG_REDACTION_MACROS: &[&str] = &["error", "warn", "info", "debug", "trace
 /// format-sign prefix (`[?#!]?`), group 2 the captured identifier name —
 /// the binding key resolved against the macro's argument segments.
 const LOG_REDACTION_CAPTURE_PATTERN: &str = r"\{\s*([?#!]?)((?:url|uri|base_url|db_url|jdbc_url|broker_url|connection_string|dsn|config|endpoint|address|host|remote))(?::[^}]*)?\}";
+
+/// Methods whose call on an object-position sensitive identifier returns
+/// or exposes the value itself — identity-preserving: a copy, a view, a
+/// handle, or a direct conversion, never a transformation or an
+/// aggregate. A chain of `.`-linked exposing calls ending the argument
+/// segment (`self.url.clone()`, `url.as_str().to_string()`) flows the
+/// sensitive value to the sink, so the lint treats it as a hit
+/// (bd rc-cgen3 / mission 141). Bounded by design: value-transforming
+/// methods (`to_lowercase`, `replace`) and non-exposing queries (`len`,
+/// `is_empty`) are not in the set, and a chain containing such a link
+/// (`url.as_str().len()`) is not a hit — the logged value there is a
+/// derived aggregate, not the sensitive value.
+const LOG_REDACTION_VALUE_EXPOSING_METHODS: &[&str] = &[
+    "clone",      // owned duplicate of the value
+    "to_owned",   // owned duplicate (str/Cow semantics)
+    "into_owned", // owned duplicate (Cow::into_owned)
+    "to_string",  // full Display rendering of the value
+    "as_str",     // &str content view
+    "as_bytes",   // byte-content view
+    "to_vec",     // owned byte-content copy
+    "as_ref",     // reference/handle to the value (AsRef)
+    "borrow",     // reference/handle to the value (Borrow)
+    "deref",      // explicit Deref view
+    "into",       // conversion carrying the value into another type
+];
 
 /// Scan all workspace `src/**/*.rs` files for tracing/log calls that embed
 /// a sensitive identifier value — the url/uri/config set plus the
@@ -3020,12 +3048,24 @@ const LOG_REDACTION_CAPTURE_PATTERN: &str = r"\{\s*([?#!]?)((?:url|uri|base_url|
 /// Known blind spots (out of scope by design): `span!`/`*_span!` field
 /// sets, aliased macro imports (`use tracing::warn as w;`), and
 /// non-tracing sinks (`println!`/`format!` into errors — the latter is
-/// covered per-site by hand, see rc-a67at). Also documented, not detected:
-/// sensitive idents in object position of value-transforming method chains
-/// (`self.url.clone()`, `url.to_string()`, `url.as_str()`); values nested in
-/// parenthesized groups; `{ident}` captures nested in `format!` args; dotted
-/// captures (`{conn.url}`); and redemption breadth — any redact-named call
-/// (e.g. `should_redact(x)`) redeems its segment (see bd rc-cgen3).
+/// covered per-site by hand, see rc-a67at). Also documented, not
+/// detected: sensitive idents in object position of value-TRANSFORMING
+/// method chains (`url.to_lowercase()`); exposure chains BROKEN by a
+/// non-exposing link (`url.as_str().len()` — the logged value is a
+/// derived aggregate); turbofish call forms
+/// (`url.into::<String>()` — the `::Ty` tokens sit between method and
+/// group); exposure chains continued by further segment tokens
+/// (binary-operator continuation, e.g. `self.url.clone() + "/health"`);
+/// values nested in parenthesized groups; `{ident}` captures
+/// nested in `format!` args; dotted captures (`{conn.url}`); and
+/// redemption breadth — any redact-named call (e.g. `should_redact(x)`)
+/// redeems its segment (see bd rc-cgen3). DETECTED (bd rc-cgen3 /
+/// mission 141): a sensitive ident in object position of a TERMINAL
+/// value-exposing call CHAIN — every `.`-link an exposing method call
+/// and the final group ending the segment (`self.url.clone()`,
+/// `url.as_str().to_string()`) — IS a violation: the chain returns the
+/// value itself, so it flows to the sink (see
+/// [`LOG_REDACTION_VALUE_EXPOSING_METHODS`]).
 pub fn lint_log_redaction(workspace_root: &Path) -> Result<Vec<Violation>, String> {
     use regex::Regex;
     use std::path::Component;
@@ -3165,7 +3205,14 @@ fn redaction_violation_reason(span: &str, capture_re: &regex::Regex) -> Option<&
         //    Object position (`config.topic`, `producer.config.operation`)
         //    is NOT a hit: the sensitive object merely qualifies a benign
         //    leaf, and flagging it would fire on every config-sourced
-        //    number/name in the tree.
+        //    number/name in the tree. EXCEPTION (bd rc-cgen3): a
+        //    TERMINAL value-exposing call CHAIN (`self.url.clone()`,
+        //    `url.as_str().to_string()`) returns the sensitive value
+        //    itself — every `.`-link is an exposing method call and the
+        //    final group ends the segment — so the value flows to the
+        //    sink and it IS a hit. A non-exposing link
+        //    (`url.as_str().len()`) breaks the chain: the logged value
+        //    is a derived aggregate, not the value.
         let is_punct_dot = |t: Option<&&proc_macro2::TokenTree>| matches!(t, Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '.');
         let mut sensitive_use = false;
         for (idx, t) in seg.iter().enumerate() {
@@ -3173,7 +3220,33 @@ fn redaction_violation_reason(span: &str, capture_re: &regex::Regex) -> Option<&
                 && LOG_REDACTION_SENSITIVE.contains(&i.to_string().as_str())
             {
                 let object_position = is_punct_dot(seg.get(idx + 1));
-                if !object_position {
+                let terminal_exposing_chain = object_position && {
+                    let mut j = idx + 1;
+                    loop {
+                        if !is_punct_dot(seg.get(j)) {
+                            break false;
+                        }
+                        let exposing = matches!(
+                            seg.get(j + 1),
+                            Some(proc_macro2::TokenTree::Ident(m))
+                                if LOG_REDACTION_VALUE_EXPOSING_METHODS
+                                    .contains(&m.to_string().as_str())
+                        );
+                        if !exposing {
+                            break false;
+                        }
+                        match seg.get(j + 2) {
+                            Some(proc_macro2::TokenTree::Group(g))
+                                if g.delimiter() == proc_macro2::Delimiter::Parenthesis => {}
+                            _ => break false,
+                        }
+                        j += 3;
+                        if j == seg.len() {
+                            break true;
+                        }
+                    }
+                };
+                if !object_position || terminal_exposing_chain {
                     sensitive_use = true;
                     break;
                 }
@@ -7774,5 +7847,178 @@ mod lint_log_redaction_tests {
             alt, sensitive,
             "capture-regex alternation must equal the sensitive set"
         );
+    }
+
+    // --- Value-exposing method calls on object-position sensitive idents ---
+
+    #[test]
+    fn flags_clone_exposing_sensitive_object_value() {
+        // Mission 141 shape 1 (benign-key variant): the sensitive value
+        // flows through clone() — object position no longer shields it.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(s: &S) { tracing::info!(location = %self.url.clone(), \"hit\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn flags_to_string_on_bare_argument() {
+        // Mission 141 shape 2: bare argument segment, value rendered via
+        // to_string().
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) { tracing::info!(\"connecting {}\", url.to_string()); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn flags_as_str_exposing_sensitive_value() {
+        // Mission 141 shape 3 (benign-key variant).
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) { tracing::info!(location = %url.as_str(), \"hit\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn flags_clone_on_sensitive_member_leaf() {
+        // Leaf variant: `base_url` is the sensitive leaf; cloning it
+        // exposes the value.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(s: &S) { tracing::info!(location = %s.base_url.clone(), \"hit\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn sensitive_key_with_exposed_value_still_fires() {
+        // Pin: a sensitive binding key (`url = ...`) fires via rule 1
+        // regardless of value shape — this held before mission 141.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(s: &S) { tracing::info!(url = %self.url.clone(), \"hit\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn allows_benign_method_on_sensitive_object() {
+        // `config.len()`-class: the method does not return the value.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(config: &Cfg) { tracing::debug!(count = %config.len(), \"cfg\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn allows_nonterminal_exposure_in_chain() {
+        // `url.as_str().len()`: the exposure is not the chain terminus —
+        // the logged value is the derived length, not the string.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) { tracing::debug!(len = %url.as_str().len(), \"len\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn allows_benign_leaf_method_on_sensitive_object() {
+        // `config.topic()`: method on a benign leaf — object position
+        // exclusion unchanged for non-exposing shapes.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(config: &Cfg) { tracing::debug!(topic = config.topic(), \"sub\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn redemptive_wrapper_around_exposed_value_stays_clean() {
+        // `redacted_url(self.url.clone())`: redact call shape still
+        // redeems; the group interior is span-invisible to the scan and
+        // the top-level call is redact-named either way.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(s: &S) { tracing::info!(location = %redacted_url(self.url.clone()), \"ok\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn redact_call_redeems_terminal_exposure_shape() {
+        // Same segment carries BOTH a top-level terminal exposure
+        // (`self.url.clone()`) and a top-level redact call — redemption
+        // wins (existing rule: sensitive_use && !seg_has_redact_call).
+        // Token-level precedence pin; redemption breadth is documented.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(u: &str, s: &S) { tracing::info!(location = redact_url(&u) + self.url.clone(), \"ok\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn flags_chained_identity_exposures() {
+        // r_glm finding: chained exposing links flow the value too.
+        // Every `.`-link after the sensitive ident is exposing and the
+        // final group terminates the segment → hit.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(s: &S) { tracing::info!(location = %self.url.clone().as_str(), \"hit\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) { tracing::info!(\"at {}\", url.as_str().to_string()); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn allows_chain_broken_by_non_exposing_link() {
+        // `url.clone().len()`: a non-exposing link breaks the chain —
+        // the logged value is the derived length.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) { tracing::debug!(len = %url.clone().len(), \"len\"); }",
+        )]);
+        assert!(vs.is_empty(), "{vs:?}");
+    }
+
+    #[test]
+    fn flags_into_owned_exposure() {
+        // r_glm finding: into_owned is the Cow twin of to_owned.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: Cow<str>) { tracing::info!(location = %url.into_owned(), \"hit\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn terminal_exposure_in_non_final_segment_still_fires() {
+        // Segment-local terminus: the exposure's group ends ITS segment
+        // even when more comma-separated arguments follow.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str, ctx: &str) { tracing::info!(\"connecting {}\", url.clone(), ctx); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+
+    #[test]
+    fn debug_shorthand_terminal_exposure_fires() {
+        // `?url.clone()` shorthand prefix tokens precede the ident; the
+        // chain walk starts at the sensitive ident itself.
+        let vs = violations_for(&[(
+            "crates/foo/src/lib.rs",
+            "fn f(url: &str) { tracing::debug!(location = ?url.clone(), \"hit\"); }",
+        )]);
+        assert_eq!(vs.len(), 1, "{vs:?}");
     }
 }

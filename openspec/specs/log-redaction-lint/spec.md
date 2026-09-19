@@ -94,12 +94,15 @@ segment in the macro (implicit capture of a local) SHALL be a violation.
 ### Requirement: Sensitive identifier set
 
 The lint's sensitive value-identifier set SHALL contain exactly the
-workspace-sensitive names: `url`, `uri`, `base_url`, `db_url`, `jdbc_url`,
-`broker_url`, `connection_string`, `dsn`, `config`, `endpoint`, `address`,
-`host`, `remote`. Matching SHALL be exact-identifier and leaf-or-standalone:
-object position (`config.topic`) is not a hit; standalone (`%host`), field
-name (`address = ...`), and leaf (`self.remote`) are. The message-capture
-regex alternation SHALL contain the same names.
+workspace-sensitive names: `url`, `uri`, `base_url`, `db_url`,
+`jdbc_url`, `broker_url`, `connection_string`, `dsn`, `config`,
+`endpoint`, `address`, `host`, `remote`. Matching SHALL be
+exact-identifier and leaf-or-standalone: object position
+(`config.topic`) is not a hit — unless the chain terminates in a
+value-exposing method call (see "Terminal value-exposing method calls
+are detected"); standalone (`%host`), field name (`address = ...`),
+and leaf (`self.remote`) are. The message-capture regex alternation
+SHALL contain the same names.
 
 #### Scenario: endpoint field name is caught
 
@@ -174,30 +177,101 @@ value is credential-free.
   corpus remediation
 - **THEN** it reports OK (0 violations)
 
+### Requirement: Terminal value-exposing method calls are detected
+
+The lint SHALL treat a sensitive identifier in object position of a
+terminal value-exposing call chain as a hit. A call is value-exposing
+when the method returns or exposes the value itself — the bounded set
+`clone`, `to_owned`, `into_owned`, `to_string`, `as_str`, `as_bytes`,
+`to_vec`, `as_ref`, `borrow`, `deref`, `into` (a copy, a content view,
+a handle/reference, or a direct conversion; never a transformation or
+an aggregate). The chain is terminal when every `.`-link after the
+sensitive identifier is an exposing method call and the final call's
+argument group ends the argument segment — the logged value is then
+the chain's return, i.e. the sensitive value. Such a segment SHALL be
+a violation unless redeemed by a redact call shape (existing
+redemption rules apply). The set stays bounded by design:
+value-transforming methods (`url.to_lowercase()`), non-exposing
+queries (`config.len()`), and chains broken by a non-exposing link
+(`url.as_str().len()` — derived aggregates) SHALL NOT be hits, nor
+SHALL turbofish call forms (`url.into::<String>()`, where the `::Ty`
+tokens sit between method and group).
+
+#### Scenario: clone exposure is caught
+
+- **GIVEN** a log macro argument `location = %self.url.clone()` with no
+  redact call (benign binding key; the sensitive identifier is in
+  object position of a terminal clone call)
+- **WHEN** the lint scans the segment
+- **THEN** it reports a violation — the clone returns the value itself,
+  so the sensitive value flows to the sink
+
+#### Scenario: to_string on a bare argument is caught
+
+- **GIVEN** `info!("connecting {}", url.to_string())` — the exposure is
+  the entire bare argument value
+- **WHEN** the lint scans the segment
+- **THEN** it reports a violation
+
+#### Scenario: as_str exposure is caught
+
+- **GIVEN** a log macro argument `location = %url.as_str()` with no
+  redact call
+- **WHEN** the lint scans the segment
+- **THEN** it reports a violation
+
+#### Scenario: chained exposure is caught
+
+- **GIVEN** a log macro argument `location = %self.url.clone().as_str()`
+  — every `.`-link is an exposing call and the final group ends the
+  segment
+- **WHEN** the lint scans the segment
+- **THEN** it reports a violation — the chain returns the sensitive
+  value itself
+
+#### Scenario: benign query method on sensitive object is not caught
+
+- **GIVEN** a log macro argument `count = %config.len()` — `len` is not
+  in the value-exposing set; the logged value is a count, not the
+  config
+- **WHEN** the lint scans the segment
+- **THEN** no violation is reported
+
+#### Scenario: chain broken by a non-exposing link is not caught
+
+- **GIVEN** a log macro argument `len = %url.as_str().len()` — the
+  non-exposing `len` link breaks the chain; the logged value is the
+  derived length
+- **WHEN** the lint scans the segment
+- **THEN** no violation is reported
+
+#### Scenario: redact call shape still redeems an exposed value
+
+- **GIVEN** a log macro argument `location = %redacted_url(self.url.clone())`
+- **WHEN** the lint scans the segment
+- **THEN** no violation is reported — existing redemption rules apply
+
 ### Requirement: Documented detection blind spots
 
-The lint's span-local token-walk contract SHALL document (not detect) the
-following consumption shapes, which can carry a sensitive value without a
-violation: sensitive identifier in object position of a value-transforming
-method chain (`self.url.clone()`, `url.to_string()`, `url.as_str()`); a
-sensitive value nested inside a parenthesized group (`(url)`,
-`helper(url)`); a `{ident}` capture nested inside a `format!` argument
-passed to the log macro; dotted captures (`{conn.url}`); and redemption
-breadth — any identifier containing `redact` followed by a parenthesized
-group redeems its segment, including boolean predicates such as
-`should_redact(x)`. The pre-existing structural blind spots (`span!` /
-`*_span!` field sets, aliased macro imports, non-tracing sinks) remain
-documented in the lint's module documentation. Tracked as bd rc-cgen3.
-
-#### Scenario: method-chain object position is a documented blind spot
-
-- **GIVEN** a log macro argument `location = %self.url.clone()` (the
-  binding key is not sensitive; the sensitive identifier is in object
-  position of a value-transforming method chain)
-- **WHEN** the lint scans the segment
-- **THEN** no violation is reported (documented blind spot — a sensitive
-  binding key such as `url = ...` WOULD fire via rule 1 regardless of the
-  value shape)
+The lint's span-local token-walk contract SHALL document (not detect)
+the following consumption shapes, which can carry a sensitive value
+without a violation: a sensitive value nested inside a parenthesized
+group (`(url)`, `helper(url)`); a `{ident}` capture nested inside a
+`format!` argument passed to the log macro; dotted captures
+(`{conn.url}`); and redemption breadth — any identifier containing
+`redact` followed by a parenthesized group redeems its segment,
+including boolean predicates such as `should_redact(x)`. The
+pre-existing structural blind spots (`span!` / `*_span!` field sets,
+aliased macro imports, non-tracing sinks) remain documented in the
+lint's module documentation. Terminal value-exposing call chains
+(`self.url.clone()`, `url.as_str().to_string()`) are DETECTED
+(see "Terminal value-exposing method calls are detected"); the
+remaining method-chain blind spots are value-transforming calls
+(`url.to_lowercase()`), chains broken by a non-exposing link
+(`url.as_str().len()`), turbofish call forms
+(`url.into::<String>()`), and exposure chains continued by further
+segment tokens (binary-operator continuation, e.g.
+`self.url.clone() + "/health"`). Tracked as bd rc-cgen3.
 
 #### Scenario: redact-named boolean predicate redeems
 
