@@ -20,15 +20,25 @@ path).
 
 ## What Changes
 
-- **Flavor bodies** in `crates/camel-cli/Cargo.toml`:
-  - `flavor-slim` = pure-Rust edge set (http, file, timer, log, direct, seda,
-    mqtt; base CLI). Musl-only in CI.
-  - `flavor-regular` = hand-curated most-used set: full minus `exec`, minus
-    `kafka`, minus `lang-js`/`lang-rhai`/`lang-xpath` (verdict §2: regular
-    keeps `lang-jsonpath` + `lang-minijinja`). Pure Rust, all 7 targets.
-  - `flavor-full` = full + kafka (unchanged).
-  - Remove the one-release `slim-http` alias chain if 0.50 is the cutoff
-    (alias expiry tracked by rc-n6iop — drop here if this lands ≥0.50).
+- **Flavor bodies** in `crates/camel-cli/Cargo.toml` (CHAINED — each flavor
+  includes the one below; moving a feature = editing one list):
+  - `flavor-slim` = edge pack on base: mqtt + mqtt-tls + http-static + sql
+    (sqlite) + lang-jsonpath + lang-rhai. Musl-only in CI.
+  - `flavor-regular` = slim + everything pure-Rust/OSI EXCEPT four
+    principled exclusions: otel, grpc, wasm, llm, mcp, security, redis(+tls),
+    jms, cxf, xj, xslt, opensearch, ws, lang-xpath, lang-js (boa),
+    lang-minijinja, lsp, kubernetes, integration-http, integration-sql.
+  - `flavor-full` = regular + exec, kafka, surrealdb, containers.
+  - Principled exclusions from regular (each named): kafka (C dep, musl),
+    surrealdb (BUSL-1.1, sole non-OSI dep), exec (arbitrary host-binary
+    execution, ADR-0037), containers (Docker-daemon client — camel-function
+    + camel-component-container gated as one feature).
+  - New gates: `containers` (Tier-2: two optionalized deps + cfg-gated
+    registration + fail-closed steps), `kubernetes` (de-hardcode the
+    camel-config feature forward); `full_covers_universe` test mechanizes
+    "nothing gets left out" (every feature must be reachable from
+    flavor-full).
+  - Remove the one-release `slim-http` alias chain (rc-n6iop).
 - **Matrix** in `release-matrix.yml`: 14 legs = slim (musl ×2), regular (all 7
   targets), full (gnu ×2 on native `ubuntu-24.04-arm` for aarch64, macOS ×2,
   Windows). Per-leg `--features flavor-*` marker (single selection surface —

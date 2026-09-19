@@ -7,49 +7,82 @@ NOTE: after Task 1 lands alone, several closure tests are temporarily red
 (marker-table and slim-body expectations); Task 2 turns them green. That is
 acknowledged mid-phase breakage — do not "fix" Task 1 to avoid it.
 
-## Task 1: Flavor bodies in camel-cli Cargo.toml
+## Task 1: Chained flavor bodies + Tier-2 gates in Cargo.toml
 
 Files:
 - `crates/camel-cli/Cargo.toml` (modified)
+- `crates/camel-bundles/Cargo.toml` (modified — one feature)
+- `crates/camel-bundles/src/lib.rs` (modified — one cfg gate)
 
 Steps:
-1. Replace the `flavor-slim` body `["slim-http"]` with `["mqtt", "http-static"]`.
-2. Replace the `flavor-regular` body `["full"]` with the explicit curated
-   list: `["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "mqtt",
-   "mcp", "integration-http", "integration-sql", "security", "redis-tls",
-   "lsp", "lang-jsonpath", "lang-minijinja", "jms", "sql", "redis",
-   "opensearch", "ws", "cxf", "xj", "xslt"]` (= the existing `full` list minus
-   `exec`, `lang-js`, `lang-rhai`, `lang-xpath`).
-3. Replace the `flavor-full` body `["full", "kafka"]` with
-   `["flavor-regular", "exec", "lang-js", "lang-rhai", "lang-xpath", "kafka"]`
-   (regular + deltas; `full` itself stays as the historical closure list).
-4. Delete the `slim-http` and `slim-benchmarks` alias feature entries and
+1. Replace the `flavor-slim` body `["slim-http"]` with the chained edge pack:
+   `["mqtt", "mqtt-tls", "http-static", "sql", "lang-jsonpath", "lang-rhai"]`.
+2. Replace the `flavor-regular` body `["full"]` with:
+   `["flavor-slim", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]`.
+3. Replace the `flavor-full` body `["full", "kafka"]` with:
+   `["flavor-regular", "exec", "kafka", "surrealdb", "containers"]`.
+4. New Tier-2 feature `containers` (one feature for the coupled pair,
+   function⇒container per ADR-0005):
+   - `camel-cli/Cargo.toml`: `camel-function` dependency gains
+     `optional = true`; add feature
+     `containers = ["dep:camel-function", "camel-bundles/containers"]`.
+   - `camel-bundles/Cargo.toml`: `camel-component-container` dependency
+     gains `optional = true`; add feature
+     `containers = ["dep:camel-component-container"]`.
+   - `camel-bundles/src/lib.rs` line ~344: gate the
+     `register_bundle::<camel_component_container::ContainerBundle>` call
+     with `#[cfg(feature = "containers")]` (keep the always-on Http, File,
+     Template, Master registrations untouched).
+   - `crates/camel-cli/src/` (the two concrete wiring sites — locate with
+     `grep -rn 'camel_function::' crates/camel-cli/src/`, expect
+     `run.rs:253` and `job/mod.rs:1022`): gate each
+     `camel_function::FunctionRuntimeService::with_default_container_provider`
+     call behind `#[cfg(feature = "containers")]` so a build without the
+     feature constructs no function runtime and the `function:` /
+     `container:` paths fail closed with an explicit error at those
+     call sites (verify the existing error path fires; if no explicit
+     rejection exists for the featureless path, STOP and report
+     `test-design-gap: function step without containers feature has no
+     explicit rejection`).
+5. New feature `kubernetes`: in `crates/camel-cli/Cargo.toml`, remove the
+   hardcoded `"kubernetes"` from the `camel-config` dependency's
+   `features = ["otel", "kubernetes"]` (KEEP `"otel"` — base telemetry
+   wiring), and add feature
+   `kubernetes = ["camel-config/kubernetes"]`.
+6. Delete the `slim-http` and `slim-benchmarks` alias feature entries and
    their comment block (aliases expire at 0.50; this change lands ≥0.50).
-5. Update the comment above the flavor markers to document the three bodies
-   (slim = edge contract, regular = most-used, full = regular + deltas) and
-   that CI legs pass only `flavor-*` markers.
+7. Update the comment above the flavor markers: chained bodies, the four
+   principled exclusions from regular (kafka C-dep, surrealdb BUSL,
+   exec ADR-0037, containers daemon-client), and that CI legs pass only
+   `flavor-*` markers.
 
-Tests (run after edit; these are verification commands, not new test files):
-- name: flavor-slim resolves
-  action: `CARGO_TERM_COLOR=never cargo tree -p camel-cli --no-default-features --features flavor-slim -e features,no-dev > /dev/null`
-  assert: exit 0
-- name: flavor-regular resolves
-  action: `CARGO_TERM_COLOR=never cargo tree -p camel-cli --features flavor-regular -e features,no-dev > /dev/null`
-  assert: exit 0
-- name: flavor-full resolves
-  action: `CARGO_TERM_COLOR=never cargo tree -p camel-cli --features flavor-full -e features,no-dev > /dev/null`
-  assert: exit 0
+Tests (run after edit; verification commands, not new test files):
+- name: all three markers resolve
+  action: for each of `flavor-slim` (with `--no-default-features`),
+  `flavor-regular`, `flavor-full`:
+  `CARGO_TERM_COLOR=never cargo tree -p camel-cli [--no-default-features] --features <marker> -e features,no-dev > /dev/null`
+  assert: exit 0 for all three
+- name: slim excludes the principled set
+  action: `cargo tree -p camel-cli --no-default-features --features flavor-slim -e no-dev --prefix none | grep -ci 'surrealdb\|camel-function\|camel-component-container'`
+  assert: 0 (kafka/exec absent by feature absence — verify via the closure
+  test in Task 2)
+- name: default (regular) excludes exactly the four
+  action: `cargo tree -p camel-cli --features flavor-regular -e no-dev --prefix none | grep -ci 'surrealdb\|rdkafka\|camel-component-exec\|camel-function\|camel-component-container'`
+  assert: 0
+- name: default includes the new regulars
+  action: `cargo tree -p camel-cli --features flavor-regular -e no-dev --prefix none | grep -c 'kube\|boa_engine\|rhai\|tower-lsp'`
+  assert: ≥ 4 (kubernetes client, boa, rhai, lsp all in regular)
 - name: removed aliases rejected
   action: `cargo tree -p camel-cli --no-default-features --features slim-http -e features,no-dev > /dev/null 2>&1`
   assert: exit non-zero, stderr contains `none of the selected packages contains these features: slim-http`
-  (mirror of the existing `removed_kafka_feature_names_rejected` pattern at
-  `crates/camel-cli/tests/feature_profiles.rs:591`)
 
 Acceptance:
-- `cargo tree -p camel-cli --no-default-features --features flavor-slim -e features,no-dev` exits 0
-- all four verification commands hold their asserted outcomes
+- all five verification commands hold their asserted outcomes
 - `grep -c 'slim-http\|slim-benchmarks' crates/camel-cli/Cargo.toml` returns 0
-- `cargo fmt --check` and `cargo clippy -p camel-cli -- -D warnings` exit 0
+- `grep -n 'features = \["otel"\]' crates/camel-cli/Cargo.toml` matches the
+  camel-config dependency line (kubernetes de-hardcoded)
+- `grep -c 'cfg(feature = "containers")' crates/camel-bundles/src/lib.rs` ≥ 1
+- `cargo fmt --check` and `cargo clippy -p camel-cli -p camel-bundles -- -D warnings` exit 0
 
 - [ ] 1
 
@@ -63,102 +96,130 @@ Files:
   `golden_fixture_lines`, do not relocate it) (modified)
 
 Steps:
-1. Extract shared prefix consts: the five entries that today exist only as
-   inline literals in `SLIM_FORBIDDEN_PREFIXES` (lines ~341-361) — kafka,
-   exec, lang-js, lang-rhai, lang-xpath — become named consts
-   (`KAFKA_PREFIX`, `EXEC_PREFIX`, `LANG_JS_PREFIX`, `LANG_RHAI_PREFIX`,
-   `LANG_XPATH_PREFIX`, all `&str` like the existing `GRPC_PREFIX` at :338),
-   and `SLIM_FORBIDDEN_PREFIXES` references them. Do NOT duplicate string
-   literals across arrays.
-2. Remove `camel-component-mqtt v` from `SLIM_FORBIDDEN_PREFIXES` — slim now
-   INCLUDES mqtt by design (spec R1 slim-body scenario; the forbid entry
-   predates the real slim body). Put any rationale comment ABOVE the const
-   declaration, never between the array brackets (the acceptance grep
-   scopes to the bracket range). Also add a `SECURITY_PREFIX` const naming
-   the actual shared security crate observed in the tree (run
-   `cargo tree -p camel-cli --features security -e features,no-dev` and use
-   the real crate name, e.g. `camel-component-keycloak v` if that is what
-   resolves — do not guess) and INCLUDE it in `SLIM_FORBIDDEN_PREFIXES`
-   (slim ships no security features, spec R1).
-3. Add `REGULAR_FORBIDDEN_PREFIXES: &[&str]` referencing `KAFKA_PREFIX`,
-   `EXEC_PREFIX`, `LANG_JS_PREFIX`, `LANG_RHAI_PREFIX`, `LANG_XPATH_PREFIX`
-   (exact subset of SLIM_FORBIDDEN_PREFIXES; mqtt NOT forbidden in regular).
-   Add `FULL_REQUIRED_PREFIXES: &[&str] = &[KAFKA_PREFIX]`.
-4. Add `REGULAR_REQUIRED_PREFIXES: &[&str]` = the scheme components regular
-   must resolve: use the REAL crate names observed from
-   `cargo tree -p camel-cli --features flavor-regular -e features,no-dev`
-   (file, timer, log, direct/seda core crates, `camel-component-mqtt v`,
-   `camel-component-redis v`, existing `SQL_PREFIX`, `camel-component-jms v`,
-   otel instrumentation crate, `camel-language-jsonpath v`,
-   `camel-language-minijinja v`, `SECURITY_PREFIX`). NOTE on http:
-   `camel-component-http` is a NON-OPTIONAL dep (present in every closure
-   including slim — a tree assert on it is vacuous, do not add it), and
-   `http-static` is a registration-level gate with no tree-level crate
-   (already covered by camel-bundles' `http_static_registers_without_bridges`
-   test) — neither gets a REGULAR_REQUIRED entry; http capability is proven
-   by the existing registration test.
+1. Extract shared prefix consts: today `SLIM_FORBIDDEN_PREFIXES`
+   (lines ~340-362) holds ~21 entries, mostly INLINE string literals
+   (mqtt, wasm, llm, mcp, jms, opensearch, ws, cxf, camel-xj, camel-xslt,
+   lsp/tower-lsp, language crates) plus the const `GRPC_PREFIX` and
+   `SQL_PREFIX`. Extract the literals that remain relevant in the final
+   model into named consts (`KAFKA_PREFIX`, `EXEC_PREFIX`,
+   `LANG_JS_PREFIX`, `LANG_XPATH_PREFIX`, `SURREALDB_PREFIX`
+   (`camel-component-surrealdb v`), `FUNCTION_PREFIX` (`camel-function v`),
+   `CONTAINER_PREFIX` (`camel-component-container v`), and `SECURITY_PREFIX`
+   — the actual shared security crate observed via
+   `cargo tree -p camel-cli --features security -e features,no-dev`, do not
+   guess). Entries that become irrelevant (mqtt, sql, jsonpath, rhai, and
+   the other regular capabilities) are NOT extracted — they are deleted in
+   step 2. Do NOT duplicate string literals across arrays.
+2. REPLACE the entire `SLIM_FORBIDDEN_PREFIXES` array (it is ~21 entries
+   today, including `SQL_PREFIX`, wasm, llm, mcp, jms, opensearch, ws, cxf,
+   xj, xslt, lsp, `camel-language-rhai`, `camel-language-jsonpath`,
+   minijinja — most of which are IN slim or regular now) with the 8-entry
+   final set: `KAFKA_PREFIX`, `EXEC_PREFIX`, `LANG_JS_PREFIX`,
+   `LANG_XPATH_PREFIX`, `SURREALDB_PREFIX`, `FUNCTION_PREFIX`,
+   `CONTAINER_PREFIX`, `SECURITY_PREFIX`. Explicitly DROP `SQL_PREFIX` and
+   `camel-language-jsonpath v` (both IN slim now). Put any rationale
+   comment ABOVE the const declaration, never between the array brackets
+   (the acceptance grep scopes to the bracket range).
+3. Add `REGULAR_FORBIDDEN_PREFIXES: &[&str]` = `KAFKA_PREFIX`,
+   `EXEC_PREFIX`, `SURREALDB_PREFIX`, `FUNCTION_PREFIX`,
+   `CONTAINER_PREFIX` (the four principled exclusions; lang-js/rhai/xpath
+   are IN regular). Add `FULL_REQUIRED_PREFIXES: &[&str]` =
+   `&[KAFKA_PREFIX, SURREALDB_PREFIX, FUNCTION_PREFIX, CONTAINER_PREFIX,
+   EXEC_PREFIX]`.
+4. Add `REGULAR_REQUIRED_PREFIXES: &[&str]` = the capabilities regular must
+   resolve — use REAL crate names observed from
+   `cargo tree -p camel-cli --features flavor-regular -e features,no-dev`:
+   mqtt, redis, `SQL_PREFIX`, jms, otel instrumentation crate,
+   `LANG_JSONPATH` (`camel-language-jsonpath v`), rhai (`rhai v`),
+   boa (`boa_engine v`), `LANG_XPATH` (`camel-language-xpath v`),
+   `LANG_MINIJINJA` (`camel-language-minijinja v`), lsp (`tower-lsp v`),
+   kubernetes client (the `kube` crate or actual name observed), wasm
+   (`wasmtime v`), `SECURITY_PREFIX`. NOTE on http: `camel-component-http`
+   is a NON-OPTIONAL dep (present in every closure including slim — a tree
+   assert on it is vacuous, do not add it), and `http-static` is a
+   registration-level gate with no tree-level crate (already covered by
+   camel-bundles' `http_static_registers_without_bridges` test) — neither
+   gets a REGULAR_REQUIRED entry; http capability is proven by the existing
+   registration test.
 5. Add test `regular_closure_satisfies_contract`:
    action `tree_lines(&["--features", "flavor-regular"])`; assert every
    `REGULAR_REQUIRED_PREFIXES` entry present and every
    `REGULAR_FORBIDDEN_PREFIXES` entry absent (reuse `assert_absent`).
 6. Add test `full_closure_satisfies_contract`:
    action `tree_lines(&["--features", "flavor-full"])`; assert every
-   `FULL_REQUIRED_PREFIXES` entry present plus `EXEC_PREFIX`, `LANG_JS_PREFIX`,
-   `LANG_RHAI_PREFIX`, `LANG_XPATH_PREFIX` present.
+   `FULL_REQUIRED_PREFIXES` entry present (kafka, surrealdb, function,
+   container, exec all reachable in full).
 7. Add test `slim_closure_satisfies_contract`:
    action `tree_lines(&["--no-default-features", "--features", "flavor-slim"])`;
-   assert `camel-component-mqtt v` present and every
-   `SLIM_FORBIDDEN_PREFIXES` entry absent (now satisfiable — mqtt removed
-   from the forbidden list in step 2; http-static presence is
-   registration-level, not tree-level — see step 4 NOTE).
-8. Update `flavor_regular_closure_equals_full` (line ~556): regular no longer
-   equals `full`. Rewrite as
-   `flavor_regular_closure_equals_full_minus_deltas`: compute both closures,
-   set-difference, assert the diff contains no crate beyond the closures of
-   `exec`, `lang-js`, `lang-rhai`, `lang-xpath`.
-9. Update `flavor_slim_closure_equals_slim_http` (line ~563): rename to
-   `flavor_slim_closure_equals_mqtt_http_static`: the `flavor-slim` closure
-   equals `--no-default-features --features mqtt,http-static` closure.
-10. Delete `slim_alias_resolves_identically` (line ~426) — its subject alias
+   assert mqtt, rhai, jsonpath and the sql stack present, and every
+   `SLIM_FORBIDDEN_PREFIXES` entry absent.
+8. Add test `full_covers_universe` (the anti-omission net): parse the
+   `[features]` table of `crates/camel-cli/Cargo.toml` (the test file
+   already reads files for the golden fixture — follow that pattern);
+   compute the closure of `flavor-full` (existing tree helpers) as a
+   feature-name set by resolving `flavor-slim`/`flavor-regular` chains;
+   assert every feature name in `[features]` EXCEPT the non-flavor axes
+   (`jemalloc`, `dynamic-linking`, `itest-e2e`, `slim-benchmarks`-style
+   aliases if any remain, and the `flavor-*` markers themselves) appears
+   transitively in the flavor-full body. A new feature placed in no flavor
+   fails this test with a message naming it.
+9. Update `flavor_regular_closure_equals_full` (line ~556): regular no
+   longer relates to `full` that way. REPLACE with
+   `flavor_chain_is_structural`: assert the closure of `flavor-slim` ⊆
+   closure of `flavor-regular` ⊆ closure of `flavor-full` (set inclusion on
+   normalized tree lines — the chained bodies make this structural; the
+   test guards against future body edits that break the chain).
+    ALSO delete `flavor_full_closure_equals_full_plus_kafka` (line ~550) —
+    its premise (flavor-full == legacy `full` + kafka) is false under the
+    new bodies (flavor-full adds containers/kubernetes the legacy `full`
+    lacks); it is superseded by `full_closure_satisfies_contract` +
+    `flavor_chain_is_structural`.
+10. Update `flavor_slim_closure_equals_slim_http` (line ~563): DELETE it —
+    replaced by `slim_closure_satisfies_contract` (step 7).
+11. Delete `slim_alias_resolves_identically` (line ~426) — its subject alias
     is deleted in Task 1.
-11. Retarget `slim_plus_grpc_resolves_grpc_only` (line ~376) and
+12. Retarget `slim_plus_grpc_resolves_grpc_only` (line ~376) and
     `slim_plus_sql_resolves_sql_only` (line ~400): replace the deleted
     `slim-benchmarks` feature with `flavor-slim` in their feature
     selections (e.g. `--no-default-features --features flavor-slim,grpc`).
+    NOTE: `slim_plus_sql` becomes partially vacuous (sql is IN slim now) —
+    rewrite it as `slim_plus_grpc` style: assert the added feature resolves
+    exactly (sql asserts stay on the slim closure itself via step 7).
     Their per-feature resolution assertions stay unchanged.
-12. Update `flavor_marker_table` (lines ~515-545) to the new three bodies.
-    Mind the line-collector: format the new multi-entry bodies single-line
-    per marker in Cargo.toml (the whole flavor-regular feature list stays
-    on ONE line) so the table test keeps parsing, or rework its parser for
-    multi-line — prefer single-line Cargo.toml formatting.
-13. Update `default_closure_matches_golden` package-presence loop
-    (lines ~259-271): remove `camel-language-js v`, `camel-language-rhai v`,
-    `camel-language-xpath v` from the asserted-present set; keep
-    `camel-language-jsonpath v` and `camel-language-minijinja v` asserted
-    present; add asserted-ABSENT lines for the three dropped language crates
-    (reuse `assert_absent`).
-14. Regenerate the golden fixture using the procedure documented in the file
-    header comment at `feature_profiles.rs:1-16` — run
+13. Update `flavor_marker_table` (lines ~515-545) to the three new bodies.
+    Mind the line-collector: format each body single-line per marker in
+    Cargo.toml (the whole feature list stays on ONE line) so the table test
+    keeps parsing, or rework its parser for multi-line — prefer single-line
+    Cargo.toml formatting.
+14. Update `default_closure_matches_golden` package-presence loop
+    (lines ~259-271): default = flavor-regular now — keep
+    `camel-language-js/rhai/xpath/jsonpath/minijinja v` ALL asserted
+    present (regular includes them); ADD asserted-ABSENT lines for the
+    four principled exclusions (`camel-component-exec`,
+    `camel-component-surrealdb`, `camel-function`,
+    `camel-component-container`) via `assert_absent`.
+15. Regenerate the golden fixture using the procedure documented in the
+    file header comment at `feature_profiles.rs:1-16` — run
     `CARGO_TERM_COLOR=never cargo tree -p camel-cli -e features,no-dev` from
     the workspace root and save the normalized output into the fixture file
     exactly as the header describes — so the fixture matches the new default
     (flavor-regular) closure.
-15. In `crates/camel-bundles/src/lib.rs`: first VERIFY (read the security
+16. In `crates/camel-bundles/src/lib.rs`: first VERIFY (read the security
     boot path) that a configuration requiring the security guard under
     `not(feature = "security")` is rejected with a descriptive error at the
     same entry point the kafka rejection test uses (that test lives at
     `camel-bundles/src/lib.rs:620`; :441-463 is its module header/helpers).
-    If production     does NOT fail closed there, STOP and report
+    If production does NOT fail closed there, STOP and report
     `test-design-gap: security omission does not fail closed in camel-bundles`
     AND file a bd issue for the production gap
     (`bd create "<title>" -t bug --deps discovered-from:rc-5t5fo.5` from
     the repo root) — do not fix production behavior in this task. If
-    verified, add test
-    `security_omission_fails_closed` gated `#[cfg(not(feature = "security"))]`
-    following the kafka-test pattern: action — feed the security-requiring
-    configuration to the boot/registry entry point; assert an explicit
-    descriptive error variant (the real existing one — do not invent);
-    assert it does NOT return Ok with an insecure default.
+    verified, add test `security_omission_fails_closed` gated
+    `#[cfg(not(feature = "security"))]` following the kafka-test pattern:
+    action — feed the security-requiring configuration to the boot/registry
+    entry point; assert an explicit descriptive error variant (the real
+    existing one — do not invent); assert it does NOT return Ok with an
+    insecure default.
 
 Tests:
 - name: regular_closure_satisfies_contract
@@ -167,13 +228,17 @@ Tests:
   assert: passes
 - name: full_closure_satisfies_contract
   command: `cargo test -p camel-cli --test feature_profiles full_closure_satisfies_contract`
-  assert: passes (kafka present in full)
+  assert: passes (kafka, surrealdb, function, container, exec reachable in full)
 - name: slim_closure_satisfies_contract
   command: `cargo test -p camel-cli --test feature_profiles slim_closure_satisfies_contract`
-  assert: passes (mqtt present, forbidden set absent)
+  assert: passes (mqtt, rhai, jsonpath, sql present; forbidden set absent)
+- name: full_covers_universe
+  command: `cargo test -p camel-cli --test feature_profiles full_covers_universe`
+  assert: passes (every non-axis feature reachable from flavor-full)
 - name: default_closure_matches_golden (regenerated)
   command: `cargo test -p camel-cli --test feature_profiles default_closure_matches_golden`
-  assert: passes with regenerated fixture
+  assert: passes with regenerated fixture; all five language crates asserted
+  present, the four principled exclusions asserted absent
 - name: security_omission_fails_closed
   command: `cargo test -p camel-bundles --lib security_omission_fails_closed 2>&1 | tee /dev/stderr | grep -c '1 passed'`
   assert: output contains `1 passed` (guards against a vacuous 0-matched
@@ -190,7 +255,7 @@ Acceptance:
 - `cargo test -p camel-bundles --lib` passes with default features
 - `cargo fmt --check` and `cargo clippy -p camel-cli -p camel-bundles -- -D warnings` exit 0
 - `grep -c 'slim_alias_resolves_identically' crates/camel-cli/tests/feature_profiles.rs` returns 0
-- `sed -n '/^const SLIM_FORBIDDEN_PREFIXES/,/^\]/p' crates/camel-cli/tests/feature_profiles.rs | grep -c mqtt` returns 0 (anchored to the declaration; a rationale comment above the const is outside the range; mqtt may appear elsewhere in the file)
+- `sed -n '/^const SLIM_FORBIDDEN_PREFIXES/,/^\]/p' crates/camel-cli/tests/feature_profiles.rs | grep -ci 'mqtt\|rhai'` returns 0 (anchored to the declaration; a rationale comment above the const is outside the range; mqtt/rhai may appear elsewhere in the file)
 
 - [ ] 2
 
@@ -428,11 +493,19 @@ Steps:
   targets, artifact names), the Docker tag map (`latest`/`:regular`,
   `-alpine`/`:slim`, `-gnu`/`:full`), install guidance per channel
   (release download, docker, `cargo install camel-cli` = regular source
-  build, `--features flavor-full` for kafka), and a BREAKING-CHANGE section:
-  `camel-<target>` re-aliases from the historical full-ish closure to
-  regular at 0.50 — one-time; this section is the canonical callout text
-  the 0.50 release notes will reference (release notes are generated by
-  `xtask changelog` at tag time; the release operator links this section).
+  build, `--features flavor-full` for everything, composition beyond
+  presets), a BREAKING-CHANGE section (`camel-<target>` re-aliases from
+  the historical full-ish closure to regular at 0.50 — one-time; this
+  section is the canonical callout text the 0.50 release notes will
+  reference), the ITERATION POLICY (flavors are presets, not walls;
+  additions flow down freely in minors — full→regular→slim is
+  non-breaking; removals only at majors), and the HOW-TO-MOVE-A-FEATURE
+  RECIPE: (1) edit the ONE flavor list in camel-cli/Cargo.toml where the
+  feature should start appearing (bodies are chained), (2) update the
+  contract prefix sets in feature_profiles.rs if a principle boundary is
+  crossed, (3) regenerate the golden fixture with the documented one-line
+  command, (4) update the flavor table in this doc; CI matrix legs never
+  change (legs are target×flavor).
 2. Update `crates/camel-cli/CONTEXT.md` flavor-markers section: the three
   bodies as landed (slim = mqtt+http-static on base; regular = curated
   list; full = regular + exec/lang-js/rhai/xpath/kafka), alias removal

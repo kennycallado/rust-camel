@@ -22,47 +22,66 @@ would ship FOUR names for one release (legacy-full, slim, regular, full) at
 final semantics — no stale-name window exists because binstall's default
 guesses never matched (crate `camel-cli` vs assets `camel-*`).
 
-## Decision 2 — Flavor bodies (hand-curated contract)
+## Decision 2 — Flavor bodies (chained, principled exclusions)
 
-Budget-based curation was REJECTED by e_opus (§2): size is the wrong axis;
-security surface and fail-closed startup coupling are not percentages. The
-contract is prefix sets in `feature_profiles.rs`, reviewed like API surface.
+FINAL MODEL (owner rulings 2026-09-19, after three expert adjudications, one
+completeness sweep, and the license axis — see
+`docs/audits/2026-09-19-flavor-facts-dossier.md` and siblings). Bodies are
+CHAINED: each flavor includes the one below (`slim ⊆ regular ⊆ full` is
+structural, not tested-in). Moving a feature = editing exactly ONE list.
 
-- **slim** (musl-only, pure Rust): base CLI closure (core, direct, seda, log,
-  file, timer — unconditional after rc-9720m) + `mqtt` + http-static path
-  (`slim-http` body: the http server components with pure-Rust hyper). No
-  security features — their omission must fail closed at startup with a
-  tested rejection (an insecure option on a slim build errors out, never
-  degrades silently).
-- **regular** (7 targets, pure Rust): `full` minus `exec` (verdict: exec is a
-  support-and-CVE magnet, fail-closed capability model is a full-flavor
-  concern) minus `lang-js`/`lang-rhai`/`lang-xpath` (regular keeps
-  `lang-jsonpath` + `lang-minijinja` only) minus `kafka` (already absent from
-  `full`; kafka remains full-only via `flavor-full`).
-- **full**: `full` + `kafka` — unchanged from rc-5t5fo.3.
+Principles — regular excludes ONLY what violates a named principle:
+kafka (C dep, musl-impossible), surrealdb (BUSL-1.1, only non-OSI dep in
+the graph), exec (arbitrary host-binary execution, ADR-0037 doctrine),
+containers (Docker-daemon socket client: camel-function + camel-component-
+container gated as ONE feature). Everything else — including wasm (sandboxed
+canonical ABI per ADR-0050), lang-js/boa, lsp, rhai — is IN regular by owner
+ruling. Slim adds the edge pack on top of base.
 
-Feature syntax in `crates/camel-cli/Cargo.toml`:
 ```toml
-flavor-slim    = ["mqtt", "http-static", "slim-http"]   # final body; see alias note
-flavor-regular = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb",
-                  "mqtt", "mcp", "integration-http", "integration-sql", "security",
-                  "redis-tls", "lsp", "lang-jsonpath", "lang-minijinja", "jms", "sql",
-                  "redis", "opensearch", "ws", "cxf", "xj", "xslt"]
-flavor-full    = ["flavor-regular", "exec", "lang-js", "lang-rhai", "lang-xpath", "kafka"]
+flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql",
+               "lang-jsonpath", "lang-rhai"]
+flavor-regular = ["flavor-slim", "otel", "grpc", "wasm", "llm", "mcp",
+                  "security", "redis", "redis-tls", "jms", "cxf", "xj",
+                  "xslt", "opensearch", "ws", "lang-xpath", "lang-js",
+                  "lang-minijinja", "lsp", "kubernetes",
+                  "integration-http", "integration-sql"]
+flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb", "containers"]
 ```
-(Normalization: full as regular+delta avoids duplicating 20 entries and makes
-the regular contract the single list to review. `surrealdb` stays in regular —
-its nixpkgs LLVM block is a nix problem, not a flavor problem.)
 
-Alias chain: `slim-http` → `slim-benchmarks` (one-release aliases, rc-n6iop
-tracks expiry at 0.50). If this change lands for ≥0.50, DELETE both aliases
-and fold the real slim body into `flavor-slim` directly. When de-aliased, the
-empty `slim-benchmarks` placeholder is replaced by the pure-Rust http-static
-server closure (the hyper-based `http-static` path — no `security`, no
-`exec`, no `lang-*` beyond none; the concrete component set is the
-`http-static` feature body in camel-cli, already exercised by the slim
-closure tests). rc-n6iop remains the tracking ticket for the alias expiry
-itself.
+New gates this change creates (Tier-2 optionalization):
+- `containers = ["dep:camel-function", "camel-bundles/containers"]` —
+  camel-cli dep goes optional; camel-bundles gains feature gating the
+  ContainerBundle registration (camel-bundles/src/lib.rs:344) and the two
+  `camel_function::FunctionRuntimeService::with_default_container_provider`
+  call sites in camel-cli (`run.rs:253`, `job/mod.rs:1022`) get
+  `#[cfg(feature = "containers")]` gates (function⇒container per ADR-0005,
+  one feature). Fail-closed: without the feature no function runtime is
+  constructed and `function:`/`container:` paths error explicitly at those
+  call sites.
+- `kubernetes = ["camel-config/kubernetes"]` — remove the hardcoded
+  `"kubernetes"` from camel-cli's camel-config dep features (Cargo.toml
+  dependency-declaration line); camel-config already has the feature.
+  The hardcoded `otel` STAYS (base telemetry wiring, documented as
+  base-cost honesty in the dossier).
+
+The full minus-4 historical framing is REPLACED by the lists above. The
+`full` feature (historical closure list) remains as-is for compatibility;
+flavors no longer reference it.
+
+Iteration doctrine (owner requirement — must be cheap to adjust):
+- Flavors are PRESETS, not walls: users compose beyond them
+  (`--features flavor-regular,cxf`).
+- Additions flow DOWN freely in minor releases (full→regular→slim is
+  non-breaking); removals only at majors. Documented in the distribution
+  doc with a "how to move a feature between flavors" recipe (edit one
+  list, update contract sets if a principle is crossed, regen fixture —
+  one command; CI legs never move because legs are target×flavor).
+- `full_covers_universe` test (Task 2): every camel-cli feature except
+  the non-flavor axes (jemalloc, dynamic-linking, itest-e2e, and the
+  marker features themselves) SHALL be reachable from flavor-full — a
+  new feature placed nowhere goes red in CI. This mechanizes "nothing
+  gets left out of camel-cli".
 
 ## Decision 3 — Matrix topology (14 tag legs)
 
@@ -153,8 +172,14 @@ jemalloc-symbol-assert pattern; camel-bundles already has the gating assert at
 - **ARM runner availability**: `ubuntu-24.04-arm` is a GitHub-managed runner
   pool; if flaky, fall back to QEMU cross for that leg only (perf, not
   correctness).
-- **`surrealdb` in regular**: keeps a heavy dep in the recommended flavor;
-  accepted (pure Rust from cargo's view; nixpkgs block is upstream-LLVM).
+- **Tier-2 gates are new code** (containers: two optionalized deps + cfg
+  registration + fail-closed path; kubernetes: de-hardcode): the function/
+  container fail-closed None-path is verified in Task 1 step 4 with a
+  STOP-and-report escape hatch if the explicit rejection is missing.
+- **boa/wasm in regular** (owner ruling): the default install carries a JS
+  engine + wasmtime — accepted product cost for capability presence; the
+  crate-count axis understates boa's compile weight (documented in the
+  dossier's honesty section).
 - **Default closure change**: `cargo build` (no features) now yields the
   regular contract — golden fixture regen covers it.
 
