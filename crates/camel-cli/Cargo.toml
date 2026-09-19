@@ -68,6 +68,7 @@ camel-master = { workspace = true }
 camel-component-redis = { workspace = true, optional = true }
 camel-component-sql = { workspace = true, optional = true }
 camel-component-cron.workspace = true
+camel-component-stream.workspace = true
 camel-component-timer.workspace = true
 camel-component-validator.workspace = true
 camel-component-ws = { workspace = true, optional = true }

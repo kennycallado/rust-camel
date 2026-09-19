@@ -113,6 +113,10 @@ pub fn register_builtin_components_for_lint(ctx: &mut camel_core::CamelContext) 
     ctx.register_component(camel_component_seda::SedaComponent::new());
     ctx.register_component(camel_component_mock::MockComponent::new());
     ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
+    // stream: config-free stdio component (ADR-0080), always-on via
+    // camel-bundles at runtime — mirrored here so lint verifies
+    // stream:in/stream:out in every flavor (rc-qsenm).
+    ctx.register_component(camel_component_stream::StreamComponent::new());
 
     // --- Bridge components WITHOUT their runtime handles ---
     // validator: xsd_bridge_backend() not captured, no backend stored.

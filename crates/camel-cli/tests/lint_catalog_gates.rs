@@ -64,6 +64,10 @@ async fn slim_lint_catalog_omits_gated_bridges() {
         registry.get("timer").is_some(),
         "timer must stay registered in every profile"
     );
+    assert!(
+        registry.get("stream").is_some(),
+        "stream must stay registered in every profile (ADR-0080 always-on)"
+    );
 }
 
 #[tokio::test]

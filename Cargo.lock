@@ -1391,6 +1391,7 @@ dependencies = [
  "camel-component-redis",
  "camel-component-seda",
  "camel-component-sql",
+ "camel-component-stream",
  "camel-component-surrealdb",
  "camel-component-timer",
  "camel-component-validator",
