@@ -103,7 +103,7 @@
          side=$((side+1))
          tgz="${b%.sha256}"
          [ -f "dist/$tgz" ] || { echo "FAIL: sidecar without tarball: $b"; ok=0; }
-         # format: 64 lowercase hex + exactly two spaces + tarball basename
+         # format: 64 lowercase hex + exactly two spaces + own basename
          head -1 "$f" | grep -Eq "^[0-9a-f]{64}  ${tgz}$" \
            || { echo "FAIL: sidecar format: $b"; ok=0; }
          ;;
