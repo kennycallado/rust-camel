@@ -254,21 +254,34 @@ fn default_closure_matches_golden() {
         .filter(|line| !is_lang_feature_edge(line))
         .collect();
     if actual_set == expected_set {
-        // Package-level presence survives the feature-edge filter: the
-        // camel-language-* crates must remain in the default closure
-        // (minijinja via both the forward and camel-template).
+        // Package-level presence survives the feature-edge filter: default
+        // = flavor-regular, and regular includes every language adapter
+        // (minijinja also via the camel-template hard dep).
         for prefix in [
-            "camel-language-js v",
-            "camel-language-rhai v",
-            "camel-language-jsonpath v",
-            "camel-language-xpath v",
-            "camel-language-minijinja v",
+            LANG_JS_PREFIX,
+            LANG_RHAI_PREFIX,
+            LANG_JSONPATH_PREFIX,
+            LANG_XPATH_PREFIX,
+            LANG_MINIJINJA_PREFIX,
         ] {
             assert!(
                 actual.iter().any(|line| line.starts_with(prefix)),
                 "default closure must still contain `{prefix}`"
             );
         }
+        // Default = flavor-regular: the four principled exclusions must
+        // stay out of the default closure (kafka is covered by
+        // REGULAR_FORBIDDEN_PREFIXES in regular_closure_satisfies_contract).
+        assert_absent(
+            &actual,
+            &[
+                EXEC_PREFIX,
+                SURREALDB_PREFIX,
+                FUNCTION_PREFIX,
+                CONTAINER_PREFIX,
+            ],
+            "default (flavor-regular) closure must exclude the four principled exclusions",
+        );
         return;
     }
     let mut missing: Vec<&String> = expected_set.difference(&actual_set).copied().collect();
@@ -326,117 +339,203 @@ fn default_build_has_no_allocator_crate() {
     );
 }
 
-/// The slim profile's controllable exclusion set: crates the `clidiet`
-/// feature-table rework (task 2.2) must be able to drop from the
-/// `--no-default-features` closure. `ariadne` is deliberately absent —
-/// `camel lint` keeps it non-optional. The bridgeforward bridges join as
-/// their per-bridge gates landed, except `camel-component-redis`: the
-/// unconditional camel-config → camel-redis-repo path keeps it linked
-/// out of zone. `camel-xj` pulls `camel-xslt` transitively, so
-/// slim + `xj` links both; default/full enable all eight bridges via
-/// `full`.
+/// Feature-edge probes for other workspace crates use plain `-e no-dev`
+/// (see [`tree_lines_for`]); the two bridge probes below assert package
+/// presence only.
 const GRPC_PREFIX: &str = "camel-component-grpc v";
 const SQL_PREFIX: &str = "camel-component-sql v";
+
+// Final-model flavor contract prefixes (design.md Decision 2). Each const
+// names one crate the closure tests assert on; no string literal is
+// duplicated across the arrays below. SECURITY_PREFIX is the shared
+// security crate observed via `cargo tree -p camel-cli --features security
+// -e features,no-dev` (camel-bundles/security pulls camel-component-keycloak).
+const KAFKA_PREFIX: &str = "camel-component-kafka v";
+const EXEC_PREFIX: &str = "camel-component-exec v";
+const LANG_JS_PREFIX: &str = "camel-language-js v";
+const LANG_XPATH_PREFIX: &str = "camel-language-xpath v";
+const LANG_JSONPATH_PREFIX: &str = "camel-language-jsonpath v";
+const LANG_MINIJINJA_PREFIX: &str = "camel-language-minijinja v";
+const LANG_RHAI_PREFIX: &str = "camel-language-rhai v";
+const SURREALDB_PREFIX: &str = "camel-component-surrealdb v";
+const FUNCTION_PREFIX: &str = "camel-function v";
+const CONTAINER_PREFIX: &str = "camel-component-container v";
+const SECURITY_PREFIX: &str = "camel-component-keycloak v";
+
+// Slim's exclusion set in the final model: the four principled exclusions
+// from regular (kafka: C dependency unportable to musl; exec: arbitrary
+// host-binary execution, ADR-0037; surrealdb: BUSL-1.1, the only non-OSI
+// license in the graph; containers: infrastructure-daemon client, one
+// feature with camel-function) plus the language runtimes and the security
+// stack slim deliberately drops (lang-js, lang-xpath, security). The old
+// controllable-set entries (mqtt, sql, jsonpath, rhai, the bridges, lsp,
+// wasm/llm/mcp/grpc) are IN slim or regular now and no longer forbidden —
+// explicitly dropped here: SQL_PREFIX and the jsonpath crate.
 const SLIM_FORBIDDEN_PREFIXES: &[&str] = &[
-    "camel-component-kafka v",
-    GRPC_PREFIX,
-    "camel-component-wasm v",
-    "camel-component-llm v",
-    "camel-component-mcp v",
-    "camel-component-mqtt v",
-    "camel-component-surrealdb v",
-    "camel-component-exec v",
-    SQL_PREFIX,
-    "camel-component-jms v",
-    "camel-component-opensearch v",
-    "camel-component-ws v",
-    "camel-component-cxf v",
-    "camel-xj v",
-    "camel-xslt v",
-    "camel-lsp v",
-    "tower-lsp v",
-    "camel-language-js v",
-    "camel-language-rhai v",
-    "camel-language-jsonpath v",
-    "camel-language-xpath v",
-    // camel-language-minijinja stays: camel-template hard-depends on it (non-optional via camel-cli + camel-bundles; deferred family, bundles-internal bridges).
+    KAFKA_PREFIX,
+    EXEC_PREFIX,
+    LANG_JS_PREFIX,
+    LANG_XPATH_PREFIX,
+    SURREALDB_PREFIX,
+    FUNCTION_PREFIX,
+    CONTAINER_PREFIX,
+    SECURITY_PREFIX,
 ];
 
+// Regular excludes ONLY the four principled items — lang-js, rhai and
+// lang-xpath are IN regular (owner ruling, design.md Decision 2).
+const REGULAR_FORBIDDEN_PREFIXES: &[&str] = &[
+    KAFKA_PREFIX,
+    EXEC_PREFIX,
+    SURREALDB_PREFIX,
+    FUNCTION_PREFIX,
+    CONTAINER_PREFIX,
+];
+
+// Full = regular plus exactly the four principled deltas; every delta must
+// be reachable in the full closure (the historical kafka-less-full defect
+// stays fixed).
+const FULL_REQUIRED_PREFIXES: &[&str] = &[
+    KAFKA_PREFIX,
+    SURREALDB_PREFIX,
+    FUNCTION_PREFIX,
+    CONTAINER_PREFIX,
+    EXEC_PREFIX,
+];
+
+// Capabilities regular must resolve — REAL crate names observed via
+// `cargo tree -p camel-cli --features flavor-regular -e features,no-dev`:
+// `kube` is the observed kubernetes client, and `rhai`/`boa_engine` are
+// the language runtimes. Deliberately absent from this table:
+// `camel-component-http` is a NON-OPTIONAL dep (present in every closure
+// including slim — a presence assert would be vacuous), `http-static` is a
+// registration-level gate with no tree-level crate (covered by
+// camel-bundles' `http_static_registers_without_bridges`), and the CLI
+// `otel` feature has no tree-visible unique effect (camel-config wires
+// tracing-opentelemetry unconditionally and camel-otel is always linked) —
+// otel placement is pinned by `flavor_marker_table` instead.
+const REGULAR_REQUIRED_PREFIXES: &[&str] = &[
+    "camel-component-mqtt v",
+    "camel-component-redis v",
+    SQL_PREFIX,
+    "camel-component-jms v",
+    LANG_JSONPATH_PREFIX,
+    "rhai v",
+    "boa_engine v",
+    LANG_XPATH_PREFIX,
+    LANG_MINIJINJA_PREFIX,
+    "tower-lsp v",
+    "kube v",
+    "wasmtime v",
+    SECURITY_PREFIX,
+];
+
+/// Panic naming the first missing prefix unless every prefix has at least
+/// one line in `lines` starting with it — the positive twin of
+/// [`assert_absent`].
+fn assert_all_present(lines: &[String], prefixes: &[&str], context: &str) {
+    for prefix in prefixes {
+        assert!(
+            lines.iter().any(|line| line.starts_with(prefix)),
+            "{context}: closure must contain `{prefix}`"
+        );
+    }
+}
+
 #[test]
-fn slim_closure_excludes_controllable_set() {
+fn slim_closure_excludes_principled_set() {
     let lines = tree_lines(&["--no-default-features"]);
     assert_absent(
         &lines,
         SLIM_FORBIDDEN_PREFIXES,
-        "slim closure (--no-default-features) must exclude the controllable set",
+        "slim closure (--no-default-features) must exclude the principled set",
     );
 }
 
 #[test]
 fn slim_plus_grpc_resolves_grpc_only() {
-    let lines = tree_lines(&[
-        "--no-default-features",
-        "--features",
-        "slim-benchmarks,grpc",
-    ]);
+    let lines = tree_lines(&["--no-default-features", "--features", "flavor-slim,grpc"]);
     for prefix in [GRPC_PREFIX, "tonic v"] {
         assert!(
             lines.iter().any(|line| line.starts_with(prefix)),
-            "slim-benchmarks,grpc closure must contain `{prefix}`"
+            "flavor-slim,grpc closure must contain `{prefix}`"
         );
     }
-    let other_twenty: Vec<&str> = SLIM_FORBIDDEN_PREFIXES
-        .iter()
-        .copied()
-        .filter(|prefix| *prefix != GRPC_PREFIX)
-        .collect();
     assert_absent(
         &lines,
-        &other_twenty,
-        "slim-benchmarks,grpc closure must still exclude the other twenty forbidden prefixes",
+        SLIM_FORBIDDEN_PREFIXES,
+        "flavor-slim,grpc closure must still exclude the slim-forbidden prefixes",
     );
 }
 
 #[test]
 fn slim_plus_sql_resolves_sql_only() {
-    let lines = tree_lines(&["--no-default-features", "--features", "slim-benchmarks,sql"]);
+    // sql is IN flavor-slim now, so the added-feature resolution half is
+    // partially vacuous; it stays as the retargeted smoke, and the slim-sql
+    // presence asserts proper live in slim_closure_satisfies_contract.
+    let lines = tree_lines(&["--no-default-features", "--features", "flavor-slim,sql"]);
     assert!(
         lines.iter().any(|line| line.starts_with(SQL_PREFIX)),
-        "slim-benchmarks,sql closure must contain `{SQL_PREFIX}`"
+        "flavor-slim,sql closure must contain `{SQL_PREFIX}`"
     );
     // Datasource-stack parity with the grpc test's `tonic v` assertion:
     // camel-component-sql hard-depends on sqlx, so its presence pins the
     // stack the scenario text names.
     assert!(
         lines.iter().any(|line| line.starts_with("sqlx v")),
-        "slim-benchmarks,sql closure must contain the sqlx datasource stack"
+        "flavor-slim,sql closure must contain the sqlx datasource stack"
     );
-    let other_twenty: Vec<&str> = SLIM_FORBIDDEN_PREFIXES
-        .iter()
-        .copied()
-        .filter(|prefix| *prefix != SQL_PREFIX)
-        .collect();
     assert_absent(
         &lines,
-        &other_twenty,
-        "slim-benchmarks,sql closure must still exclude the other twenty forbidden prefixes",
+        SLIM_FORBIDDEN_PREFIXES,
+        "flavor-slim,sql closure must still exclude the slim-forbidden prefixes",
     );
 }
 
 #[test]
-fn slim_alias_resolves_identically() {
-    let alias_lines = tree_lines(&["--no-default-features", "--features", "slim-http"]);
-    let canonical_lines = tree_lines(&["--no-default-features", "--features", "slim-benchmarks"]);
-    let alias_set: HashSet<&str> = alias_lines.iter().map(String::as_str).collect();
-    let canonical_set: HashSet<&str> = canonical_lines.iter().map(String::as_str).collect();
-    assert_eq!(
-        alias_set, canonical_set,
-        "slim-http alias closure must resolve identically to slim-benchmarks"
+fn regular_closure_satisfies_contract() {
+    let lines = tree_lines(&["--features", "flavor-regular"]);
+    assert_all_present(
+        &lines,
+        REGULAR_REQUIRED_PREFIXES,
+        "flavor-regular closure must resolve every required capability",
     );
     assert_absent(
-        &alias_lines,
+        &lines,
+        REGULAR_FORBIDDEN_PREFIXES,
+        "flavor-regular closure must exclude the four principled exclusions",
+    );
+}
+
+#[test]
+fn full_closure_satisfies_contract() {
+    let lines = tree_lines(&["--features", "flavor-full"]);
+    assert_all_present(
+        &lines,
+        FULL_REQUIRED_PREFIXES,
+        "flavor-full closure must reach every principled delta",
+    );
+}
+
+#[test]
+fn slim_closure_satisfies_contract() {
+    let lines = tree_lines(&["--no-default-features", "--features", "flavor-slim"]);
+    assert_all_present(
+        &lines,
+        &[
+            "camel-component-mqtt v",
+            "rhai v",
+            LANG_JSONPATH_PREFIX,
+            SQL_PREFIX,
+            "sqlx v",
+        ],
+        "flavor-slim closure must contain the edge pack (mqtt, rhai, jsonpath) \
+         and the sql stack",
+    );
+    assert_absent(
+        &lines,
         SLIM_FORBIDDEN_PREFIXES,
-        "slim-http alias closure must exclude the controllable set",
+        "flavor-slim closure must exclude the principled set",
     );
 }
 
@@ -538,33 +637,137 @@ fn flavor_marker_table() {
         marker_lines,
         vec![
             r#"default = ["flavor-regular"]"#,
-            r#"flavor-slim = ["slim-http"]"#,
-            r#"flavor-regular = ["full"]"#,
-            r#"flavor-full = ["full", "kafka"]"#,
+            r#"flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql", "lang-jsonpath", "lang-rhai"]"#,
+            r#"flavor-regular = ["flavor-slim", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]"#,
+            r#"flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb", "containers"]"#,
         ],
         "the flavor marker table must be exactly the four declared lines"
     );
 }
 
 #[test]
-fn flavor_full_closure_equals_full_plus_kafka() {
-    let a = tree_lines(&["--no-default-features", "--features", "flavor-full"]);
-    let b = tree_lines(&["--no-default-features", "--features", "full,kafka"]);
-    assert_eq!(a, b);
+fn flavor_chain_is_structural() {
+    // The chained bodies make slim ⊆ regular ⊆ full structural; this test
+    // guards against future body edits that break the chain. Set inclusion
+    // on the normalized tree lines (premise of the old equality twins is
+    // gone: flavors no longer alias `full`/`slim-http`, which are legacy
+    // compose-users surfaces).
+    let slim = tree_lines(&["--no-default-features", "--features", "flavor-slim"]);
+    let regular = tree_lines(&["--features", "flavor-regular"]);
+    let full = tree_lines(&["--features", "flavor-full"]);
+    let slim_set: HashSet<&String> = slim.iter().collect();
+    let regular_set: HashSet<&String> = regular.iter().collect();
+    let full_set: HashSet<&String> = full.iter().collect();
+    let slim_extra: Vec<&String> = slim_set.difference(&regular_set).copied().collect();
+    let regular_extra: Vec<&String> = regular_set.difference(&full_set).copied().collect();
+    assert!(
+        slim_extra.is_empty(),
+        "flavor-slim closure must be a subset of flavor-regular's; offenders: {slim_extra:?}"
+    );
+    assert!(
+        regular_extra.is_empty(),
+        "flavor-regular closure must be a subset of flavor-full's; offenders: {regular_extra:?}"
+    );
+}
+
+/// Parse the `[features]` table of `manifest` into `(name, entries)` pairs
+/// for [`full_covers_universe`]. Comment-safe (`#` comments stripped per
+/// line) and multi-line-body safe: an entry's value runs to its closing
+/// `]`. Feature values are always arrays in this manifest.
+fn parse_feature_table(manifest: &str) -> Vec<(String, Vec<String>)> {
+    let mut in_features = false;
+    let mut section = String::new();
+    for line in manifest.lines() {
+        if line.starts_with('[') {
+            in_features = line == "[features]";
+            continue;
+        }
+        if in_features {
+            let code = match line.split_once('#') {
+                Some((code, _)) => code,
+                None => line,
+            };
+            section.push_str(code);
+            section.push('\n');
+        }
+    }
+    let mut entries: Vec<(String, Vec<String>)> = Vec::new();
+    let mut rest = section.as_str();
+    while let Some(eq) = rest.find('=') {
+        let name = rest[..eq].trim().to_string();
+        let after = &rest[eq + 1..];
+        let start = after.find('[').expect("feature value must be an array");
+        let close = start + after[start..].find(']').expect("unclosed feature array");
+        let list = after[start + 1..close]
+            .split(',')
+            .map(|item| item.trim().trim_matches('"').to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+        entries.push((name, list));
+        rest = &after[close + 1..];
+    }
+    entries
 }
 
 #[test]
-fn flavor_regular_closure_equals_full() {
-    let a = tree_lines(&["--no-default-features", "--features", "flavor-regular"]);
-    let b = tree_lines(&["--no-default-features", "--features", "full"]);
-    assert_eq!(a, b);
-}
-
-#[test]
-fn flavor_slim_closure_equals_slim_http() {
-    let a = tree_lines(&["--no-default-features", "--features", "flavor-slim"]);
-    let b = tree_lines(&["--no-default-features", "--features", "slim-http"]);
-    assert_eq!(a, b);
+fn full_covers_universe() {
+    // The anti-omission net: every camel-cli feature except the non-flavor
+    // axes must be reachable from flavor-full's body — a new feature placed
+    // in no flavor goes red here (design.md iteration doctrine).
+    let manifest = fs::read_to_string(workspace_root().join("crates/camel-cli/Cargo.toml"))
+        .expect("failed to read crates/camel-cli/Cargo.toml");
+    let table = parse_feature_table(&manifest);
+    // Transitive body of flavor-full over camel-cli's own feature names:
+    // `dep:` edges and cross-crate forwards (`other-crate/feature`) count
+    // as placed leaves — placement is membership in the body set, not
+    // resolvability. A name absent from the table is an optional-dependency
+    // leaf too.
+    let mut body: HashSet<String> = HashSet::new();
+    let mut stack = vec!["flavor-full".to_string()];
+    while let Some(name) = stack.pop() {
+        if !body.insert(name.clone()) {
+            continue;
+        }
+        if let Some((_, entries)) = table.iter().find(|(feature, _)| *feature == name) {
+            for entry in entries {
+                if entry.starts_with("dep:") || entry.contains('/') {
+                    continue;
+                }
+                stack.push(entry.clone());
+            }
+        }
+    }
+    // Non-flavor axes live outside the flavor universe: the allocator and
+    // linking overrides, the CI-only e2e switch, the selection markers
+    // themselves, and the default wiring. `full` is the historical closure
+    // alias kept for compose-users — design.md rules that flavors no longer
+    // reference it, so it is placed nowhere by design (same class as the
+    // removed slim-benchmarks alias; tasks.md excludes aliases that remain).
+    const NON_FLAVOR_AXES: &[&str] = &[
+        "default",
+        "full",
+        "flavor-slim",
+        "flavor-regular",
+        "flavor-full",
+        "dynamic-linking",
+        "itest-e2e",
+        "jemalloc",
+    ];
+    let unplaced: Vec<&String> = table
+        .iter()
+        .map(|(name, _)| name)
+        .filter(|name| !NON_FLAVOR_AXES.contains(&name.as_str()) && !body.contains(*name))
+        .collect();
+    assert!(
+        unplaced.is_empty(),
+        "features placed in no flavor — flavor-full's body must reach them \
+         (add each to a flavor list or a non-flavor axis): {unplaced:?}"
+    );
+    // Guard against a vacuous pass: the chain itself must have resolved.
+    assert!(
+        body.contains("flavor-regular") && body.contains("flavor-slim"),
+        "flavor-full must chain through flavor-regular and flavor-slim"
+    );
 }
 
 #[test]
@@ -579,12 +782,12 @@ fn dynamic_linking_closure_resolves_kafka() {
     let remaining: Vec<&str> = SLIM_FORBIDDEN_PREFIXES
         .iter()
         .copied()
-        .filter(|prefix| *prefix != "camel-component-kafka v")
+        .filter(|prefix| *prefix != KAFKA_PREFIX)
         .collect();
     assert_absent(
         &lines,
         &remaining,
-        "dynamic-linking closure must still exclude the remaining controllable set",
+        "dynamic-linking closure must still exclude the remaining principled set",
     );
 }
 
@@ -597,8 +800,10 @@ fn removed_kafka_feature_names_rejected() {
 /// The seven droppable bridge packages: every bridgeforward bridge except
 /// `camel-component-redis`, which the unconditional camel-config →
 /// camel-redis-repo path keeps linked in every closure (out-of-zone
-/// deferral). The same seven entries also live in
-/// [`SLIM_FORBIDDEN_PREFIXES`] for the camel-cli-side assertions.
+/// deferral). These probes run against camel-bundles' own tree (the
+/// bridges live there); the camel-cli-side slim contract uses
+/// [`SLIM_FORBIDDEN_PREFIXES`], which no longer lists the bridges — they
+/// are IN slim and regular now.
 const DROPPABLE_BRIDGE_PREFIXES: &[&str] = &[
     "camel-component-jms v",
     "camel-component-sql v",

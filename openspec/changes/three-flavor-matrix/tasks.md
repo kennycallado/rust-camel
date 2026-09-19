@@ -267,7 +267,7 @@ Acceptance:
 - `grep -c 'slim_alias_resolves_identically' crates/camel-cli/tests/feature_profiles.rs` returns 0
 - `sed -n '/^const SLIM_FORBIDDEN_PREFIXES/,/^\]/p' crates/camel-cli/tests/feature_profiles.rs | grep -ci 'mqtt\|rhai'` returns 0 (anchored to the declaration; a rationale comment above the const is outside the range; mqtt/rhai may appear elsewhere in the file)
 
-- [ ] 2
+- [x] 2
 
 ## Task 3: 14-leg build matrix, artifact names, dev-profile input
 

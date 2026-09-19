@@ -487,7 +487,6 @@ mod tests {
             "https",
             "ws",
             "file",
-            "container",
             "template",
             "jms",
             "xslt",
@@ -502,6 +501,19 @@ mod tests {
                 "scheme '{scheme}' must resolve after boot"
             );
         }
+        // Container registers only under the Tier-2 `containers` gate
+        // (infrastructure-daemon client, one feature with camel-function):
+        // default builds omit the scheme, so the assert is cfg-gated.
+        #[cfg(feature = "containers")]
+        assert!(
+            ctx.registry().get("container").is_some(),
+            "scheme 'container' must resolve after boot"
+        );
+        #[cfg(not(feature = "containers"))]
+        assert!(
+            ctx.registry().get("container").is_none(),
+            "scheme 'container' must NOT register without the containers feature"
+        );
     }
 
     /// Slim polarity of the boot cascade: with the per-bridge features off
@@ -675,6 +687,31 @@ mod tests {
             ctx.registry().get("kafka").is_some(),
             "kafka must resolve with the kafka feature enabled"
         );
+    }
+
+    /// Disabled-feature half of the security gate: without the `security`
+    /// cargo feature, a configuration carrying `[security.*]` is rejected
+    /// descriptively by the shared fail-closed guard
+    /// (`security_boot::ensure_security_supported`, the same entry-point
+    /// pattern as the kafka gating probe above) — never booted into an
+    /// insecure default. Companion polarity (feature on) lives in
+    /// `security_boot`'s tests.
+    #[cfg(not(feature = "security"))]
+    #[test]
+    fn security_omission_fails_closed() {
+        let config: CamelConfig = toml::from_str("[security.native]\nsubject = \"probe\"")
+            .expect("parse test CamelConfig");
+        let err = security_boot::ensure_security_supported(&config)
+            .expect_err("security-requiring config must be rejected without the security feature");
+        match err {
+            // The real guard variant: a descriptive Config error naming the
+            // required feature — no silent insecure default.
+            CamelError::Config(msg) => assert!(
+                msg.contains("camel-bundles/security"),
+                "rejection must name the required feature: {msg}"
+            ),
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
     }
 
     /// The booted handle exposes the datasource catalog the cascade threaded

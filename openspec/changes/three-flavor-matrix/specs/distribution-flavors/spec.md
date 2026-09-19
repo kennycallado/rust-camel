@@ -47,8 +47,9 @@ placed in no flavor. Enabling no marker SHALL report flavor `custom`.
 
 - **WHEN** the feature-closure suite runs the full_covers_universe test
 - **THEN** every camel-cli feature except the non-flavor axes (jemalloc,
-  dynamic-linking, itest-e2e, and the flavor markers themselves) is
-  reachable from `flavor-full`, and an unplaced feature fails the test
+  dynamic-linking, itest-e2e, `default`, the legacy `full` closure list,
+  and the flavor markers themselves) is reachable from `flavor-full`, and
+  an unplaced feature fails the test
 
 ### Requirement: Flavor closure contract enforced in tests and release
 
