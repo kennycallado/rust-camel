@@ -338,7 +338,9 @@ pub async fn boot(
         validator: validator_backend,
     });
 
-    // Register HTTP, File, Container, Template (always-on in the cascade).
+    // Register HTTP, File, Template (always-on in the cascade). Container
+    // registers under the `containers` gate (infrastructure-daemon client;
+    // one feature with camel-function, function⇒container per ADR-0005).
     // WS registers under its own per-bridge `ws` gate (rc-9720m): the gate
     // below is the ws gate, no longer a carrier rider.
     register_bundle::<camel_component_http::HttpBundle>(ctx, config)?;
@@ -347,6 +349,7 @@ pub async fn boot(
     #[cfg(feature = "ws")]
     register_bundle::<camel_component_ws::WsBundle>(ctx, config)?;
     register_bundle::<camel_component_file::FileBundle>(ctx, config)?;
+    #[cfg(feature = "containers")]
     register_bundle::<camel_component_container::ContainerBundle>(ctx, config)?;
     // External template renderer (ADR-0047 Stage 2): always-on built-in.
     register_bundle::<camel_template::TemplateBundle>(ctx, config)?;

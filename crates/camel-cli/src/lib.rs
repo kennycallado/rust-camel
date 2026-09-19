@@ -137,6 +137,7 @@ pub fn register_builtin_components_for_lint(ctx: &mut camel_core::CamelContext) 
     #[cfg(feature = "ws")]
     register_bundle_empty!(ctx, camel_component_ws::WsBundle);
     register_bundle_empty!(ctx, camel_component_file::FileBundle);
+    #[cfg(feature = "containers")]
     register_bundle_empty!(ctx, camel_component_container::ContainerBundle);
     register_bundle_empty!(ctx, camel_template::TemplateBundle);
     register_bundle_empty!(ctx, camel_master::MasterBundle);

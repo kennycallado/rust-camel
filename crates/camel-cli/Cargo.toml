@@ -49,9 +49,9 @@ camel-integration-test.workspace = true
 camel-dsl.workspace = true
 camel-core.workspace = true
 camel-matchers.workspace = true
-camel-config = { workspace = true, features = ["otel", "kubernetes"] }
+camel-config = { workspace = true, features = ["otel"] }
 camel-component-api.workspace = true
-camel-component-container.workspace = true
+camel-component-container = { workspace = true, optional = true }
 camel-component-controlbus.workspace = true
 camel-component-direct.workspace = true
 camel-component-seda.workspace = true
@@ -80,7 +80,7 @@ camel-component-wasm = { workspace = true, optional = true }
 camel-component-llm = { workspace = true, optional = true }
 camel-component-mcp = { workspace = true, optional = true }
 camel-component-cxf = { workspace = true, optional = true }
-camel-function = { workspace = true }
+camel-function = { workspace = true, optional = true }
 camel-wit.workspace = true
 camel-lint.workspace = true
 camel-lsp = { workspace = true, optional = true }
@@ -132,28 +132,32 @@ default = ["flavor-regular"]
 # reproduces today's default closure exactly (golden fixture proof:
 # tests/feature_profiles.rs::default_closure_matches_golden). Slim profiles
 # start from `--no-default-features`.
+# Historical closure list, kept for compose-users; its closure no longer
+# wires function/container (gated behind `containers`) — prefer flavor-full.
 full = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "integration-sql", "security", "redis-tls", "lsp", "lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath", "lang-minijinja", "jms", "sql", "redis", "opensearch", "ws", "cxf", "xj", "xslt"]
 # LSP server surface (`camel lsp`): tower-lsp transport + camel-lsp backend.
 lsp = ["dep:camel-lsp", "dep:tower-lsp"]
+# kubernetes forwards camel-config's platform wiring (pod identity,
+# readiness-gate patching); demand-gated, no longer hardcoded on the dep.
+kubernetes = ["camel-config/kubernetes"]
 # Language adapter forwarding features (camel-core compiles them in).
 lang-js = ["camel-core/lang-js"]
 lang-rhai = ["camel-core/lang-rhai"]
 lang-jsonpath = ["camel-core/lang-jsonpath"]
 lang-xpath = ["camel-core/lang-xpath"]
 lang-minijinja = ["camel-core/lang-minijinja"]
-# Flavor markers are the single selection surface for profiles; priority when
-# several are enabled is full > regular > slim; builds with no marker report
-# `custom`; bodies in this change are aliases only (content curation is the
-# flavor-matrix change).
-flavor-slim = ["slim-http"]
-flavor-regular = ["full"]
-flavor-full = ["full", "kafka"]
-# slim-benchmarks is the renamed slim-http (owner ruling 2026-09-17:
-# benchmark-oriented baseline); the alias below keeps existing legs
-# building for one release.
-slim-benchmarks = []
-# One-release alias (drop at 0.50).
-slim-http = ["slim-benchmarks"]
+# Flavor markers are the single selection surface for profiles; CI legs pass
+# only `flavor-*` markers. Bodies are CHAINED: each flavor includes the
+# marker of the flavor below it, so slim ⊆ regular ⊆ full is structural.
+# Priority when several are enabled is full > regular > slim; a build with
+# no marker reports `custom`. Regular excludes ONLY the four principled
+# items: kafka (C dependency, unportable to musl), surrealdb (BUSL-1.1, the
+# only non-OSI license in the graph), exec (arbitrary host-binary
+# execution, ADR-0037), containers (infrastructure-daemon client:
+# camel-function + camel-component-container as ONE feature).
+flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql", "lang-jsonpath", "lang-rhai"]
+flavor-regular = ["flavor-slim", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]
+flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb", "containers"]
 # otel instruments http (always linked) and ws. The ws/otel forward
 # activates the optional camel-component-ws dep without the `ws`
 # capability gate — pre-existing shape: telemetry-on does not imply
@@ -217,6 +221,12 @@ redis-tls = ["redis", "camel-component-redis/tls"]
 surrealdb = ["dep:camel-component-surrealdb", "camel-bundles/surrealdb"]
 # exec activates the fail-closed system command execution component.
 exec = ["dep:camel-component-exec"]
+# containers gates the Docker-daemon client stack as ONE feature
+# (function⇒container per ADR-0005): the camel-function runtime service
+# and the camel-component-container bundle registration. Principled
+# exclusion from regular: an infrastructure-daemon client, not a
+# data-plane component.
+containers = ["dep:camel-function", "dep:camel-component-container", "camel-bundles/containers"]
 # Integration-tier HTTP partner activation (ADR-0069 §8): non-default
 # and demand-gated. The scenario harness itself is always present;
 # without this feature, scenario endpoints of scheme http keep the

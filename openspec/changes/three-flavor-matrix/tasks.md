@@ -84,7 +84,7 @@ Acceptance:
 - `grep -c 'cfg(feature = "containers")' crates/camel-bundles/src/lib.rs` ≥ 1
 - `cargo fmt --check` and `cargo clippy -p camel-cli -p camel-bundles -- -D warnings` exit 0
 
-- [ ] 1
+- [x] 1
 
 ## Task 2: Closure contract tests and golden fixture
 
@@ -204,7 +204,17 @@ Steps:
     the workspace root and save the normalized output into the fixture file
     exactly as the header describes — so the fixture matches the new default
     (flavor-regular) closure.
-16. In `crates/camel-bundles/src/lib.rs`: first VERIFY (read the security
+16. Gate the container-scheme asserts that regressed with the Tier-2 gate
+    (containers is default-off in camel-bundles now):
+    - `crates/camel-bundles/tests/parity_test.rs:72`
+      (`two_boots_register_identical_sets` asserts `schemes.contains("container")`
+      with no cfg gate): cfg-gate the container entries behind
+      `#[cfg(feature = "containers")]` (split assert or gated scheme list),
+      so default `cargo test -p camel-bundles` is green.
+    - `crates/camel-bundles/src/lib.rs` boot-fixture test (~:465-476,
+      `boot_registers_all_bundles_from_fixture_config`): same gating for its
+      container scheme assertion.
+17. In `crates/camel-bundles/src/lib.rs`: first VERIFY (read the security
     boot path) that a configuration requiring the security guard under
     `not(feature = "security")` is rejected with a descriptive error at the
     same entry point the kafka rejection test uses (that test lives at
