@@ -13,6 +13,12 @@
 // `register_builtin_components_for_lint`). Each carries a `//` justification.
 // Suspected false positives are NOT baselined - they are reported and the
 // rule is fixed/gated instead. See Task 3.2 of openspec/changes/add-camel-lint.
+//
+// FLAVOR PIN: this baseline is generated under the camel-cli DEFAULT
+// feature set (`flavor-regular`). Schemes registered only under
+// `flavor-full` (e.g. `containers`) emit by-design unverified-scheme Info
+// here — same accepted graceful degradation as feature-gated bridges
+// (rc-qsenm, kafka precedent above).
 [
     // R-SCHEMA: remaining Apache-style forms not yet rewritten.
     (
@@ -258,5 +264,22 @@
     (
         "examples/yaml-dsl/config/sequence-demo.yaml",
         [("R-MOCK-IN-PRODUCTION", "warning")],
+    ),
+
+    // container: schemes verify only under flavor-full (containers feature,
+    // dea5c9c7); the corpus gate runs flavor-regular by design (FLAVOR PIN
+    // note above). The routes themselves target the containers stack.
+    // kafka-precedent class: by-design unverified-scheme Info (rc-qsenm).
+    (
+        "examples/camel-cli-run/routes/jms.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
+    ),
+    (
+        "examples/container-hot-reload/routes/route.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
+    ),
+    (
+        "examples/container-nginx/routes/route.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
     ),
 ]
