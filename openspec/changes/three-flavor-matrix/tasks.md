@@ -493,7 +493,7 @@ Acceptance:
 - `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml'))"` exits 0
 - no `inputs.publish` conditional appears anywhere in release.yml
 
-- [ ] 5
+- [x] 5
 
 ## Task 6: Distribution documentation
 

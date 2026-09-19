@@ -21,6 +21,9 @@ jobs:
     name: Publish crates to crates.io
     runs-on: ubuntu-latest
     needs: call-release-matrix
+    # Prerelease smoke tags (v*-rc.*) exercise matrix/assets/docker but must
+    # not publish crates; skip cleanly rather than fail.
+    if: ${{ !contains(github.ref_name, '-rc.') }}
     # Job-level permissions REPLACE the workflow-level set, so contents: read
     # must be restated for checkout. id-token: write enables the OIDC token
     # exchange with crates.io (trusted publishing).
