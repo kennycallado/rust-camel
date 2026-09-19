@@ -6,7 +6,7 @@ The `camel` CLI ships in three flavors: slim, regular, and full. Each flavor is 
 
 | Group | What ships | Targets | Artifact names |
 |-------|-----------|---------|----------------|
-| Base (unconditional) | core, direct, seda, log, file, timer, http (server and client, REST DSL, health and metrics, ADR-0052), template (minijinja), master, cron, controlbus, mock, validator, camel test harness | every flavor, every target | none (no separate artifact) |
+| Base (unconditional) | core, direct, seda, log, file, timer, stream (in/out/err), http (server and client, REST DSL, health and metrics, ADR-0052), template (minijinja), master, cron, controlbus, mock, validator, camel test harness | every flavor, every target | none (no separate artifact) |
 | Edge pack (slim additions) | mqtt, mqtt-tls, http-static, sql, lang-jsonpath, lang-rhai | x86_64-unknown-linux-musl, aarch64-unknown-linux-musl | `camel-slim-<target>` |
 | Regular additions | otel, grpc, wasm, llm, mcp, security, redis, redis-tls, jms, cxf, xj, xslt, opensearch, ws, lang-xpath, lang-js (boa), lang-minijinja, lsp, kubernetes, integration-http, integration-sql | all 7 targets | `camel-<target>` |
 | Full additions | exec, kafka, surrealdb, containers | x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin, x86_64-pc-windows-msvc | `camel-full-<target>` |

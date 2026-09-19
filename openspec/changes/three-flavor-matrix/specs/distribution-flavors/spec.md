@@ -21,7 +21,8 @@ placed in no flavor. Enabling no marker SHALL report flavor `custom`.
 
 - **WHEN** `cargo build --no-default-features --features flavor-slim` resolves
 - **THEN** the closure contains the base components (core, direct, seda,
-  log, file, timer, http with REST DSL) plus mqtt (+tls), http-static, sql
+  log, file, timer, http with REST DSL, stream in/out/err) plus mqtt
+  (+tls), http-static, sql
   (sqlite), lang-jsonpath and lang-rhai, and contains no kafka, no exec,
   no surrealdb, no containers (camel-function/camel-component-container),
   no lang-js, no lang-xpath, and no security features
