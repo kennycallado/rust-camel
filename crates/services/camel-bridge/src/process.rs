@@ -1148,10 +1148,8 @@ mod tests {
         // Call the production drain function directly (I-1: no duplicated logic)
         let handle = tokio::spawn(drain_stdout(reader, token.clone()));
 
-        // Give drain task time to start
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Cancel and verify prompt exit
+        // drain_stdout polls `token.cancelled()` first in a biased select,
+        // so cancelling before the task's first poll still exits promptly.
         token.cancel();
         let result = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
         assert!(

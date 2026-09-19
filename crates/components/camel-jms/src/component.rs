@@ -1766,7 +1766,7 @@ mod tests {
                 if matches!(*state_rx_clone.borrow(), BridgeState::Stopped) {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await; // allow-test-sleep: paces the simulated health-monitor poll loop
             }
         });
         *monitor_handle_ref.lock().await = Some(handle);
@@ -1826,7 +1826,8 @@ mod tests {
 
         pool.spawn_health_monitor(Arc::clone(&slot)).await;
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // spawn_health_monitor stores the handle before returning, so the
+        // guard is already Some here — no settle window needed.
         let guard = slot.health_monitor_handle.lock().await;
         assert!(
             guard.is_some(),
@@ -2157,7 +2158,7 @@ mod tests {
                 if matches!(*rx.borrow(), BridgeState::Stopped) {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::sleep(Duration::from_millis(10)).await; // allow-test-sleep: paces the simulated monitor poll loop
             }
             exited.store(true, Ordering::SeqCst);
         });
@@ -2181,11 +2182,25 @@ mod tests {
         // Drop the pool WITHOUT calling shutdown() — the Drop impl must fire.
         drop(pool);
 
-        // Give the spawned cleanup task time to send Stopped and await the monitor.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Poll-with-deadline instead of a bare sleep: the Drop cleanup task
+        // sends Stopped asynchronously; a deadline-bounded wait fails the
+        // assertion (not a flake) when it never lands.
+        async fn wait_monitor_exit(
+            exited: &Arc<AtomicBool>,
+            deadline: std::time::Duration,
+        ) -> bool {
+            let start = std::time::Instant::now();
+            while !exited.load(Ordering::SeqCst) {
+                if start.elapsed() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            true
+        }
 
         assert!(
-            monitor_exited.load(Ordering::SeqCst),
+            wait_monitor_exit(&monitor_exited, std::time::Duration::from_secs(2)).await,
             "health monitor should have exited after pool drop (Stopped signal sent by Drop)"
         );
     }

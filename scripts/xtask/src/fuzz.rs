@@ -471,7 +471,7 @@ mod tests {
         let before = list_files(&artifacts).unwrap(); // allow-unwrap
         let started = SystemTime::now();
         // same clock-skew margin as the other rewrite tests
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(10)); // allow-test-sleep: mtime clock-skew margin — advances the fs timestamp past `started`
         // re-crash on the same input: same filename, same inode, fresh mtime
         fs::write(&artifact, b"prev").unwrap(); // allow-unwrap
         let after = list_files(&artifacts).unwrap(); // allow-unwrap
@@ -510,7 +510,7 @@ mod tests {
         // Inode timestamps can lag CLOCK_REALTIME by a few ms on some
         // hosts (VM clock skew); real fuzz runs span seconds, so the
         // sleep only closes that gap for the unit-tier window.
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(10)); // allow-test-sleep: mtime clock-skew margin — advances the fs timestamp past `started`
         // libFuzzer re-crash: same inode rewritten, birth time unchanged
         fs::write(&path, b"").unwrap(); // allow-unwrap
         assert!(
@@ -530,7 +530,7 @@ mod tests {
         fs::write(&artifact, b"").unwrap(); // allow-unwrap
         let started = SystemTime::now();
         // same clock-skew margin as above
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(10)); // allow-test-sleep: mtime clock-skew margin — advances the fs timestamp past `started`
         // this run crashed on the same empty input and rewrote the file
         // byte-identically — still a new crash event, still fresh evidence
         fs::write(&artifact, b"").unwrap(); // allow-unwrap

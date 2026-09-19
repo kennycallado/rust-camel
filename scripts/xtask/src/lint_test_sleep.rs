@@ -1,5 +1,5 @@
-//! Lint test function bodies for blocking/async sleep calls
-//! (`lint-test-sleep`, advisory).
+//! Ratchet lint for blocking/async sleep calls in test function bodies
+//! (`lint-test-sleep`, bd rc-c9r6w).
 //!
 //! Finds `tokio::time::sleep` and `std::thread::sleep` calls that execute
 //! directly in `#[test]` / `#[tokio::test]` function bodies (at any module
@@ -13,8 +13,16 @@
 //! `while let` patterns) shadows a same-named
 //! import (conservative fn-wide rule, no name-resolution engine).
 //!
+//! Enforcement is a soft count ratchet, NOT a build break for existing
+//! code (mirror of `lint-cancel-tokens`, bd rc-pu2s / mission 128):
+//! `scripts/xtask/ratchet-test-sleep.max` holds the maximum allowed count
+//! of unadjudicated findings. The number may only decrease (monotone).
+//! Lowering it is the ratchet action; raising it is a review-visible
+//! regression signal.
+//!
 //! Escape hatch: append `// allow-test-sleep: <reason>` (non-empty reason)
-//! to any source line spanned by the sleep call.
+//! to any source line spanned by the sleep call. Marked sites are
+//! suppressed at scan time and never count toward the ceiling.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -30,7 +38,7 @@ pub struct Finding {
     pub line: usize,
 }
 
-/// Scanner failure. An unreadable or unparsable file makes the advisory
+/// Scanner failure. An unreadable or unparsable file makes the ratchet
 /// report untrustworthy, so callers must surface the file path.
 #[derive(Debug)]
 pub enum ScanError {
@@ -70,23 +78,47 @@ pub fn scan_source(source: &str, file: &Path) -> Result<Vec<Finding>, ScanError>
 /// Member roots scanned by [`run`], relative to the workspace root.
 const MEMBER_ROOTS: [&str; 5] = ["crates", "scripts", "examples", "benchmarks", "fuzz"];
 
-/// Aggregated advisory result for a workspace scan.
+/// Name of the ratchet file inside `scripts/xtask/`.
+pub const RATCHET_FILE: &str = "ratchet-test-sleep.max";
+
+/// Read the ratchet ceiling from `scripts/xtask/ratchet-test-sleep.max`.
+/// First non-empty, non-`#` line must be a non-negative integer. A missing
+/// file is an error: an accidentally deleted ratchet must not silently pass
+/// (same fail-closed rule as `lint_cancel_tokens::read_ratchet_max`).
+fn read_ratchet_max(workspace_root: &Path) -> Result<usize, String> {
+    let path = workspace_root
+        .join("scripts")
+        .join("xtask")
+        .join(RATCHET_FILE);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    content
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .and_then(|l| l.parse::<usize>().ok())
+        .ok_or_else(|| format!("{} must contain one integer line", path.display()))
+}
+
+/// Aggregated ratchet result for a workspace scan.
 #[derive(Debug)]
 pub struct Report {
     /// Sleep findings with their source-file paths.
     pub findings: Vec<(PathBuf, Finding)>,
-    /// Number of `.rs` files actually read and parsed.
-    pub files_scanned: usize,
+    /// Ceiling read from the ratchet file.
+    pub max: usize,
 }
 
-/// Scan every member root under `root` (`crates/`, `scripts/`, `examples/`,
-/// `benchmarks/`, `fuzz/`) for test-body sleeps. Member roots that do not
-/// exist are skipped and `target`, `.worktrees`, `node_modules`, and
-/// `archive` directories are pruned. A read or parse failure aborts the scan
-/// with a path-qualified [`ScanError`].
+/// Read the ratchet ceiling, then scan every member root under `root`
+/// (`crates/`, `scripts/`, `examples/`, `benchmarks/`, `fuzz/`) for
+/// test-body sleeps. Member roots that do not exist are skipped and
+/// `target`, `.worktrees`, `node_modules`, and `archive` directories are
+/// pruned. A read or parse failure aborts the scan with a path-qualified
+/// [`ScanError`]. A missing or malformed ratchet file is an error before
+/// any scanning (fail-closed).
 pub fn run(root: &Path) -> Result<Report, Box<dyn std::error::Error>> {
+    let max = read_ratchet_max(root)?;
     let mut findings = Vec::new();
-    let mut files_scanned = 0usize;
     for member in MEMBER_ROOTS {
         let member_root = root.join(member);
         if !member_root.is_dir() {
@@ -114,13 +146,9 @@ pub fn run(root: &Path) -> Result<Report, Box<dyn std::error::Error>> {
             for finding in scan_source(&source, path)? {
                 findings.push((path.to_path_buf(), finding));
             }
-            files_scanned += 1;
         }
     }
-    Ok(Report {
-        findings,
-        files_scanned,
-    })
+    Ok(Report { findings, max })
 }
 
 /// Visible-name -> fully-qualified target path (e.g. `sleep` ->
@@ -369,11 +397,19 @@ impl Visit<'_> for SleepFinder<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScanError, run, scan_source};
+    use super::{RATCHET_FILE, ScanError, run, scan_source};
     use std::path::Path;
 
     /// A minimal file containing one reportable test-body sleep.
     const TEST_SLEEP_SRC: &str = "#[test]\nfn t() {\n    std::thread::sleep(d);\n}\n";
+
+    /// Write a ratchet ceiling file into a throwaway workspace root
+    /// (mirrors `tmp_workspace_tokens` in lint_cancel_tokens.rs).
+    fn seed_ratchet(root: &Path, max: usize) {
+        let xtask = root.join("scripts").join("xtask");
+        std::fs::create_dir_all(&xtask).unwrap(); // allow-unwrap
+        std::fs::write(xtask.join(RATCHET_FILE), format!("# ratchet\n{max}\n")).unwrap(); // allow-unwrap
+    }
 
     #[test]
     fn blocking_sleep_in_plain_test_reported() {
@@ -510,6 +546,7 @@ mod tests {
     #[test]
     fn run_walks_member_trees_and_skips_target() {
         let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 1);
         let a = root.path().join("crates/x/src/a.rs");
         std::fs::create_dir_all(a.parent().unwrap()).unwrap(); // allow-unwrap
         std::fs::write(&a, TEST_SLEEP_SRC).unwrap(); // allow-unwrap
@@ -519,7 +556,7 @@ mod tests {
 
         let report = run(root.path()).unwrap(); // allow-unwrap
 
-        assert_eq!(report.files_scanned, 1);
+        // Only a.rs is scanned: target/ is pruned.
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].0, a);
         assert_eq!(report.findings[0].1.line, 3);
@@ -528,6 +565,7 @@ mod tests {
     #[test]
     fn run_prunes_sibling_excluded_dirs() {
         let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 1);
         let a = root.path().join("crates/x/src/a.rs");
         std::fs::create_dir_all(a.parent().unwrap()).unwrap(); // allow-unwrap
         std::fs::write(&a, TEST_SLEEP_SRC).unwrap(); // allow-unwrap
@@ -544,7 +582,7 @@ mod tests {
 
         let report = run(root.path()).unwrap(); // allow-unwrap
 
-        assert_eq!(report.files_scanned, 1);
+        // Excluded sibling dirs contribute no findings; only a.rs does.
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].0, a);
         assert_eq!(report.findings[0].1.line, 3);
@@ -553,6 +591,7 @@ mod tests {
     #[test]
     fn run_skips_absent_member_roots() {
         let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 1);
         let a = root.path().join("crates/x/src/a.rs");
         std::fs::create_dir_all(a.parent().unwrap()).unwrap(); // allow-unwrap
         std::fs::write(&a, TEST_SLEEP_SRC).unwrap(); // allow-unwrap
@@ -565,6 +604,7 @@ mod tests {
     #[test]
     fn run_reports_path_qualified_parse_error() {
         let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 1);
         let broken = root.path().join("crates/x/src/broken.rs");
         std::fs::create_dir_all(broken.parent().unwrap()).unwrap(); // allow-unwrap
         std::fs::write(&broken, "fn broken( {").unwrap(); // allow-unwrap
@@ -577,6 +617,7 @@ mod tests {
     #[test]
     fn run_reports_read_error_for_directory_named_rs() {
         let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 0);
         let dir = root.path().join("crates/x/src/dir.rs");
         std::fs::create_dir_all(&dir).unwrap(); // allow-unwrap
 
@@ -588,6 +629,7 @@ mod tests {
     #[test]
     fn run_ignores_non_member_roots() {
         let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 0);
         let note = root.path().join("docs/note.rs");
         std::fs::create_dir_all(note.parent().unwrap()).unwrap(); // allow-unwrap
         std::fs::write(&note, TEST_SLEEP_SRC).unwrap(); // allow-unwrap
@@ -595,6 +637,112 @@ mod tests {
         let report = run(root.path()).unwrap(); // allow-unwrap
 
         assert!(report.findings.is_empty());
-        assert_eq!(report.files_scanned, 0);
+        // Zero findings against a zero ceiling: at baseline, pass.
+        assert_eq!(report.findings.len(), report.max);
+    }
+
+    // ---- ratchet semantics (mirror of lint_cancel_tokens) ----
+
+    /// The FAIL condition's inputs: more findings than the ceiling allows.
+    /// The command layer (main.rs) names every offender on this branch.
+    #[test]
+    fn ratchet_exceeded_when_findings_over_max() {
+        let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 0);
+        let a = root.path().join("crates/x/src/a.rs");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap(); // allow-unwrap
+        std::fs::write(&a, TEST_SLEEP_SRC).unwrap(); // allow-unwrap
+
+        let report = run(root.path()).unwrap(); // allow-unwrap
+
+        assert_eq!(report.findings.len(), 1);
+        assert!(report.findings.len() > report.max);
+    }
+
+    /// The PASS condition at exactly the ceiling: a new unadjudicated sleep
+    /// pushes the count over (previous test); the seeded count passes.
+    #[test]
+    fn ratchet_passes_at_exact_baseline() {
+        let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 1);
+        let a = root.path().join("crates/x/src/a.rs");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap(); // allow-unwrap
+        std::fs::write(&a, TEST_SLEEP_SRC).unwrap(); // allow-unwrap
+
+        let report = run(root.path()).unwrap(); // allow-unwrap
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings.len(), report.max);
+    }
+
+    /// Under the ceiling: green with a headroom hint (lower-to-N data).
+    #[test]
+    fn ratchet_headroom_when_findings_under_max() {
+        let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 4);
+        let a = root.path().join("crates/x/src/a.rs");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap(); // allow-unwrap
+        std::fs::write(&a, TEST_SLEEP_SRC).unwrap(); // allow-unwrap
+
+        let report = run(root.path()).unwrap(); // allow-unwrap
+
+        assert!(report.findings.len() < report.max);
+    }
+
+    /// Allowlist exemption: a `// allow-test-sleep:`-marked site is
+    /// suppressed at scan time and therefore never counts toward the
+    /// ceiling — the ratchet sees only unadjudicated findings.
+    #[test]
+    fn allow_marker_sites_do_not_count_toward_ratchet() {
+        let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 1);
+        let a = root.path().join("crates/x/src/a.rs");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap(); // allow-unwrap
+        std::fs::write(
+            &a,
+            "#[test]\nfn t() {\n    std::thread::sleep(d); // allow-test-sleep: timed drain\n}\n",
+        )
+        .unwrap(); // allow-unwrap
+        let b = root.path().join("crates/x/src/b.rs");
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap(); // allow-unwrap
+        std::fs::write(&b, TEST_SLEEP_SRC).unwrap(); // allow-unwrap
+
+        let report = run(root.path()).unwrap(); // allow-unwrap
+
+        // Only the unmarked site in b.rs is a finding; the marked one in
+        // a.rs is exempt. At baseline (1 = 1): pass.
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].0, b);
+        assert_eq!(report.findings.len(), report.max);
+    }
+
+    /// An accidentally deleted ratchet file must not silently pass
+    /// (fail-closed, same rule as lint_cancel_tokens).
+    #[test]
+    fn missing_ratchet_file_is_error() {
+        let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        let a = root.path().join("crates/x/src/a.rs");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap(); // allow-unwrap
+        std::fs::write(&a, TEST_SLEEP_SRC).unwrap(); // allow-unwrap
+
+        let err = run(root.path()).unwrap_err();
+
+        assert!(err.to_string().contains(RATCHET_FILE));
+    }
+
+    /// A ratchet file without a parsable integer line is an error.
+    #[test]
+    fn malformed_ratchet_file_is_error() {
+        let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        let xtask = root.path().join("scripts").join("xtask");
+        std::fs::create_dir_all(&xtask).unwrap(); // allow-unwrap
+        std::fs::write(xtask.join(RATCHET_FILE), "# only comments\n").unwrap(); // allow-unwrap
+        let a = root.path().join("crates/x/src/a.rs");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap(); // allow-unwrap
+        std::fs::write(&a, TEST_SLEEP_SRC).unwrap(); // allow-unwrap
+
+        let err = run(root.path()).unwrap_err();
+
+        assert!(err.to_string().contains(RATCHET_FILE));
     }
 }

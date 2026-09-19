@@ -64,6 +64,8 @@
   run: cargo xtask lint-log-redaction
 - name: lint-cancel-tokens
   run: cargo xtask lint-cancel-tokens
+- name: lint-test-sleep
+  run: cargo xtask lint-test-sleep
 - name: lint-ignore
   run: cargo xtask lint-ignore
 - name: lint-publish-cycles

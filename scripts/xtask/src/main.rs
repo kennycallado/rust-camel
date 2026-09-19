@@ -11,7 +11,6 @@ mod lint_test_sleep;
 mod mutants;
 mod scan_state;
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -118,10 +117,13 @@ enum Commands {
     /// existence, anchor resolution, and (later) symbol validation against
     /// the workspace's own crate definitions. Exits non-zero on violations.
     LintContextCitations,
-    /// Scan test function bodies for blocking/async sleep calls
-    /// (`tokio::time::sleep`, `std::thread::sleep`). Advisory: exits 0
-    /// even with findings. Escape hatch: append `// allow-test-sleep:`
-    /// followed by a non-empty reason to the finding line.
+    /// Ratchet-count sleep calls in test function bodies
+    /// (`tokio::time::sleep`, `std::thread::sleep`) against a monotone
+    /// ceiling in `scripts/xtask/ratchet-test-sleep.max`
+    /// (bd rc-c9r6w, mirror of lint-cancel-tokens). Exits non-zero only
+    /// when the unadjudicated count exceeds the ratchet ceiling.
+    /// Escape hatch: append `// allow-test-sleep:` followed by a
+    /// non-empty reason to the finding line — marked sites never count.
     LintTestSleep,
     /// Enforce closed label sets on metric emission calls
     /// (`record_counter`, `record_histogram`,
@@ -417,24 +419,42 @@ fn main() {
         Commands::LintTestSleep => {
             let workspace_root = workspace_root_or_exit();
             match lint_test_sleep::run(&workspace_root) {
-                Ok(report) => {
+                Ok(report) if report.findings.len() > report.max => {
+                    println!(
+                        "TEST-SLEEP RATCHET EXCEEDED ({} findings > max {}):",
+                        report.findings.len(),
+                        report.max
+                    );
                     for (file, finding) in &report.findings {
+                        println!("  {}:{}", file.display(), finding.line);
                         println!(
-                            "{}:{}: sleep in test body — use wait_until or a deadline (suppress with an allow-test-sleep marker comment)",
-                            file.display(),
-                            finding.line
+                            "    remedy: use wait_until or a deadline instead of a bare sleep (suppress with an allow-test-sleep marker comment if the sleep is the behavior under test)"
                         );
                     }
-                    let distinct_files: HashSet<_> = report
-                        .findings
-                        .iter()
-                        .map(|(file, _)| file.as_path())
-                        .collect();
                     println!(
-                        "lint-test-sleep: {} findings across {} files (advisory; {} files scanned)",
+                        "  fix the sites above, or lower scripts/xtask/{} — never raise it without review justification.",
+                        lint_test_sleep::RATCHET_FILE
+                    );
+                    eprintln!("\nlint-test-sleep: FAILED");
+                    std::process::exit(1);
+                }
+                Ok(report) if report.findings.len() < report.max => {
+                    println!(
+                        "lint-test-sleep: OK ({} findings < max {})",
                         report.findings.len(),
-                        distinct_files.len(),
-                        report.files_scanned
+                        report.max
+                    );
+                    println!(
+                        "  ratchet headroom: lower scripts/xtask/{} to {}.",
+                        lint_test_sleep::RATCHET_FILE,
+                        report.findings.len()
+                    );
+                }
+                Ok(report) => {
+                    println!(
+                        "lint-test-sleep: OK ({} findings = max {})",
+                        report.findings.len(),
+                        report.max
                     );
                 }
                 Err(e) => {
