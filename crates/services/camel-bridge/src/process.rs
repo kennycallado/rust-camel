@@ -1084,8 +1084,6 @@ mod tests {
 
     #[tokio::test]
     async fn drain_chatty_child_no_deadlock() {
-        use tokio::io::AsyncBufReadExt;
-
         // Child writes many short lines quickly, then exits
         let mut child =
             spawn_child_with_stdout("for i in $(seq 1 500); do echo \"line $i\"; done").await;
@@ -1108,8 +1106,6 @@ mod tests {
 
     #[tokio::test]
     async fn drain_oversized_line_bounded() {
-        use tokio::io::AsyncBufReadExt;
-
         // Child writes a line >64 KiB without newline, then newline.
         // Use printf + head to generate 200 KiB of 'A' without python dependency.
         // Bound verification: the drain loop caps line_buf at MAX_LINE_BYTES (64 KiB)
@@ -1142,8 +1138,6 @@ mod tests {
 
     #[tokio::test]
     async fn drain_cancellation_exits_promptly() {
-        use tokio::io::AsyncBufReadExt;
-
         // Child writes slowly (sleep between lines)
         let mut child = spawn_child_with_stdout("while true; do echo tick; sleep 1; done").await;
 
@@ -1211,11 +1205,10 @@ mod tests {
                 let line_trimmed = line.trim_end_matches('\n');
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(line_trimmed)
                     && v.get("status").and_then(|s| s.as_str()) == Some("ready")
+                    && let Some(p) = v.get("port").and_then(|p| p.as_u64())
                 {
-                    if let Some(p) = v.get("port").and_then(|p| p.as_u64()) {
-                        port_found = Some(p as u16);
-                        break;
-                    }
+                    port_found = Some(p as u16);
+                    break;
                 }
                 buf_acc.clear();
             }
