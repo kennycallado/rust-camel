@@ -18,6 +18,12 @@
 //!   | sed -E 's| \(/[^)]*\)||g; s| \(\*\)||g; s| \[\*\]||g' | LC_ALL=C sort -u \
 //!   > crates/camel-cli/tests/fixtures/default-deptree.txt
 //! ```
+//!
+//! The golden comparison in [`default_closure_matches_golden`] is
+//! version-agnostic: both comparison sides canonicalize ` vX.Y.Z` to
+//! ` v*` (see [`canonicalize_version`]), so a dependency bump cannot
+//! churn the fixture (rc-2eal2). The fixture file itself stays as
+//! generated, with concrete versions.
 
 use std::collections::HashSet;
 use std::fs;
@@ -195,6 +201,37 @@ fn strip_paren_paths(line: &str) -> String {
     out
 }
 
+/// Collapse a package line's version payload to `*`: the first
+/// ` v<digit>` run through the end of the version token becomes ` v*`.
+/// Crate names cannot contain spaces, so the first space-`v`-digit
+/// window is always the name/version separator; feature-edge lines
+/// (`addr2line feature "std"`) carry no such window and pass through
+/// unchanged. The ` v` boundary is preserved, so the `*_PREFIX` consts
+/// (`camel-component-grpc v`) keep discriminating package lines from
+/// feature edges against canonicalized output. Coexisting major
+/// versions of one crate collapse onto a single `name v*` line — the
+/// price of a version-agnostic golden comparison.
+fn canonicalize_version(line: &str) -> String {
+    let Some(sep) = line
+        .as_bytes()
+        .windows(3)
+        .position(|window| window[0] == b' ' && window[1] == b'v' && window[2].is_ascii_digit())
+    else {
+        return line.to_string();
+    };
+    // The version token runs to the next space or the end of the line
+    // (pre-release and build metadata contain no spaces); anything after
+    // it (e.g. ` (proc-macro)`) is annotation, not version.
+    let end = line[sep + 2..]
+        .find(' ')
+        .map_or(line.len(), |offset| sep + 2 + offset);
+    let mut out = String::with_capacity(line.len());
+    out.push_str(&line[..sep + 2]);
+    out.push('*');
+    out.push_str(&line[end..]);
+    out
+}
+
 /// The golden snapshot, sorted + deduplicated. It is produced by the same
 /// normalization pipeline as [`tree_lines`] (see the module docs).
 fn golden_fixture_lines() -> Vec<String> {
@@ -245,14 +282,20 @@ fn default_closure_matches_golden() {
     // task 2.2 rework (lang features moved from declaration to forwarding)
     // erases ten golden lines mechanically with zero closure change. Both
     // comparison sides drop those edges.
-    let actual_set: HashSet<&String> = actual
-        .iter()
-        .filter(|line| !is_lang_feature_edge(line))
-        .collect();
-    let expected_set: HashSet<&String> = expected
-        .iter()
-        .filter(|line| !is_lang_feature_edge(line))
-        .collect();
+    //
+    // Bilateral version canonicalization: both sides also collapse
+    // ` vX.Y.Z` to ` v*` so dependency bumps cannot churn the golden
+    // fixture (rc-2eal2). Package presence/absence stays fully asserted;
+    // only version payloads stop being compared.
+    let canonical_set = |lines: &[String]| -> HashSet<String> {
+        lines
+            .iter()
+            .filter(|line| !is_lang_feature_edge(line))
+            .map(|line| canonicalize_version(line))
+            .collect()
+    };
+    let actual_set = canonical_set(&actual);
+    let expected_set = canonical_set(&expected);
     if actual_set == expected_set {
         // Package-level presence survives the feature-edge filter: default
         // = flavor-regular, and regular includes every language adapter
@@ -284,8 +327,8 @@ fn default_closure_matches_golden() {
         );
         return;
     }
-    let mut missing: Vec<&String> = expected_set.difference(&actual_set).copied().collect();
-    let mut extra: Vec<&String> = actual_set.difference(&expected_set).copied().collect();
+    let mut missing: Vec<String> = expected_set.difference(&actual_set).cloned().collect();
+    let mut extra: Vec<String> = actual_set.difference(&expected_set).cloned().collect();
     missing.sort();
     extra.sort();
     let missing_total = missing.len();
@@ -301,7 +344,7 @@ fn default_closure_matches_golden() {
 }
 
 /// Render up to 20 lines of a diff direction with `marker` prefixes.
-fn diff_block(lines: &[&String], marker: char) -> String {
+fn diff_block(lines: &[String], marker: char) -> String {
     lines
         .iter()
         .take(20)
