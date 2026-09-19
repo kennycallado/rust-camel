@@ -2681,6 +2681,7 @@ fn is_structurally_excluded(file_rel: &str, lines: &[&str], line_idx: usize) -> 
 
 pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> {
     use regex::Regex;
+    use scan_state::{Brace, ScanState, scan_line};
     use std::path::Component;
     use walkdir::WalkDir;
 
@@ -2746,6 +2747,11 @@ pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> 
         let mut pending_test_attr = false;
         let mut test_scope_entry_depth: Option<i32> = None;
         let mut brace_depth: i32 = 0;
+        // Literal/comment-aware scanner state, persists across lines
+        // (rc-0jdc2 port of the lint_unwrap_src / lint_cancel_tokens
+        // machinery): braces inside strings, chars, raw strings, and
+        // comments must not skew test-scope tracking.
+        let mut scan = ScanState::Normal;
 
         for (line_idx, raw_line) in lines.iter().enumerate() {
             let trimmed = raw_line.trim();
@@ -2758,26 +2764,23 @@ pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> 
 
             let entering_test_scope = pending_test_attr && test_scope_entry_depth.is_none();
 
-            for ch in trimmed.chars() {
-                match ch {
-                    '{' => {
-                        brace_depth += 1;
-                        if pending_test_attr && test_scope_entry_depth.is_none() {
-                            test_scope_entry_depth = Some(brace_depth - 1);
-                            pending_test_attr = false;
-                        }
+            scan_line(trimmed, &mut scan, &mut |brace| match brace {
+                Brace::Open => {
+                    brace_depth += 1;
+                    if pending_test_attr && test_scope_entry_depth.is_none() {
+                        test_scope_entry_depth = Some(brace_depth - 1);
+                        pending_test_attr = false;
                     }
-                    '}' => {
-                        brace_depth -= 1;
-                        if let Some(entry) = test_scope_entry_depth
-                            && brace_depth <= entry
-                        {
-                            test_scope_entry_depth = None;
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                Brace::Close => {
+                    brace_depth -= 1;
+                    if let Some(entry) = test_scope_entry_depth
+                        && brace_depth <= entry
+                    {
+                        test_scope_entry_depth = None;
+                    }
+                }
+            });
 
             if pending_test_attr && test_scope_entry_depth.is_none() && trimmed.contains(';') {
                 pending_test_attr = false;
@@ -5756,6 +5759,152 @@ fn next_item() {}"#;
             )]);
             let violations = lint_log_levels(&ws).unwrap();
             assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Adversarial (rc-0jdc2): a string literal with unbalanced closing
+        /// braces inside a `cfg(test)` mod must NOT exit test scope early.
+        /// The naive raw-character counter saw the three `}` in `"{}}}"`
+        /// and left the mod, flagging the test's own `error!` as a spurious
+        /// production violation.
+        #[test]
+        fn string_close_braces_in_test_mod_do_not_exit_scope() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "#[cfg(test)]\n\
+                 mod tests {\n\
+                     #[test]\n\
+                     fn fmt_test() {\n\
+                         let template = \"{}}}\";\n\
+                         error!(\"in test scope\");\n\
+                     }\n\
+                 }\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Adversarial (rc-0jdc2): a `'}'` char literal at mod level inside
+        /// `cfg(test)` drops the naive depth to the entry depth and exits
+        /// the scope; a helper WITHOUT its own `#[test]` attribute (unwrap
+        /// regression shape) then becomes a spurious production violation.
+        #[test]
+        fn char_literal_close_brace_in_test_mod_does_not_exit_scope() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "#[cfg(test)]\n\
+                 mod tests {\n\
+                     const CLOSE: char = '}';\n\
+                     fn helper() { error!(\"in test scope\"); }\n\
+                 }\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Adversarial (rc-0jdc2): a raw string containing braces inside a
+        /// `cfg(test)` mod must not skew scope tracking. The helper has no
+        /// `#[test]` attribute, so an early scope exit flags it directly.
+        #[test]
+        fn raw_string_braces_in_test_mod_do_not_exit_scope() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "#[cfg(test)]\n\
+                 mod tests {\n\
+                     const FMT: &str = r#\"}{\"#;\n\
+                     fn helper() { error!(\"in test scope\"); }\n\
+                 }\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Adversarial (rc-0jdc2): a `// {` comment inside a test fn adds
+        /// phantom depth with the naive counter, so the mod never closes
+        /// and every later production `error!` in the file is silently
+        /// missed (fail-open).
+        #[test]
+        fn comment_open_brace_does_not_pin_test_scope_open() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "#[cfg(test)]\n\
+                 mod tests {\n\
+                     fn t() {\n\
+                         // {\n\
+                         error!(\"in test scope\");\n\
+                     }\n\
+                 }\n\
+                 \n\
+                 fn prod() {\n\
+                     error!(\"real production issue\");\n\
+                 }\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+            assert!(violations[0].snippet.contains("real production issue"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Adversarial (rc-0jdc2): a `// }` comment at mod level inside
+        /// `cfg(test)` exits the scope early with the naive counter; the
+        /// test's own `error!` becomes a spurious production violation.
+        #[test]
+        fn comment_close_brace_in_test_mod_does_not_exit_scope() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "#[cfg(test)]\n\
+                 mod tests {\n\
+                     // }\n\
+                     fn t() { error!(\"in test scope\"); }\n\
+                 }\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Adversarial (rc-0jdc2): a string literal with an unbalanced
+        /// OPEN brace inside a test mod pins the scope open with the naive
+        /// counter (fail-open): the production `error!` after the mod is
+        /// silently missed.
+        #[test]
+        fn string_open_brace_does_not_pin_test_scope_open() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "#[cfg(test)]\n\
+                 mod tests {\n\
+                     const S: &str = \"{\";\n\
+                     fn t() { error!(\"in test scope\"); }\n\
+                 }\n\
+                 \n\
+                 fn prod() { error!(\"real production issue\"); }\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+            assert!(violations[0].snippet.contains("real production issue"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Control (rc-0jdc2): real braces in a closed `cfg(test)` mod
+        /// still hand scope back — the production `error!` after the mod
+        /// must keep being flagged. Guards against an over-broad port.
+        #[test]
+        fn real_braces_still_exit_test_scope_and_flag_after() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "#[cfg(test)]\n\
+                 mod tests {\n\
+                     fn t() { error!(\"in test scope\"); }\n\
+                 }\n\
+                 \n\
+                 fn prod() { error!(\"real production issue\"); }\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+            assert!(violations[0].snippet.contains("real production issue"));
             fs::remove_dir_all(&ws).unwrap();
         }
 
