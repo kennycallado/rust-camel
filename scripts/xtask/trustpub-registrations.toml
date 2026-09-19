@@ -127,10 +127,6 @@ name = "camel-component-grpc"
 state = "registered"
 
 [[crates]]
-name = "camel-component-jms"
-state = "registered"
-
-[[crates]]
 name = "camel-component-keycloak"
 state = "registered"
 
@@ -232,6 +228,10 @@ state = "registered"
 
 [[crates]]
 name = "camel-component-http"
+state = "registered"
+
+[[crates]]
+name = "camel-component-jms"
 state = "registered"
 
 [[crates]]
