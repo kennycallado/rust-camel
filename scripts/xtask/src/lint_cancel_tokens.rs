@@ -12,6 +12,7 @@
 //! production count. The number may only decrease (monotone). Lowering it is
 //! the ratchet action; raising it is a review-visible regression signal.
 
+use crate::scan_state::{self, Brace, ScanState};
 use std::path::{Component, Path};
 use walkdir::WalkDir;
 
@@ -123,13 +124,19 @@ fn collect_sites_from_path(path: &Path, sites: &mut Vec<CancelTokenSite>) {
 }
 
 /// Core scanner: count `CancellationToken::new(` in production scope —
-/// outside `#[cfg(test)]` blocks and full-line comments. Mirrors the
-/// brace-depth test-scope tracking of `lint_log_levels`.
+/// outside test-scope attribute blocks (`#[cfg(test)]`, `#[test]`,
+/// `#[tokio::test]`, and `#[cfg(all/any(..., test, ...))]` conjunctions)
+/// and full-line comments. Brace-depth tracking uses the shared
+/// literal/comment-aware scanner (`scan_state`, extracted from
+/// `lint_unwrap_src` by rc-drcgf): braces inside strings, chars, raw
+/// strings, and comments do not skew test-scope tracking.
 ///
 /// Known limitation (same class as the other line-based lints): trailing
-/// `// ...` comments and string-literal mentions on a code line are counted.
+/// `// ...` comments and string-literal mentions on a code line are
+/// counted — site detection is a line-level `contains`, not state-aware.
 fn collect_sites_from_src(src: &str, file: &str, sites: &mut Vec<CancelTokenSite>) {
     let lines: Vec<&str> = src.lines().collect();
+    let mut state = ScanState::Normal;
     let mut pending_test_attr = false;
     let mut test_scope_entry_depth: Option<i32> = None;
     let mut brace_depth: i32 = 0;
@@ -137,34 +144,27 @@ fn collect_sites_from_src(src: &str, file: &str, sites: &mut Vec<CancelTokenSite
     for (line_idx, raw_line) in lines.iter().enumerate() {
         let trimmed = raw_line.trim();
 
-        if test_scope_entry_depth.is_none()
-            && (trimmed.starts_with("#[cfg(test)]")
-                || trimmed.starts_with("#[test]")
-                || trimmed.starts_with("#[tokio::test]"))
-        {
+        if test_scope_entry_depth.is_none() && is_test_attr_line(trimmed) {
             pending_test_attr = true;
         }
 
-        for ch in trimmed.chars() {
-            match ch {
-                '{' => {
-                    brace_depth += 1;
-                    if pending_test_attr && test_scope_entry_depth.is_none() {
-                        test_scope_entry_depth = Some(brace_depth - 1);
-                        pending_test_attr = false;
-                    }
+        scan_state::scan_line(trimmed, &mut state, &mut |brace| match brace {
+            Brace::Open => {
+                brace_depth += 1;
+                if pending_test_attr && test_scope_entry_depth.is_none() {
+                    test_scope_entry_depth = Some(brace_depth - 1);
+                    pending_test_attr = false;
                 }
-                '}' => {
-                    brace_depth -= 1;
-                    if let Some(entry) = test_scope_entry_depth
-                        && brace_depth <= entry
-                    {
-                        test_scope_entry_depth = None;
-                    }
-                }
-                _ => {}
             }
-        }
+            Brace::Close => {
+                brace_depth -= 1;
+                if let Some(entry) = test_scope_entry_depth
+                    && brace_depth <= entry
+                {
+                    test_scope_entry_depth = None;
+                }
+            }
+        });
 
         // An attribute on a non-block item (`#[test] fn f();`-style) never
         // opens a scope.
@@ -193,6 +193,52 @@ fn collect_sites_from_src(src: &str, file: &str, sites: &mut Vec<CancelTokenSite
             });
         }
     }
+}
+
+/// True for attribute lines that open a test scope: `#[cfg(test)]`,
+/// `#[test]`, `#[tokio::test]`, and `#[cfg(all(...))]` / `#[cfg(any(...))]`
+/// conjunctions whose DIRECT predicate list contains `test` (e.g.
+/// `#[cfg(all(test, feature = "llm"))]`, used by camel-component-api).
+/// Nested predicates do not count: `#[cfg(not(test))]` compiles its body
+/// in non-test builds and stays production scope.
+fn is_test_attr_line(trimmed: &str) -> bool {
+    trimmed.starts_with("#[cfg(test)]")
+        || trimmed.starts_with("#[test]")
+        || trimmed.starts_with("#[tokio::test]")
+        || cfg_conjunction_has_direct_test_predicate(trimmed)
+}
+
+/// `#[cfg(all/any(...))]` where a top-level predicate of the conjunction
+/// is exactly `test`. Nested conjunctions (e.g. `all(test, any(...))`)
+/// still count — the `test` predicate is direct; `not(test)` does not.
+fn cfg_conjunction_has_direct_test_predicate(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("#[cfg(") else {
+        return false;
+    };
+    let Some(body) = rest
+        .strip_prefix("all(")
+        .or_else(|| rest.strip_prefix("any("))
+    else {
+        return false;
+    };
+    // The conjunction body runs to its matching close paren; predicates
+    // are its top-level comma-separated segments.
+    let mut depth = 1usize;
+    let mut end = body.len();
+    for (i, ch) in body.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    body[..end].split(',').any(|pred| pred.trim() == "test")
 }
 
 /// Same test-file rule as the other lints (`lint_unwrap`, `lint_log_levels`):
@@ -487,6 +533,177 @@ mod tests {
         );
         let report = lint_cancel_tokens(&ws).unwrap();
         assert_eq!(report.sites.len(), 1, "got: {:?}", report.sites);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// rc-drcgf: a `}` inside a string literal must not close the test
+    /// scope early. With the naive brace counter this line exited
+    /// `mod tests` mid-line and every following test-fn site was counted
+    /// as production (fail-closed overcount).
+    #[test]
+    fn string_brace_does_not_exit_test_scope_early() {
+        let ws = tmp_workspace_tokens(
+            &[(
+                "crates/components/fake-comp/src/lib.rs",
+                "#[cfg(test)]\nmod tests {\n    fn t() { let s = \"}\"; let _ = CancellationToken::new(); }\n    fn u() { let _ = CancellationToken::new(); }\n}\n",
+            )],
+            0,
+        );
+        let report = lint_cancel_tokens(&ws).unwrap();
+        assert!(report.sites.is_empty(), "got: {:?}", report.sites);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// rc-drcgf: a `{` inside a full-line comment inside a test mod must
+    /// not pin the brace depth above the entry depth. With the naive
+    /// counter the scope never closed and later production sites were
+    /// silently skipped (fail-open undercount).
+    #[test]
+    fn comment_brace_does_not_trap_test_scope_open() {
+        let ws = tmp_workspace_tokens(
+            &[(
+                "crates/components/fake-comp/src/lib.rs",
+                "#[cfg(test)]\nmod tests {\n    // { stray brace drifts naive depth\n    fn t() { let _ = CancellationToken::new(); }\n}\n\nfn prod() { let _ = CancellationToken::new(); }\n",
+            )],
+            1,
+        );
+        let report = lint_cancel_tokens(&ws).unwrap();
+        assert_eq!(report.sites.len(), 1, "got: {:?}", report.sites);
+        assert_eq!(report.sites[0].line, 7);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// rc-drcgf: same premature-exit failure mode as strings, via a char
+    /// literal `'}'`.
+    #[test]
+    fn char_literal_brace_does_not_exit_test_scope_early() {
+        let ws = tmp_workspace_tokens(
+            &[(
+                "crates/components/fake-comp/src/lib.rs",
+                "#[cfg(test)]\nmod tests {\n    fn t() { let c = '}'; let _ = CancellationToken::new(); }\n    fn u() { let _ = CancellationToken::new(); }\n}\n",
+            )],
+            0,
+        );
+        let report = lint_cancel_tokens(&ws).unwrap();
+        assert!(report.sites.is_empty(), "got: {:?}", report.sites);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// rc-drcgf: raw strings hide braces from the naive counter too.
+    #[test]
+    fn raw_string_brace_does_not_exit_test_scope_early() {
+        let ws = tmp_workspace_tokens(
+            &[(
+                "crates/components/fake-comp/src/lib.rs",
+                "#[cfg(test)]\nmod tests {\n    fn t() { let s = r#\"}\"#; let _ = CancellationToken::new(); }\n    fn u() { let _ = CancellationToken::new(); }\n}\n",
+            )],
+            0,
+        );
+        let report = lint_cancel_tokens(&ws).unwrap();
+        assert!(report.sites.is_empty(), "got: {:?}", report.sites);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// rc-drcgf: `#[cfg(all(test, ...))]` opens a test scope when `test`
+    /// is a direct predicate of the conjunction (shape used in
+    /// camel-component-api, camel-cxf). Previously treated as production.
+    #[test]
+    fn recognizes_cfg_all_test_conjunction_as_test_scope() {
+        let ws = tmp_workspace_tokens(
+            &[(
+                "crates/components/fake-comp/src/lib.rs",
+                "#[cfg(all(test, feature = \"llm\"))]\nmod gated_tests {\n    fn t() { let _ = CancellationToken::new(); }\n}\n",
+            )],
+            0,
+        );
+        let report = lint_cancel_tokens(&ws).unwrap();
+        assert!(report.sites.is_empty(), "got: {:?}", report.sites);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// rc-drcgf: `#[cfg(any(test, ...))]` — same rule as `all`.
+    #[test]
+    fn recognizes_cfg_any_test_conjunction_as_test_scope() {
+        let ws = tmp_workspace_tokens(
+            &[(
+                "crates/components/fake-comp/src/lib.rs",
+                "#[cfg(any(test, feature = \"native\"))]\nmod gated_tests {\n    fn t() { let _ = CancellationToken::new(); }\n}\n",
+            )],
+            0,
+        );
+        let report = lint_cancel_tokens(&ws).unwrap();
+        assert!(report.sites.is_empty(), "got: {:?}", report.sites);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// Control: `not(test)` inverts the gate — the body is compiled in
+    /// NON-test builds, so it must stay production scope.
+    #[test]
+    fn cfg_not_test_stays_production_scope() {
+        let ws = tmp_workspace_tokens(
+            &[(
+                "crates/components/fake-comp/src/lib.rs",
+                "#[cfg(not(test))]\nfn offline_only() { let _ = CancellationToken::new(); }\n",
+            )],
+            1,
+        );
+        let report = lint_cancel_tokens(&ws).unwrap();
+        assert_eq!(report.sites.len(), 1, "got: {:?}", report.sites);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// Control: an all/any conjunction WITHOUT a direct `test` predicate
+    /// stays production scope.
+    #[test]
+    fn cfg_conjunction_without_test_predicate_stays_production() {
+        let ws = tmp_workspace_tokens(
+            &[(
+                "crates/components/fake-comp/src/lib.rs",
+                "#[cfg(all(feature = \"a\", feature = \"b\"))]\nfn feats() { let _ = CancellationToken::new(); }\n",
+            )],
+            1,
+        );
+        let report = lint_cancel_tokens(&ws).unwrap();
+        assert_eq!(report.sites.len(), 1, "got: {:?}", report.sites);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// Control: `test` nested inside a sub-conjunction (e.g.
+    /// `all(feature, any(test, ...))`) is NOT a direct predicate — the
+    /// gate does not vanish in test builds, so the body stays production
+    /// scope.
+    #[test]
+    fn cfg_nested_test_predicate_stays_production() {
+        let ws = tmp_workspace_tokens(
+            &[(
+                "crates/components/fake-comp/src/lib.rs",
+                "#[cfg(all(feature = \"a\", any(test, feature = \"b\")))]\nfn feats() { let _ = CancellationToken::new(); }\n",
+            )],
+            1,
+        );
+        let report = lint_cancel_tokens(&ws).unwrap();
+        assert_eq!(report.sites.len(), 1, "got: {:?}", report.sites);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// Control: balanced braces inside string literals in production code
+    /// do not shift depth, and real production sites around a test mod
+    /// are still counted (real-drift detection must survive the fix).
+    #[test]
+    fn counts_prod_sites_around_test_mod_with_literals() {
+        let ws = tmp_workspace_tokens(
+            &[(
+                "crates/components/fake-comp/src/lib.rs",
+                "fn a() { let _ = CancellationToken::new(); }\n\n#[cfg(test)]\nmod tests {\n    fn t() { let s = \"{}{}\"; let _ = CancellationToken::new(); }\n}\n\nfn b() { let _ = CancellationToken::new(); }\n",
+            )],
+            2,
+        );
+        let report = lint_cancel_tokens(&ws).unwrap();
+        assert_eq!(report.sites.len(), 2, "got: {:?}", report.sites);
+        assert_eq!(
+            report.sites.iter().map(|s| s.line).collect::<Vec<_>>(),
+            vec![1, 8]
+        );
         fs::remove_dir_all(&ws).unwrap();
     }
 }

@@ -9,6 +9,7 @@ mod lint_publish_registration;
 mod lint_single_source;
 mod lint_test_sleep;
 mod mutants;
+mod scan_state;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -1719,21 +1720,13 @@ fn is_test_file(path: &std::path::Path) -> bool {
 /// that are NOT in test scope, attribute, or comment lines, and NOT marked with `// allow-unwrap`.
 ///
 /// This function is extracted from [`lint_unwrap`] for unit-testability.
-/// It uses a character-level state machine to correctly ignore braces inside
-/// string/char literals, raw strings, line comments, and block comments,
-/// preventing false test-scope-exit when unbalanced braces appear in literals (rc-4fs).
+/// Brace/test-scope tracking uses the shared literal/comment-aware scanner
+/// ([`scan_state`], introduced here by rc-4fs and extracted to a shared
+/// module by rc-drcgf), preventing false test-scope-exit when unbalanced
+/// braces appear in literals.
 fn lint_unwrap_src(src: &str, file_path: &str) -> Vec<Violation> {
     use regex::Regex;
-
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    enum ScanState {
-        Normal,
-        StringLit,
-        CharLit,
-        LineComment,
-        BlockComment,
-        RawStr(usize),
-    }
+    use scan_state::{Brace, ScanState, scan_line};
 
     let unwrap_re = Regex::new(r"\.(unwrap\(\)|expect\()").expect("valid regex"); // allow-unwrap
     let lines: Vec<&str> = src.lines().collect();
@@ -1757,119 +1750,23 @@ fn lint_unwrap_src(src: &str, file_path: &str) -> Vec<Violation> {
         let entering_test_scope = pending_test_attr && test_scope_entry_depth.is_none();
 
         // State-machine brace counting — persists across lines.
-        let mut chars = trimmed.chars().peekable();
-        while let Some(ch) = chars.next() {
-            match current_state {
-                ScanState::Normal => match ch {
-                    '{' => {
-                        brace_depth += 1;
-                        if pending_test_attr && test_scope_entry_depth.is_none() {
-                            test_scope_entry_depth = Some(brace_depth - 1);
-                            pending_test_attr = false;
-                        }
-                    }
-                    '}' => {
-                        brace_depth -= 1;
-                        if let Some(entry) = test_scope_entry_depth
-                            && brace_depth <= entry
-                        {
-                            test_scope_entry_depth = None;
-                        }
-                    }
-                    '/' if chars.peek() == Some(&'/') => {
-                        current_state = ScanState::LineComment;
-                        chars.next();
-                    }
-                    '/' if chars.peek() == Some(&'*') => {
-                        current_state = ScanState::BlockComment;
-                        chars.next();
-                    }
-                    '"' => {
-                        current_state = ScanState::StringLit;
-                    }
-                    '\'' => {
-                        // Distinguish char literal ('a', '\n') from lifetime ('a, 'static, '_).
-                        let next = chars.peek().copied();
-                        let is_lifetime = next
-                            .map(|c| c.is_ascii_alphanumeric() || c == '_')
-                            .unwrap_or(false)
-                            && {
-                                let mut tmp = chars.clone();
-                                tmp.next();
-                                !matches!(tmp.peek(), Some('\'') | Some('\\'))
-                            };
-                        if !is_lifetime {
-                            current_state = ScanState::CharLit;
-                        }
-                    }
-                    'r' => {
-                        // Potential raw string: r"..." or r#"..."# etc.
-                        let mut hash_count: usize = 0;
-                        let mut lookahead = chars.clone();
-                        while lookahead.peek() == Some(&'#') {
-                            hash_count += 1;
-                            lookahead.next();
-                        }
-                        if lookahead.peek() == Some(&'"') {
-                            current_state = ScanState::RawStr(hash_count);
-                            for _ in 0..hash_count {
-                                chars.next();
-                            }
-                            chars.next();
-                        }
-                    }
-                    _ => {}
-                },
-                ScanState::StringLit => match ch {
-                    '\\' => {
-                        chars.next();
-                    }
-                    '"' => {
-                        current_state = ScanState::Normal;
-                    }
-                    _ => {}
-                },
-                ScanState::CharLit => match ch {
-                    '\\' => {
-                        chars.next();
-                    }
-                    '\'' => {
-                        current_state = ScanState::Normal;
-                    }
-                    _ => {}
-                },
-                ScanState::LineComment => {
-                    // Consume remaining chars; state resets at EOL below.
-                }
-                ScanState::BlockComment => {
-                    if ch == '*' && chars.peek() == Some(&'/') {
-                        current_state = ScanState::Normal;
-                        chars.next();
-                    }
-                }
-                ScanState::RawStr(n) => {
-                    if ch == '"' {
-                        let mut count = 0;
-                        let mut lookahead = chars.clone();
-                        while lookahead.peek() == Some(&'#') {
-                            count += 1;
-                            lookahead.next();
-                        }
-                        if count >= n {
-                            current_state = ScanState::Normal;
-                            for _ in 0..count {
-                                chars.next();
-                            }
-                        }
-                    }
+        scan_line(trimmed, &mut current_state, &mut |brace| match brace {
+            Brace::Open => {
+                brace_depth += 1;
+                if pending_test_attr && test_scope_entry_depth.is_none() {
+                    test_scope_entry_depth = Some(brace_depth - 1);
+                    pending_test_attr = false;
                 }
             }
-        }
-
-        // Line comments end at the newline boundary.
-        if current_state == ScanState::LineComment {
-            current_state = ScanState::Normal;
-        }
+            Brace::Close => {
+                brace_depth -= 1;
+                if let Some(entry) = test_scope_entry_depth
+                    && brace_depth <= entry
+                {
+                    test_scope_entry_depth = None;
+                }
+            }
+        });
 
         // Clear pending_test_attr if no brace was opened on a semicolon line.
         if pending_test_attr && test_scope_entry_depth.is_none() && trimmed.contains(';') {
