@@ -34,6 +34,7 @@ camel-component-opensearch = { workspace = true, optional = true }
 camel-component-redis = { workspace = true, optional = true }
 camel-component-seda.workspace = true
 camel-component-sql = { workspace = true, optional = true }
+camel-component-stream.workspace = true
 camel-component-timer.workspace = true
 camel-component-validator.workspace = true
 camel-component-ws = { workspace = true, optional = true }

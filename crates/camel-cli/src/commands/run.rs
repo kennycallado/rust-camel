@@ -484,6 +484,12 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
         // `CamelContext::start()` before any route consumer is started
         // (task 2.3: shared installer in camel-bundles).
         camel_bundles::security_boot::install_sql_startup_checks(&mut ctx, &defs);
+
+        // stream-component task 1.4: warn when a route writes `stream:out`
+        // while the tracer stdout sink is enabled. Warn-only posture — the
+        // collision is never auto-muxed; the operator resolves it.
+        camel_bundles::warn_stream_stdout_collision(&defs, &camel_config);
+
         defs
     };
 

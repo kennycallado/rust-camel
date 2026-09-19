@@ -1,0 +1,15 @@
+[package]
+name = "stream-echo"
+description = "Interactive stdio echo example for rust-camel (stream:in to stream:out)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-bundles.workspace = true
+camel-config.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

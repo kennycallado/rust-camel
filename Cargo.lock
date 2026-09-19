@@ -1337,6 +1337,7 @@ dependencies = [
  "camel-component-redis",
  "camel-component-seda",
  "camel-component-sql",
+ "camel-component-stream",
  "camel-component-surrealdb",
  "camel-component-timer",
  "camel-component-validator",
@@ -1937,6 +1938,21 @@ dependencies = [
  "tracing",
  "tracing-test",
  "url",
+]
+
+[[package]]
+name = "camel-component-stream"
+version = "0.49.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "camel-api",
+ "camel-component-api",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tower 0.5.3",
+ "tracing",
 ]
 
 [[package]]
@@ -11616,6 +11632,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "stream-echo"
+version = "0.49.0"
+dependencies = [
+ "camel-api",
+ "camel-bundles",
+ "camel-config",
+ "tokio",
 ]
 
 [[package]]

@@ -1,0 +1,8 @@
+[default]
+routes = ["routes/*.yaml"]
+# WARN keeps the stream:out data plane clean: `configure_context` writes the
+# general log layer to stdout, and every log line would mix into the echo
+# output this example pipes. WARN keeps interactive-TTY diagnostics visible;
+# piped/data-on-stdout invocations should use RUST_LOG=off per README (the
+# airtight form).
+log_level = "WARN"

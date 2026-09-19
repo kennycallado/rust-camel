@@ -259,6 +259,72 @@ fn consumer_gate_allows_only_job_safe_schemes() {
 }
 
 #[test]
+fn job_gate_accepts_stream_in() {
+    assert!(document::validate_consumer_uri("stream:in").is_ok());
+    assert!(document::validate_consumer_uri("stream:in?frame=line").is_ok());
+}
+
+#[test]
+fn job_gate_rejects_stream_out_as_consumer() {
+    let err = document::validate_consumer_uri("stream:out").unwrap_err();
+    assert!(err.contains("stream:in"), "got {err}");
+}
+
+#[test]
+fn job_gate_rejects_stream_err_as_consumer() {
+    let err = document::validate_consumer_uri("stream:err").unwrap_err();
+    assert!(err.contains("stream:in"), "got {err}");
+}
+
+#[test]
+fn job_gate_rejects_bare_and_unknown_stream_paths() {
+    for uri in ["stream:", "stream:foo"] {
+        let err = document::validate_consumer_uri(uri).unwrap_err();
+        assert!(err.contains("stream:in"), "{uri}: {err}");
+    }
+}
+
+#[test]
+fn job_gate_still_rejects_kafka() {
+    assert!(document::validate_consumer_uri("kafka:topic").is_err());
+}
+
+#[test]
+fn job_gate_still_accepts_direct() {
+    assert!(document::validate_consumer_uri("direct:in").is_ok());
+}
+
+#[test]
+fn job_gate_producers_unrestricted_with_stream_sinks() {
+    let text = r#"
+execute:
+  mode: one-shot
+  timeout: 5s
+  send:
+    to: direct:in
+routes:
+  - id: echo
+    from: "direct:in"
+    steps:
+      - to: "stream:out"
+      - to: "stream:err"
+"#;
+    let doc = document::parse_job_document(&doc_path(), text).expect("document loads");
+    let source =
+        document::resolve_route_source(&doc, Path::new("")).expect("route source resolves");
+    let document::JobRouteSource::Inline(routes_yaml) = source else {
+        panic!("expected inline routes source");
+    };
+    let defs = camel_dsl::parse_routes_with_env(&routes_yaml, &|_| None).expect("routes parse");
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].from_uri(), "direct:in");
+    assert!(
+        document::validate_consumer_uri(defs[0].from_uri()).is_ok(),
+        "consumer gate must pass for direct:in with stream: sinks"
+    );
+}
+
+#[test]
 fn uri_base_strips_query_options() {
     assert_eq!(document::uri_base("direct:x?a=1&b=2"), "direct:x");
     assert_eq!(document::uri_base("seda:q"), "seda:q");

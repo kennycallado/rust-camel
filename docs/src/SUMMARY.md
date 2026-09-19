@@ -79,6 +79,7 @@
     - [File](components/file.md)
     - [Cron](components/cron.md)
     - [Exec](components/exec.md)
+    - [Stream](components/stream.md)
     - [Container](components/container.md)
   - [AI and extension](components/ai.md)
     - [LLM](components/llm.md)

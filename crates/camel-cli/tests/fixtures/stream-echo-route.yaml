@@ -1,0 +1,7 @@
+routes:
+  - id: "stream-echo-pipe"
+    from: "stream:in"
+    steps:
+      - transform:
+          simple: "echo: ${body}"
+      - to: "stream:out"

@@ -163,6 +163,10 @@ name = "camel-component-sql"
 state = "registered"
 
 [[crates]]
+name = "camel-component-stream"
+state = "new-unpublished"
+
+[[crates]]
 name = "camel-component-timer"
 state = "registered"
 

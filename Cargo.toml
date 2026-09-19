@@ -100,6 +100,7 @@ camel-endpoint-macros = { path = "crates/camel-endpoint-macros", version = "=0.4
 camel-test = { path = "crates/camel-test", version = "=0.49.0" }
 camel-component-timer = { path = "crates/components/camel-timer", version = "=0.49.0" }
 camel-component-log = { path = "crates/components/camel-log", version = "=0.49.0" }
+camel-component-stream = { path = "crates/components/camel-stream", version = "=0.49.0" }
 camel-component-file = { path = "crates/components/camel-file", version = "=0.49.0" }
 camel-component-direct = { path = "crates/components/camel-direct", version = "=0.49.0" }
 camel-component-seda = { path = "crates/components/camel-component-seda", version = "=0.49.0" }

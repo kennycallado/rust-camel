@@ -1,0 +1,30 @@
+[package]
+name = "camel-component-stream"
+description = "Stream (stdio) component for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-component-stream"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-component-api.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

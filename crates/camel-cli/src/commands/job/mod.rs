@@ -1387,6 +1387,17 @@ async fn setup_booted_job(
     // SqlDynamicQueryCheck for every `sql:` endpoint).
     camel_bundles::security_boot::install_sql_startup_checks(ctx, &defs);
 
+    // stream-component task 2.3: same warn-only stdout-collision posture
+    // as `camel run` — a route writing `stream:out` while the tracer
+    // stdout sink is enabled is surfaced, never auto-muxed.
+    //
+    // The job path projects the config via `job_effective_config`
+    // (observability defaulted, tracer disabled — jobcoexist projection),
+    // so this warn is structurally unreachable for `camel job` TODAY; the
+    // call is kept for parity with `camel run` and future-proofs if the
+    // projection ever relaxes.
+    camel_bundles::warn_stream_stdout_collision(&defs, camel_config);
+
     for def in defs {
         let id = def.route_id().to_string();
         if let Err(e) = ctx.add_route_definition(def).await {

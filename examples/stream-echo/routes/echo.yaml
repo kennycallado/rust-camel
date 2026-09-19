@@ -1,0 +1,15 @@
+routes:
+  - id: "stream-echo"
+    from: "stream:in"
+    steps:
+      # Prefix each stdin line, then write it to stdout as data.
+      - transform:
+          simple: "echo: ${body}"
+      - to: "stream:out"
+      # Re-show the prompt on stderr after each echoed line. A per-exchange
+      # route cannot print a prompt before the first line is read (no
+      # exchange exists until stdin delivers one), so the prompt postcedes
+      # the transform — see examples/stream-echo/README.md.
+      - set_body:
+          value: "Enter text:"
+      - to: "stream:err"

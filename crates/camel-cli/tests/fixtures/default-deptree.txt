@@ -308,6 +308,8 @@ camel-component-sql feature "mysql"
 camel-component-sql feature "postgres"
 camel-component-sql feature "sqlite"
 camel-component-sql v0.49.0
+camel-component-stream feature "default"
+camel-component-stream v0.49.0
 camel-component-surrealdb feature "default"
 camel-component-surrealdb v0.49.0
 camel-component-timer feature "default"

@@ -30,9 +30,11 @@ const BODY_SCALAR_SENTINEL: &str = "unsupported body scalar: ";
 
 /// Consumer schemes a one-shot job document may start routes for. The
 /// gate is fail-closed: every other `from:` scheme is rejected at load
-/// (producers/sinks as `to:` URIs are unrestricted). See the cli-jobs
-/// spec delta.
-pub(crate) const JOB_SAFE_CONSUMER_SCHEMES: [&str; 4] = ["direct", "seda", "log", "mock"];
+/// (producers/sinks as `to:` URIs are unrestricted). `stream:` is
+/// admitted only with the `stream:in` consumer path — `stream:out` and
+/// `stream:err` are stdout/stderr writers, never consumers. See the
+/// cli-jobs spec delta.
+pub(crate) const JOB_SAFE_CONSUMER_SCHEMES: [&str; 5] = ["direct", "seda", "log", "mock", "stream"];
 
 /// Schemes the single `send` action may target (v1: in-memory, synchronous
 /// request/reply transports).
@@ -1133,10 +1135,8 @@ pub(crate) fn target_route_ids(
 /// `from:` scheme decides whether a route may auto-consume.
 pub(crate) fn validate_consumer_uri(from_uri: &str) -> Result<(), String> {
     let scheme = scheme_of_uri(from_uri).unwrap_or_default();
-    if JOB_SAFE_CONSUMER_SCHEMES.contains(&scheme) {
-        Ok(())
-    } else {
-        Err(format!(
+    if !JOB_SAFE_CONSUMER_SCHEMES.contains(&scheme) {
+        return Err(format!(
             "route consumes from `{from_uri}`; one-shot job documents allow only {} \
              consumers (producers/sinks as to: URIs are unrestricted); scheme `{scheme}` \
              is rejected",
@@ -1145,6 +1145,21 @@ pub(crate) fn validate_consumer_uri(from_uri: &str) -> Result<(), String> {
                 .map(|s| format!("`{s}:`"))
                 .collect::<Vec<_>>()
                 .join(", ")
-        ))
+        ));
     }
+    if scheme == "stream" {
+        // The stream component's only consumer is stdin; `stream:out` and
+        // `stream:err` are stdout/stderr producers and stay sink-only.
+        let path = uri_base(from_uri)
+            .split_once(':')
+            .map(|(_, path)| path)
+            .unwrap_or_default();
+        if path != "in" {
+            return Err(format!(
+                "route consumes from `{from_uri}`; the only accepted stream consumer \
+                 path is `stream:in` (`stream:out`/`stream:err` are producers/sinks)"
+            ));
+        }
+    }
+    Ok(())
 }

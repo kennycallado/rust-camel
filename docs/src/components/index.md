@@ -29,6 +29,7 @@ Components connect routes to external systems. Each Component owns a URI scheme 
 | `llm` | producer | [camel-component-llm](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-llm/CONTEXT.md) |
 | `mcp` | both | [camel-component-mcp](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-mcp/CONTEXT.md) |
 | `exec` | producer | [camel-component-exec](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-exec/CONTEXT.md) |
+| `stream` | both | [camel-stream](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-stream/CONTEXT.md) |
 | `validator` | producer | [camel-validator](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-validator/CONTEXT.md) |
 | `xslt` | producer | [camel-xslt](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-xslt/CONTEXT.md) |
 | `xj` | producer | [camel-xj](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-xj/CONTEXT.md) |

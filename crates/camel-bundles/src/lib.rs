@@ -27,11 +27,16 @@ use camel_core::CamelContext;
 use camel_core::datasource::RuntimeDatasourceCatalog;
 
 pub mod security_boot;
+pub mod stream_collision;
 
 // Shared security compile-context builder (task 2.2), doc-visible at the
 // crate root for boot consumers.
 #[cfg(feature = "security")]
 pub use security_boot::build_security_compile_context_from_config;
+
+// stream:out / tracer-stdout collision warning (stream-component task 1.4),
+// doc-visible at the crate root for the CLI boot paths.
+pub use stream_collision::warn_stream_stdout_collision;
 
 struct BridgeCleanup {
     #[cfg(feature = "xslt")]
@@ -300,6 +305,7 @@ pub async fn boot(
     ctx.register_component(camel_component_timer::TimerComponent::new());
     ctx.register_component(camel_component_cron::CronComponent::new());
     ctx.register_component(camel_component_log::LogComponent::new());
+    ctx.register_component(camel_component_stream::StreamComponent::new());
     ctx.register_component(camel_component_direct::DirectComponent::new());
     ctx.register_component(camel_component_seda::SedaComponent::new());
     ctx.register_component(camel_component_mock::MockComponent::new());
@@ -505,7 +511,15 @@ mod tests {
     async fn boot_slim_registers_core_without_bridges() {
         let (mut ctx, handle, _config) = booted_context("no-http/Camel.toml").await;
 
-        for scheme in ["timer", "log", "direct", "seda", "mock", "controlbus"] {
+        for scheme in [
+            "timer",
+            "log",
+            "stream",
+            "direct",
+            "seda",
+            "mock",
+            "controlbus",
+        ] {
             assert!(
                 ctx.registry().get(scheme).is_some(),
                 "core scheme '{scheme}' must resolve after slim boot"
