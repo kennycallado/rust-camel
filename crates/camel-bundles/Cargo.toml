@@ -20,7 +20,7 @@ camel-core.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
-camel-component-container.workspace = true
+camel-component-container = { workspace = true, optional = true }
 camel-component-controlbus.workspace = true
 camel-component-cron.workspace = true
 camel-component-cxf = { workspace = true, optional = true }
@@ -82,6 +82,10 @@ cxf = ["dep:camel-component-cxf"]
 xj = ["dep:camel-xj"]
 xslt = ["dep:camel-xslt"]
 kafka = ["dep:camel-component-kafka"]
+# containers gates the ContainerBundle registration (the `container:`
+# scheme); forwarded by camel-cli's same-named gate — one feature with
+# camel-function (function⇒container per ADR-0005).
+containers = ["dep:camel-component-container"]
 mqtt = ["dep:camel-component-mqtt"]
 surrealdb = ["dep:camel-component-surrealdb"]
 grpc = ["dep:camel-component-grpc"]

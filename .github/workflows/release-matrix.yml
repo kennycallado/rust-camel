@@ -8,6 +8,11 @@ on:
         type: boolean
         required: false
         default: false
+      dev-profile:
+        description: "Trim the build matrix to the 3-leg dev subset"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -23,18 +28,50 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ---- slim: edge pack. Native musl legs carry jemalloc (allocator
+          # selection, not closure selection). x86-musl is runnable on the
+          # runner -> kafka-absence-probe; aarch64-musl is cross -> exempt.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use-cross: false
+            bin-suffix: ""
+            install-musl-tools: true
+            alloc-features: "jemalloc"
+            flavor: "flavor-slim"
+            no-default-features: true
+            artifact-name: "camel-slim-x86_64-unknown-linux-musl"
+            upload: true
+            in-dev-profile: false
+            kafka-absence-probe: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use-cross: true
+            bin-suffix: ""
+            alloc-features: "jemalloc"
+            flavor: "flavor-slim"
+            no-default-features: true
+            artifact-name: "camel-slim-aarch64-unknown-linux-musl"
+            upload: true
+            in-dev-profile: false
+          # ---- regular: keeps the clean legacy name, all 7 targets. Never
+          # kafka-probe/install-librdkafka (kafka is absent by design).
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             use-cross: false
             bin-suffix: ""
-            flavor: "flavor-full"
-            kafka-probe: true
-            install-librdkafka: true
+            flavor: "flavor-regular"
+            artifact-name: "camel-x86_64-unknown-linux-gnu"
+            upload: true
+            in-dev-profile: false
+            kafka-absence-probe: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             use-cross: true
             bin-suffix: ""
-            flavor: "flavor-full"
+            flavor: "flavor-regular"
+            artifact-name: "camel-aarch64-unknown-linux-gnu"
+            upload: true
+            in-dev-profile: false
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             use-cross: false
@@ -42,59 +79,114 @@ jobs:
             install-musl-tools: true
             alloc-features: "jemalloc"
             flavor: "flavor-regular"
+            artifact-name: "camel-x86_64-unknown-linux-musl"
+            upload: true
+            in-dev-profile: true
+            kafka-absence-probe: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             use-cross: true
             bin-suffix: ""
             alloc-features: "jemalloc"
             flavor: "flavor-regular"
+            artifact-name: "camel-aarch64-unknown-linux-musl"
+            upload: true
+            in-dev-profile: false
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            use-cross: false
+            bin-suffix: ""
+            flavor: "flavor-regular"
+            artifact-name: "camel-x86_64-apple-darwin"
+            # compile-guard only: proves the regular closure builds on
+            # darwin for cargo-install source users; never uploaded.
+            upload: false
+            in-dev-profile: true
+            kafka-absence-probe: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use-cross: false
+            bin-suffix: ""
+            flavor: "flavor-full"
+            artifact-name: "camel-full-x86_64-unknown-linux-gnu"
+            upload: true
+            in-dev-profile: true
+            kafka-probe: true
+            install-librdkafka: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            use-cross: false
+            bin-suffix: ""
+            flavor: "flavor-full"
+            artifact-name: "camel-full-aarch64-unknown-linux-gnu"
+            upload: true
+            in-dev-profile: false
+            kafka-probe: true
+            install-librdkafka: true
           - os: macos-15-intel
             target: x86_64-apple-darwin
             use-cross: false
             bin-suffix: ""
             flavor: "flavor-full"
+            artifact-name: "camel-full-x86_64-apple-darwin"
+            upload: true
+            in-dev-profile: false
             kafka-probe: true
           - os: macos-latest
             target: aarch64-apple-darwin
             use-cross: false
             bin-suffix: ""
             flavor: "flavor-full"
+            artifact-name: "camel-full-aarch64-apple-darwin"
+            upload: true
+            in-dev-profile: false
             kafka-probe: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             use-cross: false
             bin-suffix: ".exe"
             flavor: "flavor-full"
+            artifact-name: "camel-full-x86_64-pc-windows-msvc"
+            upload: true
+            in-dev-profile: false
             kafka-probe: true
 
     steps:
+      # NOTE: dev gating is step-level — job-level if cannot access the
+      # matrix context (GitHub parses job-if before matrix expansion;
+      # discovered at CI rehearsal 2026-09-19). Non-dev legs skip all
+      # steps (empty green) under dev-profile.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ !inputs.dev-profile || matrix.in-dev-profile }}
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        if: ${{ !inputs.dev-profile || matrix.in-dev-profile }}
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        if: ${{ !inputs.dev-profile || matrix.in-dev-profile }}
 
       - name: Install cmake (Windows)
-        if: matrix.os == 'windows-latest'
+        if: ${{ matrix.os == 'windows-latest' && (!inputs.dev-profile || matrix.in-dev-profile) }}
         run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
 
       - name: Install build deps (Linux native)
-        if: matrix.install-librdkafka == true
+        if: ${{ matrix.install-librdkafka == true && (!inputs.dev-profile || matrix.in-dev-profile) }}
         run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev
 
       - name: Install musl-tools
-        if: matrix.install-musl-tools == true
+        if: ${{ matrix.install-musl-tools == true && (!inputs.dev-profile || matrix.in-dev-profile) }}
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Install target
-        if: matrix.use-cross == false
+        if: ${{ matrix.use-cross == false && (!inputs.dev-profile || matrix.in-dev-profile) }}
         run: rustup target add ${{ matrix.target }}
 
       - name: Install cross
-        if: matrix.use-cross == true
+        if: ${{ matrix.use-cross == true && (!inputs.dev-profile || matrix.in-dev-profile) }}
         run: cargo install cross --version 0.2.5 --locked
 
       - name: Build binary
+        if: ${{ !inputs.dev-profile || matrix.in-dev-profile }}
         env:
           FLAVOR: ${{ matrix.flavor }}
           ALLOC_FEATURES: ${{ matrix.alloc-features }}
@@ -104,16 +196,24 @@ jobs:
           # conditional expansion — empty ALLOC_FEATURES must not leave
           # a leading comma (rc-vnm8 class).
           FEATURES="${FLAVOR}${ALLOC_FEATURES:+,$ALLOC_FEATURES}"
-          echo "Building ${{ matrix.target }} with: --features $FEATURES"
+          # Slim legs MUST drop default features: default = flavor-regular
+          # and marker priority is full > regular > slim, so without this
+          # flag a slim leg silently builds the REGULAR closure (caught by
+          # the version-flavor assert at the rc.1 CI rehearsal).
+          NO_DEFAULT=""
+          if [[ "${{ matrix.no-default-features }}" == "true" ]]; then
+            NO_DEFAULT="--no-default-features"
+          fi
+          echo "Building ${{ matrix.target }} with: $NO_DEFAULT --features $FEATURES"
           if [[ "${{ matrix.use-cross }}" == "true" ]]; then
-            cross build -p camel-cli --release --target "${{ matrix.target }}" --features "$FEATURES"
+            cross build -p camel-cli --release --target "${{ matrix.target }}" $NO_DEFAULT --features "$FEATURES"
           else
-            cargo build -p camel-cli --release --target "${{ matrix.target }}" --features "$FEATURES"
+            cargo build -p camel-cli --release --target "${{ matrix.target }}" $NO_DEFAULT --features "$FEATURES"
           fi
         shell: bash
 
       - name: Assert kafka capability (release probe)
-        if: matrix.kafka-probe == true
+        if: ${{ matrix.kafka-probe == true && (!inputs.dev-profile || matrix.in-dev-profile) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -142,8 +242,42 @@ jobs:
           fi
           echo "OK: kafka capability verified on ${{ matrix.target }}"
 
+      - name: Assert kafka absence (slim/regular probe)
+        if: ${{ matrix.kafka-absence-probe == true && (!inputs.dev-profile || matrix.in-dev-profile) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          FIXTURE="$RUNNER_TEMP/kafka-absence-probe-route.yaml"
+          printf '%s\n' \
+            'routes:' \
+            '  - id: "kafka-absence-probe"' \
+            '    from: "kafka:test-topic"' \
+            '    steps:' \
+            '      - to: "log:out"' \
+            > "$FIXTURE"
+          BIN="target/${{ matrix.target }}/release/camel${{ matrix.bin-suffix }}"
+          set +e
+          OUT="$("$BIN" lint "$FIXTURE" 2>&1)"
+          RC=$?
+          set -e
+          # Absence manifests as an Info `unverified-scheme` note with
+          # exit 0 (camel-lint semantics). Both halves are required:
+          # RC≠0 means the probe itself broke (fixture drift, engine
+          # failure) — a false green if treated as absence.
+          if [ "$RC" -ne 0 ]; then
+            echo "FAIL: probe broken — lint exited $RC (expected exit 0 with an unverified-scheme note)"
+            printf '%s\n' "$OUT"
+            exit 1
+          fi
+          if ! printf '%s\n' "$OUT" | grep -iq 'unverified-scheme'; then
+            echo "FAIL: kafka route accepted by a slim/regular build — closure leaked"
+            printf '%s\n' "$OUT"
+            exit 1
+          fi
+          echo "OK: kafka correctly absent on ${{ matrix.target }}"
+
       - name: Assert version flavor
-        if: matrix.use-cross != true
+        if: ${{ matrix.use-cross != true && (!inputs.dev-profile || matrix.in-dev-profile) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -158,7 +292,7 @@ jobs:
           esac
 
       - name: Assert jemalloc linked (musl only)
-        if: contains(matrix.alloc-features, 'jemalloc')
+        if: ${{ contains(matrix.alloc-features, 'jemalloc') && (!inputs.dev-profile || matrix.in-dev-profile) }}
         run: |
           # Build-green does not prove the allocator was linked — a feature
           # typo or resolver quirk silently yields musl mallocng (the exact
@@ -172,17 +306,19 @@ jobs:
           fi
         shell: bash
 
-      - name: Rename binary
+      - name: Stage binary
+        if: ${{ (!inputs.dev-profile || matrix.in-dev-profile) && matrix.upload != false }}
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/camel${{ matrix.bin-suffix }}" "dist/camel-${{ matrix.target }}${{ matrix.bin-suffix }}"
+          cp "target/${{ matrix.target }}/release/camel${{ matrix.bin-suffix }}" "dist/${{ matrix.artifact-name }}${{ matrix.bin-suffix }}"
         shell: bash
 
       - name: Upload artifact
+        if: ${{ (!inputs.dev-profile || matrix.in-dev-profile) && matrix.upload != false }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: camel-${{ matrix.target }}
-          path: dist/camel-${{ matrix.target }}${{ matrix.bin-suffix }}
+          name: ${{ matrix.artifact-name }}
+          path: dist/${{ matrix.artifact-name }}${{ matrix.bin-suffix }}
 
   release:
     name: Create GitHub Release
@@ -228,6 +364,57 @@ jobs:
           pattern: camel-*
           merge-multiple: true
 
+      - name: Assert artifact flavor suffixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Disjoint filename classification: each file must match exactly
+          # one class (2 slim + 5 full + 4 enumerated regular names = 11;
+          # desktop targets ship full-only — owner ruling post-rc.2).
+          # Filename-based only — cross-compiled binaries are not runnable
+          # on this runner; the runtime flavor smoke happened per build leg
+          # via the --version probe.
+          REGULAR_NAMES=(
+            camel-x86_64-unknown-linux-gnu
+            camel-aarch64-unknown-linux-gnu
+            camel-x86_64-unknown-linux-musl
+            camel-aarch64-unknown-linux-musl
+          )
+          total=0 slim=0 full=0 regular=0
+          unexpected=()
+          for f in dist/*; do
+            [ -f "$f" ] || continue
+            name="$(basename "$f")"
+            total=$((total + 1))
+            case "$name" in
+              camel-slim-*) slim=$((slim + 1)) ;;
+              camel-full-*) full=$((full + 1)) ;;
+              *)
+                matched=""
+                for r in "${REGULAR_NAMES[@]}"; do
+                  if [ "$name" = "$r" ]; then matched=1; break; fi
+                done
+                if [ -n "$matched" ]; then
+                  regular=$((regular + 1))
+                else
+                  unexpected+=("$name")
+                fi
+                ;;
+            esac
+          done
+          echo "total=$total slim=$slim full=$full regular=$regular"
+          ok=1
+          if [ "$total" -ne 11 ] || [ "$slim" -ne 2 ] \
+             || [ "$full" -ne 5 ] || [ "$regular" -ne 4 ]; then
+            echo "FAIL: expected 11 files = 2 slim + 5 full + 4 regular"
+            ok=""
+          fi
+          if [ "${#unexpected[@]}" -gt 0 ]; then
+            printf 'FAIL: unexpected file: %s\n' "${unexpected[@]}"
+            ok=""
+          fi
+          [ -n "$ok" ] || exit 1
+
       - name: Create release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
@@ -251,48 +438,89 @@ jobs:
             target: production
             amd64-artifact: camel-x86_64-unknown-linux-musl
             arm64-artifact: camel-aarch64-unknown-linux-musl
+            in-dev: false
+            semantic-tag: regular
           - variant: alpine
             suffix: "-alpine"
             target: alpine
-            amd64-artifact: camel-x86_64-unknown-linux-musl
-            arm64-artifact: camel-aarch64-unknown-linux-musl
+            amd64-artifact: camel-slim-x86_64-unknown-linux-musl
+            arm64-artifact: camel-slim-aarch64-unknown-linux-musl
+            in-dev: false
+            semantic-tag: slim
           - variant: gnu
             suffix: "-gnu"
             target: gnu
-            amd64-artifact: camel-x86_64-unknown-linux-gnu
-            arm64-artifact: camel-aarch64-unknown-linux-gnu
+            amd64-artifact: camel-full-x86_64-unknown-linux-gnu
+            arm64-artifact: camel-full-aarch64-unknown-linux-gnu
+            in-dev: true
+            semantic-tag: full
     env:
       REGISTRY_GHCR: ghcr.io
       REGISTRY_DOCKERHUB: docker.io
       IMAGE_NAME: ${{ github.repository }}
     steps:
+      # NOTE: dev gating is step-level — job-level if cannot access the
+      # matrix context (GitHub parses job-if before matrix expansion;
+      # discovered at CI rehearsal 2026-09-19). Non-dev legs skip all
+      # steps (empty green) under dev-profile.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ !inputs.dev-profile || matrix.in-dev }}
 
       - name: Extract version
-        if: inputs.publish
+        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
       - name: Download amd64 binary
+        if: ${{ !inputs.dev-profile || matrix.in-dev }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ matrix.amd64-artifact }}
           path: binary-amd64
 
       - name: Download arm64 binary
+        if: ${{ !inputs.dev-profile }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ matrix.arm64-artifact }}
           path: binary-arm64
 
+      # Runtime flavor check for the downloaded amd64 binary — closes the
+      # seam the dev smoke cannot: dev mode builds only the gnu variant,
+      # and publish mode skips the image smoke entirely. Without this, a
+      # swapped *-artifact key would ship wrong-flavor images with no CI
+      # failure. amd64-only: arm64 binaries are not runnable on this
+      # runner (filename assert in the release job covers them).
+      - name: Assert amd64 binary flavor (variant lockstep)
+        if: ${{ !inputs.dev-profile || matrix.in-dev }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$(find binary-amd64 -type f | head -1)"
+          chmod +x "$BIN"
+          case "${{ matrix.variant }}" in
+            production) EXPECTED="regular" ;;
+            alpine) EXPECTED="slim" ;;
+            gnu) EXPECTED="full" ;;
+            *) echo "unknown variant"; exit 1 ;;
+          esac
+          OUT="$("$BIN" --version)"
+          printf '%s\n' "$OUT"
+          case "$OUT" in
+            *" ($EXPECTED)") ;;
+            *) echo "FAIL: ${{ matrix.variant }} image expects ($EXPECTED), got: $OUT"; exit 1 ;;
+          esac
+
       - name: Set up QEMU
+        if: ${{ !inputs.dev-profile || matrix.in-dev }}
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
+        if: ${{ !inputs.dev-profile || matrix.in-dev }}
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Login to GHCR
-        if: inputs.publish
+        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY_GHCR }}
@@ -300,7 +528,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to Docker Hub
-        if: inputs.publish
+        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY_DOCKERHUB }}
@@ -308,7 +536,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker metadata
-        if: inputs.publish
+        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
@@ -320,31 +548,38 @@ jobs:
             type=raw,value=latest${{ matrix.suffix }}
 
       - name: Prepare build context
+        if: ${{ !inputs.dev-profile || matrix.in-dev }}
         run: |
           mkdir -p context
           AMD64_BIN=$(find binary-amd64 -type f | head -1)
-          ARM64_BIN=$(find binary-arm64 -type f | head -1)
           cp "$AMD64_BIN" context/camel-amd64
-          cp "$ARM64_BIN" context/camel-arm64
-          chmod +x context/camel-amd64 context/camel-arm64
+          chmod +x context/camel-amd64
+          # Dev runs only carry the amd64 artifact (no separate arm64 dev
+          # image build), so the arm64 binary is only staged for publish.
+          if [ "${{ inputs.dev-profile }}" != "true" ]; then
+            ARM64_BIN=$(find binary-arm64 -type f | head -1)
+            cp "$ARM64_BIN" context/camel-arm64
+            chmod +x context/camel-arm64
+          fi
           cp Dockerfile context/Dockerfile
           docker run --rm alpine:3.21 cat /etc/ssl/certs/ca-certificates.crt > context/ca-certificates.crt
 
       - name: Build dev image (amd64 --load)
-        if: inputs.publish != true
+        if: ${{ inputs.publish != true && (!inputs.dev-profile || matrix.in-dev) }}
         run: docker buildx build --load --platform linux/amd64 --build-arg TARGETARCH=amd64 --target ${{ matrix.target }} -t camel:dev-${{ matrix.variant }} context
         shell: bash
 
       - name: Smoke dev image (assert flavor suffix)
-        if: inputs.publish != true
+        if: ${{ inputs.publish != true && (!inputs.dev-profile || matrix.in-dev) }}
         shell: bash
         run: |
           set -euo pipefail
           OUT="$(docker run --rm camel:dev-${{ matrix.variant }} --version)"
           printf '%s\n' "$OUT"
           case "${{ matrix.variant }}" in
+            production) EXPECTED="regular" ;;
+            alpine) EXPECTED="slim" ;;
             gnu) EXPECTED="full" ;;
-            *) EXPECTED="regular" ;;
           esac
           case "$OUT" in
             *" ($EXPECTED)") ;;
@@ -352,7 +587,7 @@ jobs:
           esac
 
       - name: Build and push amd64
-        if: inputs.publish
+        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
         id: push-amd64
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -368,7 +603,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Attest amd64 image
-        if: inputs.publish
+        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
         # Non-blocking: attestations fail with "Resource not accessible by
         # integration" on this repo (no toggle in security_and_analysis for
         # public user-owned repos — see v0.26.0 run 30847300641). Images push
@@ -381,7 +616,7 @@ jobs:
           push-to-registry: true
 
       - name: Build and push arm64
-        if: inputs.publish
+        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
         id: push-arm64
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -397,7 +632,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Attest arm64 image
-        if: inputs.publish
+        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
         continue-on-error: true
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -406,10 +641,10 @@ jobs:
           push-to-registry: true
 
       - name: Create and push multi-arch manifest
-        if: inputs.publish
+        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
-          for TAG in "${VERSION}${{ matrix.suffix }}" "latest${{ matrix.suffix }}"; do
+          for TAG in "${VERSION}${{ matrix.suffix }}" "latest${{ matrix.suffix }}" "${{ matrix.semantic-tag }}"; do
             docker buildx imagetools create \
               -t ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${TAG} \
               -t ${{ env.REGISTRY_DOCKERHUB }}/${{ env.IMAGE_NAME }}:${TAG} \
@@ -427,4 +662,15 @@ jobs:
         with:
           toolchain: stable
       - name: Run feature closure tests
-        run: cargo test -p camel-cli --test feature_profiles
+        run: |
+          cargo test -p camel-cli --test feature_profiles
+          # Slim fail-closed security rejection re-validated on every dev
+          # run (distribution-flavors R3). The grep guards against a
+          # vacuous 0-matched pass (cargo exits 0 when no test matches the
+          # filter; a rename would silently disable this gate).
+          OUT="$(cargo test -p camel-bundles --lib security_omission_fails_closed 2>&1)"
+          printf '%s\n' "$OUT"
+          printf '%s\n' "$OUT" | grep -q '1 passed' || {
+            echo "FAIL: security_omission_fails_closed did not run exactly once"
+            exit 1
+          }

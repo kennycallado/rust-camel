@@ -230,20 +230,37 @@ ADR-0066) and heap profiling (see below). The alternative backend feature
 unreachable whenever jemalloc was enabled and no build path enabled it
 (bd rc-rrz6a).
 
-**Feature profiles.** `default = ["flavor-regular"]`, where `full` is exactly the
-pre-change default set plus the language adapters and the LSP server
-(those were previously unconditional dependencies, so the union
-reproduces the historical default closure — golden-fixture proof in
-`tests/feature_profiles.rs`). `slim-benchmarks` is the named
-`--no-default-features` baseline: an http-only deployment that links the
-non-optional core plumbing and excludes the controllable optional set
-(kafka, grpc, wasm, llm, mcp, mqtt, surrealdb, exec, the lsp stack, and
-the `lang-*` runtimes). The flavor markers `flavor-slim`,
-`flavor-regular`, and `flavor-full` are the single selection surface for
-profiles — aliases today (`flavor-slim` → `slim-http`, `flavor-regular`
-→ `full`, `flavor-full` → `full` + `kafka`), with content curation
-deferred to the flavor-matrix change. Overlapping markers report by
-priority full > regular > slim; a raw composition with no marker reports
+**Feature profiles.** `default = ["flavor-regular"]`. The flavor markers
+`flavor-slim`, `flavor-regular`, and `flavor-full` are the single
+selection surface for profiles; CI legs pass only `flavor-*` markers.
+Bodies are CHAINED: each flavor includes the marker of the flavor below
+it, so slim ⊆ regular ⊆ full is structural (asserted by
+`flavor_chain_is_structural` in `tests/feature_profiles.rs`).
+
+- `flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql",
+  "lang-jsonpath", "lang-rhai"]` — the edge pack on top of the base
+  components (core, direct, seda, log, file, timer, http, template,
+  master, cron, controlbus, mock, validator, camel test harness).
+- `flavor-regular = ["flavor-slim", "otel", "grpc", "wasm", "llm",
+  "mcp", "security", "redis", "redis-tls", "jms", "cxf", "xj", "xslt",
+  "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp",
+  "kubernetes", "integration-http", "integration-sql"]`.
+- `flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb",
+  "containers"]`.
+
+Regular excludes ONLY the four principled items: kafka (C dependency,
+unportable to musl), surrealdb (BUSL-1.1, the only non-OSI license in
+the graph), exec (arbitrary host-binary execution, ADR-0037), and
+containers (infrastructure-daemon client: camel-function +
+camel-component-container as ONE feature). The contract sets in
+`tests/feature_profiles.rs` (`SLIM_FORBIDDEN_PREFIXES`,
+`REGULAR_FORBIDDEN_PREFIXES`, `REGULAR_REQUIRED_PREFIXES`,
+`FULL_REQUIRED_PREFIXES`) gate the closures, and `full_covers_universe`
+fails CI when a feature is placed in no flavor. The legacy `full`
+feature (historical closure list) remains for compose-users; flavors no
+longer reference it. The `slim-http` and `slim-benchmarks` aliases were
+dropped at 0.50 (bd rc-n6iop). Overlapping markers report by priority
+full > regular > slim; a raw composition with no marker reports
 `custom`. `camel --version` prints the flavor as a suffix
 (`camel 0.49.0 (regular)`) while the compiled-artifact manifest stays
 semver-only. The kafka surface is exactly two features:
@@ -256,8 +273,14 @@ targets, bd rc-2ii8l) and
 `kafka`). The historical `cmake-build` and `kafka-static` names were
 removed (bd rc-5t5fo.1): they activated the dependency without enabling
 registration. `lsp` and each `lang-*` feature are individually
-selectable and compose additively with `slim-benchmarks`. The `slim-http`
-alias lives for one release (drop at 0.50).
+selectable and compose additively with any flavor marker.
+`containers` gates the Docker-daemon client stack as ONE feature
+(function⇒container per ADR-0005): the camel-function runtime service
+and the camel-component-container bundle registration. Without it, no
+function runtime is constructed and the `function:`/`container:` paths
+error explicitly. `kubernetes` forwards camel-config's platform wiring
+(pod identity, readiness-gate patching); it is demand-gated, no longer
+hardcoded on the dependency.
 `camel-language-minijinja` stays linked in every profile: the workspace
 consumes camel-template with default features (the engine is optional at
 the source since mission 115; the in-workspace flip needs the

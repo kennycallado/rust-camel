@@ -250,6 +250,12 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
         );
     }
 
+    // Function runtime under the `containers` gate (one feature with the
+    // container stack, function⇒container per ADR-0005). Without it nothing
+    // is constructed here: `function:` steps fail closed in camel-core's
+    // step compiler (no FunctionRuntimeService registered) and `container:`
+    // endpoints fail closed as an unregistered scheme.
+    #[cfg(feature = "containers")]
     match camel_function::FunctionRuntimeService::with_default_container_provider(
         camel_function::FunctionConfig::default(),
     ) {

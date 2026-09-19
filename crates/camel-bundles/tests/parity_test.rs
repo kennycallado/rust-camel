@@ -67,9 +67,12 @@ async fn two_boots_register_identical_sets() {
     let (ctx_b, handle_b, config_b) = boot_cycle().await;
 
     // Guard against a vacuous pass: the fixture must have registered the
-    // bundles it configures, and must carry their tables.
+    // bundles it configures, and must carry their tables. Container
+    // registers only under the Tier-2 `containers` gate (infrastructure-
+    // daemon client, one feature with camel-function), so its asserts are
+    // cfg-gated — default builds omit the registration.
     let schemes_a = sorted_component_schemes(&ctx_a);
-    for scheme in ["http", "file", "container", "template"] {
+    for scheme in ["http", "file", "template"] {
         assert!(
             schemes_a.contains(&scheme.to_string()),
             "fixture boot must register '{scheme}': {schemes_a:?}"
@@ -79,6 +82,22 @@ async fn two_boots_register_identical_sets() {
             "fixture must carry [components.{scheme}]"
         );
     }
+    #[cfg(feature = "containers")]
+    {
+        assert!(
+            schemes_a.contains(&"container".to_string()),
+            "fixture boot must register 'container': {schemes_a:?}"
+        );
+        assert!(
+            config_a.components.raw.contains_key("container"),
+            "fixture must carry [components.container]"
+        );
+    }
+    #[cfg(not(feature = "containers"))]
+    assert!(
+        !schemes_a.contains(&"container".to_string()),
+        "scheme 'container' must NOT register without the containers feature"
+    );
 
     assert_eq!(
         schemes_a,
