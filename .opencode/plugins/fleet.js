@@ -110,7 +110,7 @@ async function wakeConductor(type, sid, dir) {
         ...(authHeader ? { Authorization: authHeader } : {}),
       },
       body: JSON.stringify({ parts: [{ type: "text", text }] }),
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(25_000),
     });
     log({ ev: "wake-posted", to: conductor.slice(0, 16), http: res.status });
     if (res.status !== 200) {
