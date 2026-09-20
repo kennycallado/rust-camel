@@ -382,52 +382,55 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Disjoint filename classification: each file must match exactly
-          # one class (2 slim + 5 full + 4 enumerated regular names = 11;
-          # desktop targets ship full-only — owner ruling post-rc.2).
-          # Filename-based only — cross-compiled binaries are not runnable
-          # on this runner; the runtime flavor smoke happened per build leg
-          # via the --version probe.
+          # 12-entry matrix, 11 uploading: 2 slim + 5 full + 4 regular tarballs
+          # + 11 matching sidecars = 22 files. Filename-based only.
           REGULAR_NAMES=(
-            camel-x86_64-unknown-linux-gnu
-            camel-aarch64-unknown-linux-gnu
-            camel-x86_64-unknown-linux-musl
-            camel-aarch64-unknown-linux-musl
+            camel-x86_64-unknown-linux-gnu.tar.gz
+            camel-aarch64-unknown-linux-gnu.tar.gz
+            camel-x86_64-unknown-linux-musl.tar.gz
+            camel-aarch64-unknown-linux-musl.tar.gz
           )
-          total=0 slim=0 full=0 regular=0
-          unexpected=()
+          FULL_NAMES=(
+            camel-full-x86_64-unknown-linux-gnu.tar.gz
+            camel-full-aarch64-unknown-linux-gnu.tar.gz
+            camel-full-x86_64-apple-darwin.tar.gz
+            camel-full-aarch64-apple-darwin.tar.gz
+            camel-full-x86_64-pc-windows-msvc.tar.gz
+          )
+          SLIM_NAMES=(
+            camel-slim-x86_64-unknown-linux-musl.tar.gz
+            camel-slim-aarch64-unknown-linux-musl.tar.gz
+          )
+          ok=1; slim=0; full=0; reg=0; side=0
+          declare -A seen_tgz
           for f in dist/*; do
-            [ -f "$f" ] || continue
-            name="$(basename "$f")"
-            total=$((total + 1))
-            case "$name" in
-              camel-slim-*) slim=$((slim + 1)) ;;
-              camel-full-*) full=$((full + 1)) ;;
-              *)
-                matched=""
-                for r in "${REGULAR_NAMES[@]}"; do
-                  if [ "$name" = "$r" ]; then matched=1; break; fi
-                done
-                if [ -n "$matched" ]; then
-                  regular=$((regular + 1))
-                else
-                  unexpected+=("$name")
-                fi
+            b="$(basename "$f")"
+            case "$b" in
+              *.tar.gz.sha256)
+                side=$((side+1))
+                tgz="${b%.sha256}"
+                [ -f "dist/$tgz" ] || { echo "FAIL: sidecar without tarball: $b"; ok=0; }
+                # format: 64 lowercase hex + exactly two spaces + own basename
+                head -1 "$f" | grep -Eq "^[0-9a-f]{64}  ${tgz}$" \
+                  || { echo "FAIL: sidecar format: $b"; ok=0; }
                 ;;
+              *.tar.gz)
+                if printf '%s\n' "${SLIM_NAMES[@]}" | grep -qxF "$b"; then slim=$((slim+1));
+                elif printf '%s\n' "${FULL_NAMES[@]}" | grep -qxF "$b"; then full=$((full+1));
+                elif printf '%s\n' "${REGULAR_NAMES[@]}" | grep -qxF "$b"; then reg=$((reg+1));
+                else echo "FAIL: unexpected tarball: $b"; ok=0; fi
+                [ -z "${seen_tgz[$b]:-}" ] || { echo "FAIL: dup: $b"; ok=0; }
+                seen_tgz[$b]=1
+                ;;
+              *)
+                echo "FAIL: unexpected file (raw binaries are retired): $b"; ok=0 ;;
             esac
           done
-          echo "total=$total slim=$slim full=$full regular=$regular"
-          ok=1
-          if [ "$total" -ne 11 ] || [ "$slim" -ne 2 ] \
-             || [ "$full" -ne 5 ] || [ "$regular" -ne 4 ]; then
-            echo "FAIL: expected 11 files = 2 slim + 5 full + 4 regular"
-            ok=""
-          fi
-          if [ "${#unexpected[@]}" -gt 0 ]; then
-            printf 'FAIL: unexpected file: %s\n' "${unexpected[@]}"
-            ok=""
-          fi
-          [ -n "$ok" ] || exit 1
+          [ "$slim" -eq 2 ] || { echo "FAIL: slim=$slim want 2"; ok=0; }
+          [ "$full" -eq 5 ] || { echo "FAIL: full=$full want 5"; ok=0; }
+          [ "$reg"  -eq 4 ] || { echo "FAIL: regular=$reg want 4"; ok=0; }
+          [ "$side" -eq 11 ] || { echo "FAIL: sidecars=$side want 11"; ok=0; }
+          [ "$ok" -eq 1 ] || exit 1
 
       - name: Create release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
