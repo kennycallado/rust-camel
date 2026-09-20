@@ -788,8 +788,34 @@ impl tracing::field::Visit for CollectingVisitor<'_> {
     }
 }
 
+/// Install a bare registry as the process-global tracing default, once per
+/// test binary. Guards the capture tests below against callsite-interest
+/// poisoning: `tracing` caches each callsite's `Interest` process-wide from
+/// its FIRST macro execution, evaluated against the calling thread's
+/// dispatcher. Threads that never install a subscriber resolve to
+/// `NoSubscriber`, which answers `Interest::never()` — so a plain retry
+/// test reaching the shared `warn!` callsite in `retry_async_inner` first
+/// poisons it for the whole process, and the thread-local `set_default`
+/// capture layers silently drop events ("expected at least one log event,
+/// got none" — load-dependent flake, bd rc-zushg).
+///
+/// Installing a global default heals and prevents the poison: creating the
+/// dispatch rebuilds the interest cache, and the leaked global registry
+/// floors every future rebuild at `Interest::sometimes`
+/// (`never.and(always) == sometimes` — the bare registry answers `always`),
+/// so per-event `enabled()` consults the thread-local capture subscriber
+/// again. Losers of the one-time race (or of `set_global_default` itself)
+/// are harmless: one heal suffices.
+fn ensure_global_tracing_default() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if INIT.set(()).is_ok() {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    }
+}
+
 #[tokio::test]
 async fn labeled_policy_emits_component_in_log_message() {
+    ensure_global_tracing_default();
     let events = Arc::new(Mutex::new(Vec::new()));
     let layer = CollectingLayer {
         events: events.clone(),
@@ -838,6 +864,7 @@ async fn labeled_policy_emits_component_in_log_message() {
 
 #[tokio::test]
 async fn labeled_policy_preserves_structured_fields() {
+    ensure_global_tracing_default();
     let events = Arc::new(Mutex::new(Vec::new()));
     let layer = CollectingLayer {
         events: events.clone(),
@@ -891,6 +918,7 @@ async fn labeled_policy_preserves_structured_fields() {
 
 #[tokio::test]
 async fn unlabeled_policy_omits_component_field() {
+    ensure_global_tracing_default();
     let events = Arc::new(Mutex::new(Vec::new()));
     let layer = CollectingLayer {
         events: events.clone(),
