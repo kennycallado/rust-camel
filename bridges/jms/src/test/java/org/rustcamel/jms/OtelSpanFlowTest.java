@@ -2,6 +2,10 @@ package org.rustcamel.jms;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import io.grpc.Metadata;
+import io.grpc.stub.MetadataUtils;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.sdk.testing.exporter.InMemorySpanExporter;
 import io.quarkus.test.junit.QuarkusTest;
@@ -9,19 +13,25 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import jms_bridge.BridgeServiceGrpc;
+import jms_bridge.HealthRequest;
 import org.junit.jupiter.api.Test;
 
 /**
- * SDK liveness and span flow with the operator opt-in shape, without a collector.
+ * SDK liveness and trace continuation with the operator opt-in shape, without a collector.
  *
  * <p>The profile enables the SDK and sets an explicit traces endpoint — exactly the documented
  * opt-in pair — and spans are routed to the in-memory CDI exporter ({@link OtelTestExporters}). A
- * started and ended span must show up in the exporter's finished items: the pipeline is live,
- * egress stays in-process.
+ * started and ended span must show up in the exporter's finished items (pipeline live, egress
+ * in-process), and a bridge RPC carrying escalon-1 {@code traceparent} metadata must produce a
+ * server span parented by the propagated context.
  */
 @QuarkusTest
 @TestProfile(OtelSpanFlowTest.SpanFlowProfile.class)
 class OtelSpanFlowTest {
+
+  private static final String TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736";
+  private static final String PARENT_SPAN_ID = "00f067aa0ba902b7";
 
   public static class SpanFlowProfile implements io.quarkus.test.junit.QuarkusTestProfile {
 
@@ -40,15 +50,43 @@ class OtelSpanFlowTest {
   void endedSpanReachesInMemoryExporter() throws InterruptedException {
     openTelemetry.getTracer("otel-span-flow-test").spanBuilder("bridge-span").startSpan().end();
 
-    boolean exported = false;
-    for (int i = 0; i < 100 && !exported; i++) {
-      exported =
-          exporter.getFinishedSpanItems().stream()
-              .anyMatch(span -> "bridge-span".equals(span.getName()));
-      if (!exported) {
-        TimeUnit.MILLISECONDS.sleep(50L);
-      }
+    assertTrue(awaitSpan(span -> "bridge-span".equals(span.getName())), "span must be exported");
+  }
+
+  @Test
+  void grpcServerSpanContinuesPropagatedTraceparent() throws Exception {
+    ManagedChannel channel =
+        ManagedChannelBuilder.forAddress("localhost", 9001).usePlaintext().build();
+    try {
+      Metadata headers = new Metadata();
+      headers.put(
+          Metadata.Key.of("traceparent", Metadata.ASCII_STRING_MARSHALLER),
+          "00-" + TRACE_ID + "-" + PARENT_SPAN_ID + "-01");
+      BridgeServiceGrpc.newBlockingStub(channel)
+          .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(headers))
+          .health(HealthRequest.getDefaultInstance());
+
+      assertTrue(
+          awaitSpan(
+              span ->
+                  TRACE_ID.equals(span.getTraceId())
+                      && PARENT_SPAN_ID.equals(span.getParentSpanId())),
+          "grpc server span must continue the propagated traceparent");
+    } finally {
+      channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
     }
-    assertTrue(exported, "span 'bridge-span' must reach the in-memory exporter");
+  }
+
+  private boolean awaitSpan(
+      java.util.function.Predicate<io.opentelemetry.sdk.trace.data.SpanData> predicate)
+      throws InterruptedException {
+    for (int i = 0; i < 200; i++) {
+      boolean matched = exporter.getFinishedSpanItems().stream().anyMatch(predicate);
+      if (matched) {
+        return true;
+      }
+      TimeUnit.MILLISECONDS.sleep(50L);
+    }
+    return false;
   }
 }

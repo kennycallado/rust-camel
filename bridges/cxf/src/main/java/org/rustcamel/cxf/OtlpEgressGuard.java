@@ -45,7 +45,7 @@ public class OtlpEgressGuard {
   void enforceOnStartup(@Observes StartupEvent event) {
     boolean sdkDisabled = config.getOptionalValue(SDK_DISABLED_KEY, Boolean.class).orElse(false);
     if (sdkDisabled) {
-      LOG.fine("otel SDK disabled: OTLP egress surface closed");
+      LOG.info("otel SDK disabled: OTLP egress surface closed");
       return;
     }
     if (!explicitlyConfigured(config, TRACES_ENDPOINT_KEY)) {
@@ -64,13 +64,18 @@ public class OtlpEgressGuard {
    * True when an actual {@link ConfigSource} (env var, system property, or config file) provides
    * the key. The extension's built-in endpoint default never passes this check: it is injected by
    * the config mapping, visible to {@code getOptionalValue} while no source owns it.
+   *
+   * <p>Names are read through {@link ConfigSource#getPropertyNames()}, not {@code getProperties()}:
+   * env sources key their property map by raw env-var names ({@code QUARKUS_...}) and expose the
+   * dotted aliases only through {@code getPropertyNames()} plus {@link
+   * ConfigSource#getValue(String)}.
    */
   static boolean explicitlyConfigured(Config config, String key) {
     for (ConfigSource source : config.getConfigSources()) {
       if (DEFAULT_VALUES_SOURCE.equals(source.getName())) {
         continue;
       }
-      if (source.getProperties().containsKey(key)) {
+      if (source.getPropertyNames().contains(key) && source.getValue(key) != null) {
         return true;
       }
     }

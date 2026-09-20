@@ -8,7 +8,9 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import java.util.List;
+import io.smallrye.config.EnvConfigSource;
+import io.smallrye.config.SmallRyeConfigBuilder;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import org.eclipse.microprofile.config.Config;
@@ -23,13 +25,19 @@ import org.junit.jupiter.api.Test;
  * silently. The extension injects that fallback below the source layer — it shows up in {@code
  * getOptionalValue} while no config source owns the key — so "explicit" means: present in an actual
  * source, never in {@code DefaultValuesConfigSource}.
+ *
+ * <p>Env vars are the documented operator route and get the real {@link EnvConfigSource} (raw
+ * env-var names in the property map, dotted aliases only in {@code getPropertyNames()}); file and
+ * default-value sources are mocked.
  */
 class OtlpEgressGuardTest {
 
-  private static ConfigSource source(String name, Map<String, String> properties) {
+  private static ConfigSource fileSource(String name, Map<String, String> properties) {
     ConfigSource source = mock(ConfigSource.class);
     when(source.getName()).thenReturn(name);
-    when(source.getProperties()).thenReturn(properties);
+    when(source.getPropertyNames()).thenReturn(properties.keySet());
+    when(source.getValue(eq(OtlpEgressGuard.TRACES_ENDPOINT_KEY)))
+        .thenReturn(properties.get(OtlpEgressGuard.TRACES_ENDPOINT_KEY));
     return source;
   }
 
@@ -39,7 +47,7 @@ class OtlpEgressGuardTest {
         .thenReturn(sdkDisabled == null ? Optional.empty() : Optional.of(sdkDisabled));
     when(config.getOptionalValue(eq(OtlpEgressGuard.TRACES_ENDPOINT_KEY), eq(String.class)))
         .thenReturn(Optional.of("http://localhost:4317/")); // extension fallback, always visible
-    when(config.getConfigSources()).thenReturn(List.of(sources));
+    when(config.getConfigSources()).thenReturn(java.util.List.of(sources));
     return config;
   }
 
@@ -49,7 +57,7 @@ class OtlpEgressGuardTest {
 
   @Test
   void sdkDisabledBootsWithoutEndpoint() {
-    assertDoesNotThrow(() -> enforce(configWith(true, source("EnvConfigSource", Map.of()))));
+    assertDoesNotThrow(() -> enforce(configWith(true, fileSource("EnvConfigSource", Map.of()))));
   }
 
   @Test
@@ -57,19 +65,16 @@ class OtlpEgressGuardTest {
     IllegalStateException error =
         assertThrows(
             IllegalStateException.class,
-            () -> enforce(configWith(false, source("EnvConfigSource", Map.of()))));
+            () -> enforce(configWith(false, fileSource("EnvConfigSource", Map.of()))));
     assertTrue(error.getMessage().contains(OtlpEgressGuard.TRACES_ENDPOINT_ENV));
     assertTrue(error.getMessage().contains("fail-closed"));
   }
 
   @Test
-  void sdkEnabledWithEndpointInEnvSourceBoots() {
-    Config config =
-        configWith(
-            false,
-            source(
-                "EnvConfigSource",
-                Map.of(OtlpEgressGuard.TRACES_ENDPOINT_KEY, "http://collector:4317")));
+  void sdkEnabledWithEndpointInFileSourceBoots() {
+    Map<String, String> file = new HashMap<>();
+    file.put(OtlpEgressGuard.TRACES_ENDPOINT_KEY, "http://collector:4317");
+    Config config = configWith(false, fileSource("PropertiesConfigSource[test]", file));
     assertDoesNotThrow(() -> enforce(config));
   }
 
@@ -77,12 +82,9 @@ class OtlpEgressGuardTest {
   void extensionDefaultAloneDoesNotCountAsExplicit() {
     // The built-in fallback shows up in getOptionalValue but lives in no real
     // source (only the skipped DefaultValuesConfigSource): must still fail closed.
-    Config config =
-        configWith(
-            false,
-            source(
-                OtlpEgressGuard.DEFAULT_VALUES_SOURCE,
-                Map.of(OtlpEgressGuard.TRACES_ENDPOINT_KEY, "http://localhost:4317")));
+    Map<String, String> defaults = new HashMap<>();
+    defaults.put(OtlpEgressGuard.TRACES_ENDPOINT_KEY, "http://localhost:4317");
+    Config config = configWith(false, fileSource(OtlpEgressGuard.DEFAULT_VALUES_SOURCE, defaults));
     assertThrows(IllegalStateException.class, () -> enforce(config));
   }
 
@@ -92,18 +94,33 @@ class OtlpEgressGuardTest {
     // someone deletes the application.yml line.
     assertThrows(
         IllegalStateException.class,
-        () -> enforce(configWith(null, source("EnvConfigSource", Map.of()))));
+        () -> enforce(configWith(null, fileSource("EnvConfigSource", Map.of()))));
   }
 
   @Test
-  void explicitlyConfiguredInspectsSources() {
-    Config withSource =
-        configWith(
-            false, source("EnvConfigSource", Map.of(OtlpEgressGuard.TRACES_ENDPOINT_KEY, "x")));
-    Config withoutSource = configWith(false, source("EnvConfigSource", Map.of()));
-    assertTrue(
-        OtlpEgressGuard.explicitlyConfigured(withSource, OtlpEgressGuard.TRACES_ENDPOINT_KEY));
-    assertFalse(
-        OtlpEgressGuard.explicitlyConfigured(withoutSource, OtlpEgressGuard.TRACES_ENDPOINT_KEY));
+  void envVarOptInSatisfiesExplicitCheckWithRealEnvSource() {
+    // Real EnvConfigSource semantics (r_glm finding): the property map is keyed by
+    // the raw env-var name; the dotted alias must surface via getPropertyNames().
+    Config config =
+        new SmallRyeConfigBuilder()
+            .withSources(
+                new EnvConfigSource(
+                    Map.of(
+                        OtlpEgressGuard.TRACES_ENDPOINT_ENV.toUpperCase().replace(".", "_"),
+                        "http://collector:4317"),
+                    300))
+            .build();
+    assertTrue(OtlpEgressGuard.explicitlyConfigured(config, OtlpEgressGuard.TRACES_ENDPOINT_KEY));
+    // SDK flag unset = enabled, endpoint explicit via env: must boot.
+    assertDoesNotThrow(() -> enforce(config));
+  }
+
+  @Test
+  void realEnvSourceWithoutTheVariableStaysClosed() {
+    Config config =
+        new SmallRyeConfigBuilder()
+            .withSources(new EnvConfigSource(Map.of("UNRELATED_VAR", "x"), 300))
+            .build();
+    assertFalse(OtlpEgressGuard.explicitlyConfigured(config, OtlpEgressGuard.TRACES_ENDPOINT_KEY));
   }
 }

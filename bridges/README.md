@@ -25,8 +25,11 @@ receives on bridge RPCs at info level (TraceparentInterceptor,
 ## OpenTelemetry (OTLP export)
 
 All three bridges carry `quarkus-opentelemetry` (platform BOM version) so each
-bridge can run its own OTel pipeline: spans continue the trace the Rust side
-started (escalon 1 `traceparent` propagation) instead of only logging it.
+bridge can run its own OTel pipeline: the extension's gRPC instrumentation
+extracts the W3C `traceparent` context (escalon 1) on bridge RPCs, so server
+spans continue the Rust-side trace. Continuation is test-pinned on the jms
+bridge (`OtelSpanFlowTest`, remote-parent assertion over a real RPC); xml and
+cxf have no tracing Rust callers yet and get their spans when one appears.
 
 **Egress is fail-closed.** OTLP export is a new egress surface from every
 bridge, so it follows the repo's fail-closed allowlist doctrine (Rust-side
