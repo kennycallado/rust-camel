@@ -4,15 +4,8 @@
 # Use sparingly — each entry is an accepted unredacted url/uri/config log.
 
 # ── camel-component-grpc (rc-redactstrict task 2.2) ─────────────────────
-# consumer.rs:488 — macro logs `host = %host` (clone of self.host): bare gRPC
-#   consumer hostname from config, no URL and no credential substrate.
-crates/components/camel-component-grpc/src/consumer.rs:488
-# consumer.rs:618 — `host = %self.host`: bare gRPC consumer hostname from
-#   config, no URL and no credential substrate.
-crates/components/camel-component-grpc/src/consumer.rs:618
-# consumer.rs:641 — `host = %self.host`: bare gRPC consumer hostname from
-#   config, no URL and no credential substrate.
-crates/components/camel-component-grpc/src/consumer.rs:641
+# consumer.rs entries (488/618/641) dropped in rc-c1qwn: sites no longer
+#   violate (redeemed at source; empty-allowlist probe showed 0 hits).
 # tls_reload.rs:47 — macro logs `host = %self.host`: bare TLS listener
 #   hostname from config, no URL and no credential substrate.
 crates/components/camel-component-grpc/src/tls_reload.rs:47
@@ -24,9 +17,8 @@ crates/components/camel-component-grpc/src/tls_reload.rs:56
 # lib.rs:1193 — `host = host`: bare HTTP server hostname parameter
 #   (&str), no URL and no credential substrate.
 crates/components/camel-http/src/lib.rs:1193
-# lib.rs:2166 — `host = %self.config.host`: bare configured HTTP bind
-#   hostname, no URL and no credential substrate.
-crates/components/camel-http/src/lib.rs:2166
+# lib.rs:2166 entry dropped in rc-c1qwn: site no longer violates
+#   (redeemed at source; empty-allowlist probe showed 0 hits).
 # tls_reload.rs:60 — macro logs `host = %self.host`: bare HTTP TLS server
 #   hostname from config, no URL and no credential substrate.
 crates/components/camel-http/src/tls_reload.rs:60
@@ -44,41 +36,8 @@ crates/components/camel-redis/src/config.rs:400
 #   password field), no URL and no credential substrate.
 crates/components/camel-redis/src/config.rs:840
 
-# ── camel-ws (rc-redactstrict task 2.2) ─────────────────────────────────
-# Line refs renumbered by rc-onm5b (ServerRegistry liveness eviction insertions).
-# lib.rs:583 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
-#   provably credential-free; wrapping a non-URL IP in redact_url is
-#   semantically wrong (disposition b).
-crates/components/camel-ws/src/lib.rs:583
-# lib.rs:612 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
-#   provably credential-free; wrapping a non-URL IP in redact_url is
-#   semantically wrong (disposition b).
-crates/components/camel-ws/src/lib.rs:612
-# lib.rs:624 — `host = %bound_addr.ip()`: bare listener IP from SocketAddr,
-#   provably credential-free; wrapping a non-URL IP in redact_url is
-#   semantically wrong (disposition b).
-crates/components/camel-ws/src/lib.rs:624
-# lib.rs:704 — `host = %addr.ip()`: bare listener IP from SocketAddr,
-#   provably credential-free; wrapping a non-URL IP in redact_url is
-#   semantically wrong (disposition b).
-crates/components/camel-ws/src/lib.rs:704
-# lib.rs:1728 — `host = self.cfg.inner.host`: bare configured WebSocket
-#   hostname, no URL and no credential substrate.
-crates/components/camel-ws/src/lib.rs:1728
-# lib.rs:1760 — `host = self.cfg.inner.host`: bare configured WebSocket
-#   hostname, no URL and no credential substrate.
-crates/components/camel-ws/src/lib.rs:1760
-# lib.rs:1794 — `host = self.cfg.inner.host`: bare configured WebSocket
-#   hostname, no URL and no credential substrate.
-crates/components/camel-ws/src/lib.rs:1794
-# lib.rs:1802 — `host = self.cfg.inner.host`: bare configured WebSocket
-#   hostname, no URL and no credential substrate.
-crates/components/camel-ws/src/lib.rs:1802
-# lib.rs:1961 — `host = canonical_host`: canonical host derived from config
-#   (hostname/IP only, see WsUriConfig::canonical_host), no credential
-#   substrate.
-crates/components/camel-ws/src/lib.rs:1961
-# lib.rs:1982 — `host = canonical_host`: canonical host derived from config
-#   (hostname/IP only, see WsUriConfig::canonical_host), no credential
-#   substrate.
-crates/components/camel-ws/src/lib.rs:1982
+# ── camel-ws ────────────────────────────────────────────────────────────
+# No entries since rc-c1qwn (mission 163): all former entries (lib.rs
+#   583/612/624/704 and the 1728-1982 region, stale after mission 162's
+#   twin deletion) were dead — sites redeemed at source; empty-allowlist
+#   probe showed 0 camel-ws violations.
