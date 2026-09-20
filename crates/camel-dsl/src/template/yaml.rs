@@ -380,4 +380,97 @@ templates:
             "error should name the unknown variant: {err}"
         );
     }
+
+    // ── TemplateSections view regression pins (bd rc-28b90) ──
+    // Extraction runs through the targeted view and must NOT re-validate
+    // the routes section; errors inside the templates/templated_routes
+    // scope must still fail.
+
+    #[test]
+    fn template_extraction_tolerates_invalid_routes_section() {
+        use crate::route_ast::RouteDslRoutes;
+
+        // A string at an integer-typed route position (the env-int probe
+        // symptom shape: `${env:...}` stays STRING-typed after
+        // interpolation) fails the full-document parse.
+        let yaml = r#"
+routes:
+  - id: bad-int-route
+    from: direct:start
+    steps:
+      - delay:
+          delay_ms: "${env:DWD_DELAY_MS:-500}"
+templates:
+  - id: good-tpl
+    routes:
+      - id: tpl-route
+        from: "direct:{{name}}"
+        steps:
+          - to: "log:info"
+templated_routes:
+  - route_template_ref: good-tpl
+    route_id: instantiated
+    parameters:
+      name: bob
+"#;
+        // The routes section is genuinely invalid for the full view: the
+        // doc only parses after a typed probe coerces the string leaf.
+        let full: Result<RouteDslRoutes, _> = serde_yml::from_str(yaml);
+        assert!(
+            full.is_err(),
+            "doc must fail the full RouteDslRoutes parse (regression pin)"
+        );
+
+        // Targeted view: both extractions succeed without touching routes.
+        let templates = parse_yaml_templates(yaml).unwrap();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].id, "good-tpl");
+        assert_eq!(templates[0].routes[0]["id"], "tpl-route");
+
+        let templated = parse_yaml_templated_routes(yaml).unwrap();
+        assert_eq!(templated.len(), 1);
+        assert_eq!(templated[0].route_template_ref, "good-tpl");
+        assert_eq!(templated[0].route_id.as_deref(), Some("instantiated"));
+    }
+
+    #[test]
+    fn template_scope_errors_still_fail() {
+        // `templates` itself malformed (scalar where a sequence is
+        // required) is inside the view's scope and must fail.
+        let bad_templates = r#"
+routes: []
+templates: "not-a-sequence"
+"#;
+        assert!(parse_yaml_templates(bad_templates).is_err());
+
+        // A template entry missing its required `id` is in-scope.
+        let missing_id = r#"
+routes: []
+templates:
+  - routes:
+      - id: anon-route
+        from: timer:tick
+"#;
+        assert!(parse_yaml_templates(missing_id).is_err());
+
+        // A `templated_routes` entry missing its required
+        // `route_template_ref` is in-scope.
+        let missing_ref = r#"
+routes: []
+templated_routes:
+  - route_id: dangling
+    parameters:
+      name: bob
+"#;
+        assert!(parse_yaml_templated_routes(missing_ref).is_err());
+    }
+
+    #[test]
+    fn template_extraction_rejects_non_mapping_document() {
+        // Mapping-only enforcement mirrors RouteDslRoutes (rc-m5ah):
+        // a positional-sequence document is not a route document mapping.
+        let yaml = "- just\n- a\n- sequence\n";
+        assert!(parse_yaml_templates(yaml).is_err());
+        assert!(parse_yaml_templated_routes(yaml).is_err());
+    }
 }
