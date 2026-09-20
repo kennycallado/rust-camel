@@ -210,16 +210,16 @@ jobs:
           docker run --rm alpine:3.21 cat /etc/ssl/certs/ca-certificates.crt > context/ca-certificates.crt
       - name: Build production image
         run: docker build --target production -t camel-smoke:production context/
-      - name: Build alpine image
-        run: docker build --target alpine -t camel-smoke:alpine context/
+      - name: Build slim image
+        run: docker build --target slim -t camel-smoke:slim context/
       - name: Test production image
         run: |
           OUTPUT=$(docker run --rm camel-smoke:production --version)
           echo "$OUTPUT"
           echo "$OUTPUT" | grep -q "camel"
-      - name: Test alpine image
+      - name: Test slim image
         run: |
-          OUTPUT=$(docker run --rm camel-smoke:alpine --version)
+          OUTPUT=$(docker run --rm camel-smoke:slim --version)
           echo "$OUTPUT"
           echo "$OUTPUT" | grep -q "camel"
       - name: Build gnu binary

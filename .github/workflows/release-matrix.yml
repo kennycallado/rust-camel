@@ -461,15 +461,15 @@ jobs:
             arm64-artifact: camel-aarch64-unknown-linux-musl
             in-dev: false
             semantic-tag: regular
-          - variant: alpine
-            suffix: "-alpine"
-            target: alpine
+          - variant: slim
+            suffix: "-slim"
+            target: slim
             amd64-artifact: camel-slim-x86_64-unknown-linux-musl
             arm64-artifact: camel-slim-aarch64-unknown-linux-musl
             in-dev: false
             semantic-tag: slim
-          - variant: gnu
-            suffix: "-gnu"
+          - variant: full
+            suffix: "-full"
             target: gnu
             amd64-artifact: camel-full-x86_64-unknown-linux-gnu
             arm64-artifact: camel-full-aarch64-unknown-linux-gnu
@@ -478,6 +478,7 @@ jobs:
     env:
       REGISTRY_GHCR: ghcr.io
       REGISTRY_DOCKERHUB: docker.io
+      STABLE: ${{ !contains(github.ref_name, '-rc.') }}
       IMAGE_NAME: ${{ github.repository }}
     steps:
       # NOTE: dev gating is step-level — job-level if cannot access the
@@ -541,8 +542,8 @@ jobs:
           chmod +x "$BIN"
           case "${{ matrix.variant }}" in
             production) EXPECTED="regular" ;;
-            alpine) EXPECTED="slim" ;;
-            gnu) EXPECTED="full" ;;
+            slim) EXPECTED="slim" ;;
+            full) EXPECTED="full" ;;
             *) echo "unknown variant"; exit 1 ;;
           esac
           OUT="$("$BIN" --version)"
@@ -576,18 +577,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Docker metadata
-        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: |
-            ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}
-            ${{ env.REGISTRY_DOCKERHUB }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ steps.version.outputs.VERSION }}${{ matrix.suffix }}
-            type=raw,value=latest${{ matrix.suffix }}
-
       - name: Prepare build context
         if: ${{ !inputs.dev-profile || matrix.in-dev }}
         run: |
@@ -617,13 +606,43 @@ jobs:
           printf '%s\n' "$OUT"
           case "${{ matrix.variant }}" in
             production) EXPECTED="regular" ;;
-            alpine) EXPECTED="slim" ;;
-            gnu) EXPECTED="full" ;;
+            slim) EXPECTED="slim" ;;
+            full) EXPECTED="full" ;;
           esac
           case "$OUT" in
             *" ($EXPECTED)") ;;
             *) echo "FAIL: expected flavor suffix ($EXPECTED)"; exit 1 ;;
           esac
+
+      - name: Compute amd64 tags
+        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
+        id: tags-amd64
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          MODE="$([ "${{ env.STABLE }}" = "true" ] && echo stable || echo rc)"
+          {
+            echo "tags<<EOF"
+            scripts/docker-tags.sh "$VERSION" "$MODE" "${{ matrix.suffix }}" "${{ matrix.semantic-tag }}" --arch amd64 \
+              | sed "s@^@${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:@"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Compute arm64 tags
+        if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
+        id: tags-arm64
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          MODE="$([ "${{ env.STABLE }}" = "true" ] && echo stable || echo rc)"
+          {
+            echo "tags<<EOF"
+            scripts/docker-tags.sh "$VERSION" "$MODE" "${{ matrix.suffix }}" "${{ matrix.semantic-tag }}" --arch arm64 \
+              | sed "s@^@${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:@"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
 
       - name: Build and push amd64
         if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
@@ -635,9 +654,7 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: TARGETARCH=amd64
-          tags: |
-            ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}-amd64${{ matrix.suffix }}
-            ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:latest-amd64${{ matrix.suffix }}
+          tags: ${{ steps.tags-amd64.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -664,9 +681,7 @@ jobs:
           platforms: linux/arm64
           push: true
           build-args: TARGETARCH=arm64
-          tags: |
-            ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}-arm64${{ matrix.suffix }}
-            ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:latest-arm64${{ matrix.suffix }}
+          tags: ${{ steps.tags-arm64.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -681,15 +696,36 @@ jobs:
 
       - name: Create and push multi-arch manifest
         if: ${{ inputs.publish && (!inputs.dev-profile || matrix.in-dev) }}
+        shell: bash
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.VERSION }}"
-          for TAG in "${VERSION}${{ matrix.suffix }}" "latest${{ matrix.suffix }}" "${{ matrix.semantic-tag }}"; do
+          MODE="$([ "${{ env.STABLE }}" = "true" ] && echo stable || echo rc)"
+          PUSHED=""
+          while IFS= read -r TAG; do
             docker buildx imagetools create \
               -t ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${TAG} \
               -t ${{ env.REGISTRY_DOCKERHUB }}/${{ env.IMAGE_NAME }}:${TAG} \
               ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${VERSION}-amd64${{ matrix.suffix }} \
               ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${VERSION}-arm64${{ matrix.suffix }}
-          done
+            PUSHED="${PUSHED:+$PUSHED$'\n'}${TAG}"
+          done < <(scripts/docker-tags.sh "$VERSION" "$MODE" "${{ matrix.suffix }}" "${{ matrix.semantic-tag }}")
+          # Assert the pushed tag set against an EXPECTED list built
+          # INDEPENDENTLY of docker-tags.sh (no tautology): matrix
+          # fields only. Arch intermediates cannot leak in — PUSHED
+          # accumulates manifest-loop tags exclusively.
+          EXPECTED="${VERSION}${{ matrix.suffix }}"
+          if [ "${{ env.STABLE }}" = "true" ]; then
+            EXPECTED="$EXPECTED"$'\n'"latest${{ matrix.suffix }}"$'\n'"${{ matrix.semantic-tag }}"
+          fi
+          DRIFT="$(comm -3 <(sort -u <<< "$EXPECTED") <(sort -u <<< "$PUSHED"))"
+          if [ -n "$DRIFT" ]; then
+            echo "expected:"
+            printf '%s\n' "$EXPECTED"
+            echo "pushed:"
+            printf '%s\n' "$PUSHED"
+            exit 1
+          fi
 
   closure-check:
     name: Feature closure tests (dev)

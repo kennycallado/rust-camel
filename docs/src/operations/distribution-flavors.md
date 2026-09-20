@@ -24,13 +24,26 @@ Regular excludes only four items, each by a named principle:
 
 ## Docker tag map
 
-| Variant | Base image | Flavor | Legacy tag | Semantic tag |
-|---------|-----------|--------|-----------|--------------|
-| production | scratch, musl | regular | `latest`, no suffix | `:regular` |
-| alpine | musl | slim | `-alpine` | `:slim` |
-| gnu | distroless | full | `-gnu` | `:full` |
+| Flavor | Tags | Base image |
+|--------|------|-----------|
+| regular | `{VERSION}`, `latest`, `regular` | scratch |
+| slim | `{VERSION}-slim`, `latest-slim`, `slim` | scratch (from 0.51.0) |
+| full | `{VERSION}-full`, `latest-full`, `full` | distroless cc |
 
-The `latest` tag re-aliases to regular in the same release as the artifact re-alias. One announcement covers both. musl-based images never link rdkafka.
+The base image is a function of the toolchain. Musl flavors ship on scratch. The gnu flavor ships on distroless.
+
+### Discontinued tags
+
+The `-alpine` and `-gnu` tags are discontinued. They are never pushed again. Existing tags freeze at their last content. Pulls keep working. Nothing 404s. Use the `-slim` and `-full` families instead.
+
+### DIY alpine wrapper
+
+The slim flavor has no shell and no wget. Build a wrapper image when you need them:
+
+```dockerfile
+FROM alpine:3.21
+COPY --from=ghcr.io/kennycallado/rust-camel:{VERSION}-slim /usr/local/bin/camel /usr/local/bin/camel
+```
 
 ## Install guidance
 
@@ -78,7 +91,7 @@ cargo install camel-cli --features flavor-regular,cxf
 
 ## Breaking change at 0.50
 
-The `camel-<target>` release asset re-aliases from the historical full-ish closure to the regular flavor at 0.50. This is a one-time semantic break. The `latest` Docker tag re-aliases to regular in the same release. The 0.50 release notes reference this section as the canonical callout.
+The `camel-<target>` release asset re-aliases from the historical full-ish closure to the regular flavor at 0.50. This is a one-time semantic break. The `latest` Docker tag kept the full-no-kafka content at 0.50.0. It tracks regular from 0.51.0 (see the migration note). The 0.50 release notes reference this section as the canonical callout.
 
 Before 0.50, `camel-<target>` carried the full-ish closure. After 0.50, it carries the regular closure. Users who need the full closure download `camel-full-<target>` or pull the `:full` image.
 
@@ -109,5 +122,20 @@ Flavors are presets, not walls. Additions flow down freely in minor releases. Mo
 4. Update the flavor table in this doc.
 
 CI matrix legs never change. Legs are target by flavor. `full_covers_universe` goes red if a new feature is placed in no flavor.
+
+## Appendix: migration note for 0.51.0
+
+Ready to paste into the 0.51.0 release notes:
+
+> The `latest` Docker tag now tracks the regular flavor. The `-slim` and `-full` families are the flavor-named tag families. The `-alpine` and `-gnu` tags are discontinued and frozen at their last content. Release-candidate rehearsals never move floating tags.
+
+## Appendix: rehearsal runbook
+
+Release-time verification for the floating-tag quarantine. Executed at the 0.51.0-rc release time. Follow-up ticket rc-5t5fo.9 owns the post-0.51.0 verification pass.
+
+0. Capture the digests of the six floating tags on both registries before pushing the rc tag. Example: `docker manifest inspect ghcr.io/kennycallado/rust-camel:latest`.
+1. Push the `v0.51.0-rc.N` tag.
+2. After the run, query both registries' tag timestamps. Use the Docker Hub API and GHCR. Assert `latest`, `latest-slim`, `latest-full`, `regular`, `slim`, `full` are unchanged. Compare against the pre-rehearsal digests.
+3. Assert the rc-suffixed immutable tags exist (`v0.51.0-rc.N`, `v0.51.0-rc.N-slim`, `v0.51.0-rc.N-full`).
 
 **Reference**: [CLI crate](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-cli/CONTEXT.md)

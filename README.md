@@ -368,23 +368,25 @@ See [`SECURITY.md`](SECURITY.md) to report vulnerabilities.
 ## Docker
 
 Pre-built images on [GHCR](https://github.com/kennycallado/rust-camel/pkgs/container/rust-camel)
-and [Docker Hub](https://hub.docker.com/r/kennycallado/rust-camel). Both
-variants support `linux/amd64` and `linux/arm64`.
+and [Docker Hub](https://hub.docker.com/r/kennycallado/rust-camel). All
+three families support `linux/amd64` and `linux/arm64`.
 
-| Tag suffix | Base        | Use case                                    |
-| ---------- | ----------- | ------------------------------------------- |
-| _(none)_   | scratch     | Minimal runtime image, small attack surface |
-| `-alpine`  | alpine:3.21 | Debugging — includes a busybox shell        |
+| Tag family | Base | Use case |
+| ---------- | ---- | -------- |
+| `{VERSION}`, `latest`, `regular` | scratch | Regular flavor, minimal attack surface |
+| `{VERSION}-slim`, `latest-slim`, `slim` | scratch | Slim flavor, musl |
+| `{VERSION}-full`, `latest-full`, `full` | distroless | Full flavor, gnu |
 
 ```bash
-# Production
+# Production (regular flavor)
 docker run -v $(pwd)/routes:/app/routes \
   ghcr.io/kennycallado/rust-camel:latest run
 
-# Debugging shell
-docker run -it -v $(pwd):/app \
-  ghcr.io/kennycallado/rust-camel:latest-alpine sh
+# Full flavor (gnu, distroless)
+docker pull ghcr.io/kennycallado/rust-camel:latest-full
 ```
+
+Need a shell? See the DIY alpine wrapper in the [distribution guide](docs/src/operations/distribution-flavors.md).
 
 ## Examples
 
