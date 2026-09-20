@@ -22,6 +22,45 @@ receives on bridge RPCs at info level (TraceparentInterceptor,
 
 ---
 
+## OpenTelemetry (OTLP export)
+
+All three bridges carry `quarkus-opentelemetry` (platform BOM version) so each
+bridge can run its own OTel pipeline: spans continue the trace the Rust side
+started (escalon 1 `traceparent` propagation) instead of only logging it.
+
+**Egress is fail-closed.** OTLP export is a new egress surface from every
+bridge, so it follows the repo's fail-closed allowlist doctrine (Rust-side
+precedent: `FunctionConfig.egress_allowlist`, 69a7f143 / rc-uctc): whether a
+collector is trusted is operator config, never code. Concretely:
+
+- The shipped default is `quarkus.otel.sdk.disabled: true`
+  (application.yml): no SDK, no spans, no egress. The OTLP exporter itself
+  ships enabled at build time, so the kill switch is the runtime SDK flag.
+- The extension's built-in endpoint fallback (`http://localhost:4317`) is
+  injected below the config-source layer — it is visible through the property
+  API while no source owns it. `OtlpEgressGuard` (one per bridge) therefore
+  checks the sources, not the property value: at startup, an enabled SDK
+  without an endpoint provided by an actual config source aborts the boot.
+  The fallback can never dial silently.
+
+Operator opt-in, both required (runtime env, works in native images):
+
+| Variable                                    | Default    | Description                                             |
+| ------------------------------------------- | ---------- | ------------------------------------------------------- |
+| `QUARKUS_OTEL_SDK_DISABLED`                 | `true`     | Set `false` to enable the bridge's OTel SDK and spans.  |
+| `QUARKUS_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | _(none)_   | Trusted collector, e.g. `http://collector:4317` (gRPC). |
+
+Setting only the first variable aborts startup by design (fail-closed);
+setting only the second keeps the SDK off (no egress, harmless).
+
+Native-image: quarkus-opentelemetry is a first-party Quarkus extension and
+registers its own native support; the bridges add no manual reflection
+entries for it (same as quarkus-logging-json in escalon 2). Native
+re-verification is deferred to the CI bridge builds (no local non-docker
+native toolchain on this host).
+
+---
+
 ## Environment Variables
 
 Each bridge reads its configuration from environment variables at startup. Malformed values fail loud before the bridge accepts traffic (ADR-0033). Per-bridge semantics: [`cxf/`](cxf/README.md), [`jms/`](jms/README.md).
