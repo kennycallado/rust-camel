@@ -65,6 +65,14 @@
 - `local-pack-simulation` passes with flat layout + two-space sidecar on both checksum branches.
 - No other step in the `build` job changed (`git diff` scoped to the two steps).
 
+> POSTSCRIPT (rehearsal v0.51.0-rc.1, 2026-09-20): the step-1 script above
+> writes a NON-canonical sidecar on Windows — git-bash sha256sum emits the
+> MSYS binary-mode marker " * " instead of two spaces. Fixed post-bless on
+> the branch: extract the digest field (cut -d" " -f1, both sha256sum and
+> shasum branches) and printf the canonical "<hex>  <basename>" line. The
+> spec's sidecar format is unchanged; the implementation now constructs it
+> deterministically on all platforms.
+
 ### Task 2: Release job asserts the 22-file topology
 
 **Files:**

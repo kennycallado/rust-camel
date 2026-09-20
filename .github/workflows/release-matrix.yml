@@ -316,15 +316,18 @@ jobs:
           tar -C "target/${{ matrix.target }}/release" -czf \
             "dist/${{ matrix.artifact-name }}.tar.gz" \
             "camel${{ matrix.bin-suffix }}"
-          # portable checksum: macOS runners lack coreutils' sha256sum by
-          # default; shasum -a 256 prints the identical "<hex>␣␣<name>" format
+          # Canonical sidecar "<hex>  <basename>" (GNU text format, two
+          # spaces) on every platform. git-bash sha256sum emits the
+          # MSYS binary-mode marker " * " instead (rehearsal v0.51.0-rc.1),
+          # so extract the digest field and printf the line ourselves.
+          # macOS runners lack coreutils; shasum -a 256 gives the same field.
           if command -v sha256sum >/dev/null 2>&1; then
-            ( cd dist && sha256sum "${{ matrix.artifact-name }}.tar.gz" \
-              > "${{ matrix.artifact-name }}.tar.gz.sha256" )
+            HASH="$(sha256sum "dist/${{ matrix.artifact-name }}.tar.gz" | cut -d' ' -f1)"
           else
-            ( cd dist && shasum -a 256 "${{ matrix.artifact-name }}.tar.gz" \
-              > "${{ matrix.artifact-name }}.tar.gz.sha256" )
+            HASH="$(shasum -a 256 "dist/${{ matrix.artifact-name }}.tar.gz" | cut -d' ' -f1)"
           fi
+          printf '%s  %s\n' "$HASH" "${{ matrix.artifact-name }}.tar.gz" \
+            > "dist/${{ matrix.artifact-name }}.tar.gz.sha256"
         shell: bash
 
       - name: Upload artifact
