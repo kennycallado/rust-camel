@@ -69,6 +69,13 @@ public class OtlpEgressGuard {
    * env sources key their property map by raw env-var names ({@code QUARKUS_...}) and expose the
    * dotted aliases only through {@code getPropertyNames()} plus {@link
    * ConfigSource#getValue(String)}.
+   *
+   * <p>Supported opt-in spellings: the plain unqualified key in any config file, a system property,
+   * or the {@code QUARKUS_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT} env var. Profile-qualified keys
+   * ({@code %prod.…}) and relocated legacy spellings resolve only through property lookup, not
+   * through {@code getPropertyNames()}: the guard does not recognize them and fails closed. An
+   * explicitly configured empty value passes this check and is left to the extension's own endpoint
+   * validation. The guard's tests live in bridges/jms (twin-copy convention).
    */
   static boolean explicitlyConfigured(Config config, String key) {
     for (ConfigSource source : config.getConfigSources()) {
