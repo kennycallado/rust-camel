@@ -305,20 +305,20 @@ routeFiles:
     }
 }
 
-/// In-flight coupling: seda's `DepthGuard` keeps queue depth >= 1 while
-/// an envelope is endpoint-resident — queued or being forwarded
-/// (crates/components/camel-component-seda/src/lib.rs ~803-805) — so the
-/// drain loop cannot see this queue empty while the send/forward path
-/// holds it. Once forwarded, the exchange lives in route-pipeline
-/// residency the endpoint gauge cannot see; the drain's 2.5 s
-/// zero-streak window (batch.rs `DRAIN_ZERO_SAMPLES_REQUIRED`) outlasts
-/// this fixture's 1.5 s worker residency, so the file exists by the
-/// time the gate — and then the process — completes, without relying on
-/// teardown's in-flight wait. If seda/route stop ever gains in-flight
-/// drain, the immediate-read assertion may pass via teardown alone —
-/// re-point this test; the DETERMINISTIC regression net for a broken
-/// drain loop is `batch_timeout_expires_with_timeout_outcome`
-/// (a no-op drain would exit 0 there), not this test.
+/// In-flight coupling: every accepted exchange holds an RAII
+/// `InFlightClaim` across its whole lifecycle — seda queue residency,
+/// dispatch, and route-pipeline residency (the batch drain contract in
+/// `job/batch.rs`) — so while this fixture's 1.5 s worker delay parks
+/// the exchange mid-pipeline, `CamelContext::total_in_flight()` reads
+/// at least 1 and the drain gate's single-counter poll cannot report
+/// zero before the file write completes. The file exists by the time
+/// the gate — and then the process — completes, without relying on
+/// teardown's in-flight wait. If claims ever stop spanning
+/// route-pipeline residency, the immediate-read assertion may pass via
+/// teardown alone — re-point this test; the DETERMINISTIC regression
+/// net for a broken drain loop is
+/// `batch_timeout_expires_with_timeout_outcome` (a no-op drain would
+/// exit 0 there), not this test.
 #[test]
 fn batch_waits_for_in_flight_worker() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -373,15 +373,15 @@ routeFiles:
 }
 
 /// The batch overall timeout on a queue that never drains: a
-/// self-feeding seda route re-enqueues every message it consumes, so the
-/// drain gate can never accumulate the 10 consecutive zero samples it
-/// requires (batch.rs `DRAIN_ZERO_SAMPLES_REQUIRED`): 10 samples span
-/// 2.5 s at the 250 ms sampler cadence, more than this fixture's 2 s
-/// deadline can ever admit — the `Timeout` verdict is
-/// scheduling-independent, exit 2 within a bounded wall clock. This
-/// doubles as the deterministic
-/// regression net for a no-op drain loop: without a real drain this run
-/// would exit 0.
+/// self-feeding seda route re-enqueues every message it consumes, and
+/// each accepted exchange holds its `InFlightClaim` until its pipeline
+/// completes, so the route always owns at least one
+/// accepted-not-completed exchange and `CamelContext::total_in_flight()`
+/// never reads zero (the batch drain contract in `job/batch.rs`). The
+/// drain gate naps up to the overall `timeout` deadline — the `Timeout`
+/// verdict is scheduling-independent, exit 2 within a bounded wall
+/// clock. This doubles as the deterministic regression net for a no-op
+/// drain loop: without a real drain this run would exit 0.
 #[test]
 fn batch_timeout_expires_with_timeout_outcome() {
     let dir = tempfile::tempdir().expect("tempdir");
