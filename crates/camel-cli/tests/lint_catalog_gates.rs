@@ -97,16 +97,18 @@ async fn slim_lint_flags_gated_bridge_scheme() {
         Severity::Info,
         "gated bridge degradation is informational, like wasm/exec"
     );
-    // Naming check: the note must sit on the `jms` endpoint's URI literal.
-    // (The rule's scheme span includes the YAML opening quote — an upstream
-    // camel-lint quirk — so assert containment, not exact token equality.)
+    // Naming check: the note must sit exactly on the `jms` endpoint's
+    // scheme token. Since rc-bsx4t trims the YAML quote pair at
+    // endpoint-span construction, the span slices the bare token.
     let uri_pos = JMS_ROUTE
         .find("\"jms:queue\"")
         .expect("fixture contains the jms endpoint URI");
-    let uri_end = uri_pos + "\"jms:queue\"".len();
-    assert!(
-        note.span.start >= uri_pos && note.span.end <= uri_end,
-        "note must sit on the jms endpoint URI; span {:?}, URI at {uri_pos}..{uri_end}",
+    let scheme_start = uri_pos + "\"".len();
+    let scheme_end = scheme_start + "jms".len();
+    assert_eq!(
+        (note.span.start, note.span.end),
+        (scheme_start, scheme_end),
+        "note must sit on the exact jms scheme token; span {:?}, scheme at {scheme_start}..{scheme_end}",
         note.span
     );
 }

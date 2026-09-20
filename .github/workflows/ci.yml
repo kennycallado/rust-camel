@@ -296,6 +296,12 @@ jobs:
             -- -D warnings
           cargo clippy -p camel-component-kafka --all-targets -- -D warnings
           cargo clippy -p camel-cli -- -D warnings
+          # rc-6obii: the camel-cli leg above resolves default features
+          # only (flavor-regular, no exec) — the exec-gated cfg blocks
+          # and run_exec_guard_test never lint in CI. Mirror the rc-zrta1
+          # test leg's feature set, with --all-targets for the gated tests.
+          cargo clippy -p camel-cli --no-default-features \
+            --features flavor-regular,exec --all-targets -- -D warnings
       - name: lint-unwrap
         run: cargo xtask lint-unwrap
       - name: lint-secrets

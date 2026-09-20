@@ -629,9 +629,7 @@ fn egress_allowlist_non_array_rejected_fail_closed() {
         toml::from_str(r#"egress_allowlist = "api.example.com""#).expect("parse table"), // allow-unwrap
     );
     let raw = components_raw_with_function(block);
-    let err = egress_allowlist_from_components(&raw)
-        .err()
-        .expect("non-array value must be rejected"); // allow-unwrap
+    let err = egress_allowlist_from_components(&raw).expect_err("non-array value must be rejected");
     assert!(
         err.to_string().contains("egress_allowlist"),
         "error must name egress_allowlist, got: {err}"
@@ -644,9 +642,7 @@ fn egress_allowlist_non_string_item_rejected_fail_closed() {
         toml::from_str(r#"egress_allowlist = [1]"#).expect("parse table"), // allow-unwrap
     );
     let raw = components_raw_with_function(block);
-    let err = egress_allowlist_from_components(&raw)
-        .err()
-        .expect("non-string item must be rejected"); // allow-unwrap
+    let err = egress_allowlist_from_components(&raw).expect_err("non-string item must be rejected");
     assert!(
         err.to_string().contains("egress_allowlist"),
         "error must name egress_allowlist, got: {err}"
@@ -664,9 +660,7 @@ fn function_config_malformed_allowlist_fails_closed() {
             .expect("parse table"), // allow-unwrap
     );
     let raw = components_raw_with_function(block);
-    let err = function_config_from_components(&raw)
-        .err()
-        .expect("malformed entry must fail closed"); // allow-unwrap
+    let err = function_config_from_components(&raw).expect_err("malformed entry must fail closed");
     assert!(
         err.to_string().contains("egress_allowlist"),
         "error must name egress_allowlist, got: {err}"
