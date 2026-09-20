@@ -309,8 +309,21 @@ jobs:
       - name: Stage binary
         if: ${{ (!inputs.dev-profile || matrix.in-dev-profile) && matrix.upload != false }}
         run: |
+          set -euo pipefail
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/camel${{ matrix.bin-suffix }}" "dist/${{ matrix.artifact-name }}${{ matrix.bin-suffix }}"
+          # flavor probes already ran on the bare binary above — packaging only
+          tar -C "target/${{ matrix.target }}/release" -czf \
+            "dist/${{ matrix.artifact-name }}.tar.gz" \
+            "camel${{ matrix.bin-suffix }}"
+          # portable checksum: macOS runners lack coreutils' sha256sum by
+          # default; shasum -a 256 prints the identical "<hex>␣␣<name>" format
+          if command -v sha256sum >/dev/null 2>&1; then
+            ( cd dist && sha256sum "${{ matrix.artifact-name }}.tar.gz" \
+              > "${{ matrix.artifact-name }}.tar.gz.sha256" )
+          else
+            ( cd dist && shasum -a 256 "${{ matrix.artifact-name }}.tar.gz" \
+              > "${{ matrix.artifact-name }}.tar.gz.sha256" )
+          fi
         shell: bash
 
       - name: Upload artifact
@@ -318,7 +331,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact-name }}
-          path: dist/${{ matrix.artifact-name }}${{ matrix.bin-suffix }}
+          path: |
+            dist/${{ matrix.artifact-name }}.tar.gz*
 
   release:
     name: Create GitHub Release
