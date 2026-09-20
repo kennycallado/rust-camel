@@ -90,9 +90,25 @@ async function wakeConductor(type, sid, dir) {
     `or inject continuation if a mission stalled mid-turn. ` +
     `(4) If nothing actionable, reply briefly and stop — do not spin.]`;
   try {
+    // 2026-09-20: server enforces Basic auth — resolve the password from
+    // the server process env first, then the canonical server-auth file.
+    let authHeader = "";
+    try {
+      const pass =
+        process.env.OPENCODE_SERVER_PASSWORD ||
+        (await import("node:fs")).readFileSync(
+          `${REPO}.opencode/fleet/server-auth`,
+          "utf8",
+        ).trim();
+      authHeader =
+        "Basic " + Buffer.from("opencode:" + pass).toString("base64");
+    } catch {}
     const res = await fetch(`${BASE}/session/${conductor}/message`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(authHeader ? { Authorization: authHeader } : {}),
+      },
       body: JSON.stringify({ parts: [{ type: "text", text }] }),
       signal: AbortSignal.timeout(10_000),
     });
