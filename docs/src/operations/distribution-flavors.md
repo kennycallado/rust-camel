@@ -56,6 +56,10 @@ docker pull ghcr.io/kennycallado/rust-camel:full
 
 `cargo install camel-cli` builds the regular flavor from source. The build is pure Rust. It needs no C toolchain. The four principled exclusions stay out of the default build.
 
+### cargo binstall
+
+`cargo binstall camel-cli` installs the fullest prebuilt binary for your platform from GitHub releases. On musl it installs the regular flavor. Other flavors come via docker tags, direct release download, or `cargo install --features`. Slim additionally needs `--no-default-features`. Prebuilts via binstall start at the first metadata-bearing release (0.51.0). Older versions carry no binstall metadata, so they have no project-hosted prebuilt routing and binstall may serve a third-party quickinstall build instead; for a guaranteed source compile of an older version use `cargo install camel-cli --version <version>` (yields the regular flavor).
+
 ### Everything
 
 `--features flavor-full` enables every feature:

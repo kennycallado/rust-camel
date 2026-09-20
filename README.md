@@ -112,6 +112,11 @@ YAML](https://kennycallado.github.io/rust-camel/docs/getting-started/yaml-route.
 
 ### Use the CLI
 
+- `cargo binstall camel-cli` — installs the fullest prebuilt binary for
+  your platform from GitHub releases (regular on musl; other flavors via
+  docker tags, direct release download, or `cargo install --features` —
+  slim additionally needs `--no-default-features`).
+
 ```bash
 cargo install camel-cli
 camel new my-integration   # scaffolds Camel.toml + routes/hello.yaml
