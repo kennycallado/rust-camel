@@ -172,7 +172,7 @@ pub(crate) struct LifecycleSpec {
     /// `Some` enables the reload watcher; `None` disables it
     /// unconditionally (compiled artifacts always pass `None`).
     pub watch: Option<WatchSpec>,
-    /// Emit the `camel run` CWD-trust WARN after context configure.
+    /// Emit the `camel run` CWD-trust INFO note after context configure.
     /// Compiled artifacts skip it: their documents cannot reference
     /// scripts/WASM (compile-time asset policy).
     pub trust_note: bool,
@@ -290,9 +290,11 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
     // R4-L4: CWD trust model — camel run executes route scripts/WASM/beans
     // from the current working directory (dev-tool model, like cargo run).
     // Compiled artifacts never execute CWD-resolved assets (the compile
-    // asset policy rejects them), so the note is camel-run-only.
+    // asset policy rejects them), so the note is camel-run-only. INFO, not
+    // WARN: a trust-model disclosure, not a misconfiguration warning
+    // (e_opus ruling, bd rc-k56el Q3).
     if spec.trust_note {
-        tracing::warn!(
+        tracing::info!(
             "camel run trusts the current working directory and will execute route \
              scripts, WASM modules, and beans resolved from it; only run from a \
              trusted directory"

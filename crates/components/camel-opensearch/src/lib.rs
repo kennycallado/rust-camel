@@ -119,7 +119,12 @@ impl Component for OpenSearchsComponent {
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        OpenSearchEndpointConfig::metadata()
+        // The TLS alias shares the opensearch URI option surface; only the
+        // scheme differs. Self-setting it keeps Registry::register off the
+        // normalize-warn path.
+        let mut meta = OpenSearchEndpointConfig::metadata();
+        meta.scheme = "opensearchs".to_string();
+        meta
     }
 
     fn create_endpoint(
@@ -184,6 +189,13 @@ mod tests {
     fn test_opensearch_component_scheme() {
         let component = OpenSearchComponent::new();
         assert_eq!(component.scheme(), "opensearch");
+    }
+
+    #[test]
+    fn opensearchs_metadata_scheme_matches_component_scheme() {
+        // TLS alias shares the opensearch config surface; metadata() must
+        // report the "opensearchs" scheme so Registry::register sees no drift.
+        assert_eq!(OpenSearchsComponent::new().metadata().scheme, "opensearchs");
     }
 
     #[test]

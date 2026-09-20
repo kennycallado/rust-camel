@@ -762,7 +762,12 @@ impl Component for JmsComponent {
     }
 
     fn metadata(&self) -> camel_component_api::ComponentMetadata {
-        crate::metadata::JmsMetadataDescriptor::metadata()
+        // Alias instances (activemq/artemis) must report their own scheme,
+        // not the shared descriptor's "jms", or Registry::register warns and
+        // normalizes on every startup.
+        let mut meta = crate::metadata::JmsMetadataDescriptor::metadata();
+        meta.scheme = self.scheme.clone();
+        meta
     }
 
     fn create_endpoint(
@@ -993,6 +998,17 @@ mod tests {
         let pool_config = JmsPoolConfig::default();
         let result = JmsBridgePool::from_config(pool_config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn jms_metadata_scheme_matches_instance_scheme() {
+        // Alias instances (activemq/artemis) must report their own scheme in
+        // metadata(), not the shared descriptor's "jms".
+        let pool = Arc::new(JmsBridgePool::from_config(JmsPoolConfig::default()).unwrap());
+        for scheme in ["jms", "activemq", "artemis"] {
+            let component = JmsComponent::with_scheme(scheme, Arc::clone(&pool));
+            assert_eq!(component.metadata().scheme, scheme);
+        }
     }
 
     #[test]

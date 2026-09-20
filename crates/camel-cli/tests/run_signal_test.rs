@@ -10,7 +10,8 @@
 //!
 //! The harness mirrors `run_empty_discovery_test.rs`: spawn the real `camel`
 //! binary with piped stdout/stderr, poll the captured buffer for a marker,
-//! then send signals with `kill`. The mid-boot marker is the CWD-trust WARN:
+//! then send signals with `kill`. The mid-boot marker is the CWD-trust
+//! INFO note (demoted from WARN by the e_opus ruling, rc-k56el):
 //! it is flushed AFTER the signal handlers are armed (step 0) and while boot
 //! is still in flight (bundle cascade, discovery, context start all follow),
 //! so a signal sent on it lands inside the covered boot stretch with zero
@@ -84,7 +85,7 @@ fn sigint_during_boot_shuts_down_gracefully() {
     let drained = spawn_drained(&mut child);
 
     // Earliest mid-boot marker that proves the step-0 handlers are armed:
-    // the CWD-trust WARN prints right after the context is configured and
+    // the CWD-trust INFO note prints right after the context is configured and
     // BEFORE the component bundle cascade, discovery, and ctx.start(), the
     // whole stretch the shutdown select only arms after. The 5 ms poll keeps
     // marker-observation staleness small so the signal lands inside that

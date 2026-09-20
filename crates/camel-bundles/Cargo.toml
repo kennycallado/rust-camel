@@ -62,6 +62,9 @@ serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+# Startup log-noise regression test captures fmt-layer output through a
+# custom MakeWriter (bd rc-k56el).
+tracing-subscriber.workspace = true
 # Test-only fixtures for the moved security-builder tests (signed-JWT and
 # timestamp claims); never linked into the library.
 chrono.workspace = true

@@ -16,7 +16,7 @@
 //! deliver signals with `kill` (`common::send_signal`). The two
 //! synchronization markers are the pre-config-load
 //! `signal streams armed` stderr line (boot-buffer placement) and the
-//! mid-boot CWD-trust WARN (post-boot placement: discovery, route
+//! mid-boot CWD-trust INFO note (post-boot placement: discovery, route
 //! start, and the send race all follow it). Reports are asserted
 //! through `--report=<file>` so stdout stays clean. The kill-on-drop
 //! child guard plus a bounded exit wait keep every failure path from
@@ -39,7 +39,7 @@ use common::{
 /// still in flight (the boot-buffer window of the armed marker).
 const ARMED_MARKER: &str = "camel job: signal streams armed";
 
-/// Mid-boot marker: the CWD-trust WARN fires after context configure
+/// Mid-boot marker: the CWD-trust INFO note fires after context configure
 /// and before discovery, route start, and the send race — sending here
 /// lands the signal against a booted, in-flight job.
 const TRUST_MARKER: &str = "trusts the current working directory";
@@ -58,8 +58,8 @@ const WAIT: Duration = Duration::from_secs(30);
 const FORCE_EXIT_BOUND: Duration = Duration::from_secs(15);
 
 /// Write the standard job-fixture config. `log_level = "INFO"` (not
-/// the `"off"` of `job_one_shot_test.rs`): the mid-boot CWD-trust WARN
-/// the tests synchronize on is a `tracing::warn!` and must be visible.
+/// the `"off"` of `job_one_shot_test.rs`): the mid-boot CWD-trust INFO
+/// note the tests synchronize on must be visible at `log_level = "INFO"`.
 fn write_config(dir: &Path) {
     std::fs::write(
         dir.join("Camel.toml"),

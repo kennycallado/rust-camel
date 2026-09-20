@@ -800,3 +800,88 @@ mod tests {
         assert!(ctx.registry().get("timer").is_none());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Startup log-noise regression guard (bd rc-k56el)
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "ws", feature = "jms", feature = "opensearch"))]
+mod logquiet_regression_tests {
+    use super::*;
+
+    /// `MakeWriter` that appends formatted events to a shared `Vec<u8>` sink.
+    /// The sink collects the ANSI-stripped fmt layer output (same shape as
+    /// camel-cxf's `pool_env_test`).
+    #[derive(Clone)]
+    struct CapturingWriter {
+        sink: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.sink.lock().unwrap().extend_from_slice(buf); // allow-unwrap: test-only
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_sink() -> (Arc<std::sync::Mutex<Vec<u8>>>, impl tracing::Subscriber) {
+        let sink: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = CapturingWriter {
+            sink: Arc::clone(&sink),
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        (sink, subscriber)
+    }
+
+    /// Stock `camel run` startup must not log the registry's
+    /// `metadata scheme mismatch, normalizing` warn. The aliasing
+    /// components (wss, activemq, artemis, opensearchs) self-set their
+    /// metadata scheme, so `Registry::register` never enters the
+    /// mismatch branch for a default config (bd rc-k56el).
+    #[tokio::test]
+    async fn regular_registration_emits_no_warn_lines() {
+        let config = CamelConfig::default();
+        let mut ctx = CamelConfig::configure_context_with_beans(&config, None)
+            .await
+            .expect("configure_context_with_beans must succeed"); // allow-unwrap: test-only
+
+        let (sink, subscriber) = capture_sink();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        // Parallel tests race tracing's per-callsite interest cache against
+        // this thread-local subscriber; force a rebuild so the callsite
+        // re-evaluates against it (bd rc-u9hs, same as pool_env_test).
+        tracing::callsite::rebuild_interest_cache();
+
+        register_bundle::<camel_component_ws::WsBundle>(&mut ctx, &config)
+            .expect("ws bundle must register"); // allow-unwrap: test-only
+        register_bundle::<camel_component_jms::JmsBundle>(&mut ctx, &config)
+            .expect("jms bundle must register"); // allow-unwrap: test-only
+        register_bundle::<camel_component_opensearch::OpenSearchBundle>(&mut ctx, &config)
+            .expect("opensearch bundle must register"); // allow-unwrap: test-only
+
+        drop(_guard);
+
+        let captured = String::from_utf8(sink.lock().unwrap().clone()).unwrap(); // allow-unwrap: test-only
+        let warn_lines: Vec<&str> = captured.lines().filter(|l| l.contains("WARN")).collect();
+        assert!(
+            warn_lines.is_empty(),
+            "regular registration must not emit WARN lines, got {:#?}\nfull capture:\n{}",
+            warn_lines,
+            captured
+        );
+    }
+}

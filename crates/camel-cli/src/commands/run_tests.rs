@@ -3,19 +3,20 @@
 
 use super::*;
 
-/// The run function must emit exactly one startup warning about the CWD trust model.
+/// The run function must emit exactly one startup note about the CWD trust
+/// model (INFO: a trust-model disclosure, not a misconfiguration warning).
 #[test]
 fn startup_warning_emitted() {
     let source = include_str!("run.rs");
     // Build the search string from two parts so the concatenated form
-    // never appears literally in test code — only in the warn! call.
+    // never appears literally in test code — only in the info! call.
     let a = "camel run trusts the current working directory";
     let b = " and will execute route";
     let msg = format!("{a}{b}");
     let count = source.matches(&msg).count();
     assert_eq!(
         count, 1,
-        "expected exactly one tracing::warn! with the trust-model message in run.rs; found {count}"
+        "expected exactly one trust-model message emission in run.rs; found {count}"
     );
 }
 

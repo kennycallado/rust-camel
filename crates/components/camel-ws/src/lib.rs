@@ -833,6 +833,21 @@ fn redact_ws_url_for_log(url: &str) -> String {
     }
 }
 
+/// Redact a bare host value for logs (ADR-0076, `lint-log-redaction`).
+/// The host grammar carries no userinfo, but the config field is
+/// externally influenced, so any `@`-prefixed authority is masked
+/// defensively (same treatment as [`redact_ws_url_for_log`]). Masking
+/// runs through the LAST `@` so multi-`@` userinfo (`bob:p@ss@host`)
+/// cannot leak its tail (canonical doctrine: over-masking is safe,
+/// under-masking is not). Clean hosts pass through unchanged for
+/// diagnosability.
+fn redact_host_for_log(host: &str) -> String {
+    match host.rsplit_once('@') {
+        Some((_, after)) => format!("***@{after}"),
+        None => host.to_string(),
+    }
+}
+
 /// ADR-0051 defense-in-depth: when the accepted credential came from a
 /// query param, log the redacted URI in the upgrade debug record. ws
 /// forbids `QueryParam` at compile time since Task 1.8; the redaction
@@ -1383,7 +1398,11 @@ impl Component for WssComponent {
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        WsEndpointConfig::metadata()
+        // WSS shares the ws URI option surface; only the scheme differs.
+        // Self-setting it keeps Registry::register off the normalize-warn path.
+        let mut meta = WsEndpointConfig::metadata();
+        meta.scheme = "wss".to_string();
+        meta
     }
 
     fn create_endpoint(
@@ -1727,7 +1746,7 @@ impl Consumer for WsConsumer {
         }
 
         tracing::info!(
-            host = self.cfg.inner.host,
+            host = redact_host_for_log(&self.cfg.inner.host),
             port = self.cfg.inner.port,
             path = self.cfg.inner.path,
             scheme = self.cfg.inner.scheme,
@@ -1759,7 +1778,7 @@ impl Consumer for WsConsumer {
 
     async fn stop(&mut self) -> Result<(), CamelError> {
         tracing::info!(
-            host = self.cfg.inner.host,
+            host = redact_host_for_log(&self.cfg.inner.host),
             port = self.cfg.inner.port,
             path = self.cfg.inner.path,
             "WebSocket consumer stopping"
@@ -1793,7 +1812,7 @@ impl Consumer for WsConsumer {
         }
 
         tracing::info!(
-            host = self.cfg.inner.host,
+            host = redact_host_for_log(&self.cfg.inner.host),
             port = self.cfg.inner.port,
             path = self.cfg.inner.path,
             "WebSocket consumer stopped"
@@ -1801,7 +1820,7 @@ impl Consumer for WsConsumer {
 
         if had_server_error {
             tracing::warn!(
-                host = self.cfg.inner.host,
+                host = redact_host_for_log(&self.cfg.inner.host),
                 port = self.cfg.inner.port,
                 path = self.cfg.inner.path,
                 "WebSocket server had errors during its lifetime"
@@ -1960,7 +1979,7 @@ impl Service<Exchange> for WsProducer {
 
                 if dropped > 0 {
                     tracing::warn!(
-                        host = canonical_host,
+                        host = redact_host_for_log(&canonical_host),
                         port = cfg.inner.port,
                         path = cfg.inner.path,
                         dropped,
@@ -1981,7 +2000,7 @@ impl Service<Exchange> for WsProducer {
                 }
 
                 tracing::debug!(
-                    host = canonical_host,
+                    host = redact_host_for_log(&canonical_host),
                     port = cfg.inner.port,
                     path = cfg.inner.path,
                     targets = targets.len(),
@@ -2314,6 +2333,21 @@ mod tests {
         );
     }
 
+    /// ADR-0076: `host` log fields must route through a redact helper.
+    /// Clean hosts stay visible for diagnosability; a config value that
+    /// somehow carries userinfo loses the userinfo part.
+    #[test]
+    fn redact_host_for_log_masks_userinfo_keeps_clean_hosts() {
+        assert_eq!(super::redact_host_for_log("localhost"), "localhost");
+        assert_eq!(
+            super::redact_host_for_log("broker.example.com"),
+            "broker.example.com"
+        );
+        assert_eq!(super::redact_host_for_log("user:pass@host"), "***@host");
+        assert_eq!(super::redact_host_for_log("bob:p@ss@host"), "***@host");
+        assert_eq!(super::redact_host_for_log("a@b@c"), "***@c");
+    }
+
     /// Re-review of F2-3: connection errors must not echo the raw URL
     /// (query tokens / userinfo) — only the redacted form.
     #[test]
@@ -2386,6 +2420,13 @@ mod tests {
     #[test]
     fn wss_component_scheme_is_wss() {
         assert_eq!(WssComponent::new().scheme(), "wss");
+    }
+
+    #[test]
+    fn wss_metadata_scheme_matches_component_scheme() {
+        // WSS shares the ws URI option surface; only the scheme differs, and
+        // metadata() must report it so Registry::register sees no drift.
+        assert_eq!(WssComponent::new().metadata().scheme, "wss");
     }
 
     #[test]

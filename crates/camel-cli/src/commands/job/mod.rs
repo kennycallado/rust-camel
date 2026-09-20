@@ -1011,8 +1011,10 @@ async fn execute_job(
     };
 
     // R4-L4 trust-model parity: a job executes route scripts/WASM/beans
-    // from the current working directory, like `camel run`.
-    tracing::warn!(
+    // from the current working directory, like `camel run`. INFO, not
+    // WARN: a trust-model disclosure, not a misconfiguration warning
+    // (e_opus ruling, bd rc-k56el Q3).
+    tracing::info!(
         "camel job trusts the current working directory and will execute route \
          scripts and WASM route components resolved from it; only run from a \
          trusted directory"
