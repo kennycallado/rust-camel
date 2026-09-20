@@ -2184,14 +2184,18 @@ impl Consumer for HttpConsumer {
         if server_died {
             // log-policy: system-broken
             tracing::error!(
-                host = %redact_host_for_log(&self.config.host),
+                host = %camel_api::redact::redact_host(&self.config.host),
                 port = self.config.port,
                 path = %path,
                 "Shared HTTP server exited — failing consumer to engage route supervision (ADR-0007)"
             );
+            // The error value is logged upstream by supervision (ADR-0076):
+            // the host must ride the canonical masker, message structure
+            // unchanged (bd rc-8bxeo item 3).
             return Err(CamelError::RouteError(format!(
                 "shared HTTP server for {}:{} exited unexpectedly; route transport is dead",
-                self.config.host, self.config.port
+                camel_api::redact::redact_host(&self.config.host),
+                self.config.port
             )));
         }
 
@@ -3119,24 +3123,6 @@ pub(crate) fn redact_url_for_diagnostics(raw: &str) -> String {
     }
 }
 
-/// Redact a bare host value for logs (ADR-0076, `lint-log-redaction`).
-/// [`redact_url_for_diagnostics`] is a semantic no-op here: a bare host
-/// carries no `//` authority window for the canonical scanner to open,
-/// so userinfo-shaped config values (the URI parser routes
-/// `http://user:pass@host:8080/` to `config.host = "user:pass@host"`)
-/// would pass through byte-identical. This helper masks everything
-/// before the LAST `@` (over-masking is safe, under-masking is not —
-/// canonical doctrine, see [`camel_api::redact`]); clean hosts pass
-/// through unchanged for diagnosability. Mirrors camel-ws's
-/// `redact_host_for_log`; local duplication is the accepted pattern
-/// (camel-cxf keeps a local `redact_url` too).
-pub(crate) fn redact_host_for_log(host: &str) -> String {
-    match host.rsplit_once('@') {
-        Some((_, after)) => format!("***@{after}"),
-        None => host.to_string(),
-    }
-}
-
 /// Maximum bytes of an upstream error response body embedded into
 /// `CamelError::HttpOperationFailed`. The body is attacker-controllable (a
 /// malicious or compromised upstream), so it is truncated and lossy-decoded to
@@ -3901,20 +3887,19 @@ mod tests {
     // Security: credential redaction (audit 2026-08-31, finding F3-1)
     // -----------------------------------------------------------------------
 
-    /// ADR-0076: bare `host` log fields need their own masker —
-    /// `redact_url_for_diagnostics` never opens an authority window on a
-    /// base-less string, so userinfo-shaped values pass through untouched.
-    /// Masking runs through the LAST `@`; clean hosts stay visible.
+    /// ADR-0076: bare `host` log fields route through the canonical
+    /// [`camel_api::redact::redact_host`] (bd rc-8bxeo promoted the
+    /// crate-local twin — `redact_url_for_diagnostics` never opens an
+    /// authority window on a base-less string). Thin local pin — the
+    /// full matrix lives in camel-api's
+    /// `redact_host_masks_userinfo_keeps_clean_hosts`.
     #[test]
-    fn redact_host_for_log_masks_userinfo_keeps_clean_hosts() {
-        assert_eq!(redact_host_for_log("localhost"), "localhost");
+    fn canonical_redact_host_pinned() {
         assert_eq!(
-            redact_host_for_log("host.example:8080"),
+            camel_api::redact::redact_host("host.example:8080"),
             "host.example:8080"
         );
-        assert_eq!(redact_host_for_log("user:pass@host"), "***@host");
-        assert_eq!(redact_host_for_log("bob:p@ss@host"), "***@host");
-        assert_eq!(redact_host_for_log("a@b@c"), "***@c");
+        assert_eq!(camel_api::redact::redact_host("a@b@c"), "***@c");
     }
 
     #[test]

@@ -581,7 +581,7 @@ async fn spawn_server(
                         .force_unhealthy_for_route(&rid, "g:ws:bind-tls", &e.to_string());
                     // log-policy: outside-contract
                     tracing::error!(
-                        host = %redact_host_for_log(&bound_addr.ip().to_string()),
+                        host = %camel_api::redact::redact_host(&bound_addr.ip().to_string()),
                         port = bound_addr.port(),
                         error = %e,
                         "WebSocket server terminated with error"
@@ -610,7 +610,7 @@ async fn spawn_server(
                         .force_unhealthy_for_route(&rid, "g:ws:bind-plain", &e.to_string());
                     // log-policy: outside-contract
                     tracing::error!(
-                        host = %redact_host_for_log(&bound_addr.ip().to_string()),
+                        host = %camel_api::redact::redact_host(&bound_addr.ip().to_string()),
                         port = bound_addr.port(),
                         error = %e,
                         "WebSocket server terminated with error"
@@ -622,7 +622,7 @@ async fn spawn_server(
         };
 
     tracing::info!(
-        host = %redact_host_for_log(&bound_addr.ip().to_string()),
+        host = %camel_api::redact::redact_host(&bound_addr.ip().to_string()),
         port = bound_addr.port(),
         is_tls,
         "WebSocket server started"
@@ -702,7 +702,7 @@ async fn monitor_ws_server_task(
                 .increment_errors(&route_id, "e:ws:server-task-exited");
             // log-policy: outside-contract
             tracing::error!(
-                host = %redact_host_for_log(&addr.ip().to_string()),
+                host = %camel_api::redact::redact_host(&addr.ip().to_string()),
                 port = addr.port(),
                 error = %join_err,
                 "WebSocket server task exited unexpectedly — all routes on this port are now dead"
@@ -828,31 +828,18 @@ fn ws_upgrade_auth_error(e: &CamelError) -> axum::response::Response {
 /// Redact a producer-side WS URL for debug logs (audit 2026-08-31, F2-3).
 /// The endpoint path can carry a query string with tokens
 /// (`ws://host/path?token=…`); userinfo is not supported by the URI grammar
-/// but we mask any `@`-prefixed authority defensively. Returns
+/// but any `@`-bearing authority is masked defensively, through the LAST
+/// `@` (canonical doctrine: over-masking is safe, under-masking is not —
+/// a first-`@` mask would leak `bob:p@ss@host`'s tail). Returns
 /// `scheme://host:port/path` with the query stripped.
 fn redact_ws_url_for_log(url: &str) -> String {
     let no_query = url.split('?').next().unwrap_or(url);
     match no_query.split_once("://") {
-        Some((scheme, rest)) => match rest.split_once('@') {
+        Some((scheme, rest)) => match rest.rsplit_once('@') {
             Some((_, after)) => format!("{scheme}://***@{after}"),
             None => no_query.to_string(),
         },
         None => no_query.to_string(),
-    }
-}
-
-/// Redact a bare host value for logs (ADR-0076, `lint-log-redaction`).
-/// The host grammar carries no userinfo, but the config field is
-/// externally influenced, so any `@`-prefixed authority is masked
-/// defensively (same treatment as [`redact_ws_url_for_log`]). Masking
-/// runs through the LAST `@` so multi-`@` userinfo (`bob:p@ss@host`)
-/// cannot leak its tail (canonical doctrine: over-masking is safe,
-/// under-masking is not). Clean hosts pass through unchanged for
-/// diagnosability.
-fn redact_host_for_log(host: &str) -> String {
-    match host.rsplit_once('@') {
-        Some((_, after)) => format!("***@{after}"),
-        None => host.to_string(),
     }
 }
 
@@ -1771,7 +1758,7 @@ impl Consumer for WsConsumer {
         }
 
         tracing::info!(
-            host = redact_host_for_log(&self.cfg.inner.host),
+            host = camel_api::redact::redact_host(&self.cfg.inner.host),
             port = self.cfg.inner.port,
             path = self.cfg.inner.path,
             scheme = self.cfg.inner.scheme,
@@ -1803,7 +1790,7 @@ impl Consumer for WsConsumer {
 
     async fn stop(&mut self) -> Result<(), CamelError> {
         tracing::info!(
-            host = redact_host_for_log(&self.cfg.inner.host),
+            host = camel_api::redact::redact_host(&self.cfg.inner.host),
             port = self.cfg.inner.port,
             path = self.cfg.inner.path,
             "WebSocket consumer stopping"
@@ -1837,7 +1824,7 @@ impl Consumer for WsConsumer {
         }
 
         tracing::info!(
-            host = redact_host_for_log(&self.cfg.inner.host),
+            host = camel_api::redact::redact_host(&self.cfg.inner.host),
             port = self.cfg.inner.port,
             path = self.cfg.inner.path,
             "WebSocket consumer stopped"
@@ -1845,7 +1832,7 @@ impl Consumer for WsConsumer {
 
         if had_server_error {
             tracing::warn!(
-                host = redact_host_for_log(&self.cfg.inner.host),
+                host = camel_api::redact::redact_host(&self.cfg.inner.host),
                 port = self.cfg.inner.port,
                 path = self.cfg.inner.path,
                 "WebSocket server had errors during its lifetime"
@@ -2004,7 +1991,7 @@ impl Service<Exchange> for WsProducer {
 
                 if dropped > 0 {
                     tracing::warn!(
-                        host = redact_host_for_log(&canonical_host),
+                        host = camel_api::redact::redact_host(&canonical_host),
                         port = cfg.inner.port,
                         path = cfg.inner.path,
                         dropped,
@@ -2025,7 +2012,7 @@ impl Service<Exchange> for WsProducer {
                 }
 
                 tracing::debug!(
-                    host = redact_host_for_log(&canonical_host),
+                    host = camel_api::redact::redact_host(&canonical_host),
                     port = cfg.inner.port,
                     path = cfg.inner.path,
                     targets = targets.len(),
@@ -2342,6 +2329,8 @@ mod tests {
     use crate::test_doubles::RecordingMetrics;
 
     /// Audit 2026-08-31, F2-3: producer debug logs must not leak query tokens.
+    /// The multi-`@` case pins the last-`@` doctrine (bd rc-8bxeo): a
+    /// first-`@` mask would leak `p@ss@host`'s tail as `***@ss@host`.
     #[test]
     fn redact_ws_url_strips_query_and_userinfo() {
         assert_eq!(
@@ -2356,21 +2345,23 @@ mod tests {
             super::redact_ws_url_for_log("ws://host:80/clean"),
             "ws://host:80/clean"
         );
+        assert_eq!(
+            super::redact_ws_url_for_log("ws://bob:p@ss@host:9292/x?token=z"),
+            "ws://***@host:9292/x"
+        );
     }
 
-    /// ADR-0076: `host` log fields must route through a redact helper.
-    /// Clean hosts stay visible for diagnosability; a config value that
-    /// somehow carries userinfo loses the userinfo part.
+    /// ADR-0076: `host` log fields route through the canonical
+    /// [`camel_api::redact::redact_host`] (bd rc-8bxeo promoted the
+    /// crate-local twin). Thin local pin — the full matrix lives in
+    /// camel-api's `redact_host_masks_userinfo_keeps_clean_hosts`.
     #[test]
-    fn redact_host_for_log_masks_userinfo_keeps_clean_hosts() {
-        assert_eq!(super::redact_host_for_log("localhost"), "localhost");
+    fn canonical_redact_host_pinned() {
         assert_eq!(
-            super::redact_host_for_log("broker.example.com"),
+            camel_api::redact::redact_host("broker.example.com"),
             "broker.example.com"
         );
-        assert_eq!(super::redact_host_for_log("user:pass@host"), "***@host");
-        assert_eq!(super::redact_host_for_log("bob:p@ss@host"), "***@host");
-        assert_eq!(super::redact_host_for_log("a@b@c"), "***@c");
+        assert_eq!(camel_api::redact::redact_host("bob:p@ss@host"), "***@host");
     }
 
     /// Re-review of F2-3: connection errors must not echo the raw URL

@@ -371,6 +371,23 @@ pub fn window_has_at_sign(raw: &str) -> bool {
         .any(|(start, end)| raw[start..end].contains('@'))
 }
 
+/// Redact a bare host value for logs (ADR-0076, `lint-log-redaction`).
+/// A bare host carries no `//` authority window, so [`redact_url`] is a
+/// semantic no-op on it; this helper masks everything before the LAST
+/// `@` instead (`***@host`). The host grammar carries no userinfo, but
+/// the value can be externally influenced (a config field the URI
+/// parser can route `user:pass@host` into), so userinfo-shaped input is
+/// masked defensively — through the LAST `@`, because over-masking is
+/// safe and under-masking is not. Clean hosts pass through unchanged
+/// for diagnosability. Canonical single source: components log `host`
+/// fields through this helper, not crate-local twins (bd rc-8bxeo).
+pub fn redact_host(host: &str) -> String {
+    match host.rsplit_once('@') {
+        Some((_, after)) => format!("***@{after}"),
+        None => host.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +691,19 @@ mod tests {
     #[test]
     fn redact_url_masks_through_last_at() {
         assert_eq!(redact_url("redis://user:p@ss@h:6379"), "redis://***@h:6379");
+    }
+
+    /// Bare-host masking (bd rc-8bxeo, promoted from the camel-ws /
+    /// camel-http twins): clean hosts pass through unchanged for
+    /// diagnosability; userinfo-shaped values mask through the LAST `@`.
+    #[test]
+    fn redact_host_masks_userinfo_keeps_clean_hosts() {
+        assert_eq!(redact_host("localhost"), "localhost");
+        assert_eq!(redact_host("broker.example.com"), "broker.example.com");
+        assert_eq!(redact_host("host.example:8080"), "host.example:8080");
+        assert_eq!(redact_host("user:pass@host"), "***@host");
+        assert_eq!(redact_host("bob:p@ss@host"), "***@host");
+        assert_eq!(redact_host("a@b@c"), "***@c");
     }
 
     /// A slash run after `//` must not hide userinfo behind it; extra leading
