@@ -22,12 +22,14 @@ freeze). musl-based images SHALL never link rdkafka.
   reports `(full)`, and each downloads its binaries from the matching
   flavor-prefixed workflow artifacts
 
-#### Scenario: flavor-named tags publish without legacy suffixes
+#### Scenario: semantic tags publish alongside legacy suffixes
 
 - **WHEN** a stable tag run publishes images
 - **THEN** `{VERSION}`, `latest`, `:regular`, `{VERSION}-slim`,
   `latest-slim`, `:slim`, `{VERSION}-full`, `latest-full`, and `:full`
-  exist for the same version, and no `-alpine` or `-gnu` tag is pushed
+  exist for the same version, no `-alpine` or `-gnu` tag is pushed, and
+  the discontinued legacy suffix tags remain pullable in the registries
+  at their last frozen content
 
 ## ADDED Requirements
 
