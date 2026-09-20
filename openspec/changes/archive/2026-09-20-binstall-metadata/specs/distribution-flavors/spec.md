@@ -2,9 +2,11 @@
 
 ### Requirement: Prebuilt assets are binstall-addressable
 
-The `camel-cli` crate carries `[package.metadata.binstall]` so that
+The `camel-cli` crate MUST carry `[package.metadata.binstall]` so that
 `cargo binstall camel-cli` installs a prebuilt binary from the project's
 GitHub releases instead of falling back to a long compile. Flavor selection
+MUST use only `cfg(target)` overrides — binstall's template language has no
+feature variable — and MUST follow the platform-ceiling rule. Flavor selection
 uses only `cfg(target)` overrides — binstall's template language has no
 feature variable — and follows the platform-ceiling rule: the default is
 `full` everywhere full exists; targets where full cannot exist get `regular`
