@@ -20,6 +20,9 @@ dependencies {
     // YAML file is an inert resource and ALL yml-only config is silently ignored.
     implementation("io.quarkus:quarkus-config-yaml")
     implementation("io.quarkus:quarkus-logging-json")
+    // OpenTelemetry: own pipeline with OTLP export. Egress is fail-closed
+    // (see application.yml + OtlpEgressGuard) — no dial-out defaults.
+    implementation("io.quarkus:quarkus-opentelemetry")
 
     // XSD — Xerces-J JAXP reference impl
     implementation("xerces:xercesImpl:2.12.2")

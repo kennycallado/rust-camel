@@ -25,6 +25,18 @@ quarkus:
     console:
       json:
         enabled: true
+  otel:
+    # Escalon 3 (rc-cuteb): own OTel pipeline. Egress is FAIL-CLOSED:
+    # the OTLP exporter ships enabled at build time, so the SDK is off by
+    # default and OtlpEgressGuard refuses to start when the SDK is on
+    # without an explicit traces endpoint — the exporter's built-in
+    # http://localhost:4317 fallback must never dial silently (same
+    # doctrine as the Rust-side egress allowlist, 69a7f143 / rc-uctc).
+    # Operator opt-in (both required, runtime env):
+    #   QUARKUS_OTEL_SDK_DISABLED=false
+    #   QUARKUS_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://<collector>:4317
+    sdk:
+      disabled: true
   tls:
     bridge:
       key-store:

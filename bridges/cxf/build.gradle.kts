@@ -30,6 +30,9 @@ dependencies {
     implementation("io.quarkus:quarkus-arc")
     implementation("io.quarkus:quarkus-config-yaml")
     implementation("io.quarkus:quarkus-logging-json")
+    // OpenTelemetry: own pipeline with OTLP export. Egress is fail-closed
+    // (see application.yml + OtlpEgressGuard) — no dial-out defaults.
+    implementation("io.quarkus:quarkus-opentelemetry")
 
     // Apache CXF
     implementation("org.apache.cxf:cxf-core:$cxfVersion")

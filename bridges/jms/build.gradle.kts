@@ -18,6 +18,9 @@ dependencies {
     implementation("io.quarkus:quarkus-arc")
     implementation("io.quarkus:quarkus-config-yaml")
     implementation("io.quarkus:quarkus-logging-json")
+    // OpenTelemetry: own pipeline with OTLP export. Egress is fail-closed
+    // (see application.yml + OtlpEgressGuard) — no dial-out defaults.
+    implementation("io.quarkus:quarkus-opentelemetry")
 
     // ActiveMQ Classic (OpenWire)
     implementation("org.apache.activemq:activemq-client:5.19.10")
@@ -34,6 +37,8 @@ dependencies {
 
     testImplementation("io.quarkus:quarkus-junit5")
     testImplementation("org.mockito:mockito-core:5.12.0")
+    // In-memory SpanExporter for otel wiring tests (no collector, no egress)
+    testImplementation("io.opentelemetry:opentelemetry-sdk-testing")
 }
 
 java {
