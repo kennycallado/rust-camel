@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -11,6 +11,14 @@ use camel_api::{CamelError, Exchange};
 use camel_auth::CredentialSource;
 
 use crate::dispatch::InlineRouteDispatcher;
+
+/// Re-export of [`camel_api::InFlightClaim`] — the context-global
+/// accepted-not-completed RAII claim (drainclaim). The canonical
+/// definition and contract live in `camel_api::in_flight`; this alias
+/// keeps the historical `camel_component_api::consumer::InFlightClaim`
+/// path stable. claimfamily: the type moved to camel-api so
+/// [`camel_api::Exchange`] can carry it for stash-site residency.
+pub use camel_api::InFlightClaim;
 
 /// A message sent from a consumer to the route pipeline.
 ///
@@ -25,38 +33,6 @@ pub struct ExchangeEnvelope {
     /// `send_and_wait`, seda enqueue, inline dispatch). `None` on the raw
     /// `sender()` fast path — a documented uncounted exception (drainclaim).
     pub in_flight_claim: Option<InFlightClaim>,
-}
-
-/// One accepted-not-completed unit on the context-global in-flight counter.
-///
-/// Attaching a claim increments the counter; dropping it decrements the
-/// counter exactly once (RAII), covering every release path — normal
-/// pipeline completion, dispatch push failure, queued-envelope drop,
-/// pipeline task abort, panic, and readiness failure — with no manual
-/// rollback code. Fanout sites mint one sibling claim per subscriber copy
-/// via [`InFlightClaim::split`], so each copy counts and releases
-/// independently (drainclaim).
-pub struct InFlightClaim(Arc<AtomicU64>);
-
-impl InFlightClaim {
-    /// Mint a claim against `counter`, incrementing it by one.
-    pub fn attach(counter: &Arc<AtomicU64>) -> Self {
-        counter.fetch_add(1, Ordering::AcqRel);
-        Self(Arc::clone(counter))
-    }
-
-    /// Mint a sibling claim for a fanout copy, incrementing the same
-    /// counter by one. The original claim stays live.
-    pub fn split(&self) -> Self {
-        self.0.fetch_add(1, Ordering::AcqRel);
-        Self(Arc::clone(&self.0))
-    }
-}
-
-impl Drop for InFlightClaim {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
 }
 
 /// Declares when the runtime may consider a Consumer "started".

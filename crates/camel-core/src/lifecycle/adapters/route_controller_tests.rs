@@ -6795,6 +6795,211 @@ mod drainclaim {
         controller.stop_route("rt-drain-agg-pending").await.unwrap();
     }
 
+    /// claimfamily (rc-hllkk): an exchange buffered inside a resequencer
+    /// policy keeps a claim (counter 1) after its pipeline ack resolves;
+    /// completing the batch emits through the continuation and the
+    /// counter returns to 0.
+    #[tokio::test]
+    async fn resequencer_buffer_residency_counted_until_emission() {
+        struct RecordingPost {
+            tx: mpsc::UnboundedSender<String>,
+        }
+        impl Clone for RecordingPost {
+            fn clone(&self) -> Self {
+                Self {
+                    tx: self.tx.clone(),
+                }
+            }
+        }
+        impl Service<Exchange> for RecordingPost {
+            type Response = Exchange;
+            type Error = CamelError;
+            type Future =
+                Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, exchange: Exchange) -> Self::Future {
+                let body = exchange
+                    .input
+                    .body
+                    .as_text()
+                    .unwrap_or_default()
+                    .to_string();
+                let _ = self.tx.send(body);
+                Box::pin(async move { Ok(exchange) })
+            }
+        }
+
+        let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = drain_controller(Arc::clone(&captured));
+        crate::lifecycle::adapters::route_controller::tests::register_simple_language(
+            &mut controller,
+        );
+
+        let (emitted_tx, mut emitted_rx) = mpsc::unbounded_channel::<String>();
+        let route = RouteDefinition::new(
+            "capture:src",
+            vec![
+                BuilderStep::Resequence {
+                    policy_config: camel_api::ResequencePolicyConfig {
+                        mode: camel_api::ResequenceMode::Batch {
+                            correlation: "${header.id}".into(),
+                            sort: "${header.id}".into(),
+                            completion: camel_api::BatchCompletion::Size(2),
+                        },
+                    },
+                },
+                BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(RecordingPost {
+                    tx: emitted_tx,
+                }))),
+            ],
+        )
+        .with_route_id("rt-drain-reseq");
+        controller.add_route(route).await.unwrap();
+        controller.start_route("rt-drain-reseq").await.unwrap();
+        controller.activate_cohort();
+
+        let ctx = await_capture(&captured).await;
+
+        // First exchange: the pipeline ack resolves (pipeline task done,
+        // its envelope claim dropped) but the exchange sits in the batch
+        // buffer — the drain-site split claim keeps it counted.
+        let mut first = test_exchange("reseq-1");
+        first.input.set_header("id", "k");
+        let ack = ctx.send_and_wait(first).await.expect("resequencer ack");
+        assert_eq!(
+            ack.property("CamelResequencerAccepted")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "first exchange must be accepted into the buffer"
+        );
+        await_total(&controller.in_flight_total, 1).await;
+
+        // Second exchange completes the batch (Size 2): both buffered
+        // exchanges emit through the post-continuation, then every claim
+        // releases.
+        let mut second = test_exchange("reseq-2");
+        second.input.set_header("id", "k");
+        let _ = ctx.send_and_wait(second).await.expect("second ack");
+        let mut emitted = Vec::new();
+        emitted.push(emitted_rx.recv().await.expect("first emission"));
+        emitted.push(emitted_rx.recv().await.expect("second emission"));
+        emitted.sort();
+        assert_eq!(emitted, vec!["reseq-1", "reseq-2"]);
+        await_total(&controller.in_flight_total, 0).await;
+
+        controller.stop_route("rt-drain-reseq").await.unwrap();
+    }
+
+    /// claimfamily (rc-qbigm): a size-only aggregator compiled INSIDE
+    /// the pipeline (no timeout, no force-completion — the embedded
+    /// branch of `find_top_level_aggregate_requiring_split`) stashes
+    /// partial buckets beyond pipeline completion. The drain-site split
+    /// sibling rides the exchange into the bucket: the counter reads 1
+    /// after the pending-ack pipeline resolves, and 0 once the
+    /// completing exchange's aggregated output runs the remaining
+    /// pipeline.
+    #[tokio::test]
+    async fn embedded_aggregator_stash_counted_until_completion() {
+        struct RecordingPost {
+            tx: mpsc::UnboundedSender<String>,
+        }
+        impl Clone for RecordingPost {
+            fn clone(&self) -> Self {
+                Self {
+                    tx: self.tx.clone(),
+                }
+            }
+        }
+        impl Service<Exchange> for RecordingPost {
+            type Response = Exchange;
+            type Error = CamelError;
+            type Future =
+                Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, exchange: Exchange) -> Self::Future {
+                let body = exchange
+                    .input
+                    .body
+                    .as_text()
+                    .unwrap_or_default()
+                    .to_string();
+                let _ = self.tx.send(body);
+                Box::pin(async move { Ok(exchange) })
+            }
+        }
+
+        let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = drain_controller(Arc::clone(&captured));
+
+        let (emitted_tx, mut emitted_rx) = mpsc::unbounded_channel::<String>();
+        let agg_config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(2)
+            .build()
+            .unwrap();
+        let route = RouteDefinition::new(
+            "capture:src",
+            vec![
+                BuilderStep::DeclarativeSetHeader {
+                    key: "key".into(),
+                    value: ValueSourceDef::Literal(Value::String("k1".into())),
+                },
+                BuilderStep::Aggregate { config: agg_config },
+                BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(RecordingPost {
+                    tx: emitted_tx,
+                }))),
+            ],
+        )
+        .with_route_id("rt-drain-agg-embedded");
+        controller.add_route(route).await.unwrap();
+        controller
+            .start_route("rt-drain-agg-embedded")
+            .await
+            .unwrap();
+        controller.activate_cohort();
+
+        let ctx = await_capture(&captured).await;
+
+        // First exchange: the pending-ack reply proves the stash inside
+        // the embedded bucket; the pipeline task is done, so only the
+        // stashed sibling keeps the counter at 1.
+        let first = ctx
+            .send_and_wait(test_exchange("frag-1"))
+            .await
+            .expect("pending ack reply");
+        assert!(
+            first.property("CamelAggregatorPending").is_some(),
+            "first exchange must be stashed, not completed"
+        );
+        await_total(&controller.in_flight_total, 1).await;
+
+        // Second exchange completes the bucket: the aggregated output
+        // carries one claim through the remaining pipeline steps (the
+        // recording post-step fires), then every claim releases.
+        let second = ctx
+            .send_and_wait(test_exchange("frag-2"))
+            .await
+            .expect("aggregated reply");
+        assert!(
+            second.property("CamelAggregatorPending").is_none(),
+            "second exchange must complete the bucket"
+        );
+        let _ = emitted_rx.recv().await.expect("aggregated emission");
+        await_total(&controller.in_flight_total, 0).await;
+
+        controller
+            .stop_route("rt-drain-agg-embedded")
+            .await
+            .unwrap();
+    }
+
     /// drainclaim claim propagation: stopping the route with a pending
     /// bucket force-completes it; the forced emission's continuation
     /// runs and every stashed claim releases — counter 0 after stop.
@@ -6873,7 +7078,10 @@ mod drainclaim {
             .await
             .expect("pipeline entry within 2s")
             .expect("entry channel alive");
-        await_total(&controller.in_flight_total, 1).await;
+        // claimfamily: the parked exchange holds TWO claims — the
+        // task-scoped envelope claim (drainclaim) plus its drain-site
+        // split sibling carried on the exchange (stash-site coverage).
+        await_total(&controller.in_flight_total, 2).await;
 
         // Barrier still held: the drain loop is parked inside the
         // pipeline call, past every cancellation select, so the stop
@@ -6925,7 +7133,9 @@ mod drainclaim {
             .await
             .expect("pipeline entry within 2s")
             .expect("entry channel alive");
-        await_total(&controller.in_flight_total, 1).await;
+        // claimfamily: parked #1 holds two claims (task-scoped envelope
+        // claim + drain-site split sibling on the exchange).
+        await_total(&controller.in_flight_total, 2).await;
 
         // The drain loop is parked on envelope #1, so these two
         // fire-and-forget envelopes queue in the channel buffer, each
@@ -6936,7 +7146,7 @@ mod drainclaim {
         ctx.send(test_exchange("queued-3"))
             .await
             .expect("queued send");
-        await_total(&controller.in_flight_total, 3).await;
+        await_total(&controller.in_flight_total, 4).await;
 
         // Teardown aborts the parked pipeline task; the queued envelopes
         // drop with the channel and every claim releases.

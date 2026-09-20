@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::Ordering;
 
 // --- InFlightClaim / drainclaim tests ---
 

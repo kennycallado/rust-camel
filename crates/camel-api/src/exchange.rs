@@ -77,6 +77,14 @@ pub struct Exchange {
     /// Carries the active span context between processing steps.
     /// Defaults to an empty context (noop span) if OTel is not active.
     pub otel_context: Context,
+    /// RAII claim on the context-global accepted-not-completed counter
+    /// (drainclaim, claimfamily). Pipeline drain sites split a sibling
+    /// of the envelope's claim onto the exchange so residency inside
+    /// pipeline-embedded stash sites (resequencer buffers, aggregator
+    /// buckets — raw-`Exchange` territory with no envelope) stays
+    /// counted. `None` on every constructor, on clones, and on
+    /// exchanges accepted through uncounted paths.
+    pub in_flight_claim: Option<crate::in_flight::InFlightClaim>,
 }
 
 impl Exchange {
@@ -91,6 +99,7 @@ impl Exchange {
             pattern: ExchangePattern::default(),
             correlation_id: Uuid::new_v4().to_string(),
             otel_context: Context::new(),
+            in_flight_claim: None,
         }
     }
 
@@ -105,6 +114,7 @@ impl Exchange {
             pattern: ExchangePattern::InOut,
             correlation_id: Uuid::new_v4().to_string(),
             otel_context: Context::new(),
+            in_flight_claim: None,
         }
     }
 
@@ -208,6 +218,10 @@ impl Clone for Exchange {
             pattern: self.pattern,
             correlation_id: self.correlation_id.clone(),
             otel_context: self.otel_context.clone(),
+            // claimfamily: clones carry no claim — duplicating one would
+            // double-release on drop. Fanout sites that need each copy
+            // counted split a sibling explicitly.
+            in_flight_claim: None,
         }
     }
 }

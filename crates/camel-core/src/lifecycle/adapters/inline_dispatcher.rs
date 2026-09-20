@@ -146,6 +146,14 @@ impl InlineRouteDispatcher for RouteInlineDispatcher {
             let cohort = Arc::clone(&state.cohort);
             let operation_cancel = state.cancel.clone();
 
+            // claimfamily (rc-hllkk): split a sibling claim onto the
+            // exchange so residency inside pipeline-embedded stash sites
+            // (resequencer buffers, aggregator buckets) stays counted
+            // after this future completes. Taken back from an in-band Ok
+            // result below — stash emissions escape with theirs.
+            let mut exchange = exchange;
+            exchange.in_flight_claim = _in_flight_claim.as_ref().map(InFlightClaim::split);
+
             // Operation, strictly ordered: admission → cohort gate →
             // readiness → scoped pipeline call. Dropping this future on the
             // cancel arm below drops every stage and releases the admission
@@ -165,11 +173,17 @@ impl InlineRouteDispatcher for RouteInlineDispatcher {
 
             // Consumer-cancel wins ties: the biased select polls the cancel
             // arm first.
-            let result = tokio::select! {
+            let mut result = tokio::select! {
                 biased;
                 _ = state.cancel.cancelled() => Err(CamelError::ConsumerStopping),
                 result = operation => result,
             };
+            // claimfamily: reclaim the sibling from an in-band result (the
+            // exchange completed inside this dispatch) so release stays at
+            // future end; a stash emission escaped with its claim.
+            if let Ok(ref mut ex) = result {
+                ex.in_flight_claim = None;
+            }
 
             if result.is_ok() {
                 let prev = state.hop_budget.fetch_add(1, Ordering::Relaxed);

@@ -697,4 +697,181 @@ mod tests {
             .await
             .expect("shutdown");
     }
+
+    // ── claimfamily (rc-hllkk): buffer residency claims ──
+    //
+    // The exchanges a route pipeline hands the resequencer carry an
+    // `in_flight_claim` sibling (split at the pipeline drain site). These
+    // tests prove the claim rides the exchange through every residency
+    // path: buffered (held), emitted (released after the continuation
+    // processes the exchange), shutdown flush (released), and intake
+    // drop during shutdown (released immediately).
+
+    /// Test expression that reads the "seq" property (same shape as the
+    /// stream-policy test expr).
+    struct SeqExpr;
+
+    #[async_trait]
+    impl camel_language_api::Expression for SeqExpr {
+        async fn evaluate(
+            &self,
+            exchange: &Exchange,
+        ) -> Result<serde_json::Value, camel_language_api::LanguageError> {
+            Ok(exchange.property("seq").cloned().unwrap_or_default())
+        }
+    }
+
+    fn seq_exchange(seq: u64) -> Exchange {
+        let mut ex = Exchange::new(Message::new(format!("msg-{seq}")));
+        ex.set_property("seq", serde_json::json!(seq));
+        ex
+    }
+
+    fn stream_service(capture_tx: mpsc::UnboundedSender<Exchange>) -> ResequencerService {
+        let policy: Arc<dyn ResequencePolicy> = stream::StreamPolicy::new_cyclic(
+            Arc::new(SeqExpr),
+            100,
+            600_000, // gap timeout far beyond test duration
+            camel_api::resequencer::GapPolicy::EmitPartial,
+            camel_api::resequencer::CapacityPolicy::LogAndDrop,
+            false,
+        );
+        let post: BoxProcessor = BoxProcessor::new(CapturePost { tx: capture_tx });
+        ResequencerService::new(policy, post, 1024, vec![])
+    }
+
+    /// Poll until the counter reaches `want` (bounded, panics past the
+    /// deadline) — same discipline as the drainclaim route tests.
+    async fn await_in_flight(counter: &Arc<AtomicU64>, want: u64) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while counter.load(Ordering::SeqCst) != want {
+            assert!(
+                Instant::now() < deadline,
+                "in-flight counter did not reach {want} within 2s (now {})",
+                counter.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_held_while_buffered_released_on_completion() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<Exchange>();
+        let service = stream_service(capture_tx);
+
+        // seq 2 arrives first: buffered behind the gap at seq 1. The
+        // claim rides the exchange into the policy buffer — the counter
+        // stays at 1 even though `call` (the ack) already resolved.
+        let mut first = seq_exchange(2);
+        first.in_flight_claim = Some(camel_api::InFlightClaim::attach(&counter));
+        let ack = service.clone().oneshot(first).await.unwrap();
+        assert_eq!(
+            ack.property(CAMEL_RESEQUENCER_ACCEPTED)
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "buffered exchange must stay counted after the ack resolves"
+        );
+
+        // seq 1 completes the contiguous run: both emissions run the
+        // post-continuation, then their claims release.
+        let mut second = seq_exchange(1);
+        second.in_flight_claim = Some(camel_api::InFlightClaim::attach(&counter));
+        let _ = service.clone().oneshot(second).await.unwrap();
+        let _ = capture_rx.recv().await;
+        let _ = capture_rx.recv().await;
+        await_in_flight(&counter, 0).await;
+
+        service
+            .shutdown(StepShutdownReason::RouteStop)
+            .await
+            .expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn claim_released_on_shutdown_flush() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<Exchange>();
+        let service = stream_service(capture_tx);
+
+        // seq 2 buffers (gap at 1); shutdown flush must emit it through
+        // the continuation and release the claim.
+        let mut buffered = seq_exchange(2);
+        buffered.in_flight_claim = Some(camel_api::InFlightClaim::attach(&counter));
+        let _ = service.clone().oneshot(buffered).await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        service
+            .shutdown(StepShutdownReason::RouteStop)
+            .await
+            .expect("shutdown");
+        let _ = capture_rx.recv().await;
+        await_in_flight(&counter, 0).await;
+    }
+
+    #[tokio::test]
+    async fn claim_released_when_input_dropped_after_shutdown() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let (capture_tx, _capture_rx) = mpsc::unbounded_channel::<Exchange>();
+        let service = stream_service(capture_tx);
+        service
+            .shutdown(StepShutdownReason::RouteStop)
+            .await
+            .expect("shutdown first");
+
+        // The input sender slot is gone after shutdown: the exchange is
+        // never accepted — dropped inside `call` — and the claim
+        // releases immediately.
+        let mut dropped = seq_exchange(1);
+        dropped.in_flight_claim = Some(camel_api::InFlightClaim::attach(&counter));
+        let ack = service.clone().oneshot(dropped).await.unwrap();
+        assert!(
+            ack.property(CAMEL_RESEQUENCER_ACCEPTED).is_none(),
+            "shutdown-intake exchange must not be accepted"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "dropped input releases its claim immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_released_when_capacity_policy_drops_exchange() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let (capture_tx, _capture_rx) = mpsc::unbounded_channel::<Exchange>();
+        // Capacity 1: seq 2 occupies the queue (gap at 1); seq 3 hits
+        // the cap and CapacityPolicy::LogAndDrop drops it — the dropped
+        // exchange's claim releases, the held one stays counted.
+        let policy: Arc<dyn ResequencePolicy> = stream::StreamPolicy::new_cyclic(
+            Arc::new(SeqExpr),
+            1,
+            600_000,
+            camel_api::resequencer::GapPolicy::EmitPartial,
+            camel_api::resequencer::CapacityPolicy::LogAndDrop,
+            false,
+        );
+        let post: BoxProcessor = BoxProcessor::new(CapturePost { tx: capture_tx });
+        let service = ResequencerService::new(policy, post, 1024, vec![]);
+
+        let mut held = seq_exchange(2);
+        held.in_flight_claim = Some(camel_api::InFlightClaim::attach(&counter));
+        let _ = service.clone().oneshot(held).await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        let mut overflow = seq_exchange(3);
+        overflow.in_flight_claim = Some(camel_api::InFlightClaim::attach(&counter));
+        let _ = service.clone().oneshot(overflow).await.unwrap();
+        await_in_flight(&counter, 1).await;
+
+        service
+            .shutdown(StepShutdownReason::RouteStop)
+            .await
+            .expect("shutdown flushes the held exchange and releases it");
+        await_in_flight(&counter, 0).await;
+    }
 }

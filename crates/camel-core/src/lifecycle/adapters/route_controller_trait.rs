@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 use camel_api::metrics::MetricsCollector;
 use camel_api::security_policy::RouteSecurityPlan;
-use camel_api::{CamelError, NoOpMetrics, StepLifecycle, StepShutdownReason};
+use camel_api::{CamelError, InFlightClaim, NoOpMetrics, StepLifecycle, StepShutdownReason};
 use camel_component_api::Consumer;
 use camel_component_api::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
 
@@ -539,6 +539,18 @@ impl camel_api::RouteController for DefaultRouteController {
                             // task — completion, abort, panic, or the
                             // readiness early-return below all drop it.
                             let _in_flight_claim = in_flight_claim;
+                            // claimfamily (rc-hllkk): split a sibling claim
+                            // onto the exchange so residency inside
+                            // pipeline-embedded stash sites (resequencer
+                            // buffers, aggregator buckets) stays counted
+                            // after this task completes. The sibling is
+                            // taken back from an in-band Ok result below —
+                            // exchanges that complete inside the pipeline
+                            // release at task end (drainclaim semantics);
+                            // stash emissions escape with theirs.
+                            let mut exchange = exchange;
+                            exchange.in_flight_claim =
+                                _in_flight_claim.as_ref().map(InFlightClaim::split);
 
                             // Load current pipeline from ArcSwap
                             let mut pipe = pipe_ref.load().processor.clone_inner();
@@ -562,9 +574,18 @@ impl camel_api::RouteController for DefaultRouteController {
 
                             // B1: scope CANCEL_TOKEN so run_steps can check
                             // cancellation between steps.
-                            let result = CANCEL_TOKEN
+                            let mut result = CANCEL_TOKEN
                                 .scope(cancel, async move { pipe.call(exchange).await })
                                 .await;
+                            // claimfamily: reclaim the sibling from an
+                            // in-band result (input completed inside this
+                            // pipeline) so release stays at task end. A
+                            // stash emission already escaped with its claim;
+                            // a transformed result carries None (its input's
+                            // sibling dropped on consume).
+                            if let Ok(ref mut ex) = result {
+                                ex.in_flight_claim = None;
+                            }
                             if let Some(tx) = reply_tx {
                                 // Helper clones the error before the send, so a
                                 // dropped receiver emits b′ with the REAL error.
@@ -672,9 +693,29 @@ impl camel_api::RouteController for DefaultRouteController {
                         // child token stays cancelled after stop→restart).
                         let cancel = pipeline_cancel.clone();
                         let _drain_guard = DrainGuard::new(Arc::clone(&drain_in_flight));
-                        let result = CANCEL_TOKEN
+                        // claimfamily (rc-hllkk): split a sibling claim onto
+                        // the exchange so residency inside pipeline-embedded
+                        // stash sites (resequencer buffers, aggregator
+                        // buckets) stays counted after this iteration
+                        // completes. Taken back from an in-band Ok result
+                        // below — exchanges that complete inside the
+                        // pipeline release at iteration end (drainclaim
+                        // semantics); stash emissions escape with theirs.
+                        let mut exchange = exchange;
+                        exchange.in_flight_claim =
+                            _in_flight_claim.as_ref().map(InFlightClaim::split);
+                        let mut result = CANCEL_TOKEN
                             .scope(cancel, async move { pipeline.call(exchange).await })
                             .await;
+                        // claimfamily: reclaim the sibling from an in-band
+                        // result (input completed inside this pipeline) so
+                        // release stays at iteration end. A stash emission
+                        // already escaped with its claim; a transformed
+                        // result carries None (its input's sibling dropped
+                        // on consume).
+                        if let Ok(ref mut ex) = result {
+                            ex.in_flight_claim = None;
+                        }
                         if let Some(tx) = reply_tx {
                             // Helper clones the error before the send, so a
                             // dropped receiver emits b′ with the REAL error.

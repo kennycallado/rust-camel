@@ -505,11 +505,27 @@ impl Service<Exchange> for AggregatorService {
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let svc = self.clone();
         Box::pin(async move {
-            // Pipeline-embedded submissions carry no claims (the drain
-            // site holds the claim for the whole pipeline call), so any
-            // claims a completion returns are dropped here — drop IS
-            // the release.
-            svc.submit_with_claim(exchange, None).await.reply
+            // claimfamily (rc-qbigm): pipeline-embedded submissions carry
+            // their drain-site split sibling ON the exchange — take it as
+            // the stash sidecar so a pending bucket keeps the exchange
+            // counted after the embedding pipeline's ack resolves. A sync
+            // completion re-attaches ONE of the bucket's claims to the
+            // aggregated output (its downstream continuation stays
+            // counted; the drain site takes it back if the output
+            // completes in-band); the remaining claims drop — their
+            // input exchanges were consumed into the aggregate. Every
+            // rejection path drops the submitted claim inside
+            // (rejected = released).
+            let mut exchange = exchange;
+            let claim = exchange.in_flight_claim.take();
+            let AggregationReceipt { reply, claims } = svc.submit_with_claim(exchange, claim).await;
+            match reply {
+                Ok(mut result) => {
+                    result.in_flight_claim = claims.into_iter().flatten().next();
+                    Ok(result)
+                }
+                Err(e) => Err(e),
+            }
         })
     }
 }
@@ -1095,6 +1111,83 @@ mod tests {
         assert_eq!(
             result.property(CAMEL_AGGREGATOR_PENDING),
             Some(&serde_json::json!(true))
+        );
+    }
+
+    // ── claimfamily (rc-qbigm): embedded (size-only) stash claims ──
+
+    #[tokio::test]
+    async fn embedded_stash_keeps_carried_claim_until_completion() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let svc = new_test_svc(config_size(2));
+
+        // First exchange: pending stash — the carried claim moves into
+        // the bucket and keeps the exchange counted after `call`
+        // (the embedding pipeline's ack) resolves.
+        let mut first = make_exchange("orderId", "A", "first");
+        first.in_flight_claim = Some(InFlightClaim::attach(&counter));
+        let pending = svc.clone().oneshot(first).await.unwrap();
+        assert_eq!(
+            pending.property(CAMEL_AGGREGATOR_PENDING),
+            Some(&serde_json::json!(true)),
+            "first exchange must be stashed"
+        );
+        assert!(
+            pending.in_flight_claim.is_none(),
+            "the pending marker carries no claim (it completes immediately)"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "stashed exchange must stay counted"
+        );
+
+        // Second exchange completes the bucket: the aggregated output
+        // carries ONE claim for its downstream continuation; the other
+        // claim dropped (that input was consumed into the aggregate).
+        let mut second = make_exchange("orderId", "A", "second");
+        second.in_flight_claim = Some(InFlightClaim::attach(&counter));
+        let aggregated = svc.clone().oneshot(second).await.unwrap();
+        assert!(
+            aggregated.property(CAMEL_AGGREGATOR_PENDING).is_none(),
+            "second exchange must complete the bucket"
+        );
+        assert!(
+            aggregated.in_flight_claim.is_some(),
+            "aggregated output carries one claim downstream"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "consumed input's claim released; the output's stays held"
+        );
+        drop(aggregated);
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "dropping the completed output releases the last claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_rejection_releases_carried_claim() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let svc = new_test_svc(config_size(2));
+
+        // Missing correlation header: the submission is rejected and the
+        // carried claim drops inside — rejected = released.
+        let mut bad = Exchange::new(Message::new("no-header"));
+        bad.in_flight_claim = Some(InFlightClaim::attach(&counter));
+        let result = svc.clone().oneshot(bad).await;
+        assert!(result.is_err(), "missing correlation key must reject");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "rejected submission releases its claim"
         );
     }
 
