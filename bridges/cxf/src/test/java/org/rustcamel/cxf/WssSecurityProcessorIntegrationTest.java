@@ -173,10 +173,121 @@ class WssSecurityProcessorIntegrationTest {
         </soapenv:Envelope>
         """;
 
-    assertThrows(
-        Exception.class,
-        () -> processor.processInbound(plainSoap),
-        "Should reject unsigned message when Signature action is required");
+    WSSecurityException noHeaderEx =
+        assertThrows(
+            WSSecurityException.class,
+            () -> processor.processInbound(plainSoap),
+            "Should reject unsigned message when Signature action is required");
+    assertEquals(
+        "No WS-Security header found in message",
+        noHeaderEx.getMessage(),
+        "The no-header failure must carry its distinct detail text");
+  }
+
+  @Test
+  void processInbound_distinctText_missingSignatureAction() throws Exception {
+    WssSecurityProcessor processor =
+        createProcessorWithActions(
+            keystorePath, "changeit", "alice", "changeit", "alice", "Signature", "Signature");
+
+    // A Timestamp-only Security header yields a TS engine result but no SIGN result, so the
+    // rejection comes from the missing-Signature check alone (not from freshness or coverage).
+    DateTimeFormatter fmt = DateTimeFormatter.ISO_INSTANT;
+    Instant now = Instant.now();
+    String timestampOnly =
+        """
+        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+          <soapenv:Header>
+            <wsse:Security>
+              <wsu:Timestamp wsu:Id="Ts-only-1">
+                <wsu:Created>%s</wsu:Created>
+                <wsu:Expires>%s</wsu:Expires>
+              </wsu:Timestamp>
+            </wsse:Security>
+          </soapenv:Header>
+          <soapenv:Body><test:Hello xmlns:test="http://test.example.com">World</test:Hello></soapenv:Body>
+        </soapenv:Envelope>
+        """
+            .formatted(
+                fmt.format(now.truncatedTo(ChronoUnit.MILLIS)),
+                fmt.format(now.plusSeconds(300).truncatedTo(ChronoUnit.MILLIS)));
+
+    WSSecurityException ex =
+        assertThrows(
+            WSSecurityException.class,
+            () -> processor.processInbound(timestampOnly),
+            "A Timestamp-only message must be rejected when Signature is required");
+    assertEquals(
+        "Required Signature action not found in message",
+        ex.getMessage(),
+        "The missing-Signature failure must carry its distinct detail text");
+  }
+
+  @Test
+  void processInbound_distinctText_missingEncryptAction() throws Exception {
+    WssSecurityProcessor processor =
+        createProcessorWithActions(
+            keystorePath,
+            "changeit",
+            "alice",
+            "changeit",
+            "alice",
+            "Signature",
+            "Signature Encrypt");
+
+    String soapXml =
+        """
+        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+          <soapenv:Header/>
+          <soapenv:Body><test:Hello xmlns:test="http://test.example.com">World</test:Hello></soapenv:Body>
+        </soapenv:Envelope>
+        """;
+
+    // Outbound signs only, so inbound sees a valid signature but no EncryptedData.
+    String signed = processor.processOutbound(soapXml);
+    WSSecurityException ex =
+        assertThrows(
+            WSSecurityException.class,
+            () -> processor.processInbound(signed),
+            "A signed-but-unencrypted message must be rejected when Encrypt is required");
+    assertEquals(
+        "Required Encrypt action not found in message",
+        ex.getMessage(),
+        "The missing-Encrypt failure must carry its distinct detail text");
+  }
+
+  @Test
+  void processInbound_distinctText_missingTimestampAction() throws Exception {
+    WssSecurityProcessor processor =
+        createProcessorWithActions(
+            keystorePath,
+            "changeit",
+            "alice",
+            "changeit",
+            "alice",
+            "Signature",
+            "Timestamp Signature");
+
+    String soapXml =
+        """
+        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+          <soapenv:Header/>
+          <soapenv:Body><test:Hello xmlns:test="http://test.example.com">World</test:Hello></soapenv:Body>
+        </soapenv:Envelope>
+        """;
+
+    // Outbound has no Timestamp action, so the signature covers the Body only and the inbound
+    // required-action check rejects the missing TS result before the coverage check runs.
+    String signed = processor.processOutbound(soapXml);
+    WSSecurityException ex =
+        assertThrows(
+            WSSecurityException.class,
+            () -> processor.processInbound(signed),
+            "A message without a Timestamp must be rejected when Timestamp is required");
+    assertEquals(
+        "Required Timestamp action not found in message",
+        ex.getMessage(),
+        "The missing-Timestamp failure must carry its distinct detail text");
   }
 
   @Test

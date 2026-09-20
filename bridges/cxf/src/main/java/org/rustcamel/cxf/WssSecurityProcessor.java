@@ -165,10 +165,8 @@ public class WssSecurityProcessor {
   private void enforceRequiredActions(List<WSSecurityEngineResult> results, String requiredActions)
       throws WSSecurityException {
     if (results == null || results.isEmpty()) {
-      throw new WSSecurityException(
-          WSSecurityException.ErrorCode.SECURITY_ERROR,
-          "noSecurity",
-          new Object[] {"No WS-Security header found in message"});
+      throw new WssRequirementException(
+          WSSecurityException.ErrorCode.SECURITY_ERROR, "No WS-Security header found in message");
     }
 
     Set<Integer> foundActions = new HashSet<>();
@@ -180,28 +178,25 @@ public class WssSecurityProcessor {
     if (containsAction(requiredActions, "Signature")) {
       boolean signatureFound = foundActions.contains(WSConstants.SIGN);
       if (!signatureFound) {
-        throw new WSSecurityException(
+        throw new WssRequirementException(
             WSSecurityException.ErrorCode.FAILED_CHECK,
-            "noSecurity",
-            new Object[] {"Required Signature action not found in message"});
+            "Required Signature action not found in message");
       }
     }
     if (containsAction(requiredActions, "Encrypt")) {
       boolean encryptFound = foundActions.contains(WSConstants.ENCR);
       if (!encryptFound) {
-        throw new WSSecurityException(
+        throw new WssRequirementException(
             WSSecurityException.ErrorCode.FAILED_CHECK,
-            "noSecurity",
-            new Object[] {"Required Encrypt action not found in message"});
+            "Required Encrypt action not found in message");
       }
     }
     if (containsAction(requiredActions, "Timestamp")) {
       boolean timestampFound = foundActions.contains(WSConstants.TS);
       if (!timestampFound) {
-        throw new WSSecurityException(
+        throw new WssRequirementException(
             WSSecurityException.ErrorCode.FAILED_CHECK,
-            "noSecurity",
-            new Object[] {"Required Timestamp action not found in message"});
+            "Required Timestamp action not found in message");
       }
     }
   }
@@ -215,10 +210,9 @@ public class WssSecurityProcessor {
       throws WSSecurityException {
     NodeList timestampNodes = doc.getElementsByTagNameNS(WSConstants.WSU_NS, "Timestamp");
     if (timestampNodes.getLength() == 0) {
-      throw new WSSecurityException(
+      throw new WssRequirementException(
           WSSecurityException.ErrorCode.FAILED_CHECK,
-          "noSecurity",
-          new Object[] {"Required wsu:Timestamp element not found in message"});
+          "Required wsu:Timestamp element not found in message");
     }
 
     Element timestamp = (Element) timestampNodes.item(0);
@@ -237,10 +231,9 @@ public class WssSecurityProcessor {
         if (protectedElement != null && protectedElement.isSameNode(timestamp)) return;
       }
     }
-    throw new WSSecurityException(
+    throw new WssRequirementException(
         WSSecurityException.ErrorCode.FAILED_CHECK,
-        "noSecurity",
-        new Object[] {"wsu:Timestamp is not covered by the message signature"});
+        "wsu:Timestamp is not covered by the message signature");
   }
 
   private static boolean containsAction(String actions, String token) {
@@ -276,5 +269,35 @@ public class WssSecurityProcessor {
 
   private static boolean hasText(String value) {
     return value != null && !value.isBlank();
+  }
+
+  /**
+   * WSSecurityException whose message survives verbatim. Every String-bearing constructor of wss4j
+   * 4.0.1's WSSecurityException resolves its message through Santuario's I18n bundle
+   * (org/apache/xml/security/resource/xmlsecurity), and the msgId used at the requirement throw
+   * sites is absent from that bundle, so the lookup fell back to a generic "No message with ID"
+   * text and the MessageFormat pass (no placeholder) dropped the Object[] detail args — every
+   * coverage/required-action failure rendered byte-identical diagnostics (bd rc-sggo9). A
+   * resource-bundle override is not viable here: WSSecurityException never consults wss4j's own
+   * messages bundle for these constructors, and swapping the shared Santuario bundle would hijack
+   * i18n for every other msgId. This subclass keeps the WSSecurityException type and ErrorCode
+   * (SOAP fault-code mapping unchanged) while returning the exact per-failure detail from
+   * getMessage(), leaving bundle-backed msgIds untouched.
+   */
+  private static final class WssRequirementException extends WSSecurityException {
+
+    private static final long serialVersionUID = 1L;
+
+    private final String detail;
+
+    WssRequirementException(WSSecurityException.ErrorCode errorCode, String detail) {
+      super(errorCode);
+      this.detail = detail;
+    }
+
+    @Override
+    public String getMessage() {
+      return detail;
+    }
   }
 }

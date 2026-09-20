@@ -32,9 +32,9 @@ import org.w3c.dom.NodeList;
  * order, and a Timestamp result whose element is gone by check time (defense in depth). The
  * injected and stripped shapes never reach the check on the wire — the WSS4J engine rejects
  * multi-Timestamp headers itself (BSP:R3227) and element-less messages yield no TS result — so
- * those branches are pinned by direct invocation of the private check. WSS4J drops the detail
- * arguments of the coverage exceptions during message resolution, so distinctness is asserted
- * through scenario controls rather than exception message text.
+ * those branches are pinned by direct invocation of the private check. Every rejection asserts its
+ * distinct operator-facing message text: since bd rc-sggo9 the coverage throw sites carry their
+ * detail verbatim on WssRequirementException, so the texts are part of the pinned behavior.
  */
 class WssSecurityProcessorTimestampCoverageTest {
 
@@ -72,10 +72,15 @@ class WssSecurityProcessorTimestampCoverageTest {
     WssSecurityProcessor signatureOnlyVerifier = createProcessor("Signature", "Signature");
     assertDoesNotThrow(() -> signatureOnlyVerifier.processInbound(crafted));
 
-    assertThrows(
-        WSSecurityException.class,
-        () -> processor.processInbound(crafted),
-        "An unsigned Timestamp next to a Body-only signature must be rejected");
+    WSSecurityException unsignedEx =
+        assertThrows(
+            WSSecurityException.class,
+            () -> processor.processInbound(crafted),
+            "An unsigned Timestamp next to a Body-only signature must be rejected");
+    assertEquals(
+        "wsu:Timestamp is not covered by the message signature",
+        unsignedEx.getMessage(),
+        "The unsigned-Timestamp failure must carry its distinct detail text");
   }
 
   // --- injected Timestamp: wire shape rejected by the engine, branch pinned directly ---
@@ -130,10 +135,15 @@ class WssSecurityProcessorTimestampCoverageTest {
     List<WSSecurityEngineResult> signatureResult =
         List.of(new WSSecurityEngineResult(WSConstants.SIGN, List.of(dataRef)));
 
-    assertThrows(
-        WSSecurityException.class,
-        () -> invokeCoverageCheck(processor, doc, signatureResult),
-        "A Timestamp injected ahead of the signed one must fail the coverage check");
+    WSSecurityException shadowingEx =
+        assertThrows(
+            WSSecurityException.class,
+            () -> invokeCoverageCheck(processor, doc, signatureResult),
+            "A Timestamp injected ahead of the signed one must fail the coverage check");
+    assertEquals(
+        "wsu:Timestamp is not covered by the message signature",
+        shadowingEx.getMessage(),
+        "The shadowing-Timestamp failure must carry its distinct detail text");
   }
 
   // --- stripped Timestamp: engine result present, element absent (defense in depth) ---
@@ -154,10 +164,15 @@ class WssSecurityProcessorTimestampCoverageTest {
     List<WSSecurityEngineResult> timestampResult =
         List.of(new WSSecurityEngineResult(WSConstants.TS));
 
-    assertThrows(
-        WSSecurityException.class,
-        () -> invokeCoverageCheck(processor, doc, timestampResult),
-        "A missing wsu:Timestamp element must be rejected even when a TS result exists");
+    WSSecurityException strippedEx =
+        assertThrows(
+            WSSecurityException.class,
+            () -> invokeCoverageCheck(processor, doc, timestampResult),
+            "A missing wsu:Timestamp element must be rejected even when a TS result exists");
+    assertEquals(
+        "Required wsu:Timestamp element not found in message",
+        strippedEx.getMessage(),
+        "The stripped-Timestamp failure must carry its distinct detail text");
   }
 
   /** Happy-path control: the check returns normally when a signed reference covers the element. */
