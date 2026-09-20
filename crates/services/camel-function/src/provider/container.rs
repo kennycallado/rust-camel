@@ -36,6 +36,7 @@ pub struct ContainerProviderBuilder {
     boot_timeout: std::time::Duration,
     pull_policy: PullPolicy,
     instance_id: Option<String>,
+    egress_allowlist: Vec<String>,
 }
 
 impl Default for ContainerProviderBuilder {
@@ -45,6 +46,7 @@ impl Default for ContainerProviderBuilder {
             boot_timeout: std::time::Duration::from_secs(10),
             pull_policy: PullPolicy::IfMissing,
             instance_id: None,
+            egress_allowlist: Vec::new(),
         }
     }
 }
@@ -74,7 +76,23 @@ impl ContainerProviderBuilder {
         self
     }
 
+    /// Set the Deno runner's outbound-network allowlist (`host[:port]`
+    /// entries). Empty (the default) keeps deny-all egress.
+    ///
+    /// Entries are validated at `build()` time — fail-closed: a malformed
+    /// entry is an error, never a silently widened permission.
+    pub fn egress_allowlist(mut self, entries: Vec<String>) -> Self {
+        self.egress_allowlist = entries;
+        self
+    }
+
     pub fn build(self) -> Result<ContainerProvider, ProviderError> {
+        // Validate before touching Docker so a bad allowlist fails fast
+        // (and unit-testably, without a daemon).
+        for entry in &self.egress_allowlist {
+            crate::config::validate_egress_allowlist_entry(entry)
+                .map_err(|e| ProviderError::InvalidConfig(e.to_string()))?;
+        }
         let docker = bollard::Docker::connect_with_local_defaults()
             .map_err(|e| ProviderError::SpawnFailed(format!("docker connect: {e}")))?;
         let instance_id = self.instance_id.unwrap_or_else(|| {
@@ -99,6 +117,7 @@ impl ContainerProviderBuilder {
             client: ProtocolClient::new(),
             containers_by_handle: DashMap::new(),
             instance_id,
+            egress_allowlist: self.egress_allowlist,
             log_forwarder_handles: std::sync::Mutex::new(Vec::new()),
         })
     }
@@ -110,6 +129,7 @@ pub struct ContainerProvider {
     instance_id: String,
     boot_timeout: std::time::Duration,
     pull_policy: PullPolicy,
+    egress_allowlist: Vec<String>,
     client: ProtocolClient,
     containers_by_handle: DashMap<String, ContainerEntry>,
     log_forwarder_handles: std::sync::Mutex<Vec<JoinHandle<()>>>,
@@ -270,12 +290,29 @@ fn inspect_error_to_spawn_failed(image: &str, e: bollard::errors::Error) -> Prov
     ProviderError::SpawnFailed(format!("failed to inspect image '{image}': {e}"))
 }
 
+/// Compute the Deno `--allow-net` value from the egress allowlist.
+///
+/// `0.0.0.0` is always first: it is the runner's HTTP bind address
+/// (inbound only) and keeps the container reachable for the control
+/// protocol. Each allowlist entry adds one exact-host outbound grant.
+/// An empty allowlist yields `0.0.0.0` alone — byte-identical to the
+/// runner image's default `CMD`, i.e. deny-all egress.
+fn deno_allow_net_value(egress_allowlist: &[String]) -> String {
+    let mut value = String::from("0.0.0.0");
+    for entry in egress_allowlist {
+        value.push(',');
+        value.push_str(entry);
+    }
+    value
+}
+
 /// Build the container creation request with security hardening.
 fn build_container_config(
     image: &str,
     host_port: u16,
     instance_id: &str,
     handle_id: &str,
+    egress_allowlist: &[String],
 ) -> bollard::models::ContainerCreateBody {
     let labels = std::collections::HashMap::from([
         ("camel.function.runner".to_string(), "true".to_string()),
@@ -286,8 +323,19 @@ fn build_container_config(
         ),
     ]);
 
+    // The provider owns the full deno command line so the net permission
+    // derives from configuration, not from the image's baked-in CMD.
+    let cmd = vec![
+        "deno".to_string(),
+        "run".to_string(),
+        format!("--allow-net={}", deno_allow_net_value(egress_allowlist)),
+        "--allow-env=PORT".to_string(),
+        "main.ts".to_string(),
+    ];
+
     bollard::models::ContainerCreateBody {
         image: Some(image.to_string()),
+        cmd: Some(cmd),
         env: Some(vec![
             "PORT=8080".to_string(),
             "DENO_NO_PROMPT=1".to_string(),
@@ -428,7 +476,13 @@ impl FunctionProvider for ContainerProvider {
 
         self.pull_image_if_needed().await?;
 
-        let config = build_container_config(&self.image, host_port, &self.instance_id, &handle_id);
+        let config = build_container_config(
+            &self.image,
+            host_port,
+            &self.instance_id,
+            &handle_id,
+            &self.egress_allowlist,
+        );
 
         let create_opts = bollard::query_parameters::CreateContainerOptions {
             name: Some(handle_id.clone()),
@@ -668,8 +722,13 @@ mod tests {
 
     #[test]
     fn container_config_has_security_hardening() {
-        let config =
-            build_container_config("denoland/deno:2.1.4", 8080, "test-instance", "test-handle");
+        let config = build_container_config(
+            "denoland/deno:2.1.4",
+            8080,
+            "test-instance",
+            "test-handle",
+            &[],
+        );
 
         let hc = config.host_config.expect("host_config must be set");
 
@@ -719,6 +778,78 @@ mod tests {
         assert!(
             env.iter().any(|e| e.contains("DENO_DIR=/tmp")),
             "env must set DENO_DIR=/tmp for readonly rootfs"
+        );
+    }
+
+    #[test]
+    fn empty_allowlist_pins_default_deny_net_permission() {
+        // Mission pin: an empty allowlist must reproduce the runner image's
+        // baked-in CMD exactly — outbound egress denied, only the bind
+        // address is granted. The expectation is parsed FROM the Dockerfile
+        // so image drift fails here instead of silently re-widening.
+        let dockerfile = include_str!("../../runner/Dockerfile");
+        let cmd_line = dockerfile
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("CMD "))
+            .expect("runner Dockerfile must declare a CMD");
+        let image_cmd: Vec<String> =
+            serde_json::from_str(cmd_line).expect("Dockerfile CMD must be a JSON string array");
+
+        let config = build_container_config(
+            "denoland/deno:2.1.4",
+            8080,
+            "test-instance",
+            "test-handle",
+            &[],
+        );
+        assert_eq!(
+            config.cmd.expect("cmd must be set"),
+            image_cmd,
+            "empty allowlist must keep the image's deny-all net permission"
+        );
+    }
+
+    #[test]
+    fn allowlist_grants_exact_hosts_only() {
+        let entries = vec![
+            "api.example.com:443".to_string(),
+            "internal".to_string(),
+            "[::1]:5432".to_string(),
+        ];
+        let config = build_container_config(
+            "denoland/deno:2.1.4",
+            8080,
+            "test-instance",
+            "test-handle",
+            &entries,
+        );
+        let cmd = config.cmd.expect("cmd must be set");
+        let net_flag = cmd
+            .iter()
+            .find(|c| c.starts_with("--allow-net="))
+            .expect("cmd must carry --allow-net");
+        assert_eq!(
+            net_flag, "--allow-net=0.0.0.0,api.example.com:443,internal,[::1]:5432",
+            "allow-net must be the bind address plus exactly the allowlisted entries"
+        );
+        // Non-allowlisted hosts stay denied (nothing else is granted).
+        assert!(!net_flag.contains("evil.com"));
+        assert!(!net_flag.contains('*'));
+    }
+
+    #[test]
+    fn builder_rejects_malformed_egress_entry_before_docker() {
+        // Fail-closed at construction; no Docker daemon may be required to
+        // surface a bad allowlist entry.
+        let result = ContainerProvider::builder()
+            .egress_allowlist(vec![
+                "api.example.com:443".to_string(),
+                "bad host".to_string(),
+            ])
+            .build();
+        assert!(
+            matches!(result, Err(ProviderError::InvalidConfig(ref msg)) if msg.contains("egress_allowlist")),
+            "expected InvalidConfig naming egress_allowlist, got: {result:?}"
         );
     }
 }

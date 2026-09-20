@@ -56,7 +56,9 @@ impl FunctionRuntimeService {
     pub fn with_default_container_provider(
         config: FunctionConfig,
     ) -> Result<Self, crate::provider::ProviderError> {
-        let provider = crate::provider::container::ContainerProvider::builder().build()?;
+        let provider = crate::provider::container::ContainerProvider::builder()
+            .egress_allowlist(config.egress_allowlist.clone())
+            .build()?;
         Ok(Self::with_container_provider(config, provider))
     }
 

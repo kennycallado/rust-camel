@@ -180,6 +180,55 @@ pub(crate) struct LifecycleSpec {
     pub idle_note: &'static str,
 }
 
+/// Parse `[default.components.function].egress_allowlist` from the raw
+/// component blocks (camel-config serde-flattens `[default.components.*]`
+/// into `components.raw`). Shared with `camel job` (same real-boot
+/// config seam).
+///
+/// Shape is fail-closed: a present `egress_allowlist` that is not an
+/// array of strings is a hard boot error.
+#[cfg(any(feature = "containers", test))]
+pub(crate) fn egress_allowlist_from_components(
+    raw: &std::collections::HashMap<String, toml::Value>,
+) -> Result<Vec<String>, camel_api::CamelError> {
+    let invalid = || {
+        camel_api::CamelError::Config(
+            "[default.components.function].egress_allowlist must be an array of host[:port] strings"
+                .to_string(),
+        )
+    };
+    let Some(block) = raw.get("function") else {
+        return Ok(Vec::new());
+    };
+    let Some(value) = block.get("egress_allowlist") else {
+        return Ok(Vec::new());
+    };
+    let array = value.as_array().ok_or_else(invalid)?;
+    let mut entries = Vec::with_capacity(array.len());
+    for item in array {
+        let entry = item.as_str().ok_or_else(invalid)?;
+        entries.push(entry.to_string());
+    }
+    Ok(entries)
+}
+
+/// Build the container-runtime `FunctionConfig` from the raw component
+/// blocks: parse the Egress Allowlist, then validate it fail-closed.
+/// Shared by `camel run` and `camel job`; the provider builder
+/// re-validates before touching Docker.
+#[cfg(feature = "containers")]
+pub(crate) fn function_config_from_components(
+    raw: &std::collections::HashMap<String, toml::Value>,
+) -> Result<camel_function::FunctionConfig, camel_api::CamelError> {
+    egress_allowlist_from_components(raw).and_then(|egress_allowlist| {
+        let cfg = camel_function::FunctionConfig {
+            egress_allowlist,
+            ..Default::default()
+        };
+        cfg.validate().map(|()| cfg)
+    })
+}
+
 /// Lifecycle failure classes; the caller owns rendering and exit codes
 /// (`camel run` logs and exits 1, an artifact writes its report and exits
 /// 2).
@@ -256,11 +305,13 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
     // step compiler (no FunctionRuntimeService registered) and `container:`
     // endpoints fail closed as an unregistered scheme.
     #[cfg(feature = "containers")]
-    match camel_function::FunctionRuntimeService::with_default_container_provider(
-        camel_function::FunctionConfig::default(),
-    ) {
-        Ok(svc) => ctx = ctx.with_lifecycle(svc),
-        Err(e) => tracing::warn!("Function runtime disabled: {e}"),
+    {
+        let fn_config = function_config_from_components(&camel_config.components.raw)
+            .map_err(LifecycleFailure::Boot)?;
+        match camel_function::FunctionRuntimeService::with_default_container_provider(fn_config) {
+            Ok(svc) => ctx = ctx.with_lifecycle(svc),
+            Err(e) => tracing::warn!("Function runtime disabled: {e}"),
+        }
     }
 
     // Load WASM beans after context is created (needs component registry)

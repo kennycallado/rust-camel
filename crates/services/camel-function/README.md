@@ -54,7 +54,20 @@ docker build -t kennycallado/deno-runner:latest runner/
 
 Endpoints on port 8080: `GET /health`, `POST /register`, `POST /invoke`, `POST /shutdown`.
 
-Security: `--allow-net=0.0.0.0 --allow-env=PORT` only.
+Security: `--allow-net=0.0.0.0 --allow-env=PORT` only. No filesystem, no subprocesses, no other env.
+
+## Egress Allowlist
+
+Outbound network access is denied by default. A deployment opts in per endpoint through Camel.toml:
+
+```toml
+[default.components.function]
+egress_allowlist = ["api.example.com:443", "internal", "[::1]:5432"]
+```
+
+Entry semantics follow Deno `--allow-net` exact-host matching: `host` allows any port on that host; `host:port` allows only that host and port; IPv6 literals must be bracketed. Malformed entries (schemes, wildcards, paths, invalid ports) are rejected at config load — fail-closed. Absent or empty list keeps deny-all egress.
+
+The `ContainerProvider` sets the full Deno command at container creation, so the runner image's baked-in `CMD` stays a deny-all default for standalone image use.
 
 ## Container Lifecycle
 

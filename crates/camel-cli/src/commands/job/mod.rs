@@ -1024,11 +1024,20 @@ async fn execute_job(
     // step compiler (no FunctionRuntimeService registered) and `container:`
     // endpoints fail closed as an unregistered scheme.
     #[cfg(feature = "containers")]
-    match camel_function::FunctionRuntimeService::with_default_container_provider(
-        camel_function::FunctionConfig::default(),
-    ) {
-        Ok(svc) => ctx = ctx.with_lifecycle(svc),
-        Err(e) => tracing::warn!("Function runtime disabled: {e}"),
+    {
+        let fn_config = match crate::commands::run::function_config_from_components(
+            &camel_config.components.raw,
+        ) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("camel-cli job failed: {e}");
+                return 2;
+            }
+        };
+        match camel_function::FunctionRuntimeService::with_default_container_provider(fn_config) {
+            Ok(svc) => ctx = ctx.with_lifecycle(svc),
+            Err(e) => tracing::warn!("Function runtime disabled: {e}"),
+        }
     }
 
     // Security compile context: the same fail-closed seams as `camel run`

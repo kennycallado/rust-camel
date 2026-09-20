@@ -28,6 +28,8 @@ pub enum ProviderError {
     InvokeFailed(String),
     #[error("shutdown failed: {0}")]
     ShutdownFailed(String),
+    #[error("invalid provider config: {0}")]
+    InvalidConfig(String),
     #[error("boot timeout")]
     BootTimeout,
 }

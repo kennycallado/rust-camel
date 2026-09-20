@@ -28,6 +28,10 @@ _Avoid_: function name, function hash
 The mutation returned by a Function execution — a partial update specifying body replacement, header additions/removals, and property changes. Applied to the Exchange after the Function completes.
 _Avoid_: response, result, diff
 
+**Egress Allowlist**:
+The configurable list of `host[:port]` entries that a Deno runner may connect to outbound. Configured through `[default.components.function].egress_allowlist` in Camel.toml and translated into the runner's Deno `--allow-net` permission set. Empty (the default) denies all outbound connections.
+_Avoid_: net whitelist, network permissions, allow-net config
+
 ## Example dialogue
 
 > "What is the difference between `script:` and `function:`?"
@@ -35,3 +39,6 @@ _Avoid_: response, result, diff
 >
 > "Does the Function see the full Exchange?"
 > "It receives a snapshot of body, headers, and properties. It returns an ExchangePatch — it cannot access CamelContext or send to other Routes directly from inside the Function."
+>
+> "Can a Function call external services?"
+> "Not by default — egress is denied. Opt in per endpoint through the Egress Allowlist in Camel.toml; entries are `host[:port]` and malformed entries fail config load."

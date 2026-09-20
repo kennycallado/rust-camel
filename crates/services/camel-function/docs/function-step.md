@@ -65,7 +65,16 @@ The `camel` object passed to `export default (camel) => { ... }`:
 
 ## Security
 
-Runner flags: `--allow-net=0.0.0.0 --allow-env=PORT` only. No filesystem, no subprocesses, no other env.
+Runner flags: `--allow-env=PORT` plus `--allow-net`, which always contains the bind address `0.0.0.0` and the configured Egress Allowlist entries — nothing else. No filesystem, no subprocesses, no other env.
+
+Outbound egress is denied by default. Opt in per endpoint:
+
+```toml
+[default.components.function]
+egress_allowlist = ["api.example.com:443", "internal"]
+```
+
+`host` allows any port on that host; `host:port` allows only that port; IPv6 literals must be bracketed (`[::1]:443`). Malformed entries abort config load (fail-closed).
 
 ## Container Lifecycle
 

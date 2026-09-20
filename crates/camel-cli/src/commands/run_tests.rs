@@ -571,3 +571,117 @@ routes:
 
     let _ = boot_handle.shutdown(&mut ctx).await;
 }
+
+// ---------------------------------------------------------------------------
+// Egress allowlist config surface
+// ---------------------------------------------------------------------------
+
+fn components_raw_with_function(
+    table: toml::Value,
+) -> std::collections::HashMap<String, toml::Value> {
+    std::collections::HashMap::from([("function".to_string(), table)])
+}
+
+#[test]
+fn egress_allowlist_absent_yields_empty_vec() {
+    // No [default.components.function] block at all.
+    let empty = std::collections::HashMap::new();
+    assert!(
+        egress_allowlist_from_components(&empty)
+            .expect("absent block must parse")
+            .is_empty()
+    );
+
+    // Block present, key absent: still deny-all egress (default unchanged).
+    let block = toml::Value::Table(
+        toml::from_str("default_timeout_ms = 5000").expect("parse table"), // allow-unwrap
+    );
+    let raw = components_raw_with_function(block);
+    assert!(
+        egress_allowlist_from_components(&raw)
+            .expect("absent key must parse")
+            .is_empty()
+    );
+}
+
+#[test]
+fn egress_allowlist_parses_entries_in_order() {
+    let table = toml::Value::Table(
+        toml::from_str(r#"egress_allowlist = ["api.example.com:443", "internal", "[::1]:5432"]"#)
+            .expect("parse table"), // allow-unwrap
+    );
+    let raw = components_raw_with_function(table);
+    let entries = egress_allowlist_from_components(&raw).expect("valid entries must parse");
+    assert_eq!(
+        entries,
+        vec![
+            "api.example.com:443".to_string(),
+            "internal".to_string(),
+            "[::1]:5432".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn egress_allowlist_non_array_rejected_fail_closed() {
+    let block = toml::Value::Table(
+        toml::from_str(r#"egress_allowlist = "api.example.com""#).expect("parse table"), // allow-unwrap
+    );
+    let raw = components_raw_with_function(block);
+    let err = egress_allowlist_from_components(&raw)
+        .err()
+        .expect("non-array value must be rejected"); // allow-unwrap
+    assert!(
+        err.to_string().contains("egress_allowlist"),
+        "error must name egress_allowlist, got: {err}"
+    );
+}
+
+#[test]
+fn egress_allowlist_non_string_item_rejected_fail_closed() {
+    let block = toml::Value::Table(
+        toml::from_str(r#"egress_allowlist = [1]"#).expect("parse table"), // allow-unwrap
+    );
+    let raw = components_raw_with_function(block);
+    let err = egress_allowlist_from_components(&raw)
+        .err()
+        .expect("non-string item must be rejected"); // allow-unwrap
+    assert!(
+        err.to_string().contains("egress_allowlist"),
+        "error must name egress_allowlist, got: {err}"
+    );
+}
+
+/// The composition both boot paths use (`camel run` →
+/// `LifecycleFailure::Boot`, `camel job` → exit 2): a malformed entry
+/// must fail closed before any runtime is constructed.
+#[cfg(feature = "containers")]
+#[test]
+fn function_config_malformed_allowlist_fails_closed() {
+    let block = toml::Value::Table(
+        toml::from_str(r#"egress_allowlist = ["api.example.com:443", "bad host"]"#)
+            .expect("parse table"), // allow-unwrap
+    );
+    let raw = components_raw_with_function(block);
+    let err = function_config_from_components(&raw)
+        .err()
+        .expect("malformed entry must fail closed"); // allow-unwrap
+    assert!(
+        err.to_string().contains("egress_allowlist"),
+        "error must name egress_allowlist, got: {err}"
+    );
+}
+
+#[cfg(feature = "containers")]
+#[test]
+fn function_config_valid_allowlist_roundtrip() {
+    let block = toml::Value::Table(
+        toml::from_str(r#"egress_allowlist = ["api.example.com:443"]"#).expect("parse table"), // allow-unwrap
+    );
+    let raw = components_raw_with_function(block);
+    let cfg = function_config_from_components(&raw).expect("valid allowlist must pass");
+    assert_eq!(
+        cfg.egress_allowlist,
+        vec!["api.example.com:443".to_string()]
+    );
+}
