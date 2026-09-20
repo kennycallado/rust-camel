@@ -288,8 +288,8 @@ pipeline, so `aggregate` has no nested `steps` block.
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `header` | string | yes | — | Header used as the correlation key |
-| `correlation_key` | string | no | — | Alternative correlation expression |
+| `header` | string | no | `""` | Header used as the correlation key (header-based source; used when `correlation_key` is absent) |
+| `correlation_key` | string | no | — | Expression correlation source (simple language); overrides `header` when both are present |
 | `completion_size` | integer | no | — | Complete after N exchanges |
 | `completion_timeout_ms` | integer | no | — | Complete after timeout |
 | `completion_predicate` | object | no | — | Predicate-block completion trigger |
@@ -300,10 +300,15 @@ pipeline, so `aggregate` has no nested `steps` block.
 | `force_completion_on_stop` | bool | no | — | Emit pending buckets on route stop |
 | `discard_on_timeout` | bool | no | — | Drop buckets that time out |
 
+At least one non-empty source is required; when both are present, `correlation_key` overrides `header`, and an empty `correlation_key` string is rejected.
+
 ```yaml
 - aggregate:
     header: "CorrelationId"
     completion_size: 10
+- aggregate:
+    correlation_key: "${header.orderId}"
+    completion_timeout_ms: 5000
 ```
 
 ### `marshal`

@@ -954,6 +954,7 @@ pub struct AggregateStep {
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AggregateData {
+    #[serde(default)]
     pub header: String,
     #[serde(default)]
     pub correlation_key: Option<String>,

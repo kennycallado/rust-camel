@@ -2616,6 +2616,35 @@ routes:
     }
 
     #[test]
+    fn aggregate_yaml_parses_without_header_key() {
+        let yaml = r#"
+routes:
+  - id: "aggregate-no-header"
+    from: "direct:start"
+    steps:
+      - aggregate:
+          correlation_key: "${header.orderId}"
+          completion_size: 2
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        let agg = routes[0]
+            .steps
+            .iter()
+            .find_map(|step| {
+                if let DeclarativeStep::Aggregate(spec) = step {
+                    Some(spec)
+                } else {
+                    None
+                }
+            })
+            .expect("expected an Aggregate step");
+        assert_eq!(agg.header, "");
+        assert_eq!(agg.correlation_key.as_deref(), Some("${header.orderId}"));
+        assert_eq!(agg.completion_size, Some(2));
+    }
+
+    #[test]
     fn test_parse_yaml_to_canonical_aggregate_no_completion_predicate() {
         let yaml = r#"
 routes:

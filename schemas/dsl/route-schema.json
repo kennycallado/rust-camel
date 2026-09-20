@@ -62,6 +62,7 @@
           ]
         },
         "header": {
+          "default": "",
           "type": "string"
         },
         "max_bucket_size": {
@@ -88,9 +89,6 @@
           "type": "string"
         }
       },
-      "required": [
-        "header"
-      ],
       "type": "object"
     },
     "AggregateStep": {

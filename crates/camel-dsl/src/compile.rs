@@ -3,7 +3,9 @@ use std::time::Duration;
 
 const DEFAULT_FUNCTION_TIMEOUT_MS: u64 = 5000;
 
-use camel_api::aggregator::{AggregationStrategy as AggregatorStrategy, AggregatorConfig};
+use camel_api::aggregator::{
+    AggregationStrategy as AggregatorStrategy, AggregatorConfig, CorrelationStrategy,
+};
 use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
@@ -663,6 +665,18 @@ fn compile_canonical_split(
     }
 }
 
+/// Shared correlation mapping for both aggregate lowering paths: an explicit
+/// `correlation_key` expression wins over the header name.
+fn aggregate_correlation(header: &str, correlation_key: Option<&str>) -> CorrelationStrategy {
+    match correlation_key {
+        Some(expr) => CorrelationStrategy::Expression {
+            expr: expr.to_string(),
+            language: "simple".to_string(),
+        },
+        None => CorrelationStrategy::HeaderName(header.to_string()),
+    }
+}
+
 fn compile_canonical_aggregate(config: CanonicalAggregateSpec) -> Result<BuilderStep, CamelError> {
     let completion_size = config.completion_size.unwrap_or(1);
     let mut builder = AggregatorConfig::correlate_by(&config.header);
@@ -709,10 +723,7 @@ fn compile_canonical_aggregate(config: CanonicalAggregateSpec) -> Result<Builder
 
     // When a completion_predicate is present, rebuild completion from the
     // explicitly-configured conditions (no default Size injection — predicate-
-    // alone routes get Single(PredicateExpr)). MUST run BEFORE the
-    // correlation_key partial-move below (config.correlation_key is moved by
-    // value, so accessing other config fields after it is illegal; this block
-    // only clones/borrows).
+    // alone routes get Single(PredicateExpr)).
     if let Some(led) = config.completion_predicate.clone() {
         use camel_api::aggregator::{CompletionCondition, CompletionMode};
         let mut conds: Vec<CompletionCondition> = Vec::new();
@@ -735,13 +746,8 @@ fn compile_canonical_aggregate(config: CanonicalAggregateSpec) -> Result<Builder
         };
     }
 
-    if let Some(expr) = config.correlation_key {
-        use camel_api::aggregator::CorrelationStrategy;
-        agg_config.correlation = CorrelationStrategy::Expression {
-            expr,
-            language: "simple".to_string(),
-        };
-    }
+    agg_config.correlation =
+        aggregate_correlation(&config.header, config.correlation_key.as_deref());
 
     Ok(BuilderStep::Aggregate { config: agg_config })
 }
@@ -1831,14 +1837,11 @@ fn compile_aggregate_step(def: AggregateStepDef) -> Result<BuilderStep, CamelErr
     if def.completion_predicate.is_some() {
         return Err(CamelError::RouteError(
             "aggregate.completion_predicate requires the canonical route path \
-             (the builder path does not lower expression predicates or correlation keys)"
+             (the builder path does not lower expression predicates)"
                 .to_string(),
         ));
     }
 
-    // NOTE: def.correlation_key is intentionally not wired here — the builder path
-    // lacks correlate_by_expr(). Expression correlation is resolved at runtime by
-    // the processor via CanonicalAggregateSpec.correlation_key (canonical path).
     let mut builder = AggregatorConfig::correlate_by(&def.header);
 
     match (def.completion_timeout_ms, completion_size) {
@@ -1872,9 +1875,10 @@ fn compile_aggregate_step(def: AggregateStepDef) -> Result<BuilderStep, CamelErr
         builder = builder.discard_on_timeout(discard);
     }
 
-    Ok(BuilderStep::Aggregate {
-        config: builder.build()?,
-    })
+    let mut agg_config = builder.build()?;
+    agg_config.correlation = aggregate_correlation(&def.header, def.correlation_key.as_deref());
+
+    Ok(BuilderStep::Aggregate { config: agg_config })
 }
 
 fn compile_multicast_step(
@@ -2106,9 +2110,22 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
             }
         }
         DeclarativeStep::Aggregate(def) => {
-            if def.correlation_key.is_none() {
+            if def
+                .correlation_key
+                .as_deref()
+                .is_some_and(|k| !k.trim().is_empty())
+            {
+                // Expression source present.
+            } else if def.correlation_key.is_some() {
                 return Err(CamelError::Config(
-                    "aggregate requires a correlation_key".to_string(),
+                    "aggregate.correlation_key cannot be empty".to_string(),
+                ));
+            } else if !def.header.trim().is_empty() {
+                // Header source present.
+            } else {
+                return Err(CamelError::Config(
+                    "aggregate requires a correlation source: header or correlation_key"
+                        .to_string(),
                 ));
             }
         }
@@ -3550,6 +3567,183 @@ mod tests {
         }
     }
 
+    fn assert_correlation_parity(
+        label: &str,
+        builder: &CorrelationStrategy,
+        canonical: &CorrelationStrategy,
+    ) {
+        match (builder, canonical) {
+            (CorrelationStrategy::HeaderName(b), CorrelationStrategy::HeaderName(c)) => {
+                assert_eq!(b, c, "{label}: header names must be equal");
+            }
+            (
+                CorrelationStrategy::Expression {
+                    expr: b_expr,
+                    language: b_language,
+                },
+                CorrelationStrategy::Expression {
+                    expr: c_expr,
+                    language: c_language,
+                },
+            ) => {
+                assert_eq!(b_expr, c_expr, "{label}: expressions must be equal");
+                assert_eq!(b_language, c_language, "{label}: languages must be equal");
+            }
+            (CorrelationStrategy::Fn(_), CorrelationStrategy::Fn(_)) => {}
+            _ => panic!("{label}: correlation variant mismatch: {builder:?} vs {canonical:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_path_lowers_correlation_key_expression() {
+        let def = AggregateStepDef {
+            header: "region".to_string(),
+            correlation_key: Some("${header.orderId}".to_string()),
+            completion_size: Some(2),
+            completion_timeout_ms: None,
+            completion_predicate: None,
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        };
+        let canonical = compile_aggregate_step_to_canonical(def).expect("must lower to canonical");
+        let CanonicalStepSpec::Aggregate(spec) = canonical else {
+            panic!("expected Aggregate canonical step");
+        };
+        let step = compile_canonical_aggregate(spec).expect("must compile");
+        let BuilderStep::Aggregate { config } = step else {
+            panic!("expected Aggregate step");
+        };
+        assert!(
+            matches!(
+                config.correlation,
+                CorrelationStrategy::Expression { ref expr, ref language }
+                    if expr == "${header.orderId}" && language == "simple"
+            ),
+            "expected Expression correlation, got: {:?}",
+            config.correlation
+        );
+    }
+
+    #[test]
+    fn canonical_path_expression_only_empty_header_lowers_expression() {
+        let def = AggregateStepDef {
+            header: String::new(),
+            correlation_key: Some("${body.id}".to_string()),
+            completion_size: None,
+            completion_timeout_ms: None,
+            completion_predicate: None,
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        };
+        let canonical = compile_aggregate_step_to_canonical(def).expect("must lower to canonical");
+        let CanonicalStepSpec::Aggregate(spec) = canonical else {
+            panic!("expected Aggregate canonical step");
+        };
+        let step = compile_canonical_aggregate(spec).expect("must compile");
+        let BuilderStep::Aggregate { config } = step else {
+            panic!("expected Aggregate step");
+        };
+        assert!(
+            matches!(
+                config.correlation,
+                CorrelationStrategy::Expression { ref expr, ref language }
+                    if expr == "${body.id}" && language == "simple"
+            ),
+            "expected Expression correlation, got: {:?}",
+            config.correlation
+        );
+    }
+
+    #[test]
+    fn canonical_and_builder_paths_agree_on_correlation() {
+        let cases: [(&str, Option<&str>); 3] = [
+            ("orderId", None),
+            ("", Some("${body.id}")),
+            ("region", Some("${header.orderId}")),
+        ];
+        for (header, key) in cases {
+            let def = AggregateStepDef {
+                header: header.to_string(),
+                correlation_key: key.map(str::to_string),
+                completion_size: None,
+                completion_timeout_ms: None,
+                completion_predicate: None,
+                strategy: AggregateStrategyDef::CollectAll,
+                max_buckets: None,
+                max_bucket_size: None,
+                bucket_ttl_ms: None,
+                force_completion_on_stop: None,
+                discard_on_timeout: None,
+            };
+            let builder_step =
+                compile_aggregate_step(def.clone()).expect("builder path must compile");
+            let BuilderStep::Aggregate {
+                config: builder_config,
+            } = builder_step
+            else {
+                panic!("expected Aggregate step on builder path");
+            };
+            let canonical =
+                compile_aggregate_step_to_canonical(def).expect("must lower to canonical");
+            let CanonicalStepSpec::Aggregate(spec) = canonical else {
+                panic!("expected Aggregate canonical step");
+            };
+            let canonical_step =
+                compile_canonical_aggregate(spec).expect("canonical path must compile");
+            let BuilderStep::Aggregate {
+                config: canonical_config,
+            } = canonical_step
+            else {
+                panic!("expected Aggregate step on canonical path");
+            };
+            assert_correlation_parity(
+                header,
+                &builder_config.correlation,
+                &canonical_config.correlation,
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_recompile_of_canonicalized_expression_config_yields_expression() {
+        // Shape emitted by canonicalize_aggregate for an Expression config:
+        // the header carries the expression text and correlation_key repeats it.
+        let spec = CanonicalAggregateSpec {
+            header: "${header.orderId}".to_string(),
+            completion_size: None,
+            completion_timeout_ms: None,
+            correlation_key: Some("${header.orderId}".to_string()),
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+            strategy: CanonicalAggregateStrategySpec::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            completion_predicate: None,
+        };
+        let step = compile_canonical_aggregate(spec).expect("must compile");
+        let BuilderStep::Aggregate { config } = step else {
+            panic!("expected Aggregate step");
+        };
+        assert!(
+            matches!(
+                config.correlation,
+                CorrelationStrategy::Expression { ref expr, ref language }
+                    if expr == "${header.orderId}" && language == "simple"
+            ),
+            "expected Expression correlation, got: {:?}",
+            config.correlation
+        );
+    }
+
     #[test]
     fn compile_step_to() {
         let step = DeclarativeStep::To(ToStepDef::new("direct:a"));
@@ -4348,26 +4542,189 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_requires_correlation_key() {
-        let route = make_basic_route(
-            "direct:start",
-            vec![DeclarativeStep::Aggregate(AggregateStepDef {
-                header: "orderId".to_string(),
-                correlation_key: None,
-                completion_size: Some(2),
-                completion_timeout_ms: None,
-                completion_predicate: None,
-                strategy: AggregateStrategyDef::CollectAll,
-                max_buckets: None,
-                max_bucket_size: None,
-                bucket_ttl_ms: None,
-                force_completion_on_stop: None,
-                discard_on_timeout: None,
-            })],
+    fn aggregate_missing_both_sources_is_rejected() {
+        let step = DeclarativeStep::Aggregate(AggregateStepDef {
+            header: String::new(),
+            correlation_key: None,
+            completion_size: None,
+            completion_timeout_ms: None,
+            completion_predicate: None,
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        });
+        let err = validate_step(&step)
+            .expect_err("aggregate without header and correlation_key must be rejected");
+        assert!(
+            matches!(err, CamelError::Config(_)),
+            "expected Config error, got: {err:?}"
         );
-        assert_config_error(
-            compile_declarative_route(route),
-            "aggregate requires a correlation_key",
+        assert!(
+            err.to_string().contains("correlation source"),
+            "error must mention correlation source, got: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregate_empty_correlation_key_is_rejected() {
+        let step = DeclarativeStep::Aggregate(AggregateStepDef {
+            header: "region".to_string(),
+            correlation_key: Some(String::new()),
+            completion_size: None,
+            completion_timeout_ms: None,
+            completion_predicate: None,
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        });
+        let err = validate_step(&step).expect_err("empty correlation_key must be rejected");
+        assert!(
+            err.to_string().contains("correlation_key cannot be empty"),
+            "error must mention correlation_key cannot be empty, got: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregate_header_only_passes_validation() {
+        let step = DeclarativeStep::Aggregate(AggregateStepDef {
+            header: "orderId".to_string(),
+            correlation_key: None,
+            completion_size: None,
+            completion_timeout_ms: None,
+            completion_predicate: None,
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        });
+        assert!(
+            validate_step(&step).is_ok(),
+            "header-only aggregate must pass validation"
+        );
+    }
+
+    #[test]
+    fn builder_path_lowers_correlation_key_expression() {
+        let def = AggregateStepDef {
+            header: "region".to_string(),
+            correlation_key: Some("${header.orderId}".to_string()),
+            completion_size: Some(2),
+            completion_timeout_ms: None,
+            completion_predicate: None,
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        };
+        let step = compile_aggregate_step(def).expect("must compile");
+        let BuilderStep::Aggregate { config } = step else {
+            panic!("expected Aggregate step");
+        };
+        assert!(
+            matches!(
+                config.correlation,
+                CorrelationStrategy::Expression { ref expr, ref language }
+                    if expr == "${header.orderId}" && language == "simple"
+            ),
+            "expected Expression correlation, got: {:?}",
+            config.correlation
+        );
+    }
+
+    #[test]
+    fn builder_path_header_only_keeps_header_strategy() {
+        let def = AggregateStepDef {
+            header: "orderId".to_string(),
+            correlation_key: None,
+            completion_size: None,
+            completion_timeout_ms: None,
+            completion_predicate: None,
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        };
+        let step = compile_aggregate_step(def).expect("must compile");
+        let BuilderStep::Aggregate { config } = step else {
+            panic!("expected Aggregate step");
+        };
+        assert!(
+            matches!(
+                config.correlation,
+                CorrelationStrategy::HeaderName(ref h) if h == "orderId"
+            ),
+            "expected HeaderName correlation, got: {:?}",
+            config.correlation
+        );
+    }
+
+    #[test]
+    fn builder_path_expression_only_empty_header_lowers_expression() {
+        let def = AggregateStepDef {
+            header: String::new(),
+            correlation_key: Some("${body.id}".to_string()),
+            completion_size: None,
+            completion_timeout_ms: None,
+            completion_predicate: None,
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        };
+        let step = compile_aggregate_step(def).expect("must compile");
+        let BuilderStep::Aggregate { config } = step else {
+            panic!("expected Aggregate step");
+        };
+        assert!(
+            matches!(
+                config.correlation,
+                CorrelationStrategy::Expression { ref expr, ref language }
+                    if expr == "${body.id}" && language == "simple"
+            ),
+            "expected Expression correlation, got: {:?}",
+            config.correlation
+        );
+    }
+
+    #[test]
+    fn builder_path_predicate_error_no_longer_mentions_correlation_keys() {
+        let def = AggregateStepDef {
+            header: "region".to_string(),
+            correlation_key: None,
+            completion_size: None,
+            completion_timeout_ms: None,
+            completion_predicate: Some(make_predicate("true")),
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        };
+        let err = compile_aggregate_step(def)
+            .expect_err("completion_predicate must be rejected on the builder path");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("completion_predicate"),
+            "error must mention completion_predicate, got: {msg}"
+        );
+        assert!(
+            !msg.contains("correlation keys"),
+            "error must not mention correlation keys, got: {msg}"
         );
     }
 
@@ -5552,5 +5909,132 @@ mod tests {
         // paths consume the stream-cache threshold through.
         assert_eq!(stream_cache_config(None, 7).threshold, 7);
         assert_eq!(stream_cache_config(Some(3), 7).threshold, 3);
+    }
+
+    #[test]
+    fn yaml_expression_only_aggregate_compiles_on_both_paths() {
+        let yaml = r#"
+routes:
+  - id: "aggregate-expression-only"
+    from: "direct:start"
+    steps:
+      - aggregate:
+          correlation_key: "${header.orderId}"
+          completion_size: 2
+"#;
+        let routes = crate::yaml::parse_yaml_to_declarative(yaml).expect("yaml must parse");
+        assert_eq!(routes.len(), 1);
+        let route = routes.into_iter().next().expect("one route");
+
+        let compiled = compile_declarative_route(route.clone()).expect("builder path must compile");
+        let agg = compiled
+            .steps()
+            .iter()
+            .find_map(|step| match step {
+                BuilderStep::Aggregate { config } => Some(config),
+                _ => None,
+            })
+            .expect("expected an Aggregate step on the builder path");
+        assert!(
+            matches!(
+                agg.correlation,
+                CorrelationStrategy::Expression { ref expr, ref language }
+                    if expr == "${header.orderId}" && language == "simple"
+            ),
+            "expected Expression correlation, got: {:?}",
+            agg.correlation
+        );
+
+        let (spec, loss_report) = compile_declarative_route_to_canonical(route, false)
+            .expect("canonical path must compile");
+        assert!(loss_report.is_none());
+        let canonical = spec
+            .steps
+            .iter()
+            .find_map(|step| match step {
+                CanonicalStepSpec::Aggregate(config) => Some(config),
+                _ => None,
+            })
+            .expect("expected an Aggregate step on the canonical path");
+        assert_eq!(
+            canonical.correlation_key.as_deref(),
+            Some("${header.orderId}")
+        );
+    }
+
+    #[test]
+    fn yaml_both_present_expression_overrides_header() {
+        let yaml = r#"
+routes:
+  - id: "aggregate-both-sources"
+    from: "direct:start"
+    steps:
+      - aggregate:
+          header: "region"
+          correlation_key: "${header.orderId}"
+          completion_size: 2
+"#;
+        let routes = crate::yaml::parse_yaml_to_declarative(yaml).expect("yaml must parse");
+        assert_eq!(routes.len(), 1);
+        let route = routes.into_iter().next().expect("one route");
+
+        let compiled = compile_declarative_route(route.clone()).expect("builder path must compile");
+        let agg = compiled
+            .steps()
+            .iter()
+            .find_map(|step| match step {
+                BuilderStep::Aggregate { config } => Some(config),
+                _ => None,
+            })
+            .expect("expected an Aggregate step on the builder path");
+        assert!(
+            matches!(
+                agg.correlation,
+                CorrelationStrategy::Expression { ref expr, ref language }
+                    if expr == "${header.orderId}" && language == "simple"
+            ),
+            "correlation_key must override header, got: {:?}",
+            agg.correlation
+        );
+
+        let (spec, loss_report) = compile_declarative_route_to_canonical(route, false)
+            .expect("canonical path must compile");
+        assert!(loss_report.is_none());
+        let canonical = spec
+            .steps
+            .iter()
+            .find_map(|step| match step {
+                CanonicalStepSpec::Aggregate(config) => Some(config),
+                _ => None,
+            })
+            .expect("expected an Aggregate step on the canonical path");
+        assert_eq!(
+            canonical.correlation_key.as_deref(),
+            Some("${header.orderId}")
+        );
+    }
+
+    #[test]
+    fn yaml_missing_both_sources_is_rejected_at_route_level() {
+        let yaml = r#"
+routes:
+  - id: "aggregate-no-source"
+    from: "direct:start"
+    steps:
+      - aggregate:
+          header: ""
+          completion_size: 2
+"#;
+        let routes = crate::yaml::parse_yaml_to_declarative(yaml).expect("yaml must parse");
+        assert_eq!(routes.len(), 1);
+        let route = routes.into_iter().next().expect("one route");
+
+        let Err(err) = compile_declarative_route(route) else {
+            panic!("aggregate without header and correlation_key must be rejected");
+        };
+        assert!(
+            err.to_string().contains("correlation source"),
+            "error must mention correlation source, got: {err}"
+        );
     }
 }

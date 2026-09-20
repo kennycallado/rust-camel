@@ -332,6 +332,21 @@ impl AggregatorConfigBuilder {
         self
     }
 
+    /// Overrides the correlation strategy with an expression-based key
+    /// (leaving `header_name` untouched); runtime correlation reads
+    /// `config.correlation`.
+    pub fn correlate_by_expr(
+        mut self,
+        expr: impl Into<String>,
+        language: impl Into<String>,
+    ) -> Self {
+        self.correlation = CorrelationStrategy::Expression {
+            expr: expr.into(),
+            language: language.into(),
+        };
+        self
+    }
+
     /// Override the default `CollectAll` aggregation strategy.
     pub fn strategy(mut self, strategy: AggregationStrategy) -> Self {
         self.strategy = strategy;
@@ -588,6 +603,21 @@ mod tests {
         assert!(
             matches!(config.correlation, CorrelationStrategy::HeaderName(ref h) if h == "second")
         );
+    }
+
+    #[test]
+    fn correlate_by_expr_overrides_strategy_and_keeps_header_name() {
+        let config = AggregatorConfig::correlate_by("orderId")
+            .correlate_by_expr("${header.orderId}", "simple")
+            .complete_when_size(2)
+            .build()
+            .unwrap();
+        assert!(matches!(
+            config.correlation,
+            CorrelationStrategy::Expression { ref expr, ref language }
+                if expr == "${header.orderId}" && language == "simple"
+        ));
+        assert_eq!(config.header_name, "orderId");
     }
 
     #[test]

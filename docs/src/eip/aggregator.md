@@ -26,7 +26,7 @@ The Aggregator is a Message Routing pattern from Hohpe and Woolf. It collects re
 
 </details>
 
-Each incoming exchange carries a correlation key in a header. The `correlate_by("orderId")` call names that header. Exchanges that share the key land in the same bucket. An `AggregationFn` folds each new exchange into the bucket seed to build the emitted batch body. In the included route, the `process` step rotates the `orderId` header through `"A"`, `"B"`, and `"C"`, so three buckets fill in parallel.
+Each incoming exchange carries a correlation key in a header. The `correlate_by("orderId")` call names that header. A route can also derive the key with `correlate_by_expr`, which evaluates a simple-language expression per exchange. At least one source is required. When both are set, the expression overrides the header. Exchanges that share the key land in the same bucket. An `AggregationFn` folds each new exchange into the bucket seed to build the emitted batch body. In the included route, the `process` step rotates the `orderId` header through `"A"`, `"B"`, and `"C"`, so three buckets fill in parallel.
 
 A bucket completes when it reaches its size limit or when its inactivity timeout fires. `complete_when_size(3)` flushes the bucket after three exchanges arrive for that key. `complete_on_timeout(Duration)` flushes it after a period with no new exchange. `complete_on_size_or_timeout(size, timeout)` combines both triggers. The `bucket_ttl` setting caps how long an incomplete bucket can live before the background sweep evicts it. The config validator rejects any setup with no memory bound, so set `max_buckets`, a timeout, or `bucket_ttl`.
 

@@ -464,9 +464,20 @@ fn validate_steps(steps: &[CanonicalStepSpec]) -> Result<(), CamelError> {
                 validate_steps(steps)?;
             }
             CanonicalStepSpec::Aggregate(config) => {
-                if config.header.trim().is_empty() {
+                let header_present = !config.header.trim().is_empty();
+                let key_present = config
+                    .correlation_key
+                    .as_deref()
+                    .is_some_and(|k| !k.trim().is_empty());
+                if !key_present && config.correlation_key.is_some() {
                     return Err(CamelError::RouteError(
-                        "canonical contract violation: aggregate.header cannot be empty"
+                        "canonical contract violation: aggregate.correlation_key cannot be empty"
+                            .to_string(),
+                    ));
+                }
+                if !header_present && !key_present {
+                    return Err(CamelError::RouteError(
+                        "canonical contract violation: aggregate requires a correlation source: header or correlation_key"
                             .to_string(),
                     ));
                 }
@@ -849,7 +860,7 @@ mod tests {
             completion_predicate: None,
         })];
         let err = spec.validate_contract().unwrap_err().to_string();
-        assert!(err.contains("aggregate.header cannot be empty"));
+        assert!(err.contains("correlation source"));
 
         spec.steps = vec![CanonicalStepSpec::Aggregate(CanonicalAggregateSpec {
             header: "k".to_string(),
@@ -883,6 +894,65 @@ mod tests {
         });
         let err = spec.validate_contract().unwrap_err().to_string();
         assert!(err.contains("open_duration_ms must be > 0"));
+    }
+
+    #[test]
+    fn contract_accepts_expression_only_aggregate() {
+        let mut spec = CanonicalRouteSpec::new("r1", "timer:tick");
+        spec.steps = vec![CanonicalStepSpec::Aggregate(CanonicalAggregateSpec {
+            header: String::new(),
+            completion_size: None,
+            completion_timeout_ms: None,
+            correlation_key: Some("${header.orderId}".to_string()),
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+            strategy: CanonicalAggregateStrategySpec::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            completion_predicate: None,
+        })];
+        assert!(spec.validate_contract().is_ok());
+    }
+
+    #[test]
+    fn contract_rejects_aggregate_missing_both_sources() {
+        let mut spec = CanonicalRouteSpec::new("r1", "timer:tick");
+        spec.steps = vec![CanonicalStepSpec::Aggregate(CanonicalAggregateSpec {
+            header: String::new(),
+            completion_size: None,
+            completion_timeout_ms: None,
+            correlation_key: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+            strategy: CanonicalAggregateStrategySpec::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            completion_predicate: None,
+        })];
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("correlation source"));
+    }
+
+    #[test]
+    fn contract_rejects_empty_correlation_key() {
+        let mut spec = CanonicalRouteSpec::new("r1", "timer:tick");
+        spec.steps = vec![CanonicalStepSpec::Aggregate(CanonicalAggregateSpec {
+            header: "region".to_string(),
+            completion_size: None,
+            completion_timeout_ms: None,
+            correlation_key: Some(String::new()),
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+            strategy: CanonicalAggregateStrategySpec::CollectAll,
+            max_buckets: None,
+            max_bucket_size: None,
+            bucket_ttl_ms: None,
+            completion_predicate: None,
+        })];
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("correlation_key cannot be empty"));
     }
 
     #[test]

@@ -4020,6 +4020,45 @@ mod tests {
         }
     }
 
+    // ── canonicalize_aggregate: correlation strategy → correlation_key mapping ──
+    //
+    // These tests pin the canonicalize half of the expression round-trip
+    // scenario. The recompile half is
+    // `canonical_recompile_of_canonicalized_expression_config_yields_expression`
+    // in camel-dsl compile.rs (task 2.4) — camel-builder has no camel-dsl
+    // dependency, so the two halves live in their own crates.
+
+    #[test]
+    fn canonicalize_aggregate_expression_maps_correlation_key() {
+        use camel_api::aggregator::AggregatorConfig;
+
+        let config = AggregatorConfig::correlate_by("seed")
+            .correlate_by_expr("${header.orderId}", "simple")
+            .complete_when_size(2)
+            .build()
+            .unwrap();
+
+        let spec = canonicalize_aggregate(config).unwrap();
+
+        assert_eq!(spec.correlation_key, Some("${header.orderId}".to_string()));
+        assert_eq!(spec.header, "${header.orderId}");
+    }
+
+    #[test]
+    fn canonicalize_aggregate_header_only_maps_no_correlation_key() {
+        use camel_api::aggregator::AggregatorConfig;
+
+        let config = AggregatorConfig::correlate_by("orderId")
+            .complete_when_size(2)
+            .build()
+            .unwrap();
+
+        let spec = canonicalize_aggregate(config).unwrap();
+
+        assert_eq!(spec.correlation_key, None);
+        assert_eq!(spec.header, "orderId");
+    }
+
     // ── SplitBuilder with filter inside ─────────────────────────────────────────
 
     #[test]
