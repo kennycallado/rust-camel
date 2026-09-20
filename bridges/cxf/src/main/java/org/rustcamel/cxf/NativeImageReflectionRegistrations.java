@@ -9,9 +9,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * build-time class loading that can fail native-image builds.
  *
  * <p>This annotation is the ONLY live reflection mechanism in this bridge: Quarkus regenerates
- * {@code META-INF/native-image/reflect-config.json} at packaging time from these {@code classNames},
- * so any static config file placed at that path is silently ignored (its unique entries must live
- * here instead).
+ * {@code META-INF/native-image/reflect-config.json} at packaging time from these {@code
+ * classNames}, so any static config file placed at that path is silently ignored (its unique
+ * entries must live here instead).
  *
  * <p>Every entry here must be a class that exists on the runtime classpath. Nonexistent classes are
  * silently no-ops (Quarkus writes them to the generated config, but native-image never resolves
