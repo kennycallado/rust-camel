@@ -20,9 +20,9 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
 #[allow(unused_imports)]
 use camel_api::{
-    BoxProcessor, CamelError, Exchange, FunctionInvoker, IdentityProcessor, NoOpMetrics,
-    NoopPlatformService, PlatformService, ProducerContext, RouteController, RuntimeHandle,
-    StepLifecycle,
+    BoxProcessor, CamelError, Exchange, FunctionInvoker, IdentityProcessor, InFlightClaim,
+    NoOpMetrics, NoopPlatformService, PlatformService, ProducerContext, RouteController,
+    RuntimeHandle, StepLifecycle,
 };
 use camel_component_api::{Consumer, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_processor::aggregator::AggregatorService;
@@ -1057,7 +1057,11 @@ impl DefaultRouteController {
     /// continuation. Paths that drop a bucket without emitting (TTL
     /// eviction, unarmed-bucket release, discard-on-timeout, saturated
     /// late channel) release by dropping. Exactly one release per claim
-    /// on every path.
+    /// on every path. claimfamily (rc-e1a4f): every oneshot dispatch
+    /// through the pre/post pipelines splits a sibling claim onto the
+    /// exchange (in-band results take it back, stash emissions escape
+    /// with theirs), so stash sites embedded in those pipelines stay
+    /// counted.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn start_aggregate_route(
         &mut self,
@@ -1135,9 +1139,19 @@ impl DefaultRouteController {
                                 // claims across the post-pipeline — drop
                                 // at iteration end is the release.
                                 let AggregateEmission {
-                                    exchange,
+                                    mut exchange,
                                     claims: _in_flight_claims,
                                 } = emission;
+                                // claimfamily (rc-e1a4f): split a sibling onto the emission exchange so
+                                // residency inside stash sites embedded in the post-pipeline stays
+                                // counted after this iteration. An in-band result drops at iteration end
+                                // (its sibling releases with it); a stash emission escapes with its
+                                // sibling; an Err drops it with the exchange.
+                                exchange.in_flight_claim = _in_flight_claims
+                                    .iter()
+                                    .flatten()
+                                    .next()
+                                    .map(InFlightClaim::split);
                                 let pipe = post_pipeline.load();
                                 if let Err(e) =
                                     pipe.processor.clone_inner().oneshot(exchange).await
@@ -1201,8 +1215,21 @@ impl DefaultRouteController {
                                 // Rejection paths drop it inside the
                                 // service — rejected = released.
                                 let pre_pipe = pre_pipeline.load();
+                                // claimfamily (rc-e1a4f): split a sibling claim onto the exchange so
+                                // residency inside stash sites embedded in the pre-pipeline stays
+                                // counted after this oneshot resolves. Taken back from an in-band Ok
+                                // result below — the envelope's own claim still travels with the
+                                // exchange into the aggregator; a stash emission escapes with its
+                                // sibling; an Err drops it with the exchange.
+                                let mut exchange = exchange;
+                                exchange.in_flight_claim = in_flight_claim.as_ref().map(InFlightClaim::split);
                                 let ex = match pre_pipe.processor.clone_inner().oneshot(exchange).await {
-                                    Ok(ex) => ex,
+                                    // claimfamily: in-band completion — reclaim the sibling so release
+                                    // stays at this loop iteration.
+                                    Ok(mut ex) => {
+                                        ex.in_flight_claim = None;
+                                        ex
+                                    }
                                     Err(e) => {
                                         // rc-e2r9: the real error rides with the
                                         // result so a dropped receiver still gets
@@ -1230,7 +1257,22 @@ impl DefaultRouteController {
                                     Ok(ex) => {
                                         if !is_pending(&ex) {
                                             let post_pipe = post_pipeline.load();
-                                            let out = post_pipe.processor.clone_inner().oneshot(ex).await;
+                                            // claimfamily (rc-e1a4f): split a sibling from the completed
+                                            // bucket's claims onto the aggregated output so residency inside
+                                            // stash sites embedded in the post-pipeline stays counted after
+                                            // this iteration. Taken back from an in-band result before the
+                                            // reply — release stays at iteration end; a stash emission
+                                            // escapes with its sibling; an Err drops it with the exchange.
+                                            let mut ex = ex;
+                                            ex.in_flight_claim = _completed_bucket_claims
+                                                .iter()
+                                                .flatten()
+                                                .next()
+                                                .map(InFlightClaim::split);
+                                            let mut out = post_pipe.processor.clone_inner().oneshot(ex).await;
+                                            if let Ok(ref mut out_ex) = out {
+                                                out_ex.in_flight_claim = None;
+                                            }
                                             // rc-e2r9 review, Important 1: this site
                                             // previously `let _ = send`ed the
                                             // post-pipeline result — an Err with an
@@ -1279,9 +1321,18 @@ impl DefaultRouteController {
                             // dropped after the oneshot completes (or
                             // immediately, which is also a release).
                             let AggregateEmission {
-                                exchange,
+                                mut exchange,
                                 claims: _in_flight_claims,
                             } = late_ex;
+                            // claimfamily (rc-e1a4f): split a sibling onto the forced emission so
+                            // residency inside stash sites embedded in the post-pipeline stays
+                            // counted. The discarded result releases an in-band sibling with its
+                            // drop; a stash emission escapes with its sibling.
+                            exchange.in_flight_claim = _in_flight_claims
+                                .iter()
+                                .flatten()
+                                .next()
+                                .map(InFlightClaim::split);
                             let pipe = post_pipeline.load();
                             let _ = pipe.processor.clone_inner().oneshot(exchange).await;
                         }

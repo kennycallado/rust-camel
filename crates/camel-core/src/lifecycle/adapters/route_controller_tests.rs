@@ -6610,6 +6610,41 @@ mod drainclaim {
         Exchange::new(Message::new(tag))
     }
 
+    /// Pass-through processor that records each exchange's text body
+    /// into an unbounded channel, then forwards the exchange unchanged
+    /// (drainclaim/claimfamily scenario pins).
+    struct RecordingPost {
+        tx: mpsc::UnboundedSender<String>,
+    }
+    impl Clone for RecordingPost {
+        fn clone(&self) -> Self {
+            Self {
+                tx: self.tx.clone(),
+            }
+        }
+    }
+    impl Service<Exchange> for RecordingPost {
+        type Response = Exchange;
+        type Error = CamelError;
+        type Future =
+            Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, exchange: Exchange) -> Self::Future {
+            let body = exchange
+                .input
+                .body
+                .as_text()
+                .unwrap_or_default()
+                .to_string();
+            let _ = self.tx.send(body);
+            Box::pin(async move { Ok(exchange) })
+        }
+    }
+
     #[tokio::test]
     async fn pipeline_residency_counted_until_completion() {
         let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
@@ -6801,38 +6836,6 @@ mod drainclaim {
     /// counter returns to 0.
     #[tokio::test]
     async fn resequencer_buffer_residency_counted_until_emission() {
-        struct RecordingPost {
-            tx: mpsc::UnboundedSender<String>,
-        }
-        impl Clone for RecordingPost {
-            fn clone(&self) -> Self {
-                Self {
-                    tx: self.tx.clone(),
-                }
-            }
-        }
-        impl Service<Exchange> for RecordingPost {
-            type Response = Exchange;
-            type Error = CamelError;
-            type Future =
-                Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
-
-            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
-                Poll::Ready(Ok(()))
-            }
-
-            fn call(&mut self, exchange: Exchange) -> Self::Future {
-                let body = exchange
-                    .input
-                    .body
-                    .as_text()
-                    .unwrap_or_default()
-                    .to_string();
-                let _ = self.tx.send(body);
-                Box::pin(async move { Ok(exchange) })
-            }
-        }
-
         let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
         let mut controller = drain_controller(Arc::clone(&captured));
         crate::lifecycle::adapters::route_controller::tests::register_simple_language(
@@ -6904,38 +6907,6 @@ mod drainclaim {
     /// pipeline.
     #[tokio::test]
     async fn embedded_aggregator_stash_counted_until_completion() {
-        struct RecordingPost {
-            tx: mpsc::UnboundedSender<String>,
-        }
-        impl Clone for RecordingPost {
-            fn clone(&self) -> Self {
-                Self {
-                    tx: self.tx.clone(),
-                }
-            }
-        }
-        impl Service<Exchange> for RecordingPost {
-            type Response = Exchange;
-            type Error = CamelError;
-            type Future =
-                Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
-
-            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
-                Poll::Ready(Ok(()))
-            }
-
-            fn call(&mut self, exchange: Exchange) -> Self::Future {
-                let body = exchange
-                    .input
-                    .body
-                    .as_text()
-                    .unwrap_or_default()
-                    .to_string();
-                let _ = self.tx.send(body);
-                Box::pin(async move { Ok(exchange) })
-            }
-        }
-
         let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
         let mut controller = drain_controller(Arc::clone(&captured));
 
@@ -7045,6 +7016,191 @@ mod drainclaim {
         // held across the drain loop's post-pipeline continuation and
         // released afterwards.
         controller.stop_route("rt-drain-agg-force").await.unwrap();
+        await_total(&controller.in_flight_total, 0).await;
+    }
+
+    /// claimfamily (rc-e1a4f): a stash site (size-only aggregator)
+    /// compiled into the POST-pipeline of a route-level aggregate split
+    /// parks the split sibling with the aggregated output — the counter
+    /// reads 1 after the completing exchange's reply (the stash,
+    /// uncounted before this fix, would read 0), and 0 once the
+    /// embedded bucket completes and emits through the tail.
+    #[tokio::test]
+    async fn aggregate_split_post_pipeline_stash_counted_until_completion() {
+        let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = drain_controller(Arc::clone(&captured));
+
+        let (emitted_tx, mut emitted_rx) = mpsc::unbounded_channel::<String>();
+        // The timeout (600s, never fires) materializes the route-level
+        // SPLIT; the second, size-only aggregate is the embedded stash
+        // site living in the post-pipeline.
+        let route = RouteDefinition::new(
+            "capture:src",
+            vec![
+                BuilderStep::DeclarativeSetHeader {
+                    key: "key".into(),
+                    value: ValueSourceDef::Literal(Value::String("k1".into())),
+                },
+                BuilderStep::Aggregate {
+                    config: AggregatorConfig::correlate_by("key")
+                        .complete_on_size_or_timeout(2, Duration::from_secs(600))
+                        .build()
+                        .unwrap(),
+                },
+                BuilderStep::DeclarativeSetHeader {
+                    key: "key".into(),
+                    value: ValueSourceDef::Literal(Value::String("k1".into())),
+                },
+                BuilderStep::Aggregate {
+                    config: AggregatorConfig::correlate_by("key")
+                        .complete_when_size(2)
+                        .build()
+                        .unwrap(),
+                },
+                BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(RecordingPost {
+                    tx: emitted_tx,
+                }))),
+            ],
+        )
+        .with_route_id("rt-aggrloop-post-stash");
+        controller.add_route(route).await.unwrap();
+        controller
+            .start_route("rt-aggrloop-post-stash")
+            .await
+            .unwrap();
+        controller.activate_cohort();
+
+        let ctx = await_capture(&captured).await;
+
+        // First fragment: stashed in the route-level bucket — the
+        // envelope's claim parks there, counter 1.
+        let reply1 = ctx
+            .send_and_wait(test_exchange("frag-1"))
+            .await
+            .expect("pending ack reply");
+        assert!(
+            reply1.property("CamelAggregatorPending").is_some(),
+            "first exchange must be stashed in the route bucket"
+        );
+        await_total(&controller.in_flight_total, 1).await;
+
+        // Second fragment completes the route bucket; the aggregated
+        // output is stashed in the embedded post-pipeline aggregator.
+        // The split sibling parks with it — counter stays 1 (before
+        // rc-e1a4f the embedded stash was uncounted and this read 0).
+        let reply2 = ctx
+            .send_and_wait(test_exchange("frag-2"))
+            .await
+            .expect("embedded pending marker reply");
+        assert!(
+            reply2.property("CamelAggregatorPending").is_some(),
+            "second exchange must be stashed in the embedded post-pipeline aggregator"
+        );
+        await_total(&controller.in_flight_total, 1).await;
+
+        // Third fragment opens a fresh route bucket: embedded stash (1)
+        // plus the new bucket's claim (1).
+        let reply3 = ctx
+            .send_and_wait(test_exchange("frag-3"))
+            .await
+            .expect("pending ack reply");
+        assert!(
+            reply3.property("CamelAggregatorPending").is_some(),
+            "third exchange must be stashed in a new route bucket"
+        );
+        await_total(&controller.in_flight_total, 2).await;
+
+        // Fourth fragment completes the route bucket again; the second
+        // aggregated output completes the embedded bucket, which emits
+        // through the RecordingPost tail — no pending marker.
+        let reply4 = ctx
+            .send_and_wait(test_exchange("frag-4"))
+            .await
+            .expect("final aggregate reply");
+        assert!(
+            reply4.property("CamelAggregatorPending").is_none(),
+            "fourth exchange must complete the embedded bucket"
+        );
+
+        // Recordings happen synchronously before their replies arrive:
+        // the embedded pending marker (ex2) and the final aggregate
+        // (ex4) both traversed RecordingPost; nothing else did.
+        let _ = emitted_rx.try_recv().expect("ex2 pending marker recording");
+        let _ = emitted_rx
+            .try_recv()
+            .expect("ex4 final aggregate recording");
+        assert!(
+            matches!(emitted_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no third recording expected"
+        );
+
+        await_total(&controller.in_flight_total, 0).await;
+        controller
+            .stop_route("rt-aggrloop-post-stash")
+            .await
+            .unwrap();
+    }
+
+    /// claimfamily (rc-e1a4f): a force-completed late emission traverses
+    /// the post-pipeline with a split sibling; the discarded in-band
+    /// result releases it — counter 0 after stop, and the emission
+    /// observably traversed the post-pipeline.
+    #[tokio::test]
+    async fn aggregate_split_forced_emission_sibling_released_after_stop() {
+        let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = drain_controller(Arc::clone(&captured));
+
+        let (emitted_tx, mut emitted_rx) = mpsc::unbounded_channel::<String>();
+        // force_completion_on_stop materializes the SPLIT; size 10 never
+        // completes by size, so the only emission is the forced one at
+        // stop. The RecordingPost tail is the stash-free post-pipeline.
+        let route = RouteDefinition::new(
+            "capture:src",
+            vec![
+                BuilderStep::DeclarativeSetHeader {
+                    key: "key".into(),
+                    value: ValueSourceDef::Literal(Value::String("k1".into())),
+                },
+                BuilderStep::Aggregate {
+                    config: AggregatorConfig::correlate_by("key")
+                        .complete_when_size(10)
+                        .force_completion_on_stop(true)
+                        .build()
+                        .unwrap(),
+                },
+                BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(RecordingPost {
+                    tx: emitted_tx,
+                }))),
+            ],
+        )
+        .with_route_id("rt-aggrloop-force-sib");
+        controller.add_route(route).await.unwrap();
+        controller
+            .start_route("rt-aggrloop-force-sib")
+            .await
+            .unwrap();
+        controller.activate_cohort();
+
+        let ctx = await_capture(&captured).await;
+        let first = ctx
+            .send_and_wait(test_exchange("frag-1"))
+            .await
+            .expect("pending ack reply");
+        assert!(first.property("CamelAggregatorPending").is_some());
+        await_total(&controller.in_flight_total, 1).await;
+
+        // Stop force-completes the bucket: the late emission traverses
+        // the post-pipeline with a split sibling (SITE D), RecordingPost
+        // fires, and the discarded result releases sibling + originals.
+        controller
+            .stop_route("rt-aggrloop-force-sib")
+            .await
+            .unwrap();
+
+        let _body = timeout(Duration::from_secs(2), emitted_rx.recv())
+            .await
+            .expect("forced emission within 2s")
+            .expect("emission channel alive");
         await_total(&controller.in_flight_total, 0).await;
     }
 
