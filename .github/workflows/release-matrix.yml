@@ -495,12 +495,32 @@ jobs:
           name: ${{ matrix.amd64-artifact }}
           path: binary-amd64
 
+      # Artifacts are tarball+sidecar since the pack change; verify the
+      # checksum before anything consumes the binary.
+      - name: Verify and extract amd64
+        if: ${{ !inputs.dev-profile || matrix.in-dev }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd binary-amd64
+          sha256sum -c "${{ matrix.amd64-artifact }}.tar.gz.sha256"
+          mkdir -p out && tar -xzf "${{ matrix.amd64-artifact }}.tar.gz" -C out
+
       - name: Download arm64 binary
         if: ${{ !inputs.dev-profile }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ matrix.arm64-artifact }}
           path: binary-arm64
+
+      - name: Verify and extract arm64
+        if: ${{ !inputs.dev-profile }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd binary-arm64
+          sha256sum -c "${{ matrix.arm64-artifact }}.tar.gz.sha256"
+          mkdir -p out && tar -xzf "${{ matrix.arm64-artifact }}.tar.gz" -C out
 
       # Runtime flavor check for the downloaded amd64 binary — closes the
       # seam the dev smoke cannot: dev mode builds only the gnu variant,
@@ -513,7 +533,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BIN="$(find binary-amd64 -type f | head -1)"
+          BIN="binary-amd64/out/camel"
           chmod +x "$BIN"
           case "${{ matrix.variant }}" in
             production) EXPECTED="regular" ;;
@@ -568,14 +588,12 @@ jobs:
         if: ${{ !inputs.dev-profile || matrix.in-dev }}
         run: |
           mkdir -p context
-          AMD64_BIN=$(find binary-amd64 -type f | head -1)
-          cp "$AMD64_BIN" context/camel-amd64
+          cp binary-amd64/out/camel context/camel-amd64
           chmod +x context/camel-amd64
           # Dev runs only carry the amd64 artifact (no separate arm64 dev
           # image build), so the arm64 binary is only staged for publish.
           if [ "${{ inputs.dev-profile }}" != "true" ]; then
-            ARM64_BIN=$(find binary-arm64 -type f | head -1)
-            cp "$ARM64_BIN" context/camel-arm64
+            cp binary-arm64/out/camel context/camel-arm64
             chmod +x context/camel-arm64
           fi
           cp Dockerfile context/Dockerfile
