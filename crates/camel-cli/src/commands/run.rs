@@ -499,11 +499,23 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
         defs
     };
 
+    // Fail-closed route registration (rc-n6jre): a discovered route that
+    // cannot be added (unknown component scheme, duplicate id, ...) aborts
+    // startup with a non-zero exit. Starting the context anyway would run
+    // an empty application forever while reporting success — fail-open,
+    // unlike every other path here. This loop is the INITIAL load in both
+    // non-watch and watch modes (the reload watcher starts only after it);
+    // routes added by hot-reload mid-run keep the reload watcher's existing
+    // error handling — a failed reload logs and leaves the RUNNING context
+    // untouched. Only initial startup is fail-closed.
     for def in defs {
         let id = def.route_id().to_string();
         if let Err(e) = ctx.add_route_definition(def).await {
             // log-policy: system-broken
             tracing::error!("Failed to add route '{}': {}", id, e);
+            return Err(LifecycleFailure::Boot(camel_api::CamelError::RouteError(
+                format!("Failed to add route '{id}': {e}"),
+            )));
         }
     }
 

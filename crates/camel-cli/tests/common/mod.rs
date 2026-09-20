@@ -238,9 +238,10 @@ pub fn send_signal(child: &Child, signal: &str) {
 /// passed: watching is controlled by the fixture config (`watch = true`
 /// enables it, otherwise the run is single-shot). The child is wrapped in a
 /// kill-on-drop guard so a failed assertion mid-test cannot leak the process.
-// Shared by run_watch_test_doc_test.rs and test_intercepts.rs only; the
-// test binaries that include `common` without calling these would otherwise
-// warn dead_code (each compilation unit gets its own copy of the module).
+// Shared by run_watch_test_doc_test.rs, test_intercepts.rs, and
+// run_route_add_failure_test.rs; the test binaries that include `common`
+// without calling these would otherwise warn dead_code (each compilation
+// unit gets its own copy of the module).
 #[allow(dead_code)]
 pub fn spawn_camel_run(dir: &Path) -> KillOnDrop {
     let config_path = dir.join("Camel.toml");

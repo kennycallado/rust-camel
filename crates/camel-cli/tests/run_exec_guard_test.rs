@@ -33,6 +33,14 @@
 //!   fast path.
 //! - The shared subprocess plumbing (drain threads, kill-on-drop guard,
 //!   marker wait, single-SIGTERM send) lives in `tests/common`.
+//! - The whole file is gated on the `exec` feature: these tests exercise
+//!   ExecBundle startup-guard behavior, which only exists in a build that
+//!   carries the exec component (`flavor-full` or `--features exec`).
+//!   Under the default flavor the same fixtures abort earlier — at
+//!   route-add with `Component not found` — which is the generic
+//!   route-add guard's job (`run_route_add_failure_test.rs`).
+
+#![cfg(feature = "exec")]
 
 mod common;
 
