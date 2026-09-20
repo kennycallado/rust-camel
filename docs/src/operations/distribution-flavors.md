@@ -7,9 +7,11 @@ The `camel` CLI ships in three flavors: slim, regular, and full. Each flavor is 
 | Group | What ships | Targets | Artifact names |
 |-------|-----------|---------|----------------|
 | Base (unconditional) | core, direct, seda, log, file, timer, stream (in/out/err), http (server and client, REST DSL, health and metrics, ADR-0052), template (minijinja), master, cron, controlbus, mock, validator, camel test harness | every flavor, every target | none (no separate artifact) |
-| Edge pack (slim additions) | mqtt, mqtt-tls, http-static, sql, lang-jsonpath, lang-rhai | x86_64-unknown-linux-musl, aarch64-unknown-linux-musl | `camel-slim-<target>` |
-| Regular additions | otel, grpc, wasm, llm, mcp, security, redis, redis-tls, jms, cxf, xj, xslt, opensearch, ws, lang-xpath, lang-js (boa), lang-minijinja, lsp, kubernetes, integration-http, integration-sql | the 4 Linux targets (gnu ×2, musl ×2) | `camel-<target>` |
-| Full additions | exec, kafka, surrealdb, containers | gnu ×2, macOS ×2, Windows — desktop platforms ship full only | `camel-full-<target>` |
+| Edge pack (slim additions) | mqtt, mqtt-tls, http-static, sql, lang-jsonpath, lang-rhai | x86_64-unknown-linux-musl, aarch64-unknown-linux-musl | `camel-slim-<target>.tar.gz` |
+| Regular additions | otel, grpc, wasm, llm, mcp, security, redis, redis-tls, jms, cxf, xj, xslt, opensearch, ws, lang-xpath, lang-js (boa), lang-minijinja, lsp, kubernetes, integration-http, integration-sql | the 4 Linux targets (gnu ×2, musl ×2) | `camel-<target>.tar.gz` |
+| Full additions | exec, kafka, surrealdb, containers | gnu ×2, macOS ×2, Windows — desktop platforms ship full only | `camel-full-<target>.tar.gz` |
+
+Each asset has a matching `.tar.gz.sha256` sidecar that stores the tarball checksum.
 
 The bodies are chained. Each flavor includes the marker of the flavor below it. `slim ⊆ regular ⊆ full` is structural, not tested-in. `camel lint` is part of the base set, so it works in every flavor.
 
@@ -36,9 +38,9 @@ The `latest` tag re-aliases to regular in the same release as the artifact re-al
 
 GitHub release assets carry the flavor prefix in the name:
 
-- slim: `camel-slim-<target>` (musl x2)
-- regular: `camel-<target>` (all 7 targets)
-- full: `camel-full-<target>` (gnu x2, macOS x2, Windows)
+- slim: `camel-slim-<target>.tar.gz` (musl x2)
+- regular: `camel-<target>.tar.gz` (the 4 Linux targets)
+- full: `camel-full-<target>.tar.gz` (gnu x2, macOS x2, Windows)
 
 ### Docker
 
@@ -76,6 +78,11 @@ The `camel-<target>` release asset re-aliases from the historical full-ish closu
 
 Before 0.50, `camel-<target>` carried the full-ish closure. After 0.50, it carries the regular closure. Users who need the full closure download `camel-full-<target>` or pull the `:full` image.
 
+v0.50.0 shipped release assets with extensionless names, such as `camel-x86_64-unknown-linux-gnu`. From the next release, every asset is a `.tar.gz` tarball with a matching `.tar.gz.sha256` sidecar. Update a download script with one line:
+
+```text
+curl -O https://github.com/kennycallado/rust-camel/releases/download/<tag>/camel-x86_64-unknown-linux-gnu.tar.gz https://github.com/kennycallado/rust-camel/releases/download/<tag>/camel-x86_64-unknown-linux-gnu.tar.gz.sha256 && sha256sum -c camel-x86_64-unknown-linux-gnu.tar.gz.sha256 && tar -xzf camel-x86_64-unknown-linux-gnu.tar.gz
+```
 
 Desktop targets (macOS, Windows) ship full only from 0.50: the clean
 `camel-<target>` regular name does not exist there. Scripts that download
@@ -83,6 +90,8 @@ Desktop targets (macOS, Windows) ship full only from 0.50: the clean
 switch to the `camel-full-` prefixed names. `cargo install camel-cli`
 still compiles the regular closure from source on every platform (a
 compile-guard leg proves macOS regular builds).
+
+Windows 10 before version 1803 and Windows Server 2016 do not ship `tar`. Users on these systems must supply their own tar, such as 7-Zip or bsdtar.
 
 ## Iteration policy
 
