@@ -15,7 +15,9 @@ fn spawn_echo(rt: &tokio::runtime::Runtime) -> mpsc::Sender<ExchangeEnvelope> {
     let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(256);
     rt.spawn(async move {
         while let Some(envelope) = rx.recv().await {
-            let ExchangeEnvelope { exchange, reply_tx } = envelope;
+            let ExchangeEnvelope {
+                exchange, reply_tx, ..
+            } = envelope;
             if let Some(tx) = reply_tx {
                 let _ = tx.send(Ok(exchange));
             }
@@ -41,6 +43,7 @@ fn bench_channel_control(c: &mut Criterion) {
                         .send(ExchangeEnvelope {
                             exchange: ex,
                             reply_tx: Some(reply_tx),
+                            in_flight_claim: None,
                         })
                         .await
                         .unwrap();

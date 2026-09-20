@@ -313,17 +313,20 @@ impl camel_api::RouteController for DefaultRouteController {
         let crash_notifier = self.crash_notifier.clone();
         let runtime_for_consumer = self.runtime.clone();
 
-        let consumer_component_ctx = Arc::new(ControllerComponentContext::new(
-            Arc::clone(&self.registry),
-            Arc::clone(&self.languages),
-            self.tracer_metrics
-                .clone()
-                .unwrap_or_else(|| Arc::new(NoOpMetrics)),
-            Arc::clone(&self.platform_service),
-            self.health_registry(),
-            Some(route_id.to_string()),
-            self.tracer_gating.levers.components_enabled(),
-        ));
+        let consumer_component_ctx = Arc::new(
+            ControllerComponentContext::new(
+                Arc::clone(&self.registry),
+                Arc::clone(&self.languages),
+                self.tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                Arc::clone(&self.platform_service),
+                self.health_registry(),
+                Some(route_id.to_string()),
+                self.tracer_gating.levers.components_enabled(),
+            )
+            .with_in_flight(Arc::clone(&self.in_flight_total)),
+        );
         let consumer_rt: Arc<dyn camel_component_api::RuntimeObservability> =
             Arc::clone(&consumer_component_ctx) as Arc<_>;
         let (mut consumer, consumer_concurrency) = match consumer_management::create_route_consumer(
@@ -367,7 +370,10 @@ impl camel_api::RouteController for DefaultRouteController {
         let drain_in_flight = Arc::clone(&managed.drain_in_flight);
         // Clone sender for storage (to reuse on resume)
         let tx_for_storage = tx.clone();
-        let consumer_ctx = ConsumerContext::new(tx, consumer_cancel.clone(), route_id.to_string());
+        // drainclaim: the consumer context mints one claim per envelope
+        // sent through `send`/`send_and_wait` — counted from acceptance.
+        let consumer_ctx = ConsumerContext::new(tx, consumer_cancel.clone(), route_id.to_string())
+            .with_in_flight_counter(Arc::clone(&self.in_flight_total));
 
         // direct-inline-dispatch Task 2.2: publish the inline dispatcher
         // capability for every non-Concurrent topology. Sequential and the
@@ -391,6 +397,7 @@ impl camel_api::RouteController for DefaultRouteController {
                 pipeline_cancel.clone(),
                 Arc::clone(&drain_in_flight),
                 Arc::clone(&self.cohort),
+                Some(Arc::clone(&self.in_flight_total)),
             );
             consumer_ctx.set_inline_dispatcher(Arc::new(dispatcher));
         }
@@ -476,7 +483,13 @@ impl camel_api::RouteController for DefaultRouteController {
                         let ExchangeEnvelope {
                             exchange,
                             mut reply_tx,
+                            in_flight_claim,
                         } = envelope;
+                        // drainclaim: `in_flight_claim` is moved into the
+                        // per-envelope task below and held across the
+                        // pipeline future; any earlier exit of THIS scope
+                        // (denied dispatch, cohort-gate cancel) drops it —
+                        // drop = release.
                         // rc-jxkj cohort gate: park dispatch until the startup
                         // cohort completes. Level-triggered — after the first
                         // open, later envelopes pass without parking.
@@ -522,6 +535,10 @@ impl camel_api::RouteController for DefaultRouteController {
                             // Permit owned by this task — released on completion (RAII).
                             let _permit = permit;
                             let _drain_guard = DrainGuard::new(drain_clone);
+                            // drainclaim: the claim lives as long as this
+                            // task — completion, abort, panic, or the
+                            // readiness early-return below all drop it.
+                            let _in_flight_claim = in_flight_claim;
 
                             // Load current pipeline from ArcSwap
                             let mut pipe = pipe_ref.load().processor.clone_inner();
@@ -592,7 +609,12 @@ impl camel_api::RouteController for DefaultRouteController {
                         let ExchangeEnvelope {
                             exchange,
                             mut reply_tx,
+                            in_flight_claim,
                         } = envelope;
+                        // drainclaim: hold the claim for the whole iteration
+                        // — the readiness early-return below and every
+                        // `continue`/`return` exit drop it via scope exit.
+                        let _in_flight_claim = in_flight_claim;
                         // rc-jxkj cohort gate: park dispatch until the startup
                         // cohort completes. Level-triggered — after the first
                         // open, later envelopes pass without parking.
@@ -859,17 +881,20 @@ impl camel_api::RouteController for DefaultRouteController {
 
         info!(route_id = %route_id, "Resuming route (spawning consumer only)");
 
-        let consumer_component_ctx = Arc::new(ControllerComponentContext::new(
-            Arc::clone(&self.registry),
-            Arc::clone(&self.languages),
-            self.tracer_metrics
-                .clone()
-                .unwrap_or_else(|| Arc::new(NoOpMetrics)),
-            Arc::clone(&self.platform_service),
-            self.health_registry(),
-            Some(route_id.to_string()),
-            self.tracer_gating.levers.components_enabled(),
-        ));
+        let consumer_component_ctx = Arc::new(
+            ControllerComponentContext::new(
+                Arc::clone(&self.registry),
+                Arc::clone(&self.languages),
+                self.tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                Arc::clone(&self.platform_service),
+                self.health_registry(),
+                Some(route_id.to_string()),
+                self.tracer_gating.levers.components_enabled(),
+            )
+            .with_in_flight(Arc::clone(&self.in_flight_total)),
+        );
         let consumer_rt: Arc<dyn camel_component_api::RuntimeObservability> =
             Arc::clone(&consumer_component_ctx) as Arc<_>;
         let (mut consumer, consumer_concurrency) = consumer_management::create_route_consumer(
@@ -899,9 +924,11 @@ impl camel_api::RouteController for DefaultRouteController {
         let crash_notifier = self.crash_notifier.clone();
         let runtime_for_consumer = self.runtime.clone();
 
-        // Create ConsumerContext with the stored sender
+        // Create ConsumerContext with the stored sender. drainclaim: same
+        // counter installation as the start path — resumed routes count.
         let consumer_ctx =
-            ConsumerContext::new(sender, consumer_cancel.clone(), route_id.to_string());
+            ConsumerContext::new(sender, consumer_cancel.clone(), route_id.to_string())
+                .with_in_flight_counter(Arc::clone(&self.in_flight_total));
 
         // direct-inline-dispatch Task 3.3 (bd rc-y4vk): mirror the
         // start_route publication on the resume path. Without this the
@@ -942,6 +969,7 @@ impl camel_api::RouteController for DefaultRouteController {
                 pipeline_cancel,
                 drain_in_flight,
                 Arc::clone(&self.cohort),
+                Some(Arc::clone(&self.in_flight_total)),
             );
             consumer_ctx.set_inline_dispatcher(Arc::new(dispatcher));
         }

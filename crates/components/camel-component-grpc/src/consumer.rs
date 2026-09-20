@@ -695,6 +695,7 @@ async fn process_unary_request(
     let envelope = ExchangeEnvelope {
         exchange,
         reply_tx: Some(reply_tx),
+        in_flight_claim: None,
     };
 
     sender
@@ -792,6 +793,7 @@ async fn process_server_streaming_request(
     let envelope = ExchangeEnvelope {
         exchange,
         reply_tx: Some(pipeline_reply_tx),
+        in_flight_claim: None,
     };
 
     if sender.send(envelope).await.is_err() {
@@ -872,6 +874,7 @@ async fn process_client_streaming_request(
         let envelope = ExchangeEnvelope {
             exchange,
             reply_tx: Some(reply_tx_pipe),
+            in_flight_claim: None,
         };
 
         if sender.send(envelope).await.is_err() {
@@ -908,6 +911,7 @@ async fn process_client_streaming_request(
     let envelope = ExchangeEnvelope {
         exchange: completion_exchange,
         reply_tx: Some(reply_tx_pipe),
+        in_flight_claim: None,
     };
 
     if sender.send(envelope).await.is_err() {
@@ -1032,6 +1036,7 @@ async fn process_bidi_request(
             let envelope = ExchangeEnvelope {
                 exchange,
                 reply_tx: Some(pipeline_reply_tx),
+                in_flight_claim: None,
             };
 
             if sender_clone.send(envelope).await.is_err() {

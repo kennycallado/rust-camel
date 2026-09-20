@@ -120,6 +120,10 @@ camel-auth.workspace = true
 tempfile = { workspace = true }
 serde_json.workspace = true
 ron = { workspace = true }
+# job tests run the real entry under `#[tokio::test(start_paused = true)]`
+# (deterministic batch-drain verdicts); the workspace `full` tokio set
+# does not include test-util (same shape as camel-processor/camel-http).
+tokio = { workspace = true, features = ["test-util"] }
 # compiled_artifact_test free-space probe (statvfs) for the fixture-root
 # fallback: the suite writes ~3.5 GiB of compiled artifacts and must pick
 # a temp root with room for them. Already a transitive dependency; the

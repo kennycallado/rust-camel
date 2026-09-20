@@ -1174,6 +1174,7 @@ async fn ws_handler(
                     .send(ExchangeEnvelope {
                         exchange,
                         reply_tx: None,
+                        in_flight_claim: None,
                     })
                     .await
                     .is_err()
@@ -1220,6 +1221,7 @@ async fn ws_handler(
                     .send(ExchangeEnvelope {
                         exchange,
                         reply_tx: None,
+                        in_flight_claim: None,
                     })
                     .await
                     .is_err()

@@ -407,6 +407,7 @@ mod tests {
         ExchangeEnvelope {
             exchange: Exchange::new(Message::new(Body::Text(text.to_string()))),
             reply_tx: None,
+            in_flight_claim: None,
         }
     }
 

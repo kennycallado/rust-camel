@@ -154,7 +154,10 @@ must never be inline-executed — aggregate entries stay channel-dispatched),
 the controller publishes an `InlineRouteDispatcher`
 (`lifecycle/adapters/inline_dispatcher.rs`) onto the fresh `ConsumerContext`:
 the live `SharedPipeline` swap source, a child of the pipeline cancellation
-token, the shared drain counter, and the cohort gate. Sequential dispatch
+token, the shared drain counter, the context-global in-flight counter (each
+dispatch mints an `InFlightClaim` held across the dispatch future — one of
+the claim acceptance boundaries, see CONTEXT-MAP.md "in-flight claim"), and
+the cohort gate. Sequential dispatch
 through the capability runs admission + snapshot + `pipeline.call` on the
 caller's task; consumer stop surfaces `CamelError::ConsumerStopping`. See
 CONTEXT-MAP.md "Inline dispatch" (rc-wijd).

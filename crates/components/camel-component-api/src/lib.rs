@@ -30,7 +30,7 @@ pub use component::Component;
 pub use component_context::{ComponentContext, NoOpComponentContext};
 pub use consumer::{
     ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, ExchangeEnvelope,
-    SecurityContext, StartupReceiver, StartupSignal,
+    InFlightClaim, SecurityContext, StartupReceiver, StartupSignal,
 };
 pub use dispatch::InlineRouteDispatcher;
 pub use endpoint::{Endpoint, PollingConsumer};

@@ -3,6 +3,7 @@
 //! for endpoint resolution and observability during route compilation and startup.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use camel_api::metrics::MetricsCollector;
 use camel_api::{AsyncHealthCheck, PlatformService};
@@ -24,6 +25,11 @@ pub(crate) struct ControllerComponentContext {
     /// assembly — the production seam for
     /// [`RuntimeObservability::component_metrics`] (lever-gated family).
     component_metrics_enabled: bool,
+    /// Context-global accepted-not-completed counter (drainclaim):
+    /// `Some` on production paths whose `Arc<dyn RuntimeObservability>`
+    /// reaches `create_producer`, so producers can mint `InFlightClaim`s.
+    /// Default `None` keeps test-only contexts uncounted.
+    in_flight: Option<Arc<AtomicU64>>,
 }
 
 impl ControllerComponentContext {
@@ -44,7 +50,18 @@ impl ControllerComponentContext {
             health_registry,
             route_id,
             component_metrics_enabled,
+            in_flight: None,
         }
+    }
+
+    /// Install the context-global accepted-not-completed counter
+    /// (drainclaim). Production construction sites chain this with the
+    /// SAME `Arc<AtomicU64>` the `CamelContext` exposes through
+    /// `total_in_flight()`.
+    pub(crate) fn with_in_flight(self, counter: Arc<AtomicU64>) -> Self {
+        let mut this = self;
+        this.in_flight = Some(counter);
+        this
     }
 }
 
@@ -79,6 +96,10 @@ impl ComponentContext for ControllerComponentContext {
 
     fn component_metrics_enabled(&self) -> bool {
         self.component_metrics_enabled
+    }
+
+    fn in_flight_counter(&self) -> Option<Arc<AtomicU64>> {
+        self.in_flight.clone()
     }
 }
 

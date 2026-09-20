@@ -314,8 +314,13 @@ Apache Camel's `forceCompletionOnStop()` flows pending buckets synchronously thr
 pipeline during `context.stop()`. rust-camel's `force_complete_all()` (in
 `crates/camel-processor/src/aggregator.rs`, the `force_complete_all` method) is nonblocking
 (`-> ()`): it cannot return completed exchanges inline, so it emits them through a bounded `late_tx`
-mpsc channel (capacity 256, see `crates/camel-core/src/lifecycle/adapters/route_controller.rs` where
-the channel is created) that a `select!` arm drains into the post-pipeline. Boolean semantics are
+mpsc channel of `AggregateEmission { exchange, claims }` items (capacity 256, see
+`crates/camel-core/src/lifecycle/adapters/route_controller.rs` where the channel is created) that a
+`select!` arm drains into the post-pipeline. Each emission carries the stashed exchanges'
+`InFlightClaim`s (attached via `AggregatorService::submit_with_claim`, which returns an
+`AggregationReceipt`); the drain arm must hold them across the post-pipeline — the claim-stash
+contract keeps `CamelContext::total_in_flight()` exact while a bucket is pending. Boolean semantics
+are
 equal: `force_completion_on_stop == true` emits pending buckets, `== false` drops them. Two
 divergences: (1) channel-mediated async emission vs Camel's synchronous flow; (2) under
 late-channel-full pressure, `try_send` fails and the force-completed exchange is DROPPED with a

@@ -21,9 +21,36 @@ use camel_api::{
     exchange::Exchange,
     message::Message,
 };
+use camel_component_api::InFlightClaim;
 use camel_language_api::Language;
 
 pub type SharedLanguageRegistry = Arc<std::sync::Mutex<HashMap<String, Arc<dyn Language>>>>;
+
+/// A bucket emission delivered outside the submitting call (timeout
+/// fire, `force_complete_all`): the aggregated exchange plus every
+/// stashed drainclaim it completes. The consumer of the late channel
+/// MUST hold `claims` until the emission's continuation pipeline (or
+/// reply) completes — dropping them IS the release.
+pub struct AggregateEmission {
+    pub exchange: Exchange,
+    pub claims: Vec<Option<InFlightClaim>>,
+}
+
+/// Result of [`AggregatorService::submit_with_claim`].
+///
+/// Claim-propagation contract (drainclaim): on a pending stash the
+/// claim stays inside the bucket; on sync completion the bucket's
+/// claims (the submitter's included) are returned here so the caller
+/// can hold them across the aggregated exchange's continuation; on
+/// error the submitted claim was dropped inside (rejected = released).
+pub struct AggregationReceipt {
+    /// The pending-marked ack or the aggregated exchange — the same
+    /// shapes the tower `Service::call` returns.
+    pub reply: Result<Exchange, CamelError>,
+    /// Claims released with this receipt. Empty for a pending stash
+    /// (claims stay in the bucket) and for errors.
+    pub claims: Vec<Option<InFlightClaim>>,
+}
 
 /// Sampling cadence for the metrics-only sweep (no `bucket_ttl` configured):
 /// matches the 250ms cadence of the other dashboard-observability T3.3
@@ -36,8 +63,16 @@ pub const CAMEL_AGGREGATED_KEY: &str = "CamelAggregatedKey";
 pub const CAMEL_AGGREGATED_COMPLETION_REASON: &str = "CamelAggregatedCompletionReason";
 
 /// Internal bucket structure with timestamp tracking for TTL eviction.
+///
+/// drainclaim: `claims` runs parallel to `exchanges` (same length
+/// invariant, maintained by [`Bucket::push`] and [`Bucket::into_parts`])
+/// — one stashed claim per buffered exchange, moved in by the route
+/// loop via [`AggregatorService::submit_with_claim`]. Whenever a bucket
+/// leaves the map without emitting (TTL eviction, unarmed-bucket
+/// release, discard-on-timeout), the dropped claims release.
 struct Bucket {
     exchanges: Vec<Exchange>,
+    claims: Vec<Option<InFlightClaim>>,
     last_updated: Instant,
 }
 
@@ -45,13 +80,21 @@ impl Bucket {
     fn new() -> Self {
         Self {
             exchanges: Vec::new(),
+            claims: Vec::new(),
             last_updated: Instant::now(),
         }
     }
 
-    fn push(&mut self, exchange: Exchange) {
+    fn push(&mut self, exchange: Exchange, claim: Option<InFlightClaim>) {
         self.exchanges.push(exchange);
+        self.claims.push(claim);
         self.last_updated = Instant::now();
+    }
+
+    /// Split the bucket into its exchanges and their stashed claims
+    /// (same order, same length).
+    fn into_parts(self) -> (Vec<Exchange>, Vec<Option<InFlightClaim>>) {
+        (self.exchanges, self.claims)
     }
 
     fn is_expired(&self, ttl: Duration) -> bool {
@@ -65,7 +108,7 @@ pub struct AggregatorService {
     buckets: Arc<Mutex<HashMap<String, Bucket>>>,
     timeout_tasks: Arc<Mutex<HashMap<String, CancellationToken>>>,
     timeout_handles: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
-    late_tx: mpsc::Sender<Exchange>,
+    late_tx: mpsc::Sender<AggregateEmission>,
     language_registry: SharedLanguageRegistry,
     /// Swappable cell holding the cancellation token for the background
     /// maintenance sweep task. `StepLifecycle::start` replaces this with a fresh token
@@ -153,7 +196,7 @@ impl AggregatorService {
     /// `Drop` also aborts it as defense-in-depth.
     pub fn new(
         config: AggregatorConfig,
-        late_tx: mpsc::Sender<Exchange>,
+        late_tx: mpsc::Sender<AggregateEmission>,
         language_registry: SharedLanguageRegistry,
         route_cancel: CancellationToken,
     ) -> Self {
@@ -238,13 +281,21 @@ impl AggregatorService {
                         &self.timeout_tasks,
                         &self.timeout_handles,
                     );
-                    match aggregate(bucket.exchanges, &self.config.strategy) {
+                    let (exchanges, claims) = bucket.into_parts();
+                    match aggregate(exchanges, &self.config.strategy) {
                         Ok(mut result) => {
                             result.set_property(
                                 CAMEL_AGGREGATED_COMPLETION_REASON,
                                 serde_json::json!(CompletionReason::Stop.as_str()),
                             );
-                            if self.late_tx.try_send(result).is_err() {
+                            if self
+                                .late_tx
+                                .try_send(AggregateEmission {
+                                    exchange: result,
+                                    claims,
+                                })
+                                .is_err()
+                            {
                                 tracing::warn!(
                                     key = %key,
                                     "aggregator force-complete emit dropped: late channel full"
@@ -452,6 +503,33 @@ impl Service<Exchange> for AggregatorService {
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
+        let svc = self.clone();
+        Box::pin(async move {
+            // Pipeline-embedded submissions carry no claims (the drain
+            // site holds the claim for the whole pipeline call), so any
+            // claims a completion returns are dropped here — drop IS
+            // the release.
+            svc.submit_with_claim(exchange, None).await.reply
+        })
+    }
+}
+
+impl AggregatorService {
+    /// Submit one exchange with its drainclaim sidecar (drainclaim
+    /// claim propagation) — the route loop's aggregate entry point.
+    ///
+    /// Behaviorally identical to the tower `Service::call` this is
+    /// extracted from, except the claim travels with the exchange: a
+    /// pending stash moves it into the bucket, a sync completion
+    /// returns it (with the rest of the bucket's claims) to the caller
+    /// to hold across the aggregated exchange's continuation, and every
+    /// rejection path (bad correlation key, bucket caps) drops it —
+    /// rejected means released.
+    pub async fn submit_with_claim(
+        &self,
+        exchange: Exchange,
+        claim: Option<InFlightClaim>,
+    ) -> AggregationReceipt {
         let config = self.config.clone();
         let buckets = Arc::clone(&self.buckets);
         let timeout_tasks = Arc::clone(&self.timeout_tasks);
@@ -462,7 +540,7 @@ impl Service<Exchange> for AggregatorService {
         #[cfg(test)]
         let key_serializations = Arc::clone(&self.key_serializations);
 
-        Box::pin(async move {
+        let inner = async move {
             let key_value =
                 extract_correlation_key(&exchange, &config.correlation, &language_registry).await?;
 
@@ -548,7 +626,7 @@ impl Service<Exchange> for AggregatorService {
                     Some(b) => b,
                     None => guard.entry(key_str.clone()).or_insert_with(Bucket::new),
                 };
-                bucket.push(exchange);
+                bucket.push(exchange, claim);
 
                 let (is_complete, reason) = check_sync_completion(
                     &config.completion,
@@ -556,12 +634,12 @@ impl Service<Exchange> for AggregatorService {
                     predicate_satisfied,
                 );
 
-                let exchanges = if is_complete {
-                    guard.remove(&key_str).map(|b| b.exchanges)
+                let bucket_parts = if is_complete {
+                    guard.remove(&key_str).map(Bucket::into_parts)
                 } else {
                     None
                 };
-                (exchanges, reason)
+                (bucket_parts, reason)
             };
 
             if completed_bucket.0.is_none() && has_timeout_condition(&config.completion) {
@@ -623,7 +701,7 @@ impl Service<Exchange> for AggregatorService {
                 }
             }
 
-            if let Some(exchanges) = completed_bucket.0 {
+            if let Some((exchanges, claims)) = completed_bucket.0 {
                 cancel_timeout_task_with_handle(&key_str, &timeout_tasks, &timeout_handles);
                 let reason = completed_bucket.1;
                 let size = exchanges.len();
@@ -634,16 +712,31 @@ impl Service<Exchange> for AggregatorService {
                     CAMEL_AGGREGATED_COMPLETION_REASON,
                     serde_json::json!(reason.as_str()),
                 );
-                Ok(result)
+                Ok((result, claims))
             } else {
                 let mut pending = Exchange::new(Message {
                     headers: Default::default(),
                     body: Body::Empty,
                 });
                 pending.set_property(CAMEL_AGGREGATOR_PENDING, serde_json::json!(true));
-                Ok(pending)
+                // Claims stay stashed in the bucket.
+                Ok((pending, Vec::new()))
             }
-        })
+        }
+        .await;
+
+        match inner {
+            Ok((exchange, claims)) => AggregationReceipt {
+                reply: Ok(exchange),
+                claims,
+            },
+            // The submitted claim was dropped inside the body — rejected
+            // means released, so nothing to hand back.
+            Err(e) => AggregationReceipt {
+                reply: Err(e),
+                claims: Vec::new(),
+            },
+        }
     }
 }
 
@@ -828,7 +921,7 @@ fn spawn_timeout_task(
     buckets: Arc<Mutex<HashMap<String, Bucket>>>,
     timeout_tasks: Arc<Mutex<HashMap<String, CancellationToken>>>,
     timeout_handles: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
-    late_tx: mpsc::Sender<Exchange>,
+    late_tx: mpsc::Sender<AggregateEmission>,
     strategy: AggregationStrategy,
     discard: bool,
 ) -> JoinHandle<()> {
@@ -854,11 +947,11 @@ fn spawn_timeout_task(
                     let mut hh = timeout_handles.lock().unwrap_or_else(|e| e.into_inner());
                     hh.remove(&key);
                 }
-                let bucket_exchanges = {
+                let bucket_parts = {
                     let mut guard = buckets.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.remove(&key).map(|b| b.exchanges)
+                    guard.remove(&key).map(Bucket::into_parts)
                 };
-                if let Some(exchanges) = bucket_exchanges
+                if let Some((exchanges, claims)) = bucket_parts
                     && !discard
                 {
                     match aggregate(exchanges, &strategy) {
@@ -867,7 +960,13 @@ fn spawn_timeout_task(
                                 CAMEL_AGGREGATED_COMPLETION_REASON,
                                 serde_json::json!(CompletionReason::Timeout.as_str()),
                             );
-                            if late_tx.try_send(result).is_err() {
+                            if late_tx
+                                .try_send(AggregateEmission {
+                                    exchange: result,
+                                    claims,
+                                })
+                                .is_err()
+                            {
                                 tracing::warn!(
                                     key = %key,
                                     "aggregator timeout emit dropped: late channel full"
@@ -1475,6 +1574,7 @@ mod tests {
         svc.force_complete_all();
 
         let result = rx.try_recv().expect("should emit on force-complete");
+        let result = result.exchange;
         assert!(
             result.input.body.as_text().is_some() || matches!(result.input.body, Body::Json(_))
         );
@@ -1615,12 +1715,15 @@ mod tests {
             .build()
             .unwrap();
         // capacity 1 — deliberately tiny so the pre-fill fully saturates the slot.
-        let (late_tx, mut late_rx) = mpsc::channel::<Exchange>(1);
+        let (late_tx, mut late_rx) = mpsc::channel::<AggregateEmission>(1);
         // Pre-saturate the 1-slot mpsc BEFORE the Sender is moved into
         // AggregatorService::new. The Sender is taken by value into the
         // service, so this `try_send` is the only chance to occupy the slot.
         late_tx
-            .try_send(make_exchange("k", "99", "dummy"))
+            .try_send(AggregateEmission {
+                exchange: make_exchange("k", "99", "dummy"),
+                claims: Vec::new(),
+            })
             .expect("pre-fill succeeds");
 
         let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -1643,7 +1746,7 @@ mod tests {
             .try_recv()
             .expect("pre-fill should still be in channel");
         assert_eq!(
-            pre_fill.input.headers.get("k"),
+            pre_fill.exchange.input.headers.get("k"),
             Some(&serde_json::json!("99"))
         );
 
@@ -2222,7 +2325,10 @@ mod tests {
             .expect("armed bucket must emit on its timeout")
             .expect("late channel must stay open");
         assert_eq!(
-            emitted.properties.get(CAMEL_AGGREGATED_COMPLETION_REASON),
+            emitted
+                .exchange
+                .properties
+                .get(CAMEL_AGGREGATED_COMPLETION_REASON),
             Some(&serde_json::json!("timeout"))
         );
 

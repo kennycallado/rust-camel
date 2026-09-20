@@ -33,7 +33,7 @@ use camel_component_api::parse_uri;
 use camel_component_api::{
     BoxProcessor, CamelError, Component, ComponentContext, ComponentMetadata, ConcurrencyModel,
     Consumer, ConsumerContext, ConsumerStartupMode, Endpoint, Exchange, ExchangeEnvelope,
-    ProducerContext,
+    InFlightClaim, ProducerContext,
 };
 use tracing::{info, warn};
 
@@ -661,10 +661,14 @@ impl Endpoint for SedaEndpoint {
         rt: Arc<dyn camel_component_api::RuntimeObservability>,
         _ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
+        // Captured once (drainclaim): every enqueue mints its
+        // InFlightClaims against the context-global counter.
+        let in_flight = rt.in_flight_counter();
         let producer = SedaProducer {
             state: Arc::clone(&self.state),
             producer_config: ProducerConfig::from(&self.config),
             runtime: rt,
+            in_flight,
         };
         Ok(BoxProcessor::from_fn(move |ex| {
             let mut svc = producer.clone();
@@ -1018,6 +1022,31 @@ struct SedaProducer {
     /// Observability handle: `component_metrics()` powers the uniform
     /// `seda:produce` emission (dashboard-observability Task 4.2).
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+    /// Context-global accepted-not-completed counter (drainclaim),
+    /// captured once at `create_producer` from
+    /// [`camel_component_api::RuntimeObservability::in_flight_counter`].
+    /// `None` keeps this producer's enqueues uncounted (test runtimes).
+    in_flight: Option<Arc<AtomicU64>>,
+}
+
+/// Mint the fanout claim set: ONE minted claim plus one `split()` sibling
+/// per additional subscriber copy (drainclaim). The siblings are collected
+/// BEFORE the minted claim moves into the first envelope — `split()` borrows
+/// the minted claim, so the set must be fully materialised first. Yields one
+/// claim per copy in send order; an empty iterator when the runtime installs
+/// no counter (uncounted enqueues, e.g. test runtimes).
+fn fanout_claims(
+    counter: Option<&Arc<AtomicU64>>,
+    copies: usize,
+) -> std::vec::IntoIter<InFlightClaim> {
+    let mut claims = Vec::with_capacity(copies);
+    if let Some(counter) = counter {
+        let minted = InFlightClaim::attach(counter);
+        let siblings: Vec<InFlightClaim> = (1..copies).map(|_| minted.split()).collect();
+        claims.push(minted);
+        claims.extend(siblings);
+    }
+    claims.into_iter()
 }
 
 impl Service<Exchange> for SedaProducer {
@@ -1034,6 +1063,7 @@ impl Service<Exchange> for SedaProducer {
         let producer_config = self.producer_config.clone();
         let original = exchange.clone();
         let component_metrics = self.runtime.component_metrics();
+        let in_flight = self.in_flight.clone();
         Box::pin(async move {
             // The produce operation covers the whole enqueue outcome
             // (no-consumers rejection, queue-full, timeout, reply wait):
@@ -1074,8 +1104,6 @@ impl Service<Exchange> for SedaProducer {
                     (None, None)
                 };
 
-                let envelope = ExchangeEnvelope { exchange, reply_tx };
-
                 match &state.mode {
                     SedaMode::Single { tx, .. } => {
                         // Count the envelope into the queue depth before it
@@ -1083,6 +1111,18 @@ impl Service<Exchange> for SedaProducer {
                         // send failure, panic, or abort before the commit, so
                         // the lock-free counter never under-reads or leaks.
                         let guard = DepthGuard::count_in(&state.depth, 1);
+                        // Attach the in-flight claim at the same acceptance
+                        // boundary (drainclaim): the envelope owns it from
+                        // enqueue until the route pipeline's successor claim
+                        // takes over at the dispatch handoff. Every failed
+                        // push below (timeout, queue-full, closed) drops the
+                        // envelope and releases the claim, mirroring the
+                        // guard rollback above.
+                        let envelope = ExchangeEnvelope {
+                            exchange,
+                            reply_tx,
+                            in_flight_claim: in_flight.as_ref().map(InFlightClaim::attach),
+                        };
                         if producer_config.block_when_full {
                             let result = tokio::time::timeout(
                                 Duration::from_millis(producer_config.timeout_ms),
@@ -1155,10 +1195,17 @@ impl Service<Exchange> for SedaProducer {
                             // copy. The guard rolls back if anything between
                             // here and the sends panics; commit afterwards.
                             let guard = DepthGuard::count_in(&state.depth, permits.len());
+                            // One in-flight claim per subscriber copy
+                            // (drainclaim): the minted claim rides the first
+                            // copy, each additional copy rides a `split()`
+                            // sibling. Un-sent claims drop on panic and
+                            // self-release, mirroring the guard rollback.
+                            let mut claims = fanout_claims(in_flight.as_ref(), permits.len());
                             for permit in permits {
                                 permit.send(ExchangeEnvelope {
                                     exchange: original.clone(),
                                     reply_tx: None,
+                                    in_flight_claim: claims.next(),
                                 });
                             }
                             guard.commit();
@@ -1181,10 +1228,17 @@ impl Service<Exchange> for SedaProducer {
                                 }
                             }
                             let guard = DepthGuard::count_in(&state.depth, permits.len());
+                            // One in-flight claim per subscriber copy
+                            // (drainclaim): the minted claim rides the first
+                            // copy, each additional copy rides a `split()`
+                            // sibling. Un-sent claims drop on panic and
+                            // self-release, mirroring the guard rollback.
+                            let mut claims = fanout_claims(in_flight.as_ref(), permits.len());
                             for permit in permits {
                                 permit.send(ExchangeEnvelope {
                                     exchange: original.clone(),
                                     reply_tx: None,
+                                    in_flight_claim: claims.next(),
                                 });
                             }
                             guard.commit();
@@ -1465,6 +1519,7 @@ mod consumer_producer_tests {
             .send(ExchangeEnvelope {
                 exchange: Exchange::new(Message::new("dummy")),
                 reply_tx: None,
+                in_flight_claim: None,
             })
             .await
             .unwrap();
@@ -2318,6 +2373,7 @@ mod consumer_producer_tests {
                     tx.send(ExchangeEnvelope {
                         exchange: Exchange::new(Message::new(format!("msg-{}", i))),
                         reply_tx: Some(reply_tx),
+                        in_flight_claim: None,
                     })
                     .await
                     .unwrap();
@@ -2532,6 +2588,7 @@ mod consumer_producer_tests {
             tx.send(ExchangeEnvelope {
                 exchange: Exchange::new(Message::new(body)),
                 reply_tx: None,
+                in_flight_claim: None,
             })
             .await
             .unwrap();
@@ -2553,6 +2610,7 @@ mod consumer_producer_tests {
         tx.send(ExchangeEnvelope {
             exchange: Exchange::new(Message::new("e2")),
             reply_tx: None,
+            in_flight_claim: None,
         })
         .await
         .unwrap();
@@ -2567,6 +2625,7 @@ mod consumer_producer_tests {
         tx.send(ExchangeEnvelope {
             exchange: Exchange::new(Message::new("e3")),
             reply_tx: None,
+            in_flight_claim: None,
         })
         .await
         .unwrap();
@@ -2973,5 +3032,307 @@ mod queue_depth_tests {
         }
 
         drop(blocked_rx);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-flight claim tests (drainclaim task 1.5)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod in_flight_tests {
+    use super::*;
+    use camel_api::MetricsCollector;
+    use camel_component_api::{
+        HealthCheckRegistry, Message, NoOpComponentContext, RuntimeObservability,
+    };
+    use tower::ServiceExt;
+
+    /// Test runtime reporting a shared in-flight counter through
+    /// `RuntimeObservability::in_flight_counter` (drainclaim): producers
+    /// created with it mint real enqueue claims against `counter`.
+    struct CountingRuntime {
+        in_flight: Arc<AtomicU64>,
+    }
+
+    impl RuntimeObservability for CountingRuntime {
+        fn metrics(&self) -> Arc<dyn MetricsCollector> {
+            Arc::new(NoopRuntimeObservability)
+        }
+        fn health(&self) -> Arc<dyn HealthCheckRegistry> {
+            Arc::new(NoopRuntimeObservability)
+        }
+        fn in_flight_counter(&self) -> Option<Arc<AtomicU64>> {
+            Some(Arc::clone(&self.in_flight))
+        }
+    }
+
+    fn counting_rt(counter: &Arc<AtomicU64>) -> Arc<dyn RuntimeObservability> {
+        Arc::new(CountingRuntime {
+            in_flight: Arc::clone(counter),
+        })
+    }
+
+    /// Deadline-bounded poll for the in-flight counter to reach exactly
+    /// `expected` (helper-fn poll pattern — no bare test-fn sleeps). Sound
+    /// only for states that are STABLE once reached (settled claims,
+    /// parked forwarders); never a sampler of transient windows.
+    async fn await_in_flight(counter: &AtomicU64, expected: u64) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let seen = counter.load(Ordering::Acquire);
+            if seen == expected {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "in-flight counter stuck at {seen}, expected {expected}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// spec: "seda queue residency is counted" — one exchange stays
+    /// counted from enqueue until full pipeline completion: the enqueue
+    /// shell claim hands the count over to the pipeline's successor claim
+    /// (minted by `ConsumerContext::send`), so the counter reads exactly 1
+    /// while the pipeline parks and returns to baseline on completion.
+    #[tokio::test]
+    async fn enqueue_residency_counted() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let runtime = counting_rt(&counter);
+
+        let comp = SedaComponent::new();
+        let ep = comp
+            .create_endpoint("seda:res", &NoOpComponentContext)
+            .unwrap();
+
+        // Parked pipeline: takes-and-holds the first envelope on a gate,
+        // exactly like the real pipeline's take-and-hold at the drain
+        // sites (drainclaim task 1.4).
+        let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(1);
+        let ctx = ConsumerContext::new(route_tx, CancellationToken::new(), "res-route".to_string())
+            .with_in_flight_counter(Arc::clone(&counter));
+        let mut consumer = ep.create_consumer(Arc::clone(&runtime)).unwrap();
+        consumer.start(ctx).await.unwrap();
+
+        let (got_tx, got_rx) = oneshot::channel::<()>();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let pipeline = tokio::spawn(async move {
+            let held = route_rx.recv().await.expect("pipeline receives exchange");
+            let _ = got_tx.send(());
+            let _ = release_rx.await;
+            drop(held); // pipeline completion releases the claim
+        });
+
+        let producer = ep
+            .create_producer(runtime, &ProducerContext::default())
+            .unwrap();
+        producer
+            .clone()
+            .oneshot(Exchange::new(Message::new("resident")))
+            .await
+            .unwrap();
+
+        // Exchange taken-and-held by the parked pipeline; after the
+        // handoff settles only its successor claim is live.
+        got_rx.await.unwrap();
+        await_in_flight(&counter, 1).await;
+
+        release_tx.send(()).unwrap();
+        pipeline.await.unwrap();
+        consumer.stop().await.unwrap();
+
+        // Full pipeline completion returns the counter to baseline.
+        await_in_flight(&counter, 0).await;
+    }
+
+    /// spec: "fanout splits one claim per subscriber copy" — one enqueue
+    /// on a two-subscriber fanout mints one claim and splits a sibling, so
+    /// each parked pipeline holds exactly one claim; completing the
+    /// subscribers releases them one by one.
+    #[tokio::test]
+    async fn fanout_splits_claim_per_copy() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let runtime = counting_rt(&counter);
+
+        let comp = SedaComponent::new();
+        let ep = comp
+            .create_endpoint("seda:fosplit?multipleConsumers=true", &NoOpComponentContext)
+            .unwrap();
+
+        let mut consumer_a = ep.create_consumer(Arc::clone(&runtime)).unwrap();
+        let (tx_a, mut rx_a) = mpsc::channel::<ExchangeEnvelope>(1);
+        let ctx_a = ConsumerContext::new(tx_a, CancellationToken::new(), "fan-a".to_string())
+            .with_in_flight_counter(Arc::clone(&counter));
+        consumer_a.start(ctx_a).await.unwrap();
+
+        let mut consumer_b = ep.create_consumer(Arc::clone(&runtime)).unwrap();
+        let (tx_b, mut rx_b) = mpsc::channel::<ExchangeEnvelope>(1);
+        let ctx_b = ConsumerContext::new(tx_b, CancellationToken::new(), "fan-b".to_string())
+            .with_in_flight_counter(Arc::clone(&counter));
+        consumer_b.start(ctx_b).await.unwrap();
+
+        let (got_a_tx, got_a_rx) = oneshot::channel::<()>();
+        let (release_a_tx, release_a_rx) = oneshot::channel::<()>();
+        let pipe_a = tokio::spawn(async move {
+            let held = rx_a.recv().await.expect("subscriber A copy");
+            let _ = got_a_tx.send(());
+            let _ = release_a_rx.await;
+            drop(held);
+        });
+        let (got_b_tx, got_b_rx) = oneshot::channel::<()>();
+        let (release_b_tx, release_b_rx) = oneshot::channel::<()>();
+        let pipe_b = tokio::spawn(async move {
+            let held = rx_b.recv().await.expect("subscriber B copy");
+            let _ = got_b_tx.send(());
+            let _ = release_b_rx.await;
+            drop(held);
+        });
+
+        let producer = ep
+            .create_producer(runtime, &ProducerContext::default())
+            .unwrap();
+        producer
+            .clone()
+            .oneshot(Exchange::new(Message::new("fan")))
+            .await
+            .unwrap();
+
+        // Both copies taken-and-held: after the handoffs settle, exactly
+        // one claim per subscriber copy is live (2 = split minted one
+        // claim per copy at enqueue).
+        got_a_rx.await.unwrap();
+        got_b_rx.await.unwrap();
+        await_in_flight(&counter, 2).await;
+
+        // Complete subscriber A: its copy's claim releases; B's stays.
+        release_a_tx.send(()).unwrap();
+        pipe_a.await.unwrap();
+        await_in_flight(&counter, 1).await;
+
+        // Complete subscriber B: back to baseline.
+        release_b_tx.send(()).unwrap();
+        pipe_b.await.unwrap();
+        await_in_flight(&counter, 0).await;
+
+        consumer_a.stop().await.unwrap();
+        consumer_b.stop().await.unwrap();
+    }
+
+    /// spec: "dispatch handoff never uncovers an exchange" — deterministic
+    /// observation of the handoff overlap itself. The pipeline parks its
+    /// FIRST exchange (E1) on a gate and the dispatch channel has capacity
+    /// 1: E2's successor envelope fills the channel, so the forwarder
+    /// holding E3's shell claim parks INSIDE `ctx.send` with E3's successor
+    /// claim already minted onto the in-send envelope. That parked state is
+    /// STABLE, and the counter reads exactly
+    /// baseline + E1 (pipeline-held) + E2 (queued) + E3 shell + E3 successor
+    /// = 4 — both handoff claims live at once, observed, not sampled.
+    #[tokio::test]
+    async fn handoff_overlap_observed_at_boundary() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let runtime = counting_rt(&counter);
+
+        let comp = SedaComponent::new();
+        let ep = comp
+            .create_endpoint("seda:ovl", &NoOpComponentContext)
+            .unwrap();
+
+        // Capacity-1 dispatch channel: full once E2's successor envelope
+        // is queued, forcing the E3 handoff to park inside `ctx.send`.
+        let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(1);
+        let ctx = ConsumerContext::new(route_tx, CancellationToken::new(), "ovl-route".to_string())
+            .with_in_flight_counter(Arc::clone(&counter));
+        let mut consumer = ep.create_consumer(Arc::clone(&runtime)).unwrap();
+        consumer.start(ctx).await.unwrap();
+
+        let (got_e1_tx, got_e1_rx) = oneshot::channel::<()>();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let pipeline = tokio::spawn(async move {
+            // E1: take-and-hold on the gate.
+            let e1 = route_rx.recv().await.expect("pipeline receives E1");
+            let _ = got_e1_tx.send(());
+            let _ = release_rx.await;
+            drop(e1);
+            // Post-gate: complete E2 and E3 (exactly two successor
+            // envelopes are behind the gate), then end the pipeline.
+            for _ in 0..2 {
+                let _ = route_rx.recv().await.expect("successor envelope");
+            }
+        });
+
+        let producer = ep
+            .create_producer(runtime, &ProducerContext::default())
+            .unwrap();
+
+        // E1 → taken by the parked pipeline: 1 pipeline-held claim.
+        producer
+            .clone()
+            .oneshot(Exchange::new(Message::new("e1")))
+            .await
+            .unwrap();
+        got_e1_rx.await.unwrap();
+        await_in_flight(&counter, 1).await;
+
+        // E2 → successor claim queued in the capacity-1 dispatch channel.
+        producer
+            .clone()
+            .oneshot(Exchange::new(Message::new("e2")))
+            .await
+            .unwrap();
+        await_in_flight(&counter, 2).await;
+
+        // E3 → the forwarder parks inside `ctx.send`: E3's shell claim is
+        // still held by the forwarder's envelope AND E3's successor claim
+        // is already attached to the in-send envelope. Exactly 4 = 0
+        // baseline + 1 (E1 pipeline-held) + 1 (E2 queued) + 1 (E3 shell)
+        // + 1 (E3 in-send successor). This observes the overlap window
+        // itself (stable until the gate opens), not a sample of it.
+        producer
+            .clone()
+            .oneshot(Exchange::new(Message::new("e3")))
+            .await
+            .unwrap();
+        await_in_flight(&counter, 4).await;
+
+        // Release: E1 completes, E2 and E3 drain through the pipeline,
+        // every claim releases — eventual return to baseline.
+        release_tx.send(()).unwrap();
+        pipeline.await.unwrap();
+        consumer.stop().await.unwrap();
+        await_in_flight(&counter, 0).await;
+    }
+
+    /// Enqueue against an endpoint with no active consumers and
+    /// `discard_if_no_consumers = false` (default) is rejected BEFORE any
+    /// claim is minted — the counter stays at baseline.
+    #[tokio::test]
+    async fn no_consumer_rejection_leaves_counter_zero() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let runtime = counting_rt(&counter);
+
+        let comp = SedaComponent::new();
+        let ep = comp
+            .create_endpoint("seda:noc", &NoOpComponentContext)
+            .unwrap();
+
+        // No consumer ever started.
+        let producer = ep
+            .create_producer(runtime, &ProducerContext::default())
+            .unwrap();
+        let err = producer
+            .oneshot(Exchange::new(Message::new("rejected")))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no active consumers"),
+            "unexpected rejection: {err}"
+        );
+        assert_eq!(
+            counter.load(Ordering::Acquire),
+            0,
+            "rejection must not leave a claim behind"
+        );
     }
 }

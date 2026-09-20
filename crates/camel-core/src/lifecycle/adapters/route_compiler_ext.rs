@@ -190,20 +190,24 @@ pub(crate) fn build_eh_config_pipeline(
     security_policy: Option<SecurityPolicyConfig>,
     transport: TransportId,
     circuit_breaker: Option<CircuitBreakerConfig>,
+    in_flight_total: Arc<AtomicU64>,
 ) -> Result<BoxProcessor, CamelError> {
     Ok(if let Some(config) = eh_config {
         // ── New path: RouteChannelService with explicit gates ──
-        let component_ctx = Arc::new(ControllerComponentContext::new(
-            registry,
-            languages,
-            tracer_metrics
-                .clone()
-                .unwrap_or_else(|| Arc::new(NoOpMetrics)),
-            platform_service,
-            health_registry,
-            Some(route_id.to_string()),
-            tracer_gating.levers.components_enabled(),
-        ));
+        let component_ctx = Arc::new(
+            ControllerComponentContext::new(
+                registry,
+                languages,
+                tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                platform_service,
+                health_registry,
+                Some(route_id.to_string()),
+                tracer_gating.levers.components_enabled(),
+            )
+            .with_in_flight(in_flight_total),
+        );
         let rt: Arc<dyn RuntimeObservability> = Arc::clone(&component_ctx) as Arc<_>;
         let handler = Arc::new(resolve_error_handler(
             config.clone(),
@@ -311,6 +315,11 @@ pub(crate) struct RouteCompilerExt<'a> {
     pub(crate) cache_repositories: crate::SharedCacheRegistry,
     /// Route send-point interception rules captured at compile time.
     pub(crate) intercept: &'a InterceptRules,
+    /// Context-global accepted-not-completed counter (drainclaim): the
+    /// controller's `in_flight_total` — every `ControllerComponentContext`
+    /// this extension builds (step resolution, error handler, UoW hooks)
+    /// exposes it to `create_producer`.
+    pub(crate) in_flight_total: Arc<AtomicU64>,
 }
 
 impl RouteCompilerExt<'_> {
@@ -337,17 +346,20 @@ impl RouteCompilerExt<'_> {
         route_id: Option<&str>,
         staging_mode: &super::step_resolution::FunctionStagingMode,
     ) -> Result<Vec<CompiledStep>, CamelError> {
-        let component_ctx = Arc::new(ControllerComponentContext::new(
-            Arc::clone(registry),
-            Arc::clone(self.languages),
-            self.tracer_metrics
-                .clone()
-                .unwrap_or_else(|| Arc::new(NoOpMetrics)),
-            Arc::clone(self.platform_service),
-            self.health_registry(),
-            route_id.map(|s| s.to_string()),
-            self.tracer_gating.levers.components_enabled(),
-        ));
+        let component_ctx = Arc::new(
+            ControllerComponentContext::new(
+                Arc::clone(registry),
+                Arc::clone(self.languages),
+                self.tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                Arc::clone(self.platform_service),
+                self.health_registry(),
+                route_id.map(|s| s.to_string()),
+                self.tracer_gating.levers.components_enabled(),
+            )
+            .with_in_flight(Arc::clone(&self.in_flight_total)),
+        );
         let rt: Arc<dyn camel_component_api::RuntimeObservability> =
             Arc::clone(&component_ctx) as Arc<_>;
 
@@ -736,23 +748,27 @@ impl RouteCompilerExt<'_> {
             def.security_policy,
             transport,
             circuit_breaker,
+            Arc::clone(&self.in_flight_total),
         )?;
 
         // Apply UoW layer outermost
         if let Some(uow_config) = &def.unit_of_work {
             let existing_counter = self.route_registry.in_flight_counter(&route_id);
 
-            let component_ctx = Arc::new(ControllerComponentContext::new(
-                Arc::clone(self.registry),
-                Arc::clone(self.languages),
-                self.tracer_metrics
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
-                Arc::clone(self.platform_service),
-                self.health_registry(),
-                Some(route_id.clone()),
-                self.tracer_gating.levers.components_enabled(),
-            ));
+            let component_ctx = Arc::new(
+                ControllerComponentContext::new(
+                    Arc::clone(self.registry),
+                    Arc::clone(self.languages),
+                    self.tracer_metrics
+                        .clone()
+                        .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                    Arc::clone(self.platform_service),
+                    self.health_registry(),
+                    Some(route_id.clone()),
+                    self.tracer_gating.levers.components_enabled(),
+                )
+                .with_in_flight(Arc::clone(&self.in_flight_total)),
+            );
             let rt: Arc<dyn camel_component_api::RuntimeObservability> =
                 Arc::clone(&component_ctx) as Arc<_>;
 

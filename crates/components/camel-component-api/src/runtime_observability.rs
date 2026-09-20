@@ -10,6 +10,7 @@
 //! exactly the two observability surfaces an ADR-0012 emitter calls.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use camel_api::{ComponentMetrics, MetricsCollector};
 
@@ -50,6 +51,13 @@ pub trait RuntimeObservability: Send + Sync {
     fn component_metrics(&self) -> ComponentMetrics {
         ComponentMetrics::new(self.metrics(), false)
     }
+
+    /// Context-global counter of accepted-not-completed exchanges
+    /// (drainclaim), forwarded from [`ComponentContext::in_flight_counter`].
+    /// Default `None` keeps runtimes that install no counter uncounted.
+    fn in_flight_counter(&self) -> Option<Arc<AtomicU64>> {
+        None
+    }
 }
 
 // Blanket impl: every ComponentContext is automatically a RuntimeObservability.
@@ -73,6 +81,10 @@ impl<T: ComponentContext> RuntimeObservability for T {
             <Self as ComponentContext>::metrics(self),
             <Self as ComponentContext>::component_metrics_enabled(self),
         )
+    }
+
+    fn in_flight_counter(&self) -> Option<Arc<AtomicU64>> {
+        <Self as ComponentContext>::in_flight_counter(self)
     }
 }
 

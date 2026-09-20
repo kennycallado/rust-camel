@@ -259,6 +259,20 @@ fn consumer_gate_allows_only_job_safe_schemes() {
 }
 
 #[test]
+fn consumer_gate_rejects_timer_and_cron() {
+    // Scheduled recurring producers would auto-fire after the trigger
+    // send and perturb the batch drain verdict, so the gate fails
+    // closed at load — the reject message must name the scheme.
+    for (uri, scheme) in [("timer:1s", "timer"), ("cron:0/5 * * * * ?", "cron")] {
+        let err = document::validate_consumer_uri(uri).unwrap_err();
+        assert!(
+            err.contains(&format!("scheme `{scheme}` is rejected")),
+            "{uri} reject must name the scheme; got: {err}"
+        );
+    }
+}
+
+#[test]
 fn job_gate_accepts_stream_in() {
     assert!(document::validate_consumer_uri("stream:in").is_ok());
     assert!(document::validate_consumer_uri("stream:in?frame=line").is_ok());

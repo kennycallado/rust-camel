@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use tokio_util::sync::CancellationToken;
 
 use camel_api::{
@@ -309,6 +310,13 @@ impl CamelContextBuilder {
             reg
         };
 
+        // Context-global accepted-not-completed counter (drainclaim):
+        // created ONCE here. The SAME Arc seeds the route controller
+        // (consumer contexts, producer-creation contexts, the inline
+        // dispatcher) and the CamelContext slot exposed through
+        // `total_in_flight()` — one counter, one linearizable verdict.
+        let in_flight_total = Arc::new(AtomicU64::new(0));
+
         let (controller, actor_join, supervision_join) =
             if let Some(config) = self.supervision_config {
                 let (crash_tx, crash_rx) = tokio::sync::mpsc::channel(64);
@@ -338,6 +346,7 @@ impl CamelContextBuilder {
                 controller_impl.set_health_registry(Arc::clone(&health_registry));
                 controller_impl
                     .set_tracer_metrics(Arc::clone(&metrics_handle) as Arc<dyn MetricsCollector>);
+                controller_impl.set_in_flight_total(Arc::clone(&in_flight_total));
                 controller_impl.set_crash_notifier(crash_tx);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 let supervision_join = spawn_supervision_task(
@@ -374,6 +383,7 @@ impl CamelContextBuilder {
                 controller_impl.set_health_registry(Arc::clone(&health_registry));
                 controller_impl
                     .set_tracer_metrics(Arc::clone(&metrics_handle) as Arc<dyn MetricsCollector>);
+                controller_impl.set_in_flight_total(Arc::clone(&in_flight_total));
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 (controller, actor_join, None)
             };
@@ -418,6 +428,7 @@ impl CamelContextBuilder {
             build_version: env!("CARGO_PKG_VERSION"),
             build_git_sha: option_env!("VERGEN_GIT_SHA").unwrap_or("unknown"),
             build_started_at: started_at,
+            in_flight_total,
         }))
     }
 }

@@ -74,7 +74,8 @@ pub(crate) enum JobMode {
     /// Run the single send action immediately against the booted routes.
     OneShot,
     /// Batch mode: runs the same send path as one-shot and then drains
-    /// until every seda queue is empty (see `commands::job::batch`).
+    /// until the context-global in-flight counter reads zero (see
+    /// `commands::job::batch`).
     Batch,
 }
 

@@ -229,6 +229,7 @@ fn open_dispatcher(
         cancel.clone(),
         Arc::clone(&drain),
         gate,
+        None,
     ));
     (dispatcher, cancel, drain)
 }
@@ -376,6 +377,7 @@ async fn dispatch_parks_on_startup_cohort() {
         cancel.clone(),
         Arc::clone(&drain),
         Arc::clone(&gate),
+        None,
     ));
     let cap = as_capability(&dispatcher);
 
@@ -1319,4 +1321,75 @@ async fn published_dispatcher_implies_non_identity_pipeline() {
 
         controller.stop_route(&route_id).await.unwrap();
     }
+}
+
+// ------------------------------------------------------------------
+// drainclaim (task 1.3): inline dispatch is counted on the global
+// in-flight counter
+// ------------------------------------------------------------------
+
+/// Poll until the controller's global counter reaches `want` (bounded).
+async fn await_global_total(counter: &std::sync::atomic::AtomicU64, want: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while counter.load(std::sync::atomic::Ordering::SeqCst) != want {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "global in-flight counter did not reach {want} within 2s (now {})",
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn inline_dispatch_counted() {
+    let captured: CapturedCtxs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut controller = probe_controller(Arc::clone(&captured));
+    let (route, mut harness) = probe_route_with_step("rt-inline-counted", ProbeMode::Gated);
+    controller.add_route(route).await.unwrap();
+    controller.start_route("rt-inline-counted").await.unwrap();
+    controller.activate_cohort();
+
+    let ctx = await_captured(&captured).await;
+    let dispatcher = ctx
+        .inline_dispatcher()
+        .expect("Sequential route publishes the capability");
+
+    // A parked dispatch holds a claim on the controller's global counter.
+    let first = tokio::spawn(dispatcher.dispatch(test_exchange("1")));
+    assert_eq!(harness.await_entry().await, "1");
+    assert!(
+        controller
+            .in_flight_total
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 1,
+        "parked inline dispatch must be counted"
+    );
+
+    // Aborting the producer mid-park drops the boxed future, which
+    // releases the claim.
+    first.abort();
+    await_global_total(&controller.in_flight_total, 0).await;
+
+    // A dispatch that runs to completion is counted while parked and
+    // released after resolution.
+    let second = tokio::spawn(dispatcher.dispatch(test_exchange("2")));
+    assert_eq!(harness.await_entry().await, "2");
+    assert!(
+        controller
+            .in_flight_total
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 1,
+        "second parked dispatch must be counted"
+    );
+    harness.release(2);
+    let out = timeout(Duration::from_secs(2), second)
+        .await
+        .expect("second dispatch completes")
+        .expect("task join")
+        .expect("dispatch ok");
+    assert_eq!(out.property("sink").and_then(|v| v.as_str()), Some("gated"));
+    await_global_total(&controller.in_flight_total, 0).await;
+
+    controller.stop_route("rt-inline-counted").await.unwrap();
 }

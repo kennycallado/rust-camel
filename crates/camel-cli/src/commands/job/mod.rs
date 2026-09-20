@@ -44,7 +44,6 @@ mod job_effective_config_tests;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -1078,7 +1077,7 @@ async fn execute_job(
     // send-phase paths that already shut down stay inside
     // `execute_job` unchanged.
     let deadline = started + doc.execute.timeout;
-    let batch_probe = match setup_booted_job(
+    if let Err(EarlyJobFailure) = setup_booted_job(
         &mut ctx,
         &doc,
         &document_label,
@@ -1088,15 +1087,12 @@ async fn execute_job(
     )
     .await
     {
-        Ok(batch_probe) => batch_probe,
-        Err(EarlyJobFailure) => {
-            let budget = shutdown_budget(doc.execute.mode, deadline);
-            if let Err(detail) = shutdown(&mut ctx, &boot_handle, budget).await {
-                eprintln!("{detail}");
-            }
-            return 2;
+        let budget = shutdown_budget(doc.execute.mode, deadline);
+        if let Err(detail) = shutdown(&mut ctx, &boot_handle, budget).await {
+            eprintln!("{detail}");
         }
-    };
+        return 2;
+    }
 
     // ---- Send under the mandatory overall timeout ----------------------
     let tokio_deadline = tokio::time::Instant::from_std(deadline);
@@ -1177,20 +1173,21 @@ async fn execute_job(
                 shutdown_error: None,
             },
             JobWaitOutcome::Completed(Ok(Ok(reply))) => {
-                // Batch drain: the trigger send's seda hops are
-                // fire-and-forget, so wait until every expected queue has
-                // ten consecutive zero-depth samples (a 2.5 s quiescence
-                // window) — see the `batch` module docs — before the
-                // verdict; pre-send zero samples were reset away. The
-                // drain waits on the same registered signal streams, so
-                // an interruption during drain follows the same path as
-                // one during send. One-shot skips the drain.
-                let drained = match &batch_probe {
-                    Some(probe) => {
-                        probe.reset();
+                // Batch drain: wait until the context-global in-flight
+                // counter (`total_in_flight()`) reads zero — a single
+                // linearizable load of accepted-not-completed exchanges.
+                // Each accepted exchange holds an RAII claim across seda
+                // queue residency, dispatch, and pipeline residency, so a
+                // zero read needs no timed samples or quiescence window —
+                // see the `batch` module docs. The drain waits on the same
+                // registered signal streams, so an interruption during
+                // drain follows the same path as one during send. One-shot
+                // skips the drain.
+                let drained = match doc.execute.mode {
+                    document::JobMode::Batch => {
                         match await_job_operation(
                             signals.as_mut(),
-                            batch::drain_until_empty(probe, tokio_deadline),
+                            batch::drain_until_settled(&ctx, tokio_deadline),
                         )
                         .await
                         {
@@ -1201,7 +1198,7 @@ async fn execute_job(
                             }
                         }
                     }
-                    None => true,
+                    document::JobMode::OneShot => true,
                 };
                 if interrupted {
                     interrupted_report()
@@ -1289,14 +1286,13 @@ struct EarlyJobFailure;
 /// The post-boot setup stretch between the boot handle and the send:
 /// route loading (real-boot seam), the fail-closed consumer gate, the
 /// send-target selection, conditional bundle registration, route
-/// registration, the batch probe, and `ctx.start()`. Every failure
-/// prints its existing diagnostic here and returns
-/// [`EarlyJobFailure`] — the diagnostic list and exit outcomes are
-/// carried over verbatim from the pre-border control flow — so the
-/// teardown border can run the one bounded shutdown for all of them.
-/// On success it returns the batch drain probe (`None` for one-shot);
-/// the probe is registered before `ctx.start()` so the seda samplers'
-/// emissions fan out to it from their first tick.
+/// registration, and `ctx.start()`. Every failure prints its existing
+/// diagnostic here and returns [`EarlyJobFailure`] — the diagnostic
+/// list and exit outcomes are carried over verbatim from the pre-border
+/// control flow — so the teardown border can run the one bounded
+/// shutdown for all of them. Batch-mode drain needs no setup here: the
+/// global in-flight counter is installed by the builder and needs no
+/// labels or registration.
 async fn setup_booted_job(
     ctx: &mut camel_core::CamelContext,
     doc: &JobDocument,
@@ -1304,7 +1300,7 @@ async fn setup_booted_job(
     route_load: RouteLoad,
     security_compile_context: &camel_dsl::SecurityCompileContext,
     camel_config: &camel_config::config::CamelConfig,
-) -> Result<Option<std::sync::Arc<batch::BatchDepthProbe>>, EarlyJobFailure> {
+) -> Result<(), EarlyJobFailure> {
     // ---- Route loading (real-boot seam: ambient ${env:}) ---------------
     let defs = match load_route_definitions(route_load, camel_config, security_compile_context) {
         Ok(defs) => defs,
@@ -1326,16 +1322,6 @@ async fn setup_booted_job(
         if let Err(e) = document::validate_consumer_uri(def.from_uri()) {
             eprintln!("{document_label}: route `{}` rejected: {e}", def.route_id());
             return Err(EarlyJobFailure);
-        }
-    }
-
-    // Batch drain expectation set: every seda consumer route's URI
-    // base. The queue-depth gauge label is exactly the seda URI base
-    // (`seda:<name>`), so the drain waits on precisely these labels.
-    let mut expected_queues = HashSet::new();
-    for def in &defs {
-        if document::scheme_of_uri(def.from_uri()) == Some("seda") {
-            expected_queues.insert(document::uri_base(def.from_uri()).to_string());
         }
     }
 
@@ -1414,18 +1400,6 @@ async fn setup_booted_job(
         }
     }
 
-    // Batch mode: register the drain probe BEFORE `ctx.start()` so the
-    // seda samplers' emissions fan out to it from their first tick (the
-    // metrics handle composes; every emission reaches the composite).
-    let batch_probe = match doc.execute.mode {
-        document::JobMode::Batch => {
-            let probe = std::sync::Arc::new(batch::BatchDepthProbe::new(expected_queues));
-            ctx.add_lifecycle(batch::BatchProbeLifecycle(std::sync::Arc::clone(&probe)));
-            Some(probe)
-        }
-        document::JobMode::OneShot => None,
-    };
-
     if let Err(e) = ctx.start().await {
         // log-policy: system-broken
         tracing::error!("Failed to start CamelContext: {e}");
@@ -1433,7 +1407,7 @@ async fn setup_booted_job(
         return Err(EarlyJobFailure);
     }
 
-    Ok(batch_probe)
+    Ok(())
 }
 
 /// Load the run's route definitions through the real-boot seams:

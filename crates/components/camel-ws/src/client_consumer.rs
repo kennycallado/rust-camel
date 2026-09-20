@@ -473,6 +473,7 @@ async fn receive_until_disconnect(
                     pending = Some(ExchangeEnvelope {
                         exchange: Exchange::new(message),
                         reply_tx: None,
+                        in_flight_claim: None,
                     });
                 },
             },

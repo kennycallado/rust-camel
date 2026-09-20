@@ -2054,6 +2054,7 @@ impl Consumer for HttpConsumer {
                         let envelope = camel_component_api::consumer::ExchangeEnvelope {
                             exchange,
                             reply_tx: Some(tx),
+                            in_flight_claim: None,
                         };
 
                         let result = match sender.send(envelope).await {

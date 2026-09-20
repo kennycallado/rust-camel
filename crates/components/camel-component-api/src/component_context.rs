@@ -16,6 +16,15 @@ pub trait ComponentContext: Send + Sync {
     /// Access the active metrics collector.
     fn metrics(&self) -> Arc<dyn MetricsCollector>;
 
+    /// Context-global counter of accepted-not-completed exchanges
+    /// (drainclaim). Production contexts return the counter installed on
+    /// every `ConsumerContext` at consumer start and read by
+    /// `CamelContext::total_in_flight()` for the drain verdict. Default
+    /// `None` keeps test contexts uncounted.
+    fn in_flight_counter(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+        None
+    }
+
     /// Snapshot of the `[observability.metrics].components` lever —
     /// gates only the uniform component-operations family served through
     /// `RuntimeObservability::component_metrics()`; error-family

@@ -4,6 +4,7 @@
 //! including starting, stopping, suspending, and resuming routes.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use camel_api::{
 use camel_component_api::{Consumer, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_processor::aggregator::AggregatorService;
 pub use camel_processor::aggregator::SharedLanguageRegistry;
+use camel_processor::aggregator::{AggregateEmission, AggregationReceipt};
 
 use crate::health_registry::HealthCheckRegistry;
 use crate::intercept::InterceptRules;
@@ -109,6 +111,12 @@ pub struct DefaultRouteController {
     /// `RouteControllerHandle` at spawn; reset/activate act on this shared
     /// gate directly, never through the actor.
     pub(super) cohort: Arc<CohortActivationGate>,
+    /// Context-global accepted-not-completed counter (drainclaim): the
+    /// SAME `Arc` the owning `CamelContext` exposes through
+    /// `total_in_flight()` (installed by the builder). Standalone
+    /// controllers keep an isolated zero counter — claims flow, but only
+    /// the constructing scope can read them.
+    pub(super) in_flight_total: Arc<AtomicU64>,
 }
 
 impl DefaultRouteController {
@@ -183,6 +191,7 @@ impl DefaultRouteController {
             intercept: InterceptRules::default(),
             frozen: false,
             cohort: Arc::new(CohortActivationGate::new_closed()),
+            in_flight_total: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -215,6 +224,7 @@ impl DefaultRouteController {
             intercept: InterceptRules::default(),
             frozen: false,
             cohort: Arc::new(CohortActivationGate::new_closed()),
+            in_flight_total: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -247,6 +257,7 @@ impl DefaultRouteController {
             intercept: InterceptRules::default(),
             frozen: false,
             cohort: Arc::new(CohortActivationGate::new_closed()),
+            in_flight_total: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -430,6 +441,16 @@ impl DefaultRouteController {
         self.tracer_metrics = Some(metrics);
     }
 
+    /// Install the context-global accepted-not-completed counter
+    /// (drainclaim) — the SAME `Arc<AtomicU64>` the owning
+    /// `CamelContext` reads through `total_in_flight()`. Called once by
+    /// `CamelContextBuilder::build()`; contexts built without a builder
+    /// (or standalone controllers) keep the isolated zero counter from
+    /// construction.
+    pub fn set_in_flight_total(&mut self, counter: Arc<AtomicU64>) {
+        self.in_flight_total = counter;
+    }
+
     fn build_producer_context(&self, route_id: &str) -> Result<ProducerContext, CamelError> {
         let mut producer_ctx = ProducerContext::new().with_route_id(route_id);
         if let Some(runtime) = self.runtime.as_ref().and_then(Weak::upgrade) {
@@ -457,6 +478,7 @@ impl DefaultRouteController {
             claim_check_repositories: Arc::clone(&self.claim_check_repositories),
             cache_repositories: Arc::clone(&self.cache_repositories),
             intercept: &self.intercept,
+            in_flight_total: Arc::clone(&self.in_flight_total),
         }
     }
 
@@ -641,20 +663,24 @@ impl DefaultRouteController {
             security_policy.clone(),
             transport,
             circuit_breaker,
+            Arc::clone(&self.in_flight_total),
         )?;
 
         let uow_counter = if let Some(uow_config) = &unit_of_work {
-            let component_ctx = Arc::new(ControllerComponentContext::new(
-                Arc::clone(&self.registry),
-                Arc::clone(&self.languages),
-                self.tracer_metrics
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
-                Arc::clone(&self.platform_service),
-                self.health_registry(),
-                Some(route_id.clone()),
-                self.tracer_gating.levers.components_enabled(),
-            ));
+            let component_ctx = Arc::new(
+                ControllerComponentContext::new(
+                    Arc::clone(&self.registry),
+                    Arc::clone(&self.languages),
+                    self.tracer_metrics
+                        .clone()
+                        .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                    Arc::clone(&self.platform_service),
+                    self.health_registry(),
+                    Some(route_id.clone()),
+                    self.tracer_gating.levers.components_enabled(),
+                )
+                .with_in_flight(Arc::clone(&self.in_flight_total)),
+            );
             let rt: Arc<dyn camel_component_api::RuntimeObservability> =
                 Arc::clone(&component_ctx) as Arc<_>;
             let (uow_layer, counter) = super::route_compiler_ext::resolve_uow_layer(
@@ -1020,6 +1046,18 @@ impl DefaultRouteController {
     /// Spawns a biased-select forward loop that routes exchanges through the
     /// pre-pipeline, aggregator, and post-pipeline in sequence, with late-exchange
     /// handling and force-completion on stop.
+    ///
+    /// drainclaim claim propagation: the forward loop submits each
+    /// envelope's [`InFlightClaim`] into the aggregator WITH its exchange
+    /// ([`AggregatorService::submit_with_claim`]) — a pending stash parks
+    /// the claim inside the bucket so the stashed exchange stays counted,
+    /// and every emission path (sync completion, timeout `late_tx` fire,
+    /// `force_complete_all` at stop) hands the bucket's claims back to
+    /// this loop, which holds them across the post-pipeline
+    /// continuation. Paths that drop a bucket without emitting (TTL
+    /// eviction, unarmed-bucket release, discard-on-timeout, saturated
+    /// late channel) release by dropping. Exactly one release per claim
+    /// on every path.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn start_aggregate_route(
         &mut self,
@@ -1035,7 +1073,11 @@ impl DefaultRouteController {
         pipeline_cancel: CancellationToken,
         drain_in_flight: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<(), CamelError> {
-        let (late_tx, late_rx) = mpsc::channel::<Exchange>(256);
+        // drainclaim claim propagation: the late channel carries each
+        // emission's stashed claims alongside the aggregated exchange —
+        // the loop holds them across the post-pipeline continuation.
+        let (late_tx, late_rx) =
+            mpsc::channel::<camel_processor::aggregator::AggregateEmission>(256);
 
         let route_cancel_clone = pipeline_cancel.clone();
         let mut svc = AggregatorService::new(
@@ -1088,9 +1130,18 @@ impl DefaultRouteController {
                         rx.recv().await
                     } => {
                         match late_ex {
-                            Some(ex) => {
+                            Some(emission) => {
+                                // drainclaim: hold the emission's stashed
+                                // claims across the post-pipeline — drop
+                                // at iteration end is the release.
+                                let AggregateEmission {
+                                    exchange,
+                                    claims: _in_flight_claims,
+                                } = emission;
                                 let pipe = post_pipeline.load();
-                                if let Err(e) = pipe.processor.clone_inner().oneshot(ex).await {
+                                if let Err(e) =
+                                    pipe.processor.clone_inner().oneshot(exchange).await
+                                {
                                     tracing::warn!(error = %e, "late exchange post-pipeline failed");
                                 }
                             }
@@ -1133,8 +1184,22 @@ impl DefaultRouteController {
                                         continue;
                                     }
                                 }
-                                let ExchangeEnvelope { exchange, reply_tx } = envelope;
+                                let ExchangeEnvelope {
+                                    exchange,
+                                    reply_tx,
+                                    in_flight_claim,
+                                } = envelope;
                                 let _drain_guard = super::route_helpers::DrainGuard::new(Arc::clone(&drain_in_flight));
+                                // drainclaim claim PROPAGATION: the
+                                // envelope's claim travels WITH the
+                                // exchange into the aggregator — a
+                                // pending stash parks it in the bucket
+                                // (counted until the bucket completes),
+                                // and a sync completion returns it (with
+                                // the rest of the bucket's claims) to be
+                                // held across the post-pipeline below.
+                                // Rejection paths drop it inside the
+                                // service — rejected = released.
                                 let pre_pipe = pre_pipeline.load();
                                 let ex = match pre_pipe.processor.clone_inner().oneshot(exchange).await {
                                     Ok(ex) => ex,
@@ -1153,12 +1218,15 @@ impl DefaultRouteController {
                                     }
                                 };
 
-                                let ex = {
-                                    let cloned_svc = agg.as_ref().clone();
-                                    cloned_svc.oneshot(ex).await
-                                };
+                                let AggregationReceipt { reply, claims } =
+                                    agg.submit_with_claim(ex, in_flight_claim).await;
+                                // drainclaim: hold the completed bucket's
+                                // claims across the post-pipeline
+                                // continuation; dropped at iteration end or
+                                // any `continue`/`return` (scope exit).
+                                let _completed_bucket_claims = claims;
 
-                                match ex {
+                                match reply {
                                     Ok(ex) => {
                                         if !is_pending(&ex) {
                                             let post_pipe = post_pipeline.load();
@@ -1206,8 +1274,16 @@ impl DefaultRouteController {
                         agg.force_complete_all();
                         let mut rx_guard = late_rx.lock().await;
                         while let Ok(late_ex) = rx_guard.try_recv() {
+                            // drainclaim: each forced emission's claims are
+                            // held across its post-pipeline continuation —
+                            // dropped after the oneshot completes (or
+                            // immediately, which is also a release).
+                            let AggregateEmission {
+                                exchange,
+                                claims: _in_flight_claims,
+                            } = late_ex;
                             let pipe = post_pipeline.load();
-                            let _ = pipe.processor.clone_inner().oneshot(late_ex).await;
+                            let _ = pipe.processor.clone_inner().oneshot(exchange).await;
                         }
                         break;
                     }

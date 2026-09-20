@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use camel_api::{CamelError, Exchange};
-use camel_component_api::InlineRouteDispatcher;
+use camel_component_api::{InFlightClaim, InlineRouteDispatcher};
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
@@ -50,6 +50,10 @@ struct DispatcherState {
     /// Fairness yield counter, cumulative across ALL dispatches through this
     /// dispatcher.
     hop_budget: AtomicU32,
+    /// Context-global accepted-not-completed counter (drainclaim): each
+    /// dispatch mints one claim held across the pipeline call. `None` on
+    /// test harnesses built without a controller counter.
+    in_flight: Option<Arc<AtomicU64>>,
     /// Test-only count of times the `yield_now` fairness site fired.
     #[cfg(test)]
     yields: AtomicU32,
@@ -81,6 +85,7 @@ impl RouteInlineDispatcher {
         cancel: CancellationToken,
         drain_in_flight: Arc<AtomicU64>,
         cohort: Arc<CohortActivationGate>,
+        in_flight: Option<Arc<AtomicU64>>,
     ) -> Self {
         Self {
             state: Arc::new(DispatcherState {
@@ -91,6 +96,7 @@ impl RouteInlineDispatcher {
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 cohort,
                 hop_budget: AtomicU32::new(0),
+                in_flight,
                 #[cfg(test)]
                 yields: AtomicU32::new(0),
             }),
@@ -119,7 +125,15 @@ impl InlineRouteDispatcher for RouteInlineDispatcher {
         exchange: Exchange,
     ) -> Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send + 'static>> {
         let state = Arc::clone(&self.state);
+        // drainclaim: mint at the acceptance boundary (the dispatch call
+        // itself). The claim moves into the boxed future and drops when
+        // the future completes, is dropped (producer abort), or panics.
+        let claim = state.in_flight.as_ref().map(InFlightClaim::attach);
         Box::pin(async move {
+            // Named binding, not `claim`: an `async move` block only
+            // captures what it references — this line is what moves the
+            // claim in and holds it for the whole body.
+            let _in_flight_claim = claim;
             // Drain accounting starts BEFORE the operation: the guard's Drop
             // runs exactly once on every exit path — producer cancellation
             // (future drop), consumer cancellation, success, or error.

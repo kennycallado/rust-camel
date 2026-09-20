@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -19,6 +20,43 @@ use crate::dispatch::InlineRouteDispatcher;
 pub struct ExchangeEnvelope {
     pub exchange: Exchange,
     pub reply_tx: Option<oneshot::Sender<Result<Exchange, CamelError>>>,
+    /// RAII claim on the context-global accepted-not-completed counter,
+    /// attached at acceptance boundaries (`ConsumerContext::send` /
+    /// `send_and_wait`, seda enqueue, inline dispatch). `None` on the raw
+    /// `sender()` fast path — a documented uncounted exception (drainclaim).
+    pub in_flight_claim: Option<InFlightClaim>,
+}
+
+/// One accepted-not-completed unit on the context-global in-flight counter.
+///
+/// Attaching a claim increments the counter; dropping it decrements the
+/// counter exactly once (RAII), covering every release path — normal
+/// pipeline completion, dispatch push failure, queued-envelope drop,
+/// pipeline task abort, panic, and readiness failure — with no manual
+/// rollback code. Fanout sites mint one sibling claim per subscriber copy
+/// via [`InFlightClaim::split`], so each copy counts and releases
+/// independently (drainclaim).
+pub struct InFlightClaim(Arc<AtomicU64>);
+
+impl InFlightClaim {
+    /// Mint a claim against `counter`, incrementing it by one.
+    pub fn attach(counter: &Arc<AtomicU64>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(counter))
+    }
+
+    /// Mint a sibling claim for a fanout copy, incrementing the same
+    /// counter by one. The original claim stays live.
+    pub fn split(&self) -> Self {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl Drop for InFlightClaim {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Declares when the runtime may consider a Consumer "started".
@@ -183,6 +221,10 @@ pub struct ConsumerContext {
     /// context (`Arc<OnceLock<_>>`). Set once by the camel-core runtime
     /// before the consumer starts; every clone observes the same value.
     inline_dispatcher: Arc<OnceLock<Arc<dyn InlineRouteDispatcher>>>,
+    /// Context-global accepted-not-completed counter, installed by the
+    /// camel-core runtime at consumer start (drainclaim). `None` keeps
+    /// the context's sends uncounted (tests, raw fast paths).
+    in_flight: Option<Arc<AtomicU64>>,
 }
 
 impl ConsumerContext {
@@ -211,6 +253,7 @@ impl ConsumerContext {
             route_id,
             startup,
             inline_dispatcher: Arc::new(OnceLock::new()),
+            in_flight: None,
         }
     }
 
@@ -219,6 +262,16 @@ impl ConsumerContext {
     /// is returned to the route controller.
     pub fn with_startup(mut self, startup: StartupSignal) -> Self {
         self.startup = startup;
+        self
+    }
+
+    /// Install the context-global accepted-not-completed counter on this
+    /// context (drainclaim). The camel-core runtime calls this at consumer
+    /// start; afterwards every envelope sent via [`Self::send`] or
+    /// [`Self::send_and_wait`] carries an [`InFlightClaim`]. Contexts
+    /// without a counter (tests, raw fast paths) send uncounted envelopes.
+    pub fn with_in_flight_counter(mut self, counter: Arc<AtomicU64>) -> Self {
+        self.in_flight = Some(counter);
         self
     }
 
@@ -313,11 +366,16 @@ impl ConsumerContext {
     }
 
     /// Send an exchange into the route pipeline (fire-and-forget).
+    ///
+    /// Attaches an [`InFlightClaim`] when a counter is installed
+    /// ([`Self::with_in_flight_counter`]); a failed push drops the
+    /// envelope, which drops the claim and rolls the count back.
     pub async fn send(&self, exchange: Exchange) -> Result<(), CamelError> {
         self.sender
             .send(ExchangeEnvelope {
                 exchange,
                 reply_tx: None,
+                in_flight_claim: self.in_flight.as_ref().map(InFlightClaim::attach),
             })
             .await
             .map_err(|_| CamelError::ChannelClosed)
@@ -333,6 +391,7 @@ impl ConsumerContext {
             .send(ExchangeEnvelope {
                 exchange,
                 reply_tx: Some(reply_tx),
+                in_flight_claim: self.in_flight.as_ref().map(InFlightClaim::attach),
             })
             .await
             .map_err(|_| CamelError::ChannelClosed)?;
@@ -940,3 +999,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "consumer_claim_tests.rs"]
+mod consumer_claim_tests;

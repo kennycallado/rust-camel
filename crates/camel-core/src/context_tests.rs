@@ -1421,3 +1421,26 @@ async fn test_start_with_no_registered_checks_proceeds() {
     // this test — the assertion above is the contract.
     let _ = result;
 }
+
+// ── drainclaim (task 1.3): context-global in-flight counter ──
+
+#[tokio::test]
+async fn total_in_flight_starts_zero() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+    assert_eq!(
+        ctx.total_in_flight(),
+        0,
+        "fresh context must report zero in-flight exchanges"
+    );
+}
+
+#[tokio::test]
+async fn component_context_exposes_counter() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(ctx);
+    assert!(
+        rt.in_flight_counter().is_some(),
+        "CamelContext coerced to RuntimeObservability must expose the counter"
+    );
+}

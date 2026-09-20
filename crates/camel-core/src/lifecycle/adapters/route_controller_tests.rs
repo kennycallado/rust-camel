@@ -755,6 +755,7 @@ async fn concurrent_backpressure_blocks_processor_when_saturated() {
         .send(ExchangeEnvelope {
             exchange: Exchange::new(Message::new("A")),
             reply_tx: None,
+            in_flight_claim: None,
         })
         .await
         .unwrap();
@@ -773,6 +774,7 @@ async fn concurrent_backpressure_blocks_processor_when_saturated() {
         .send(ExchangeEnvelope {
             exchange: Exchange::new(Message::new("B")),
             reply_tx: None,
+            in_flight_claim: None,
         })
         .await
         .unwrap();
@@ -2233,7 +2235,8 @@ fn swap_pipeline_rejects_agg_service_route() {
 
     let mut controller = build_controller();
 
-    let (tx, _rx) = tokio::sync::mpsc::channel::<camel_api::Exchange>(64);
+    let (tx, _rx) =
+        tokio::sync::mpsc::channel::<camel_processor::aggregator::AggregateEmission>(64);
     let agg_config = AggregatorConfig::correlate_by("key")
         .complete_when_size(10)
         .build()
@@ -5532,6 +5535,7 @@ mod drain_gate {
             .send(ExchangeEnvelope {
                 exchange: Exchange::new(Message::new("A")),
                 reply_tx: None,
+                in_flight_claim: None,
             })
             .await
             .unwrap();
@@ -5563,6 +5567,7 @@ mod drain_gate {
             .send(ExchangeEnvelope {
                 exchange: Exchange::new(Message::new("A")),
                 reply_tx: None,
+                in_flight_claim: None,
             })
             .await
             .unwrap();
@@ -5602,6 +5607,7 @@ mod drain_gate {
             .send(ExchangeEnvelope {
                 exchange: Exchange::new(Message::new("A")),
                 reply_tx: None,
+                in_flight_claim: None,
             })
             .await
             .unwrap();
@@ -5622,6 +5628,7 @@ mod drain_gate {
             .send(ExchangeEnvelope {
                 exchange: Exchange::new(Message::new("B")),
                 reply_tx: None,
+                in_flight_claim: None,
             })
             .await
             .unwrap();
@@ -5654,6 +5661,7 @@ mod drain_gate {
             .send(ExchangeEnvelope {
                 exchange: Exchange::new(Message::new("A")),
                 reply_tx: Some(reply_tx),
+                in_flight_claim: None,
             })
             .await
             .unwrap();
@@ -6358,6 +6366,7 @@ async fn b_prime_emit_on_reply_drop_aggregate_post_pipeline_err() {
         .send(ExchangeEnvelope {
             exchange: Exchange::new(Message::new("abandoned")),
             reply_tx: Some(reply_tx),
+            in_flight_claim: None,
         })
         .await
         .unwrap();
@@ -6390,4 +6399,730 @@ async fn b_prime_emit_on_reply_drop_aggregate_post_pipeline_err() {
     );
 
     controller.stop_route("agg-bprime").await.unwrap();
+}
+
+// ── drainclaim (task 1.3): context-global in-flight counter ──
+
+mod drainclaim {
+    use std::collections::HashMap;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
+    use tower::{Service, ServiceExt};
+
+    use camel_api::error_handler::ErrorHandlerConfig;
+    use camel_api::unit_of_work::UnitOfWorkConfig;
+    use camel_api::{
+        AggregatorConfig, BoxProcessor, BoxProcessorExt, CamelError, Exchange, IdentityProcessor,
+        Message, OpaqueProcessor, RouteController, Value, ValueSourceDef,
+    };
+    use camel_component_api::{
+        Component, Consumer, ConsumerContext, Endpoint, ProducerContext, RuntimeObservability,
+    };
+
+    use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
+    use crate::shared::components::domain::Registry;
+
+    use super::DefaultRouteController;
+
+    /// ConsumerContext clones captured per consumer boot (same shape as
+    /// the inline-dispatcher test harness).
+    type CapturedCtxs = Arc<Mutex<Vec<ConsumerContext>>>;
+
+    struct CaptureComponent {
+        captured: CapturedCtxs,
+    }
+
+    struct CaptureEndpoint {
+        captured: CapturedCtxs,
+    }
+
+    struct CaptureConsumer {
+        captured: CapturedCtxs,
+    }
+
+    impl Component for CaptureComponent {
+        fn scheme(&self) -> &str {
+            "capture"
+        }
+        fn create_endpoint(
+            &self,
+            _uri: &str,
+            _ctx: &dyn camel_component_api::ComponentContext,
+        ) -> Result<Box<dyn Endpoint>, CamelError> {
+            Ok(Box::new(CaptureEndpoint {
+                captured: Arc::clone(&self.captured),
+            }))
+        }
+    }
+
+    impl Endpoint for CaptureEndpoint {
+        fn uri(&self) -> &str {
+            "capture"
+        }
+        fn create_consumer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+        ) -> Result<Box<dyn Consumer>, CamelError> {
+            Ok(Box::new(CaptureConsumer {
+                captured: Arc::clone(&self.captured),
+            }))
+        }
+        fn create_producer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+            _ctx: &ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
+            Ok(BoxProcessor::new(IdentityProcessor))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Consumer for CaptureConsumer {
+        async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+            self.captured
+                .lock()
+                .expect("captured lock")
+                .push(ctx.clone());
+            ctx.cancel_token().cancelled().await;
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+    }
+
+    /// Gated probe parts: entry signal + release barrier.
+    struct ProbeParts {
+        entered_rx: mpsc::UnboundedReceiver<()>,
+        release_tx: tokio::sync::watch::Sender<u32>,
+    }
+
+    /// Pipeline processor that signals entry, then parks on the release
+    /// barrier until the test releases its ordinal.
+    fn gated_processor() -> (BoxProcessor, ProbeParts) {
+        let (entered_tx, entered_rx) = mpsc::unbounded_channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::watch::channel(0u32);
+        let ordinal = Arc::new(AtomicU32::new(0));
+        let processor = BoxProcessor::from_fn(move |mut ex: Exchange| {
+            let entered_tx = entered_tx.clone();
+            let mut release_rx = release_rx.clone();
+            let ordinal = Arc::clone(&ordinal);
+            async move {
+                let _ = entered_tx.send(());
+                let mine = ordinal.fetch_add(1, Ordering::SeqCst) + 1;
+                release_rx
+                    .wait_for(|v| *v >= mine)
+                    .await
+                    .expect("release channel alive");
+                ex.set_property("sink", "gated");
+                Ok(ex)
+            }
+        });
+        (
+            processor,
+            ProbeParts {
+                entered_rx,
+                release_tx,
+            },
+        )
+    }
+
+    /// A service whose readiness check always fails — drives the
+    /// `ready_with_backoff` early-return path in the drain sites.
+    #[derive(Clone)]
+    struct NeverReady;
+
+    impl Service<Exchange> for NeverReady {
+        type Response = Exchange;
+        type Error = CamelError;
+        type Future =
+            Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
+            Poll::Ready(Err(CamelError::ProcessorError(
+                "planned readiness failure".into(),
+            )))
+        }
+
+        fn call(&mut self, ex: Exchange) -> Self::Future {
+            Box::pin(async move { Ok(ex) })
+        }
+    }
+
+    fn drain_controller(captured: CapturedCtxs) -> DefaultRouteController {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        registry
+            .lock()
+            .expect("registry lock")
+            .register(Arc::new(CaptureComponent { captured }));
+        DefaultRouteController::new(
+            registry,
+            Arc::new(camel_api::NoopPlatformService::default()),
+        )
+    }
+
+    async fn await_capture(captured: &CapturedCtxs) -> ConsumerContext {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(ctx) = captured.lock().expect("captured lock").first().cloned() {
+                return ctx;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("consumer context was not captured within 2s");
+    }
+
+    /// Poll until the controller's global in-flight counter reaches
+    /// `want` (bounded; panics past the deadline).
+    async fn await_total(counter: &AtomicU64, want: u64) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while counter.load(Ordering::SeqCst) != want {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "global in-flight counter did not reach {want} within 2s (now {})",
+                counter.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Poll until the context's global in-flight counter reaches `want`
+    /// (bounded; panics past the deadline). Same discipline as
+    /// [`await_total`], for tests driving a full `CamelContext`.
+    async fn await_ctx_total(ctx: &crate::CamelContext, want: u64) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while ctx.total_in_flight() != want {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "total_in_flight did not reach {want} within 2s (now {})",
+                ctx.total_in_flight()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn test_exchange(tag: &str) -> Exchange {
+        Exchange::new(Message::new(tag))
+    }
+
+    #[tokio::test]
+    async fn pipeline_residency_counted_until_completion() {
+        let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = drain_controller(Arc::clone(&captured));
+        let (processor, mut parts) = gated_processor();
+        let route = RouteDefinition::new(
+            "capture:src",
+            vec![BuilderStep::Processor(OpaqueProcessor(processor))],
+        )
+        .with_route_id("rt-drain-residency");
+        controller.add_route(route).await.unwrap();
+        controller.start_route("rt-drain-residency").await.unwrap();
+        controller.activate_cohort();
+
+        let ctx = await_capture(&captured).await;
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = ctx.send_and_wait(test_exchange("residency")).await;
+            let _ = done_tx.send(result);
+        });
+
+        timeout(Duration::from_secs(2), parts.entered_rx.recv())
+            .await
+            .expect("pipeline entry within 2s")
+            .expect("entry channel alive");
+        assert!(
+            controller.in_flight_total.load(Ordering::SeqCst) >= 1,
+            "exchange parked in the pipeline must be counted"
+        );
+
+        parts.release_tx.send(1).expect("release channel alive");
+        let result = timeout(Duration::from_secs(2), done_rx)
+            .await
+            .expect("reply within 2s")
+            .expect("reply channel alive");
+        assert!(result.is_ok(), "gated pipeline must complete: {result:?}");
+        await_total(&controller.in_flight_total, 0).await;
+
+        controller.stop_route("rt-drain-residency").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn readiness_failure_releases_claim() {
+        let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = drain_controller(Arc::clone(&captured));
+        let route = RouteDefinition::new(
+            "capture:src",
+            vec![BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                NeverReady,
+            )))],
+        )
+        .with_route_id("rt-drain-readyfail");
+        controller.add_route(route).await.unwrap();
+        controller.start_route("rt-drain-readyfail").await.unwrap();
+        controller.activate_cohort();
+
+        let ctx = await_capture(&captured).await;
+        let result = timeout(
+            Duration::from_secs(2),
+            ctx.send_and_wait(test_exchange("ready")),
+        )
+        .await
+        .expect("readiness failure must surface as a reply within 2s");
+        assert!(result.is_err(), "readiness failure must fail the exchange");
+        // The drain site's early return dropped the claim via scope exit.
+        await_total(&controller.in_flight_total, 0).await;
+
+        controller.stop_route("rt-drain-readyfail").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn seda_enqueue_through_real_context_counted() {
+        let mut ctx = crate::CamelContext::builder().build().await.unwrap();
+        ctx.register_component(camel_component_seda::SedaComponent::new());
+        let (processor, mut parts) = gated_processor();
+        ctx.add_route_definition(
+            RouteDefinition::new(
+                "seda:a",
+                vec![BuilderStep::Processor(OpaqueProcessor(processor))],
+            )
+            .with_route_id("rt-seda-drain"),
+        )
+        .await
+        .unwrap();
+        ctx.start().await.unwrap();
+
+        // Produce through the real registry/compile path.
+        let component = ctx.registry().get("seda").unwrap();
+        let endpoint = component.create_endpoint("seda:a", &ctx).unwrap();
+        let producer = endpoint
+            .create_producer(
+                Arc::new(camel_component_api::NoOpComponentContext),
+                &ctx.producer_context(),
+            )
+            .unwrap();
+        producer
+            .clone()
+            .oneshot(test_exchange("e2e"))
+            .await
+            .expect("seda enqueue accepted");
+
+        timeout(Duration::from_secs(2), parts.entered_rx.recv())
+            .await
+            .expect("pipeline entry within 2s")
+            .expect("entry channel alive");
+        assert!(
+            ctx.total_in_flight() >= 1,
+            "exchange parked in the seda-fed pipeline must be counted"
+        );
+
+        parts.release_tx.send(1).expect("release channel alive");
+        await_ctx_total(&ctx, 0).await;
+
+        ctx.stop().await.unwrap();
+    }
+
+    /// drainclaim claim propagation: an exchange stashed in a pending
+    /// aggregate bucket keeps its claim (counter >= 1) until the bucket
+    /// completes, emits, and the post-pipeline continuation finishes.
+    #[tokio::test]
+    async fn pending_bucket_keeps_claim() {
+        let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = drain_controller(Arc::clone(&captured));
+
+        // Timeout materializes the aggregate SPLIT (size alone compiles
+        // an embedded aggregator); 600s keeps the timeout from firing
+        // during the test — size 2 completes the bucket on the second
+        // exchange.
+        let agg_config = AggregatorConfig::correlate_by("key")
+            .complete_on_size_or_timeout(2, Duration::from_secs(600))
+            .build()
+            .unwrap();
+
+        let route = RouteDefinition::new(
+            "capture:src",
+            vec![
+                BuilderStep::DeclarativeSetHeader {
+                    key: "key".into(),
+                    value: ValueSourceDef::Literal(Value::String("k1".into())),
+                },
+                BuilderStep::Aggregate { config: agg_config },
+            ],
+        )
+        .with_route_id("rt-drain-agg-pending");
+        controller.add_route(route).await.unwrap();
+        controller
+            .start_route("rt-drain-agg-pending")
+            .await
+            .unwrap();
+        controller.activate_cohort();
+
+        let ctx = await_capture(&captured).await;
+
+        // First exchange: the pending-ack reply proves the stash inside
+        // the bucket happened; the claim stays stashed — counter 1.
+        let first = ctx
+            .send_and_wait(test_exchange("frag-1"))
+            .await
+            .expect("pending ack reply");
+        assert!(
+            first.property("CamelAggregatorPending").is_some(),
+            "first exchange must be stashed, not completed"
+        );
+        assert_eq!(
+            controller.in_flight_total.load(Ordering::SeqCst),
+            1,
+            "stashed exchange must stay counted"
+        );
+
+        // Second exchange completes the bucket: the aggregated exchange
+        // runs the post-pipeline while BOTH claims are held, then they
+        // release.
+        let second = ctx
+            .send_and_wait(test_exchange("frag-2"))
+            .await
+            .expect("aggregated reply");
+        assert!(
+            second.property("CamelAggregatorPending").is_none(),
+            "second exchange must complete the bucket"
+        );
+        await_total(&controller.in_flight_total, 0).await;
+
+        controller.stop_route("rt-drain-agg-pending").await.unwrap();
+    }
+
+    /// drainclaim claim propagation: stopping the route with a pending
+    /// bucket force-completes it; the forced emission's continuation
+    /// runs and every stashed claim releases — counter 0 after stop.
+    #[tokio::test]
+    async fn force_complete_releases_claims() {
+        let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = drain_controller(Arc::clone(&captured));
+
+        let agg_config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(10)
+            .force_completion_on_stop(true)
+            .build()
+            .unwrap();
+
+        let route = RouteDefinition::new(
+            "capture:src",
+            vec![
+                BuilderStep::DeclarativeSetHeader {
+                    key: "key".into(),
+                    value: ValueSourceDef::Literal(Value::String("k1".into())),
+                },
+                BuilderStep::Aggregate { config: agg_config },
+            ],
+        )
+        .with_route_id("rt-drain-agg-force");
+        controller.add_route(route).await.unwrap();
+        controller.start_route("rt-drain-agg-force").await.unwrap();
+        controller.activate_cohort();
+
+        let ctx = await_capture(&captured).await;
+        let first = ctx
+            .send_and_wait(test_exchange("frag-1"))
+            .await
+            .expect("pending ack reply");
+        assert!(first.property("CamelAggregatorPending").is_some());
+        assert_eq!(
+            controller.in_flight_total.load(Ordering::SeqCst),
+            1,
+            "stashed exchange must stay counted"
+        );
+
+        // Stop force-completes the bucket: the emission's claims are
+        // held across the drain loop's post-pipeline continuation and
+        // released afterwards.
+        controller.stop_route("rt-drain-agg-force").await.unwrap();
+        await_total(&controller.in_flight_total, 0).await;
+    }
+
+    /// drainclaim release path (aborted pipeline): stopping the route
+    /// while a pipeline call is parked on a barrier cannot observe
+    /// cancellation inside the parked processor, so the stop burns its
+    /// shutdown budget and aborts the pipeline task at the await point.
+    /// The abort drops the envelope's claim — counter 0 after teardown.
+    #[tokio::test]
+    async fn abort_releases_claim() {
+        let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = drain_controller(Arc::clone(&captured));
+        let (processor, mut parts) = gated_processor();
+        let route = RouteDefinition::new(
+            "capture:src",
+            vec![BuilderStep::Processor(OpaqueProcessor(processor))],
+        )
+        .with_route_id("rt-drain-abort");
+        controller.add_route(route).await.unwrap();
+        controller.start_route("rt-drain-abort").await.unwrap();
+        controller.activate_cohort();
+
+        let ctx = await_capture(&captured).await;
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = ctx.send_and_wait(test_exchange("abort")).await;
+            let _ = done_tx.send(result);
+        });
+
+        timeout(Duration::from_secs(2), parts.entered_rx.recv())
+            .await
+            .expect("pipeline entry within 2s")
+            .expect("entry channel alive");
+        await_total(&controller.in_flight_total, 1).await;
+
+        // Barrier still held: the drain loop is parked inside the
+        // pipeline call, past every cancellation select, so the stop
+        // path reaches the abort fallback.
+        controller.stop_route("rt-drain-abort").await.unwrap();
+        await_total(&controller.in_flight_total, 0).await;
+
+        // The parked waiter learns of the teardown through the dropped
+        // reply sender (ChannelClosed), not a pipeline result.
+        let result = timeout(Duration::from_secs(2), done_rx)
+            .await
+            .expect("reply resolution within 2s")
+            .expect("reply channel alive");
+        assert!(
+            result.is_err(),
+            "aborted pipeline must fail the waiter: {result:?}"
+        );
+    }
+
+    /// drainclaim release path (queued-envelope drop): envelopes accepted
+    /// while the pipeline is parked queue in the dispatch channel, each
+    /// already carrying its claim (minted at the acceptance boundary).
+    /// Stopping the route aborts the parked pipeline task, dropping the
+    /// channel receiver — the queued envelopes and their claims release
+    /// — counter 0.
+    #[tokio::test]
+    async fn queued_envelope_drop_releases_claim() {
+        let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = drain_controller(Arc::clone(&captured));
+        let (processor, mut parts) = gated_processor();
+        let route = RouteDefinition::new(
+            "capture:src",
+            vec![BuilderStep::Processor(OpaqueProcessor(processor))],
+        )
+        .with_route_id("rt-drain-queued");
+        controller.add_route(route).await.unwrap();
+        controller.start_route("rt-drain-queued").await.unwrap();
+        controller.activate_cohort();
+
+        let ctx = await_capture(&captured).await;
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let waiter_ctx = ctx.clone();
+        tokio::spawn(async move {
+            let result = waiter_ctx.send_and_wait(test_exchange("parked")).await;
+            let _ = done_tx.send(result);
+        });
+
+        timeout(Duration::from_secs(2), parts.entered_rx.recv())
+            .await
+            .expect("pipeline entry within 2s")
+            .expect("entry channel alive");
+        await_total(&controller.in_flight_total, 1).await;
+
+        // The drain loop is parked on envelope #1, so these two
+        // fire-and-forget envelopes queue in the channel buffer, each
+        // holding a claim minted at enqueue.
+        ctx.send(test_exchange("queued-2"))
+            .await
+            .expect("queued send");
+        ctx.send(test_exchange("queued-3"))
+            .await
+            .expect("queued send");
+        await_total(&controller.in_flight_total, 3).await;
+
+        // Teardown aborts the parked pipeline task; the queued envelopes
+        // drop with the channel and every claim releases.
+        controller.stop_route("rt-drain-queued").await.unwrap();
+        await_total(&controller.in_flight_total, 0).await;
+
+        let result = timeout(Duration::from_secs(2), done_rx)
+            .await
+            .expect("reply resolution within 2s")
+            .expect("reply channel alive");
+        assert!(
+            result.is_err(),
+            "aborted pipeline must fail the parked waiter: {result:?}"
+        );
+    }
+
+    /// drainclaim release path (panicked pipeline): a panicking processor
+    /// unwinds the pipeline task — there is no panic-to-error conversion
+    /// in the drain path — and the claim drops during the unwind. The
+    /// waiter resolves through the dropped reply sender; counter 0 once
+    /// the task exits.
+    #[tokio::test]
+    async fn panic_releases_claim() {
+        let captured: CapturedCtxs = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = drain_controller(Arc::clone(&captured));
+        let route = RouteDefinition::new(
+            "capture:src",
+            vec![BuilderStep::Processor(OpaqueProcessor(
+                BoxProcessor::from_fn(|_ex: Exchange| async move {
+                    panic!("planned pipeline panic");
+                }),
+            ))],
+        )
+        .with_route_id("rt-drain-panic");
+        controller.add_route(route).await.unwrap();
+        controller.start_route("rt-drain-panic").await.unwrap();
+        controller.activate_cohort();
+
+        let ctx = await_capture(&captured).await;
+        // The panic unwinds the pipeline task, not this test task: the
+        // waiter only sees the dropped reply sender.
+        let result = timeout(
+            Duration::from_secs(2),
+            ctx.send_and_wait(test_exchange("boom")),
+        )
+        .await
+        .expect("panic must resolve the waiter within 2s");
+        assert!(
+            result.is_err(),
+            "panicking pipeline must fail the exchange: {result:?}"
+        );
+        await_total(&controller.in_flight_total, 0).await;
+
+        controller.stop_route("rt-drain-panic").await.unwrap();
+    }
+
+    /// Per-endpoint flags recorded by the spy component's
+    /// `create_producer`: `true` when the runtime handle exposed the
+    /// context-global counter.
+    type SpyFlags = Arc<Mutex<HashMap<String, bool>>>;
+
+    struct SpyComponent {
+        flags: SpyFlags,
+    }
+
+    struct SpyEndpoint {
+        flags: SpyFlags,
+        base: String,
+    }
+
+    impl Component for SpyComponent {
+        fn scheme(&self) -> &str {
+            "spy"
+        }
+        fn create_endpoint(
+            &self,
+            uri: &str,
+            _ctx: &dyn camel_component_api::ComponentContext,
+        ) -> Result<Box<dyn Endpoint>, CamelError> {
+            let base = uri
+                .strip_prefix("spy:")
+                .unwrap_or(uri)
+                .split('?')
+                .next()
+                .unwrap_or(uri)
+                .to_string();
+            Ok(Box::new(SpyEndpoint {
+                flags: Arc::clone(&self.flags),
+                base,
+            }))
+        }
+    }
+
+    impl Endpoint for SpyEndpoint {
+        fn uri(&self) -> &str {
+            "spy"
+        }
+        fn create_consumer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+        ) -> Result<Box<dyn Consumer>, CamelError> {
+            // Spy routes are never started; a consumer is a wiring bug.
+            Err(CamelError::ComponentNotFound("spy has no consumer".into()))
+        }
+        fn create_producer(
+            &self,
+            rt: Arc<dyn RuntimeObservability>,
+            _ctx: &ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
+            self.flags
+                .lock()
+                .expect("flags lock")
+                .insert(self.base.clone(), rt.in_flight_counter().is_some());
+            Ok(BoxProcessor::new(IdentityProcessor))
+        }
+    }
+
+    /// Deterministic tripwire for the producer-creation wiring: each spy
+    /// endpoint exercises one `ControllerComponentContext` construction
+    /// site, and the flag records whether that site's runtime exposed
+    /// the counter.
+    #[tokio::test]
+    async fn producer_path_receives_counter_spy() {
+        let flags: SpyFlags = Arc::new(Mutex::new(HashMap::new()));
+        let mut ctx = crate::CamelContext::builder().build().await.unwrap();
+        ctx.register_component(SpyComponent {
+            flags: Arc::clone(&flags),
+        });
+        ctx.register_component(camel_component_direct::DirectComponent::new());
+
+        // (a) Plain `to:` step — step resolution site
+        // (route_compiler_ext.rs `resolve_steps`).
+        ctx.add_route_definition(
+            RouteDefinition::new("direct:spya", vec![BuilderStep::To("spy:plain".into())])
+                .with_route_id("rt-spy-plain"),
+        )
+        .await
+        .unwrap();
+
+        // (b) Error-handler DLC target — `build_eh_config_pipeline` site.
+        ctx.add_route_definition(
+            RouteDefinition::new("direct:spyb", vec![])
+                .with_route_id("rt-spy-dlc")
+                .with_error_handler(ErrorHandlerConfig {
+                    dlc_uri: Some("spy:dlc".into()),
+                    policies: vec![],
+                    use_original_message: false,
+                }),
+        )
+        .await
+        .unwrap();
+
+        // (d) Managed-route UoW hook — `build_managed_route` site
+        // (route_controller.rs).
+        ctx.add_route_definition(
+            RouteDefinition::new("direct:spyd", vec![])
+                .with_route_id("rt-spy-ctl")
+                .with_unit_of_work(UnitOfWorkConfig {
+                    on_complete: Some("spy:ctl".into()),
+                    on_failure: None,
+                }),
+        )
+        .await
+        .unwrap();
+
+        // (c) Route-definition compile path UoW hook —
+        // `compile_route_impl` site (route_compiler_ext.rs).
+        ctx.runtime_execution_handle()
+            .compile_route_definition(
+                RouteDefinition::new("direct:spyc", vec![])
+                    .with_route_id("rt-spy-uow")
+                    .with_unit_of_work(UnitOfWorkConfig {
+                        on_complete: Some("spy:uow".into()),
+                        on_failure: None,
+                    }),
+            )
+            .await
+            .expect("compile spy UoW route");
+
+        let snapshot = flags.lock().expect("flags lock").clone();
+        for key in ["plain", "dlc", "ctl", "uow"] {
+            assert_eq!(
+                snapshot.get(key),
+                Some(&true),
+                "producer for spy:{key} must see the in-flight counter — a production ControllerComponentContext site was missed"
+            );
+        }
+    }
 }

@@ -1,6 +1,7 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
@@ -80,6 +81,11 @@ pub struct CamelContext {
     build_git_sha: &'static str,
     /// Anchor for `camel_uptime_seconds` (context build time).
     build_started_at: std::time::Instant,
+    /// Context-global accepted-not-completed counter (drainclaim): every
+    /// live `InFlightClaim` on this context increments it. The SAME `Arc`
+    /// is installed into the route controller, so consumers, producers,
+    /// and the inline dispatcher all mint claims against one counter.
+    in_flight_total: Arc<AtomicU64>,
 }
 
 /// Parts bag used by [`CamelContextBuilder::build`] to construct a [`CamelContext`]
@@ -107,6 +113,7 @@ pub(crate) struct FromParts {
     pub(crate) build_version: &'static str,
     pub(crate) build_git_sha: &'static str,
     pub(crate) build_started_at: std::time::Instant,
+    pub(crate) in_flight_total: Arc<AtomicU64>,
 }
 
 impl CamelContext {
@@ -135,6 +142,7 @@ impl CamelContext {
             build_version: parts.build_version,
             build_git_sha: parts.build_git_sha,
             build_started_at: parts.build_started_at,
+            in_flight_total: parts.in_flight_total,
         }
     }
 }
@@ -667,6 +675,19 @@ impl CamelContext {
         Arc::clone(&self.metrics) as Arc<dyn MetricsCollector>
     }
 
+    /// Canonical accepted-not-completed count for the whole context
+    /// (drainclaim): the number of exchanges accepted through a counted
+    /// path (seda enqueue, `ConsumerContext::send`, inline dispatch)
+    /// whose pipelines have not completed yet.
+    ///
+    /// A single atomic load — the drain verdict is linearizable by
+    /// construction; a read of zero states that no counted exchange is
+    /// awaiting completion. Distinct from the per-route `drain_in_flight`
+    /// stop-bookkeeping (ADR-0043), which is untouched.
+    pub fn total_in_flight(&self) -> u64 {
+        self.in_flight_total.load(Ordering::Acquire)
+    }
+
     /// Get the platform service.
     pub fn platform_service(&self) -> Arc<dyn PlatformService> {
         Arc::clone(&self.platform_service)
@@ -1018,6 +1039,13 @@ impl ComponentContext for CamelContext {
 
     fn unregister_route_health_check(&self, route_id: &str) {
         self.health_registry.unregister_for_route(route_id);
+    }
+
+    /// The context-global accepted-not-completed counter (drainclaim):
+    /// producers created through this context capture it once at
+    /// `create_producer` and mint `InFlightClaim`s against it.
+    fn in_flight_counter(&self) -> Option<Arc<AtomicU64>> {
+        Some(Arc::clone(&self.in_flight_total))
     }
 }
 

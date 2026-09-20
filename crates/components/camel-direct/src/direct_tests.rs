@@ -283,7 +283,9 @@ async fn test_direct_producer_consumer_roundtrip() {
     // Spawn a pipeline simulator that reads envelopes and replies Ok.
     tokio::spawn(async move {
         while let Some(envelope) = route_rx.recv().await {
-            let ExchangeEnvelope { exchange, reply_tx } = envelope;
+            let ExchangeEnvelope {
+                exchange, reply_tx, ..
+            } = envelope;
             if let Some(tx) = reply_tx {
                 let _ = tx.send(Ok(exchange));
             }
