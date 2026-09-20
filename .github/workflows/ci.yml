@@ -169,6 +169,14 @@ jobs:
         run: cargo check -p camel-test --features integration-tests --tests
       - name: Test (full workspace)
         run: cargo test --workspace
+      - name: Test camel-cli (exec flavor)
+        # rc-zrta1: the workspace test above resolves camel-cli's default
+        # flavor-regular, which excludes exec (ADR-0037) — the exec-gated
+        # run_exec_guard_test battery (4 tests) never compiled in CI, the
+        # gap that let the dea5c9c7 exec-flavor regression ship unseen.
+        # flavor-regular,exec rather than flavor-full: same exec closure
+        # delta without the kafka/surrealdb/containers rebuild.
+        run: cargo test -p camel-cli --no-default-features --features flavor-regular,exec
 
   docker-smoke-test:
     name: Docker Smoke Test
