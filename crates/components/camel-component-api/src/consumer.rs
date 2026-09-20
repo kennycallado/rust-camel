@@ -251,6 +251,16 @@ impl ConsumerContext {
         self
     }
 
+    /// Returns the installed accepted-not-completed counter, if any
+    /// (drainclaim). Components whose consumers dispatch through the raw
+    /// [`Self::sender`] fast path capture this once at consumer start and
+    /// mint an [`InFlightClaim`] at their acceptance-dequeue points, so raw
+    /// dispatches count exactly like [`Self::send`] (rc-nftni). Returns
+    /// `None` for contexts without a counter (tests) — callers mint none.
+    pub fn in_flight_counter(&self) -> Option<Arc<AtomicU64>> {
+        self.in_flight.clone()
+    }
+
     /// Returns a clone of the internal [`StartupSignal`] so callers (e.g.
     /// `spawn_consumer_task`) can drive failure propagation independently of
     /// the consumer's own `mark_ready()` call.
@@ -314,6 +324,12 @@ impl ConsumerContext {
     /// Useful for consumers that spawn per-request tasks (e.g., `HttpConsumer`)
     /// where each task independently sends exchanges into the pipeline.
     /// For simple consumers, prefer `send()` or `send_and_wait()` instead.
+    ///
+    /// Raw pushes through this sender bypass the claim minting of
+    /// [`Self::send`]; components using it MUST capture
+    /// [`Self::in_flight_counter`] once at start and attach a claim to every
+    /// envelope at their acceptance-dequeue point (rc-nftni), or their
+    /// in-flight work stays invisible to `total_in_flight()`.
     pub fn sender(&self) -> mpsc::Sender<ExchangeEnvelope> {
         self.sender.clone()
     }

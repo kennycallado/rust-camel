@@ -136,6 +136,7 @@ fn make_app_state(
             server_error: Arc::new(AtomicBool::new(false)),
             runtime: Arc::new(NoopRuntimeObservability),
             route_id: "ws-kernel-test-route".to_string(),
+            in_flight: Arc::default(),
         },
         rx,
     )

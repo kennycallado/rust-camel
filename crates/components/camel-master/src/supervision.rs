@@ -64,6 +64,10 @@ impl Consumer for MasterConsumer {
         let metrics = Arc::clone(&self.metrics);
         let platform_service = Arc::clone(&self.platform_service);
         let sender = context.sender();
+        // rc-nftni (drainclaim): the route's context-global counter —
+        // installed on the delegate's synthetic context and used by the
+        // epoch bridge as a mint-if-none net (see ReconcileContext).
+        let in_flight = context.in_flight_counter();
         let parent_cancel = context.cancel_token();
         let route_id = context.route_id().to_string();
         let drain_timeout = self.drain_timeout;
@@ -95,6 +99,7 @@ impl Consumer for MasterConsumer {
                 leader_epoch: Arc::clone(&leader_epoch),
                 attempts: AtomicU32::new(0),
                 reconnect,
+                in_flight,
             };
 
             let initial_event = { events.borrow().clone() };

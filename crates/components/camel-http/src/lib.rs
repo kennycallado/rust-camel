@@ -1851,6 +1851,11 @@ impl Consumer for HttpConsumer {
         // listener-bound marker.
         ctx.mark_ready();
 
+        // rc-nftni (drainclaim): capture the context-global counter once;
+        // every envelope this raw-sender consumer constructs carries a
+        // claim minted at the acceptance dequeue below.
+        let in_flight = ctx.in_flight_counter();
+
         let path = self.config.path.clone();
         let registry_for_cleanup = registry.clone();
         let server_exited = registry.server_exited.clone();
@@ -1874,8 +1879,18 @@ impl Consumer for HttpConsumer {
                     server_died = true;
                     break;
                 }
-                envelope = env_rx.recv() => {
+                 envelope = env_rx.recv() => {
                     let Some(envelope) = envelope else { break; };
+
+                    // rc-nftni: mint at acceptance — the dequeue of the
+                    // dispatcher's RequestEnvelope is where this consumer
+                    // takes ownership of the wire request. The claim is held
+                    // across the authn await, the route channel, and the
+                    // pipeline; every early exit in the per-request task
+                    // (cancel-503, auth denial) drops it, and a failed push
+                    // rolls it back with the dropped envelope (RAII).
+                    let claim =
+                        in_flight.as_ref().map(camel_component_api::InFlightClaim::attach);
 
                     // Build Exchange from HTTP request
                     let mut msg = Message::default();
@@ -2054,7 +2069,12 @@ impl Consumer for HttpConsumer {
                         let envelope = camel_component_api::consumer::ExchangeEnvelope {
                             exchange,
                             reply_tx: Some(tx),
-                            in_flight_claim: None,
+                            // rc-nftni: the acceptance-minted claim rides the
+                            // envelope; the pipeline drain sites take it and
+                            // hold it across the pipeline (release at
+                            // completion; rejection paths above already
+                            // dropped it).
+                            in_flight_claim: claim,
                         };
 
                         let result = match sender.send(envelope).await {
@@ -7717,6 +7737,96 @@ mod tests {
         let resp = http_result.unwrap();
         assert_eq!(resp.status().as_u16(), 201);
 
+        token.cancel();
+    }
+
+    /// rc-nftni (drainclaim): the raw-sender dispatch path mints a claim at
+    /// the acceptance dequeue and carries it on the envelope. Exact totals:
+    /// 1 while the envelope is held, 0 after release. No wall-clock sleeps —
+    /// readiness is the startup signal, the recv IS the barrier.
+    #[tokio::test]
+    async fn http_consumer_raw_dispatch_carries_in_flight_claim() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        use camel_component_api::ConsumerContext;
+        use camel_component_api::StartupSignal;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
+            host: "127.0.0.1".to_string(),
+            port,
+            path: "/claim".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 10 * 1024 * 1024,
+            max_inflight_requests: 1024,
+            method: None,
+            tls_config: None,
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+        let counter = std::sync::Arc::new(AtomicU64::new(0));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let (signal, startup_rx) = StartupSignal::pair();
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-claim-route".to_string())
+            .with_startup(signal)
+            .with_in_flight_counter(std::sync::Arc::clone(&counter));
+
+        tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        // Deterministic readiness: the consumer marks ready only after the
+        // listener is bound and the path registered.
+        tokio::time::timeout(std::time::Duration::from_secs(5), startup_rx.await_ready())
+            .await
+            .expect("startup must resolve within 5s")
+            .expect("startup must be Ok");
+
+        let client = reqwest::Client::new();
+        let (http_result, claim) = tokio::join!(
+            client
+                .post(format!("http://127.0.0.1:{port}/claim"))
+                .body("hello")
+                .send(),
+            async {
+                let mut envelope = rx.recv().await.expect("envelope must arrive");
+                let claim = envelope
+                    .in_flight_claim
+                    .take()
+                    .expect("raw dispatch must carry an acceptance-minted claim");
+                assert_eq!(
+                    counter.load(Ordering::Acquire),
+                    1,
+                    "exact total: the acceptance mint is the only live claim"
+                );
+                // Materialized reply body: echoing the request's Stream body
+                // back would tie the response to the request-body stream
+                // (not what this test exercises).
+                let reply_tx = envelope.reply_tx.take().expect("reply channel must be set");
+                let reply_exchange = Exchange::new(camel_component_api::Message::new(
+                    camel_component_api::Body::Text("done".to_string()),
+                ));
+                reply_tx
+                    .send(Ok(reply_exchange))
+                    .expect("reply must be taken");
+                claim
+            },
+        );
+
+        let resp = http_result.expect("http roundtrip must complete");
+        assert_eq!(resp.status().as_u16(), 200);
+
+        drop(claim);
+        assert_eq!(
+            counter.load(Ordering::Acquire),
+            0,
+            "release exactly once when the holder drops"
+        );
         token.cancel();
     }
 

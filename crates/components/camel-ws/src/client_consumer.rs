@@ -2,13 +2,14 @@
 //! server and consumes frames as an inbound route source (`consumeAsClient`).
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use camel_component_api::{
     Body as CamelBody, CamelError, ConcurrencyModel, Consumer, ConsumerContext,
-    ConsumerStartupMode, Exchange, ExchangeEnvelope, Message as CamelMessage, NetworkRetryPolicy,
-    RuntimeObservability, retry_async_cancelable,
+    ConsumerStartupMode, Exchange, ExchangeEnvelope, InFlightClaim, Message as CamelMessage,
+    NetworkRetryPolicy, RuntimeObservability, retry_async_cancelable,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -61,6 +62,10 @@ struct FrameLoopDeps {
     max_message_size: u32,
     plan: ReconnectPlan,
     conn_state_tx: watch::Sender<ClientConnState>,
+    /// rc-nftni (drainclaim): context-global counter captured at start;
+    /// every frame envelope mints its claim at acceptance in
+    /// [`receive_until_disconnect`].
+    in_flight: Option<Arc<AtomicU64>>,
 }
 
 /// Private lifecycle gate: rejects double `start` and makes `stop` idempotent.
@@ -188,6 +193,9 @@ impl Consumer for WsClientConsumer {
                 ctx.mark_ready();
                 self.conn_state_tx.send_replace(ClientConnState::Connected);
                 let sender = ctx.sender();
+                // rc-nftni: capture the counter once; frame envelopes mint
+                // claims at their acceptance dequeue in the frame loop.
+                let in_flight = ctx.in_flight_counter();
                 let route_id = ctx.route_id().to_string();
                 let runtime = Arc::clone(&self.runtime);
                 let max_message_size = self.cfg.inner.max_message_size;
@@ -210,6 +218,7 @@ impl Consumer for WsClientConsumer {
                             connector: self.connector.clone(),
                         },
                         conn_state_tx: self.conn_state_tx.clone(),
+                        in_flight,
                     },
                     cancel.clone(),
                 ));
@@ -334,6 +343,7 @@ async fn run_frame_loop(
             &deps.route_id,
             deps.runtime.as_ref(),
             deps.max_message_size,
+            deps.in_flight.as_ref(),
             &cancel,
         )
         .await;
@@ -401,6 +411,7 @@ async fn receive_until_disconnect(
     route_id: &str,
     runtime: &dyn RuntimeObservability,
     max_message_size: u32,
+    in_flight: Option<&Arc<AtomicU64>>,
     cancel: &CancellationToken,
 ) -> Result<(), CamelError> {
     let mut pending: Option<ExchangeEnvelope> = None;
@@ -473,7 +484,12 @@ async fn receive_until_disconnect(
                     pending = Some(ExchangeEnvelope {
                         exchange: Exchange::new(message),
                         reply_tx: None,
-                        in_flight_claim: None,
+                        // rc-nftni: mint at acceptance — the frame dequeue is
+                        // where this consumer takes ownership of the wire
+                        // message. The claim covers the pending-send park, the
+                        // route channel, and the pipeline; a failed push or a
+                        // cancelled pending send drops it (RAII rollback).
+                        in_flight_claim: in_flight.map(InFlightClaim::attach),
                     });
                 },
             },

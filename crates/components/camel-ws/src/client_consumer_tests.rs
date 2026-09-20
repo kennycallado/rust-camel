@@ -1195,3 +1195,55 @@ async fn wss_client_consumer_frames_flow() {
     token.cancel();
     server.abort();
 }
+
+/// rc-nftni (drainclaim): frame dispatch through the raw-sender path mints
+/// a claim at the frame's acceptance dequeue and carries it on the
+/// envelope. Exact totals: 1 while held, 0 after release. No wall-clock
+/// sleeps — the recv is the barrier.
+#[tokio::test]
+async fn frame_dispatch_carries_in_flight_claim() {
+    use std::sync::atomic::AtomicU64;
+
+    let frames = vec![Message::text("claim-me")];
+    let (addr, server) = spawn_frame_push_server("127.0.0.1:0", frames, Duration::ZERO).await;
+
+    let (state_tx, _state_rx) = watch::channel(ClientConnState::Connecting);
+    let mut consumer = WsClientConsumer::new(
+        client_cfg(addr.port(), Vec::new()),
+        Arc::new(NoopRuntimeObservability),
+        state_tx,
+    );
+
+    let counter = Arc::new(AtomicU64::new(0));
+    let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(16);
+    let (signal, _startup_rx) = StartupSignal::pair();
+    let ctx = ConsumerContext::new(tx, CancellationToken::new(), "claim-route".into())
+        .with_startup(signal)
+        .with_in_flight_counter(Arc::clone(&counter));
+
+    consumer.start(ctx).await.expect("start must succeed");
+
+    let mut env = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("envelope within 2s")
+        .expect("route channel open");
+    let claim = env
+        .in_flight_claim
+        .take()
+        .expect("frame dispatch must carry an acceptance-minted claim");
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "exact total: the acceptance mint is the only live claim"
+    );
+    drop(claim);
+    drop(env);
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "release exactly once when the holder drops"
+    );
+
+    consumer.stop().await.expect("stop must succeed");
+    server.abort();
+}

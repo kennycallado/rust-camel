@@ -13,7 +13,7 @@ use camel_api::{Body, CamelError, Exchange, Message, Value};
 use camel_auth::{AuthenticatedPrincipal, CredentialSource, enforce_dispatch, install_carrier};
 use camel_component_api::{
     ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, ExchangeEnvelope,
-    SecurityContext,
+    InFlightClaim, SecurityContext,
 };
 use camel_proto_compiler::ProtoCache;
 use prost::Message as _;
@@ -72,6 +72,19 @@ fn kernel_request_auth(
         plan: kernel.plan.clone(),
         principal,
     })
+}
+
+/// Redact a config-influenced host or method path for logs (ADR-0076,
+/// `lint-log-redaction`). The grammar carries no userinfo, but the config
+/// fields are externally influenced, so any `@`-prefixed authority is
+/// masked defensively, through the LAST `@` (canonical doctrine:
+/// over-masking is safe, under-masking is not). Clean values pass through
+/// unchanged for diagnosability.
+fn redact_for_log(value: &str) -> String {
+    match value.rsplit_once('@') {
+        Some((_, after)) => format!("***@{after}"),
+        None => value.to_string(),
+    }
 }
 
 fn proto_cache() -> &'static ProtoCache {
@@ -483,10 +496,14 @@ impl GrpcConsumer {
         let host = self.host.clone();
         let port = self.port;
         let sender = ctx.sender();
+        // rc-nftni (drainclaim): capture the context-global counter once;
+        // every envelope this raw-sender consumer constructs carries a
+        // claim minted at the acceptance dequeue below.
+        let in_flight = ctx.in_flight_counter();
 
         info!(
-            path = %path,
-            host = %host,
+            path = %redact_for_log(&path),
+            host = %redact_for_log(&host),
             port = port,
             mode = ?mode,
             "grpc consumer started, waiting for requests"
@@ -510,6 +527,21 @@ impl GrpcConsumer {
                 envelope = env_rx.recv() => {
                     let Some(envelope) = envelope else { break };
 
+                    // rc-nftni: mint at acceptance — the dequeue of the
+                    // transport's GrpcRequestEnvelope is where this consumer
+                    // takes ownership of the wire request. The claim covers
+                    // the semaphore wait and (unary/server-streaming) decode,
+                    // route channel, and pipeline; every decode/rejection
+                    // exit below drops it (RAII). It moves into the spawned
+                    // processor future: for the streaming modes it is never
+                    // consumed there, so it is held CALL-SCOPED — for the
+                    // whole call, including idle gaps between chunk
+                    // exchanges — while each chunk/completion envelope mints
+                    // its own claim in the processor (transient +1 overlap,
+                    // sound, never a false zero; pinned by
+                    // grpc_consumer_client_streaming_holds_claim_across_idle_gap).
+                    let claim = in_flight.as_ref().map(InFlightClaim::attach);
+
                     let sem = semaphore.clone();
                     let permit = sem.acquire_owned().await.map_err(|_| CamelError::ChannelClosed)?;
                     let req_desc = req_desc.clone();
@@ -524,6 +556,7 @@ impl GrpcConsumer {
                     // enforcement lives in the pipeline layer plus the
                     // strict dispatch check.
                     let kernel = kernel.clone();
+                    let in_flight = in_flight.clone();
 
                     debug!(
                         path = %path_for_log,
@@ -544,7 +577,7 @@ impl GrpcConsumer {
 
                                 let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 let result = process_unary_request(
-                                    body, metadata, req_desc, resp_desc, sender, kernel_auth,
+                                    body, metadata, req_desc, resp_desc, sender, kernel_auth, claim,
                                 ).await;
                                 let reply = match result {
                                     Ok(bytes) => GrpcReply::Ok(bytes),
@@ -562,7 +595,7 @@ impl GrpcConsumer {
 
                                 let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 process_server_streaming_request(
-                                    body, metadata, req_desc, resp_desc, sender, reply_tx, kernel_auth,
+                                    body, metadata, req_desc, resp_desc, sender, reply_tx, kernel_auth, claim,
                                 ).await;
                             }
                             GrpcRequestEnvelope::ClientStreaming { metadata, body_rx, reply_tx, kernel_principal } => {
@@ -574,7 +607,7 @@ impl GrpcConsumer {
 
                                 let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 process_client_streaming_request(
-                                    body_rx, metadata, req_desc, resp_desc, sender, reply_tx, kernel_auth,
+                                    body_rx, metadata, req_desc, resp_desc, sender, reply_tx, kernel_auth, &in_flight,
                                 ).await;
                             }
                             GrpcRequestEnvelope::Bidi { metadata, body_rx, reply_tx, kernel_principal } => {
@@ -586,7 +619,7 @@ impl GrpcConsumer {
 
                                 let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 process_bidi_request(
-                                    body_rx, metadata, req_desc, resp_desc, sender, reply_tx, kernel_auth,
+                                    body_rx, metadata, req_desc, resp_desc, sender, reply_tx, kernel_auth, &in_flight,
                                 ).await;
                             }
                         }
@@ -615,7 +648,7 @@ impl Consumer for GrpcConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
         self.validate_route_credential_sources()?;
         info!(
-            host = %self.host,
+            host = %redact_for_log(&self.host),
             port = self.port,
             service = %self.service_name,
             method = %self.method_name,
@@ -638,7 +671,7 @@ impl Consumer for GrpcConsumer {
 
     async fn stop(&mut self) -> Result<(), CamelError> {
         info!(
-            host = %self.host,
+            host = %redact_for_log(&self.host),
             port = self.port,
             service = %self.service_name,
             method = %self.method_name,
@@ -672,6 +705,7 @@ async fn process_unary_request(
     resp_desc: MessageDescriptor,
     sender: mpsc::Sender<ExchangeEnvelope>,
     kernel_auth: Option<KernelRequestAuth>,
+    claim: Option<InFlightClaim>,
 ) -> Result<Vec<u8>, Status> {
     let req_dyn = DynamicMessage::decode(req_desc, body.as_slice())
         .map_err(|e| Status::invalid_argument(format!("failed to decode protobuf: {e}")))?;
@@ -695,7 +729,9 @@ async fn process_unary_request(
     let envelope = ExchangeEnvelope {
         exchange,
         reply_tx: Some(reply_tx),
-        in_flight_claim: None,
+        // rc-nftni: acceptance-minted claim (drainclaim); decode failure
+        // above dropped it via RAII, a failed push below rolls it back.
+        in_flight_claim: claim,
     };
 
     sender
@@ -733,6 +769,7 @@ async fn process_unary_request(
 
 // ── Server-streaming processor ─────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn process_server_streaming_request(
     body: Vec<u8>,
     metadata: tonic::metadata::MetadataMap,
@@ -741,6 +778,7 @@ async fn process_server_streaming_request(
     sender: mpsc::Sender<ExchangeEnvelope>,
     reply_tx: mpsc::Sender<GrpcStreamItem>,
     kernel_auth: Option<KernelRequestAuth>,
+    claim: Option<InFlightClaim>,
 ) {
     let req_dyn = match DynamicMessage::decode(req_desc, body.as_slice()) {
         Ok(m) => m,
@@ -793,7 +831,10 @@ async fn process_server_streaming_request(
     let envelope = ExchangeEnvelope {
         exchange,
         reply_tx: Some(pipeline_reply_tx),
-        in_flight_claim: None,
+        // rc-nftni: acceptance-minted claim (drainclaim); decode/auth
+        // failures above dropped it via RAII, a failed push below rolls it
+        // back.
+        in_flight_claim: claim,
     };
 
     if sender.send(envelope).await.is_err() {
@@ -824,6 +865,7 @@ async fn process_server_streaming_request(
 
 // ── Client-streaming processor ─────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn process_client_streaming_request(
     mut body_rx: mpsc::Receiver<Vec<u8>>,
     metadata: tonic::metadata::MetadataMap,
@@ -832,6 +874,7 @@ async fn process_client_streaming_request(
     sender: mpsc::Sender<ExchangeEnvelope>,
     reply_tx: tokio::sync::oneshot::Sender<GrpcReply>,
     kernel_auth: Option<KernelRequestAuth>,
+    in_flight: &Option<Arc<AtomicU64>>,
 ) {
     while let Some(body) = body_rx.recv().await {
         let req_dyn = match DynamicMessage::decode(req_desc.clone(), body.as_slice()) {
@@ -874,7 +917,9 @@ async fn process_client_streaming_request(
         let envelope = ExchangeEnvelope {
             exchange,
             reply_tx: Some(reply_tx_pipe),
-            in_flight_claim: None,
+            // rc-nftni: each chunk envelope mints its own claim at its
+            // acceptance (the body_rx dequeue inside this loop).
+            in_flight_claim: in_flight.as_ref().map(InFlightClaim::attach),
         };
 
         if sender.send(envelope).await.is_err() {
@@ -911,7 +956,9 @@ async fn process_client_streaming_request(
     let envelope = ExchangeEnvelope {
         exchange: completion_exchange,
         reply_tx: Some(reply_tx_pipe),
-        in_flight_claim: None,
+        // rc-nftni: the completion exchange mints its claim like every
+        // chunk envelope.
+        in_flight_claim: in_flight.as_ref().map(InFlightClaim::attach),
     };
 
     if sender.send(envelope).await.is_err() {
@@ -957,6 +1004,7 @@ async fn process_client_streaming_request(
 
 // ── Bidi-streaming processor ───────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn process_bidi_request(
     mut body_rx: mpsc::Receiver<Vec<u8>>,
     metadata: tonic::metadata::MetadataMap,
@@ -965,6 +1013,7 @@ async fn process_bidi_request(
     sender: mpsc::Sender<ExchangeEnvelope>,
     reply_tx: mpsc::Sender<GrpcStreamItem>,
     kernel_auth: Option<KernelRequestAuth>,
+    in_flight: &Option<Arc<AtomicU64>>,
 ) {
     let observer = GrpcStreamObserver::new(reply_tx.clone(), resp_desc);
     let observer_id = next_observer_id();
@@ -975,6 +1024,7 @@ async fn process_bidi_request(
     let sender_clone = sender.clone();
     let metadata_clone = metadata.clone();
     let req_desc_clone = req_desc.clone();
+    let in_flight_clone = in_flight.clone();
 
     let forward_task = tokio::spawn(async move {
         let mut sequence: u64 = 0;
@@ -1036,7 +1086,9 @@ async fn process_bidi_request(
             let envelope = ExchangeEnvelope {
                 exchange,
                 reply_tx: Some(pipeline_reply_tx),
-                in_flight_claim: None,
+                // rc-nftni: each message envelope mints its own claim at
+                // its acceptance (the body_rx dequeue inside this loop).
+                in_flight_claim: in_flight_clone.as_ref().map(InFlightClaim::attach),
             };
 
             if sender_clone.send(envelope).await.is_err() {

@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use camel_api::{CamelError, MetricsCollector, PlatformService};
 use camel_component_api::{
-    Component, ConsumerContext, ExchangeEnvelope, NetworkRetryPolicy, is_retryable_camel_error,
+    Component, ConsumerContext, ExchangeEnvelope, InFlightClaim, NetworkRetryPolicy,
+    is_retryable_camel_error,
 };
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -37,6 +38,7 @@ pub(crate) fn spawn_epoch_bridge(
     real_sender: tokio::sync::mpsc::Sender<ExchangeEnvelope>,
     my_epoch: u64,
     parent_cancel: CancellationToken,
+    in_flight: Option<Arc<AtomicU64>>,
 ) -> (
     tokio::sync::mpsc::Sender<ExchangeEnvelope>,
     tokio::task::JoinHandle<()>,
@@ -51,6 +53,7 @@ pub(crate) fn spawn_epoch_bridge(
                     match env {
                         Some(mut env) => {
                             stamp_epoch(&mut env, my_epoch);
+                            bridge_mint_claim(&mut env, &in_flight);
                             if real_sender.send(env).await.is_err() {
                                 break;
                             }
@@ -60,6 +63,7 @@ pub(crate) fn spawn_epoch_bridge(
                             // buffered envelopes with the same constant epoch.
                             while let Ok(mut env) = stamp_rx.try_recv() {
                                 stamp_epoch(&mut env, my_epoch);
+                                bridge_mint_claim(&mut env, &in_flight);
                                 if real_sender.send(env).await.is_err() {
                                     break;
                                 }
@@ -73,6 +77,21 @@ pub(crate) fn spawn_epoch_bridge(
     });
 
     (stamp_tx, handle)
+}
+
+/// rc-nftni (drainclaim): the bridge mints a claim for envelopes that
+/// arrive uncounted — the acceptance point into THIS route's dispatch
+/// path is the `stamp_rx` dequeue. Envelopes already carrying a claim
+/// (delegates using the counter installed on their synthetic context, or
+/// raw-sender components minting at their own acceptance) pass through
+/// untouched — never a double count. A failed forward drops the envelope
+/// and rolls the claim back (RAII).
+fn bridge_mint_claim(env: &mut ExchangeEnvelope, in_flight: &Option<Arc<AtomicU64>>) {
+    if env.in_flight_claim.is_none()
+        && let Some(counter) = in_flight
+    {
+        env.in_flight_claim = Some(InFlightClaim::attach(counter));
+    }
 }
 
 /// Stamp the leader-epoch fencing token on an envelope's properties.
@@ -214,6 +233,12 @@ pub(crate) struct ReconcileContext<'a> {
     pub(crate) attempts: AtomicU32,
     /// Reconnect policy consulted before every delegate create attempt.
     pub(crate) reconnect: NetworkRetryPolicy,
+    /// rc-nftni (drainclaim): the route's context-global accepted-not-
+    /// completed counter. Installed on the delegate's synthetic
+    /// `ConsumerContext` (so `send()`/`send_and_wait()` delegates mint at
+    /// `stamp_tx` entry) and consulted by the epoch bridge as a mint-if-none
+    /// safety net for delegates that push raw envelopes.
+    pub(crate) in_flight: Option<Arc<AtomicU64>>,
 }
 
 pub(crate) async fn reconcile_event(
@@ -343,11 +368,21 @@ pub(crate) async fn reconcile_event(
                 ctx.sender.clone(),
                 my_epoch,
                 ctx.parent_cancel.child_token(),
+                ctx.in_flight.clone(),
             );
 
             let run_token = ctx.parent_cancel.child_token();
-            let delegate_ctx =
+            // rc-nftni: install the route's counter on the delegate's
+            // synthetic context so `send()`/`send_and_wait()` delegates mint
+            // at `stamp_tx` entry (full bridge-queue residency); raw-sender
+            // delegates capture it via `ConsumerContext::in_flight_counter`
+            // the same way. The bridge's mint-if-none covers anything that
+            // still arrives uncounted.
+            let mut delegate_ctx =
                 ConsumerContext::new(stamp_tx, run_token.clone(), ctx.route_id.clone());
+            if let Some(counter) = ctx.in_flight.clone() {
+                delegate_ctx = delegate_ctx.with_in_flight_counter(counter);
+            }
             let handle = tokio::spawn(async move {
                 consumer.start(delegate_ctx).await?;
                 consumer.stop().await?;
@@ -391,7 +426,7 @@ pub(crate) async fn reconcile_event(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     use camel_api::{Body, CamelError, Exchange, Message, NoOpMetrics};
@@ -418,7 +453,7 @@ mod tests {
         let (pipeline_tx, mut pipeline_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(10);
         let cancel = CancellationToken::new();
 
-        let (stamp_tx, _bridge) = spawn_epoch_bridge(pipeline_tx, 42, cancel);
+        let (stamp_tx, _bridge) = spawn_epoch_bridge(pipeline_tx, 42, cancel, None);
 
         stamp_tx.send(make_envelope("hello")).await.unwrap();
         drop(stamp_tx);
@@ -443,7 +478,7 @@ mod tests {
         let (pipeline_tx, mut pipeline_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(10);
         let cancel = CancellationToken::new();
 
-        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 5, cancel);
+        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 5, cancel, None);
 
         for i in 0..3 {
             stamp_tx
@@ -489,7 +524,7 @@ mod tests {
 
         // Snapshot epoch=7 at bridge spawn
         let my_epoch = epoch.load(std::sync::atomic::Ordering::Acquire);
-        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, my_epoch, cancel);
+        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, my_epoch, cancel, None);
 
         // Change the live epoch — bridge should NOT pick this up
         epoch.store(99, std::sync::atomic::Ordering::Release);
@@ -524,7 +559,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         // Bridge spawned with epoch=3 (e.g., from a previous leader term).
-        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 3, cancel);
+        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 3, cancel, None);
 
         stamp_tx
             .send(make_envelope("from-old-leader"))
@@ -558,7 +593,7 @@ mod tests {
         let (pipeline_tx, mut _pipeline_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(10);
         let cancel = CancellationToken::new();
 
-        let (_stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 1, cancel.clone());
+        let (_stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 1, cancel.clone(), None);
 
         cancel.cancel();
 
@@ -579,7 +614,7 @@ mod tests {
         // Fill the pipeline channel so bridge.send() will block
         pipeline_tx.send(make_envelope("blocker")).await.unwrap();
 
-        let (stamp_tx, mut bridge_handle) = spawn_epoch_bridge(pipeline_tx, 42, cancel);
+        let (stamp_tx, mut bridge_handle) = spawn_epoch_bridge(pipeline_tx, 42, cancel, None);
 
         // Send an envelope to the bridge — it will try to forward to the
         // full pipeline channel and block.
@@ -611,7 +646,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let (pipeline_tx, _pipeline_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(10);
-        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 42, cancel);
+        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 42, cancel, None);
 
         // Keep an AbortHandle to verify completion after stop_delegate.
         let bridge_abort = bridge_handle.abort_handle();
@@ -673,7 +708,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let (pipeline_tx, _pipeline_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(10);
-        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 42, cancel);
+        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 42, cancel, None);
 
         let bridge_abort = bridge_handle.abort_handle();
         assert!(
@@ -710,5 +745,80 @@ mod tests {
         );
 
         drop(stamp_tx);
+    }
+
+    /// rc-nftni (drainclaim): envelopes that arrive uncounted get a claim
+    /// minted by the bridge at its acceptance dequeue — mint/carry/release
+    /// with exact totals.
+    #[tokio::test]
+    async fn bridge_mints_claim_for_uncounted_envelopes() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let (pipeline_tx, mut pipeline_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(10);
+        let cancel = CancellationToken::new();
+
+        let (stamp_tx, bridge_handle) =
+            spawn_epoch_bridge(pipeline_tx, 9, cancel, Some(Arc::clone(&counter)));
+
+        stamp_tx.send(make_envelope("uncounted")).await.unwrap();
+        drop(stamp_tx);
+        timeout(Duration::from_secs(1), bridge_handle)
+            .await
+            .expect("bridge should finish within 1s")
+            .expect("bridge task should not panic");
+
+        let mut received = pipeline_rx.recv().await.expect("envelope must arrive");
+        let claim = received
+            .in_flight_claim
+            .take()
+            .expect("bridge must have minted a claim for the uncounted envelope");
+        // Exact total: the minted claim is the only live claim.
+        assert_eq!(counter.load(Ordering::Acquire), 1);
+        drop(claim);
+        drop(received);
+        assert_eq!(
+            counter.load(Ordering::Acquire),
+            0,
+            "dropping the envelope must release exactly once"
+        );
+    }
+
+    /// rc-nftni (drainclaim): envelopes already carrying a claim (delegate
+    /// minted via the counter installed on its synthetic context) pass
+    /// through the bridge untouched — never a double count.
+    #[tokio::test]
+    async fn bridge_preserves_existing_claim_without_double_counting() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let (pipeline_tx, mut pipeline_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(10);
+        let cancel = CancellationToken::new();
+
+        let (stamp_tx, bridge_handle) =
+            spawn_epoch_bridge(pipeline_tx, 9, cancel, Some(Arc::clone(&counter)));
+
+        // The delegate's own acceptance mint — exactly as ConsumerContext::send
+        // would attach it on the synthetic context.
+        let mut pre_claimed = make_envelope("already-counted");
+        pre_claimed.in_flight_claim = Some(camel_component_api::InFlightClaim::attach(&counter));
+        assert_eq!(counter.load(Ordering::Acquire), 1);
+
+        stamp_tx.send(pre_claimed).await.unwrap();
+        drop(stamp_tx);
+        timeout(Duration::from_secs(1), bridge_handle)
+            .await
+            .expect("bridge should finish within 1s")
+            .expect("bridge task should not panic");
+
+        let mut received = pipeline_rx.recv().await.expect("envelope must arrive");
+        let claim = received
+            .in_flight_claim
+            .take()
+            .expect("pre-existing claim must survive the bridge");
+        assert_eq!(
+            counter.load(Ordering::Acquire),
+            1,
+            "bridge must not mint a sibling for an already-counted envelope"
+        );
+        drop(claim);
+        drop(received);
+        assert_eq!(counter.load(Ordering::Acquire), 0);
     }
 }

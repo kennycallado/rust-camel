@@ -34,8 +34,8 @@ use camel_component_api::tls_source::ServerTlsSource;
 use camel_component_api::{
     Body as CamelBody, BoxProcessor, CamelError, Component, ComponentMetadata, ConcurrencyModel,
     Consumer, ConsumerContext, ConsumerStartupMode, Endpoint, Exchange, ExchangeEnvelope,
-    Message as CamelMessage, NetworkRetryPolicy, ProducerContext, RuntimeObservability,
-    retry_async,
+    InFlightClaim, Message as CamelMessage, NetworkRetryPolicy, ProducerContext,
+    RuntimeObservability, retry_async,
 };
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
@@ -536,6 +536,7 @@ async fn spawn_server(
         server_error: Arc::clone(&server_error),
         runtime: Arc::clone(&runtime),
         route_id: route_id.clone(),
+        in_flight: Arc::default(),
     };
     let app = Router::new()
         .fallback(dispatch_handler)
@@ -580,7 +581,7 @@ async fn spawn_server(
                         .force_unhealthy_for_route(&rid, "g:ws:bind-tls", &e.to_string());
                     // log-policy: outside-contract
                     tracing::error!(
-                        host = %bound_addr.ip(),
+                        host = %redact_host_for_log(&bound_addr.ip().to_string()),
                         port = bound_addr.port(),
                         error = %e,
                         "WebSocket server terminated with error"
@@ -609,7 +610,7 @@ async fn spawn_server(
                         .force_unhealthy_for_route(&rid, "g:ws:bind-plain", &e.to_string());
                     // log-policy: outside-contract
                     tracing::error!(
-                        host = %bound_addr.ip(),
+                        host = %redact_host_for_log(&bound_addr.ip().to_string()),
                         port = bound_addr.port(),
                         error = %e,
                         "WebSocket server terminated with error"
@@ -621,7 +622,7 @@ async fn spawn_server(
         };
 
     tracing::info!(
-        host = %bound_addr.ip(),
+        host = %redact_host_for_log(&bound_addr.ip().to_string()),
         port = bound_addr.port(),
         is_tls,
         "WebSocket server started"
@@ -701,7 +702,7 @@ async fn monitor_ws_server_task(
                 .increment_errors(&route_id, "e:ws:server-task-exited");
             // log-policy: outside-contract
             tracing::error!(
-                host = %addr.ip(),
+                host = %redact_host_for_log(&addr.ip().to_string()),
                 port = addr.port(),
                 error = %join_err,
                 "WebSocket server task exited unexpectedly — all routes on this port are now dead"
@@ -720,6 +721,13 @@ pub struct WsAppState {
     pub runtime: Arc<dyn RuntimeObservability>,
     /// Route id of the consumer that created this server.
     pub route_id: String,
+    /// rc-nftni (drainclaim): the context-global accepted-not-completed
+    /// counter, set once by the first route whose consumer registered on
+    /// this shared server (`finish_start`). Set-once, keep-first — routes
+    /// sharing a server share a CamelContext, so the counter is the same
+    /// Arc in practice. The per-connection handler mints one claim per
+    /// inbound frame envelope (acceptance dequeue).
+    pub in_flight: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>>,
 }
 
 pub struct WsConnectionRegistry {
@@ -1189,7 +1197,13 @@ async fn ws_handler(
                     .send(ExchangeEnvelope {
                         exchange,
                         reply_tx: None,
-                        in_flight_claim: None,
+                        // rc-nftni: mint at acceptance — the frame dequeue is
+                        // where this route takes ownership of the wire
+                        // message. The claim covers the per-path env_tx
+                        // queue, the forwarder, the route channel, and the
+                        // pipeline; a failed push or route shutdown drops it
+                        // (RAII rollback).
+                        in_flight_claim: state.in_flight.get().map(InFlightClaim::attach),
                     })
                     .await
                     .is_err()
@@ -1236,7 +1250,9 @@ async fn ws_handler(
                     .send(ExchangeEnvelope {
                         exchange,
                         reply_tx: None,
-                        in_flight_claim: None,
+                        // rc-nftni: binary frames mint at acceptance exactly
+                        // like text frames (see the text site above).
+                        in_flight_claim: state.in_flight.get().map(InFlightClaim::attach),
                     })
                     .await
                     .is_err()
@@ -1614,6 +1630,15 @@ impl WsConsumer {
         }
 
         global_registries().insert(registry_key.clone(), Arc::clone(&self.registry));
+
+        // rc-nftni: publish this route's context-global counter on the
+        // shared server state (set-once, keep-first — routes sharing a
+        // server share a CamelContext, so the Arc is the same in practice).
+        // The per-connection handler mints one claim per inbound frame
+        // envelope from it.
+        if let Some(counter) = ctx.in_flight_counter() {
+            let _ = state.in_flight.set(counter);
+        }
 
         let sender = ctx.sender();
         let route_id = ctx.route_id().to_string();
@@ -2651,6 +2676,71 @@ mod tests {
 
         consumer.stop().await.unwrap();
         route_task.await.unwrap();
+    }
+
+    /// rc-nftni (drainclaim): server frame dispatch mints a claim at the
+    /// frame's acceptance dequeue and carries it on the envelope through
+    /// the per-path env_tx queue and the forwarder. Exact totals: 1 while
+    /// held, 0 after release. No wall-clock sleeps — the recv is the
+    /// barrier.
+    #[tokio::test]
+    async fn server_frame_dispatch_carries_in_flight_claim() {
+        use std::sync::atomic::AtomicU64;
+
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let uri = format!("ws://127.0.0.1:{port}/claim");
+        let component_ctx = NoOpComponentContext;
+        let _endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
+
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-claim-route".to_string(),
+        )
+        .with_in_flight_counter(Arc::clone(&counter));
+
+        consumer.start_with_listener(ctx, listener).await.unwrap();
+
+        let url = format!("ws://127.0.0.1:{port}/claim");
+        let mut client = connect_until_ready(&url).await;
+        client
+            .send(ClientMessage::Text("claim-me".into()))
+            .await
+            .unwrap();
+
+        let mut envelope = tokio::time::timeout(Duration::from_secs(2), route_rx.recv())
+            .await
+            .expect("envelope within 2s")
+            .expect("route channel open");
+        let claim = envelope
+            .in_flight_claim
+            .take()
+            .expect("server frame dispatch must carry an acceptance-minted claim");
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "exact total: the acceptance mint is the only live claim"
+        );
+        drop(claim);
+        drop(envelope);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "release exactly once when the holder drops"
+        );
+
+        consumer.stop().await.unwrap();
     }
 
     /// Echo a single envelope back through `producer` (test helper for the
@@ -4232,6 +4322,7 @@ mod tests {
             server_error: new_atomic_false(),
             runtime: test_rt(),
             route_id: "test-route".into(),
+            in_flight: Arc::default(),
         };
         assert!(
             !state.server_error.load(Ordering::Relaxed),
@@ -4248,6 +4339,7 @@ mod tests {
             server_error: new_atomic_false(),
             runtime: test_rt(),
             route_id: "test-route".into(),
+            in_flight: Arc::default(),
         };
         assert!(!state.server_error.load(Ordering::Relaxed));
         state.server_error.store(true, Ordering::Relaxed);

@@ -93,3 +93,27 @@ async fn raw_sender_path_stays_uncounted() {
     assert!(envelope.in_flight_claim.is_none());
     assert_eq!(counter.load(Ordering::Acquire), 0);
 }
+
+// rc-nftni: raw-sender components capture the counter through the getter and
+// mint at their own acceptance points — the getter must return the SAME Arc
+// the context mints with, not a copy of the current value.
+#[test]
+fn in_flight_counter_getter_returns_the_installed_arc() {
+    let counter = Arc::new(AtomicU64::new(0));
+    let (tx, _rx) = mpsc::channel(1);
+    let ctx = ConsumerContext::new(tx, CancellationToken::new(), "route".to_string());
+    assert!(
+        ctx.in_flight_counter().is_none(),
+        "contexts without a counter must return None"
+    );
+    let ctx = ctx.with_in_flight_counter(Arc::clone(&counter));
+    let returned = ctx
+        .in_flight_counter()
+        .expect("counter must be returned once installed");
+    // Attach through the RETURNED handle: only the same Arc moves the
+    // original counter.
+    let claim = InFlightClaim::attach(&returned);
+    assert_eq!(counter.load(Ordering::Acquire), 1);
+    drop(claim);
+    assert_eq!(counter.load(Ordering::Acquire), 0);
+}

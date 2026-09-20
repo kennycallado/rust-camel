@@ -501,8 +501,12 @@ After the trigger send it SHALL wait until the context-global
 in-flight counter (`CamelContext::total_in_flight()`) reads zero, then
 emit the existing JSON report with outcome `Completed` and mode `batch`,
 and exit 0. The counter covers every exchange accepted through a counted
-path (seda enqueue, channel dispatch, inline dispatch); the raw-sender
-exception is documented in the observability spec. The drain verdict
+path (seda enqueue, channel dispatch, inline dispatch, and the
+raw-sender acceptance dequeues of http/grpc/ws/master per rc-nftni;
+gRPC streaming calls hold their acceptance claim call-scoped, so
+inter-chunk idle gaps stay counted); bounded non-exchange residuals
+(transport intake, post-completion egress) are documented in the
+observability spec. The drain verdict
 SHALL be that single atomic read; it SHALL NOT depend on timed gauge
 samples, queue-depth labels, or any fixed quiescence window. A batch job
 with no `seda:` consumer routes completes as soon as the counter reads

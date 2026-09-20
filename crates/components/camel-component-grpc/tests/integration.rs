@@ -1577,3 +1577,261 @@ async fn grpc_plaintext_server_does_not_register_reload_handler() {
 
     shutdown_consumer(cancel_token, consumer_task, pipeline_task).await;
 }
+
+/// rc-nftni (drainclaim): unary dispatch through the raw-sender path mints
+/// a claim at the acceptance dequeue (the transport env_rx recv inside
+/// `start_inner`) and carries it on the envelope. Exact totals: 1 while
+/// held, 0 after release. No wall-clock sleeps — the listener is bound
+/// before start, so the kernel backlog covers the accept race and the recv
+/// is the barrier.
+#[tokio::test]
+async fn grpc_consumer_unary_dispatch_carries_in_flight_claim() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let port = addr.port();
+
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+
+    let mut consumer = GrpcConsumer::new(
+        "127.0.0.1".to_string(),
+        port,
+        "/helloworld.Greeter/SayHello".to_string(),
+        proto_path,
+        "helloworld.Greeter".to_string(),
+        "SayHello".to_string(),
+        GrpcMode::Unary,
+        test_rt(),
+        GrpcServerConfig::default(),
+    );
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
+    let cancel_token = CancellationToken::new();
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-claim-route".to_string(),
+    )
+    .with_in_flight_counter(std::sync::Arc::clone(&counter));
+
+    let consumer_task = tokio::spawn(async move {
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("consumer start");
+    });
+
+    // Stand-in pipeline: take the claim out of the envelope, reply, and hand
+    // the claim back for exact-total assertions in the test body.
+    let pipeline_task = tokio::spawn(async move {
+        if let Some(mut envelope) = route_rx.recv().await {
+            let claim = envelope.in_flight_claim.take();
+            let reply_tx = envelope.reply_tx.take();
+            let resp = Exchange::new(Message::new(Body::Json(
+                serde_json::json!({"message": "Hello Claim"}),
+            )));
+            if let Some(tx) = reply_tx {
+                let _ = tx.send(Ok(resp));
+            }
+            claim
+        } else {
+            None
+        }
+    });
+
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let mut client = helloworld::greeter_client::GreeterClient::new(channel);
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.say_hello(helloworld::HelloRequest {
+            name: "Claim".to_string(),
+        }),
+    )
+    .await
+    .expect("call within 5s")
+    .expect("call");
+
+    assert_eq!(response.into_inner().message, "Hello Claim");
+
+    let claim = pipeline_task
+        .await
+        .expect("pipeline join")
+        .expect("unary dispatch must carry an acceptance-minted claim");
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "exact total: the acceptance mint is the only live claim"
+    );
+    drop(claim);
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "release exactly once when the holder drops"
+    );
+
+    cancel_token.cancel();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), consumer_task).await;
+}
+
+/// rc-nftni (drainclaim): a client-streaming call holds its
+/// acceptance-minted claim CALL-SCOPED — the spawned processor future owns
+/// it from the transport dequeue until the call completes, so idle gaps
+/// between chunk exchanges keep `total_in_flight()` at 1. Each chunk and
+/// the completion exchange mint their own claims transiently on top. Exact
+/// totals, event-driven (no wall-clock sleeps).
+#[tokio::test]
+async fn grpc_consumer_client_streaming_holds_claim_across_idle_gap() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/streaming.proto");
+
+    let mut consumer = GrpcConsumer::new(
+        "127.0.0.1".to_string(),
+        port,
+        "/streaming.StreamService/ClientSum".to_string(),
+        proto_path,
+        "streaming.StreamService".to_string(),
+        "ClientSum".to_string(),
+        GrpcMode::ClientStreaming,
+        test_rt(),
+        GrpcServerConfig::default(),
+    );
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
+    let cancel_token = CancellationToken::new();
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-claim-cs-route".to_string(),
+    )
+    .with_in_flight_counter(std::sync::Arc::clone(&counter));
+
+    let consumer_task = tokio::spawn(async move {
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("consumer start");
+    });
+
+    // Gated pipeline stand-in: per envelope — take the claim, signal
+    // arrival, WAIT for release, reply, drop the claim. The gate turns
+    // every counter value below into a stable state, not a transient.
+    let (arrived_tx, mut arrived_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let (release_tx, mut release_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let seen_claims = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen_claims_task = std::sync::Arc::clone(&seen_claims);
+    let pipeline_task = tokio::spawn(async move {
+        while let Some(mut envelope) = route_rx.recv().await {
+            let claim = envelope.in_flight_claim.take();
+            if claim.is_some() {
+                seen_claims_task.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+            let reply_tx = envelope.reply_tx.take();
+            arrived_tx.send(()).await.expect("test alive");
+            release_rx.recv().await.expect("test alive");
+            let resp = Exchange::new(Message::new(Body::Json(serde_json::json!({"total": 1}))));
+            if let Some(tx) = reply_tx {
+                let _ = tx.send(Ok(resp));
+            }
+            drop(claim);
+        }
+    });
+
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let mut client = StreamServiceClient::new(channel);
+
+    // Open the call and send one chunk; keep the stream open afterwards.
+    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<NumberRequest>(4);
+    chunk_tx
+        .send(NumberRequest { value: 1 })
+        .await
+        .expect("chunk send");
+    let call_task = tokio::spawn(async move {
+        client
+            .client_sum(Request::new(tokio_stream::wrappers::ReceiverStream::new(
+                chunk_rx,
+            )))
+            .await
+    });
+
+    // Chunk exchange arrived and is HELD by the gated pipeline: exactly the
+    // call-scoped claim + the chunk envelope claim.
+    tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx.recv())
+        .await
+        .expect("chunk exchange must arrive within 5s")
+        .expect("route channel open");
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::Acquire),
+        2,
+        "call-scoped claim + chunk envelope claim, both held"
+    );
+
+    // Release the reply — the chunk claim drops and the IDLE GAP begins:
+    // no live exchange, yet the counter stays 1 because the processor
+    // future still holds the call-scoped acceptance claim.
+    release_tx.send(()).await.expect("pipeline alive");
+    assert!(
+        wait_for_total(&counter, 1, std::time::Duration::from_secs(5)).await,
+        "idle gap must keep the call-scoped claim: counter == 1"
+    );
+
+    // End the call: the completion exchange arrives (2 while held), then
+    // releasing it lets the processor future resolve, dropping the
+    // call-scoped claim.
+    drop(chunk_tx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx.recv())
+        .await
+        .expect("completion exchange must arrive within 5s")
+        .expect("route channel open");
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::Acquire),
+        2,
+        "call-scoped claim + completion envelope claim, both held"
+    );
+    release_tx.send(()).await.expect("pipeline alive");
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), call_task)
+        .await
+        .expect("call must complete within 5s")
+        .expect("join")
+        .expect("call");
+    assert_eq!(response.into_inner().total, 1);
+
+    assert!(
+        wait_for_total(&counter, 0, std::time::Duration::from_secs(5)).await,
+        "call and completion claims all released exactly once"
+    );
+    assert_eq!(
+        seen_claims.load(std::sync::atomic::Ordering::Acquire),
+        2,
+        "chunk + completion envelopes each carried a minted claim"
+    );
+
+    cancel_token.cancel();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), consumer_task).await;
+    drop(release_tx);
+    let _ = pipeline_task.await;
+}
+
+/// Poll-free-friendly wait: yields between reads; bounded by `bound`.
+async fn wait_for_total(
+    counter: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    target: u64,
+    bound: std::time::Duration,
+) -> bool {
+    let _ = tokio::time::timeout(bound, async {
+        while counter.load(std::sync::atomic::Ordering::Acquire) != target {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    counter.load(std::sync::atomic::Ordering::Acquire) == target
+}

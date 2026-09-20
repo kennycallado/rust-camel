@@ -194,11 +194,28 @@ are not counted.
 - **THEN** the counter holds two claims (one per copy), and each
   subscriber's pipeline completion releases exactly its own claim
 
-#### Scenario: raw sender fast path stays uncounted
+#### Scenario: raw sender fast path mints at acceptance
 
-- **GIVEN** an http/grpc/ws/master per-request task that submits an
-  envelope through `ConsumerContext::sender()`
-- **WHEN** the envelope moves through the route pipeline
-- **THEN** the counter does not include it (documented exception; the
-  exchange is observable only through the component's own signals)
+- **GIVEN** an http/grpc/ws/master consumer that submits envelopes
+  through the raw `ConsumerContext::sender()` fast path, with the
+  counter captured at consumer start via
+  `ConsumerContext::in_flight_counter()`
+- **WHEN** the component dequeues an accepted wire message at its
+  acceptance point (http `RequestEnvelope` dequeue, grpc transport recv
+  or streaming chunk acceptance, ws frame acceptance, master epoch
+  bridge dequeue for uncounted delegate envelopes)
+- **THEN** the constructed envelope carries a claim minted from that
+  counter, `total_in_flight()` includes it from acceptance through
+  pipeline completion, and every rejection/early-exit path releases it
+  by drop
+
+#### Scenario: master delegate bridge never double counts
+
+- **GIVEN** a master delegate whose synthetic `ConsumerContext` has the
+  route counter installed (so the delegate's own `send()` mints at
+  bridge-channel entry)
+- **WHEN** the epoch bridge forwards the already-counted envelope to
+  the route pipeline
+- **THEN** the bridge mints nothing (the existing claim passes through
+  untouched) and the counter holds exactly one claim for that envelope
 
