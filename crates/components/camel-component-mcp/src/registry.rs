@@ -299,17 +299,22 @@ impl McpServerRegistry {
                 .lock()
                 .map_err(|_| McpError::Endpoint("McpServerRegistry lock poisoned".to_string()))?;
             // Evict a dead server so a fresh one can spawn (matches camel-http
-            // ServerRegistry dead-server eviction). The serve-loop JoinHandle's
-            // `is_finished()` is a reliable proxy for the listener being gone
-            // (crashed or aborted). The spawn counter is carried forward so a
+            // ServerRegistry dead-server eviction). rc-nyxti: the signal is
+            // the serve-future drop guard (`serve_alive`, camel-ws rc-onm5b
+            // pattern) — it flips on EVERY death mode (normal exit, serve
+            // error, abort, and runtime-drop cancellation, polled or not),
+            // covering the runtime-dropped-task class whose JoinHandle never
+            // reports completion; the old `monitor_task.is_finished()` signal
+            // missed exactly that. The spawn counter is carried forward so a
             // respawn continues the count instead of resetting it; the
             // security book dies with the slot — its plans belong to routes
             // on the dead listener, which re-register on restart.
             let mut carried: Option<Arc<AtomicUsize>> = None;
             if let Some(slot) = guard.get(bind)
                 && let Some(handle) = slot.cell.get()
-                && handle.monitor_task.is_finished()
+                && !handle.serve_alive.load(Ordering::Acquire)
             {
+                tracing::debug!(bind, "evicting dead MCP server entry (serve task gone)");
                 carried = Some(slot.spawn_count.clone());
                 guard.remove(bind);
             }
@@ -397,6 +402,11 @@ impl McpServerRegistry {
         let tool_registry = Arc::new(McpToolRegistry::new(cfg.effective_max_tools()));
         let resource_registry = Arc::new(McpResourceRegistry::new(cfg.effective_max_resources()));
 
+        // rc-nyxti: accept-loop liveness, flipped `false` by a drop guard
+        // captured into the serve future below (camel-ws rc-onm5b pattern)
+        // — the direct eviction signal read by `get_or_spawn`.
+        let serve_alive: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
+
         let (local_addr, monitor_task) = if let Some(tls) = &cfg.tls {
             let rustls_config = load_tls_config(&tls.cert_path, &tls.key_path)?;
             let addr: SocketAddr = bind.parse().map_err(|_| {
@@ -417,15 +427,20 @@ impl McpServerRegistry {
                 cfg.allowed_hosts.clone(),
             );
             // The serve loop IS the monitored task (no separate wrapper):
-            // storing its JoinHandle directly gives `get_or_spawn` a
-            // dead-server signal via `is_finished()` and gives tests a kill
-            // seam via `abort()`. Its terminal error is also fed to
-            // `bind_err_tx` so `spawn` can put the CAUSE in the startup
-            // error when the listener never comes up (a bare "did not come
-            // up" hides the reason); on the Ok path the sender is dropped
-            // unsent and the receiver falls back to a no-cause message.
+            // the JoinHandle stays the test kill seam via `abort()`, while
+            // rc-nyxti made the drop guard inside this future (not the
+            // handle's completion) the `get_or_spawn` eviction signal. The
+            // terminal error is also fed to `bind_err_tx` so `spawn` can put
+            // the CAUSE in the startup error when the listener never comes
+            // up (a bare "did not come up" hides the reason); on the Ok path
+            // the sender is dropped unsent and the receiver falls back to a
+            // no-cause message.
             let (bind_err_tx, bind_err_rx) = tokio::sync::oneshot::channel::<String>();
+            let alive_guard = ServeAliveGuard(Arc::clone(&serve_alive));
             let monitor_task = tokio::spawn(async move {
+                // rc-nyxti: dropped with this future on every death mode —
+                // flips `serve_alive` for lazy eviction.
+                let _alive = alive_guard;
                 if let Err(e) = axum_server::bind_rustls(addr, tls_config)
                     .handle(task_handle)
                     .serve(app.into_make_service_with_connect_info::<SocketAddr>())
@@ -469,7 +484,11 @@ impl McpServerRegistry {
             // Same serve-loop-as-monitored-task shape as the TLS branch.
             // `into_make_service_with_connect_info` feeds the rejection warn
             // layer's peer field (spec: rejection warn names the peer).
+            let alive_guard = ServeAliveGuard(Arc::clone(&serve_alive));
             let monitor_task = tokio::spawn(async move {
+                // rc-nyxti: dropped with this future on every death mode —
+                // flips `serve_alive` for lazy eviction.
+                let _alive = alive_guard;
                 if let Err(e) = axum::serve(
                     listener,
                     app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -492,7 +511,23 @@ impl McpServerRegistry {
             cfg,
             spawn_count,
             monitor_task,
+            serve_alive,
         }))
+    }
+}
+
+/// Drop guard that flips `serve_alive` to `false` when the serve future is
+/// gone (rc-nyxti, camel-ws rc-onm5b pattern). Captured into the serve
+/// future by value — so it is part of the future's state from construction,
+/// before the first poll — which makes runtime-drop cancellation (the task
+/// dropped without ever being polled, or parked mid-accept at runtime
+/// shutdown) flip the flag just like a normal exit, serve error, or abort
+/// does.
+struct ServeAliveGuard(Arc<AtomicBool>);
+
+impl Drop for ServeAliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -548,11 +583,20 @@ pub struct McpListenerHandle {
     /// dead-server respawns (shared with the registry slot so eviction doesn't
     /// reset it).
     pub spawn_count: Arc<AtomicUsize>,
-    /// JoinHandle for the spawned serve loop. `is_finished()` is the
-    /// dead-server eviction signal in `get_or_spawn`, and `abort()` is the kill
-    /// seam used by tests. No separate monitor wrapper: the serve loop is the
-    /// monitored task directly, so aborting it stops the listener.
+    /// JoinHandle for the spawned serve loop. rc-nyxti: no longer the
+    /// eviction signal (a runtime-dropped task's JoinHandle never reports
+    /// completion — eviction reads `serve_alive` instead); retained as the
+    /// kill seam used by tests (`abort()` stops the listener directly).
     pub monitor_task: tokio::task::JoinHandle<()>,
+    /// Accept-loop liveness (rc-nyxti): flipped to `false` by a drop guard
+    /// captured into the serve future, so it fires on EVERY death mode —
+    /// normal exit, serve error, abort, and runtime-drop cancellation,
+    /// polled or not. `get_or_spawn` reads this as the dead-server
+    /// eviction signal; it is strictly more reliable than the JoinHandle's
+    /// completion (a runtime-dropped task never reports completion, and a
+    /// joiner arriving after serve-future death but before completion would
+    /// rejoin the corpse).
+    pub serve_alive: Arc<AtomicBool>,
 }
 
 /// Manual `Debug` — `cfg.tls` holds certificate/key PATHS (not material);

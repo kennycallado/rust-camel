@@ -12,7 +12,7 @@
 //! production count. The number may only decrease (monotone). Lowering it is
 //! the ratchet action; raising it is a review-visible regression signal.
 
-use crate::scan_state::{self, Brace, ScanState};
+use crate::scan_state::TestScopeTracker;
 use std::path::{Component, Path};
 use walkdir::WalkDir;
 
@@ -136,46 +136,15 @@ fn collect_sites_from_path(path: &Path, sites: &mut Vec<CancelTokenSite>) {
 /// counted — site detection is a line-level `contains`, not state-aware.
 fn collect_sites_from_src(src: &str, file: &str, sites: &mut Vec<CancelTokenSite>) {
     let lines: Vec<&str> = src.lines().collect();
-    let mut state = ScanState::Normal;
-    let mut pending_test_attr = false;
-    let mut test_scope_entry_depth: Option<i32> = None;
-    let mut brace_depth: i32 = 0;
+    let mut tracker = TestScopeTracker::new();
 
     for (line_idx, raw_line) in lines.iter().enumerate() {
         let trimmed = raw_line.trim();
 
-        if test_scope_entry_depth.is_none() && is_test_attr_line(trimmed) {
-            pending_test_attr = true;
-        }
-
-        scan_state::scan_line(trimmed, &mut state, &mut |brace| match brace {
-            Brace::Open => {
-                brace_depth += 1;
-                if pending_test_attr && test_scope_entry_depth.is_none() {
-                    test_scope_entry_depth = Some(brace_depth - 1);
-                    pending_test_attr = false;
-                }
-            }
-            Brace::Close => {
-                brace_depth -= 1;
-                if let Some(entry) = test_scope_entry_depth
-                    && brace_depth <= entry
-                {
-                    test_scope_entry_depth = None;
-                }
-            }
-        });
-
-        // An attribute on a non-block item (`#[test] fn f();`-style) never
-        // opens a scope.
-        if pending_test_attr && test_scope_entry_depth.is_none() && trimmed.contains(';') {
-            pending_test_attr = false;
-        }
-
-        if pending_test_attr || test_scope_entry_depth.is_some() {
+        if tracker.line_in_test_scope(trimmed) {
             continue;
         }
-        if trimmed.starts_with("//") {
+        if tracker.in_normal_context() && trimmed.starts_with("//") {
             continue;
         }
 
@@ -195,52 +164,10 @@ fn collect_sites_from_src(src: &str, file: &str, sites: &mut Vec<CancelTokenSite
     }
 }
 
-/// True for attribute lines that open a test scope: `#[cfg(test)]`,
-/// `#[test]`, `#[tokio::test]`, and `#[cfg(all(...))]` / `#[cfg(any(...))]`
-/// conjunctions whose DIRECT predicate list contains `test` (e.g.
-/// `#[cfg(all(test, feature = "llm"))]`, used by camel-component-api).
-/// Nested predicates do not count: `#[cfg(not(test))]` compiles its body
-/// in non-test builds and stays production scope.
-fn is_test_attr_line(trimmed: &str) -> bool {
-    trimmed.starts_with("#[cfg(test)]")
-        || trimmed.starts_with("#[test]")
-        || trimmed.starts_with("#[tokio::test]")
-        || cfg_conjunction_has_direct_test_predicate(trimmed)
-}
-
-/// `#[cfg(all/any(...))]` where a top-level predicate of the conjunction
-/// is exactly `test`. Nested conjunctions (e.g. `all(test, any(...))`)
-/// still count — the `test` predicate is direct; `not(test)` does not.
-fn cfg_conjunction_has_direct_test_predicate(trimmed: &str) -> bool {
-    let Some(rest) = trimmed.strip_prefix("#[cfg(") else {
-        return false;
-    };
-    let Some(body) = rest
-        .strip_prefix("all(")
-        .or_else(|| rest.strip_prefix("any("))
-    else {
-        return false;
-    };
-    // The conjunction body runs to its matching close paren; predicates
-    // are its top-level comma-separated segments.
-    let mut depth = 1usize;
-    let mut end = body.len();
-    for (i, ch) in body.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = i;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    body[..end].split(',').any(|pred| pred.trim() == "test")
-}
-
+/// Test-scope attribute recognition (`is_test_attr_line`) lives in
+/// [`scan_state`](crate::scan_state) beside [`TestScopeTracker`] since
+/// rc-xkx42 extracted the shared tracker.
+///
 /// Same test-file rule as the other lints (`lint_unwrap`, `lint_log_levels`):
 /// `tests/` dirs, `test_*`, `*_test.rs`, `*_tests.rs`, `tests.rs`, `build.rs`.
 fn is_test_file(path: &Path) -> bool {

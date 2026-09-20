@@ -309,6 +309,47 @@ mod tests {
     }
 
     #[test]
+    fn unverified_scheme_span_exact_for_quoted_uri() {
+        // Regression (rc-bsx4t): the scheme span used to start at the YAML
+        // opening quote (`"jm` for from: "jms:queue"). It must slice the
+        // exact scheme token for quoted scalars.
+        let source = "id: r1\nfrom: \"kafka:topic\"\n";
+        let diags = analyze(source, &StubCatalog::empty());
+        let note = diags
+            .iter()
+            .find(|d| {
+                matches!(
+                    d.code,
+                    DiagnosticCode::RUriKnown(UriKnownSubCode::UnverifiedScheme)
+                )
+            })
+            .expect("UnverifiedScheme diagnostic present");
+        assert_eq!(slice(source, &note.span), "kafka");
+    }
+
+    #[test]
+    fn unknown_option_span_exact_for_quoted_uri() {
+        // Query-option spans derive from `uri.span.start` too: on a quoted
+        // URI the key span must slice the exact key token.
+        let catalog = StubCatalog::empty()
+            .with("direct", ComponentMetadata::minimal("direct"))
+            .with(
+                "timer",
+                meta_with_options(
+                    "timer",
+                    vec![UriOption::new("period", "period", OptionKind::Duration)],
+                ),
+            );
+        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: \"timer:foo?frequency=1s\"\n";
+        let diags = analyze(source, &catalog);
+        let d = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::UnknownOption))
+            .expect("UnknownOption diagnostic present");
+        assert_eq!(slice(source, &d.span), "frequency");
+    }
+
+    #[test]
     fn minimal_known_scheme_is_silent() {
         // `redis` is registered with minimal metadata (no uri_options): known
         // but nothing to validate → no UnverifiedScheme, no option diagnostics.

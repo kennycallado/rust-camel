@@ -1746,61 +1746,31 @@ fn is_test_file(path: &std::path::Path) -> bool {
 /// braces appear in literals.
 fn lint_unwrap_src(src: &str, file_path: &str) -> Vec<Violation> {
     use regex::Regex;
-    use scan_state::{Brace, ScanState, scan_line};
+    use scan_state::TestScopeTracker;
 
     let unwrap_re = Regex::new(r"\.(unwrap\(\)|expect\()").expect("valid regex"); // allow-unwrap
     let lines: Vec<&str> = src.lines().collect();
 
-    let mut current_state = ScanState::Normal;
-    let mut pending_test_attr = false;
-    let mut test_scope_entry_depth: Option<i32> = None;
-    let mut brace_depth: i32 = 0;
+    // Literal/comment-aware test-scope tracking (scan_state, rc-4fs /
+    // rc-drcgf / rc-xkx42): shared tracker prevents false
+    // test-scope-exit when unbalanced braces appear in literals. It also
+    // widened this lint's attribute set (rc-xkx42): `#[tokio::test]` and
+    // `#[cfg(all/any(..., test, ...))]` conjunctions now open test scope
+    // — those unwraps were always test-scope, previously misflagged.
+    let mut tracker = TestScopeTracker::new();
     let mut violations = Vec::new();
 
     for (line_idx, raw_line) in lines.iter().enumerate() {
         let trimmed = raw_line.trim();
 
-        // Detect test attributes only when not already inside a test scope.
-        if test_scope_entry_depth.is_none()
-            && (trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]"))
-        {
-            pending_test_attr = true;
-        }
-
-        let entering_test_scope = pending_test_attr && test_scope_entry_depth.is_none();
-
-        // State-machine brace counting — persists across lines.
-        scan_line(trimmed, &mut current_state, &mut |brace| match brace {
-            Brace::Open => {
-                brace_depth += 1;
-                if pending_test_attr && test_scope_entry_depth.is_none() {
-                    test_scope_entry_depth = Some(brace_depth - 1);
-                    pending_test_attr = false;
-                }
-            }
-            Brace::Close => {
-                brace_depth -= 1;
-                if let Some(entry) = test_scope_entry_depth
-                    && brace_depth <= entry
-                {
-                    test_scope_entry_depth = None;
-                }
-            }
-        });
-
-        // Clear pending_test_attr if no brace was opened on a semicolon line.
-        if pending_test_attr && test_scope_entry_depth.is_none() && trimmed.contains(';') {
-            pending_test_attr = false;
-        }
-
         // Skip: the attribute line itself, the line that opens a test scope,
         // and all lines inside a test scope.
-        if pending_test_attr || entering_test_scope || test_scope_entry_depth.is_some() {
+        if tracker.line_in_test_scope(trimmed) {
             continue;
         }
 
         // Skip pure comment lines (only when not mid-block-comment).
-        if current_state == ScanState::Normal && trimmed.starts_with("//") {
+        if tracker.in_normal_context() && trimmed.starts_with("//") {
             continue;
         }
 
@@ -2671,25 +2641,27 @@ fn validate_inline_escape_markers(
 /// - camel-log LogProducer: user-output mechanism, NOT framework telemetry.
 ///   Per oracle ruling ses_16262b201ffeCmO67e3T6qa73b.
 fn is_structurally_excluded(file_rel: &str, lines: &[&str], line_idx: usize) -> bool {
+    use scan_state::{Brace, ScanState, scan_line};
     // camel-log LogProducer — symbol-bound inside `impl Service<Exchange> for LogProducer`
     if file_rel.contains("camel-log/src/lib.rs") {
         let impl_start = lines
             .iter()
             .position(|l| l.contains("impl Service<Exchange> for LogProducer"));
         if let Some(start) = impl_start {
+            // Literal/comment-aware brace counting (rc-xkx42): a '}' inside
+            // a string/char literal or comment in the impl body must not
+            // truncate the exclusion window early.
+            let mut state = ScanState::Normal;
             let mut depth: i32 = 0;
             let mut seen_open = false;
             for (i, line) in lines.iter().enumerate().skip(start) {
-                for ch in line.chars() {
-                    match ch {
-                        '{' => {
-                            depth += 1;
-                            seen_open = true;
-                        }
-                        '}' => depth -= 1,
-                        _ => {}
+                scan_line(line.trim(), &mut state, &mut |brace| match brace {
+                    Brace::Open => {
+                        depth += 1;
+                        seen_open = true;
                     }
-                }
+                    Brace::Close => depth -= 1,
+                });
                 if seen_open && depth <= 0 {
                     return line_idx >= start && line_idx <= i;
                 }
@@ -2701,7 +2673,6 @@ fn is_structurally_excluded(file_rel: &str, lines: &[&str], line_idx: usize) -> 
 
 pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> {
     use regex::Regex;
-    use scan_state::{Brace, ScanState, scan_line};
     use std::path::Component;
     use walkdir::WalkDir;
 
@@ -2764,52 +2735,20 @@ pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> 
             .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
         let lines: Vec<&str> = content.lines().collect();
-        let mut pending_test_attr = false;
-        let mut test_scope_entry_depth: Option<i32> = None;
-        let mut brace_depth: i32 = 0;
-        // Literal/comment-aware scanner state, persists across lines
-        // (rc-0jdc2 port of the lint_unwrap_src / lint_cancel_tokens
-        // machinery): braces inside strings, chars, raw strings, and
-        // comments must not skew test-scope tracking.
-        let mut scan = ScanState::Normal;
+        // Literal/comment-aware test-scope tracking (rc-xkx42): the shared
+        // TestScopeTracker replaces this lint's naive brace counting and its
+        // attribute-blindness — `#[tokio::test]` and
+        // `#[cfg(all/any(..., test, ...))]` conjunctions now open test
+        // scope, matching lint_cancel_tokens.
+        let mut tracker = scan_state::TestScopeTracker::new();
 
         for (line_idx, raw_line) in lines.iter().enumerate() {
             let trimmed = raw_line.trim();
 
-            if test_scope_entry_depth.is_none()
-                && (trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]"))
-            {
-                pending_test_attr = true;
-            }
-
-            let entering_test_scope = pending_test_attr && test_scope_entry_depth.is_none();
-
-            scan_line(trimmed, &mut scan, &mut |brace| match brace {
-                Brace::Open => {
-                    brace_depth += 1;
-                    if pending_test_attr && test_scope_entry_depth.is_none() {
-                        test_scope_entry_depth = Some(brace_depth - 1);
-                        pending_test_attr = false;
-                    }
-                }
-                Brace::Close => {
-                    brace_depth -= 1;
-                    if let Some(entry) = test_scope_entry_depth
-                        && brace_depth <= entry
-                    {
-                        test_scope_entry_depth = None;
-                    }
-                }
-            });
-
-            if pending_test_attr && test_scope_entry_depth.is_none() && trimmed.contains(';') {
-                pending_test_attr = false;
-            }
-
-            if pending_test_attr || entering_test_scope || test_scope_entry_depth.is_some() {
+            if tracker.line_in_test_scope(trimmed) {
                 continue;
             }
-            if trimmed.starts_with("//") {
+            if tracker.in_normal_context() && trimmed.starts_with("//") {
                 continue;
             }
 

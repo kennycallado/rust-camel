@@ -140,6 +140,80 @@ async fn dead_listener_is_respawned() {
     );
 }
 
+/// Leave a listened-then-dead entry in the global registry (rc-nyxti
+/// harness, port of camel-ws rc-onm5b): spawn an MCP listener on a
+/// dedicated current-thread runtime, let that runtime poll the serve task
+/// into its accept park (LISTENED, proven by a live TCP connect), then drop
+/// the runtime so the parked serve task dies mid-park. Returns the corpse
+/// entry's resolved address.
+///
+/// This is the death mode `#[tokio::test]` runtimes inflict at test end:
+/// the task is dropped, not run to completion, and its JoinHandle may never
+/// report completion — while the process-lifetime registry keeps the
+/// initialized entry for the next test to join via ephemeral port reuse.
+/// Only the serve-future drop guard (`serve_alive`) observes this death
+/// deterministically.
+fn leave_listened_then_dead_entry(bind: &str) -> std::net::SocketAddr {
+    let bind = bind.to_string();
+    std::thread::spawn(move || {
+        let owner_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("owner runtime");
+        owner_rt.block_on(async {
+            let handle = McpServerRegistry::global()
+                .get_or_spawn(&bind, &cfg(&bind, None))
+                .await
+                .expect("owner server entry should spawn");
+            // Yield so the owner runtime polls the serve task into its
+            // accept park: the entry has now LISTENED before it dies.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Liveness proof at the moment of death: the bound socket
+            // accepts a connection into its backlog.
+            tokio::net::TcpStream::connect(handle.local_addr)
+                .await
+                .expect("owner accept loop must be live before death");
+            handle.local_addr
+        })
+    })
+    .join()
+    .expect("owner thread must not panic")
+}
+
+#[tokio::test]
+async fn listened_then_dead_entry_is_evicted_by_serve_drop() {
+    // Pinned regression (rc-nyxti): a runtime-dropped serve task's
+    // JoinHandle never reports completion, so the old `is_finished()`
+    // eviction signal would keep the corpse entry forever — a later
+    // `get_or_spawn` would rejoin the dead listener. The serve-future drop
+    // guard flips `serve_alive` during runtime shutdown (inside the owner
+    // thread, before join() returns), so eviction here is deterministic.
+    let bind = "127.0.0.26:0";
+    let dead_addr = leave_listened_then_dead_entry(bind);
+
+    let fresh = McpServerRegistry::global()
+        .get_or_spawn(bind, &cfg(bind, None))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fresh.spawn_count.load(Ordering::SeqCst),
+        2,
+        "the corpse entry must have been evicted and respawned (count carried)"
+    );
+    assert_ne!(
+        fresh.local_addr.port(),
+        dead_addr.port(),
+        "respawn must bind a fresh ephemeral port, not rejoin the corpse's"
+    );
+    assert!(
+        tokio::net::TcpStream::connect(fresh.local_addr)
+            .await
+            .is_ok(),
+        "respawned listener must accept connections"
+    );
+}
+
 #[tokio::test]
 async fn conflicting_bind_max_tools_rejected() {
     let bind = "127.0.0.5:0";

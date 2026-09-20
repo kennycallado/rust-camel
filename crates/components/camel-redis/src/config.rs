@@ -1108,6 +1108,12 @@ pub fn is_auth_failure_message(msg: &str) -> bool {
 
 /// Append sentinel-plane guidance to a sentinel-side connect error when it
 /// looks like an auth failure; non-auth errors pass through unchanged.
+///
+/// Production call sites live behind `#[cfg(feature = "sentinel")]`
+/// (SentinelTopology::resolve); like `embed_sentinel_creds`, this pure
+/// helper is deliberately kept compilable and unit-testable without the
+/// feature.
+#[cfg_attr(not(feature = "sentinel"), allow(dead_code))]
 pub(crate) fn enrich_sentinel_auth_error(msg: String) -> String {
     if !is_auth_failure_message(&msg) {
         return msg;

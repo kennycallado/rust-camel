@@ -402,7 +402,7 @@ fn walk(
                 {
                     *from_slot = Some(Spanned {
                         value: s.to_string(),
-                        span: Span::new(start, end),
+                        span: unquoted_span(doc, start, end),
                     });
                     *from_parameters = effective.clone();
                     continue;
@@ -547,7 +547,7 @@ fn endpoint_for(
     params: &[LintOption],
 ) -> Option<Spanned<LintNode>> {
     let (start, end) = doc.span_at(path)?;
-    let span = Span::new(start, end);
+    let span = unquoted_span(doc, start, end);
     let mut options = LintOption::parse_from_query(uri, span.clone());
     options.extend(params.iter().cloned());
     Some(Spanned {
@@ -605,6 +605,24 @@ pub(crate) fn value_span_for(doc: &cst::Document, path: &str) -> Span {
     }
 }
 
+/// Trim a matching quote pair from a scalar value span. `span_at` returns the
+/// raw YAML scalar token — quotes included for quoted scalars — but endpoint
+/// URI spans must index the UNQUOTED value: downstream consumers slice
+/// `uri.value` offsets against `uri.span.start` (R-URI-known's scheme span,
+/// `parse_from_query`'s option spans, engine completions), so an untrimmed
+/// span lands one byte early on every quoted URI. Boundary-trim only — inner
+/// escapes never touch the first/last byte of the quoted content.
+fn unquoted_span(doc: &cst::Document, start: usize, end: usize) -> Span {
+    if end >= start + 2 {
+        let raw = doc.source().as_bytes();
+        let (first, last) = (raw[start], raw[end - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return Span::new(start + 1, end - 1);
+        }
+    }
+    Span::new(start, end)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -630,6 +648,26 @@ mod tests {
         assert_eq!(&source[from.span.start..from.span.end], "direct:start");
         assert_eq!(from.span.start, 6, "`direct:start` begins at byte 6");
         assert_eq!(from.value, "direct:start");
+    }
+
+    #[test]
+    fn quoted_uri_span_excludes_quote_pair() {
+        // Quoted YAML scalars (double and single): the URI span must index
+        // the unquoted content so scheme/option spans derived from
+        // `uri.span.start` slice byte-exact tokens.
+        let source = "from: \"direct:start\"\nsteps:\n  - to: 'log:out'\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let from = doc.route_view.from.as_ref().expect("from must be captured");
+        assert_eq!(slice_at(&doc.raw, &from.span), "direct:start");
+        assert_eq!(from.span.start, 7, "content begins after the opening quote");
+        let to_ep = doc
+            .route_view
+            .endpoints()
+            .into_iter()
+            .find(|e| e.uri.value == "log:out")
+            .expect("to endpoint must be captured");
+        assert_eq!(slice_at(&doc.raw, &to_ep.uri.span), "log:out");
     }
 
     #[test]
