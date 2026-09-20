@@ -222,6 +222,8 @@ configuration, not the data plane.
 | --------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CXF_MAX_BODY_BYTES`  | `16777216` (16 MiB)  | Body cap in bytes for both directions: the listener request body (rejected with HTTP 413) and the serialized producer response body (over-cap responses fail the invoke with `RESOURCE_EXHAUSTED`). |
 | `CXF_MAX_DISPATCHES`  | `64`                 | Bound on the producer Dispatch cache (ceiling 1024); the least-recently-used entry is evicted and closed when an insertion would exceed it.                |
+| `QUARKUS_OTEL_SDK_DISABLED` | `true`          | Set `false` to enable the bridge's OTel SDK. Fail-closed pair with the endpoint var.                                                                     |
+| `QUARKUS_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | _(none)_ | Trusted OTLP collector, e.g. `http://collector:4317`. Required when the SDK is enabled: startup aborts without it (no dial-out defaults).               |
 
 A malformed, non-positive, or above-ceiling value aborts startup for both variables. The body-cap ceiling is 17 MiB. Operators must respect the ordering constraint: the cap stays at or below 17 MiB, and the Rust gRPC decode limit is 18 MiB. A body accepted by the listener is therefore always decodable on the Rust side. The dispatch-cap ceiling is 1024.
 

@@ -14,6 +14,8 @@ A Quarkus-based gRPC bridge that exposes JMS messaging to the Rust runtime. The 
 | `BRIDGE_BROKER_KEYSTORE_PATH`   | _(none)_                | PKCS12 keystore for secure broker schemes. Operator-provided.                                                         |
 | `BRIDGE_BROKER_TRUSTSTORE_PATH` | _(none)_                | PKCS12 truststore for secure broker schemes. Operator-provided.                                                       |
 | `BRIDGE_BROKER_KEYSTORE_PASSWORD` | _(none)_              | Keystore password.                                                                                                    |
+| `QUARKUS_OTEL_SDK_DISABLED`        | `true`                | Set `false` to enable the bridge's OTel SDK (spans continue the Rust-side trace). Fail-closed pair with the endpoint var. |
+| `QUARKUS_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | _(none)_    | Trusted OTLP collector, e.g. `http://collector:4317`. Required when the SDK is enabled: startup aborts without it (no dial-out defaults). |
 
 ### Body cap
 
