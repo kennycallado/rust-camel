@@ -43,6 +43,9 @@ dependencies {
 
     testImplementation("io.quarkus:quarkus-junit5")
     testImplementation("io.grpc:grpc-testing")
+    testImplementation("org.mockito:mockito-core:5.12.0")
+    // In-memory SpanExporter for otel wiring tests (no collector, no egress)
+    testImplementation("io.opentelemetry:opentelemetry-sdk-testing")
 }
 
 java {
