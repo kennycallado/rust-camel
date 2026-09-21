@@ -22,7 +22,6 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use camel_api::Body;
-use camel_api::CamelError;
 use camel_api::Exchange;
 use camel_api::Message;
 use camel_api::Value;
@@ -878,17 +877,12 @@ impl PartnerAdapter for DirectStimulus {
                     // `expectReply` assertion reads (rc-qvz6).
                     Ok(reply) => return Ok(Some(reply)),
                     Err(e) => {
-                        // The direct producer types the startup race as
-                        // EndpointCreationFailed at both error sites:
-                        // poll_ready ("direct endpoint '{}' not registered",
-                        // camel-direct/src/lib.rs) and call ("no consumer
-                        // registered for direct:{name}"). No string matching.
-                        // The SEDA no-active-consumers gate shares the
-                        // variant but fails fast — retrying duplicates
-                        // executed side effects (rc-tgaxf).
-                        let is_startup_race =
-                            !camel_component_seda::is_no_active_consumers_gate(&e)
-                                && matches!(e, CamelError::EndpointCreationFailed(_));
+                        // Structural startup-race classification via the
+                        // shared seda predicate (rc-utx98):
+                        // EndpointCreationFailed minus the no-active-consumers
+                        // gate, which fails fast (rc-tgaxf). The full
+                        // rationale lives on the predicate's rustdoc.
+                        let is_startup_race = camel_component_seda::is_direct_startup_race(&e);
                         if is_startup_race && tokio::time::Instant::now() < deadline {
                             tokio::time::sleep(STIMULUS_RETRY_SLEEP).await;
                             continue;

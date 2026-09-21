@@ -275,9 +275,7 @@ async fn deliver_input(
                 // readiness probe makes this error unreachable in practice;
                 // failing fast here is the accurate outcome when it still
                 // fires.
-                let is_startup_race = !camel_component_seda::is_no_active_consumers_gate(&e)
-                    && (matches!(e, camel_api::CamelError::EndpointCreationFailed(_))
-                        || e.to_string().contains("not registered"));
+                let is_startup_race = camel_component_seda::is_direct_startup_race(&e);
                 if is_startup_race && tokio::time::Instant::now() < deadline {
                     tokio::time::sleep(STARTUP_RETRY_SLEEP).await;
                     continue;

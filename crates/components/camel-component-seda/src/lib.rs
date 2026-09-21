@@ -548,6 +548,23 @@ pub fn is_no_active_consumers_gate(err: &CamelError) -> bool {
         || matches!(err, CamelError::EndpointCreationFailed(msg) if msg.contains("has no active subscribers"))
 }
 
+/// True for the consumer-startup race a sender may safely retry: an
+/// [`CamelError::EndpointCreationFailed`] that is NOT the SEDA
+/// no-active-consumers gate. The direct component reports its startup
+/// race ("direct endpoint '{}' not registered" at poll_ready, "no
+/// consumer registered for direct:{name}" at call) under this variant,
+/// so the variant — not the Display wording — carries the
+/// classification (rc-fr20u doctrine). The gate shares the variant but
+/// must FAIL FAST: it rejects pre-enqueue yet INSIDE the caller's
+/// pipeline, so a retry duplicates already-executed side effects
+/// (rc-tgaxf) — [`is_no_active_consumers_gate`] is the exclusion
+/// discriminator this crate owns. Boundary (rc-utx98): a text-carrying
+/// `ProcessorError` ("… not registered") is NOT a startup race —
+/// terminal, never retried; only the variant decides.
+pub fn is_direct_startup_race(err: &CamelError) -> bool {
+    !is_no_active_consumers_gate(err) && matches!(err, CamelError::EndpointCreationFailed(_))
+}
+
 type SedaRegistry = Arc<Mutex<HashMap<String, Arc<SedaEndpointState>>>>;
 
 /// Cloning shares the endpoint registry, so a clone registered into a
@@ -2443,6 +2460,88 @@ mod consumer_producer_tests {
             )
         ));
         assert!(!is_no_active_consumers_gate(&CamelError::Config(
+            "unrelated".to_string()
+        )));
+    }
+
+    /// `is_direct_startup_race` is the shared structural classification for
+    /// the consumer-startup race a sender may safely retry (rc-utx98): the
+    /// `EndpointCreationFailed` variant minus the SEDA no-active-consumers
+    /// gate, which fails fast. The direct component's poll_ready wording
+    /// ("direct endpoint '{}' not registered") is retryable.
+    #[test]
+    fn direct_startup_race_poll_ready_wording_is_retryable() {
+        assert!(is_direct_startup_race(&CamelError::EndpointCreationFailed(
+            "direct endpoint 'out' not registered".to_string()
+        )));
+    }
+
+    /// The direct component's call-site wording ("no consumer registered
+    /// for direct:{name}") is retryable too — the variant, not the Display
+    /// wording, carries the classification (rc-fr20u doctrine).
+    #[test]
+    fn direct_startup_race_call_wording_is_retryable() {
+        assert!(is_direct_startup_race(&CamelError::EndpointCreationFailed(
+            "no consumer registered for direct:out".to_string()
+        )));
+    }
+
+    /// Conservative by design: any non-gate `EndpointCreationFailed` is
+    /// treated as a retryable startup race.
+    #[test]
+    fn generic_endpoint_creation_failed_is_retryable() {
+        assert!(is_direct_startup_race(&CamelError::EndpointCreationFailed(
+            "boom".to_string()
+        )));
+    }
+
+    /// The SEDA Single-mode gate wording fails fast — retrying duplicates
+    /// already-executed side effects (rc-tgaxf).
+    #[test]
+    fn seda_gate_single_fails_fast() {
+        assert!(!is_direct_startup_race(
+            &CamelError::EndpointCreationFailed(
+                "SEDA endpoint 'x' has no active consumers".to_string()
+            )
+        ));
+    }
+
+    /// The SEDA Fanout-mode gate wording fails fast (rc-tgaxf).
+    #[test]
+    fn seda_gate_fanout_fails_fast() {
+        assert!(!is_direct_startup_race(
+            &CamelError::EndpointCreationFailed(
+                "SEDA endpoint 'x' has no active subscribers".to_string()
+            )
+        ));
+    }
+
+    /// The 187-doctrine boundary: the former text sniff retried a
+    /// `ProcessorError` carrying "not registered"; structurally it is
+    /// terminal — never retried. Only the variant decides (rc-utx98).
+    #[test]
+    fn text_carrying_processor_error_is_terminal() {
+        assert!(!is_direct_startup_race(&CamelError::ProcessorError(
+            "endpoint 'x' not registered".to_string()
+        )));
+    }
+
+    /// A generic `ProcessorError` is terminal — never a startup race.
+    #[test]
+    fn generic_processor_error_is_terminal() {
+        assert!(!is_direct_startup_race(&CamelError::ProcessorError(
+            "boom".to_string()
+        )));
+    }
+
+    /// Unrelated variants are terminal: no variant, no retry.
+    #[test]
+    fn unrelated_variants_are_terminal() {
+        assert!(!is_direct_startup_race(&CamelError::ComponentNotFound(
+            "direct".to_string()
+        )));
+        assert!(!is_direct_startup_race(&CamelError::Io("boom".to_string())));
+        assert!(!is_direct_startup_race(&CamelError::Config(
             "unrelated".to_string()
         )));
     }
