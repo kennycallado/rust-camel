@@ -105,16 +105,16 @@ component grows a genuine credential leaf, the principle says extend
 retained for compatibility; it is OFF the load path.
 
 PROVENANCE + TYPED PROBE (env-int-placeholder-typing): the walk also returns a
-`struct ProvenanceSet` (`config.rs:3016`) of STRUCTURAL
-`enum ConfigSeg` (`config.rs:3007`) paths for token-bearing string leaves
+`struct ProvenanceSet` (`env_int_probe.rs:34`) of STRUCTURAL
+`enum ConfigSeg` (`env_int_probe.rs:25`) paths for token-bearing string leaves
 only — recorded before resolution, in document order. Resolution behavior
 is unchanged; `fn resolve_tree_with` delegates to
-`fn resolve_tree_with_provenance` (`config.rs:3091`) and discards the set.
+`fn resolve_tree_with_provenance` (`config.rs:3180`) and discards the set.
 At the strict `try_into` boundary, the probe
-(`fn deserialize_with_probe`, `config.rs:3280`) first runs today's strict
+(`fn deserialize_with_probe`, `env_int_probe.rs:142`) first runs today's strict
 deserialization; on failure it tries candidate subsets ascending-size (cap
 8), coercing leaves whose post-resolution text passes
-`fn clean_i64` (`config.rs:3236`; i64-only, a SYNC mirror of camel-dsl's
+`fn clean_i64` (`env_int_probe.rs:98`; i64-only, a SYNC mirror of camel-dsl's
 u64-inclusive `clean_integer`) to `toml::Value::Integer` in cloned trees.
 First success wins; otherwise the original first-pass error stands. Because
 `CAMEL_*` overrides merge into the raw tree BEFORE the walk, a token-bearing

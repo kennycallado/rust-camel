@@ -38,9 +38,10 @@ const MAX_PROBE_CANDIDATES: usize = 8;
 /// zeros — YAML 1.1 octal ambiguity; floats, bools, and `1e3` are not
 /// clean), then an exact i64 or u64 parse (overflow past u64 is not clean).
 /// Returns the number leaf the candidate is coerced to.
-// SYNC: this rule is mirrored by camel-config's `clean_i64` (config.rs) and
-// camel-lint's typing-mirror carve-out (rschema.rs); crate purity forbids
-// the dependency. Update all three together.
+// SYNC: this rule is mirrored by camel-config's `clean_i64`
+// (crates/camel-config/src/env_int_probe.rs) and camel-lint's
+// typing-mirror carve-out (rschema.rs); crate purity forbids the
+// dependency. Update all three together.
 pub(crate) fn clean_integer(s: &str) -> Option<serde_yml::Value> {
     let digits = s.strip_prefix('-').unwrap_or(s);
     let lexically_clean = match digits.as_bytes() {

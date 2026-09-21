@@ -6,6 +6,7 @@
 pub mod config;
 pub(crate) mod context_ext;
 pub mod discovery;
+mod env_int_probe;
 pub(crate) mod filter;
 pub(crate) mod include;
 pub mod json;
