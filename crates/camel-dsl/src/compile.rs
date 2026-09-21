@@ -920,6 +920,7 @@ fn supported_exception_kinds() -> Vec<&'static str> {
         "StreamLimitExceeded",
         "Unauthenticated",
         "Unauthorized",
+        "AuthProviderUnavailable",
         "ValidationError",
     ]
 }
@@ -954,6 +955,10 @@ fn exception_kind_matches(kind: &str, err: &CamelError) -> bool {
         // raised inside the route body.
         "Unauthenticated" => matches!(err, CamelError::Unauthenticated(_)),
         "Unauthorized" => matches!(err, CamelError::Unauthorized(_)),
+        // rc-2vm2y: auth-family sibling of the above; ws/gRPC transports
+        // map it to 503/UNAVAILABLE. Distinct from ProcessorError despite
+        // the variant_name() alias (spec §5.4) — matching is structural.
+        "AuthProviderUnavailable" => matches!(err, CamelError::AuthProviderUnavailable(_)),
         "ValidationError" => matches!(err, CamelError::ValidationError(_)),
         _ => false,
     }
@@ -2442,6 +2447,7 @@ mod tests {
             "StreamLimitExceeded",
             "Unauthenticated",
             "Unauthorized",
+            "AuthProviderUnavailable",
             "ValidationError",
         ];
 
@@ -2493,6 +2499,67 @@ mod tests {
                 "kind {kind} should not match unrelated variants"
             );
         }
+    }
+
+    #[test]
+    fn test_compile_error_handler_auth_provider_unavailable_matches() {
+        // rc-2vm2y: AuthProviderUnavailable (auth-family sibling of
+        // Unauthenticated/Unauthorized, 503-class via ws/gRPC transports)
+        // must be matchable by `kind:` clauses. Note: `variant_name()`
+        // aliases it to "ProcessorError" (spec §5.4, doTry catch-by-variant
+        // compat) — on_exceptions matching is structural and must keep the
+        // two kinds distinct.
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("AuthProviderUnavailable".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: None,
+                continued: None,
+            }]),
+            use_original_message: false,
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(
+            config.policies.len(),
+            1,
+            "kind AuthProviderUnavailable should compile to one policy"
+        );
+        assert!(
+            (config.policies[0].matches)(&CamelError::AuthProviderUnavailable("jwks down".into())),
+            "kind AuthProviderUnavailable should match its CamelError variant"
+        );
+        assert!(
+            !(config.policies[0].matches)(&CamelError::Io("other".into())),
+            "kind AuthProviderUnavailable should not match unrelated variants"
+        );
+
+        // Alias pin: despite variant_name() aliasing AuthProviderUnavailable
+        // to "ProcessorError", the ProcessorError kind must not catch it.
+        let processor_config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("ProcessorError".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: None,
+                continued: None,
+            }]),
+            use_original_message: false,
+        })
+        .expect("compile should succeed");
+        assert!(
+            !(processor_config.policies[0].matches)(&CamelError::AuthProviderUnavailable(
+                "jwks down".into()
+            )),
+            "kind ProcessorError must not match AuthProviderUnavailable"
+        );
     }
 
     #[test]
