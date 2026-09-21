@@ -2452,7 +2452,7 @@ fn webpki_fallback_client(
             // does not enable. Kept as an honest, loudly-logged terminal
             // instead of silently re-panicking: reaching it means the TLS
             // stack is broken process-wide, CA store or not.
-            // log-policy: handler-owned
+            // log-policy: system-broken
             tracing::error!(
                 error = %second_error,
                 "webpki fallback client build failed — TLS stack broken process-wide"
