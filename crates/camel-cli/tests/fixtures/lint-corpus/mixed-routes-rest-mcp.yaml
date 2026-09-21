@@ -1,0 +1,42 @@
+# Corpus fixture (rc-ysvjl): a mixed envelope carrying all three depth-0
+# forms — `routes`, `rest`, and `mcp` (mcp modeled in ROUTE_SCHEMA since
+# 7c5ae43e / rc-6pikg). The whole document must lint CLEAN end to end:
+# R-SCHEMA validates the envelope at depth 0 (no bare-route wrap
+# false-positive on the `mcp` key), and the R-URI-known walk skips the
+# mcp subtree, so the `crm://` resource URI cannot false-positive as an
+# unverified scheme. No baseline entry: this file is a zero-false-
+# positives witness for the mcp form.
+routes:
+  - id: "mixed-routes-rest-mcp"
+    from: "direct:start"
+    steps:
+      - log: "mixed envelope: routes + rest + mcp"
+rest:
+  - host: 0.0.0.0
+    port: 9090
+    path: /api
+    operations:
+      - method: GET
+        to: "direct:listUsers"
+mcp:
+  - server:
+      name: crm
+      bind: "127.0.0.1:9100"
+      security_policy:
+        roles: ["admin"]
+      tls:
+        cert_path: /etc/certs/crm.pem
+        key_path: /etc/certs/crm-key.pem
+      max_tools: 200
+      max_resources: 64
+    tools:
+      - name: lookup
+        input_schema:
+          type: object
+          properties:
+            id:
+              type: string
+          required: [id]
+    resources:
+      - name: customers
+        uri: crm://customers
