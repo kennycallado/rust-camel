@@ -13573,21 +13573,79 @@ mod tests {
         );
     }
 
+    /// Throwaway self-signed root used ONLY to make the native-root
+    /// store non-empty hermetically (tests need a parseable PEM
+    /// CERTIFICATE section, nothing more — the private key was discarded
+    /// at generation and the root signs/trusts nothing). Generated
+    /// 2026-09-21, self-expiring 2126.
+    const HERMETIC_TEST_ROOT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+        MIIDVzCCAj+gAwIBAgIUQ+hB0JPFtHpUKaNwcTB8ijGqEW0wDQYJKoZIhvcNAQEL\n\
+        BQAwOjEdMBsGA1UEAwwUY2FtZWwtaHR0cCB0ZXN0IHJvb3QxGTAXBgNVBAoMEGNh\n\
+        bWVsLWh0dHAgdGVzdHMwIBcNMjYwOTIxMTEyMzUwWhgPMjEyNjA4MjgxMTIzNTBa\n\
+        MDoxHTAbBgNVBAMMFGNhbWVsLWh0dHAgdGVzdCByb290MRkwFwYDVQQKDBBjYW1l\n\
+        bC1odHRwIHRlc3RzMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAolnF\n\
+        SiT/bK8pMl9n50HTQj4oxPZGXK34Q/OSq8TMUEcmhUFzBjzwZKoFqvDIt/e0mSi/\n\
+        h8WQlnrHAvYOnsRlpDsfs4yder+lpEYE84OooJjQvj/kREj7ncK6WQKDY1NTGikx\n\
+        lF8kIaCrNHNIlUgoSWMR4E6UshLFwSu5lKtcWCeN6FNzGVQ9jxYJSFsmVk+wFyHI\n\
+        edvpPbnFkD3M1/GKNVuxCCR50sO+cQeB7w9FCyFdHvoTWWuwPV4Qq2LBM2n4eedG\n\
+        pCXkqmuARtFuOKjpYIRryGybic9u9ZW59FbTbgHSj6rcOXNtBUVV/KnWRDRWo7ZC\n\
+        cR5SmO2YwtfpISjbmwIDAQABo1MwUTAdBgNVHQ4EFgQUkhwU0Q5JYNLrs7yOqbXE\n\
+        szzn2/cwHwYDVR0jBBgwFoAUkhwU0Q5JYNLrs7yOqbXEszzn2/cwDwYDVR0TAQH/\n\
+        BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAXLqN7poLyxlpxN9vY1jISs403P2I\n\
+        edwgX3eWyJgXQfc/+dhnig8Pi7SkJKNM9PM27qain3+e2/HeetNYGBD8xnzQo5ga\n\
+        1ScPvm7u2DWIWc5y0bpm5JuCPqXoDl/7kBcaelA2lZRrPJzQuu6uPnH1ubjUPFJj\n\
+        9SxWhR+QgJW3cFc17C179WSVSJSPLozxX1ODABSyxNXnz14Rq+MOJi2tEsDggyMm\n\
+        txh6GwgVbiSey9c9bvu3B28iPfNpULuxBzxSLHcRrSSoII+46foY0G63V/jx7huY\n\
+        Fc2DPwOcO2Ni8fLssMaAnEdWPZaIN/DdjmUFw9XgHE9Eld6aKEXBcRFPzA==\n\
+        -----END CERTIFICATE-----";
+
     #[test]
-    fn test_build_client_primary_path_when_native_roots_exist() {
-        // On a host with a loadable CA store the fallback must stay
-        // inactive — the webpki set is a FALLBACK, never a replacement
-        // for platform roots (managed fleets keep OS root-program
-        // control). Guarded by the CA-store mutex so the env-simulating
-        // sibling test cannot force this build through the fallback.
+    fn test_build_client_primary_path_when_platform_store_non_empty() {
+        // The webpki set is a FALLBACK, never a replacement for platform
+        // roots (managed fleets keep OS root-program control). Hermetic:
+        // SSL_CERT_FILE pinned to a parseable fixture root makes the
+        // native store non-empty on ANY host — including genuinely
+        // CA-less ones — so the no-fallback assertion cannot depend on
+        // the build machine. Serialized against the CA-less sibling test
+        // by the CA-store mutex (its env window forces the fallback).
         let _ca_guard = lock_ca_store_test_mutex();
+        let ca_dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_file = ca_dir.path().join("hermetic-root.pem");
+        std::fs::write(&ca_file, HERMETIC_TEST_ROOT_PEM).expect("write fixture root"); // allow-unwrap(test)
+
+        // Safety: test-only mutation of process env vars, restored
+        // before any assertion below.
+        let (prev_file, prev_dir) = unsafe {
+            let prev = (
+                std::env::var_os("SSL_CERT_FILE"),
+                std::env::var_os("SSL_CERT_DIR"),
+            );
+            std::env::set_var("SSL_CERT_FILE", &ca_file);
+            std::env::set_var("SSL_CERT_DIR", ca_dir.path());
+            prev
+        };
+
         let fallbacks_before = build_client_fallback_count();
         let _client = build_client(&HttpConfig::default(), None);
+        let fallbacks_taken = build_client_fallback_count() - fallbacks_before;
+
+        // Safety: restoring the previously-captured values.
+        unsafe {
+            match prev_file {
+                Some(v) => std::env::set_var("SSL_CERT_FILE", v),
+                None => std::env::remove_var("SSL_CERT_FILE"),
+            }
+            match prev_dir {
+                Some(v) => std::env::set_var("SSL_CERT_DIR", v),
+                None => std::env::remove_var("SSL_CERT_DIR"),
+            }
+        }
+
         assert_eq!(
-            build_client_fallback_count() - fallbacks_before,
-            0,
-            "with native roots loadable, build_client must use the \
-             platform-verifier primary path, never the webpki fallback"
+            fallbacks_taken, 0,
+            "with at least one platform root loadable, build_client must \
+             use the platform-verifier primary path, never the webpki \
+             fallback"
         );
     }
 }

@@ -53,7 +53,7 @@ GitHub release assets carry the flavor prefix in the name:
 
 - slim: `camel-slim-<target>.tar.gz` (musl x2)
 - regular: `camel-<target>.tar.gz` (the 4 Linux targets)
-- full: `camel-full-<target>.tar.gz` (gnu ×2, macOS ×2, Windows)
+- full: `camel-full-<target>.tar.gz` (gnu x2, macOS x2, Windows)
 
 ### Android (Termux)
 
@@ -61,9 +61,10 @@ Android is not a release target, but the `aarch64-unknown-linux-musl`
 slim/regular binaries run under Termux. Android ships no system CA
 store at the probed paths, so:
 
-- since 0.51.0 the base HTTP component carries bundled Mozilla webpki
-  roots as a fallback — startup and plain HTTP work out of the box, and
-  TLS verifies against Mozilla's root set (a `warn` names the fallback);
+- since the release after 0.51.0 the base HTTP component carries
+  bundled Mozilla webpki roots as a fallback — startup and plain HTTP
+  work out of the box, and TLS verifies against Mozilla's root set (a
+  `warn` names the fallback);
 - for the Termux-maintained trust store instead, run
   `pkg install ca-certificates` and export
   `SSL_CERT_FILE="$PREFIX/etc/tls/ca-bundle.crt"` — with native roots
