@@ -136,7 +136,27 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
     }
 }
 
+/// Install a bare registry as the process-global tracing default, once
+/// per test binary. Guards the `capture_sink` tests against
+/// callsite-interest poisoning: `tracing` caches each callsite's
+/// `Interest` process-wide from its FIRST macro execution, evaluated
+/// against the executing thread's dispatcher. Subscriber-less sibling
+/// tests in this binary hit the shared bridge-spawn `trace!` callsite
+/// (`crate::pool::bridge_config_with_env_trace`) first and cache
+/// `Interest::never`, so a later thread-local `set_default` capture
+/// silently drops events. The global registry heals prior poison and
+/// floors future rebuilds at `sometimes`
+/// (fix pattern: c3853198; bd rc-img5; bd rc-6jarb; convention:
+/// docs/testing/tracing-capture-guards.md).
+fn ensure_global_tracing_default() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if INIT.set(()).is_ok() {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    }
+}
+
 fn capture_sink() -> (Arc<Mutex<Vec<u8>>>, impl tracing::Subscriber) {
+    ensure_global_tracing_default();
     let sink: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let writer = CapturingWriter {
         sink: Arc::clone(&sink),
