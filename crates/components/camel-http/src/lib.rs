@@ -1190,7 +1190,7 @@ impl ServerRegistry {
     /// deregistration happens separately in the consumer's cleanup.
     pub async fn unregister(&self, host: &str, port: u16) {
         debug!(
-            host = host,
+            host = camel_api::redact::redact_host(host),
             port = port,
             "consumer unregistered from HTTP server"
         );
