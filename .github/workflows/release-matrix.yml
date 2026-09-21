@@ -441,6 +441,9 @@ jobs:
         with:
           files: dist/camel-*
           body: ${{ steps.notes.outputs.body }}
+          # Rehearsal tags must never become /releases/latest (v0.51.0-rc.3
+          # did until it was hand-flagged; bd rc-9zjhf).
+          prerelease: ${{ contains(github.ref_name, '-rc.') }}
 
   docker:
     name: Docker (${{ matrix.variant }})
