@@ -115,3 +115,8 @@ mod sql_stub;
 /// test bodies split internally per config.
 #[cfg(test)]
 mod sql_validate_test;
+
+/// Shared cfg(test) support for the in-crate test modules (bd
+/// rc-kkznl): single-entry partner-router construction.
+#[cfg(test)]
+mod test_util;

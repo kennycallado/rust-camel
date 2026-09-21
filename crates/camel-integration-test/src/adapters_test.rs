@@ -18,6 +18,7 @@ use futures::future::BoxFuture;
 use crate::adapters::{
     FakeAdapter, IncomingMessage, PartnerAdapter, PartnerRouter, ReceiveError, TransportError,
 };
+use crate::test_util::router_for;
 
 /// A partner-shaped stub: declares a bound authority without owning a
 /// listener, so router address math is testable without the wire.
@@ -138,10 +139,7 @@ async fn incoming_message_carries_arrival_instant() {
         path: None,
         arrival: std::time::Instant::now(),
     }]);
-    let router = PartnerRouter::new(BTreeMap::from([(
-        "partner://fake".to_string(),
-        Box::new(fake) as Box<dyn PartnerAdapter>,
-    )]));
+    let router = router_for("partner://fake", fake);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let message = router
         .receive("partner://fake", "partner://fake", Duration::from_secs(1))

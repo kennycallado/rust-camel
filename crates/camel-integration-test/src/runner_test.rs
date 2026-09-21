@@ -2,9 +2,10 @@
 //!
 //! Unit-test module of the lib target, declared in `src/lib.rs` under
 //! `#[cfg(test)]`. Every test wraps a [`FakeAdapter`] in a
-//! single-entry [`PartnerRouter`] and drives [`run_scenario`] under a
-//! tokio runtime; deadlines are real monotonic time and stay at
-//! test-scale magnitudes.
+//! single-entry
+//! [`PartnerRouter`](crate::adapters::PartnerRouter) and drives
+//! [`run_scenario`] under a tokio runtime; deadlines are real
+//! monotonic time and stay at test-scale magnitudes.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -31,6 +32,7 @@ use crate::runner::{
 };
 #[cfg(all(test, feature = "sql"))]
 use crate::sql_stub::{seed, sqlite_catalog};
+use crate::test_util::router_for;
 
 #[cfg(feature = "http")]
 use crate::adapters::http::HttpPartner;
@@ -58,14 +60,6 @@ fn doc_with(actions: Vec<ScenarioAction>) -> ScenarioDocument {
         inbound: None,
         logs: None,
     }
-}
-
-/// A single-entry router over one fake adapter, keyed by endpoint URI.
-fn router_for(uri: &str, fake: FakeAdapter) -> PartnerRouter {
-    PartnerRouter::new(BTreeMap::from([(
-        uri.to_string(),
-        Box::new(fake) as Box<dyn PartnerAdapter>,
-    )]))
 }
 
 /// An incoming message with a string body and no headers.
@@ -837,10 +831,7 @@ async fn send_interpolates_endpoint() {
         .expect("partner must bind 127.0.0.1:0");
     let recorder = partner.recorder();
     let authority = partner.bound_addr().to_string();
-    let router = PartnerRouter::new(BTreeMap::from([(
-        "http://127.0.0.1:0/orders".to_string(),
-        Box::new(partner) as Box<dyn PartnerAdapter>,
-    )]));
+    let router = router_for("http://127.0.0.1:0/orders", partner);
     let doc = doc_with(vec![
         ScenarioAction::Send {
             to: endpoint("http://${PARTNER}/orders"),
@@ -879,10 +870,7 @@ async fn send_interpolates_body_and_headers() {
         .expect("partner must bind 127.0.0.1:0");
     let recorder = partner.recorder();
     let uri = format!("http://{}/orders", partner.bound_addr());
-    let router = PartnerRouter::new(BTreeMap::from([(
-        uri.clone(),
-        Box::new(partner) as Box<dyn PartnerAdapter>,
-    )]));
+    let router = router_for(&uri, partner);
     let doc = doc_with(vec![
         ScenarioAction::Send {
             to: endpoint(&uri),
@@ -931,10 +919,7 @@ async fn send_interpolates_body_and_headers() {
 #[test]
 fn fill_bind_vars_sets_authority_without_scheme() {
     let uri = "http://127.0.0.1:0/orders";
-    let router = PartnerRouter::new(BTreeMap::from([(
-        uri.to_string(),
-        Box::new(StaticAuthority("127.0.0.1:45678")) as Box<dyn PartnerAdapter>,
-    )]));
+    let router = router_for(uri, StaticAuthority("127.0.0.1:45678"));
     let wired = vec![EndpointRef {
         endpoint: uri.to_string(),
         provisioning: Some(Provisioning::Harness),
@@ -1026,13 +1011,13 @@ impl PartnerAdapter for CannedOverflow {
 #[cfg(feature = "http")]
 async fn receive_timeout_failure_carries_redacted_endpoint() {
     let declared = "http://host/login?authPassword=hunter2&x=1";
-    let router = PartnerRouter::new(BTreeMap::from([(
-        declared.to_string(),
-        Box::new(CannedTimeout {
+    let router = router_for(
+        declared,
+        CannedTimeout {
             endpoint: "http://host/login?authPassword=***&x=1".to_string(),
             lanes_recorded: vec!["/login?authPassword=***&x=1".to_string()],
-        }) as Box<dyn PartnerAdapter>,
-    )]));
+        },
+    );
     let doc = doc_with(vec![ScenarioAction::Receive {
         from: endpoint(declared),
         deadline: Duration::from_millis(50),
@@ -1066,13 +1051,13 @@ async fn receive_timeout_failure_carries_redacted_endpoint() {
 #[cfg(feature = "http")]
 async fn raw_adapter_timeout_redacts_at_the_mapping() {
     let declared = "http://host/login?authPassword=hunter2&x=1";
-    let router = PartnerRouter::new(BTreeMap::from([(
-        declared.to_string(),
-        Box::new(CannedTimeout {
+    let router = router_for(
+        declared,
+        CannedTimeout {
             endpoint: "http://host/login?authPassword=hunter2&x=1".to_string(),
             lanes_recorded: vec!["/login?authPassword=hunter2&x=1".to_string()],
-        }) as Box<dyn PartnerAdapter>,
-    )]));
+        },
+    );
     router.set_secret_query_keys(vec!["authPassword".to_string()]);
     let doc = doc_with(vec![ScenarioAction::Receive {
         from: endpoint(declared),
@@ -1106,13 +1091,13 @@ async fn raw_adapter_timeout_redacts_at_the_mapping() {
 #[cfg(feature = "http")]
 async fn raw_lane_fifo_overflow_redacts_at_the_mapping() {
     let declared = "http://host/login?authPassword=hunter2&x=1";
-    let router = PartnerRouter::new(BTreeMap::from([(
-        declared.to_string(),
-        Box::new(CannedOverflow {
+    let router = router_for(
+        declared,
+        CannedOverflow {
             lane_key: "http://host/login?authPassword=hunter2&x=1".to_string(),
             bound: 64,
-        }) as Box<dyn PartnerAdapter>,
-    )]));
+        },
+    );
     router.set_secret_query_keys(vec!["authPassword".to_string()]);
     let doc = doc_with(vec![ScenarioAction::Send {
         to: endpoint(declared),
@@ -1149,13 +1134,13 @@ async fn raw_lane_fifo_overflow_redacts_at_the_mapping() {
 #[cfg(feature = "http")]
 async fn raw_overflow_key_with_space_redacts_whole() {
     let declared = "http://host/login";
-    let router = PartnerRouter::new(BTreeMap::from([(
-        declared.to_string(),
-        Box::new(CannedOverflow {
+    let router = router_for(
+        declared,
+        CannedOverflow {
             lane_key: "http://host/login?authPassword=hunter 2&x=1".to_string(),
             bound: 64,
-        }) as Box<dyn PartnerAdapter>,
-    )]));
+        },
+    );
     router.set_secret_query_keys(vec!["authPassword".to_string()]);
     let doc = doc_with(vec![ScenarioAction::Send {
         to: endpoint(declared),
@@ -1187,13 +1172,13 @@ async fn raw_overflow_key_with_space_redacts_whole() {
 #[cfg(feature = "http")]
 async fn prerendered_overflow_form_redacts_per_half() {
     let declared = "http://host/login";
-    let router = PartnerRouter::new(BTreeMap::from([(
-        declared.to_string(),
-        Box::new(CannedOverflow {
+    let router = router_for(
+        declared,
+        CannedOverflow {
             lane_key: "http://host/login?authPassword=hunter2 /orders?x=1".to_string(),
             bound: 64,
-        }) as Box<dyn PartnerAdapter>,
-    )]));
+        },
+    );
     router.set_secret_query_keys(vec!["authPassword".to_string()]);
     let doc = doc_with(vec![ScenarioAction::Send {
         to: endpoint(declared),

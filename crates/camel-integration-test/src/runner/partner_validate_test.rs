@@ -11,7 +11,6 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::adapters::PartnerAdapter;
 use crate::adapters::PartnerRouter;
 use crate::adapters::http::{HttpPartner, HttpWireRequest};
 use crate::document::{
@@ -22,6 +21,7 @@ use crate::runner::{
     DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, matching_requests,
     partner_mismatch_detail, render_bound, render_filters, run_scenario_document,
 };
+use crate::test_util::router_for;
 
 /// A bare endpoint reference with no provisioning and no bind variable
 /// (the `runner_test` fixture, repeated here so the module stays
@@ -58,10 +58,7 @@ const ORDERS: &str = "http://127.0.0.1:0/orders";
 /// A single-entry router with `partner` registered under the declared
 /// `:0` orders endpoint.
 fn orders_router(partner: HttpPartner) -> PartnerRouter {
-    PartnerRouter::new(BTreeMap::from([(
-        ORDERS.to_string(),
-        Box::new(partner) as Box<dyn PartnerAdapter>,
-    )]))
+    router_for(ORDERS, partner)
 }
 
 /// A POST send to the declared `:0` orders endpoint.

@@ -19,6 +19,7 @@ use crate::adapters::ReceiveError;
 use crate::adapters::http::{ARRIVAL_LANE_CAPACITY, HttpPartner, ScriptedResponse};
 use crate::adapters::{OutgoingMessage, PartnerAdapter, PartnerRouter};
 use crate::document::PartnerFault;
+use crate::test_util::router_for;
 
 /// The permissive default is non-consuming: every request no scripted
 /// response matches is answered with the permissive status for the
@@ -67,14 +68,6 @@ async fn permissive_default_serves_every_unmatched_request() {
         2,
         "both requests must reach the wire"
     );
-}
-
-/// A single-entry router over one adapter, keyed by endpoint URI.
-fn router_for(uri: &str, adapter: HttpPartner) -> PartnerRouter {
-    PartnerRouter::new(BTreeMap::from([(
-        uri.to_string(),
-        Box::new(adapter) as Box<dyn PartnerAdapter>,
-    )]))
 }
 
 /// The outbound partner records the wire request: method, path,
