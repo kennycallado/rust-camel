@@ -33,8 +33,10 @@ camel-config.workspace = true
 # DirectStimulus delivers route stimulus through the booted context's
 # producer path — the same mechanism camel-test / camel run use.
 camel-component-api.workspace = true
-# Shared SEDA gate predicate (is_no_active_consumers_gate) for the
-# stimulus retry loop: gate errors fail fast instead of retrying
+# Shared SEDA retry-classification predicates for the DirectStimulus
+# retry loop (adapters.rs): is_direct_startup_race classifies the
+# direct-startup race as retryable (rc-utx98), while the
+# no-active-consumers gate fails fast instead of retrying
 # (rc-tgaxf, adopting rc-zjrx's landed predicate).
 camel-component-seda.workspace = true
 tower.workspace = true
