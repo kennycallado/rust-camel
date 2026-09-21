@@ -1199,6 +1199,17 @@ pub fn is_idempotent_command(cmd: &RedisCommand) -> bool {
 mod tests {
     use super::*;
 
+    /// Thin local pin — the full matrix lives in camel-api's
+    /// `redact_host_masks_userinfo_keeps_clean_hosts`.
+    #[test]
+    fn canonical_redact_host_pinned() {
+        assert_eq!(
+            camel_api::redact::redact_host("host.example:8080"),
+            "host.example:8080"
+        );
+        assert_eq!(camel_api::redact::redact_host("a@b@c"), "***@c");
+    }
+
     #[test]
     fn test_config_defaults() {
         let c = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
