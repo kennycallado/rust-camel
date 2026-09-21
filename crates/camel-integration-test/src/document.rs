@@ -459,12 +459,41 @@ struct RawValidate {
 // Parsing
 // ---------------------------------------------------------------------------
 
+/// The glob metacharacters rejected in `routeFiles` /
+/// `routeFilesFromRoot` entries (rc-rbde1). Scenario route files are
+/// a literal file list, but the boot's discovery delegation
+/// glob-interprets its patterns, so any of these characters would be
+/// silently reinterpreted. Braces are literal in the current `glob`
+/// dialect but stay in the rejected set: dialect drift would turn
+/// them active, and the entry remains a literal on every platform.
+pub(crate) const GLOB_METACHARACTERS: [char; 6] = ['*', '?', '[', ']', '{', '}'];
+
+/// The glob metacharacters `entry` contains, space-joined and
+/// deduplicated in first-found order (`* ?` for `a*?b*`); `None`
+/// when the entry is metacharacter-free. Shared by the load-time doc
+/// gate and the boot's defense-in-depth rejection, so the two can
+/// never drift apart.
+pub(crate) fn glob_metacharacters_in(entry: &str) -> Option<String> {
+    let mut found = String::new();
+    for ch in entry.chars().filter(|c| GLOB_METACHARACTERS.contains(c)) {
+        if !found.contains(ch) {
+            if !found.is_empty() {
+                found.push(' ');
+            }
+            found.push(ch);
+        }
+    }
+    (!found.is_empty()).then_some(found)
+}
+
 /// Parses and validates a scenario document. Validation order:
 /// (a) the path carries a reserved test-document suffix; (b) the text
 /// deserializes; (c) a non-empty `scenario:` section exists; (d) no
 /// unit-tier section coexists with it; (e) exactly one route source
-/// is declared, and it is not inline (`routes` cannot boot in v1, so
-/// the defect fails at load instead of at boot);
+/// is declared, it is not inline (`routes` cannot boot in v1, so
+/// the defect fails at load instead of at boot), and file-form
+/// entries carry no glob metacharacters (rc-rbde1: literal file
+/// list, no escape syntax);
 /// (f) each action converts (single-key dispatch, deadlines, durations,
 /// endpoint provisioning, expectation grammar, the `direct:`-only
 /// `expectReply` gate) with action-index errors; (g) each `partners`
@@ -559,6 +588,24 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
             });
         }
     };
+    // (e, rc-rbde1) File-form entries are literal file paths, not
+    // glob patterns: the boot delegates loading to route discovery,
+    // which glob-interprets its patterns, so a metacharacter entry
+    // would be silently reinterpreted (a literal `route?.yaml` also
+    // matches sibling `routeX.yaml`; a literal `route[abc].yaml`
+    // matches nothing and contributes zero routes). Rejected at load;
+    // there is no escape syntax — the boot keeps its own rejection as
+    // defense-in-depth for directly-constructed documents.
+    if let RouteSource::RouteFiles(files) | RouteSource::RouteFilesFromRoot(files) = &route_source {
+        for file in files {
+            if let Some(found) = glob_metacharacters_in(&file.display().to_string()) {
+                return Err(DocError::RouteFilesGlobMetacharacters {
+                    entry: file.display().to_string(),
+                    found,
+                });
+            }
+        }
+    }
     // (e, rc-9dpx) Inline route sources cannot boot in v1; reject at
     // load, before partners bind, instead of failing the boot after
     // the composition root is up. The boot keeps its own rejection as

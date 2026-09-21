@@ -280,6 +280,81 @@ async fn route_files_anchor_to_doc_dir() {
         .expect("the colocated route file must load from the document directory");
 }
 
+/// A route file whose name carries a glob metacharacter: distinct
+/// endpoint from the sibling so both can boot side by side.
+const METACHAR_ROUTE: &str = r#"
+routes:
+  - id: metachar-literal
+    from: direct:metachar
+    steps:
+      - to: log:info
+"#;
+
+/// The sibling a `?` glob would additionally match (`?` = any single
+/// character): pre-fix, the boot loaded BOTH this file and the
+/// declared literal (rc-rbde1 edge 1).
+const GLOB_SIBLING_ROUTE: &str = r#"
+routes:
+  - id: glob-sibling
+    from: direct:sibling
+    steps:
+      - to: log:info
+"#;
+
+#[tokio::test]
+async fn boot_rejects_metachar_route_files_entry() {
+    // rc-rbde1: the declared file `route?.yaml` exists literally, but
+    // the discovery delegation glob-interprets the entry — pre-fix,
+    // the `?` additionally matched the sibling `routeX.yaml`, so the
+    // booted context carried MORE routes than the document declared.
+    // The load-time doc gate rejects the entry inside
+    // `parse_scenario_document`; this boot-level rejection stays as
+    // defense-in-depth for documents constructed directly, bypassing
+    // the parser (the rc-9dpx inline-routes pattern).
+    let (dir, mut doc) = project("# minimal\n", Some(("routes.yaml", ROUTE)), DOC);
+    std::fs::write(dir.path().join("route?.yaml"), METACHAR_ROUTE).expect("write declared");
+    std::fs::write(dir.path().join("routeX.yaml"), GLOB_SIBLING_ROUTE).expect("write sibling");
+    doc.route_source = RouteSource::RouteFiles(vec!["route?.yaml".into()]);
+    let err = expect_boot_error(
+        boot_scenario(&doc, dir.path(), &empty_env()).await,
+        "a routeFiles entry with glob metacharacters must be rejected, not glob-interpreted",
+    );
+    assert!(
+        matches!(err, CamelError::Config(_)),
+        "expected Config, got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("route?.yaml"),
+        "error must name the declared entry: {err}"
+    );
+}
+
+#[tokio::test]
+async fn boot_rejects_metachar_entry_that_globs_to_nothing() {
+    // rc-rbde1 edge 2: `route[abc].yaml` exists literally, but the
+    // glob dialect reads `[abc]` as a character class matching only
+    // unbracketed siblings — the pattern never matches the declared
+    // file itself. Pre-fix, the literal existence pre-check passed
+    // and the entry silently contributed ZERO routes. Rejected loud
+    // instead, through the same defense-in-depth path as above.
+    let (dir, mut doc) = project("# minimal\n", Some(("routes.yaml", ROUTE)), DOC);
+    std::fs::write(dir.path().join("route[abc].yaml"), METACHAR_ROUTE).expect("write declared");
+    doc.route_source = RouteSource::RouteFiles(vec!["route[abc].yaml".into()]);
+    let err = expect_boot_error(
+        boot_scenario(&doc, dir.path(), &empty_env()).await,
+        "a metacharacter entry that globs to nothing must be rejected, not silently \
+         contribute zero routes",
+    );
+    assert!(
+        matches!(err, CamelError::Config(_)),
+        "expected Config, got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("route[abc].yaml"),
+        "error must name the declared entry: {err}"
+    );
+}
+
 #[tokio::test]
 async fn boot_inline_routes_still_rejected() {
     // The load-time doc gate (rc-9dpx) rejects inline route sources

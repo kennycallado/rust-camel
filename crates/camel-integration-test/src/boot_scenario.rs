@@ -244,7 +244,11 @@ pub async fn boot_scenario(
 /// suffix is rejected here too: the document explicitly names the
 /// file, so discovery's silent reserved-suffix skip would boot zero
 /// routes — test documents belong to `camel test`, not scenario
-/// routeFiles.
+/// routeFiles. Entries carrying glob metacharacters are rejected as
+/// well (rc-rbde1): discovery glob-interprets its patterns, so a
+/// literal metacharacter name would be silently reinterpreted; the
+/// load-time doc gate rejects the class first, and this rejection is
+/// the defense-in-depth twin.
 ///
 /// Inline routes cannot boot in v1: the document parser owns the
 /// definitions, and this entry receives the document by reference, so
@@ -260,8 +264,25 @@ fn route_patterns(
     doc_dir: &Path,
 ) -> Result<Vec<String>, CamelError> {
     /// Resolves one declared file against its anchor directory and
-    /// runs the shared pre-checks (existence, reserved test suffix).
+    /// runs the shared pre-checks (glob metacharacters, existence,
+    /// reserved test suffix).
     fn anchored(base: &Path, file: &Path) -> Result<String, CamelError> {
+        // rc-rbde1 defense-in-depth: the load-time doc gate rejects
+        // glob metacharacters inside `parse_scenario_document`; this
+        // boot-level rejection covers documents constructed directly,
+        // bypassing the parser. Without it, the existence pre-check
+        // below passes for a literal metacharacter file while
+        // discovery glob-interprets the entry — loading siblings the
+        // document never declared, or nothing at all.
+        if let Some(found) = crate::document::glob_metacharacters_in(&file.display().to_string()) {
+            return Err(CamelError::Config(format!(
+                "{}: scenario routeFiles are literal file paths, not glob patterns \
+                 (glob metacharacters {found}; no escape syntax — the load-time doc \
+                 gate rejects this class, so this document bypassed \
+                 parse_scenario_document)",
+                file.display()
+            )));
+        }
         let full = base.join(file);
         std::fs::metadata(&full).map_err(|e| CamelError::Io(format!("{}: {e}", full.display())))?;
         // Same predicate as discovery's reserved-document gate,

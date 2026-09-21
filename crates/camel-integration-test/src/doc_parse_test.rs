@@ -56,6 +56,98 @@ inputs:
     );
 }
 
+/// rc-rbde1: `routeFiles`/`routeFilesFromRoot` entries are literal
+/// file paths, not glob patterns — the boot delegates to route
+/// discovery, which glob-interprets its patterns, so a metacharacter
+/// entry would be silently reinterpreted (a literal `route?.yaml`
+/// also matches sibling `routeX.yaml`; a literal `route[abc].yaml`
+/// matches nothing and contributes zero routes). Rejected at load,
+/// naming the entry; there is no escape syntax.
+#[test]
+fn route_files_glob_metacharacters_rejected() {
+    let err = parse_case(
+        r#"
+routeFiles: [route?.yaml]
+scenario:
+- sleep:
+    duration: 1s
+"#,
+    )
+    .expect_err("parse must fail");
+    assert!(
+        matches!(err, DocError::RouteFilesGlobMetacharacters { .. }),
+        "expected RouteFilesGlobMetacharacters, got {err}"
+    );
+    assert!(
+        err.to_string().contains("route?.yaml"),
+        "error must name the declared entry: {err}"
+    );
+    assert!(
+        err.to_string().contains("doc-validation"),
+        "error must name the doc-validation class: {err}"
+    );
+}
+
+/// The from-root arm rejects the same metacharacter class (rc-rbde1).
+#[test]
+fn route_files_from_root_glob_metacharacters_rejected() {
+    let err = parse_case(
+        r#"
+routeFilesFromRoot: [routes/*.yaml]
+scenario:
+- sleep:
+    duration: 1s
+"#,
+    )
+    .expect_err("parse must fail");
+    assert!(
+        matches!(err, DocError::RouteFilesGlobMetacharacters { .. }),
+        "expected RouteFilesGlobMetacharacters, got {err}"
+    );
+    assert!(
+        err.to_string().contains("routes/*.yaml"),
+        "error must name the declared entry: {err}"
+    );
+}
+
+/// Every metacharacter of the rejected set (`* ? [ ] { }`) is
+/// rejected on its own, in any position of the entry (rc-rbde1).
+/// Block-sequence style: an entry containing `[` cannot round-trip
+/// YAML flow sequences (`[a[b.yaml]` is a flow-syntax error before
+/// the gate ever sees it).
+#[test]
+fn route_files_glob_metacharacter_set_complete() {
+    for entry in [
+        "a*b.yaml", "a?b.yaml", "a[b.yaml", "a]b.yaml", "a{b.yaml", "a}b.yaml",
+    ] {
+        let text = format!("routeFiles:\n  - {entry}\nscenario:\n- sleep:\n    duration: 1s\n");
+        let err = match parse_case(&text) {
+            Ok(_) => panic!("entry `{entry}` must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, DocError::RouteFilesGlobMetacharacters { .. }),
+            "entry `{entry}`: expected RouteFilesGlobMetacharacters, got {err}"
+        );
+    }
+}
+
+/// Regression pin: entries free of glob metacharacters keep parsing —
+/// the gate rejects only the metacharacter class, never plain paths
+/// (rc-rbde1).
+#[test]
+fn route_files_without_metacharacters_still_parse() {
+    parse_case(
+        r#"
+routeFiles: [routes.yaml, nested/dir/routes.v2.yaml]
+scenario:
+- sleep:
+    duration: 1s
+"#,
+    )
+    .expect("metacharacter-free entries must keep parsing");
+}
+
 #[test]
 fn empty_scenario_rejected() {
     let err = parse_case(

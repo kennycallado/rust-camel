@@ -103,7 +103,8 @@ impl<'de> Deserialize<'de> for RawEndpointRef {
 /// - `doc-validation` class — Display carries the `doc-validation:`
 ///   token: `NotTestDocument`, `MissingScenario`, `MixedVocabulary`,
 ///   `Validation`, `ReservedEnvKey`, `InlineRoutes`,
-///   `InlineRoutesRejected`, `ProvisioningWithoutAuthority`,
+///   `InlineRoutesRejected`, `RouteFilesGlobMetacharacters`,
+///   `ProvisioningWithoutAuthority`,
 ///   `ExpectReplyOnUnsupportedSend`, `LogsBlock`.
 /// - `infra-unavailable` class — `UnsupportedProvisioning` (reserved
 ///   provisioning grammar; Display names the class).
@@ -231,6 +232,26 @@ pub enum DocError {
         "doc-validation: inline `routes` are rejected at load: declare `routeFiles` instead (inline definitions cannot boot in the scenario tier; exit 2)"
     )]
     InlineRoutesRejected,
+    /// A `routeFiles`/`routeFilesFromRoot` entry contains glob
+    /// metacharacters (`* ? [ ] { }`). Scenario route files are a
+    /// literal file list, but the boot delegates loading to route
+    /// discovery, which glob-interprets its patterns — a declared
+    /// entry with metacharacters would be silently reinterpreted
+    /// (a literal `route?.yaml` also matches sibling `routeX.yaml`;
+    /// a literal `route[abc].yaml` matches nothing and contributes
+    /// zero routes). Rejected at load (rc-rbde1); there is no escape
+    /// syntax — rename the file.
+    #[error(
+        "doc-validation: routeFiles entry `{entry}` contains glob metacharacters ({found}): \
+         scenario routeFiles are literal file paths, not glob patterns — discovery would \
+         silently reinterpret the entry; rename the file (no escape syntax; exit 2)"
+    )]
+    RouteFilesGlobMetacharacters {
+        /// The rejected entry, as declared.
+        entry: String,
+        /// The metacharacters found, space-joined (e.g. `* ? [ ]`).
+        found: String,
+    },
     /// A send declares `expectReply` on a scheme that produces no
     /// synchronous reply: only the context-stimulus `direct:` send
     /// returns one. Partner sends (`http`/`https`) park their
