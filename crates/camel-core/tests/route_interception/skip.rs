@@ -17,8 +17,7 @@ use camel_core::{CamelContext, Registry, RouteDefinition};
 use tower::ServiceExt;
 
 use crate::common::{
-    TEST_TIMEOUT, boot_context_with_intercept, raw_seda_producer, send_awaiting_consumers,
-    send_to_direct, send_to_direct_result, test_rt,
+    TEST_TIMEOUT, boot_context_with_intercept, raw_seda_producer, send_to_direct, test_rt,
 };
 
 /// Two rules for the same URI: the first declared rule must win.
@@ -86,12 +85,10 @@ async fn empty_rule_set_leaves_the_send_untouched() {
         .expect("consumer route must register");
         ctx.start().await.expect("context start failed");
 
-        // The seda enqueue is this pipeline's only side effect, so the
-        // send can safely wait out the Immediate-mode activation race.
-        send_awaiting_consumers("direct call", || {
-            send_to_direct_result(ctx, "direct:in", Exchange::new(Message::new("sentinel")))
-        })
-        .await;
+        // The Explicit startup handshake (rc-dbrkr) guarantees the seda
+        // consumer is active when `ctx.start()` returns, so the send needs
+        // no startup-race retry.
+        send_to_direct(ctx, "direct:in", Exchange::new(Message::new("sentinel"))).await;
 
         let arrival = mock
             .get_endpoint("arrival")
@@ -223,15 +220,12 @@ async fn skip_replaces_the_enqueue() {
     q.assert_exchange_count(1).await;
 
     // Enqueue a distinguishable BARRIER directly into seda:q via a raw seda
-    // producer — no interception applies to this direct send. The send
-    // waits out the Immediate-mode consumer activation race.
+    // producer — no interception applies to this direct send.
     let producer = raw_seda_producer(&ctx, "seda:q");
-    send_awaiting_consumers("seda enqueue", || {
-        producer
-            .clone()
-            .oneshot(Exchange::new(Message::new("BARRIER")))
-    })
-    .await;
+    producer
+        .oneshot(Exchange::new(Message::new("BARRIER")))
+        .await
+        .expect("seda enqueue must succeed");
 
     // The seda consumer must deliver the BARRIER downstream — proof the
     // intercepted sentinel never entered the queue.

@@ -16,8 +16,7 @@ use tokio::sync::{Notify, Semaphore, mpsc};
 use tower::Service;
 
 use crate::common::{
-    TEST_TIMEOUT, boot_context_with_intercept, probe_seda_until_active, send_to_direct,
-    send_to_direct_result,
+    TEST_TIMEOUT, boot_context_with_intercept, send_to_direct, send_to_direct_result,
 };
 use crate::support::{
     EventRealSvc, OrderLogRealSvc, OrdinalParkSvc, ReadyFailingRealSvc, StubComponent,
@@ -47,22 +46,19 @@ async fn divert_delivers_both_copy_and_real_message() {
     .expect("send route must register");
     ctx.start().await.expect("context start failed");
 
-    // The divert copy is delivered before the seda enqueue, so the payload
-    // send must not retry (a retry would duplicate the copy). Establish
-    // seda consumer readiness with a raw probe first; the probe arrives at
-    // mock:arrival FIFO-ahead of the payload.
-    probe_seda_until_active(&ctx, "seda:out", "readiness-probe").await;
+    // The Explicit startup handshake (rc-dbrkr) guarantees the seda
+    // consumer is active when `ctx.start()` returns, so the payload send
+    // needs no readiness probe and must succeed on the first attempt.
     send_to_direct(&ctx, "direct:in", Exchange::new(Message::new("hello"))).await;
 
-    // Await the consumer's arrival notification for probe and real message.
+    // Await the consumer's arrival notification for the real message.
     let arrival = mock
         .get_endpoint("arrival")
         .expect("mock endpoint 'arrival' must exist");
-    arrival.await_exchanges(2, TEST_TIMEOUT).await;
-    arrival.assert_exchange_count(2).await;
+    arrival.await_exchanges(1, TEST_TIMEOUT).await;
+    arrival.assert_exchange_count(1).await;
     let received = arrival.get_received_exchanges().await;
-    assert_eq!(received[0].input.body.as_text(), Some("readiness-probe"));
-    assert_eq!(received[1].input.body.as_text(), Some("hello"));
+    assert_eq!(received[0].input.body.as_text(), Some("hello"));
 
     // Stop the route: the composed lifecycle drains the in-flight copy
     // before this returns, so mock:tap must have recorded the clone.
@@ -519,11 +515,9 @@ async fn divert_survives_route_stop_and_restart() {
     ctx.stop().await.expect("context stop failed");
     ctx.start().await.expect("context restart failed");
 
-    // The restart recreates the seda consumer asynchronously: probe until
-    // it is active (raw enqueue, no divert copy), then send the payload
-    // exactly once — the divert copy precedes the enqueue, so the payload
-    // send must not retry.
-    probe_seda_until_active(&ctx, consumer_uri, "readiness-probe").await;
+    // The restart's Explicit startup handshake (rc-dbrkr) returns only
+    // after the recreated seda consumer is active, so the payload send
+    // needs no readiness probe.
     send_to_direct(
         &ctx,
         "direct:in",
@@ -531,15 +525,14 @@ async fn divert_survives_route_stop_and_restart() {
     )
     .await;
 
-    // Await the consumer's arrival notification for probe and real message.
+    // Await the consumer's arrival notification for the real message.
     let arrival = mock
         .get_endpoint("arrival")
         .expect("mock endpoint 'arrival' must exist");
-    arrival.await_exchanges(2, TEST_TIMEOUT).await;
-    arrival.assert_exchange_count(2).await;
+    arrival.await_exchanges(1, TEST_TIMEOUT).await;
+    arrival.assert_exchange_count(1).await;
     let received = arrival.get_received_exchanges().await;
-    assert_eq!(received[0].input.body.as_text(), Some("readiness-probe"));
-    assert_eq!(received[1].input.body.as_text(), Some("after-restart"));
+    assert_eq!(received[0].input.body.as_text(), Some("after-restart"));
 
     // Stop again (drain) so the copy finishes, then assert both deliveries.
     ctx.stop().await.expect("context stop failed");
