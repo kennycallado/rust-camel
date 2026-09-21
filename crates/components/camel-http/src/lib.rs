@@ -2462,7 +2462,7 @@ fn webpki_fallback_client(
                 .redirect(reqwest::redirect::Policy::none())
                 .tls_backend_preconfigured(webpki_root_client_config())
                 .build()
-                .expect("webpki-rooted client must build when the platform CA store is missing") // allow-unwrap
+                .expect("preconfigured webpki-rooted client build has no fallible stage") // allow-unwrap
         }
     }
 }

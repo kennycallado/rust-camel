@@ -107,11 +107,13 @@ Android has no system CA store at the standard Linux paths
 (`/etc/ssl/certs` and friends), so the TLS stack finds zero root
 certificates. Two ways through:
 
-- **Fixed in the next release after 0.51.0**: the HTTP client falls
-  back to bundled Mozilla root certificates (webpki) when the platform
-  CA store is empty. Startup no longer fails on CA-less platforms; a
-  `warn` log names the fallback. Platform trust settings do not apply
-  while the fallback is active.
+- **Fixed in the next release after 0.51.0**: the base HTTP component no
+  longer panics at startup; it falls back to bundled Mozilla root
+  certificates (webpki) when the platform CA store is empty. A `warn`
+  log names the fallback, and platform trust settings do not apply
+  while it is active. Components that build their own verifying
+  clients (keycloak introspection, camel-function) still need the CA
+  bundle above.
 - **Preferred on Termux** (uses the store `pkg` maintains): install the
   CA bundle and point the TLS probe at it:
 
