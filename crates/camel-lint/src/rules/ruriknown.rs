@@ -430,6 +430,38 @@ rest:
     }
 
     #[test]
+    fn mcp_resource_uri_not_validated_as_endpoint() {
+        // The mirror-image of the rest `to:` pin (rc-6pikg): the mcp block
+        // authors no endpoint URIs — its consumer from-URIs are fabricated
+        // by the lowering at parse time. `resources[].uri` is an MCP
+        // resource URI (operator config, arbitrary scheme — `crm://...`),
+        // and `uri`'s URI_KEYS membership exists for EnrichConfig.uri. The
+        // walk skips the mcp subtree, so R-URI-known must stay silent on it
+        // against ANY catalog (an empty one maximally would flag `crm` as
+        // an unknown component scheme).
+        let catalog = StubCatalog::empty();
+        let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+    tools:
+      - name: lookup
+        input_schema:
+          type: object
+    resources:
+      - name: customers
+        uri: crm://customers
+";
+        let diags = analyze(source, &catalog);
+        assert!(
+            ruriknown_only(&diags).is_empty(),
+            "mcp resource uri must not be validated as an endpoint URI; got: {:?}",
+            ruriknown_only(&diags)
+        );
+    }
+
+    #[test]
     fn missing_required_option() {
         // `timer` declares `period` as required; the step omits it → one
         // MissingRequiredOption Error on the URI span.

@@ -1600,6 +1600,151 @@
       },
       "type": "object"
     },
+    "RouteDslMcp": {
+      "additionalProperties": false,
+      "description": "A top-level MCP block (`mcp:` in YAML/JSON).",
+      "properties": {
+        "resources": {
+          "description": "Resources this server exposes.",
+          "items": {
+            "$ref": "#/$defs/RouteDslMcpResource"
+          },
+          "type": "array"
+        },
+        "server": {
+          "$ref": "#/$defs/RouteDslMcpServer",
+          "description": "Named server (Consumer) declaration."
+        },
+        "tools": {
+          "description": "Tools this server exposes.",
+          "items": {
+            "$ref": "#/$defs/RouteDslMcpTool"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "server"
+      ],
+      "type": "object"
+    },
+    "RouteDslMcpResource": {
+      "additionalProperties": false,
+      "description": "A single MCP resource declaration, carrying its MCP resource URI.",
+      "properties": {
+        "name": {
+          "description": "Resource name (referenced by the lowered `mcp:<server>/resource/<name>` route).",
+          "type": "string"
+        },
+        "uri": {
+          "description": "The MCP resource URI (operator config, e.g. `crm://customers`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "uri"
+      ],
+      "type": "object"
+    },
+    "RouteDslMcpServer": {
+      "additionalProperties": false,
+      "description": "Server-role (Consumer) declaration for one named MCP server inside a\n`mcp:` block.\n\nThe block owns its listener configuration the way `rest:` does (spec: MCP\nlistener ownership): `bind` always, and `tls`/`max_tools`/`max_resources`\nwhen declared, are lowered onto every route of the block as\n`mcp.declared.*` endpoint parameters and ARE the runtime values for\nlistener construction/lookup. TOML `mcp.servers.<name>` must still carry\nthe entry (the `name` MUST match a `mcp.servers.<name>` key or consumer\nstart fails) and remains the source for keys with no DSL counterpart\n(`allowed_hosts`, `security_policy`); a key declared by BOTH sides with\ndifferent values fails consumer start with an error naming both sources —\nno DSL field is silently ignored, and silence is never a disagreement\n(a cap declared by one side only is that side's value).\nThe `security_policy` field is a real `RouteDslSecurityPolicy` (parse-time\nvalidated, mirroring the route field) and it DOES flow to the lowered\nconsumer routes — enforcement is route-level (camel-api `SecurityPolicy`),\nthe same mechanism camel-http routes use.",
+      "properties": {
+        "bind": {
+          "description": "Streamable-HTTP listen address (IP:port literal).",
+          "type": "string"
+        },
+        "max_resources": {
+          "default": null,
+          "description": "Maximum number of resources this server may register (`None` when\nthe block declares no cap).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tools": {
+          "default": null,
+          "description": "Maximum number of tools this server may register (`None` when the\nblock declares no cap — the runtime default then applies, and the\nlowering emits no `max_tools` parameter so a TOML-declared cap is\nkept).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Name of the server (referenced by lowered `mcp:<name>/...` routes).",
+          "type": "string"
+        },
+        "security_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslSecurityPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Route-level authorization policy, propagated to every lowered route\n(tools AND resources). Evaluated per request against the carried\nHTTP headers; absent means no route-level policy (the TOML\n`security_policy` presence gate still applies fail-closed)."
+        },
+        "tls": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslMcpTlsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional TLS configuration."
+        }
+      },
+      "required": [
+        "name",
+        "bind"
+      ],
+      "type": "object"
+    },
+    "RouteDslMcpTlsConfig": {
+      "additionalProperties": false,
+      "description": "TLS certificate and private-key paths declared by an MCP DSL server.",
+      "properties": {
+        "cert_path": {
+          "description": "PEM-encoded server certificate chain.",
+          "type": "string"
+        },
+        "key_path": {
+          "description": "PEM-encoded server private key.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cert_path",
+        "key_path"
+      ],
+      "type": "object"
+    },
+    "RouteDslMcpTool": {
+      "additionalProperties": false,
+      "description": "A single MCP tool declaration, carrying its input JSON Schema.",
+      "properties": {
+        "input_schema": {
+          "description": "Input JSON Schema for the tool's arguments."
+        },
+        "name": {
+          "description": "Tool name (referenced by the lowered `mcp:<server>/tool/<name>` route).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "input_schema"
+      ],
+      "type": "object"
+    },
     "RouteDslOnException": {
       "additionalProperties": false,
       "properties": {
@@ -3084,7 +3229,7 @@
   },
   "$id": "https://raw.githubusercontent.com/kennycallado/rust-camel/main/schemas/dsl/route-schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Schema envelope for the public DSL surface.\n\nExcludes templates (which use `noyalib::compat::serde_yaml::Value` —\na type that does not implement JsonSchema). Templates are internal\nmachinery; the public SDK schema is `{routes: [...]}` plus\n`{rest: [...]}` blocks (rc-p86s — modeled so R-SCHEMA validates\nrest-form documents instead of skipping them).",
+  "description": "Schema envelope for the public DSL surface.\n\nExcludes templates (which use `noyalib::compat::serde_yaml::Value` —\na type that does not implement JsonSchema). Templates are internal\nmachinery; the public SDK schema is `{routes: [...]}` plus\n`{rest: [...]}` and `{mcp: [...]}` blocks (rc-p86s/rc-6pikg —\nmodeled so R-SCHEMA validates rest/mcp-form documents instead of\nfalse-positive wrapping them as bare routes).",
   "properties": {
     "$schema": {
       "description": "Optional JSON Schema URL (mirrors RouteDslRoutes.schema_url — added in Task 9).",
@@ -3093,6 +3238,13 @@
         "null"
       ],
       "writeOnly": true
+    },
+    "mcp": {
+      "description": "MCP block definitions, lowered by `expand_mcp_into` at load time.",
+      "items": {
+        "$ref": "#/$defs/RouteDslMcp"
+      },
+      "type": "array"
     },
     "rest": {
       "description": "REST block definitions, lowered by `expand_rest_into` at load time.",

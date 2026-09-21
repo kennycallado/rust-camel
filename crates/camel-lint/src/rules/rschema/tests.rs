@@ -459,6 +459,216 @@ rest:
 }
 
 #[test]
+fn rschema_mcp_form_valid_is_silent() {
+    // A `mcp:`-block document is a valid DSL form (camel-dsl
+    // `RouteDslMcp`, lowered by `expand_mcp_into`). ROUTE_SCHEMA models
+    // the mcp block in its envelope (rc-6pikg), so a well-formed mcp
+    // document validates cleanly at envelope depth 0. Before the fold,
+    // the bare-route normalisation wrapped it as `{routes: [{mcp: ...}]}`
+    // and `RouteDslRoute`'s `additionalProperties: false` rejected the
+    // `mcp` key — the exact rc-p86s gap class, for mcp.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      security_policy:
+        roles: [\"admin\"]
+      tls:
+        cert_path: /etc/certs/crm.pem
+        key_path: /etc/certs/crm-key.pem
+      max_tools: 200
+      max_resources: 64
+    tools:
+      - name: lookup
+        input_schema:
+          type: object
+          properties:
+            id:
+              type: string
+          required: [id]
+    resources:
+      - name: customers
+        uri: crm://customers
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "a well-formed mcp-block document must validate cleanly; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_form_defect_anchors_value() {
+    // Depth-0 mcp form with a type defect: `bind` must be a string; an
+    // integer there is a type error. The diagnostic must anchor on the
+    // offending value, proving span resolution works through the
+    // envelope-depth-0 `/mcp/0/server/bind` path mapping.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 9090
+    tools:
+      - name: lookup
+        input_schema:
+          type: object
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.iter().any(|d| slice(source, &d.span) == "9090"),
+        "expected a RSchema diagnostic on the integer `bind` value; got spans: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_form_missing_bind_reports_parent() {
+    // `name` and `bind` are the required fields of `RouteDslMcpServer`
+    // (`tls`/`security_policy`/caps all have serde defaults); omitting
+    // `bind` yields a `required` error whose instance path is the server
+    // object itself, anchoring on the parent mapping.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        !rschema.is_empty(),
+        "expected an RSchema diagnostic for the missing `bind`"
+    );
+}
+
+#[test]
+fn rschema_mcp_form_unknown_key_reports_key() {
+    // `deny_unknown_fields` on `RouteDslMcpServer`: the DSL carries no
+    // session/protocol-version keys, so an undeclared server key is an
+    // `additionalProperties` error anchored on the KEY (not the parent).
+    // Mirrors the camel-dsl `unknown_server_key_rejected` parse pin.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      session: true
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.iter().any(|d| slice(source, &d.span) == "session"),
+        "expected the diagnostic to anchor on the `session` key; got spans: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mixed_routes_rest_and_mcp_document() {
+    // An envelope carrying `routes`, `rest`, AND `mcp` validates all three
+    // sides in place (single depth-0 pass, no per-form branching); a defect
+    // inside the mcp block is flagged while the valid route and rest block
+    // stay silent (one diagnostic, not a cascade).
+    let source = "\
+routes:
+  - id: r1
+    from: direct:start
+rest:
+  - host: 0.0.0.0
+    port: 9090
+    path: /api
+    operations:
+      - method: GET
+        to: direct:listUsers
+mcp:
+  - server:
+      name: crm
+      bind: 9090
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly the `bind` type error; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+    assert!(slice(source, &rschema[0].span) == "9090");
+}
+
+#[test]
+fn rschema_mcp_wrong_shape_reports_mapping() {
+    // `mcp:` must be an ARRAY of blocks. A mapping under `mcp:` is a type
+    // error at the `mcp` key itself — the depth-0 instance path is `/mcp`
+    // (noyalib path `mcp`), the same span-mapping case the rest form pins
+    // for `/rest`.
+    let source = "\
+mcp:
+  server:
+    name: crm
+    bind: 127.0.0.1:9100
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        !rschema.is_empty(),
+        "expected an RSchema diagnostic for the mapping-shaped `mcp` value"
+    );
+    assert!(
+        rschema
+            .iter()
+            .any(|d| slice(source, &d.span).contains("server")),
+        "expected the diagnostic to anchor on the `mcp` mapping; got spans: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_caps_env_default_carves_silently() {
+    // Integer-position carve-out through the mcp form: `max_tools` is a
+    // `usize` cap (presence-based, unbounded) in the mcp-block defs; a
+    // whole-scalar `${env:X:-d}` token with a clean-integer default
+    // validates as the NUMBER — no Error, no Info note. Pins the
+    // form-agnostic typing-mirror claim for the third envelope form.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      max_tools: ${env:MCP_MAX_TOOLS:-200}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "a clean-integer default at the mcp `max_tools` position must carve \
+             out silently; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn rschema_legacy_array_defect_anchors_element() {
     // Legacy array form (depth 1) with a defect: `steps` is a string
     // instead of an array. The diagnostic must anchor on the offending

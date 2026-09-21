@@ -1532,6 +1532,13 @@ fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslRestBinding);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslRestOperation);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslRestResponse);
+    // MCP DSL types (rc-6pikg) — the mcp block surface modeled in
+    // route-schema.json's envelope.
+    ts_export!(ts_config, camel_dsl::mcp::RouteDslMcp);
+    ts_export!(ts_config, camel_dsl::mcp::RouteDslMcpServer);
+    ts_export!(ts_config, camel_dsl::mcp::RouteDslMcpTlsConfig);
+    ts_export!(ts_config, camel_dsl::mcp::RouteDslMcpTool);
+    ts_export!(ts_config, camel_dsl::mcp::RouteDslMcpResource);
     ts_export!(ts_config, camel_dsl::route_ast::CredentialSourceDsl);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslPermissionPolicy);
     ts_export!(
@@ -1686,8 +1693,9 @@ fn check_ts_drift(ts_dir: &std::path::Path, temp_files: &[(String, String)]) -> 
 /// Excludes templates (which use `noyalib::compat::serde_yaml::Value` —
 /// a type that does not implement JsonSchema). Templates are internal
 /// machinery; the public SDK schema is `{routes: [...]}` plus
-/// `{rest: [...]}` blocks (rc-p86s — modeled so R-SCHEMA validates
-/// rest-form documents instead of skipping them).
+/// `{rest: [...]}` and `{mcp: [...]}` blocks (rc-p86s/rc-6pikg —
+/// modeled so R-SCHEMA validates rest/mcp-form documents instead of
+/// false-positive wrapping them as bare routes).
 #[derive(schemars::JsonSchema)]
 #[allow(dead_code)]
 struct RouteDslSchemaEnvelope {
@@ -1700,6 +1708,9 @@ struct RouteDslSchemaEnvelope {
     /// REST block definitions, lowered by `expand_rest_into` at load time.
     #[serde(default)]
     rest: Vec<camel_dsl::route_ast::RouteDslRest>,
+    /// MCP block definitions, lowered by `expand_mcp_into` at load time.
+    #[serde(default)]
+    mcp: Vec<camel_dsl::mcp::RouteDslMcp>,
 }
 
 const DSL_SCHEMA_URL: &str =

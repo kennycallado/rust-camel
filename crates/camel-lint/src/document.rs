@@ -390,6 +390,15 @@ fn walk(
                 if k == "parameters" {
                     continue;
                 }
+                // The mcp block authors no endpoint URIs (rc-6pikg): its
+                // consumer from-URIs are fabricated by the lowering at parse
+                // time, and `resources[].uri` is an MCP resource URI —
+                // operator config with an arbitrary scheme (`crm://...`) —
+                // not an endpoint. Skip the subtree so R-URI-known cannot
+                // false-positive on it (same shape as the `parameters` skip).
+                if k == "mcp" {
+                    continue;
+                }
                 // Route 1's scalar `from` is captured in the dedicated slot.
                 // Routes 2..N (from_slot already set) and the object form
                 // (child.as_str() returns None) fall through to the URI_KEYS
