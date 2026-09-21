@@ -10587,18 +10587,22 @@ mod tests {
         let contended = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        // Hammer thread: loop legal resets, counting a contention whenever
-        // its try-lock on the registry test mutex blocks (someone else held
-        // it). The guard is dropped at each iteration end.
+        // Hammer thread: loop legal resets, counting a contention only
+        // when its try-lock on the registry test mutex reports WouldBlock
+        // (someone else held it). Poison is a sibling's panic, not
+        // contention: recover through the poison-recovering helper
+        // without counting it. The guard is dropped at each iteration
+        // end.
         let contended_hammer = std::sync::Arc::clone(&contended);
         let stop_hammer = std::sync::Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
             while !stop_hammer.load(std::sync::atomic::Ordering::Relaxed) {
                 let _guard = match REGISTRY_TEST_MUTEX.try_lock() {
-                    Err(_) => {
+                    Err(std::sync::TryLockError::WouldBlock) => {
                         contended_hammer.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         lock_registry_test_mutex()
                     }
+                    Err(std::sync::TryLockError::Poisoned(_)) => lock_registry_test_mutex(),
                     Ok(guard) => guard,
                 };
                 ServerRegistry::reset();
