@@ -395,7 +395,9 @@ fn walk(
                 // time, and `resources[].uri` is an MCP resource URI —
                 // operator config with an arbitrary scheme (`crm://...`) —
                 // not an endpoint. Skip the subtree so R-URI-known cannot
-                // false-positive on it (same shape as the `parameters` skip).
+                // false-positive on it (same shape as the `parameters`
+                // skip). Revisit if the mcp block ever authors a real
+                // endpoint URI.
                 if k == "mcp" {
                     continue;
                 }
