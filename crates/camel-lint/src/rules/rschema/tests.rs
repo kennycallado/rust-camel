@@ -400,6 +400,65 @@ rest:
 }
 
 #[test]
+fn rschema_rest_wrong_shape_reports_mapping() {
+    // `rest:` must be an ARRAY of blocks. A mapping under `rest:` is a
+    // type error at the `rest` key itself — the depth-0 instance path is
+    // `/rest` (noyalib path `rest`), a distinct span-mapping case from
+    // the per-block paths like `/rest/0/port`.
+    let source = "\
+rest:
+  host: 0.0.0.0
+  port: 9090
+  path: /api
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        !rschema.is_empty(),
+        "expected an RSchema diagnostic for the mapping-shaped `rest` value"
+    );
+    assert!(
+        rschema
+            .iter()
+            .any(|d| slice(source, &d.span).contains("host")),
+        "expected the diagnostic to anchor on the `rest` mapping; got spans: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_rest_port_env_default_carves_silently() {
+    // Integer-position carve-out through the rest form: `port` is a
+    // bounded integer (u16, maximum 65535) in the rest-block defs; a
+    // whole-scalar `${env:X:-d}` token with a clean-integer default
+    // validates as the NUMBER — no Error, no Info note (the carved leaf's
+    // note is suppressed). Pins the form-agnostic typing-mirror claim.
+    let source = "\
+rest:
+  - host: 0.0.0.0
+    port: ${env:REST_PORT:-9090}
+    path: /api
+    operations:
+      - method: GET
+        to: direct:listUsers
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "a clean-integer default at the rest `port` position must carve out \
+             silently; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn rschema_legacy_array_defect_anchors_element() {
     // Legacy array form (depth 1) with a defect: `steps` is a string
     // instead of an array. The diagnostic must anchor on the offending
