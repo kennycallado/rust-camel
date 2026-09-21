@@ -3,41 +3,9 @@
 # Inline alternative: append `// allow-log-redaction` to the offending line.
 # Use sparingly — each entry is an accepted unredacted url/uri/config log.
 
-# ── camel-component-grpc (rc-redactstrict task 2.2) ─────────────────────
-# consumer.rs entries (488/618/641) dropped in rc-c1qwn: sites no longer
-#   violate (redeemed at source; empty-allowlist probe showed 0 hits).
-# tls_reload.rs:47 — macro logs `host = %self.host`: bare TLS listener
-#   hostname from config, no URL and no credential substrate.
-crates/components/camel-component-grpc/src/tls_reload.rs:47
-# tls_reload.rs:56 — macro logs `host = %self.host`: bare TLS listener
-#   hostname from config, no URL and no credential substrate.
-crates/components/camel-component-grpc/src/tls_reload.rs:56
-
-# ── camel-http (rc-redactstrict task 2.2) ───────────────────────────────
-# lib.rs:1193 — `host = host`: bare HTTP server hostname parameter
-#   (&str), no URL and no credential substrate.
-crates/components/camel-http/src/lib.rs:1193
-# lib.rs:2166 entry dropped in rc-c1qwn: site no longer violates
-#   (redeemed at source; empty-allowlist probe showed 0 hits).
-# tls_reload.rs:60 — macro logs `host = %self.host`: bare HTTP TLS server
-#   hostname from config, no URL and no credential substrate.
-crates/components/camel-http/src/tls_reload.rs:60
-# tls_reload.rs:69 — macro logs `host = %self.host`: bare HTTP TLS server
-#   hostname from config, no URL and no credential substrate.
-crates/components/camel-http/src/tls_reload.rs:69
-
-# ── camel-redis (rc-redactstrict task 2.2) ──────────────────────────────
-# config.rs:400 — `host = %self.host`: bare Redis hostname from config
-#   (hostname only; credentials ride the separate password field), no URL
-#   and no credential substrate.
-crates/components/camel-redis/src/config.rs:400
-# config.rs:840 — `host = %self.host.as_deref().unwrap_or("")`: bare Redis
-#   hostname from config (hostname only; credentials ride the separate
-#   password field), no URL and no credential substrate.
-crates/components/camel-redis/src/config.rs:840
-
-# ── camel-ws ────────────────────────────────────────────────────────────
-# No entries since rc-c1qwn (mission 163): all former entries (lib.rs
-#   583/612/624/704 and the 1728-1982 region, stale after mission 162's
-#   twin deletion) were dead — sites redeemed at source; empty-allowlist
-#   probe showed 0 camel-ws violations.
+# Empty since rc-c1qwn follow-up (mission 173 / rc-3y929): all seven
+# entries (camel-component-grpc tls_reload.rs 47/56, camel-http lib.rs
+# 1193 + tls_reload.rs 60/69, camel-redis config.rs 400/840) were
+# redeemed at source via camel_api::redact::redact_host — clean hosts
+# pass through unchanged, userinfo-shaped input is masked (ADR-0076).
+# Empty-allowlist probe: 0 violations.
