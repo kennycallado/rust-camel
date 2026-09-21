@@ -37,6 +37,10 @@ base64.workspace = true
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
+rustls.workspace = true
+# Bundled Mozilla roots for the CA-less-platform client fallback (rc-3j4mq).
+# Precedent: camel-cli redis-tls pure-rust webpki roots (rc-ayy11).
+webpki-roots = "1"
 
 [features]
 otel = ["dep:camel-otel"]

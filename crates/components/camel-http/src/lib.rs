@@ -2244,15 +2244,17 @@ pub struct HttpComponent {
 #[cfg(test)]
 thread_local! {
     static BUILD_CLIENT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static BUILD_CLIENT_FALLBACKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-pub(crate) fn build_client(
+/// Shared builder assembly for [`build_client`]: everything except the
+/// terminal `build()` — proxy, timeouts, pool, redirect policy, DNS-pin
+/// override, and the permissive (warn-on-degrade) TLS material loads
+/// (rc-ayrwk / audit F2-7).
+fn client_builder(
     config: &HttpConfig,
     resolve_override: Option<(&str, &[std::net::SocketAddr])>,
-) -> reqwest::Client {
-    #[cfg(test)]
-    BUILD_CLIENT_CALLS.with(|c| c.set(c.get() + 1));
-
+) -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder()
         .no_proxy() // CRITICAL: env proxies bypass resolve_to_addrs
         .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
@@ -2358,8 +2360,128 @@ pub(crate) fn build_client(
     }
 
     builder
+}
+
+/// Bundled-root TLS config for the CA-less-platform fallback (rc-3j4mq):
+/// Mozilla's root set from `webpki-roots`, precedent rc-ayy11 (camel-cli
+/// redis-tls pure-rust roots).
+///
+/// Why a preconfigured `rustls::ClientConfig` and not a reqwest root
+/// knob: reqwest 0.13 removed `tls_built_in_root_certs` and its
+/// webpki-roots feature, `Certificate::from_der` needs full DER
+/// certificates while webpki-roots ships pre-parsed `TrustAnchor`s, and
+/// `tls_certs_merge` still routes through rustls-platform-verifier
+/// (which hard-errors on android/apple targets when extra roots are
+/// set). `tls_backend_preconfigured` swaps the whole TLS backend; on
+/// reqwest 0.13.4 the preconfigured path builds its connector without
+/// consulting platform roots, so the empty-CA-store builder error cannot
+/// recur there.
+fn webpki_root_client_config() -> rustls::ClientConfig {
+    // Mirror reqwest's own provider resolution (async_impl/client.rs):
+    // process-default provider when the host installed one (camel-cli
+    // installs ring), else the aws-lc-rs default reqwest's `rustls`
+    // feature falls back to.
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+    rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        // Stock rustls providers (ring, aws-lc-rs) always support the
+        // safe default TLS versions; this config is static, not input- or
+        // platform-dependent.
+        .expect("stock rustls provider supports the safe default protocol versions") // allow-unwrap
+        .with_root_certificates(rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        })
+        .with_no_client_auth()
+    // No ALPN override: the workspace reqwest builds without the http2
+    // feature, so the primary path negotiates plain HTTP/1.1. Sending no
+    // ALPN extension yields the same HTTP/1.1 outcome here without
+    // duplicating reqwest feature knowledge in this crate.
+}
+
+/// Fallback path when the platform-verifier client build fails (typical
+/// trigger: a platform without a system CA store at the probed paths,
+/// e.g. Android/Termux — the eager `HttpComponent::new()` in the BASE
+/// flavor used to panic there, rc-3j4mq). Startup must never panic on
+/// CA-less platforms, so the retry swaps the TLS backend for the bundled
+/// Mozilla root set. The fallback is ONLY reachable through a failed
+/// primary build — it never activates when native roots load.
+fn webpki_fallback_client(
+    config: &HttpConfig,
+    resolve_override: Option<(&str, &[std::net::SocketAddr])>,
+    first_error: reqwest::Error,
+) -> reqwest::Client {
+    #[cfg(test)]
+    BUILD_CLIENT_FALLBACKS.with(|c| c.set(c.get() + 1));
+
+    // log-policy: handler-owned
+    tracing::warn!(
+        error = %first_error,
+        "HTTP client build failed on platform TLS roots — the platform CA store \
+         is missing or unreadable (typical on Android/Termux). Retrying with \
+         bundled Mozilla root certificates; platform trust settings do not \
+         apply to this client"
+    );
+    if let Some(tls) = &config.tls
+        && tls.enabled
+        && (tls.ca_cert_path.is_some()
+            || tls.client_cert_path.is_some()
+            || tls.client_key_path.is_some())
+    {
+        // The preconfigured backend ignores reqwest's per-builder TLS
+        // material; only a load failure in the primary build can reach
+        // here with material configured, so name the degradation.
+        // log-policy: handler-owned
+        tracing::warn!(
+            "configured TLS material (custom CA / mTLS identity) is not carried \
+             into the webpki fallback client — the material failed to load or \
+             the platform verifier rejected it"
+        );
+    }
+
+    match client_builder(config, resolve_override)
+        .tls_backend_preconfigured(webpki_root_client_config())
         .build()
-        .expect("reqwest::Client::build() with valid config should not fail") // allow-unwrap
+    {
+        Ok(client) => client,
+        Err(second_error) => {
+            // Unreachable on reqwest 0.13.4: the preconfigured backend has
+            // no fallible stage (no platform verifier, no root-store
+            // parse) unless the http3 feature is on, which this workspace
+            // does not enable. Kept as an honest, loudly-logged terminal
+            // instead of silently re-panicking: reaching it means the TLS
+            // stack is broken process-wide, CA store or not.
+            // log-policy: handler-owned
+            tracing::error!(
+                error = %second_error,
+                "webpki fallback client build failed — TLS stack broken process-wide"
+            );
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .tls_backend_preconfigured(webpki_root_client_config())
+                .build()
+                .expect("webpki-rooted client must build when the platform CA store is missing") // allow-unwrap
+        }
+    }
+}
+
+/// Build the shared/dns-pinned reqwest client. Infallible at call sites:
+/// on a platform whose CA store cannot be loaded the build retries on
+/// bundled Mozilla roots (see [`webpki_fallback_client`]) instead of
+/// panicking (rc-3j4mq).
+pub(crate) fn build_client(
+    config: &HttpConfig,
+    resolve_override: Option<(&str, &[std::net::SocketAddr])>,
+) -> reqwest::Client {
+    #[cfg(test)]
+    BUILD_CLIENT_CALLS.with(|c| c.set(c.get() + 1));
+
+    match client_builder(config, resolve_override).build() {
+        Ok(client) => client,
+        Err(first_error) => webpki_fallback_client(config, resolve_override, first_error),
+    }
 }
 
 /// Eagerly load and parse the configured TLS material when strict mode is
@@ -2438,6 +2560,11 @@ fn strict_tls_error(config: &HttpConfig) -> Option<CamelError> {
 #[cfg(test)]
 pub(crate) fn build_client_call_count() -> u64 {
     BUILD_CLIENT_CALLS.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn build_client_fallback_count() -> u64 {
+    BUILD_CLIENT_FALLBACKS.with(|c| c.get())
 }
 
 impl HttpComponent {
@@ -3570,6 +3697,19 @@ pub(crate) static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::
 #[cfg(test)]
 pub(crate) fn lock_registry_test_mutex() -> std::sync::MutexGuard<'static, ()> {
     REGISTRY_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Serializes tests that mutate (or assert on) the process-global
+/// SSL_CERT_FILE/SSL_CERT_DIR CA-probe env vars (rc-3j4mq). Poison-
+/// recovering for the same reason as REGISTRY_TEST_MUTEX.
+#[cfg(test)]
+static CA_STORE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn lock_ca_store_test_mutex() -> std::sync::MutexGuard<'static, ()> {
+    CA_STORE_TEST_MUTEX
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -13351,6 +13491,103 @@ mod tests {
             "a dynamic-resolution sequence (fresh endpoint+producer per URI) \
              must reuse the component's shared unpinned client and build \
              no additional clients"
+        );
+    }
+
+    #[test]
+    fn test_webpki_fallback_config_builds_client() {
+        // The fallback backend must construct a client on ANY platform —
+        // it reads no platform state. This is the exact TLS configuration
+        // Termux executes when the primary (platform-verifier) build
+        // fails (rc-3j4mq).
+        let client = reqwest::Client::builder()
+            .tls_backend_preconfigured(webpki_root_client_config())
+            .build()
+            .expect("webpki-rooted client must build"); // allow-unwrap(test)
+        // A built client is usable (internal state initialized); assert
+        // via the debug render rather than a network round-trip.
+        let rendered = format!("{client:?}");
+        assert!(
+            !rendered.is_empty(),
+            "client must render a debug representation"
+        );
+    }
+
+    #[test]
+    fn test_build_client_falls_back_on_empty_platform_ca_store() {
+        // Serialize against the primary-path test: the env window below
+        // is process-visible and would force its build through the
+        // fallback too.
+        let _ca_guard = lock_ca_store_test_mutex();
+        // Simulate a CA-less platform (Android/Termux, rc-3j4mq):
+        // openssl-probe honors SSL_CERT_FILE/SSL_CERT_DIR only when the
+        // paths EXIST, so an existing-but-empty file plus an
+        // existing-but-empty directory make rustls-native-certs load zero
+        // roots — the exact condition that made the platform verifier
+        // (and pre-fix startup) fail on Termux. The env window is
+        // process-visible: concurrent client builds in other tests also
+        // take the fallback, which still builds a working client — no
+        // assertion outside this test can distinguish the two paths
+        // except via this thread's BUILD_CLIENT_FALLBACKS counter.
+        let empty_ca_dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let empty_ca_file = empty_ca_dir.path().join("empty-ca-bundle.pem");
+        std::fs::write(&empty_ca_file, b"").expect("write empty CA file"); // allow-unwrap(test)
+
+        // Safety: test-only mutation of process env vars. This test does
+        // not spawn threads that read these vars outside the guarded
+        // window below; the guard restores previous values before return.
+        let (prev_file, prev_dir) = unsafe {
+            let prev = (
+                std::env::var_os("SSL_CERT_FILE"),
+                std::env::var_os("SSL_CERT_DIR"),
+            );
+            std::env::set_var("SSL_CERT_FILE", &empty_ca_file);
+            std::env::set_var("SSL_CERT_DIR", empty_ca_dir.path());
+            prev
+        };
+
+        let result = std::panic::catch_unwind(|| {
+            let fallbacks_before = build_client_fallback_count();
+            let _client = build_client(&HttpConfig::default(), None);
+            build_client_fallback_count() - fallbacks_before
+        });
+
+        // Restore FIRST so the guard holds even if assertions fail.
+        // Safety: restoring the previously-captured values.
+        unsafe {
+            match prev_file {
+                Some(v) => std::env::set_var("SSL_CERT_FILE", v),
+                None => std::env::remove_var("SSL_CERT_FILE"),
+            }
+            match prev_dir {
+                Some(v) => std::env::set_var("SSL_CERT_DIR", v),
+                None => std::env::remove_var("SSL_CERT_DIR"),
+            }
+        }
+
+        let fallbacks_taken = result.expect("build_client must not panic on an empty CA store"); // allow-unwrap(test)
+        assert_eq!(
+            fallbacks_taken, 1,
+            "an empty platform CA store must route exactly one build through \
+             the webpki fallback (primary build failed, fallback succeeded)"
+        );
+    }
+
+    #[test]
+    fn test_build_client_primary_path_when_native_roots_exist() {
+        // On a host with a loadable CA store the fallback must stay
+        // inactive — the webpki set is a FALLBACK, never a replacement
+        // for platform roots (managed fleets keep OS root-program
+        // control). Guarded by the CA-store mutex so the env-simulating
+        // sibling test cannot force this build through the fallback.
+        let _ca_guard = lock_ca_store_test_mutex();
+        let fallbacks_before = build_client_fallback_count();
+        let _client = build_client(&HttpConfig::default(), None);
+        assert_eq!(
+            build_client_fallback_count() - fallbacks_before,
+            0,
+            "with native roots loadable, build_client must use the \
+             platform-verifier primary path, never the webpki fallback"
         );
     }
 }
