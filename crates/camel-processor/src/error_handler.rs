@@ -2063,6 +2063,15 @@ mod tests {
         /// Rendered as `field="value"` pairs joined by spaces, with the
         /// human-readable text under the standard `message` field.
         pub(super) fn capture_debugs<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+            // OnceLock-gated global registry: heals/prevents callsite-
+            // interest poisoning of the shared error-handler `debug!`
+            // callsites (`error_handler.rs:280/370`), which subscriber-less
+            // sibling error-handler tests in this binary hit first (fix
+            // pattern: c3853198; bd rc-img5).
+            static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            if INIT.set(()).is_ok() {
+                let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+            }
             let sink: Sink = Default::default();
             let recorder = Recorder {
                 events: Arc::clone(&sink),

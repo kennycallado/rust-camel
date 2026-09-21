@@ -3690,11 +3690,32 @@ pub(crate) mod log_capture {
         fn exit(&self, _span: &Id) {}
     }
 
+    /// Install a bare registry as the process-global tracing default, once
+    /// per test binary. Guards the `capture_warns` tests against
+    /// callsite-interest poisoning: `tracing` caches each callsite's
+    /// `Interest` process-wide from its FIRST macro execution, evaluated
+    /// against the executing thread's dispatcher. Subscriber-less sibling
+    /// tests in this binary (plain `from_file`/`from_file_with_env` loads)
+    /// resolve `NoSubscriber` and cache `Interest::never` for the shared
+    /// `warn!` callsites in the config-load paths (e.g. `config.rs:2950`,
+    /// `config.rs:2999`), so a later thread-local `with_default` capture
+    /// silently drops events. The global registry heals prior poison
+    /// (dispatch install rebuilds the interest cache) and floors future
+    /// rebuilds at `sometimes`, so captures consult their own subscriber
+    /// again (fix pattern: c3853198; bd rc-img5).
+    pub(crate) fn ensure_global_tracing_default() {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+    }
+
     /// Runs `f` with a capturing subscriber installed and returns
     /// `(f's result, captured warn/error messages)` in emission order.
     /// Messages are rendered as `field="value"` pairs joined by spaces, with
     /// the human-readable text under the standard `message` field.
     pub(crate) fn capture_warns<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+        ensure_global_tracing_default();
         let sink: Sink = Default::default();
         let recorder = Recorder {
             warnings: Arc::clone(&sink),

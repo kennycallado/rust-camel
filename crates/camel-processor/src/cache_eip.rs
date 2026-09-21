@@ -1950,6 +1950,16 @@ mod tests {
         /// returns the shared record list plus the dispatcher guard.
         fn install(self) -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
             use tracing_subscriber::prelude::*;
+            // OnceLock-gated global registry: heals/prevents callsite-
+            // interest poisoning of the shared `cache_peek_stale` debug
+            // callsites (`cache_eip.rs:258/270/457`), which subscriber-less
+            // sibling cache tests in this binary hit first — completing the
+            // PEEK_STALE_LOG_LOCK serialization with the proven global
+            // floor (fix pattern: c3853198; bd rc-img5).
+            static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            if INIT.set(()).is_ok() {
+                let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+            }
             let records = Arc::clone(&self.records);
             let guard = tracing_subscriber::registry().with(self).set_default();
             (records, guard)

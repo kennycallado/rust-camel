@@ -2557,6 +2557,7 @@ templated_routes:
     /// neither pollute this capture nor observe it.
     fn capture_warns<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
         use tracing_subscriber::prelude::*;
+        crate::test_support::ensure_global_tracing_default();
         let events = Arc::new(Mutex::new(Vec::new()));
         let guard = tracing_subscriber::registry()
             .with(WarnCaptureLayer {

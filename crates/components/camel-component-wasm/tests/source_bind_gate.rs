@@ -193,6 +193,18 @@ async fn capture_logs<F: Future>(fut: F) -> (F::Output, String) {
         })
         .with_ansi(false)
         .finish();
+    // OnceLock-gated global registry: heals/prevents callsite-interest
+    // poisoning of the shared bind-gate warn callsites (camel-auth
+    // `enforce_bind_exposure_gate`, reached via `source_consumer.rs:274`),
+    // which the sibling gate tests in this binary hit subscriber-less
+    // first — a poisoned interest cache would drop the gate warns this
+    // capture asserts on (fix pattern: c3853198; bd rc-img5).
+    {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+    }
     let _guard = tracing::subscriber::set_default(subscriber);
     let output = fut.await;
     drop(_guard);

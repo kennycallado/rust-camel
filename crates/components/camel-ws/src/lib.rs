@@ -5075,6 +5075,18 @@ mod tests {
     /// and captured on the test thread.
     #[tokio::test]
     async fn ws_producer_retry_log_emits_component_ws_producer() {
+        // OnceLock-gated global registry: heals/prevents callsite-interest
+        // poisoning of the shared retry warn! callsite in
+        // camel-component-api `retry_async_inner` (`network_retry.rs:299`)
+        // — the exact c3853198 flake class. Subscriber-less sibling tests
+        // in this binary that drive retry paths hit the callsite first and
+        // cache `Interest::never`, dropping this thread-local capture (fix
+        // pattern: c3853198; bd rc-img5).
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+
         let events = Arc::new(Mutex::new(Vec::new()));
         let layer = CollectingLayer {
             events: events.clone(),

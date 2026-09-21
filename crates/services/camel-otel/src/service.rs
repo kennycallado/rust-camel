@@ -872,6 +872,16 @@ mod tests {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
 
+        // OnceLock-gated global registry: heals/prevent callsite-interest
+        // poisoning of the shutdown/drop `warn!` callsites in this file
+        // (provider force-flush/shutdown warns), which subscriber-less
+        // sibling tests dropping live providers hit first (fix pattern:
+        // c3853198; bd rc-img5).
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let _guard = tracing_subscriber::registry()
             .with(WarnCapture {

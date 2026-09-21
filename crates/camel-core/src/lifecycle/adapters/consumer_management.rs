@@ -1526,6 +1526,26 @@ mod tests {
 
     // ── D-L7: CrashNotification send-error logging ──
 
+    /// Install a bare registry as the process-global tracing default,
+    /// once per test binary. Guards the capture tests in this module
+    /// (flag-based `set_default` subscribers and `captured_logs` writers
+    /// alike) against callsite-interest poisoning: `tracing` caches each
+    /// callsite's `Interest` process-wide from its FIRST macro
+    /// execution, evaluated against the executing thread's dispatcher.
+    /// Subscriber-less sibling tests in this binary hit the shared
+    /// `error!`/`warn!` callsites of this module (consumer_management
+    /// lines 284/294/354/382/445-530: watcher exhaustion, crash-channel
+    /// closed, resume errors) first and cache `Interest::never`, so a
+    /// later thread-local `set_default` capture silently drops events.
+    /// The global registry heals prior poison and floors future rebuilds
+    /// at `sometimes` (fix pattern: c3853198; bd rc-img5).
+    fn ensure_global_tracing_default() {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+    }
+
     #[tokio::test]
     async fn test_crash_notification_warns_on_closed_channel() {
         use tracing_subscriber::prelude::*;
@@ -1541,6 +1561,7 @@ mod tests {
                 true
             }));
 
+        ensure_global_tracing_default();
         let _guard = tracing_subscriber::registry().with(layer).set_default();
 
         let (exchange_tx, _exchange_rx) = mpsc::channel(1);
@@ -1610,6 +1631,7 @@ mod tests {
             }
         }
 
+        ensure_global_tracing_default();
         let _guard = tracing_subscriber::registry()
             .with(WarnCounter {
                 seen: warn_seen.clone(),
@@ -2416,6 +2438,7 @@ mod tests {
         // recorded attempts, final success (no exhaustion log).
         use tracing_subscriber::prelude::*;
 
+        ensure_global_tracing_default();
         let (log_buf, writer) = captured_logs();
         let _guard = tracing_subscriber::registry()
             .with(
@@ -2476,6 +2499,7 @@ mod tests {
         // terminates (handle joins).
         use tracing_subscriber::prelude::*;
 
+        ensure_global_tracing_default();
         let (log_buf, writer) = captured_logs();
         let _guard = tracing_subscriber::registry()
             .with(
@@ -2534,6 +2558,7 @@ mod tests {
         // watcher joins within the 1s outer bound.
         use tracing_subscriber::prelude::*;
 
+        ensure_global_tracing_default();
         let (log_buf, writer) = captured_logs();
         let _guard = tracing_subscriber::registry()
             .with(

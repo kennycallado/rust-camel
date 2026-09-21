@@ -39,9 +39,29 @@ fn authenticated_plan(provider: &str) -> RouteSecurityPlan {
     }
 }
 
+/// Install a bare registry as the process-global tracing default, once
+/// per test binary. Guards the `capture_logs` tests against
+/// callsite-interest poisoning: `tracing` caches each callsite's
+/// `Interest` process-wide from its FIRST macro execution, evaluated
+/// against the executing thread's dispatcher. Subscriber-less sibling
+/// tests in this binary hit the shared bind-gate acknowledged-warn
+/// callsite (camel-auth `enforce_bind_exposure_gate`, acked branch)
+/// first and cache `Interest::never`, so a later thread-local
+/// `with_default` capture silently drops events — the same race
+/// `BIND_GATE_WARN_LOCK` below serializes against. The global registry
+/// heals prior poison and floors future rebuilds at `sometimes` (fix
+/// pattern: c3853198; bd rc-img5).
+fn ensure_global_tracing_default() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if INIT.set(()).is_ok() {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    }
+}
+
 /// Runs `f` under a thread-local `fmt` subscriber capturing output into a
 /// buffer; returns the captured text.
 fn capture_logs(f: impl FnOnce()) -> String {
+    ensure_global_tracing_default();
     struct CaptureWriter {
         buf: Arc<std::sync::Mutex<Vec<u8>>>,
     }

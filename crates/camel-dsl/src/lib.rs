@@ -76,6 +76,24 @@ pub use template::yaml::{parse_yaml_templated_routes, parse_yaml_templates};
 pub(crate) mod test_support {
     use std::sync::Arc;
 
+    /// Install a bare registry as the process-global tracing default, once
+    /// per test binary. Guards capture tests against callsite-interest
+    /// poisoning: `tracing` caches each callsite's `Interest` process-wide
+    /// from its FIRST macro execution, evaluated against the executing
+    /// thread's dispatcher. Subscriber-less sibling tests in this binary
+    /// hit the shared warn/error callsites first (e.g. the discovery
+    /// "recursive includes" warn, the yaml parse-failed `error!` replay at
+    /// `yaml.rs:178/196`) and cache `Interest::never`, so a later
+    /// thread-local `set_default` capture silently drops events. The
+    /// global registry heals prior poison and floors future rebuilds at
+    /// `sometimes` (fix pattern: c3853198; bd rc-img5).
+    pub(crate) fn ensure_global_tracing_default() {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+    }
+
     /// Test double for `TokenAuthenticator`, shared by unit tests across this
     /// crate. `subject` lets tests distinguish instances by resolved identity.
     pub(crate) fn test_authenticator(subject: &str) -> Arc<dyn camel_auth::TokenAuthenticator> {

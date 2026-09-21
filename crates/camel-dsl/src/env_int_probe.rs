@@ -427,6 +427,7 @@ mod tests {
         tracing::subscriber::DefaultGuard,
     ) {
         use tracing_subscriber::prelude::*;
+        crate::test_support::ensure_global_tracing_default();
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let layer = ErrorCountLayer {
             count: Arc::clone(&count),

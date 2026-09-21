@@ -69,6 +69,15 @@ pub(super) mod warn_capture {
     /// Runs `f` with a capturing subscriber installed and returns
     /// `(f's result, captured event field strings)` in emission order.
     pub(crate) fn capture_warns<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+        // OnceLock-gated global registry: heals/prevents callsite-
+        // interest poisoning of the shared tar-entry `warn!` callsite
+        // (`tar.rs:134`), which subscriber-less sibling data-format
+        // tests in this binary hit first (fix pattern: c3853198; bd
+        // rc-img5).
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
         let sink: Sink = Default::default();
         let recorder = Recorder {
             events: Arc::clone(&sink),

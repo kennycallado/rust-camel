@@ -304,6 +304,17 @@ mod tests {
         // (same pattern as the wire_tap tests, bd rc-u9hs).
         let _guard = tracing::subscriber::set_default(subscriber);
         tracing::callsite::rebuild_interest_cache();
+        // OnceLock-gated global registry floors future interest rebuilds at
+        // `sometimes` so the wire_tap copy-failure warn! callsite
+        // (`wire_tap.rs:379`) can never be poisoned to `never` by
+        // subscriber-less sibling tests in this binary — completing the
+        // rebuild band-aid above (fix pattern: c3853198; bd rc-img5).
+        {
+            static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            if INIT.set(()).is_ok() {
+                let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+            }
+        }
 
         let tap = WireTapService::new(copy_stub);
         let svc = compose_divert(tap, real_stub);

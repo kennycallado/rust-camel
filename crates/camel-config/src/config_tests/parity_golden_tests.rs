@@ -148,9 +148,12 @@ where
 /// Run `body` under a thread-local subscriber recording WARN messages.
 /// `set_default` is thread-local, so concurrent tests neither pollute
 /// this capture nor observe it (same convention as camel-core's
-/// `disk_offload_tests::capture_warns`).
+/// `disk_offload_tests::capture_warns`). The one-time global registry
+/// guard heals/prevents callsite-interest poisoning from subscriber-less
+/// sibling loads of the same warn! callsites (bd rc-img5, c3853198).
 fn capture_warns<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
     use tracing_subscriber::prelude::*;
+    crate::config::log_capture::ensure_global_tracing_default();
     let events = Arc::new(Mutex::new(Vec::new()));
     let layer = CaptureLayer {
         events: Arc::clone(&events),

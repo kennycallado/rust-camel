@@ -477,6 +477,16 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use tracing_subscriber::prelude::*;
 
+        // OnceLock-gated global registry: heals/prevents callsite-interest
+        // poisoning of the shared `function` span callsite (target
+        // `camel_function`), which subscriber-less sibling function-step
+        // tests in this binary hit first (fix pattern: c3853198; bd
+        // rc-img5).
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+
         let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch::default())]));
         let def = FunctionDefinition {
             id: FunctionId::compute("deno", "span_test", 5000),

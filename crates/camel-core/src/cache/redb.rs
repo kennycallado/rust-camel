@@ -1183,9 +1183,28 @@ mod tests {
 
     // ── cgroup memory-limit guardrail ─────────────────────────────────────────
 
+    /// Install a bare registry as the process-global tracing default,
+    /// once per test binary. Guards the `capture_guardrail` tests against
+    /// callsite-interest poisoning: `tracing` caches each callsite's
+    /// `Interest` process-wide from its FIRST macro execution, evaluated
+    /// against the executing thread's dispatcher. Subscriber-less sibling
+    /// tests in this binary hit the shared cgroup-guardrail `warn!`
+    /// callsites in this file first and cache `Interest::never`, so a
+    /// later
+    /// thread-local `with_default` capture silently drops events. The
+    /// global registry heals prior poison and floors future rebuilds at
+    /// `sometimes` (fix pattern: c3853198; bd rc-img5).
+    fn ensure_global_tracing_default() {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+    }
+
     /// Runs `f` under a thread-local default `fmt` subscriber that appends into
     /// a shared buffer, then returns the captured text.
     fn capture_guardrail(f: impl FnOnce()) -> String {
+        ensure_global_tracing_default();
         let buf = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt::Subscriber::builder()
             .with_writer(TestWriter {

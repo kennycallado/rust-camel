@@ -2388,6 +2388,25 @@ fn sql_expectation_columns_duplicate_rejected() {
 /// advisory would land in the window under count.
 static ADVISORY_LOCK: Mutex<()> = Mutex::new(());
 
+/// Install a bare registry as the process-global tracing default, once
+/// per test binary. Guards the advisory capture tests below against
+/// callsite-interest poisoning: `tracing` caches each callsite's
+/// `Interest` process-wide from its FIRST macro execution, evaluated
+/// against the executing thread's dispatcher. Subscriber-less sibling
+/// tests in this binary parse validate documents with ordered `rows`
+/// over `ORDER BY`-less queries and hit the shared advisory warn!
+/// callsite (`document.rs`, "sql query has no `ORDER BY`") first,
+/// caching `Interest::never` — the scoped `with_default` capture then
+/// silently drops the advisory. The global registry heals prior poison
+/// and floors future rebuilds at `sometimes` (fix pattern: c3853198;
+/// bd rc-img5).
+fn ensure_global_tracing_default() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if INIT.set(()).is_ok() {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    }
+}
+
 /// An ordered `rows` assertion over a query without `ORDER BY` emits
 /// exactly one advisory warn naming the action index and the
 /// nondeterminism.
@@ -2399,6 +2418,7 @@ static ADVISORY_LOCK: Mutex<()> = Mutex::new(());
 #[test]
 fn ordered_without_order_by_warns_once() {
     let _guard = ADVISORY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    ensure_global_tracing_default();
     let dispatch = crate::log_capture::scoped_capture_dispatch();
     let window = crate::log_capture::open_window();
     let _doc = tracing::dispatcher::with_default(&dispatch, || {
@@ -2444,6 +2464,7 @@ scenario:
 #[test]
 fn unordered_without_order_by_does_not_warn() {
     let _guard = ADVISORY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    ensure_global_tracing_default();
     let dispatch = crate::log_capture::scoped_capture_dispatch();
     let window = crate::log_capture::open_window();
     let _doc = tracing::dispatcher::with_default(&dispatch, || {

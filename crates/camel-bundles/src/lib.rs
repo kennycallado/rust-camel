@@ -835,6 +835,17 @@ mod logquiet_regression_tests {
     }
 
     fn capture_sink() -> (Arc<std::sync::Mutex<Vec<u8>>>, impl tracing::Subscriber) {
+        // OnceLock-gated global registry: heals/prevents callsite-interest
+        // poisoning of the registration `warn!` callsites (e.g. the pool
+        // shutdown warns in this file), which subscriber-less sibling
+        // registration tests in this binary hit first — without it a
+        // poisoned interest cache drops the WARN lines and the
+        // no-warn-lines assertion below passes vacuously (fix pattern:
+        // c3853198; bd rc-img5).
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
         let sink: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
         let writer = CapturingWriter {
             sink: Arc::clone(&sink),
