@@ -113,20 +113,6 @@
         ],
     ),
 
-    // R-URI-known:kind-mismatch — real defect surfaced by widened kind
-    // validation (rc-68q6): `timer:tick?period=1s`. The timer's `period`
-    // option is u64 MILLIS (UriConfig `period_ms` companion convention),
-    // so the runtime `TimerConfig::from_uri` rejects `1s` (`"1s"` fails
-    // the u64 parse) at route start. The compile-parity fixture only
-    // compiles the route (no endpoint instantiation), so the defect went
-    // unseen until the lint checked Int values. Fixing the fixture would
-    // churn the config-parity goldens — out of rc-68q6's zone; this entry
-    // records the defect instead.
-    (
-        "crates/camel-cli/tests/fixtures/config-parity-project/app.yaml",
-        [("R-URI-known:kind-mismatch", "error")],
-    ),
-
     // Adjudication (rc-93wct rev 2, conductor ruling): `from:
     // ${env:INBOUND}/in` is an embedded no-default token. The scenario
     // harness sets INBOUND, so boot succeeds — but without the variable the

@@ -1,5 +1,5 @@
 routes:
   - id: parity-entry
-    from: timer:tick?period=1s
+    from: timer:tick?period=1000
     steps:
       - to: log:parity
