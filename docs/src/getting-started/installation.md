@@ -101,6 +101,29 @@ cargo run -p hello-world
 The `hello-world` example fires a timer five times and logs each tick. You
 should see five log lines, then the process waits for Ctrl+C.
 
+## Android (Termux)
+
+Android has no system CA store at the standard Linux paths
+(`/etc/ssl/certs` and friends), so the TLS stack finds zero root
+certificates. Two ways through:
+
+- **Fixed since 0.51.0**: the HTTP client falls back to bundled Mozilla
+  root certificates (webpki) when the platform CA store is empty.
+  Startup no longer fails on CA-less platforms; a `warn` log names the
+  fallback. Platform trust settings do not apply while the fallback is
+  active.
+- **Preferred on Termux** (uses the store `pkg` maintains): install the
+  CA bundle and point the TLS probe at it:
+
+  ```console
+  pkg install ca-certificates
+  export SSL_CERT_FILE="$PREFIX/etc/tls/ca-bundle.crt"
+  ```
+
+  Persist the export in `~/.bashrc`. With the env var set, every
+  reqwest-based client in the binary uses the Termux-maintained roots
+  and the fallback stays inactive.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -108,6 +131,7 @@ should see five log lines, then the process waits for Ctrl+C.
 | `rustc 1.xx is unsupported` | Run `rustup update stable`. rust-camel needs 1.89 or newer. |
 | `camel: command not found` | `cargo install` puts binaries in `~/.cargo/bin`. Add it to your `PATH`. |
 | `error[E0658]` on edition 2024 features | Your rustc is too old. See the first row. |
+| Startup `warn` about webpki fallback on Termux | Platform CA store is empty. Run `pkg install ca-certificates` and export `SSL_CERT_FILE="$PREFIX/etc/tls/ca-bundle.crt"` to use the Termux-maintained roots. |
 
 ## Next steps
 
