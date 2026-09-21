@@ -81,12 +81,7 @@ pub async fn run_logs_document(doc_yaml: &str, fixture: &str) -> DocumentOutcome
         .expect("the full boot must succeed");
     let ctx = Arc::new(tokio::sync::Mutex::new(run.ctx));
 
-    let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
-    adapters.insert(
-        "direct:start".to_string(),
-        Box::new(DirectStimulus::new(Arc::clone(&ctx))),
-    );
-    let router = PartnerRouter::new(adapters);
+    let router = router_for("direct:start", DirectStimulus::new(Arc::clone(&ctx)));
 
     let wired = wired_refs(&doc);
     let mut vars = ScenarioVars::new();

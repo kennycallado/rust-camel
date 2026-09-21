@@ -1160,6 +1160,7 @@ fn wire_body_to_value(content_type: Option<&str>, bytes: &[u8]) -> Value {
 mod tests {
     use super::*;
     use crate::adapters::PartnerRouter;
+    use crate::test_util::router_for;
 
     /// The default scripted response is well-formed serve-once OK:
     /// the derived `Default` would zero both `status` and `times`,
@@ -1348,9 +1349,7 @@ mod tests {
             .await
             .expect("partner must bind 127.0.0.1:0");
         let authority = partner.bound_addr().to_string();
-        let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
-        adapters.insert(declared.to_string(), Box::new(partner));
-        (PartnerRouter::new(adapters), authority)
+        (router_for(declared, partner), authority)
     }
 
     /// The rendered timeout message of a receive on `declared` under
@@ -1458,9 +1457,7 @@ mod tests {
             .expect("partner must bind 127.0.0.1:0");
         let authority = partner.bound_addr().to_string();
         let declared = format!("http://{authority}/login?authPassword=hunter2&x=1");
-        let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
-        adapters.insert(declared.clone(), Box::new(partner));
-        let router = PartnerRouter::new(adapters);
+        let router = router_for(&declared, partner);
         router.set_secret_query_keys(vec!["authPassword".to_string()]);
         router
             .send(
@@ -1508,9 +1505,7 @@ mod tests {
             .expect("partner must bind 127.0.0.1:0");
         let authority = partner.bound_addr().to_string();
         let declared = format!("http://{authority}/api?flag=a&x=1");
-        let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
-        adapters.insert(declared.clone(), Box::new(partner));
-        let router = PartnerRouter::new(adapters);
+        let router = router_for(&declared, partner);
         router
             .send(
                 &declared,
