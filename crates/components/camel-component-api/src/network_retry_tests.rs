@@ -797,7 +797,10 @@ impl tracing::field::Visit for CollectingVisitor<'_> {
 /// test reaching the shared `warn!` callsite in `retry_async_inner` first
 /// poisons it for the whole process, and the thread-local `set_default`
 /// capture layers silently drop events ("expected at least one log event,
-/// got none" — load-dependent flake, bd rc-zushg).
+/// got none" — load-dependent flake, bd rc-zushg; same signature later
+/// observed under workspace-wide load as bd rc-lq4bc — duplicate of
+/// this class, pinned by control: a guard-less binary reded 3/30 in
+/// the battery that kept the guarded binary green 100/100).
 ///
 /// Installing a global default heals and prevents the poison: creating the
 /// dispatch rebuilds the interest cache, and the leaked global registry
