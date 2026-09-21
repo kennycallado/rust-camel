@@ -308,7 +308,7 @@ smoke_artifact() {
     # the artifact's own cmdline as the kill pattern.
     case "$label" in
         rust-camel-lib)
-            pkill -9 -f 'target/release/http-server' 2>/dev/null || true
+            pkill -9 -f "$RUST_LIB_BIN" 2>/dev/null || true
             ;;
         rust-camel-cli)
             pkill -9 -f 'http-server-cli-wrapper.sh' 2>/dev/null || true
