@@ -210,7 +210,11 @@ the longest separator wins (e.g. `param.foo.bar` matches `param.foo.` over
 > the element kind (best-effort — no production component parses a List today).
 > String and unknown `#[non_exhaustive]` kinds stay non-erroring. Values with an
 > interpolation marker (`${...}`/`{{...}}`) skip kind validation — the resolved
-> type is unknowable at lint time (same reference treatment as R-SECRET)."
+> type is unknowable at lint time (same reference treatment as R-SECRET) — with
+> one carve-out (rc-w4otz): a value that is exactly one whole-scalar
+> `${env:VAR:-default}` token has its default (the concrete boot-time fallback)
+> validated against the kind; no-default, escaped, and mid-string tokens stay
+> exempt."
 
 > "How do I add a new lint rule?"
 > "Implement the `Rule` trait and register it in `LintEngine::with_rule`. Add the

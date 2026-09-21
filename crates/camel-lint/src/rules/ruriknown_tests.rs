@@ -762,10 +762,13 @@ fn string_kind_never_mismatches() {
 
 #[test]
 fn interpolated_value_skips_kind_validation() {
-    // A value carrying an interpolation marker (`${...}` env/arg or
-    // `{{...}}` placeholder) resolves at boot, not at lint time; its
-    // resolved type is unknowable, so kind validation is skipped
-    // (mirrors R-SECRET's reference treatment).
+    // Interpolation the lint cannot resolve stays exempt: a no-default
+    // `${env:...}` token resolves to the (unknowable) process
+    // environment at boot, `${arg:...}` tokens and `{{...}}` placeholders
+    // resolve outside the lint's knowledge, so kind validation skips
+    // them (mirrors R-SECRET's reference treatment). A whole-scalar
+    // `${env:X:-d}` token is NOT in this list — its default is
+    // validated (see the env-default tests below).
     let catalog = StubCatalog::empty()
         .with("direct", ComponentMetadata::minimal("direct"))
         .with(
@@ -784,7 +787,6 @@ fn interpolated_value_skips_kind_validation() {
         );
     for query in [
         "repeatCount=${env:RETRIES}",
-        "repeatCount=${env:RETRIES:-25}",
         "repeatCount=${arg:RETRIES}",
         "format={{ config.format }}",
     ] {
@@ -793,6 +795,405 @@ fn interpolated_value_skips_kind_validation() {
         assert!(
             ruriknown_only(&diags).is_empty(),
             "interpolated value `{query}` must skip kind validation; got: {:?}",
+            ruriknown_only(&diags)
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// Whole-scalar env-default kind validation (rc-w4otz) tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn env_default_int_kind_mismatch_reported() {
+    // `repeatCount` and `period` are Int options; each whole-scalar env
+    // token's default fails the i64/u64 parse (`many` is not a number;
+    // `1s` is the bd's motivating defect — timer's real `period` is u64
+    // MILLIS, so the `1s` default fails at boot). The default is the
+    // concrete boot-time fallback → one KindMismatch Error on the WHOLE
+    // value span, message naming integers.
+    let catalog = StubCatalog::empty()
+        .with("direct", ComponentMetadata::minimal("direct"))
+        .with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![
+                    UriOption::new("repeatCount", "repeats", OptionKind::Int),
+                    // timer's real `period` is u64 millis (UriConfig
+                    // `period_ms` companion convention) — Int kind.
+                    UriOption::new("period", "tick interval millis", OptionKind::Int),
+                ],
+            ),
+        );
+    for (query, value) in [
+        ("repeatCount=${env:RETRIES:-many}", "${env:RETRIES:-many}"),
+        ("period=${env:POLL:-1s}", "${env:POLL:-1s}"),
+    ] {
+        let source = format!("id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?{query}\n");
+        let diags = analyze(&source, &catalog);
+        assert_eq!(
+            count_subcode(&diags, UriKnownSubCode::KindMismatch),
+            1,
+            "expected one KindMismatch for `{query}`; got: {:?}",
+            ruriknown_only(&diags)
+        );
+        let d = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::KindMismatch))
+            .unwrap();
+        assert_eq!(slice(&source, &d.span), value);
+        assert_eq!(d.severity, Severity::Error);
+        assert!(
+            d.message.contains("integer"),
+            "message should name the expected kind; got: {}",
+            d.message
+        );
+    }
+}
+
+#[test]
+fn env_default_int_kind_valid_defaults_silent() {
+    // Defaults the i64/u64 grammars accept are silent — the
+    // unset-variable boot path parses them fine. In `${env:RETRIES:--3}`
+    // the first `-` after `:` is the separator, so the default is `-3`.
+    let catalog = StubCatalog::empty()
+        .with("direct", ComponentMetadata::minimal("direct"))
+        .with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![UriOption::new("repeatCount", "repeats", OptionKind::Int)],
+            ),
+        );
+    for value in [
+        "${env:RETRIES:-25}",
+        "${env:RETRIES:--3}",
+        "${env:RETRIES:-18446744073709551615}",
+    ] {
+        let source =
+            format!("id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?repeatCount={value}\n");
+        let diags = analyze(&source, &catalog);
+        assert!(
+            ruriknown_only(&diags).is_empty(),
+            "Int env default `{value}` must be silent; got: {:?}",
+            ruriknown_only(&diags)
+        );
+    }
+}
+
+#[test]
+fn env_default_bool_kind_valid_and_invalid() {
+    // Bool env defaults use the runtime vocabulary (`parse_bool_param`:
+    // true/false/1/0/yes/no, any case); `maybe` is reported on the whole
+    // token span with the boolean expectation.
+    let catalog = StubCatalog::empty()
+        .with("direct", ComponentMetadata::minimal("direct"))
+        .with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![UriOption::new("enabled", "enabled", OptionKind::Bool)],
+            ),
+        );
+    for value in ["${env:FLAG:-true}", "${env:FLAG:-1}", "${env:FLAG:-YES}"] {
+        let source =
+            format!("id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?enabled={value}\n");
+        let diags = analyze(&source, &catalog);
+        assert!(
+            ruriknown_only(&diags).is_empty(),
+            "Bool env default `{value}` is runtime-legal; got: {:?}",
+            ruriknown_only(&diags)
+        );
+    }
+    let source =
+        "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?enabled=${env:FLAG:-maybe}\n";
+    let diags = analyze(source, &catalog);
+    assert_eq!(
+        count_subcode(&diags, UriKnownSubCode::KindMismatch),
+        1,
+        "expected one KindMismatch; got: {:?}",
+        ruriknown_only(&diags)
+    );
+    let d = diags
+        .iter()
+        .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::KindMismatch))
+        .unwrap();
+    assert_eq!(slice(source, &d.span), "${env:FLAG:-maybe}");
+    assert_eq!(d.severity, Severity::Error);
+    assert!(
+        d.message.contains("boolean"),
+        "message should name the expected kind; got: {}",
+        d.message
+    );
+}
+
+#[test]
+fn env_default_float_kind_valid_and_invalid() {
+    // `${env:RATIO:-1.5}` parses as f64 → silent; the `fast` default is
+    // reported naming floating-point.
+    let catalog = StubCatalog::empty()
+        .with("direct", ComponentMetadata::minimal("direct"))
+        .with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![UriOption::new("ratio", "ratio", OptionKind::Float)],
+            ),
+        );
+    for value in ["${env:RATIO:-1.5}", "${env:RATIO:--0.25}"] {
+        let source =
+            format!("id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?ratio={value}\n");
+        let diags = analyze(&source, &catalog);
+        assert!(
+            ruriknown_only(&diags).is_empty(),
+            "Float env default `{value}` must be silent; got: {:?}",
+            ruriknown_only(&diags)
+        );
+    }
+    let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?ratio=${env:RATIO:-fast}\n";
+    let diags = analyze(source, &catalog);
+    assert_eq!(
+        count_subcode(&diags, UriKnownSubCode::KindMismatch),
+        1,
+        "expected one KindMismatch; got: {:?}",
+        ruriknown_only(&diags)
+    );
+    let d = diags
+        .iter()
+        .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::KindMismatch))
+        .unwrap();
+    assert_eq!(slice(source, &d.span), "${env:RATIO:-fast}");
+    assert!(
+        d.message.contains("floating-point"),
+        "message should name the expected kind; got: {}",
+        d.message
+    );
+}
+
+#[test]
+fn env_default_duration_kind_valid_and_invalid() {
+    // humantime grammar: `500ms`/`2h30m` defaults are silent; `soon` and
+    // the bare-integer `100` (an Int-kind value, mirroring
+    // `duration_kind_rejects_bare_integer`) are reported naming
+    // durations.
+    let catalog = StubCatalog::empty()
+        .with("direct", ComponentMetadata::minimal("direct"))
+        .with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![UriOption::new("delay", "delay", OptionKind::Duration)],
+            ),
+        );
+    for value in ["${env:POLL:-500ms}", "${env:POLL:-2h30m}"] {
+        let source =
+            format!("id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?delay={value}\n");
+        let diags = analyze(&source, &catalog);
+        assert!(
+            ruriknown_only(&diags).is_empty(),
+            "Duration env default `{value}` must be silent; got: {:?}",
+            ruriknown_only(&diags)
+        );
+    }
+    for value in ["${env:POLL:-soon}", "${env:POLL:-100}"] {
+        let source =
+            format!("id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?delay={value}\n");
+        let diags = analyze(&source, &catalog);
+        assert_eq!(
+            count_subcode(&diags, UriKnownSubCode::KindMismatch),
+            1,
+            "expected one KindMismatch for `{value}`; got: {:?}",
+            ruriknown_only(&diags)
+        );
+        let d = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::KindMismatch))
+            .unwrap();
+        assert_eq!(slice(&source, &d.span), value);
+        assert!(
+            d.message.contains("duration"),
+            "message should name the expected kind; got: {}",
+            d.message
+        );
+    }
+}
+
+#[test]
+fn env_default_enum_kind_valid_and_invalid() {
+    // Enum membership applies to the default under the same case-fold
+    // normalization as literals (`XML` matches `xml`); `yaml` is outside
+    // the allowed set → reported with the allowed-value list.
+    let catalog = StubCatalog::empty()
+        .with("direct", ComponentMetadata::minimal("direct"))
+        .with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![UriOption::new(
+                    "format",
+                    "output format",
+                    OptionKind::Enum(vec!["json".to_string(), "xml".to_string()]),
+                )],
+            ),
+        );
+    for value in ["${env:FMT:-json}", "${env:FMT:-XML}"] {
+        let source =
+            format!("id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?format={value}\n");
+        let diags = analyze(&source, &catalog);
+        assert!(
+            ruriknown_only(&diags).is_empty(),
+            "Enum env default `{value}` must be silent; got: {:?}",
+            ruriknown_only(&diags)
+        );
+    }
+    let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?format=${env:FMT:-yaml}\n";
+    let diags = analyze(source, &catalog);
+    assert_eq!(
+        count_subcode(&diags, UriKnownSubCode::KindMismatch),
+        1,
+        "expected one KindMismatch; got: {:?}",
+        ruriknown_only(&diags)
+    );
+    let d = diags
+        .iter()
+        .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::KindMismatch))
+        .unwrap();
+    assert_eq!(slice(source, &d.span), "${env:FMT:-yaml}");
+    assert!(
+        d.message.contains("one of"),
+        "message should list the allowed values; got: {}",
+        d.message
+    );
+}
+
+#[test]
+fn env_default_list_kind_valid_and_invalid() {
+    // Each comma-separated ELEMENT of the default is validated against
+    // the element kind; the empty default (`${env:IDS:-}`) is the empty
+    // list — silent. `1,b` carries a non-integer element → reported.
+    let catalog = StubCatalog::empty()
+        .with("direct", ComponentMetadata::minimal("direct"))
+        .with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![UriOption::new(
+                    "ids",
+                    "allowed ids",
+                    OptionKind::List(Box::new(OptionKind::Int)),
+                )],
+            ),
+        );
+    for value in ["${env:IDS:-1,2,3}", "${env:IDS:-42}", "${env:IDS:-}"] {
+        let source = format!("id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?ids={value}\n");
+        let diags = analyze(&source, &catalog);
+        assert!(
+            ruriknown_only(&diags).is_empty(),
+            "List env default `{value}` must be silent; got: {:?}",
+            ruriknown_only(&diags)
+        );
+    }
+    let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?ids=${env:IDS:-1,b}\n";
+    let diags = analyze(source, &catalog);
+    assert_eq!(
+        count_subcode(&diags, UriKnownSubCode::KindMismatch),
+        1,
+        "expected one KindMismatch; got: {:?}",
+        ruriknown_only(&diags)
+    );
+    let d = diags
+        .iter()
+        .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::KindMismatch))
+        .unwrap();
+    assert_eq!(slice(source, &d.span), "${env:IDS:-1,b}");
+    assert!(
+        d.message.contains("comma-separated list"),
+        "message should name the list convention; got: {}",
+        d.message
+    );
+}
+
+#[test]
+fn env_default_string_kind_any_default_silent() {
+    // String accepts any text; even a garbage-looking default on a
+    // whole-scalar token stays silent (the carve-out cannot
+    // false-positive on String options).
+    let catalog = StubCatalog::empty()
+        .with("direct", ComponentMetadata::minimal("direct"))
+        .with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![UriOption::new("fileName", "file name", OptionKind::String)],
+            ),
+        );
+    let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?fileName=${env:NAME:-%2fdev%2fnull}\n";
+    let diags = analyze(source, &catalog);
+    assert!(
+        ruriknown_only(&diags).is_empty(),
+        "String kind never mismatches; got: {:?}",
+        ruriknown_only(&diags)
+    );
+}
+
+#[test]
+fn env_default_no_default_token_stays_exempt() {
+    // `${env:RETRIES}` has no default: the boot value is the process
+    // environment, unknowable at lint time — exempt even for an Int
+    // option, mirroring R-SECRET's reference treatment.
+    let catalog = StubCatalog::empty()
+        .with("direct", ComponentMetadata::minimal("direct"))
+        .with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![UriOption::new("repeatCount", "repeats", OptionKind::Int)],
+            ),
+        );
+    let source =
+        "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?repeatCount=${env:RETRIES}\n";
+    let diags = analyze(source, &catalog);
+    assert!(
+        ruriknown_only(&diags).is_empty(),
+        "no-default token must stay exempt; got: {:?}",
+        ruriknown_only(&diags)
+    );
+}
+
+#[test]
+fn env_default_non_whole_scalar_tokens_stay_exempt() {
+    // The carve-out is whole-scalar ONLY: kind-invalid defaults inside
+    // tokens that are not one whole-scalar env token stay exempt —
+    // mid-string embedding, token concatenation, `$${...}` escape,
+    // `${arg:...}` (env-only scope), and `{{...}}` placeholders all
+    // resolve outside lint knowledge.
+    let catalog = StubCatalog::empty()
+        .with("direct", ComponentMetadata::minimal("direct"))
+        .with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![
+                    UriOption::new("repeatCount", "repeats", OptionKind::Int),
+                    UriOption::new("fileName", "file name", OptionKind::String),
+                ],
+            ),
+        );
+    for query in [
+        "repeatCount=${env:A:-many}/b",
+        "repeatCount=pre-${env:A:-many}",
+        "repeatCount=${env:A:-many}${env:B:-many}",
+        "repeatCount=$${env:A:-many}",
+        "repeatCount=${arg:RETRIES:-many}",
+        "repeatCount={{ cfg.count }}",
+        "fileName=${env:NAME:-garbage}",
+    ] {
+        let source = format!("id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?{query}\n");
+        let diags = analyze(&source, &catalog);
+        assert!(
+            ruriknown_only(&diags).is_empty(),
+            "non-whole-scalar `{query}` must stay exempt; got: {:?}",
             ruriknown_only(&diags)
         );
     }

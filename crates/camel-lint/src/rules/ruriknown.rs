@@ -37,7 +37,11 @@
 //! convention is best-effort). Values carrying an interpolation marker
 //! (`${...}` or `{{...}}`) resolve at boot, not at lint time; their
 //! resolved type is unknowable, so kind validation skips them (mirrors
-//! R-SECRET's reference treatment). String needs no validation. The
+//! R-SECRET's reference treatment) — except a value that is exactly one
+//! whole-scalar `${env:VAR:-default}` token: the default is the concrete
+//! boot-time fallback, so it is validated against the kind (no-default,
+//! escaped, and mid-string tokens stay exempt). String needs no
+//! validation. The
 //! `#[non_exhaustive]` attribute additionally requires `matches!`-style
 //! non-exhaustive matching so future kinds stay non-erroring.
 
@@ -45,6 +49,7 @@ use camel_api::component_metadata::{ComponentMetadataCatalog, OptionKind};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode, Severity, Span, UriKnownSubCode};
 use crate::document::Document;
+use crate::env_interpolation::{WholeScalarEnvToken, whole_scalar_env_token};
 use crate::route_view::{Endpoint, OptionOrigin};
 use crate::rule::Rule;
 
@@ -326,19 +331,34 @@ fn analyze_endpoint(
         // Kind validation for every validated kind. Values carrying an
         // interpolation marker (`${...}` / `{{...}}`) resolve at boot, not
         // at lint time; their resolved type is unknowable, so they are
-        // exempt (mirrors R-SECRET's reference treatment).
-        if let Some(val) = &opt.value
-            && !val.value.contains("${")
-            && !val.value.contains("{{")
-            && let Some(expected) = validate_kind(&canon.kind, &val.value)
-        {
-            diagnostics.push(Diagnostic {
-                code: DiagnosticCode::RUriKnown(UriKnownSubCode::KindMismatch),
-                severity: Severity::Error,
-                span: val.span.clone(),
-                message: format!("option `{}` expects {}", canon.name, expected),
-                fix: None,
-            });
+        // exempt (mirrors R-SECRET's reference treatment) — with one
+        // carve-out (rc-w4otz): a value that is EXACTLY one whole-scalar
+        // `${env:VAR:-default}` token carries its concrete boot-time
+        // fallback in the default (what the runtime parses when the
+        // variable is unset), so the default is validated against the
+        // kind. No-default tokens, `$${...}` escapes, and tokens nested
+        // in a larger string stay exempt.
+        if let Some(val) = &opt.value {
+            let mismatch = if !val.value.contains("${") && !val.value.contains("{{") {
+                validate_kind(&canon.kind, &val.value)
+            } else if let Some(WholeScalarEnvToken::WithDefault { default }) =
+                whole_scalar_env_token(&val.value)
+            {
+                validate_kind(&canon.kind, &default)
+            } else {
+                // Interpolation-bearing but not a whole-scalar defaulted
+                // env token: exempt.
+                None
+            };
+            if let Some(expected) = mismatch {
+                diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::RUriKnown(UriKnownSubCode::KindMismatch),
+                    severity: Severity::Error,
+                    span: val.span.clone(),
+                    message: format!("option `{}` expects {}", canon.name, expected),
+                    fix: None,
+                });
+            }
         }
     }
 
