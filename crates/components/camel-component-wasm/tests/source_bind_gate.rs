@@ -164,7 +164,11 @@ async fn wait_for_bind(port: u16, timeout: Duration) {
 /// `crates/camel-core/src/lifecycle/adapters/route_controller_trait_tests.rs`;
 /// the guard lives across the await so events emitted inside the future
 /// (e.g. the gate's warn) land in the buffer. Safe here because
-/// `#[tokio::test]` polls on one thread.
+/// `#[tokio::test]` polls on one thread. The shared one-time global
+/// registry guard heals/prevents callsite-interest poisoning of the
+/// bind-gate warn callsites (camel-auth `enforce_bind_exposure_gate`,
+/// reached via `source_consumer.rs:274`) that sibling gate tests hit
+/// subscriber-less first (fix pattern: c3853198; bd rc-img5).
 async fn capture_logs<F: Future>(fut: F) -> (F::Output, String) {
     struct CaptureWriter {
         buf: Arc<std::sync::Mutex<Vec<u8>>>,
@@ -193,18 +197,7 @@ async fn capture_logs<F: Future>(fut: F) -> (F::Output, String) {
         })
         .with_ansi(false)
         .finish();
-    // OnceLock-gated global registry: heals/prevents callsite-interest
-    // poisoning of the shared bind-gate warn callsites (camel-auth
-    // `enforce_bind_exposure_gate`, reached via `source_consumer.rs:274`),
-    // which the sibling gate tests in this binary hit subscriber-less
-    // first — a poisoned interest cache would drop the gate warns this
-    // capture asserts on (fix pattern: c3853198; bd rc-img5).
-    {
-        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        if INIT.set(()).is_ok() {
-            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
-        }
-    }
+    common::ensure_global_tracing_default();
     let _guard = tracing::subscriber::set_default(subscriber);
     let output = fut.await;
     drop(_guard);

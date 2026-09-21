@@ -1845,34 +1845,19 @@ where
 ///
 /// Mirrors the camel-core disk-offload test technique: `set_default`
 /// (guard-scoped, thread-local) instead of `with_default`, because a sync
-/// closure cannot span the `.await` points of an async test body.
+/// closure cannot span the `.await` points of an async test body. The
+/// shared one-time global registry guard heals/prevents callsite-interest
+/// poisoning from subscriber-less sibling loads of the same warn!
+/// callsites (bd rc-img5, c3853198).
 fn capture_warns() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
     use tracing_subscriber::prelude::*;
-    ensure_global_tracing_default();
+    common::ensure_global_tracing_default();
     let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let layer = CaptureLayer {
         events: Arc::clone(&events),
     };
     let guard = tracing_subscriber::registry().with(layer).set_default();
     (events, guard)
-}
-
-/// Install a bare registry as the process-global tracing default, once
-/// per test binary. Guards the `capture_warns` tests against
-/// callsite-interest poisoning: `tracing` caches each callsite's
-/// `Interest` process-wide from its FIRST macro execution, evaluated
-/// against the executing thread's dispatcher. Subscriber-less sibling
-/// tests in this binary (`configure_context` runs without capture) hit
-/// the shared cache-repo `warn!` callsites first and cache
-/// `Interest::never`, so a later thread-local `set_default` capture
-/// silently drops events. The global registry heals prior poison and
-/// floors future rebuilds at `sometimes` (fix pattern: c3853198; bd
-/// rc-img5).
-fn ensure_global_tracing_default() {
-    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    if INIT.set(()).is_ok() {
-        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
-    }
 }
 
 #[tokio::test]
