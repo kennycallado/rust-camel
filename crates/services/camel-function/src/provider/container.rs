@@ -114,7 +114,7 @@ impl ContainerProviderBuilder {
             image: self.image,
             boot_timeout: self.boot_timeout,
             pull_policy: self.pull_policy,
-            client: ProtocolClient::new(),
+            client: ProtocolClient::new()?,
             containers_by_handle: DashMap::new(),
             instance_id,
             egress_allowlist: self.egress_allowlist,

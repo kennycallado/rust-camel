@@ -588,7 +588,7 @@ mod tests {
             "my-client".into(),
             "secret".into(),
             opts,
-        );
+        ).expect("introspector"); // allow-unwrap(test)
         let mapper: Arc<dyn ClaimsMapper> = Arc::new(JsonPointerClaimsMapper::new(
             keycloak_claim_paths("my-client"),
         ));
@@ -625,7 +625,8 @@ mod tests {
             "svc".into(),
             "s".into(),
             opts,
-        );
+        )
+        .expect("introspector"); // allow-unwrap(test)
         let mapper: Arc<dyn ClaimsMapper> =
             Arc::new(JsonPointerClaimsMapper::new(keycloak_claim_paths("svc")));
         let _auth = IntrospectionAuthenticator::new(Arc::new(introspector), mapper);

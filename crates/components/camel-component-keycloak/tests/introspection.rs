@@ -22,7 +22,8 @@ fn build_auth(
         client_id.into(),
         "test-secret".into(),
         options,
-    );
+    )
+    .expect("introspector"); // allow-unwrap(test)
     let mapper: Arc<dyn ClaimsMapper> = Arc::new(JsonPointerClaimsMapper::new(
         keycloak_claim_paths(client_id),
     ));

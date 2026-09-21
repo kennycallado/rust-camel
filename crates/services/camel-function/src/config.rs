@@ -241,7 +241,10 @@ mod tests {
             egress_allowlist: vec!["api.example.com:443".to_string(), "bad host".to_string()],
             ..Default::default()
         };
-        let err = config.validate().err().expect("must be rejected");
+        // Pre-existing 1.98 clippy `err_expect` hit (test-only,
+        // behavior-identical) — fixed in passing to keep the rc-3j4mq
+        // verify gate green.
+        let err = config.validate().expect_err("must be rejected"); // allow-unwrap(test)
         assert!(err.to_string().contains("egress_allowlist"));
     }
 }

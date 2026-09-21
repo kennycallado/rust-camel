@@ -30,6 +30,8 @@ pub enum ProviderError {
     ShutdownFailed(String),
     #[error("invalid provider config: {0}")]
     InvalidConfig(String),
+    #[error("http client construction failed: {0}")]
+    HttpClientBuildFailed(String),
     #[error("boot timeout")]
     BootTimeout,
 }

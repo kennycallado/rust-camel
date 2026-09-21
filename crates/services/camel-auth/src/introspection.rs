@@ -109,19 +109,25 @@ impl CachingTokenIntrospector {
         client_id: String,
         client_secret: String,
         options: IntrospectionCacheOptions,
-    ) -> Self {
+    ) -> Result<Self, AuthError> {
+        // Typed error instead of a panic (rc-3j4mq sibling sweep): on a
+        // CA-less platform (e.g. Android/Termux) the platform verifier
+        // fails this build — callers get a config-class error, matching
+        // the AuthError::ConfigError precedent in http_client.rs.
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
             .build()
-            .expect("hardened HTTP client builder config is valid"); // allow-unwrap
-        Self::with_client(
+            .map_err(|e| {
+                AuthError::ConfigError(format!("introspection HTTP client build failed: {e}"))
+            })?;
+        Ok(Self::with_client(
             endpoint,
             client_id,
             Zeroizing::new(client_secret),
             options,
             http,
-        )
+        ))
     }
 
     fn with_client(
@@ -412,7 +418,8 @@ mod tests {
             "client-id".into(),
             "client-secret".into(),
             test_cache_opts(),
-        );
+        )
+        .expect("introspector"); // allow-unwrap(test)
 
         let r1 = introspector.introspect("token-a").await.unwrap();
         let r2 = introspector.introspect("token-a").await.unwrap();
@@ -441,7 +448,8 @@ mod tests {
             "cid".into(),
             "cs".into(),
             opts,
-        );
+        )
+        .expect("introspector"); // allow-unwrap(test)
 
         introspector.introspect("tok").await.unwrap();
         tokio::time::sleep(Duration::from_millis(80)).await;
@@ -469,7 +477,8 @@ mod tests {
             "cid".into(),
             "cs".into(),
             opts,
-        );
+        )
+        .expect("introspector"); // allow-unwrap(test)
 
         let r = introspector.introspect("dead-token").await.unwrap();
         assert!(!r.active);
@@ -492,7 +501,8 @@ mod tests {
             "cid".into(),
             "cs".into(),
             test_cache_opts(),
-        );
+        )
+        .expect("introspector"); // allow-unwrap(test)
 
         introspector.introspect("secret-token-value").await.unwrap();
         let cache = introspector.cache.read().await;
@@ -527,7 +537,8 @@ mod tests {
             "cid".into(),
             "cs".into(),
             opts,
-        );
+        )
+        .expect("introspector"); // allow-unwrap(test)
 
         introspector.introspect("token-0").await.unwrap();
         introspector.introspect("token-1").await.unwrap();
@@ -546,7 +557,8 @@ mod tests {
             "cid".into(),
             "super-secret-value".into(),
             test_cache_opts(),
-        );
+        )
+        .expect("introspector"); // allow-unwrap(test)
         let debug = format!("{introspector:?}");
         assert!(
             !debug.contains("super-secret-value"),
@@ -600,7 +612,8 @@ mod tests {
             "cid".into(),
             "cs".into(),
             test_cache_opts(),
-        );
+        )
+        .expect("introspector"); // allow-unwrap(test)
         let result = introspector.introspect("tok").await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -620,7 +633,8 @@ mod tests {
             "cid".into(),
             "cs".into(),
             test_cache_opts(),
-        );
+        )
+        .expect("introspector"); // allow-unwrap(test)
         let result = introspector.introspect("tok").await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -645,7 +659,8 @@ mod tests {
             "cid".into(),
             "cs".into(),
             test_cache_opts(),
-        );
+        )
+        .expect("introspector"); // allow-unwrap(test)
 
         let start = Instant::now();
         let (r1, r2) = tokio::join!(
@@ -680,7 +695,8 @@ mod tests {
             "cid".into(),
             "cs".into(),
             test_cache_opts(),
-        );
+        )
+        .expect("introspector"); // allow-unwrap(test)
 
         let (r1, r2) = tokio::join!(
             introspector.introspect("same-dedup-token"),

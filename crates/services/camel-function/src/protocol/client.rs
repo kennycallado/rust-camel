@@ -7,20 +7,20 @@ pub struct ProtocolClient {
     http: reqwest::Client,
 }
 
-impl Default for ProtocolClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ProtocolClient {
-    pub fn new() -> Self {
-        Self {
+    /// Typed error instead of a panic (rc-3j4mq sibling sweep): on a
+    /// CA-less platform (e.g. Android/Termux) the reqwest build fails —
+    /// callers (the container provider builder) surface it as a
+    /// `ProviderError` rather than aborting the process.
+    pub fn new() -> Result<Self, ProviderError> {
+        Ok(Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
-                .expect("reqwest client"), // allow-unwrap
-        }
+                .map_err(|e| {
+                    ProviderError::HttpClientBuildFailed(format!("reqwest client: {e}"))
+                })?,
+        })
     }
 
     pub async fn health(&self, endpoint: &str) -> Result<FunctionHealthStatus, ProviderError> {
