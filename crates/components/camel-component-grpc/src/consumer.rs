@@ -79,6 +79,21 @@ fn proto_cache() -> &'static ProtoCache {
     PROTO_CACHE.get_or_init(ProtoCache::new)
 }
 
+/// rc-ey6v: envelope channel capacity == dispatcher semaphore permits.
+///
+/// One configured value (`consumerConcurrency`, default 64) derives BOTH
+/// the envelope channel capacity and the dispatcher semaphore in
+/// `start_inner`, so the semaphore stays the single backpressure point
+/// and the channel can never become a second, hidden inflight cap.
+/// Mirrors `envelope_channel_capacity` in camel-http (rc-3y6j pattern).
+///
+/// `.max(1)`: `consumerConcurrency=0` is representable, but
+/// `tokio::sync::mpsc::channel(0)` panics and a 0-permit semaphore
+/// would stall the consumer forever.
+fn consumer_concurrency_limit(configured: usize) -> usize {
+    configured.max(1)
+}
+
 /// Map a pipeline error onto the transport denial idiom.
 ///
 /// A pipeline policy denial (`CamelError::Unauthorized`, what
@@ -359,6 +374,11 @@ pub struct GrpcConsumer {
     security_ctx: Option<SecurityContext>,
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
     server_config: GrpcServerConfig,
+    /// rc-ey6v: configured concurrency limit (`consumerConcurrency` URI
+    /// param, default 64). Derives both the envelope channel capacity and
+    /// the dispatcher semaphore in `start_inner` — never a second,
+    /// independent cap.
+    consumer_concurrency: usize,
 }
 
 impl GrpcConsumer {
@@ -373,6 +393,7 @@ impl GrpcConsumer {
         mode: GrpcMode,
         runtime: Arc<dyn camel_component_api::RuntimeObservability>,
         server_config: GrpcServerConfig,
+        consumer_concurrency: usize,
     ) -> Self {
         Self {
             host,
@@ -385,6 +406,7 @@ impl GrpcConsumer {
             security_ctx: None,
             runtime,
             server_config,
+            consumer_concurrency,
         }
     }
 
@@ -458,7 +480,13 @@ impl GrpcConsumer {
         let (req_desc, resp_desc) = self.resolve_descriptors()?;
         let mode = self.mode;
 
-        let (env_tx, mut env_rx) = mpsc::channel::<GrpcRequestEnvelope>(64);
+        // rc-ey6v: channel==semaphore invariant — the envelope channel
+        // capacity and the dispatcher semaphore (below) derive from the
+        // SAME `concurrency` value, so the channel can never become a
+        // second, hidden backpressure point (camel-http
+        // `envelope_channel_capacity`, rc-3y6j pattern).
+        let concurrency = consumer_concurrency_limit(self.consumer_concurrency);
+        let (env_tx, mut env_rx) = mpsc::channel::<GrpcRequestEnvelope>(concurrency);
         // Kernel interceptor state is captured HERE, at dispatch-entry
         // construction, from the security context wired before start
         // (Task 2.1 construction-order lifecycle fix). The per-request
@@ -499,7 +527,11 @@ impl GrpcConsumer {
 
         // NOTE: Long-running bidi streams hold a semaphore permit for their duration.
         // If this becomes an issue, consider separate concurrency limits for streaming vs unary.
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
+        // rc-ey6v: channel==semaphore invariant — permit count derives from
+        // the same `concurrency` value as the envelope channel above; the
+        // semaphore is the single backpressure point (camel-http
+        // `envelope_channel_capacity`, rc-3y6j pattern).
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
         let mut join_set = tokio::task::JoinSet::new();
 
         loop {
@@ -1141,5 +1173,19 @@ mod tests {
         ];
         assert!(validate_credential_sources(&carryable).is_ok());
         assert!(validate_credential_sources(&[]).is_ok());
+    }
+
+    /// rc-ey6v: one configured value derives BOTH the envelope channel
+    /// capacity and the dispatcher semaphore (channel==semaphore
+    /// invariant). Clamps 0 to 1 — `mpsc::channel(0)` panics and a
+    /// 0-permit semaphore would stall the consumer. Mirrors camel-http's
+    /// `envelope_channel_capacity` tests (rc-3y6j).
+    #[test]
+    fn consumer_concurrency_limit_clamps_zero_and_follows_config() {
+        assert_eq!(consumer_concurrency_limit(0), 1);
+        assert_eq!(consumer_concurrency_limit(1), 1);
+        assert_eq!(consumer_concurrency_limit(7), 7);
+        assert_eq!(consumer_concurrency_limit(64), 64);
+        assert_eq!(consumer_concurrency_limit(1024), 1024);
     }
 }

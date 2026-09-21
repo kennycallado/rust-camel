@@ -43,6 +43,7 @@ fn default_grpc_config() -> GrpcConfig {
         interceptors: camel_component_grpc::InterceptorConfig::default(),
         consumer_strategy: camel_component_grpc::ConsumerStrategy::default(),
         producer_strategy: camel_component_grpc::ProducerStrategy::default(),
+        consumer_concurrency: 64,
         retry: camel_component_api::NetworkRetryPolicy::default(),
     }
 }
@@ -232,6 +233,7 @@ async fn grpc_consumer_roundtrip_json() {
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     assert_eq!(
@@ -349,6 +351,7 @@ async fn grpc_consumer_bad_proto_startup_fails() {
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
@@ -407,6 +410,7 @@ async fn grpc_consumer_unknown_path_returns_unimplemented() {
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -470,6 +474,7 @@ async fn grpc_consumer_stop_then_request_returns_unimplemented() {
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -543,6 +548,7 @@ async fn grpc_consumer_multiple_paths_same_port() {
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let (route_tx1, mut route_rx1) = tokio::sync::mpsc::channel(16);
@@ -579,6 +585,7 @@ async fn grpc_consumer_multiple_paths_same_port() {
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let (route_tx2, mut route_rx2) = tokio::sync::mpsc::channel(16);
@@ -664,6 +671,7 @@ async fn grpc_consumer_invalid_body_returns_error() {
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -734,6 +742,7 @@ async fn grpc_consumer_duplicate_path_fails() {
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let (route_tx1, mut route_rx1) = tokio::sync::mpsc::channel(16);
@@ -767,6 +776,7 @@ async fn grpc_consumer_duplicate_path_fails() {
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let (route_tx2, _route_rx2) = tokio::sync::mpsc::channel(16);
@@ -816,6 +826,7 @@ async fn grpc_consumer_pipeline_error_returns_internal() {
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -888,6 +899,7 @@ async fn grpc_consumer_server_streaming_roundtrip() {
         GrpcMode::ServerStreaming,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -1206,6 +1218,7 @@ async fn start_tls_consumer(
         GrpcMode::Unary,
         test_rt(),
         server_config,
+        64,
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -1532,6 +1545,7 @@ async fn grpc_plaintext_server_does_not_register_reload_handler() {
             max_receive_message_len: None,
             transport: ServerTransport::Plaintext,
         },
+        64,
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -1604,6 +1618,7 @@ async fn grpc_consumer_unary_dispatch_carries_in_flight_claim() {
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1700,6 +1715,7 @@ async fn grpc_consumer_client_streaming_holds_claim_across_idle_gap() {
         GrpcMode::ClientStreaming,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));

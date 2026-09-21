@@ -115,6 +115,7 @@ async fn start_consumer(
         GrpcMode::Unary,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     if let Some(sec_ctx) = sec_ctx {
@@ -186,6 +187,7 @@ async fn start_streaming_consumer(
         mode,
         test_rt(),
         GrpcServerConfig::default(),
+        64,
     );
 
     if let Some(sec_ctx) = sec_ctx {

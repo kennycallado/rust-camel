@@ -9,7 +9,7 @@ Endpoint for `grpc://host:port/package.Service/Method?protoFile=…` URIs; resol
 _Avoid_: grpc address, grpc stub
 
 **GrpcConsumer**:
-gRPC server-side Consumer; binds one HTTP/2 listener per `(host, port)`, dispatches by path to the matching route. Mode (unary, server-streaming, client-streaming, bidi) is auto-detected from the proto method descriptor. Inbound TLS termination when `transport=tls` + `serverCertPath`/`serverKeyPath` (server-auth only). mTLS client-cert verification when `clientCaPath` is also set (fail-closed: clients without a valid cert are rejected). The shared-server registry refuses to mix TLS/plaintext on one listener (transport-mismatch hard-error).
+gRPC server-side Consumer; binds one HTTP/2 listener per `(host, port)`, dispatches by path to the matching route. Mode (unary, server-streaming, client-streaming, bidi) is auto-detected from the proto method descriptor. Inbound TLS termination when `transport=tls` + `serverCertPath`/`serverKeyPath` (server-auth only). mTLS client-cert verification when `clientCaPath` is also set (fail-closed: clients without a valid cert are rejected). The shared-server registry refuses to mix TLS/plaintext on one listener (transport-mismatch hard-error). Consumer concurrency is configurable via `consumerConcurrency` (default 64, the historical hardcoded value; clamped to a minimum of 1). One value derives BOTH the envelope channel capacity and the dispatcher semaphore (`consumer_concurrency_limit`, the channel==semaphore invariant — mirrors camel-http's `envelope_channel_capacity`, rc-3y6j): the semaphore stays the single backpressure point and the channel can never become a second, hidden inflight cap.
 _Avoid_: grpc server, grpc handler
 
 **GrpcProducer**:

@@ -316,6 +316,16 @@ pub struct GrpcConfig {
     #[serde(default)]
     pub producer_strategy: ProducerStrategy,
 
+    /// rc-ey6v: consumer concurrency limit — the maximum number of
+    /// requests ONE consumer processes concurrently. Derives BOTH the
+    /// envelope channel capacity and the dispatcher semaphore
+    /// (channel==semaphore invariant, see `consumer_concurrency_limit`
+    /// in consumer.rs; camel-http `envelope_channel_capacity`, rc-3y6j
+    /// pattern). Default 64 = the historical hardcoded value, so
+    /// behavior is unchanged when the parameter is omitted.
+    #[serde(default = "default_consumer_concurrency")]
+    pub consumer_concurrency: usize,
+
     /// Transient error retry policy for gRPC producer RPC calls.
     ///
     /// Controls how the producer retries `Unavailable`, `DeadlineExceeded`,
@@ -348,6 +358,7 @@ impl fmt::Debug for GrpcConfig {
             .field("interceptors", &self.interceptors)
             .field("consumer_strategy", &self.consumer_strategy)
             .field("producer_strategy", &self.producer_strategy)
+            .field("consumer_concurrency", &self.consumer_concurrency)
             .field("retry", &self.retry)
             .finish()
     }
@@ -363,6 +374,12 @@ fn default_connect_timeout_ms() -> u64 {
 
 fn default_deadline_ms() -> u64 {
     30_000
+}
+
+/// rc-ey6v: historical hardcoded consumer concurrency — default keeps
+/// current behavior.
+fn default_consumer_concurrency() -> usize {
+    64
 }
 
 /// Server-side configuration for the gRPC transport layer.
@@ -588,6 +605,14 @@ fn parse_grpc_query_params(
         .transpose()?
         .unwrap_or_default();
 
+    // rc-ey6v: consumer concurrency — derives both the envelope channel
+    // capacity and the dispatcher semaphore (see consumer.rs).
+    let consumer_concurrency = map
+        .remove("consumerConcurrency")
+        .map(|v| parse_numeric_param(&v, "consumerConcurrency"))
+        .transpose()?
+        .unwrap_or_else(default_consumer_concurrency);
+
     // Warn about any unrecognized params. SECURITY (audit 2026-08-31, F5-1):
     // log the KEY only — unknown params carry no metadata-driven redaction, so
     // a mistyped secret param (`authToken=…`) would otherwise land in cleartext
@@ -613,6 +638,7 @@ fn parse_grpc_query_params(
         interceptors: InterceptorConfig::default(),
         consumer_strategy,
         producer_strategy,
+        consumer_concurrency,
         retry: NetworkRetryPolicy::default(),
     })
 }
@@ -798,6 +824,41 @@ mod tests {
         assert_eq!(config.default_deadline_ms, 15000);
     }
 
+    // ── rc-ey6v: consumer concurrency knob tests ───────────────────────────
+
+    /// rc-ey6v: omitting `consumerConcurrency` keeps the historical
+    /// hardcoded 64 — default must not change behavior.
+    #[test]
+    fn test_parse_grpc_uri_consumer_concurrency_default_is_64() {
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?transport=plaintext";
+        let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
+        assert_eq!(config.consumer_concurrency, 64);
+    }
+
+    /// rc-ey6v: `consumerConcurrency=N` override is honored — the value
+    /// derives BOTH the envelope channel capacity and the dispatcher
+    /// semaphore (channel==semaphore invariant, see consumer.rs).
+    #[test]
+    fn test_parse_grpc_uri_consumer_concurrency_override_honored() {
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?consumerConcurrency=7&transport=plaintext";
+        let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
+        assert_eq!(config.consumer_concurrency, 7);
+    }
+
+    #[test]
+    fn test_parse_grpc_uri_consumer_concurrency_invalid_rejected() {
+        let uri =
+            "grpc://localhost:50051/pkg.Svc/Method?consumerConcurrency=many&transport=plaintext";
+        let result = parse_grpc_uri(uri);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid numeric value")
+        );
+    }
+
     #[test]
     fn test_parse_grpc_uri_numeric_query_params_invalid() {
         let uri =
@@ -911,6 +972,8 @@ mod tests {
         assert!(config.metadata.is_none());
         assert_eq!(config.connect_timeout_ms, 10_000);
         assert_eq!(config.default_deadline_ms, 30_000);
+        // rc-ey6v: serde path pins the same 64 default as the URI path.
+        assert_eq!(config.consumer_concurrency, 64);
     }
 
     #[test]

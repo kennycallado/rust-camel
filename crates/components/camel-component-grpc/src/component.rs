@@ -120,6 +120,7 @@ impl Endpoint for GrpcEndpoint {
             mode,
             rt,
             server_config,
+            self.config.consumer_concurrency,
         )))
     }
 
@@ -189,6 +190,7 @@ mod tests {
             interceptors: crate::config::InterceptorConfig::default(),
             consumer_strategy: crate::config::ConsumerStrategy::default(),
             producer_strategy: crate::config::ProducerStrategy::default(),
+            consumer_concurrency: 64,
             retry: camel_component_api::NetworkRetryPolicy::default(),
         };
 
