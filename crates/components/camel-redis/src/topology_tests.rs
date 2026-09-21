@@ -239,9 +239,16 @@ fn sentinel_node_conn_info_carries_username() {
 
     // sentinel_node_conn_info embeds the redis settings; redis 1.6.0 has no
     // public getter on SentinelNodeConnectionInfo, so assert on the exact
-    // RedisConnectionInfo it embeds (via its getters) plus Some(..) on the
-    // wrapper itself.
-    assert!(sentinel_node_conn_info(&config).is_some());
+    // RedisConnectionInfo it embeds (via its getters). The wrapper returns
+    // the info concretely (rc-pleop dropped its always-Some Option); feed
+    // it to SentinelTopology::new to prove the built value is accepted.
+    SentinelTopology::new(
+        vec!["redis://s-a:26379".into()],
+        "orders".into(),
+        None,
+        Some(sentinel_node_conn_info(&config)),
+    )
+    .expect("topology accepts the wrapper output");
     let redis_info = node_redis_connection_info(&config);
     assert_eq!(redis_info.username(), Some("svc"));
     assert_eq!(redis_info.password(), Some("p"));
@@ -676,7 +683,7 @@ async fn sentinel_resolve_carries_username_to_master_connection() {
         vec![format!("redis://{sentinel_addr}")],
         "orders".to_string(),
         None,
-        sentinel_node_conn_info(&config),
+        Some(sentinel_node_conn_info(&config)),
     )
     .expect("sentinel topology builds");
 

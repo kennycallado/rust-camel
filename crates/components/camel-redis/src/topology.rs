@@ -562,7 +562,7 @@ pub fn topology_from_config(
             let sentinel_creds = Some((s.username.clone(), s.password.clone()))
                 .filter(|(u, p)| u.is_some() || p.is_some())
                 .map(|(u, p)| (u.unwrap_or_default(), p.unwrap_or_default()));
-            let node_conn_info = sentinel_node_conn_info(config);
+            let node_conn_info = Some(sentinel_node_conn_info(config));
             let topology = SentinelTopology::new(
                 s.nodes.clone(),
                 s.master_name.clone(),
@@ -669,17 +669,20 @@ fn node_redis_connection_info(config: &RedisEndpointConfig) -> redis::RedisConne
 // The TLS topology arm feeds the SentinelClientBuilder from the endpoint's
 // config fields instead of this wrapper, so with `tls` enabled the wrapper
 // is only reached from tests.
+//
+// Returns the info concretely: every caller wants it, so the pre-sweep
+// always-`Some` `Option` wrapper was absurd (rc-1xc8 finding 3, rc-pleop).
 #[cfg_attr(feature = "tls", allow(dead_code))]
 #[cfg(feature = "sentinel")]
 fn sentinel_node_conn_info(
     config: &RedisEndpointConfig,
-) -> Option<redis::sentinel::SentinelNodeConnectionInfo> {
+) -> redis::sentinel::SentinelNodeConnectionInfo {
     let mut info = redis::sentinel::SentinelNodeConnectionInfo::default()
         .set_redis_connection_info(node_redis_connection_info(config));
     if config.is_ssl_enabled() {
         info = info.set_tls_mode(redis::TlsMode::Secure);
     }
-    Some(info)
+    info
 }
 
 #[cfg(test)]
