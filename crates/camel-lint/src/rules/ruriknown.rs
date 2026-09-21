@@ -14,15 +14,32 @@
 //! - **Known-but-minimal scheme** (registered, no `uri_options`) → silent.
 //! - **Known scheme with `uri_options`** → each provided option is resolved
 //!   against `name`/`aliases`: an unresolved key yields an `UnknownOption`
-//!   error on the key; a resolved `Bool` option given a non-boolean value
-//!   yields a `KindMismatch` error on the value; any catalog `UriOption`
-//!   declared `required` that is absent yields a `MissingRequiredOption`
-//!   error on the URI.
+//!   error on the key; a resolved option whose value does not parse as its
+//!   declared `OptionKind` yields a `KindMismatch` error on the value
+//!   (Bool/Int/Float/Duration/Enum/List are validated; String accepts any
+//!   text); any catalog `UriOption` declared `required` that is absent
+//!   yields a `MissingRequiredOption` error on the URI.
 //!
-//! v1 validates `OptionKind::Bool` only; other kinds (String/Int/Float/
-//! Duration/Enum/List) are deferred — see bd follow-up. The `#[non_exhaustive]`
-//! attribute additionally requires `matches!` (not an exhaustive match) so
-//! future kinds stay non-erroring.
+//! Kind validation mirrors runtime parse semantics per kind: Bool uses the
+//! `parse_bool_param` vocabulary (`true`/`false`/`1`/`0`/`yes`/`no`, any
+//! case); Int/Float use the Rust integer/float `FromStr` grammars (the kind
+//! carries no signedness or width — anything `i64` or `u64` accepts is an
+//! integer, anything `f64` accepts is a float); Duration uses the
+//! `humantime` grammar the workspace's duration strings share (`500ms`,
+//! `2h30m`, `1m 30s`, fractional `1.5s`; bare integers are Int-kind
+//! values, not durations); Enum is membership in the declared allowed
+//! values under the two normalizations runtime `FromStr` impls apply —
+//! ASCII-case folding and underscore stripping (`if_reply_expected`
+//! matches `IfReplyExpected`); List is the
+//! comma-separated convention, each element validated against the element
+//! kind (no production component parses a List option today — the derive's
+//! codegen requires `FromStr`, which bare `Vec<T>` fields lack — so the
+//! convention is best-effort). Values carrying an interpolation marker
+//! (`${...}` or `{{...}}`) resolve at boot, not at lint time; their
+//! resolved type is unknowable, so kind validation skips them (mirrors
+//! R-SECRET's reference treatment). String needs no validation. The
+//! `#[non_exhaustive]` attribute additionally requires `matches!`-style
+//! non-exhaustive matching so future kinds stay non-erroring.
 
 use camel_api::component_metadata::{ComponentMetadataCatalog, OptionKind};
 
@@ -128,6 +145,129 @@ fn flag_cross_source_duplicates(ep: &Endpoint, diagnostics: &mut Vec<Diagnostic>
     }
 }
 
+/// Validate `raw` against the declared `OptionKind`, runtime-parse parity.
+///
+/// Returns `None` when the value parses as the kind (or the kind is not
+/// validated: String, future `#[non_exhaustive]` kinds). Returns
+/// `Some(expected)` — the human-readable expectation for the mismatch
+/// message — when the value cannot parse.
+fn validate_kind(kind: &OptionKind, raw: &str) -> Option<String> {
+    match kind {
+        OptionKind::String => None,
+        OptionKind::Bool => {
+            // Mirrors camel_endpoint::uri::parse_bool_param: the runtime
+            // accepts 1/0/yes/no in any case, so the lint must too.
+            let v = raw.to_ascii_lowercase();
+            if matches!(v.as_str(), "true" | "false" | "1" | "0" | "yes" | "no") {
+                None
+            } else {
+                Some("a boolean value (true/false)".to_string())
+            }
+        }
+        OptionKind::Int => {
+            // OptionKind carries no signedness or width; the runtime parses
+            // with the field's integer FromStr, so accept the union of the
+            // i64 and u64 grammars.
+            if raw.parse::<i64>().is_ok() || raw.parse::<u64>().is_ok() {
+                None
+            } else {
+                Some("an integer value".to_string())
+            }
+        }
+        OptionKind::Float => {
+            // Same grammar the runtime's f32/f64 FromStr uses.
+            if raw.parse::<f64>().is_ok() {
+                None
+            } else {
+                Some("a floating-point value".to_string())
+            }
+        }
+        OptionKind::Duration => {
+            // humantime grammar (the workspace's duration-string parser):
+            // unit-suffixed values and concatenated groups. A bare integer
+            // is an Int-kind value (the UriConfig `_ms` companion
+            // convention), not a duration.
+            if humantime::parse_duration(raw).is_ok() {
+                None
+            } else {
+                Some("a duration value (e.g. 500ms, 2s, 1h30m)".to_string())
+            }
+        }
+        OptionKind::Enum(variants) => {
+            // Membership in the declared allowed values under the two
+            // normalizations runtime FromStr impls apply: ASCII-case
+            // folding (camel-log's level uppercases; camel-stream's frame
+            // is exact) and underscore stripping (seda's
+            // waitForTaskToComplete/exchangePattern lowercase + remove
+            // `_`, accepting `if_reply_expected` / `in_only`). Comparing
+            // with BOTH normalizations applied can only widen acceptance
+            // — strict impls lose nothing (false negatives, never false
+            // positives). A runtime parser accepting a token its
+            // metadata does not list (an alias such as log's `WARNING`
+            // or http's `none`) is a metadata gap the component must fix
+            // by listing it. An empty variant list declares no
+            // constraint — nothing to validate against.
+            if variants.is_empty()
+                || variants.iter().any(|v| {
+                    // Case-fold + underscore-strip both sides (the plain
+                    // case-compare is subsumed: stripping preserves it).
+                    v.to_ascii_lowercase().replace('_', "")
+                        == raw.to_ascii_lowercase().replace('_', "")
+                })
+            {
+                None
+            } else {
+                Some(format!("one of: {}", variants.join(", ")))
+            }
+        }
+        OptionKind::List(inner) => {
+            // No production component parses a List option today (the
+            // UriConfig codegen requires FromStr, which bare Vec<T> fields
+            // lack), so the comma-separated convention is best-effort: an
+            // empty value is an empty list; each element is validated
+            // against the element kind (elements trimmed — a list author's
+            // `1, 2` spacing is not a kind error).
+            if raw.is_empty() {
+                return None;
+            }
+            let mismatch = raw
+                .split(',')
+                .map(str::trim)
+                .any(|el| validate_kind(inner, el).is_some());
+            if mismatch {
+                Some(format!(
+                    "a comma-separated list of {} values",
+                    kind_noun(inner)
+                ))
+            } else {
+                None
+            }
+        }
+        // #[non_exhaustive]: unknown future kinds stay non-erroring.
+        _ => None,
+    }
+}
+
+/// Human-readable noun for an element kind (used by List messages).
+///
+/// KEEP IN SYNC with [`validate_kind`]: both match every `OptionKind`
+/// variant independently (the scalar branches there carry richer hints —
+/// `(true/false)`, duration examples, allowed-value lists — so they are
+/// not derived from the nouns). A future kind added to camel-api falls
+/// through both `_` arms: non-erroring, noun `valid`.
+fn kind_noun(kind: &OptionKind) -> String {
+    match kind {
+        OptionKind::String => "string".to_string(),
+        OptionKind::Int => "integer".to_string(),
+        OptionKind::Bool => "boolean".to_string(),
+        OptionKind::Float => "floating-point".to_string(),
+        OptionKind::Duration => "duration".to_string(),
+        OptionKind::Enum(variants) => format!("enum ({})", variants.join("/")),
+        OptionKind::List(inner) => format!("{} list", kind_noun(inner)),
+        _ => "valid".to_string(),
+    }
+}
+
 /// Analyze a single endpoint against the catalog, appending diagnostics.
 fn analyze_endpoint(
     ep: &Endpoint,
@@ -183,24 +323,22 @@ fn analyze_endpoint(
             });
             continue;
         };
-        // v1 validates `OptionKind::Bool` only; other kinds (String/Int/Float/
-        // Duration/Enum/List) are deferred — see bd follow-up.
-        if matches!(canon.kind, OptionKind::Bool)
-            && let Some(val) = &opt.value
+        // Kind validation for every validated kind. Values carrying an
+        // interpolation marker (`${...}` / `{{...}}`) resolve at boot, not
+        // at lint time; their resolved type is unknowable, so they are
+        // exempt (mirrors R-SECRET's reference treatment).
+        if let Some(val) = &opt.value
+            && !val.value.contains("${")
+            && !val.value.contains("{{")
+            && let Some(expected) = validate_kind(&canon.kind, &val.value)
         {
-            let v = val.value.to_ascii_lowercase();
-            if v != "true" && v != "false" {
-                diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::RUriKnown(UriKnownSubCode::KindMismatch),
-                    severity: Severity::Error,
-                    span: val.span.clone(),
-                    message: format!(
-                        "option `{}` expects a boolean value (true/false)",
-                        canon.name
-                    ),
-                    fix: None,
-                });
-            }
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::RUriKnown(UriKnownSubCode::KindMismatch),
+                severity: Severity::Error,
+                span: val.span.clone(),
+                message: format!("option `{}` expects {}", canon.name, expected),
+                fix: None,
+            });
         }
     }
 
@@ -225,662 +363,5 @@ fn analyze_endpoint(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::diagnostic::Span;
-    use crate::route_view::{LintOption, OptionOrigin, Spanned, resolve_option};
-    use crate::test_support::StubCatalog;
-    use camel_api::component_metadata::{
-        ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
-    };
-
-    /// Build a catalog entry for `scheme` with the given uri_options.
-    fn meta_with_options(scheme: &str, opts: Vec<UriOption>) -> ComponentMetadata {
-        ComponentMetadata {
-            scheme: scheme.to_string(),
-            capabilities: ComponentCapabilities::default(),
-            uri_options: opts,
-            ..ComponentMetadata::minimal(scheme)
-        }
-    }
-
-    fn analyze(source: &str, catalog: &dyn ComponentMetadataCatalog) -> Vec<Diagnostic> {
-        let doc = Document::parse(source);
-        assert!(
-            doc.parse_failure.is_none(),
-            "test fixtures must parse cleanly (got: {:?})",
-            doc.parse_failure
-        );
-        RUriKnownRule.analyze(&doc, catalog)
-    }
-
-    fn slice<'a>(raw: &'a str, span: &Span) -> &'a str {
-        &raw[span.start..span.end]
-    }
-
-    /// Keep only R-URI-known diagnostics.
-    fn ruriknown_only(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
-        diags
-            .iter()
-            .filter(|d| matches!(d.code, DiagnosticCode::RUriKnown(_)))
-            .collect()
-    }
-
-    fn count_subcode(diags: &[Diagnostic], sub: UriKnownSubCode) -> usize {
-        diags
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::RUriKnown(sub.clone()))
-            .count()
-    }
-
-    #[test]
-    fn unverified_scheme_for_absent_metadata() {
-        // `kafka` is absent from the catalog. The route-level `from` is the
-        // single endpoint, so exactly one UnverifiedScheme note is emitted on
-        // the `kafka` token, and zero option diagnostics.
-        let source = "id: r1\nfrom: kafka:topic\n";
-        let diags = analyze(source, &StubCatalog::empty());
-        let kept = ruriknown_only(&diags);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::UnverifiedScheme),
-            1,
-            "expected exactly one UnverifiedScheme; got: {:?}",
-            kept.iter()
-                .map(|d| (&d.code, slice(source, &d.span)))
-                .collect::<Vec<_>>()
-        );
-        let note = kept
-            .iter()
-            .find(|d| {
-                matches!(
-                    d.code,
-                    DiagnosticCode::RUriKnown(UriKnownSubCode::UnverifiedScheme)
-                )
-            })
-            .expect("UnverifiedScheme diagnostic present");
-        assert_eq!(slice(source, &note.span), "kafka");
-        assert_eq!(note.severity, Severity::Info);
-        // No option diagnostics for an unverified scheme.
-        assert_eq!(count_subcode(&diags, UriKnownSubCode::UnknownOption), 0);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::MissingRequiredOption),
-            0
-        );
-    }
-
-    #[test]
-    fn unverified_scheme_span_exact_for_quoted_uri() {
-        // Regression (rc-bsx4t): the scheme span used to start at the YAML
-        // opening quote (`"jm` for from: "jms:queue"). It must slice the
-        // exact scheme token for quoted scalars.
-        let source = "id: r1\nfrom: \"kafka:topic\"\n";
-        let diags = analyze(source, &StubCatalog::empty());
-        let note = diags
-            .iter()
-            .find(|d| {
-                matches!(
-                    d.code,
-                    DiagnosticCode::RUriKnown(UriKnownSubCode::UnverifiedScheme)
-                )
-            })
-            .expect("UnverifiedScheme diagnostic present");
-        assert_eq!(slice(source, &note.span), "kafka");
-    }
-
-    #[test]
-    fn unknown_option_span_exact_for_quoted_uri() {
-        // Query-option spans derive from `uri.span.start` too: on a quoted
-        // URI the key span must slice the exact key token.
-        let catalog = StubCatalog::empty()
-            .with("direct", ComponentMetadata::minimal("direct"))
-            .with(
-                "timer",
-                meta_with_options(
-                    "timer",
-                    vec![UriOption::new("period", "period", OptionKind::Duration)],
-                ),
-            );
-        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: \"timer:foo?frequency=1s\"\n";
-        let diags = analyze(source, &catalog);
-        let d = diags
-            .iter()
-            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::UnknownOption))
-            .expect("UnknownOption diagnostic present");
-        assert_eq!(slice(source, &d.span), "frequency");
-    }
-
-    #[test]
-    fn minimal_known_scheme_is_silent() {
-        // `redis` is registered with minimal metadata (no uri_options): known
-        // but nothing to validate → no UnverifiedScheme, no option diagnostics.
-        let catalog = StubCatalog::empty().with("redis", ComponentMetadata::minimal("redis"));
-        let source = "id: r1\nfrom: redis://x\n";
-        let diags = analyze(source, &catalog);
-        assert!(
-            ruriknown_only(&diags).is_empty(),
-            "minimal known scheme must be silent; got: {:?}",
-            diags
-        );
-    }
-
-    #[test]
-    fn unknown_option_for_known_scheme() {
-        // `timer` lists only `period` (no `frequency` alias). `frequency` is
-        // unknown → one UnknownOption Error on the `frequency` key span.
-        let catalog = StubCatalog::empty()
-            .with("direct", ComponentMetadata::minimal("direct"))
-            .with(
-                "timer",
-                meta_with_options(
-                    "timer",
-                    vec![UriOption::new("period", "period", OptionKind::Duration)],
-                ),
-            );
-        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?frequency=1s\n";
-        let diags = analyze(source, &catalog);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::UnknownOption),
-            1,
-            "expected one UnknownOption; got: {:?}",
-            ruriknown_only(&diags)
-        );
-        let d = diags
-            .iter()
-            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::UnknownOption))
-            .unwrap();
-        assert_eq!(slice(source, &d.span), "frequency");
-        assert_eq!(d.severity, Severity::Error);
-    }
-
-    #[test]
-    fn unknown_option_in_rest_operation_to() {
-        // A rest operation's `to:` is an endpoint URI (rc-p86s): ROUTE_SCHEMA
-        // models `rest`/`operations` as containers (CONTAINER_KEYS derives
-        // from the embedded schema), so the CST walk reaches the operation's
-        // `to:` and R-URI-known validates its options like any step `to:`.
-        let catalog = StubCatalog::empty().with(
-            "timer",
-            meta_with_options(
-                "timer",
-                vec![UriOption::new("period", "period", OptionKind::Duration)],
-            ),
-        );
-        let source = "\
-rest:
-  - host: 0.0.0.0
-    port: 9090
-    path: /api
-    operations:
-      - method: GET
-        to: timer:foo?frequency=1s
-";
-        let diags = analyze(source, &catalog);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::UnknownOption),
-            1,
-            "expected one UnknownOption on the rest `to:` URI; got: {:?}",
-            ruriknown_only(&diags)
-        );
-        let d = diags
-            .iter()
-            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::UnknownOption))
-            .unwrap();
-        assert_eq!(slice(source, &d.span), "frequency");
-        assert_eq!(d.severity, Severity::Error);
-    }
-
-    #[test]
-    fn mcp_resource_uri_not_validated_as_endpoint() {
-        // The mirror-image of the rest `to:` pin (rc-6pikg): the mcp block
-        // authors no endpoint URIs — its consumer from-URIs are fabricated
-        // by the lowering at parse time. `resources[].uri` is an MCP
-        // resource URI (operator config, arbitrary scheme — `crm://...`),
-        // and `uri`'s URI_KEYS membership exists for EnrichConfig.uri. The
-        // walk skips the mcp subtree, so R-URI-known must stay silent on it
-        // against ANY catalog (an empty one maximally would flag `crm` as
-        // an unknown component scheme).
-        let catalog = StubCatalog::empty();
-        let source = "\
-mcp:
-  - server:
-      name: crm
-      bind: 127.0.0.1:9100
-    tools:
-      - name: lookup
-        input_schema:
-          type: object
-    resources:
-      - name: customers
-        uri: crm://customers
-";
-        let diags = analyze(source, &catalog);
-        assert!(
-            ruriknown_only(&diags).is_empty(),
-            "mcp resource uri must not be validated as an endpoint URI; got: {:?}",
-            ruriknown_only(&diags)
-        );
-    }
-
-    #[test]
-    fn missing_required_option() {
-        // `timer` declares `period` as required; the step omits it → one
-        // MissingRequiredOption Error on the URI span.
-        let catalog = StubCatalog::empty()
-            .with("direct", ComponentMetadata::minimal("direct"))
-            .with(
-                "timer",
-                meta_with_options(
-                    "timer",
-                    vec![UriOption::new("period", "period", OptionKind::Duration).required()],
-                ),
-            );
-        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo\n";
-        let diags = analyze(source, &catalog);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::MissingRequiredOption),
-            1,
-            "expected one MissingRequiredOption; got: {:?}",
-            ruriknown_only(&diags)
-        );
-        let d = diags
-            .iter()
-            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::MissingRequiredOption))
-            .unwrap();
-        assert_eq!(slice(source, &d.span), "timer:foo");
-        assert_eq!(d.severity, Severity::Error);
-    }
-
-    #[test]
-    fn accepted_alias_silent() {
-        // `period` has alias `interval`; providing `interval=1s` matches and the
-        // Duration kind is non-erroring → no diagnostic for that option.
-        let catalog = StubCatalog::empty()
-            .with("direct", ComponentMetadata::minimal("direct"))
-            .with(
-                "timer",
-                meta_with_options(
-                    "timer",
-                    vec![
-                        UriOption::new("period", "period", OptionKind::Duration)
-                            .with_alias("interval"),
-                    ],
-                ),
-            );
-        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?interval=1s\n";
-        let diags = analyze(source, &catalog);
-        assert!(
-            ruriknown_only(&diags).is_empty(),
-            "an accepted alias must be silent; got: {:?}",
-            diags
-        );
-    }
-
-    #[test]
-    fn kind_mismatch_reported() {
-        // `enabled` is a Bool option; `maybe` is not boolean → one
-        // KindMismatch Error on the value span.
-        let catalog = StubCatalog::empty()
-            .with("direct", ComponentMetadata::minimal("direct"))
-            .with(
-                "timer",
-                meta_with_options(
-                    "timer",
-                    vec![UriOption::new("enabled", "enabled", OptionKind::Bool)],
-                ),
-            );
-        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?enabled=maybe\n";
-        let diags = analyze(source, &catalog);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::KindMismatch),
-            1,
-            "expected one KindMismatch; got: {:?}",
-            ruriknown_only(&diags)
-        );
-        let d = diags
-            .iter()
-            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::KindMismatch))
-            .unwrap();
-        assert_eq!(slice(source, &d.span), "maybe");
-        assert_eq!(d.severity, Severity::Error);
-    }
-
-    // -----------------------------------------------------------------------
-    // Pattern prefix resolution tests (open-namespace URI options)
-    // -----------------------------------------------------------------------
-
-    /// Helper: build a `LintOption` with a bare key (no value) at a dummy span.
-    /// Origin defaults to `Query`; tests that need another origin build the
-    /// literal directly.
-    fn lint_option(key: &str) -> LintOption {
-        LintOption {
-            key: Spanned {
-                value: key.to_string(),
-                span: Span::new(0, key.len()),
-            },
-            value: None,
-            origin: OptionOrigin::Query,
-        }
-    }
-
-    #[test]
-    fn pattern_prefix_resolves_non_empty_suffix() {
-        let uri_options =
-            vec![UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param.")];
-        let opt = lint_option("param.foo");
-        let result = resolve_option(&opt, &uri_options);
-        assert!(
-            result.is_some(),
-            "param.foo should match pattern_prefix(\"param.\")"
-        );
-        assert_eq!(result.unwrap().name, "param");
-    }
-
-    #[test]
-    fn pattern_prefix_rejects_empty_suffix() {
-        let uri_options =
-            vec![UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param.")];
-        let opt = lint_option("param.");
-        let result = resolve_option(&opt, &uri_options);
-        assert!(
-            result.is_none(),
-            "param. should NOT match pattern_prefix(\"param.\") — empty suffix"
-        );
-    }
-
-    #[test]
-    fn pattern_prefix_rejects_unrelated_key() {
-        let uri_options =
-            vec![UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param.")];
-        let opt = lint_option("direction");
-        let result = resolve_option(&opt, &uri_options);
-        assert!(
-            result.is_none(),
-            "direction should NOT match pattern_prefix(\"param.\")"
-        );
-    }
-
-    #[test]
-    fn discrete_option_wins_over_pattern_on_name_collision() {
-        let uri_options = vec![
-            UriOption::new("param.foo", "discrete", OptionKind::String),
-            UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param."),
-        ];
-        let opt = lint_option("param.foo");
-        let result = resolve_option(&opt, &uri_options);
-        assert!(
-            result.is_some(),
-            "param.foo should resolve to the discrete option"
-        );
-        let hit = result.unwrap();
-        assert_eq!(hit.name, "param.foo");
-        assert!(
-            hit.pattern.is_none(),
-            "should be the discrete option, not the patterned one"
-        );
-    }
-
-    #[test]
-    fn discrete_option_wins_when_pattern_derived_name_collides() {
-        // Both options have name == "param"; one has pattern, one doesn't.
-        // The pattern option's derived name should NOT participate in Phase-1 matching.
-        let uri_options = vec![
-            UriOption::new("param", "discrete", OptionKind::String),
-            UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param."),
-        ];
-        let opt = lint_option("param");
-        let result = resolve_option(&opt, &uri_options);
-        assert!(
-            result.is_some(),
-            "param (no suffix) should resolve to the discrete option"
-        );
-        let hit = result.unwrap();
-        assert_eq!(hit.description, "discrete");
-        assert!(
-            hit.pattern.is_none(),
-            "should be the discrete option, not the patterned one"
-        );
-    }
-
-    #[test]
-    fn longest_pattern_separator_wins() {
-        let uri_options = vec![
-            UriOption::new("param", "short", OptionKind::String).pattern_prefix("param."),
-            UriOption::new("param.foo", "long", OptionKind::String).pattern_prefix("param.foo."),
-        ];
-        let opt = lint_option("param.foo.bar");
-        let result = resolve_option(&opt, &uri_options);
-        assert!(
-            result.is_some(),
-            "param.foo.bar should match (longer separator wins)"
-        );
-        let hit = result.unwrap();
-        assert_eq!(hit.description, "long");
-    }
-
-    #[test]
-    fn shorter_pattern_wins_when_longer_does_not_match() {
-        let uri_options = vec![
-            UriOption::new("param", "short", OptionKind::String).pattern_prefix("param."),
-            UriOption::new("param.foo", "long", OptionKind::String).pattern_prefix("param.foo."),
-        ];
-        let opt = lint_option("param.baz");
-        let result = resolve_option(&opt, &uri_options);
-        assert!(
-            result.is_some(),
-            "param.baz should match the short pattern_prefix(\"param.\")"
-        );
-        let hit = result.unwrap();
-        assert_eq!(hit.description, "short");
-    }
-
-    #[test]
-    fn alias_match_skipped_for_pattern_options() {
-        let uri_options = vec![
-            UriOption::new("param", "namespace", OptionKind::String)
-                .with_alias("legacy")
-                .pattern_prefix("param."),
-        ];
-        let opt = lint_option("legacy");
-        let result = resolve_option(&opt, &uri_options);
-        assert!(
-            result.is_none(),
-            "legacy alias should NOT match a patterned option — aliases do not participate in Phase 1 for pattern options"
-        );
-    }
-
-    #[test]
-    fn pattern_option_covers_multiple_distinct_suffixes() {
-        let uri_options =
-            vec![UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param.")];
-
-        let result_a = resolve_option(&lint_option("param.a"), &uri_options);
-        let result_b = resolve_option(&lint_option("param.b"), &uri_options);
-        let result_long = resolve_option(&lint_option("param.longName"), &uri_options);
-
-        let hit_a = result_a.expect("param.a should resolve");
-        let hit_b = result_b.expect("param.b should resolve");
-        let hit_long = result_long.expect("param.longName should resolve");
-
-        // All three distinct suffixes resolve to the SAME option.
-        assert!(std::ptr::eq(hit_a, hit_b));
-        assert!(std::ptr::eq(hit_a, hit_long));
-    }
-
-    // -----------------------------------------------------------------------
-    // Cross-source duplicate key tests (Task 2.1)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn duplicate_key_display_string() {
-        assert_eq!(
-            DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey).to_string(),
-            "R-URI-known:duplicate-key"
-        );
-    }
-
-    #[test]
-    fn query_and_step_parameters_overlap_flagged() {
-        // Per the spec scenario: the catalog KNOWS `timer` with option
-        // `period` (non-Bool kind → silent), so the duplicate fires while
-        // the per-occurrence validation loop is active (coexistence path).
-        let catalog = StubCatalog::empty().with(
-            "timer",
-            meta_with_options(
-                "timer",
-                vec![UriOption::new(
-                    "period",
-                    "tick interval",
-                    OptionKind::String,
-                )],
-            ),
-        );
-        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?period=1000\n    parameters:\n      period: \"2500\"\n";
-        let diags = analyze(source, &catalog);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
-            1,
-            "expected exactly one DuplicateKey; got: {:?}",
-            ruriknown_only(&diags)
-                .iter()
-                .map(|d| (&d.code, slice(source, &d.span)))
-                .collect::<Vec<_>>()
-        );
-        let dup = diags
-            .iter()
-            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey))
-            .unwrap();
-        // Span lands on the `period` key inside the parameters map — the
-        // SECOND `period` occurrence in the source.
-        assert_eq!(slice(source, &dup.span), "period");
-        assert_eq!(
-            dup.span.start,
-            source.rfind("period").expect("parameters-side key present")
-        );
-        assert_eq!(dup.severity, Severity::Error);
-    }
-
-    #[test]
-    fn config_and_step_parameters_overlap_flagged() {
-        let catalog = StubCatalog::empty().with("db", meta_with_options("db", Vec::new()));
-        let source = "id: r1\nfrom: direct:start\nsteps:\n  - enrich:\n      uri: db:query\n      parameters:\n        timeout: \"1\"\n    parameters:\n      timeout: \"2\"\n";
-        let diags = analyze(source, &catalog);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
-            1,
-            "expected exactly one DuplicateKey; got: {:?}",
-            ruriknown_only(&diags)
-                .iter()
-                .map(|d| (&d.code, slice(source, &d.span)))
-                .collect::<Vec<_>>()
-        );
-        let dup = diags
-            .iter()
-            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey))
-            .unwrap();
-        // Span on the step-level `timeout` key — the second occurrence.
-        assert_eq!(slice(source, &dup.span), "timeout");
-        assert_eq!(
-            dup.span.start,
-            source.rfind("timeout").expect("step-level key present")
-        );
-    }
-
-    #[test]
-    fn repeated_query_keys_not_flagged() {
-        let catalog = StubCatalog::empty().with("timer", meta_with_options("timer", Vec::new()));
-        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?period=1&period=2\n";
-        let diags = analyze(source, &catalog);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
-            0,
-            "repeated keys within the raw query alone are legal; got: {:?}",
-            ruriknown_only(&diags)
-        );
-    }
-
-    #[test]
-    fn overlap_flagged_for_unregistered_scheme() {
-        // `kafka` absent from the catalog: the duplicate check still fires,
-        // alongside the informational unverified-scheme note. `direct` IS
-        // registered (known-but-minimal → silent) so the only unverified
-        // note is kafka's.
-        let catalog = StubCatalog::empty().with("direct", meta_with_options("direct", Vec::new()));
-        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: kafka:orders?brokers=h1\n    parameters:\n      brokers: \"h2\"\n";
-        let diags = analyze(source, &catalog);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
-            1,
-            "duplicate fires regardless of catalog knowledge; got: {:?}",
-            ruriknown_only(&diags)
-                .iter()
-                .map(|d| (&d.code, slice(source, &d.span)))
-                .collect::<Vec<_>>()
-        );
-        let dup = diags
-            .iter()
-            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey))
-            .unwrap();
-        assert_eq!(slice(source, &dup.span), "brokers");
-        assert_eq!(
-            dup.span.start,
-            source
-                .rfind("brokers")
-                .expect("parameters-side key present")
-        );
-        assert_eq!(count_subcode(&diags, UriKnownSubCode::UnverifiedScheme), 1);
-    }
-
-    #[test]
-    fn route_level_from_overlap_flagged() {
-        let catalog = StubCatalog::empty().with("timer", meta_with_options("timer", Vec::new()));
-        let source = "id: r1\nfrom: timer:tick?period=1s\nparameters:\n  period: \"2500\"\n";
-        let diags = analyze(source, &catalog);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
-            1,
-            "route-level from overlap must be flagged; got: {:?}",
-            ruriknown_only(&diags)
-                .iter()
-                .map(|d| (&d.code, slice(source, &d.span)))
-                .collect::<Vec<_>>()
-        );
-        let dup = diags
-            .iter()
-            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey))
-            .unwrap();
-        assert_eq!(slice(source, &dup.span), "period");
-        assert_eq!(
-            dup.span.start,
-            source.rfind("period").expect("route-level key present")
-        );
-    }
-
-    #[test]
-    fn all_three_sources_single_diagnostic() {
-        let catalog = StubCatalog::empty().with("timer", meta_with_options("timer", Vec::new()));
-        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to:\n      uri: timer:foo?period=1s\n      parameters:\n        period: \"2\"\n    parameters:\n      period: \"3\"\n";
-        let diags = analyze(source, &catalog);
-        assert_eq!(
-            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
-            1,
-            "one diagnostic per colliding key per endpoint, even across three sources; got: {:?}",
-            ruriknown_only(&diags)
-                .iter()
-                .map(|d| (&d.code, slice(source, &d.span)))
-                .collect::<Vec<_>>()
-        );
-        // Pin the span side: options arrive [query, step-inherited,
-        // config-local], so the first non-Query occurrence is the STEP-level
-        // key (value "3") — the last `period` in the source. A future reorder
-        // of the walk's `inherited ++ local` chain turns this red.
-        let dup = diags
-            .iter()
-            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey))
-            .unwrap();
-        assert_eq!(slice(source, &dup.span), "period");
-        assert_eq!(
-            dup.span.start,
-            source.rfind("period").expect("step-level key present")
-        );
-    }
-}
+#[path = "ruriknown_tests.rs"]
+mod tests;

@@ -516,7 +516,7 @@ struct HttpEndpointUriConfig {
 
     #[uri_param(
         name = "authMethod",
-        kind = "enum:Basic,Bearer",
+        kind = "enum:None,Basic,Bearer",
         desc = "Authentication method"
     )]
     auth_method: Option<String>,
@@ -3998,6 +3998,31 @@ fn constructed_header<'a>(
 #[cfg(test)]
 mod tests {
     use camel_component_api::test_support::NoopRuntimeObservability;
+
+    #[test]
+    fn test_metadata_authmethod_enum_covers_runtime_vocab() {
+        // The lint's R-URI-known kind check validates `authMethod` values
+        // against the metadata Enum variants; the runtime accepts `none`
+        // (case-insensitive, parse_auth_from_params → HttpAuth::None), so
+        // the variant list must cover it or camel lint false-positives on
+        // runtime-legal routes (rc-68q6 review finding).
+        use camel_api::component_metadata::OptionKind;
+        let meta = super::HttpEndpointConfig::metadata();
+        let auth = meta
+            .uri_options
+            .iter()
+            .find(|o| o.name == "authMethod")
+            .expect("authMethod option must exist");
+        let OptionKind::Enum(variants) = &auth.kind else {
+            panic!("authMethod kind must be Enum; got {:?}", auth.kind);
+        };
+        for value in ["None", "Basic", "Bearer"] {
+            assert!(
+                variants.iter().any(|v| v.eq_ignore_ascii_case(value)),
+                "metadata authMethod variants must cover runtime-accepted `{value}`; got {variants:?}"
+            );
+        }
+    }
 
     // Producer/consumer tests drive the component-ops facade on every
     // call (dashboard-observability 4.3), so even non-observability tests

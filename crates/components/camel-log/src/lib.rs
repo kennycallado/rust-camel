@@ -80,7 +80,7 @@ pub struct LogConfig {
     pub category: String,
     /// Log level. Default: Info.
     #[uri_param(
-        kind = "enum:TRACE,DEBUG,INFO,WARN,ERROR",
+        kind = "enum:TRACE,DEBUG,INFO,WARN,WARNING,ERROR",
         default = "INFO",
         desc = "Log level"
     )]
@@ -542,6 +542,31 @@ mod tests {
         assert!(parse_log_level("VERBOSE").is_err());
         assert!(parse_log_level("").is_err());
         assert!(parse_log_level("log").is_err());
+    }
+
+    #[test]
+    fn test_metadata_level_enum_covers_runtime_vocab() {
+        // The lint's R-URI-known kind check validates `level` values against
+        // the metadata Enum variants; the runtime accepts the alias WARNING
+        // (any case), so the variant list must cover it or camel lint false-
+        // positives on runtime-legal routes (rc-68q6 review finding).
+        use camel_component_api::{ComponentMetadata, OptionKind};
+        let meta: ComponentMetadata = LogConfig::metadata();
+        let level = meta
+            .uri_options
+            .iter()
+            .find(|o| o.name == "level")
+            .expect("level option must exist");
+        let OptionKind::Enum(variants) = &level.kind else {
+            panic!("level option kind must be Enum; got {:?}", level.kind);
+        };
+        let accepted = ["TRACE", "DEBUG", "INFO", "WARN", "WARNING", "ERROR"];
+        for value in accepted {
+            assert!(
+                variants.iter().any(|v| v.eq_ignore_ascii_case(value)),
+                "metadata level variants must cover runtime-accepted `{value}`; got {variants:?}"
+            );
+        }
     }
 
     #[test]

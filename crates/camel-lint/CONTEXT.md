@@ -200,10 +200,17 @@ the longest separator wins (e.g. `param.foo.bar` matches `param.foo.` over
 > "No. The engine takes a catalog trait object but does not start any runtime.
 > The production catalog is built handle-free by `register_builtin_components_for_lint`."
 
-> "Why does R-URI-known only check Bool kind?"
-> "v1 scope. Other `OptionKind` variants (String, Int, Float, Duration, Enum, List)
-> are deferred — validating them needs format-specific parsers. The `#[non_exhaustive]`
-> attribute means unknown future kinds are also non-erroring."
+> "How does R-URI-known validate option values?"
+> "Every validated `OptionKind` gets a runtime-parity check (rc-68q6): Bool
+> mirrors `parse_bool_param` (true/false/1/0/yes/no, any case), Int/Float use the
+> Rust FromStr grammars (the kind carries no signedness/width — i64 OR u64
+> accepts), Duration uses the shared humantime grammar (bare integers are
+> Int-kind values, not durations), Enum is case-insensitive membership in the
+> declared allowed values, List validates each comma-separated element against
+> the element kind (best-effort — no production component parses a List today).
+> String and unknown `#[non_exhaustive]` kinds stay non-erroring. Values with an
+> interpolation marker (`${...}`/`{{...}}`) skip kind validation — the resolved
+> type is unknowable at lint time (same reference treatment as R-SECRET)."
 
 > "How do I add a new lint rule?"
 > "Implement the `Rule` trait and register it in `LintEngine::with_rule`. Add the

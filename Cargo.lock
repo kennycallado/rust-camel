@@ -2440,6 +2440,7 @@ version = "0.51.0"
 dependencies = [
  "ariadne",
  "camel-api",
+ "humantime",
  "jsonschema",
  "noyalib",
  "regex",

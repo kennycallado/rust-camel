@@ -14,6 +14,7 @@ categories.workspace = true
 
 [dependencies]
 camel-api = { workspace = true }
+humantime = { workspace = true }
 noyalib = { workspace = true }
 jsonschema = { workspace = true }
 ariadne = { workspace = true }
