@@ -8,4 +8,5 @@
 # 1193 + tls_reload.rs 60/69, camel-redis config.rs 400/840) were
 # redeemed at source via camel_api::redact::redact_host — clean hosts
 # pass through unchanged, userinfo-shaped input is masked (ADR-0076).
-# Empty-allowlist probe: 0 violations.
+# Line numbers above are the lint's keys: the macro's first-argument
+# line, not the `host =` field line. Empty-allowlist probe: 0 violations.
