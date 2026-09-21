@@ -16,6 +16,9 @@ import org.junit.jupiter.api.Test;
  * source, so a bridge started without operator opt-in dials nothing. The extension's {@code
  * http://localhost:4317} mapping-level fallback still resolves through the property API — that is
  * exactly the hazard {@link OtlpEgressGuard} neutralizes, pinned here on purpose.
+ *
+ * <p>Twin-copy of bridges/jms OtelEgressConfigTest (independent gradle builds, repo convention):
+ * keep the assertions in lockstep when either copy changes.
  */
 @QuarkusTest
 class OtelEgressConfigTest {

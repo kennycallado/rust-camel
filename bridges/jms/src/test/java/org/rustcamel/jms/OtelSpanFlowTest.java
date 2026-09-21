@@ -25,6 +25,9 @@ import org.junit.jupiter.api.Test;
  * started and ended span must show up in the exporter's finished items (pipeline live, egress
  * in-process), and a bridge RPC carrying escalon-1 {@code traceparent} metadata must produce a
  * server span parented by the propagated context.
+ *
+ * <p>Twin copies of this test live in bridges/xml and bridges/cxf (independent gradle builds, repo
+ * convention): keep the assertions in lockstep when any copy changes.
  */
 @QuarkusTest
 @TestProfile(OtelSpanFlowTest.SpanFlowProfile.class)

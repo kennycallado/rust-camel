@@ -29,6 +29,9 @@ import org.junit.jupiter.api.Test;
  * <p>Env vars are the documented operator route and get the real {@link EnvConfigSource} (raw
  * env-var names in the property map, dotted aliases only in {@code getPropertyNames()}); file and
  * default-value sources are mocked.
+ *
+ * <p>Twin copies of this test live in bridges/xml and bridges/cxf (independent gradle builds, repo
+ * convention): keep the matrix in lockstep when any copy changes.
  */
 class OtlpEgressGuardTest {
 

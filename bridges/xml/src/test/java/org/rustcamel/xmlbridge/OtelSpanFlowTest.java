@@ -25,6 +25,9 @@ import xml_bridge.HealthGrpc;
  * started and ended span must show up in the exporter's finished items (pipeline live, egress
  * in-process), and a bridge Health RPC carrying a W3C {@code traceparent} header (the control-plane
  * propagation convention) must produce a server span parented by the propagated context.
+ *
+ * <p>Twin-copy of bridges/jms OtelSpanFlowTest (independent gradle builds, repo convention): keep
+ * the assertions in lockstep when either copy changes.
  */
 @QuarkusTest
 @TestProfile(OtelSpanFlowTest.SpanFlowProfile.class)

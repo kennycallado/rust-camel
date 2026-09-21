@@ -75,7 +75,7 @@ public class OtlpEgressGuard {
    * ({@code %prod.…}) and relocated legacy spellings resolve only through property lookup, not
    * through {@code getPropertyNames()}: the guard does not recognize them and fails closed. An
    * explicitly configured empty value passes this check and is left to the extension's own endpoint
-   * validation. The guard's tests live in bridges/jms (twin-copy convention).
+   * validation. The guard's tests live in all three bridges (twin-copy convention).
    */
   static boolean explicitlyConfigured(Config config, String key) {
     for (ConfigSource source : config.getConfigSources()) {

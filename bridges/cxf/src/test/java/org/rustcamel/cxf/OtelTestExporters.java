@@ -12,6 +12,9 @@ import jakarta.inject.Singleton;
  * default), so providing this bean routes spans to memory instead of OTLP: no collector, no egress.
  * The SDK is disabled by default in application.yml, so this bean is only exercised by tests whose
  * profile enables the SDK.
+ *
+ * <p>Twin-copy of bridges/jms OtelTestExporters (independent gradle builds, repo convention): keep
+ * the bean in lockstep when either copy changes.
  */
 @ApplicationScoped
 public class OtelTestExporters {
