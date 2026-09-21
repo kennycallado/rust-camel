@@ -149,6 +149,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
 /// tap task being polled on this thread (current-thread runtime) while the
 /// guard is alive.
 pub(crate) fn capture_tracing() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+    crate::common::ensure_global_tracing_default();
     let sink: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
         .with_writer(CapturingWriter {

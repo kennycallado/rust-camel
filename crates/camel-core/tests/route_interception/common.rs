@@ -162,3 +162,21 @@ pub(crate) fn direct_to_mock_route() -> RouteDefinition {
     RouteDefinition::new("direct:in", vec![BuilderStep::To("mock:out".into())])
         .with_route_id("freeze-after-add")
 }
+
+/// Install a bare registry as the process-global tracing default, once
+/// per test binary. Guards capture tests in this binary against
+/// callsite-interest poisoning: `tracing` caches each callsite's
+/// `Interest` process-wide from its FIRST macro execution, evaluated
+/// against the executing thread's dispatcher. A subscriber-less sibling
+/// test that hits a shared `warn!` callsite first caches
+/// `Interest::never`, so a later thread-local `set_default` capture
+/// silently drops events. The bare registry heals prior poison and
+/// floors future rebuilds at `sometimes` (fix pattern: c3853198; bd
+/// rc-img5; bd rc-6jarb; convention:
+/// docs/testing/tracing-capture-guards.md).
+pub(crate) fn ensure_global_tracing_default() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if INIT.set(()).is_ok() {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    }
+}
