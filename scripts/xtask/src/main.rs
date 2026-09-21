@@ -8,6 +8,7 @@ mod lint_metric_labels;
 mod lint_publish_registration;
 mod lint_single_source;
 mod lint_test_sleep;
+mod lint_unbounded_wait;
 mod mutants;
 mod scan_state;
 
@@ -125,6 +126,20 @@ enum Commands {
     /// Escape hatch: append `// allow-test-sleep:` followed by a
     /// non-empty reason to the finding line — marked sites never count.
     LintTestSleep,
+    /// Ratchet-count unbounded waits in test function bodies
+    /// (`recv`/`lock`/`acquire`/`wait`/`join_next`/`connect` awaits,
+    /// `blocking_recv`, spawn-task and spawned-handle awaits, and
+    /// await-carrying loops without a deadline) against a monotone
+    /// ceiling in `scripts/xtask/ratchet-unbounded-wait.max`
+    /// (bd rc-3lx2, ADR-0069 §13.2 R1; structural syn AST scan, mirror
+    /// of lint-test-sleep). A wait bounded by
+    /// `tokio::time::timeout(..)`/`timeout_at(..)` — future argument
+    /// containment, or a per-iteration deadline inside a loop — is not
+    /// counted. Exits non-zero only when the unadjudicated count
+    /// exceeds the ratchet ceiling.
+    /// Escape hatch: append `// allow-test-wait:` followed by a
+    /// non-empty reason to a line spanned by the finding.
+    LintUnboundedWait,
     /// Enforce closed label sets on metric emission calls
     /// (`record_counter`, `record_histogram`,
     /// `record_component_operation`, `increment_retry_attempt`):
@@ -459,6 +474,53 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-test-sleep error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintUnboundedWait => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_unbounded_wait::run(&workspace_root) {
+                Ok(report) if report.findings.len() > report.max => {
+                    println!(
+                        "UNBOUNDED-WAIT RATCHET EXCEEDED ({} findings > max {}):",
+                        report.findings.len(),
+                        report.max
+                    );
+                    for (file, finding) in &report.findings {
+                        println!("  {}:{}", file.display(), finding.line);
+                        println!(
+                            "    remedy: wrap the wait in tokio::time::timeout(..), use a bounded helper, or adjudicate with an allow-test-wait marker"
+                        );
+                    }
+                    println!(
+                        "  fix the sites above, or lower scripts/xtask/{} — never raise it without review justification.",
+                        lint_unbounded_wait::RATCHET_FILE
+                    );
+                    eprintln!("\nlint-unbounded-wait: FAILED");
+                    std::process::exit(1);
+                }
+                Ok(report) if report.findings.len() < report.max => {
+                    println!(
+                        "lint-unbounded-wait: OK ({} findings < max {})",
+                        report.findings.len(),
+                        report.max
+                    );
+                    println!(
+                        "  ratchet headroom: lower scripts/xtask/{} to {}.",
+                        lint_unbounded_wait::RATCHET_FILE,
+                        report.findings.len()
+                    );
+                }
+                Ok(report) => {
+                    println!(
+                        "lint-unbounded-wait: OK ({} findings = max {})",
+                        report.findings.len(),
+                        report.max
+                    );
+                }
+                Err(e) => {
+                    eprintln!("lint-unbounded-wait error: {e}");
                     std::process::exit(1);
                 }
             }
