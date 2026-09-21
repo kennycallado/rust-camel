@@ -878,6 +878,7 @@ mod tests {
         let stub_addr = listener.local_addr().expect("local addr");
         tokio::spawn(async move {
             loop {
+                // allow-test-wait: spawned test-server accept loop; teardown-bounded by test runtime (ADR-0069 §13.2 R1)
                 let Ok((mut stream, _)) = listener.accept().await else {
                     break;
                 };

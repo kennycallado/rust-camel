@@ -1778,12 +1778,16 @@ mod tests {
         // Spawn a simple monitor that exits on Stopped.
         let state_rx_clone = state_rx.clone();
         let handle = tokio::spawn(async move {
-            loop {
-                if matches!(*state_rx_clone.borrow(), BridgeState::Stopped) {
-                    break;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if matches!(*state_rx_clone.borrow(), BridgeState::Stopped) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await; // allow-test-sleep: paces the simulated health-monitor poll loop
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await; // allow-test-sleep: paces the simulated health-monitor poll loop
-            }
+            })
+            .await
+            .expect("health-monitor shutdown must complete within 10s");
         });
         *monitor_handle_ref.lock().await = Some(handle);
 
@@ -2170,12 +2174,16 @@ mod tests {
         let exited = monitor_exited.clone();
         let rx = state_rx.clone();
         let handle = tokio::spawn(async move {
-            loop {
-                if matches!(*rx.borrow(), BridgeState::Stopped) {
-                    break;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if matches!(*rx.borrow(), BridgeState::Stopped) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await; // allow-test-sleep: paces the simulated monitor poll loop
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await; // allow-test-sleep: paces the simulated monitor poll loop
-            }
+            })
+            .await
+            .expect("slot cleanup monitor must exit within 10s");
             exited.store(true, Ordering::SeqCst);
         });
 

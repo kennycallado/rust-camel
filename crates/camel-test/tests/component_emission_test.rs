@@ -661,6 +661,7 @@ async fn http_roundtrip_observed() {
     let server = tokio::spawn(async move {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         loop {
+            // allow-test-wait: spawned test-server accept loop; teardown-bounded by test runtime (ADR-0069 §13.2 R1)
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };

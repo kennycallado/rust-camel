@@ -501,19 +501,23 @@ async fn plain_string_send_dials_literal_without_partner() {
             .expect("the literal dial must connect");
         let mut head = Vec::new();
         let mut chunk = [0u8; 256];
-        loop {
-            if head_is_complete(&head) {
-                break;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if head_is_complete(&head) {
+                    break;
+                }
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("the connection must be readable");
+                if read == 0 {
+                    break;
+                }
+                head.extend_from_slice(&chunk[..read]);
             }
-            let read = stream
-                .read(&mut chunk)
-                .await
-                .expect("the connection must be readable");
-            if read == 0 {
-                break;
-            }
-            head.extend_from_slice(&chunk[..read]);
-        }
+        })
+        .await
+        .expect("partner must receive the complete request head within 30s");
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
             .await

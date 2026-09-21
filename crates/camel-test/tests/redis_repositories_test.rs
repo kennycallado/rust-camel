@@ -1329,25 +1329,31 @@ stale_retention = "30s"
     let recovery = Instant::now();
     let deadline = Instant::now() + SENT_ACL_RECOVERY_DEADLINE;
     let mut attempts = 0u32;
-    loop {
-        attempts += 1;
-        let roundtrip = match repo.set("post-failover-k", cache_entry(), None).await {
-            Err(_) => false,
-            Ok(()) => match repo.get("post-failover-k").await {
-                Ok(Some(got)) => got.bytes == cache_entry().bytes,
-                _ => false,
-            },
-        };
-        if roundtrip {
-            break;
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            attempts += 1;
+            let roundtrip = match repo.set("post-failover-k", cache_entry(), None).await {
+                Err(_) => false,
+                Ok(()) => match repo.get("post-failover-k").await {
+                    Ok(Some(got)) => got.bytes == cache_entry().bytes,
+                    _ => false,
+                },
+            };
+            if roundtrip {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cache_repo never recovered after acl failover within {SENT_ACL_RECOVERY_DEADLINE:?} \
+                 ({attempts} attempts) — repository refresh (re-resolve/re-auth/re-select) did not fire"
+            );
+            tokio::time::sleep(SENT_ACL_POLL).await;
         }
-        assert!(
-            Instant::now() < deadline,
-            "cache_repo never recovered after acl failover within {SENT_ACL_RECOVERY_DEADLINE:?} \
-             ({attempts} attempts) — repository refresh (re-resolve/re-auth/re-select) did not fire"
-        );
-        tokio::time::sleep(SENT_ACL_POLL).await;
-    }
+    })
+    .await
+    .expect(
+        "cache must re-auth against the new master within 90s (60s recovery deadline + 50%)",
+    );
     println!(
         "recovery: {attempts} attempt(s) in {:?}",
         recovery.elapsed()

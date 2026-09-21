@@ -4018,36 +4018,41 @@ async fn context_start_does_not_fail_fast_on_immediate_error() {
     let runtime = ctx.runtime();
     let mut sibling_started = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let failing_failed = matches!(
-            runtime
-                .ask(camel_api::RuntimeQuery::GetRouteStatus {
-                    route_id: "ctx-immediate-fail".to_string(),
-                })
-                .await,
-            Ok(camel_api::RuntimeQueryResult::RouteStatus { ref status, .. }) if status == "Failed"
-        );
-        if !sibling_started {
-            sibling_started = matches!(
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let failing_failed = matches!(
                 runtime
                     .ask(camel_api::RuntimeQuery::GetRouteStatus {
-                        route_id: "ctx-healthy-sibling".to_string(),
+                        route_id: "ctx-immediate-fail".to_string(),
                     })
                     .await,
                 Ok(camel_api::RuntimeQueryResult::RouteStatus { ref status, .. })
-                    if status == "Started"
+                    if status == "Failed"
             );
+            if !sibling_started {
+                sibling_started = matches!(
+                    runtime
+                        .ask(camel_api::RuntimeQuery::GetRouteStatus {
+                            route_id: "ctx-healthy-sibling".to_string(),
+                        })
+                        .await,
+                    Ok(camel_api::RuntimeQueryResult::RouteStatus { ref status, .. })
+                        if status == "Started"
+                );
+            }
+            if failing_failed && sibling_started {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "failing route Failed and sibling Started not both reached within 2s \
+                 (failed route done: {failing_failed}, sibling started: {sibling_started})"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        if failing_failed && sibling_started {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "failing route Failed and sibling Started not both reached within 2s \
-             (failed route done: {failing_failed}, sibling started: {sibling_started})"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    })
+    .await
+    .expect("route context must reach steady state within 3s");
 
     let _ = ctx.stop().await;
 }

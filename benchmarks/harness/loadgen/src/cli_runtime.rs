@@ -808,6 +808,7 @@ mod tests {
         let server_counter = counter.clone();
         tokio::spawn(async move {
             loop {
+                // allow-test-wait: spawned test-server accept loop; teardown-bounded by test runtime (ADR-0069 §13.2 R1)
                 let Ok((mut sock, _)) = listener.accept().await else {
                     return;
                 };
@@ -872,6 +873,7 @@ mod tests {
         let server_counter = counter.clone();
         tokio::spawn(async move {
             loop {
+                // allow-test-wait: spawned test-server accept loop; teardown-bounded by test runtime (ADR-0069 §13.2 R1)
                 let Ok((mut sock, _)) = listener.accept().await else {
                     return;
                 };

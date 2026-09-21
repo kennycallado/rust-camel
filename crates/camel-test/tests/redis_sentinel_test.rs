@@ -505,25 +505,31 @@ async fn producer_recovers_after_sentinel_failover() {
     );
 
     let mut attempt = 0usize;
-    loop {
-        let value = format!("post-failover-{attempt}");
-        if send_set(&h, &value).await {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or(Duration::ZERO);
-            let got = poll_get(&h, &value, remaining.min(Duration::from_secs(10))).await;
-            if got.as_deref() == Some(value.as_str()) {
-                break; // recovered: SET+GET round-trip against the new master
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let value = format!("post-failover-{attempt}");
+            if send_set(&h, &value).await {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or(Duration::ZERO);
+                let got = poll_get(&h, &value, remaining.min(Duration::from_secs(10))).await;
+                if got.as_deref() == Some(value.as_str()) {
+                    break; // recovered: SET+GET round-trip against the new master
+                }
             }
+            assert!(
+                Instant::now() < deadline,
+                "producer did not SET/GET against the new master within {:?}",
+                FAILOVER_DEADLINE
+            );
+            tokio::time::sleep(RECOVERY_POLL).await;
+            attempt += 1;
         }
-        assert!(
-            Instant::now() < deadline,
-            "producer did not SET/GET against the new master within {:?}",
-            FAILOVER_DEADLINE
-        );
-        tokio::time::sleep(RECOVERY_POLL).await;
-        attempt += 1;
-    }
+    })
+    .await
+    .expect(
+        "producer must SET/GET against the new master within 90s (60s failover deadline + 50%)",
+    );
 
     h.stop().await;
 }
@@ -574,18 +580,24 @@ async fn queue_consumer_recovers_after_sentinel_failover() {
     // consumer's reconnect loop re-resolves the master and BLPOPs it.
     lpush_to_master(new_port, "failover:queue", "post-failover-item");
 
-    loop {
-        let bodies = received_bodies(&h, "queue-consumed").await;
-        if bodies.iter().any(|b| b == "post-failover-item") {
-            break;
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let bodies = received_bodies(&h, "queue-consumed").await;
+            if bodies.iter().any(|b| b == "post-failover-item") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "queue consumer did not deliver the post-failover item within {:?}",
+                FAILOVER_DEADLINE
+            );
+            tokio::time::sleep(RECOVERY_POLL).await;
         }
-        assert!(
-            Instant::now() < deadline,
-            "queue consumer did not deliver the post-failover item within {:?}",
-            FAILOVER_DEADLINE
-        );
-        tokio::time::sleep(RECOVERY_POLL).await;
-    }
+    })
+    .await
+    .expect(
+        "queue consumer must deliver the post-failover item within 90s (60s failover deadline + 50%)",
+    );
 
     h.stop().await;
 
@@ -647,21 +659,27 @@ async fn pubsub_consumer_resubscribes_after_sentinel_failover() {
     // between subscriptions is lost), so publish repeatedly until the
     // resubscribed consumer delivers one of the post-failover messages.
     let mut attempt = 0usize;
-    loop {
-        let message = format!("post-failover-msg-{attempt}");
-        publish_to_master(new_port, "failover:chan", &message);
-        let bodies = received_bodies(&h, "pubsub-received").await;
-        if bodies.iter().any(|b| b.starts_with("post-failover-msg-")) {
-            break;
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let message = format!("post-failover-msg-{attempt}");
+            publish_to_master(new_port, "failover:chan", &message);
+            let bodies = received_bodies(&h, "pubsub-received").await;
+            if bodies.iter().any(|b| b.starts_with("post-failover-msg-")) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pubsub consumer did not deliver a post-failover message within {:?}",
+                FAILOVER_DEADLINE
+            );
+            tokio::time::sleep(RECOVERY_POLL).await;
+            attempt += 1;
         }
-        assert!(
-            Instant::now() < deadline,
-            "pubsub consumer did not deliver a post-failover message within {:?}",
-            FAILOVER_DEADLINE
-        );
-        tokio::time::sleep(RECOVERY_POLL).await;
-        attempt += 1;
-    }
+    })
+    .await
+    .expect(
+        "pubsub consumer must deliver a post-failover message within 90s (60s failover deadline + 50%)",
+    );
 
     h.stop().await;
 

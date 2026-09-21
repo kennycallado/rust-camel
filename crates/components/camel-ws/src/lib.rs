@@ -4996,20 +4996,24 @@ mod tests {
         let calls_clone = Arc::clone(&calls);
         let mut attempts: u32 = 0;
 
-        let _result: Result<(), ()> = loop {
-            calls_clone.fetch_add(1, Ordering::SeqCst);
-            let op_result: Result<(), ()> = Err(());
-            match op_result {
-                Ok(_) => unreachable!(),
-                Err(_) if policy.should_retry(attempts + 1) => {
-                    let delay = policy.delay_for(attempts);
-                    tokio::time::sleep(delay).await;
-                    attempts += 1;
-                    continue;
+        let _result: Result<(), ()> = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                calls_clone.fetch_add(1, Ordering::SeqCst);
+                let op_result: Result<(), ()> = Err(());
+                match op_result {
+                    Ok(_) => unreachable!(),
+                    Err(_) if policy.should_retry(attempts + 1) => {
+                        let delay = policy.delay_for(attempts);
+                        tokio::time::sleep(delay).await;
+                        attempts += 1;
+                        continue;
+                    }
+                    Err(_) => break Err(()),
                 }
-                Err(_) => break Err(()),
             }
-        };
+        })
+        .await
+        .expect("retry loop must finish within 30s");
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -5038,20 +5042,24 @@ mod tests {
         let calls_clone = Arc::clone(&calls);
         let mut attempts: u32 = 0;
 
-        let _result: Result<(), ()> = loop {
-            calls_clone.fetch_add(1, Ordering::SeqCst);
-            let op_result: Result<(), ()> = Err(());
-            match op_result {
-                Ok(_) => unreachable!(),
-                Err(_) if policy.should_retry(attempts + 1) => {
-                    let delay = policy.delay_for(attempts);
-                    tokio::time::sleep(delay).await;
-                    attempts += 1;
-                    continue;
+        let _result: Result<(), ()> = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                calls_clone.fetch_add(1, Ordering::SeqCst);
+                let op_result: Result<(), ()> = Err(());
+                match op_result {
+                    Ok(_) => unreachable!(),
+                    Err(_) if policy.should_retry(attempts + 1) => {
+                        let delay = policy.delay_for(attempts);
+                        tokio::time::sleep(delay).await;
+                        attempts += 1;
+                        continue;
+                    }
+                    Err(_) => break Err(()),
                 }
-                Err(_) => break Err(()),
             }
-        };
+        })
+        .await
+        .expect("retry loop must finish within 30s");
 
         assert_eq!(
             calls.load(Ordering::SeqCst),

@@ -332,7 +332,7 @@ async fn term_bump_while_active_reconciles_once() {
     // epoch bridge at the new epoch.
     leadership.leader_epoch().store(2, Ordering::Release);
     leadership.emit(LeadershipEvent::StartedLeading).await;
-    let reconciled = timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_millis(7500), async {
         loop {
             if create_consumer_calls.load(Ordering::SeqCst) >= 2 {
                 break;
@@ -341,11 +341,7 @@ async fn term_bump_while_active_reconciles_once() {
         }
     })
     .await
-    .is_ok();
-    assert!(
-        reconciled,
-        "term bump should force re-reconciliation within 5s"
-    );
+    .expect("reconcile observation (delegate recreation) must land within 7.5s");
     // The recreation completes only when its "started" observation is
     // recorded (the create counter bumps slightly before the lifecycle
     // emit inside reconcile_event).

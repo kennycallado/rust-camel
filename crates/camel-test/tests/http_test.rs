@@ -585,6 +585,7 @@ async fn http_custom_ok_status_code_range() {
     let _handle = tokio::spawn(async move {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         loop {
+            // allow-test-wait: spawned test-server accept loop; teardown-bounded by test runtime (ADR-0069 §13.2 R1)
             if let Ok((mut stream, _)) = listener.accept().await {
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 4096];

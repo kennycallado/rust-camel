@@ -706,16 +706,20 @@ async fn sentinel_resolve_carries_username_to_master_connection() {
     // Observable behavior: the fake master saw the redis-rs setup pipeline
     // authenticate with the username (AUTH svc p) and SELECT the db.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let master_cmds = loop {
-        let joined = {
-            let log = master_log.lock().expect("master log");
-            log.join(" | ")
-        };
-        if joined.contains("AUTH svc p") || std::time::Instant::now() > deadline {
-            break joined;
+    let master_cmds = tokio::time::timeout(Duration::from_millis(7500), async {
+        loop {
+            let joined = {
+                let log = master_log.lock().expect("master log");
+                log.join(" | ")
+            };
+            if joined.contains("AUTH svc p") || std::time::Instant::now() > deadline {
+                break joined;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
+    })
+    .await
+    .expect("fake master must observe the setup pipeline within 7500ms");
     assert!(
         master_cmds.contains("AUTH svc p"),
         "master must observe AUTH with the username, saw: {master_cmds}"

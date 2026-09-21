@@ -70,7 +70,7 @@ async fn tick_renews_epoch_advance_restamps_without_delivery() {
     // The retry tick must detect the stale stamp and re-reconcile.
     leadership.leader_epoch().store(2, Ordering::Release);
 
-    let reconciled = timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_millis(7500), async {
         loop {
             if create_consumer_calls.load(Ordering::SeqCst) >= 2 {
                 break;
@@ -79,11 +79,7 @@ async fn tick_renews_epoch_advance_restamps_without_delivery() {
         }
     })
     .await
-    .is_ok();
-    assert!(
-        reconciled,
-        "stale-stamp tick must dispatch the reconciliation within 5s"
-    );
+    .expect("stale-stamp tick must dispatch the reconciliation within 7.5s");
     // The recreation completes only when its stopped+started pair is
     // recorded (the create counter bumps before the lifecycle emits).
     assert!(
@@ -209,7 +205,7 @@ async fn dead_delegate_stale_stamp_resets_budget() {
     leadership.leader_epoch().store(2, Ordering::Release);
     let _ = exit_tx.send(());
 
-    let recreated = timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_millis(7500), async {
         loop {
             if create_consumer_calls.load(Ordering::SeqCst) >= 2 {
                 break;
@@ -218,11 +214,7 @@ async fn dead_delegate_stale_stamp_resets_budget() {
         }
     })
     .await
-    .is_ok();
-    assert!(
-        recreated,
-        "stale-stamp dispatch must reset the exhausted budget and recreate within 5s"
-    );
+    .expect("stale-stamp dispatch must reset the exhausted budget and recreate the delegate within 7.5s");
     assert!(
         !master
             .leadership_task

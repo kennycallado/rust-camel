@@ -297,35 +297,39 @@ async fn supervision_restart_reflects_crash_recovery_progress_in_runtime_project
     ctx.start().await.unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let status = match ctx
-            .runtime()
-            .ask(RuntimeQuery::GetRouteStatus {
-                route_id: "supervised-r1".into(),
-            })
-            .await
-            .unwrap()
-        {
-            RuntimeQueryResult::RouteStatus { status, .. } => status,
-            other => panic!("unexpected query result: {other:?}"),
-        };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let status = match ctx
+                .runtime()
+                .ask(RuntimeQuery::GetRouteStatus {
+                    route_id: "supervised-r1".into(),
+                })
+                .await
+                .unwrap()
+            {
+                RuntimeQueryResult::RouteStatus { status, .. } => status,
+                other => panic!("unexpected query result: {other:?}"),
+            };
 
-        if starts.load(Ordering::SeqCst) >= 2 {
+            if starts.load(Ordering::SeqCst) >= 2 {
+                assert!(
+                    status == "Started" || status == "Failed",
+                    "unexpected runtime projection status after supervised restart attempt: {status}"
+                );
+                break;
+            }
+
             assert!(
-                status == "Started" || status == "Failed",
-                "unexpected runtime projection status after supervised restart attempt: {status}"
+                Instant::now() <= deadline,
+                "expected supervised route to perform a restart attempt; last status={status}, starts={}",
+                starts.load(Ordering::SeqCst)
             );
-            break;
+
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-
-        assert!(
-            Instant::now() <= deadline,
-            "expected supervised route to perform a restart attempt; last status={status}, starts={}",
-            starts.load(Ordering::SeqCst)
-        );
-
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    })
+    .await
+    .expect("crash-recovery restart progress must be observed within 3s");
 
     ctx.stop().await.unwrap();
 }
@@ -354,29 +358,33 @@ async fn supervision_respects_runtime_stopped_state_and_skips_restart() {
     ctx.start().await.unwrap();
 
     let fail_deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let status = match ctx
-            .runtime()
-            .ask(RuntimeQuery::GetRouteStatus {
-                route_id: "supervised-stop-r1".into(),
-            })
-            .await
-            .unwrap()
-        {
-            RuntimeQueryResult::RouteStatus { status, .. } => status,
-            other => panic!("unexpected query result: {other:?}"),
-        };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let status = match ctx
+                .runtime()
+                .ask(RuntimeQuery::GetRouteStatus {
+                    route_id: "supervised-stop-r1".into(),
+                })
+                .await
+                .unwrap()
+            {
+                RuntimeQueryResult::RouteStatus { status, .. } => status,
+                other => panic!("unexpected query result: {other:?}"),
+            };
 
-        if status == "Failed" {
-            break;
+            if status == "Failed" {
+                break;
+            }
+
+            assert!(
+                Instant::now() <= fail_deadline,
+                "expected route to crash into Failed state before manual stop; last status={status}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-
-        assert!(
-            Instant::now() <= fail_deadline,
-            "expected route to crash into Failed state before manual stop; last status={status}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    })
+    .await
+    .expect("stopped-state observation (route Failed before manual stop) must arrive within 3s");
 
     ctx.runtime()
         .execute(RuntimeCommand::StopRoute {

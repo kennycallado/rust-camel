@@ -229,17 +229,22 @@ async fn multi_thread_document_fails_on_warn() {
     // iterations.
     let (done, mut running) = tokio::sync::oneshot::channel::<()>();
     let noise = tokio::spawn(async move {
-        loop {
-            tracing::warn!("harness task warn marker");
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            // Stop when the document completed (the sender dropped).
-            if matches!(
-                running.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-            ) {
-                break;
+        // 30x the 5ms poll sleep, floored at 10s (ADR-0069 §13.2 R1).
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                tracing::warn!("harness task warn marker");
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                // Stop when the document completed (the sender dropped).
+                if matches!(
+                    running.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                ) {
+                    break;
+                }
             }
-        }
+        })
+        .await
+        .expect("harness warn-log loop must stop within 10s once the document completes");
     });
     let outcome = run_logs_document(MULTI_THREAD_DOC, "marker-warn.routes.yaml").await;
     drop(done);

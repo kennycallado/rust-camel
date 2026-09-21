@@ -1434,19 +1434,23 @@ mod tests {
         let calls_clone = Arc::clone(&calls);
         let mut attempt: u32 = 0;
 
-        loop {
-            calls_clone.fetch_add(1, Ordering::SeqCst);
-            let err: Result<(), ()> = Err(());
-            match err {
-                Ok(_) => unreachable!(),
-                Err(_) if policy.should_retry(attempt + 1) => {
-                    let delay = policy.delay_for(attempt);
-                    tokio::time::sleep(delay).await;
-                    attempt += 1;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                calls_clone.fetch_add(1, Ordering::SeqCst);
+                let err: Result<(), ()> = Err(());
+                match err {
+                    Ok(_) => unreachable!(),
+                    Err(_) if policy.should_retry(attempt + 1) => {
+                        let delay = policy.delay_for(attempt);
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                    }
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
-        }
+        })
+        .await
+        .expect("retry loop must finish within 30s");
 
         assert_eq!(
             calls.load(Ordering::SeqCst),

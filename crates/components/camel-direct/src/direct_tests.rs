@@ -552,21 +552,25 @@ async fn test_direct_crashed_consumer_entry_is_overwritable() {
     // Registration must succeed and REPLACE the stale entry: within 2s
     // the live entry is the replacement consumer's.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let replaced = {
-            let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
-            reg.get("crashed")
-                .is_some_and(|entry| entry.ctx.route_id() == "replacement-route")
-        };
-        if replaced {
-            break;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let replaced = {
+                let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+                reg.get("crashed")
+                    .is_some_and(|entry| entry.ctx.route_id() == "replacement-route")
+            };
+            if replaced {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "replacement consumer did not register within 2s"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "replacement consumer did not register within 2s"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    })
+    .await
+    .expect("replacement consumer registration must be observed within 3s");
 
     token.cancel();
     handle.await.unwrap();
@@ -1155,20 +1159,27 @@ async fn test_direct_cycle_never_succeeds_or_hangs() {
     // exercises the real cycle instead of failing fast with
     // "not registered".
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let registered = {
-            let reg = component.registry.lock().unwrap_or_else(|e| e.into_inner());
-            reg.contains_key("a") && reg.contains_key("b")
-        };
-        if registered {
-            break;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let registered = {
+                let reg = component.registry.lock().unwrap_or_else(|e| e.into_inner());
+                reg.contains_key("a") && reg.contains_key("b")
+            };
+            if registered {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "cycle consumers did not register within 2s"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "cycle consumers did not register within 2s"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    })
+    .await
+    .expect(
+        "cycle consumer registration must terminate within 3s — the cycle \
+         test must terminate, not hang",
+    );
 
     let producer = component
         .create_endpoint("direct:a?timeout_ms=500", &NoOpComponentContext)

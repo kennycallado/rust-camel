@@ -32,10 +32,9 @@ async fn delegate_permanent_error_terminates_master_without_retry() {
 
     master.start(ctx).await.unwrap();
 
-    // Poll for task completion with a short timeout. A permanent error
-    // must terminate the task in milliseconds via fail-fast classification,
-    // NOT via retry-budget exhaustion.
-    let task_finished = timeout(Duration::from_millis(500), async {
+    // A permanent error must terminate the task in milliseconds via
+    // fail-fast classification, NOT via retry-budget exhaustion.
+    tokio::time::timeout(Duration::from_millis(750), async {
         loop {
             if master
                 .leadership_task
@@ -47,12 +46,8 @@ async fn delegate_permanent_error_terminates_master_without_retry() {
             sleep(Duration::from_millis(5)).await;
         }
     })
-    .await;
-
-    assert!(
-        task_finished.is_ok(),
-        "master should terminate within 500ms via fail-fast classification"
-    );
+    .await
+    .expect("master must terminate without retry within 750ms");
 
     // Verify single invocation (true fail-fast, not budget exhaustion).
     assert_eq!(

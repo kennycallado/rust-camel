@@ -3005,28 +3005,32 @@ mod queue_depth_tests {
         // bug.
         let settled = recorder.0.lock().unwrap_or_else(|e| e.into_inner()).len();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(900);
-        loop {
-            let post: Vec<usize> = {
-                let log = recorder.0.lock().unwrap_or_else(|e| e.into_inner());
-                log[settled..]
-                    .iter()
-                    .filter(|(q, _)| q == "seda:fq")
-                    .map(|(_, d)| *d)
-                    .collect()
-            };
-            if post.len() >= 3 {
+        tokio::time::timeout(Duration::from_millis(1350), async {
+            loop {
+                let post: Vec<usize> = {
+                    let log = recorder.0.lock().unwrap_or_else(|e| e.into_inner());
+                    log[settled..]
+                        .iter()
+                        .filter(|(q, _)| q == "seda:fq")
+                        .map(|(_, d)| *d)
+                        .collect()
+                };
+                if post.len() >= 3 {
+                    assert!(
+                        post.iter().all(|d| *d > 0),
+                        "false-zero gauge samples while backlog exists: {post:?}"
+                    );
+                    break;
+                }
                 assert!(
-                    post.iter().all(|d| *d > 0),
-                    "false-zero gauge samples while backlog exists: {post:?}"
+                    tokio::time::Instant::now() < deadline,
+                    "sampler produced too few samples in 900ms: {post:?}"
                 );
-                break;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "sampler produced too few samples in 900ms: {post:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        })
+        .await
+        .expect("post-settle gauge samples must arrive within 1350ms");
 
         drop(blocked_rx_a);
         consumer_a.stop().await.unwrap();

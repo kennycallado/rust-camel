@@ -302,24 +302,28 @@ async fn seda_single_consumer_survives_suspend_resume() {
         drop(ctx);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            let ctx = h.ctx().lock().await;
-            let result = producer
-                .clone()
-                .oneshot(Exchange::new(Message::new("after-resume")))
-                .await;
-            drop(ctx);
-            match result {
-                Ok(_) => break,
-                Err(e) => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "direct send after resume never succeeded: {e}"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let ctx = h.ctx().lock().await;
+                let result = producer
+                    .clone()
+                    .oneshot(Exchange::new(Message::new("after-resume")))
+                    .await;
+                drop(ctx);
+                match result {
+                    Ok(_) => break,
+                    Err(e) => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "direct send after resume never succeeded: {e}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
                 }
             }
-        }
+        })
+        .await
+        .expect("direct send after resume must succeed within 10s (10ms poll x 30, 10s floor)");
     }
 
     let endpoint = h.mock().get_endpoint("result").unwrap();

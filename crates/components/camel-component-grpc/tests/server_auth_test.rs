@@ -565,28 +565,34 @@ async fn grpc_client_streaming_pipeline_denial_regression() {
         // Reply the denial idiom to every envelope: intermediate replies
         // are discarded by design; the completion exchange's reply is
         // the RPC verdict. Stop at the completion marker so the stand-in
-        // terminates while the consumer keeps serving.
-        loop {
-            let envelope = route_rx
-                .recv()
-                .await
-                .expect("kernel-authenticated request must reach the route pipeline");
-            // Pipeline-side enforcement stand-in (SecurityPolicyService
-            // denies with Unauthorized): the pipeline policy denial idiom.
-            if let Some(tx) = envelope.reply_tx {
-                let _ = tx.send(Err(CamelError::Unauthorized("missing role".to_string())));
+        // terminates while the consumer keeps serving. Bounded by an
+        // enclosing timeout: silent expiry is failure, because a missing
+        // completion exchange would otherwise pass unnoticed.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let envelope = route_rx
+                    .recv()
+                    .await
+                    .expect("kernel-authenticated request must reach the route pipeline");
+                // Pipeline-side enforcement stand-in (SecurityPolicyService
+                // denies with Unauthorized): the pipeline policy denial idiom.
+                if let Some(tx) = envelope.reply_tx {
+                    let _ = tx.send(Err(CamelError::Unauthorized("missing role".to_string())));
+                }
+                let complete = matches!(
+                    envelope
+                        .exchange
+                        .input
+                        .header("CamelGrpcClientStreamComplete"),
+                    Some(serde_json::Value::Bool(true))
+                );
+                if complete {
+                    break;
+                }
             }
-            let complete = matches!(
-                envelope
-                    .exchange
-                    .input
-                    .header("CamelGrpcClientStreamComplete"),
-                Some(serde_json::Value::Bool(true))
-            );
-            if complete {
-                break;
-            }
-        }
+        })
+        .await
+        .expect("pipeline must observe the completion marker within 30s");
     });
 
     let mut client = stream_service_client(port).await;

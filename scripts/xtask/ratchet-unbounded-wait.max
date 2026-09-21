@@ -30,9 +30,8 @@
 # (read/write/flush awaits) is deferred to a later detector revision;
 # adding it is a deliberate, review-visible ceiling bump.
 #
+# Loopsweep burn-down (2026-09-21, bd rc-w32w7): 32 converted (23 enclosing-timeout R-P1 + 9 retry-wrap R-P3), 5 allow-test-wait markers (spawned accept-loop servers); 548 -> 511.
 # Unadjudicated inventory at seed (2026-09-21), one entry per site —
-# - benchmarks/harness/loadgen/src/cli_runtime.rs:810
-# - benchmarks/harness/loadgen/src/cli_runtime.rs:874
 # - crates/camel-cli/src/commands/test/scenario_tests.rs:575
 # - crates/camel-core/src/health_registry.rs:614
 # - crates/camel-core/src/lifecycle/adapters/consumer_management.rs:1100
@@ -53,13 +52,10 @@
 # - crates/camel-core/src/lifecycle/adapters/route_controller_drainclaim_tests.rs:486
 # - crates/camel-core/src/lifecycle/adapters/route_controller_drainclaim_tests.rs:487
 # - crates/camel-core/src/lifecycle/adapters/route_controller_drainclaim_tests.rs:560
-# - crates/camel-core/src/lifecycle/adapters/route_controller_tests.rs:4021
 # - crates/camel-core/src/lifecycle/adapters/route_controller_tests.rs:4473
 # - crates/camel-core/tests/arc_snapshot_concurrency.rs:105
 # - crates/camel-core/tests/arc_snapshot_concurrency.rs:124
 # - crates/camel-core/tests/cb_fallback_lifecycle_test.rs:326
-# - crates/camel-core/tests/runtime_consistency_test.rs:300
-# - crates/camel-core/tests/runtime_consistency_test.rs:357
 # - crates/camel-dsl/tests/rest_negotiation_e2e.rs:361
 # - crates/camel-dsl/tests/rest_negotiation_e2e.rs:419
 # - crates/camel-dsl/tests/rest_negotiation_e2e.rs:452
@@ -86,7 +82,6 @@
 # - crates/camel-dsl/tests/rest_stream_contract_e2e.rs:512
 # - crates/camel-dsl/tests/rest_stream_contract_e2e.rs:536
 # - crates/camel-integration-test/src/boot_scenario_test.rs:805
-# - crates/camel-integration-test/src/http_partner_test.rs:504
 # - crates/camel-integration-test/src/http_partner_test.rs:546
 # - crates/camel-integration-test/src/log_capture.rs:299
 # - crates/camel-integration-test/src/runner/partner_validate_test.rs:402
@@ -106,7 +101,6 @@
 # - crates/camel-integration-test/tests/http_outbound_test.rs:384
 # - crates/camel-integration-test/tests/http_outbound_test.rs:442
 # - crates/camel-integration-test/tests/http_partner_scripting_test.rs:1101
-# - crates/camel-integration-test/tests/log_assertion_test.rs:232
 # - crates/camel-integration-test/tests/log_assertion_test.rs:246
 # - crates/camel-integration-test/tests/partner_verification_test.rs:1033
 # - crates/camel-integration-test/tests/partner_verification_test.rs:1158
@@ -138,7 +132,6 @@
 # - crates/camel-test/src/time.rs:46
 # - crates/camel-test/tests/cache_admin_test.rs:245
 # - crates/camel-test/tests/cache_eip_smoke.rs:185
-# - crates/camel-test/tests/component_emission_test.rs:663
 # - crates/camel-test/tests/direct_top_level_test.rs:280
 # - crates/camel-test/tests/do_try_test.rs:215
 # - crates/camel-test/tests/do_try_test.rs:375
@@ -165,7 +158,6 @@
 # - crates/camel-test/tests/http_static_test.rs:775
 # - crates/camel-test/tests/http_static_test.rs:816
 # - crates/camel-test/tests/http_static_test.rs:883
-# - crates/camel-test/tests/http_test.rs:587
 # - crates/camel-test/tests/integration_test.rs:2412
 # - crates/camel-test/tests/integration_test.rs:3239
 # - crates/camel-test/tests/integration_test.rs:3346
@@ -206,17 +198,13 @@
 # - crates/camel-test/tests/otel_trace_tree_test.rs:425
 # - crates/camel-test/tests/redis_repositories_test.rs:1117
 # - crates/camel-test/tests/redis_repositories_test.rs:1213
-# - crates/camel-test/tests/redis_repositories_test.rs:1332
 # - crates/camel-test/tests/redis_repositories_test.rs:1512
 # - crates/camel-test/tests/redis_repositories_test.rs:569
 # - crates/camel-test/tests/redis_repositories_test.rs:632
 # - crates/camel-test/tests/redis_repositories_test.rs:830
 # - crates/camel-test/tests/redis_sentinel_test.rs:456
-# - crates/camel-test/tests/redis_sentinel_test.rs:508
 # - crates/camel-test/tests/redis_sentinel_test.rs:537
-# - crates/camel-test/tests/redis_sentinel_test.rs:577
 # - crates/camel-test/tests/redis_sentinel_test.rs:609
-# - crates/camel-test/tests/redis_sentinel_test.rs:650
 # - crates/camel-test/tests/redis_test.rs:157
 # - crates/camel-test/tests/redis_test.rs:216
 # - crates/camel-test/tests/redis_test.rs:274
@@ -237,7 +225,6 @@
 # - crates/camel-test/tests/seda_test.rs:203
 # - crates/camel-test/tests/seda_test.rs:262
 # - crates/camel-test/tests/seda_test.rs:290
-# - crates/camel-test/tests/seda_test.rs:305
 # - crates/camel-test/tests/sql_test.rs:157
 # - crates/camel-test/tests/sql_test.rs:224
 # - crates/camel-test/tests/sql_test.rs:291
@@ -327,7 +314,6 @@
 # - crates/components/camel-component-grpc/tests/server_auth_test.rs:474
 # - crates/components/camel-component-grpc/tests/server_auth_test.rs:502
 # - crates/components/camel-component-grpc/tests/server_auth_test.rs:537
-# - crates/components/camel-component-grpc/tests/server_auth_test.rs:569
 # - crates/components/camel-component-grpc/tests/server_auth_test.rs:613
 # - crates/components/camel-component-grpc/tests/server_auth_test.rs:641
 # - crates/components/camel-component-grpc/tests/server_auth_test.rs:683
@@ -365,7 +351,6 @@
 # - crates/components/camel-component-seda/src/lib.rs:2240
 # - crates/components/camel-component-seda/src/lib.rs:2367
 # - crates/components/camel-component-seda/src/lib.rs:2973
-# - crates/components/camel-component-seda/src/lib.rs:3008
 # - crates/components/camel-component-seda/src/lib.rs:3221
 # - crates/components/camel-component-seda/src/lib.rs:3242
 # - crates/components/camel-component-seda/src/lib.rs:3278
@@ -386,7 +371,6 @@
 # - crates/components/camel-component-wasm/tests/source_integration.rs:343
 # - crates/components/camel-component-wasm/tests/source_stream_integration.rs:537
 # - crates/components/camel-component-wasm/tests/streaming_integration.rs:496
-# - crates/components/camel-container/src/lib.rs:2668
 # - crates/components/camel-controlbus/src/lib.rs:661
 # - crates/components/camel-cron/src/lib.rs:511
 # - crates/components/camel-cron/src/tokio_impl.rs:103
@@ -417,13 +401,11 @@
 # - crates/components/camel-cxf/tests/ws_security_test.rs:135
 # - crates/components/camel-cxf/tests/ws_security_test.rs:51
 # - crates/components/camel-cxf/tests/ws_security_test.rs:83
-# - crates/components/camel-direct/src/direct_tests.rs:1158
 # - crates/components/camel-direct/src/direct_tests.rs:1364
 # - crates/components/camel-direct/src/direct_tests.rs:254
 # - crates/components/camel-direct/src/direct_tests.rs:285
 # - crates/components/camel-direct/src/direct_tests.rs:334
 # - crates/components/camel-direct/src/direct_tests.rs:441
-# - crates/components/camel-direct/src/direct_tests.rs:555
 # - crates/components/camel-direct/src/direct_tests.rs:572
 # - crates/components/camel-direct/src/direct_tests.rs:622
 # - crates/components/camel-direct/src/direct_tests.rs:658
@@ -450,16 +432,12 @@
 # - crates/components/camel-jms/src/bridge_client_test.rs:237
 # - crates/components/camel-jms/src/bridge_client_test.rs:316
 # - crates/components/camel-jms/src/bridge_client_test.rs:382
-# - crates/components/camel-jms/src/component.rs:1781
 # - crates/components/camel-jms/src/component.rs:1788
 # - crates/components/camel-jms/src/component.rs:1847
 # - crates/components/camel-jms/src/component.rs:2054
-# - crates/components/camel-jms/src/component.rs:2173
 # - crates/components/camel-jms/src/component.rs:2184
 # - crates/components/camel-jms/src/consumer.rs:1000
-# - crates/components/camel-jms/src/consumer.rs:898
 # - crates/components/camel-kafka/src/consumer.rs:1230
-# - crates/components/camel-kafka/src/consumer.rs:1437
 # - crates/components/camel-kafka/src/consumer.rs:1469
 # - crates/components/camel-kafka/src/consumer.rs:1529
 # - crates/components/camel-kafka/src/consumer.rs:1572
@@ -473,17 +451,10 @@
 # - crates/components/camel-master/src/leadership.rs:574
 # - crates/components/camel-master/src/leadership.rs:769
 # - crates/components/camel-master/src/leadership.rs:810
-# - crates/components/camel-master/src/tests/acquisition_budget.rs:65
-# - crates/components/camel-master/src/tests/delegate_errors.rs:39
-# - crates/components/camel-master/src/tests/leadership_state_gauge.rs:336
-# - crates/components/camel-master/src/tests/stale_stamp.rs:213
-# - crates/components/camel-master/src/tests/stale_stamp.rs:74
 # - crates/components/camel-opensearch/src/producer/mod.rs:792
-# - crates/components/camel-redis/src/executor.rs:880
 # - crates/components/camel-redis/src/executor.rs:930
 # - crates/components/camel-redis/src/producer.rs:347
 # - crates/components/camel-redis/src/producer.rs:374
-# - crates/components/camel-redis/src/topology_tests.rs:709
 # - crates/components/camel-sql/src/consumer.rs:1007
 # - crates/components/camel-sql/src/consumer.rs:1042
 # - crates/components/camel-sql/src/consumer.rs:1095
@@ -496,7 +467,6 @@
 # - crates/components/camel-sql/src/consumer.rs:1399
 # - crates/components/camel-sql/src/consumer.rs:1425
 # - crates/components/camel-sql/src/consumer.rs:1561
-# - crates/components/camel-sql/src/consumer.rs:1678
 # - crates/components/camel-sql/src/consumer.rs:776
 # - crates/components/camel-sql/src/consumer.rs:821
 # - crates/components/camel-sql/src/consumer.rs:867
@@ -506,7 +476,6 @@
 # - crates/components/camel-sql/src/pool_factory.rs:264
 # - crates/components/camel-sql/src/pool_factory.rs:265
 # - crates/components/camel-sql/src/pool_factory.rs:318
-# - crates/components/camel-sql/src/producer.rs:1298
 # - crates/components/camel-stream/src/consumer_tests.rs:308
 # - crates/components/camel-stream/src/consumer_tests.rs:325
 # - crates/components/camel-stream/src/consumer_tests.rs:337
@@ -519,7 +488,6 @@
 # - crates/components/camel-stream/src/consumer_tests.rs:560
 # - crates/components/camel-stream/src/lib.rs:958
 # - crates/components/camel-stream/src/lib.rs:959
-# - crates/components/camel-template/tests/common/mod.rs:166
 # - crates/components/camel-timer/src/lib.rs:531
 # - crates/components/camel-validator/src/bridge_client_test.rs:118
 # - crates/components/camel-validator/src/bridge_client_test.rs:129
@@ -563,20 +531,16 @@
 # - crates/components/camel-ws/src/lib.rs:4779
 # - crates/components/camel-ws/src/lib.rs:4827
 # - crates/components/camel-ws/src/lib.rs:4871
-# - crates/components/camel-ws/src/lib.rs:4999
-# - crates/components/camel-ws/src/lib.rs:5041
 # - crates/components/camel-ws/src/lib.rs:5201
 # - crates/components/camel-ws/src/lib.rs:5257
 # - crates/components/camel-ws/src/lib.rs:5325
 # - crates/components/camel-ws/src/lib.rs:5357
 # - crates/components/camel-ws/src/lib.rs:5441
 # - crates/components/camel-ws/src/lib.rs:5588
-# - crates/components/camel-xj/src/component.rs:604
 # - crates/components/camel-xslt/src/bridge_client_test.rs:101
 # - crates/components/camel-xslt/src/bridge_client_test.rs:114
-# - crates/components/camel-xslt/src/component.rs:356
 # - crates/services/camel-bridge/src/process.rs:1099
 # - crates/services/camel-bridge/src/process.rs:1129
 # - crates/services/camel-bridge/src/process.rs:1221
 # - crates/services/camel-prometheus/tests/integration_test.rs:61
-548
+511

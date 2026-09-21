@@ -163,30 +163,35 @@ mod tests {
 
         let attempts = std::sync::Arc::new(Mutex::new(0_u8));
         let deadline = tokio::time::Instant::now() + RACE_RETRY_TIMEOUT;
-        let result: Result<(), CamelError> = loop {
-            let attempts_for_op = attempts.clone();
-            let outcome: Result<(), CamelError> = async move {
-                let mut guard = attempts_for_op.lock().expect("attempts lock");
-                *guard += 1;
-                if *guard < 3 {
-                    Err(CamelError::EndpointCreationFailed(
-                        "direct endpoint 'in' not registered".to_string(),
-                    ))
-                } else {
-                    Ok(())
+        let result: Result<(), CamelError> = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let attempts_for_op = attempts.clone();
+                let outcome: Result<(), CamelError> = async move {
+                    let mut guard = attempts_for_op.lock().expect("attempts lock");
+                    *guard += 1;
+                    if *guard < 3 {
+                        Err(CamelError::EndpointCreationFailed(
+                            "direct endpoint 'in' not registered".to_string(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                }
+                .await;
+                match outcome {
+                    Ok(()) => break Ok(()),
+                    Err(err)
+                        if is_direct_not_registered(&err)
+                            && tokio::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(RACE_RETRY_POLL).await;
+                    }
+                    Err(err) => break Err(err),
                 }
             }
-            .await;
-            match outcome {
-                Ok(()) => break Ok(()),
-                Err(err)
-                    if is_direct_not_registered(&err) && tokio::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(RACE_RETRY_POLL).await;
-                }
-                Err(err) => break Err(err),
-            }
-        };
+        })
+        .await
+        .expect("retry loop must eventually succeed within 3s");
         assert!(result.is_ok());
         assert_eq!(*attempts.lock().expect("attempts lock"), 3);
     }

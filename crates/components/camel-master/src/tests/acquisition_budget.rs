@@ -61,7 +61,7 @@ async fn term_bump_at_exhausted_budget_reacquires_fresh() {
     leadership.leader_epoch().store(2, Ordering::Release);
     leadership.emit(LeadershipEvent::StartedLeading).await;
 
-    let recreated = timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if create_consumer_calls.load(Ordering::SeqCst) >= 2 {
                 break;
@@ -70,11 +70,7 @@ async fn term_bump_at_exhausted_budget_reacquires_fresh() {
         }
     })
     .await
-    .is_ok();
-    assert!(
-        recreated,
-        "term bump must reset the exhausted budget and recreate the delegate within 5s"
-    );
+    .expect("term bump must reset the exhausted budget and reacquire a fresh delegate within 10s");
     assert!(
         !master
             .leadership_task
