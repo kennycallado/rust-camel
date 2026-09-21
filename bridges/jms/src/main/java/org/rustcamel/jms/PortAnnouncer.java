@@ -5,6 +5,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
+/**
+ * Twin-copy of bridges/xml PortAnnouncer (independent gradle builds, repo convention): keep the
+ * startup checks in lockstep when either copy changes.
+ */
 @ApplicationScoped
 public class PortAnnouncer {
 

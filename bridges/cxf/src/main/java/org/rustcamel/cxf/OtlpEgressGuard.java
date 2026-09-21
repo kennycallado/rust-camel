@@ -23,6 +23,9 @@ import org.eclipse.microprofile.config.spi.ConfigSource;
  * BOTH runtime properties: {@code QUARKUS_OTEL_SDK_DISABLED=false} and {@code
  * QUARKUS_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://<collector>:4317}. Enabling the SDK without an
  * endpoint aborts startup instead of dialing the built-in fallback.
+ *
+ * <p>Twin copies of this guard live in bridges/jms, bridges/xml, and bridges/cxf (independent
+ * gradle builds, repo convention): keep the invariant in lockstep when any copy changes.
  */
 @ApplicationScoped
 public class OtlpEgressGuard {
