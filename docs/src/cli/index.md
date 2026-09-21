@@ -1,6 +1,6 @@
 # CLI reference
 
-The `camel` CLI runs, scaffolds, inspects, and compiles integration routes. Install it with `cargo install camel-cli`.
+The `camel` CLI runs, scaffolds, inspects, and compiles integration routes. Install it with `cargo install camel-cli`, or `cargo binstall camel-cli` for a prebuilt binary (see [Distribution flavors](../operations/distribution-flavors.md)).
 
 Each command has a reference page in this section. `run`, `new`, and `journal inspect` also appear in the [Getting started guide](../getting-started/cli.md) as walkthroughs.
 

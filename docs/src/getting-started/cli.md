@@ -1,6 +1,6 @@
 # CLI usage
 
-The `camel` CLI runs, scaffolds, and inspects integration routes from the terminal. Install it with `cargo install camel-cli`.
+The `camel` CLI runs, scaffolds, and inspects integration routes from the terminal. Install it with `cargo install camel-cli`, or `cargo binstall camel-cli` for a prebuilt binary (see [Distribution flavors](../operations/distribution-flavors.md)).
 
 ## Quick reference
 

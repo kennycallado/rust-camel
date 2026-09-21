@@ -63,6 +63,11 @@ Install the binary from crates.io:
 cargo install camel-cli
 ```
 
+This compiles from source. To skip the compile, run
+`cargo binstall camel-cli`: it installs the fullest prebuilt binary for
+your platform from GitHub releases (regular on musl). See
+[Distribution flavors](../operations/distribution-flavors.md).
+
 This places `camel` on your `PATH`. Confirm the install:
 
 ```console
