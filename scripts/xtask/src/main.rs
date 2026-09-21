@@ -1526,6 +1526,12 @@ fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslRoute);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslStep);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslSecurityPolicy);
+    // REST DSL types (rc-p86s) — the rest block surface modeled in
+    // route-schema.json's envelope.
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslRest);
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslRestBinding);
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslRestOperation);
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslRestResponse);
     ts_export!(ts_config, camel_dsl::route_ast::CredentialSourceDsl);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslPermissionPolicy);
     ts_export!(
@@ -1679,7 +1685,9 @@ fn check_ts_drift(ts_dir: &std::path::Path, temp_files: &[(String, String)]) -> 
 ///
 /// Excludes templates (which use `noyalib::compat::serde_yaml::Value` —
 /// a type that does not implement JsonSchema). Templates are internal
-/// machinery; the public SDK schema is `{routes: [...]}` only.
+/// machinery; the public SDK schema is `{routes: [...]}` plus
+/// `{rest: [...]}` blocks (rc-p86s — modeled so R-SCHEMA validates
+/// rest-form documents instead of skipping them).
 #[derive(schemars::JsonSchema)]
 #[allow(dead_code)]
 struct RouteDslSchemaEnvelope {
@@ -1689,6 +1697,9 @@ struct RouteDslSchemaEnvelope {
     /// Route definitions.
     #[serde(default)]
     routes: Vec<camel_dsl::RouteDslRoute>,
+    /// REST block definitions, lowered by `expand_rest_into` at load time.
+    #[serde(default)]
+    rest: Vec<camel_dsl::route_ast::RouteDslRest>,
 }
 
 const DSL_SCHEMA_URL: &str =

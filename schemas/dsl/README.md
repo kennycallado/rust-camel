@@ -4,7 +4,7 @@ JSON Schema for the rust-camel route DSL.
 
 ## Scope
 
-The schema documents the **public SDK surface**: a route file is `{routes: [...]}` plus an optional `$schema` key. Templates (`templates: [...]` and `templated_routes: [...]` in the runtime AST) are excluded — they are internal machinery that uses a dynamic YAML value type not representable in JSON Schema.
+The schema documents the **public SDK surface**: a route file is `{routes: [...]}` plus optional `rest: [...]` blocks and an optional `$schema` key. REST blocks (`RouteDslRest`: host/port/path/operations/security_policy) are lowered into routes at load time by `expand_rest_into`. Templates (`templates: [...]` and `templated_routes: [...]` in the runtime AST) are excluded — they are internal machinery that uses a dynamic YAML value type not representable in JSON Schema.
 
 ## Files
 

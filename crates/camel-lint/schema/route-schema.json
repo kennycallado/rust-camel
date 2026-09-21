@@ -1810,6 +1810,192 @@
       ],
       "type": "object"
     },
+    "RouteDslRest": {
+      "additionalProperties": false,
+      "description": "A top-level REST block (`rest:` in YAML/JSON).",
+      "properties": {
+        "host": {
+          "default": "0.0.0.0",
+          "description": "Listen host address.",
+          "type": "string"
+        },
+        "operations": {
+          "description": "Operations for this block, each carrying its own HTTP method.",
+          "items": {
+            "$ref": "#/$defs/RouteDslRestOperation"
+          },
+          "type": "array"
+        },
+        "path": {
+          "default": "",
+          "description": "Base path for all operations in this block (e.g. `/api/users`).",
+          "type": "string"
+        },
+        "port": {
+          "default": 8080,
+          "description": "Listen port.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "security_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslSecurityPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Route-level authorization policy applied to EVERY operation in this\nblock (`unify-transport-auth`, Task 2.10). Lowering copies it onto\neach lowered route, so enforcement is route-level — the same\nmechanism `http:` routes use. Same surface and load-time validation\nas `RouteDslRoute.security_policy` (the lowered routes run the shared\nconversion in `yaml.rs`). Absent means the lowered routes carry no\npolicy (Public under the kernel gate)."
+        }
+      },
+      "type": "object"
+    },
+    "RouteDslRestBinding": {
+      "description": "Binding mode for a REST operation: automatic JSON data-format binding\n(default) or raw passthrough with no automatic binding steps.",
+      "oneOf": [
+        {
+          "const": "json",
+          "description": "Automatic JSON unmarshal/marshal pipeline (v1 behavior; default).",
+          "type": "string"
+        },
+        {
+          "const": "raw",
+          "description": "No automatic binding steps; declared media used verbatim.",
+          "type": "string"
+        }
+      ]
+    },
+    "RouteDslRestOperation": {
+      "additionalProperties": false,
+      "description": "A single REST operation (identified by its `method` field).",
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslRestBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional binding mode: `json` (default) or `raw`. Never inferred from media type."
+        },
+        "consumes": {
+          "default": "application/json",
+          "description": "Default content-type consumed by this operation.",
+          "type": "string"
+        },
+        "description": {
+          "default": null,
+          "description": "Optional description of this operation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method": {
+          "description": "HTTP method for this operation (e.g. `GET`, `post`). Case-insensitive;\nvalidated against the known-verb set during lowering.",
+          "type": "string"
+        },
+        "operation_id": {
+          "default": null,
+          "description": "Optional unique identifier for this operation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Additional operation parameters.",
+          "type": "object"
+        },
+        "path": {
+          "default": "/",
+          "description": "Sub-path relative to the parent RouteDslRest path.",
+          "type": "string"
+        },
+        "produces": {
+          "default": "application/json",
+          "description": "Default content-type produced by this operation.",
+          "type": "string"
+        },
+        "request_schema": {
+          "default": null,
+          "description": "Optional request body schema."
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslRestResponse"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Response definition."
+        },
+        "steps": {
+          "description": "Child sub-pipeline steps.",
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
+        "success_status": {
+          "default": null,
+          "description": "Expected success HTTP status code (e.g. 200, 201).",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "to": {
+          "default": null,
+          "description": "Endpoint URI to route matching requests to (e.g. `bean:userService`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object"
+    },
+    "RouteDslRestResponse": {
+      "additionalProperties": false,
+      "description": "Response definition for a REST operation.",
+      "properties": {
+        "description": {
+          "default": null,
+          "description": "Optional response description.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Response headers map.",
+          "type": "object"
+        },
+        "schema": {
+          "default": null,
+          "description": "Response body schema."
+        }
+      },
+      "type": "object"
+    },
     "RouteDslRoute": {
       "additionalProperties": false,
       "properties": {
@@ -2898,7 +3084,7 @@
   },
   "$id": "https://raw.githubusercontent.com/kennycallado/rust-camel/main/schemas/dsl/route-schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Schema envelope for the public DSL surface.\n\nExcludes templates (which use `noyalib::compat::serde_yaml::Value` —\na type that does not implement JsonSchema). Templates are internal\nmachinery; the public SDK schema is `{routes: [...]}` only.",
+  "description": "Schema envelope for the public DSL surface.\n\nExcludes templates (which use `noyalib::compat::serde_yaml::Value` —\na type that does not implement JsonSchema). Templates are internal\nmachinery; the public SDK schema is `{routes: [...]}` plus\n`{rest: [...]}` blocks (rc-p86s — modeled so R-SCHEMA validates\nrest-form documents instead of skipping them).",
   "properties": {
     "$schema": {
       "description": "Optional JSON Schema URL (mirrors RouteDslRoutes.schema_url — added in Task 9).",
@@ -2907,6 +3093,13 @@
         "null"
       ],
       "writeOnly": true
+    },
+    "rest": {
+      "description": "REST block definitions, lowered by `expand_rest_into` at load time.",
+      "items": {
+        "$ref": "#/$defs/RouteDslRest"
+      },
+      "type": "array"
     },
     "routes": {
       "description": "Route definitions.",

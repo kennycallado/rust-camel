@@ -393,6 +393,43 @@ mod tests {
     }
 
     #[test]
+    fn unknown_option_in_rest_operation_to() {
+        // A rest operation's `to:` is an endpoint URI (rc-p86s): ROUTE_SCHEMA
+        // models `rest`/`operations` as containers (CONTAINER_KEYS derives
+        // from the embedded schema), so the CST walk reaches the operation's
+        // `to:` and R-URI-known validates its options like any step `to:`.
+        let catalog = StubCatalog::empty().with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![UriOption::new("period", "period", OptionKind::Duration)],
+            ),
+        );
+        let source = "\
+rest:
+  - host: 0.0.0.0
+    port: 9090
+    path: /api
+    operations:
+      - method: GET
+        to: timer:foo?frequency=1s
+";
+        let diags = analyze(source, &catalog);
+        assert_eq!(
+            count_subcode(&diags, UriKnownSubCode::UnknownOption),
+            1,
+            "expected one UnknownOption on the rest `to:` URI; got: {:?}",
+            ruriknown_only(&diags)
+        );
+        let d = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::UnknownOption))
+            .unwrap();
+        assert_eq!(slice(source, &d.span), "frequency");
+        assert_eq!(d.severity, Severity::Error);
+    }
+
+    #[test]
     fn missing_required_option() {
         // `timer` declares `period` as required; the step omits it → one
         // MissingRequiredOption Error on the URI span.

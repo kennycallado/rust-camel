@@ -5,11 +5,11 @@
 //! diagnostic per violation, anchored by keyword.
 //!
 //! The document is normalised to the envelope form first — corpus files
-//! arrive as an envelope (`{routes: [...]}`), a legacy array (`[...]`), or a
-//! bare single route (`{from, steps}`). Each form strips a different number of
-//! leading instance-path segments (`routes`, index) when mapping validator
-//! paths back onto the document's CST, so span anchoring stays exact for every
-//! form.
+//! arrive as an envelope (`{routes: [...]}`, `{rest: [...]}`, or both), a
+//! legacy array (`[...]`), or a bare single route (`{from, steps}`). Each
+//! form strips a different number of leading instance-path segments
+//! (`routes`, index) when mapping validator paths back onto the document's
+//! CST, so span anchoring stays exact for every form.
 //!
 //! Validation targets an INTERPOLATED copy of the source (rc-93wct):
 //! `${env:X:-d}` tokens resolve to their defaults (default-only lookup,
@@ -85,22 +85,23 @@ impl Rule for RSchemaRule {
         // (`routes`, then the index) belong to the wrapper rather than the raw
         // document, so span resolution maps validator paths back onto `doc.raw`
         // for every form:
-        //   - array              -> legacy array form -> {routes: <array>}, depth 1
-        //   - object with routes -> envelope form     -> as-is,            depth 0
-        //   - object with rest   -> rest-block form   -> R-SCHEMA skips (see below)
-        //   - any other object   -> bare single route -> {routes: [value]}, depth 2
-        //   - scalar/null        -> R-SCHEMA cannot validate; R-SYN owns it.
+        //   - array                     -> legacy array form -> {routes: <array>}, depth 1
+        //   - object with routes or rest -> envelope form     -> as-is,         depth 0
+        //   - any other object          -> bare single route -> {routes: [value]}, depth 2
+        //   - scalar/null               -> R-SCHEMA cannot validate; R-SYN owns it.
         //
         // A `{rest: [...]}` document is a valid DSL form (camel-dsl
-        // `RouteDslRest`, lowered by `expand_rest_into`), but ROUTE_SCHEMA
-        // does not model it; validating it as a bare route yields bogus
-        // `required`/`additionalProperties` errors (rc-xmbi). Skip the form
-        // until RestDsl defs land in the schema.
+        // `RouteDslRest`, lowered by `expand_rest_into`). ROUTE_SCHEMA models
+        // the rest block in its envelope (rc-p86s), so the document validates
+        // as-is at depth 0 — the same treatment as a `{routes: [...]}` file.
+        // (rc-xmbi previously skipped the form entirely because the schema had
+        // no RestDsl defs; the skip died with the schema gap.)
         let envelope_depth = match &value {
             serde_json::Value::Array(_) => 1,
-            serde_json::Value::Object(map) if map.contains_key("routes") => 0,
-            serde_json::Value::Object(map) if map.contains_key("rest") => {
-                return Vec::new();
+            serde_json::Value::Object(map)
+                if map.contains_key("routes") || map.contains_key("rest") =>
+            {
+                0
             }
             serde_json::Value::Object(_) => 2,
             _ => return Vec::new(),

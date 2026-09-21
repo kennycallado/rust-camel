@@ -233,15 +233,15 @@ steps:
 }
 
 #[test]
-fn rschema_rest_form_document_is_silent() {
+fn rschema_rest_form_valid_is_silent() {
     // A `rest:`-block document is a valid DSL form (camel-dsl
-    // `RouteDslRest`, lowered by `expand_rest_into`), but ROUTE_SCHEMA
-    // does not model it yet. The bare-route normalisation used to wrap it
-    // as `{routes: [{rest: ...}]}`, and `RouteDslRoute`'s
-    // `additionalProperties: false` rejected the `rest` key — a false
-    // positive on `examples/rest-crud/routes/secured.yaml` (rc-xmbi).
-    // Until RestDsl defs land in ROUTE_SCHEMA, R-SCHEMA skips the rest
-    // form entirely (same policy as scalar/null documents).
+    // `RouteDslRest`, lowered by `expand_rest_into`). ROUTE_SCHEMA models
+    // the rest block in its envelope (rc-p86s), so a well-formed rest
+    // document validates cleanly at envelope depth 0. (rc-xmbi previously
+    // skipped the form entirely because the schema had no RestDsl defs —
+    // the bare-route normalisation wrapped it as `{routes: [{rest: ...}]}`
+    // and `RouteDslRoute`'s `additionalProperties: false` rejected the
+    // `rest` key.)
     let source = "\
 rest:
   - host: 0.0.0.0
@@ -259,9 +259,143 @@ rest:
     let rschema = rschema_only(&diags);
     assert!(
         rschema.is_empty(),
-        "a rest-block document must not emit R-SCHEMA until the schema \
-             models the form; got: {:?}",
+        "a well-formed rest-block document must validate cleanly; got: {:?}",
         rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_rest_form_defect_anchors_value() {
+    // Depth-0 rest form with a type defect: `port` must be an integer.
+    // The diagnostic must anchor on the offending value, proving span
+    // resolution works through the envelope-depth-0 path mapping.
+    let source = "\
+rest:
+  - host: 0.0.0.0
+    port: notaport
+    path: /api/users
+    operations:
+      - method: GET
+        to: direct:listUsers
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.iter().any(|d| slice(source, &d.span) == "notaport"),
+        "expected a RSchema diagnostic on the `port` string value; got spans: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_rest_form_missing_method_reports_parent() {
+    // `method` is the only required field of a rest operation; omitting it
+    // yields a `required` error whose instance path is the operation
+    // object itself, anchoring on the parent mapping.
+    let source = "\
+rest:
+  - host: 0.0.0.0
+    port: 9090
+    path: /api/users
+    operations:
+      - to: direct:listUsers
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        !rschema.is_empty(),
+        "expected an RSchema diagnostic for the missing `method`"
+    );
+}
+
+#[test]
+fn rschema_rest_form_unknown_key_reports_key() {
+    // `deny_unknown_fields` on `RouteDslRestOperation`: an undeclared
+    // operation key is an `additionalProperties` error anchored on the
+    // KEY (not the parent).
+    let source = "\
+rest:
+  - host: 0.0.0.0
+    port: 9090
+    path: /api/users
+    operations:
+      - method: GET
+        verb: GET
+        to: direct:listUsers
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.iter().any(|d| slice(source, &d.span) == "verb"),
+        "expected the diagnostic to anchor on the `verb` key; got spans: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mixed_routes_and_rest_document() {
+    // An envelope carrying BOTH `routes` and `rest` validates both sides;
+    // a defect inside the rest block is flagged while the valid route
+    // stays silent (one diagnostic, not a cascade).
+    let source = "\
+routes:
+  - id: r1
+    from: direct:start
+rest:
+  - host: 0.0.0.0
+    port: notaport
+    path: /api
+    operations:
+      - method: GET
+        to: direct:listUsers
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly the `port` type error; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+    assert!(slice(source, &rschema[0].span) == "notaport");
+}
+
+#[test]
+fn rschema_rest_form_steps_defect_anchors_value() {
+    // An operation's `steps` reuse the shared `RouteDslStep` defs; a type
+    // defect inside the nested steps is flagged at the leaf.
+    let source = "\
+rest:
+  - host: 0.0.0.0
+    port: 9090
+    path: /api
+    operations:
+      - method: GET
+        steps: notanarray
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema
+            .iter()
+            .any(|d| slice(source, &d.span) == "notanarray"),
+        "expected a RSchema diagnostic on the `steps` string value; got spans: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
     );
 }
 
