@@ -66,6 +66,8 @@
   run: cargo xtask lint-cancel-tokens
 - name: lint-test-sleep
   run: cargo xtask lint-test-sleep
+- name: lint-unbounded-wait
+  run: cargo xtask lint-unbounded-wait
 - name: lint-ignore
   run: cargo xtask lint-ignore
 - name: lint-publish-cycles
