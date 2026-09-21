@@ -452,14 +452,25 @@ impl Lifecycle for OtelService {
             return Ok(());
         }
 
-        // Shutdown TracerProvider first (flushes batch span exporter)
-        if let Some(provider) = self.tracer_provider.take() {
-            if let Err(e) = provider.force_flush() {
-                warn!("Error force-flushing TracerProvider: {:?}", e);
-            }
-            if let Err(e) = provider.shutdown() {
-                warn!("Error shutting down TracerProvider: {:?}", e);
-            }
+        // Shutdown TracerProvider. `shutdown()` performs the final batch
+        // flush (BSP worker drains the queue on the Shutdown message) and
+        // is capped at 5s by the SDK. We intentionally do NOT call
+        // force_flush() first: it is redundant (shutdown flushes the same
+        // queue) and doubles the worst-case blocking under a stalled
+        // export. rc-6ju71: in opentelemetry_sdk 0.32.1 the std
+        // BatchSpanProcessor::force_flush() is itself capped at 5s
+        // (`recv_timeout(forceflush_timeout)`), so this was never the
+        // unbounded rc-q74u class here — but dropping it matches the
+        // meter-path policy (shutdown-only) and removes exposure if
+        // upstream ever reintroduces an unbounded flush receive
+        // (PeriodicReader::force_flush had exactly that trap).
+        if let Some(provider) = self.tracer_provider.take()
+            && let Err(e) = provider.shutdown()
+        {
+            warn!(
+                error = ?e,
+                "Error shutting down TracerProvider; recent spans may not have been delivered"
+            );
         }
 
         // Shutdown MeterProvider. PeriodicReader::shutdown() performs the
@@ -525,8 +536,10 @@ impl Drop for OtelService {
             "OtelService dropped without stop(); shutting down providers best-effort"
         );
 
+        // TracerProvider: shutdown only — no force_flush(). See stop() for
+        // the rc-6ju71 rationale (shutdown performs the final flush with
+        // the SDK's 5s cap; a separate force_flush is redundant).
         if let Some(provider) = self.tracer_provider.take() {
-            let _ = provider.force_flush();
             let _ = provider.shutdown();
         }
 
@@ -791,6 +804,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial] // start() sets the global tracer provider
     async fn test_start_does_not_replace_subscriber() {
         // Install a counting subscriber BEFORE OtelService starts
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1079,6 +1093,187 @@ mod tests {
             Ok(Ok(())) => {}
             Ok(Err(panic_msg)) => panic!("repro thread failed (not a hang): {panic_msg}"),
             Err(_) => panic!("repro thread did not finish: stop() hung (rc-q74u regression)"),
+        }
+        let _ = handle.join();
+    }
+
+    /// Characterization pin for rc-6ju71: `stop()` must flush pending
+    /// batched spans to the exporter ("flush-on-stop"), for spans emitted
+    /// through BOTH the service's own provider and the global tracer
+    /// provider clone that `start()` installs. The two share one inner
+    /// provider (and thus one span processor), so shutting down the local
+    /// handle must also flush spans issued through the global clone — the
+    /// tracer-path edition of the rc-q74u shared-subscriber concern.
+    ///
+    /// The provider uses a `BatchSpanProcessor` whose scheduled delay is
+    /// pushed 1h into the future, so the ONLY thing that can deliver the
+    /// batch is the flush performed during `stop()`'s shutdown. The
+    /// rc-6ju71 fix (drop the separate tracer force_flush, rely on the
+    /// SDK shutdown flush) must keep this test green.
+    ///
+    /// A custom capturing exporter is used instead of
+    /// `InMemorySpanExporter` because the latter clears its buffer on
+    /// exporter shutdown (`reset_on_shutdown` defaults to true and the
+    /// opt-out is `#[cfg(test)]`-gated inside the SDK), so the final
+    /// shutdown inside `stop()` would erase the very batch it flushed.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stop_flushes_pending_spans_from_local_and_global_tracers() {
+        use opentelemetry::trace::{Span, Tracer, TracerProvider};
+        use opentelemetry_sdk::error::OTelSdkResult;
+        use opentelemetry_sdk::trace::{
+            BatchConfigBuilder, BatchSpanProcessor, SpanData, SpanExporter,
+        };
+        use std::future::{Future, ready};
+
+        #[derive(Debug, Clone, Default)]
+        struct CapturingSpanExporter {
+            names: Arc<Mutex<Vec<String>>>,
+        }
+        impl SpanExporter for CapturingSpanExporter {
+            fn export(&self, batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
+                self.names
+                    .lock()
+                    .expect("names mutex poisoned")
+                    .extend(batch.iter().map(|s| s.name.to_string()));
+                ready(Ok(()))
+            }
+        }
+
+        let exporter = CapturingSpanExporter::default();
+        // Timer flush disabled: only stop()'s shutdown flush can export.
+        let config = BatchConfigBuilder::default()
+            .with_scheduled_delay(Duration::from_secs(3600))
+            .build();
+        let processor = BatchSpanProcessor::builder(exporter.clone())
+            .with_batch_config(config)
+            .build();
+        let provider = SdkTracerProvider::builder()
+            .with_span_processor(processor)
+            .build();
+
+        let mut service = OtelService::with_defaults();
+        service.tracer_provider = Some(provider.clone());
+        service.status.store(STATUS_STARTED, Ordering::SeqCst);
+        global::set_tracer_provider(provider.clone());
+
+        // Two pending spans: one through the service's provider, one through
+        // the global clone (same inner, same span processor).
+        provider.tracer("local-tracer").start("local-op").end();
+        global::tracer("global-tracer").start("global-op").end();
+
+        service.stop().await.unwrap();
+
+        assert!(service.tracer_provider.is_none());
+        let names = exporter.names.lock().expect("names mutex poisoned").clone();
+        assert!(
+            names.iter().any(|n| n == "local-op"),
+            "local-provider span must be flushed by stop(), got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "global-op"),
+            "global-provider span must be flushed by stop(), got: {names:?}"
+        );
+    }
+
+    /// Regression pin for rc-6ju71 (tracer-path edition of the rc-q74u
+    /// harness): `stop()` must stay bounded when a pending span batch
+    /// cannot be exported.
+    ///
+    /// Empirical correction to the bd premise: in opentelemetry_sdk 0.32.1
+    /// the std-thread `BatchSpanProcessor::force_flush()` is NOT unbounded —
+    /// it waits with `recv_timeout(5s)` — so `stop()` was already bounded
+    /// pre-fix (~10s worst case: 5s flush cap + 5s shutdown cap). The pin
+    /// stays: it guards against upstream reintroducing the unbounded
+    /// receive that `PeriodicReader::force_flush` had (rc-q74u), and after
+    /// the fix the worst case halves because the redundant force_flush
+    /// round-trip is gone.
+    ///
+    /// The stalled exporter wedges the BSP worker thread inside
+    /// `futures_executor::block_on` on a future that never resolves — the
+    /// deterministic, network-free equivalent of a stalled OTLP export on a
+    /// current-thread runtime.
+    #[test]
+    #[serial_test::serial]
+    fn test_stop_bounded_when_span_export_stalls() {
+        use opentelemetry::trace::{Span, Tracer, TracerProvider};
+        use opentelemetry_sdk::error::OTelSdkResult;
+        use opentelemetry_sdk::trace::{
+            BatchConfigBuilder, BatchSpanProcessor, SpanData, SpanExporter,
+        };
+        use std::future::Future;
+        use std::future::pending;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::sync::mpsc;
+
+        #[derive(Debug)]
+        struct StalledSpanExporter;
+        impl SpanExporter for StalledSpanExporter {
+            fn export(&self, _batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
+                pending()
+            }
+        }
+
+        let (tx, rx) = mpsc::channel::<Result<(), String>>();
+        let handle = std::thread::Builder::new()
+            .name("q6ju71-repro".to_string())
+            .spawn(move || {
+                // Report panics through the channel so an unrelated failure
+                // surfaces immediately with its own diagnosis instead of
+                // burning the outer timeout as a bogus "hang".
+                let _ = tx.send(
+                    catch_unwind(AssertUnwindSafe(|| {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("repro runtime");
+                        rt.block_on(async {
+                            // Timer flush disabled so the ONLY export attempt
+                            // is the one triggered inside stop().
+                            let config = BatchConfigBuilder::default()
+                                .with_scheduled_delay(Duration::from_secs(3600))
+                                .build();
+                            let processor = BatchSpanProcessor::builder(StalledSpanExporter)
+                                .with_batch_config(config)
+                                .build();
+                            let provider = SdkTracerProvider::builder()
+                                .with_span_processor(processor)
+                                .build();
+
+                            let mut service = OtelService::with_defaults();
+                            service.tracer_provider = Some(provider.clone());
+                            service.status.store(STATUS_STARTED, Ordering::SeqCst);
+
+                            // One pending span arms the batch export.
+                            provider.tracer("stall-tracer").start("stalled-op").end();
+
+                            // With an unbounded flush this hangs forever; with
+                            // the SDK's caps it returns within ~10s pre-fix
+                            // and ~5s post-fix even though the BSP worker
+                            // stays wedged (it is reaped at process exit).
+                            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                            let _ = service.stop().await;
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "stop() must be bounded when span export stalls (rc-6ju71)"
+                            );
+                        });
+                    }))
+                    .map_err(|payload| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_string())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "unknown panic".into())
+                    }),
+                );
+            })
+            .expect("spawn repro thread");
+
+        match rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(Ok(())) => {}
+            Ok(Err(panic_msg)) => panic!("repro thread failed (not a hang): {panic_msg}"),
+            Err(_) => panic!("repro thread did not finish: stop() hung (rc-6ju71 regression)"),
         }
         let _ = handle.join();
     }
