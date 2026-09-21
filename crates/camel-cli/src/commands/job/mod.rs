@@ -44,6 +44,9 @@ mod job_effective_config_tests;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod startup_retry_classification_tests;
+
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -1461,6 +1464,34 @@ fn load_route_definitions(
     }
 }
 
+/// Structural classification of send-phase pipeline failures that are
+/// safe to retry: the consumer-startup race, via the existing error
+/// taxonomy only (rc-fr20u — no Display-text sniffing):
+///
+/// - the SEDA no-active-consumers gate, through seda's own predicate
+///   (single "has no active consumers" / fanout "has no active
+///   subscribers" wordings over `EndpointCreationFailed`);
+/// - every `EndpointCreationFailed` — the variant under which the
+///   direct component reports its "direct endpoint '…' not registered"
+///   startup race (camel-direct owns the wording, the variant carries
+///   the classification).
+///
+/// The seda disjunct is currently subsumed by the `EndpointCreationFailed`
+/// match (the gate shares that variant); it is kept as seda's ownership
+/// marker so the classifier stays correct the day the gate gets its own
+/// variant.
+///
+/// The former `to_string().contains("not registered")` sniff matched no
+/// reachable error outside `EndpointCreationFailed`: the direct race is
+/// the only producer of that wording in a pipeline error, and the
+/// function runtime's not-registered failure renders as
+/// `function:not_registered:` (underscore), which the sniff never
+/// matched either. Generic pipeline failures stay non-retryable.
+fn is_retryable_startup_failure(e: &CamelError) -> bool {
+    camel_component_seda::is_no_active_consumers_gate(e)
+        || matches!(e, CamelError::EndpointCreationFailed(_))
+}
+
 /// Send the job's single exchange, retrying the consumer-startup race
 /// (the `deliver_input` discipline: `EndpointCreationFailed` /
 /// not-registered races, plus the SEDA no-active-consumers gate — safe
@@ -1503,9 +1534,7 @@ async fn send_with_startup_retry(
         match attempt_send(ctx, &scheme, send_to, exchange.clone()).await {
             Ok(Ok(reply)) => return Ok(reply),
             Ok(Err(e)) => {
-                let retryable = camel_component_seda::is_no_active_consumers_gate(&e)
-                    || matches!(e, CamelError::EndpointCreationFailed(_))
-                    || e.to_string().contains("not registered");
+                let retryable = is_retryable_startup_failure(&e);
                 if retryable && Instant::now() < retry_until {
                     tokio::time::sleep(SEND_RETRY_SLEEP).await;
                     continue;
