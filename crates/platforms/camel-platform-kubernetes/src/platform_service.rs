@@ -49,7 +49,10 @@ impl KubernetesPlatformConfig {
     /// must be less than `renew_deadline` to allow at least one retry.
     /// `lease_duration - renew_deadline` must be at least `retry_period`
     /// to leave one full retry window of renewal slack for clock skew
-    /// and renew jitter.
+    /// and renew jitter. The worst-case jittered retry sleep,
+    /// `retry_period * (1 + jitter_factor)`, must be less than
+    /// `renew_deadline` so a single jittered sleep cannot consume the
+    /// whole renewal budget.
     pub fn validate(&self) -> Result<(), PlatformError> {
         if self.renew_deadline >= self.lease_duration {
             return Err(PlatformError::Config(format!(
@@ -73,6 +76,17 @@ impl KubernetesPlatformConfig {
             return Err(PlatformError::Config(format!(
                 "jitter_factor ({}) must be in [0.0, 1.0]",
                 self.jitter_factor
+            )));
+        }
+        let jittered_retry_bound_ms =
+            self.retry_period.as_millis() as f64 * (1.0 + self.jitter_factor);
+        if jittered_retry_bound_ms >= self.renew_deadline.as_millis() as f64 {
+            return Err(PlatformError::Config(format!(
+                "retry_period ({:?}) with jitter_factor ({}) reaches an effective bound of {:?}, which must be less than renew_deadline ({:?})",
+                self.retry_period,
+                self.jitter_factor,
+                Duration::from_millis(jittered_retry_bound_ms as u64),
+                self.renew_deadline
             )));
         }
         Ok(())
@@ -426,6 +440,11 @@ impl LeadershipService for KubernetesLeadershipService {
     }
 }
 
+/// Randomize `base` by at most ±`jitter_factor`.
+///
+/// The worst case, `base * (1 + jitter_factor)`, is the envelope that
+/// `KubernetesPlatformConfig::validate` enforces against
+/// `renew_deadline`; keep the two in sync.
 fn jittered_duration(base: Duration, jitter_factor: f64) -> Duration {
     let capped_ms = base.as_millis() as f64;
     if jitter_factor <= 0.0 || capped_ms <= 0.0 {
@@ -982,6 +1001,75 @@ mod tests {
             lease_duration: Duration::from_secs(12),
             renew_deadline: Duration::from_secs(10),
             retry_period: Duration::from_secs(2),
+            ..KubernetesPlatformConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn config_rejects_jittered_retry_period_reaching_renew_deadline() {
+        // retry_period 2s * (1 + jitter_factor 0.5) = 3s effective bound,
+        // equal to renew_deadline: the worst-case jittered sleep consumes
+        // the whole renewal budget in one attempt.
+        let config = KubernetesPlatformConfig {
+            renew_deadline: Duration::from_secs(3),
+            retry_period: Duration::from_secs(2),
+            jitter_factor: 0.5,
+            ..KubernetesPlatformConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("retry_period"),
+            "missing retry_period: {message}"
+        );
+        assert!(
+            message.contains("jitter_factor"),
+            "missing jitter_factor: {message}"
+        );
+        assert!(
+            message.contains("renew_deadline"),
+            "missing renew_deadline: {message}"
+        );
+        assert!(
+            message.contains("3s"),
+            "missing effective jittered bound: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_jittered_bound_just_below_renew_deadline_passes() {
+        // 2s * (1 + 0.5) = 3s bound vs 3.001s deadline: just under the edge.
+        let config = KubernetesPlatformConfig {
+            renew_deadline: Duration::from_millis(3001),
+            retry_period: Duration::from_secs(2),
+            jitter_factor: 0.5,
+            ..KubernetesPlatformConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_zero_jitter_keeps_pre_jitter_margin_accepted() {
+        // jitter_factor 0 disables jitter: the effective bound equals
+        // retry_period, so the pre-jitter margin rules alone decide.
+        let config = KubernetesPlatformConfig {
+            renew_deadline: Duration::from_millis(2500),
+            retry_period: Duration::from_secs(2),
+            jitter_factor: 0.0,
+            ..KubernetesPlatformConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_max_jitter_with_wide_margin_accepted() {
+        // jitter_factor 1.0 doubles the retry cadence at worst; with a
+        // wide deadline the config stays valid.
+        let config = KubernetesPlatformConfig {
+            renew_deadline: Duration::from_secs(10),
+            retry_period: Duration::from_secs(2),
+            jitter_factor: 1.0,
             ..KubernetesPlatformConfig::default()
         };
         assert!(config.validate().is_ok());

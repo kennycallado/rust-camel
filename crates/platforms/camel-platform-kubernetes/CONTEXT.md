@@ -20,7 +20,9 @@ Config validation rejects `renew_deadline >= lease_duration`, so the holder
 fences itself before the lease can legally expire for peers (modulo clock
 skew on Lease timestamps). Validation also rejects
 `lease_duration - renew_deadline < retry_period`, reserving one retry
-window of renewal slack for clock skew and renew jitter
+window of renewal slack for clock skew and renew jitter, and rejects
+`retry_period * (1 + jitter_factor) >= renew_deadline`, so the worst-case
+jittered retry sleep cannot consume the whole renewal budget
 (`openspec/specs/kubernetes-leadership/spec.md`). While leading, the stored
 epoch is clamped monotonic (ADR-0035); an observed regression
 (deleted/recreated Lease) is ignored and logged. The clamp bounds only the LOCAL pin: after a
