@@ -872,10 +872,6 @@ mod logquiet_regression_tests {
 
         let (sink, subscriber) = capture_sink();
         let _guard = tracing::subscriber::set_default(subscriber);
-        // Parallel tests race tracing's per-callsite interest cache against
-        // this thread-local subscriber; force a rebuild so the callsite
-        // re-evaluates against it (bd rc-u9hs, same as pool_env_test).
-        tracing::callsite::rebuild_interest_cache();
 
         register_bundle::<camel_component_ws::WsBundle>(&mut ctx, &config)
             .expect("ws bundle must register"); // allow-unwrap: test-only

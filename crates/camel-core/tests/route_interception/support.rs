@@ -156,11 +156,7 @@ pub(crate) fn capture_tracing() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::De
         })
         .with_ansi(false)
         .finish();
-    // Parallel tests race tracing's per-callsite interest cache against this
-    // thread-local subscriber; force a rebuild so warn! callsites re-evaluate
-    // against it (same pattern as the wiretap tests, bd rc-u9hs).
     let guard = tracing::subscriber::set_default(subscriber);
-    tracing::callsite::rebuild_interest_cache();
     (sink, guard)
 }
 

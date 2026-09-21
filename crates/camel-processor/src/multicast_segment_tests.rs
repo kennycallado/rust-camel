@@ -734,15 +734,11 @@ async fn multicast_parallel_partial_success_warn_fields() {
     let _guard = tracing::subscriber::set_default(TestSubscriber {
         shared: Arc::clone(&shared),
     });
-    // Parallel tests race tracing's per-callsite interest cache against this
-    // thread-local subscriber; force a rebuild so the callsites below
-    // re-evaluate against it (bd rc-u9hs).
-    tracing::callsite::rebuild_interest_cache();
-    // OnceLock-gated global registry floors future interest rebuilds at
+    // OnceLock-gated global registry floors callsite interest at
     // `sometimes` so the multicast branch-failure warn! callsites
     // (`multicast_segment.rs:106/262/278/337`) can never be poisoned to
-    // `never` by subscriber-less sibling tests in this binary — completing
-    // the rebuild band-aid above (fix pattern: c3853198; bd rc-img5).
+    // `never` by subscriber-less sibling tests in this binary
+    // (fix pattern: c3853198; bd rc-img5).
     {
         static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         if INIT.set(()).is_ok() {

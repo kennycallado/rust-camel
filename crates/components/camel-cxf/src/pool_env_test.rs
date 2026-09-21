@@ -160,10 +160,6 @@ fn capture_sink() -> (Arc<Mutex<Vec<u8>>>, impl tracing::Subscriber) {
 fn bridge_env_trace_site_renders_keys_not_values() {
     let (sink, subscriber) = capture_sink();
     let _guard = tracing::subscriber::set_default(subscriber);
-    // Parallel tests race tracing's per-callsite interest cache against this
-    // thread-local subscriber; force a rebuild so the callsite re-evaluates
-    // against it (bd rc-u9hs, same as wire_tap).
-    tracing::callsite::rebuild_interest_cache();
 
     let config = crate::pool::bridge_config_with_env_trace(
         "slot-1",

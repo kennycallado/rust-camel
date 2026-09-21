@@ -961,9 +961,8 @@ mod tests {
     /// (`wire_tap.rs:364/379`: poll_ready failed / processing error) first
     /// and cache `Interest::never`, so a later thread-local `set_default`
     /// capture silently drops events. The global registry heals prior
-    /// poison and floors future rebuilds at `sometimes` — completing the
-    /// `rebuild_interest_cache` band-aids (bd rc-u9hs) with the proven
-    /// global floor (fix pattern: c3853198; bd rc-img5).
+    /// poison and floors future interest evaluations at `sometimes`
+    /// (fix pattern: c3853198; bd rc-img5).
     fn ensure_global_tracing_default() {
         static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         if INIT.set(()).is_ok() {
@@ -1015,10 +1014,6 @@ mod tests {
 
         // set_default propagates to tasks spawned via tokio within this scope.
         let _guard = tracing::subscriber::set_default(subscriber);
-        // Parallel tests race tracing's per-callsite interest cache against
-        // this thread-local subscriber; force a rebuild so the callsites
-        // below re-evaluate against it (bd rc-u9hs).
-        tracing::callsite::rebuild_interest_cache();
         let result = svc.ready().await.unwrap().call(exchange).await;
 
         assert!(result.is_ok(), "tap readiness error must be suppressed");
@@ -1046,10 +1041,6 @@ mod tests {
         let exchange = Exchange::new(Message::new("main"));
 
         let _guard = tracing::subscriber::set_default(subscriber);
-        // Parallel tests race tracing's per-callsite interest cache against
-        // this thread-local subscriber; force a rebuild so the callsites
-        // below re-evaluate against it (bd rc-u9hs).
-        tracing::callsite::rebuild_interest_cache();
         let result = svc.ready().await.unwrap().call(exchange).await;
 
         assert!(result.is_ok(), "tap processing error must be suppressed");

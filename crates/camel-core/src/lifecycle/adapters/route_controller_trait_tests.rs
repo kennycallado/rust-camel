@@ -47,10 +47,9 @@ fn authenticated_plan(provider: &str) -> RouteSecurityPlan {
 /// tests in this binary hit the shared bind-gate acknowledged-warn
 /// callsite (camel-auth `enforce_bind_exposure_gate`, acked branch)
 /// first and cache `Interest::never`, so a later thread-local
-/// `with_default` capture silently drops events — the same race
-/// `BIND_GATE_WARN_LOCK` below serializes against. The global registry
-/// heals prior poison and floors future rebuilds at `sometimes` (fix
-/// pattern: c3853198; bd rc-img5).
+/// `with_default` capture silently drops events. The global registry
+/// heals prior poison and floors future interest evaluations at
+/// `sometimes` (fix pattern: c3853198; bd rc-img5).
 fn ensure_global_tracing_default() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if INIT.set(()).is_ok() {
@@ -93,21 +92,6 @@ fn capture_logs(f: impl FnOnce()) -> String {
     String::from_utf8(buf.lock().unwrap().clone()).expect("captured output must be UTF-8")
 }
 
-/// Serializes tests that emit at the shared `bind_gate` acknowledged-warn
-/// callsite (camel-auth `enforce_bind_exposure_gate`, acked branch).
-///
-/// Why: tracing-core caches each callsite's interest process-wide. If a
-/// non-recorder thread first-registers the warn callsite AFTER the recorder
-/// test's `with_default` dispatch is built but BEFORE it emits,
-/// `Rebuilder::JustOne` consults the polluter thread's no-op dispatcher and
-/// caches `Interest::never()`; the recorder's `warn!` is then filtered
-/// before its thread-local subscriber is consulted and the capture comes
-/// back empty. Holding this lock for the whole test body keeps the recorder
-/// and the only non-recorder emitter (the acknowledged call in
-/// `gate_hostname_authority_is_nonloopback`) from overlapping on the
-/// callsite. Same pattern as `PEEK_STALE_LOG_LOCK` in camel-processor.
-static BIND_GATE_WARN_LOCK: Mutex<()> = Mutex::new(());
-
 #[test]
 fn gate_refuses_nonloopback_public_without_ack() {
     let err = enforce_bind_exposure_gate("0.0.0.0:8080", false, &[("r1", &public_plan())], false)
@@ -132,9 +116,6 @@ fn gate_names_all_public_routes_on_the_bind() {
 
 #[test]
 fn gate_acknowledged_warns_and_passes() {
-    let _gate_guard = BIND_GATE_WARN_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let captured = capture_logs(|| {
         enforce_bind_exposure_gate("0.0.0.0:8080", false, &[("r1", &public_plan())], true)
             .expect("acknowledged bind must pass");
@@ -170,9 +151,6 @@ fn gate_loopback_public_needs_no_ack() {
 
 #[test]
 fn gate_hostname_authority_is_nonloopback() {
-    let _gate_guard = BIND_GATE_WARN_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     // Hostnames other than localhost fail closed to the gate check.
     let err = enforce_bind_exposure_gate(
         "myhost.example:8080",
