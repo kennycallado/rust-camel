@@ -3727,6 +3727,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn max_message_size_rejects_binary_with_close_1009() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+        let uri = format!("ws://127.0.0.1:{port}/sizelimit-bin?maxMessageSize=10");
+        let mut consumer = WsConsumer::new(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+        );
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
+        consumer.start_with_listener(ctx, listener).await.unwrap();
+
+        let url = format!("ws://127.0.0.1:{port}/sizelimit-bin");
+        let mut client = connect_until_ready(&url).await;
+
+        let oversized = vec![0u8; 100];
+        client
+            .send(ClientMessage::Binary(oversized.into()))
+            .await
+            .unwrap();
+
+        let close_code = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match client.next().await {
+                    Some(Ok(ClientMessage::Close(frame))) => break frame.map(|f| f.code),
+                    Some(Ok(ClientMessage::Ping(_))) | Some(Ok(ClientMessage::Pong(_))) => continue,
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => panic!("ws receive failed: {e}"),
+                    None => panic!("websocket closed without close frame"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            close_code,
+            Some(CloseCode::from(1009u16)),
+            "expected 1009 (Message Too Big) for oversized binary frame"
+        );
+
+        consumer.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn origin_rejection_returns_403() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
