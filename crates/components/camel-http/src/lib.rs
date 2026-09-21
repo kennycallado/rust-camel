@@ -10557,9 +10557,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     #[should_panic(expected = "registry entry absent (concurrent reset or starvation)")]
     async fn readiness_deadline_fires_loud_with_hint() {
+        // start_paused: the backoff sleeps and the 10s deadline run on
+        // the mocked clock (tokio test-util dev-feature), so the loud
+        // path costs no wall time.
         // Poll a key no writer can produce. Registry keys come from
         // either the listener's resolved IP string (staged path) or the
         // caller-provided host verbatim (legacy get_or_spawn path), so a
