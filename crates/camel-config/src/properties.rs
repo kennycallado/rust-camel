@@ -188,6 +188,8 @@ mod tests {
 
     #[test]
     fn test_resolve_env_placeholder() {
+        // Serialize against env-touching tests (see ENV_OVERRIDE_LOCK).
+        let _guard = crate::config::env_lock();
         unsafe {
             env::set_var("RUST_CAMEL_TEST_HOST", "redis.prod.example.com");
         }
@@ -203,6 +205,7 @@ mod tests {
 
     #[test]
     fn test_resolve_env_missing_without_default_returns_error() {
+        let _guard = crate::config::env_lock();
         unsafe {
             env::remove_var("RUST_CAMEL_TEST_DEFINITELY_MISSING");
         }
@@ -213,6 +216,7 @@ mod tests {
 
     #[test]
     fn test_resolve_env_with_default_uses_default_when_missing() {
+        let _guard = crate::config::env_lock();
         unsafe {
             env::remove_var("RUST_CAMEL_TEST_MISSING_HOST");
         }
@@ -225,6 +229,7 @@ mod tests {
 
     #[test]
     fn test_resolve_env_with_default_uses_env_when_present() {
+        let _guard = crate::config::env_lock();
         unsafe {
             env::set_var("RUST_CAMEL_TEST_DB_HOST", "db.prod.example.com");
         }
@@ -240,6 +245,7 @@ mod tests {
 
     #[test]
     fn test_resolve_mixed_env_and_property() {
+        let _guard = crate::config::env_lock();
         unsafe {
             env::set_var("RUST_CAMEL_TEST_PORT", "6380");
         }
@@ -263,6 +269,7 @@ mod tests {
 
     #[test]
     fn resolves_env_var_replacing_newlines() {
+        let _guard = crate::config::env_lock();
         unsafe {
             env::set_var(
                 "TEST_CONFIG_INJECTION",
@@ -304,6 +311,7 @@ mod tests {
 
     #[test]
     fn test_resolve_env_value_with_colons() {
+        let _guard = crate::config::env_lock();
         unsafe {
             env::set_var("RUST_CAMEL_TEST_CONN", "user:pass@host:5432");
         }

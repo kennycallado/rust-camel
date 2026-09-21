@@ -3348,8 +3348,12 @@ static ENV_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Test-only coordination mutex acquisition. Recovery from poison is safe
 /// because every env test restores vars before assertions.
+///
+/// `pub(crate)` so sibling lib-test modules (e.g. `properties::tests`) share
+/// this lock with the `config_tests` children — one lock serializes ALL
+/// env-touching lib tests in the crate.
 #[cfg(test)]
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_OVERRIDE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
