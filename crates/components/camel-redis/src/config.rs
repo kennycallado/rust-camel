@@ -397,7 +397,7 @@ impl RedisConfig {
         // explicit tls_mode choice is never "silent" and never warned about)
         if effective_tls && self.tls_mode.is_none() && !self.tls {
             tracing::warn!(
-                host = %self.host,
+                host = %camel_api::redact::redact_host(&self.host),
                 "Redis auto-enabling TLS for non-loopback host (opt out with tls_mode=false or URI ?ssl=false)"
             );
         }
@@ -837,7 +837,7 @@ impl RedisEndpointConfig {
             self.ssl = Some(effective);
             if effective && defaults.tls_mode.is_none() && !defaults.tls {
                 tracing::warn!(
-                    host = %self.host.as_deref().unwrap_or(""),
+                    host = %camel_api::redact::redact_host(self.host.as_deref().unwrap_or("")),
                     "Redis auto-enabling TLS for non-loopback host (opt out with tls_mode=false or URI ?ssl=false)"
                 );
             }
