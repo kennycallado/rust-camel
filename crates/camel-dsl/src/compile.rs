@@ -901,6 +901,15 @@ fn ensure_known_exception_kind(kind: &str) -> Result<(), CamelError> {
     }
 }
 
+/// Kind vocabulary accepted by `error_handler.on_exceptions` clauses.
+///
+/// Intentionally unmatchable (rejected as unknown kinds, rc-5u8co):
+/// `ConfigValidation` and `EndpointUri` are startup fail-fast variants —
+/// they abort route compilation/creation and never reach the route error
+/// handler, so an `on_exceptions` clause could never fire for them.
+/// Deferred (pending bd decision, rc-5u8co): `TemplateReload` is raised on
+/// the lifecycle-command path, which bypasses route error handlers; it is
+/// rejected until an in-pipeline raise path (if any) is decided on.
 fn supported_exception_kinds() -> Vec<&'static str> {
     vec![
         "ComponentNotFound",
@@ -921,6 +930,9 @@ fn supported_exception_kinds() -> Vec<&'static str> {
         "Unauthenticated",
         "Unauthorized",
         "AuthProviderUnavailable",
+        "UnsupportedMediaType",
+        "NotAcceptable",
+        "ProcessorErrorWithSource",
         "ValidationError",
     ]
 }
@@ -959,6 +971,18 @@ fn exception_kind_matches(kind: &str, err: &CamelError) -> bool {
         // map it to 503/UNAVAILABLE. Distinct from ProcessorError despite
         // the variant_name() alias (spec §5.4) — matching is structural.
         "AuthProviderUnavailable" => matches!(err, CamelError::AuthProviderUnavailable(_)),
+        // rc-5u8co: media negotiation gate raises these in-pipeline
+        // (media.rs:209 UnsupportedMediaType, media.rs:241 NotAcceptable)
+        // and they reach the route error handler — 415/406-class respectively.
+        "UnsupportedMediaType" => matches!(err, CamelError::UnsupportedMediaType { .. }),
+        "NotAcceptable" => matches!(err, CamelError::NotAcceptable { .. }),
+        // rc-5u8co: raised in-pipeline by source-carrying producers (bean,
+        // exec, surrealdb). Own kind per the rc-2vm2y alias-distinction
+        // precedent: variant_name() aliases it to "ProcessorError" but
+        // on_exceptions matching is structural.
+        "ProcessorErrorWithSource" => {
+            matches!(err, CamelError::ProcessorErrorWithSource(_, _))
+        }
         "ValidationError" => matches!(err, CamelError::ValidationError(_)),
         _ => false,
     }
@@ -2448,10 +2472,104 @@ mod tests {
             "Unauthenticated",
             "Unauthorized",
             "AuthProviderUnavailable",
+            "UnsupportedMediaType",
+            "NotAcceptable",
+            "ProcessorErrorWithSource",
             "ValidationError",
         ];
 
         assert_eq!(supported_exception_kinds(), expected);
+    }
+
+    /// Every `CamelError` variant id. Source of truth: the enum arms in
+    /// crates/camel-api/src/error.rs.
+    ///
+    /// Adding a CamelError variant requires extending this table and the
+    /// exhaustive `variant_name_covers_all_variants` test in
+    /// crates/camel-api/src/error.rs (bd rc-5u8co) — reviewed manual step.
+    const ALL_CAMEL_ERROR_VARIANTS: &[&str] = &[
+        "AlreadyConsumed",
+        "AuthProviderUnavailable",
+        "ChannelClosed",
+        "CircuitOpen",
+        "ComponentNotFound",
+        "Config",
+        "ConfigValidation",
+        "ConsumerStopping",
+        "DeadLetterChannelFailed",
+        "EndpointCreationFailed",
+        "EndpointUri",
+        "HttpOperationFailed",
+        "InvalidUri",
+        "Io",
+        "NotAcceptable",
+        "ProcessorError",
+        "ProcessorErrorWithSource",
+        "RouteError",
+        "StreamLimitExceeded",
+        "TemplateReload",
+        "TypeConversionFailed",
+        "Unauthenticated",
+        "Unauthorized",
+        "UnsupportedMediaType",
+        "ValidationError",
+    ];
+
+    /// Variants raised only at startup fail-fast: they abort route
+    /// compilation/creation and never reach the route error handler, so an
+    /// `on_exceptions` clause could never fire for them (rc-5u8co).
+    const STARTUP_UNMATCHABLE_VARIANTS: &[&str] = &["ConfigValidation", "EndpointUri"];
+
+    /// Variants deferred pending a bd decision (rc-5u8co): raised outside the
+    /// data-plane pipeline, so rejected as unknown kinds until an in-pipeline
+    /// raise path is decided on.
+    const DEFERRED_VARIANTS: &[&str] = &["TemplateReload"];
+
+    #[test]
+    fn test_exception_kind_vocabulary_classification_guard() {
+        assert_eq!(
+            ALL_CAMEL_ERROR_VARIANTS.len(),
+            25,
+            "ALL_CAMEL_ERROR_VARIANTS must enumerate every CamelError variant"
+        );
+        assert_eq!(
+            ALL_CAMEL_ERROR_VARIANTS
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            25
+        ); // dupe+omission swap would keep len==25
+
+        let vocab = supported_exception_kinds();
+
+        // No pseudo-kinds: every accepted kind must name a real CamelError
+        // variant (bd rc-5u8co stale-note resolution).
+        for kind in &vocab {
+            assert!(
+                ALL_CAMEL_ERROR_VARIANTS.contains(kind),
+                "supported exception kind '{kind}' is not a CamelError variant"
+            );
+        }
+
+        // Disjoint union: every variant is classified in exactly one of the
+        // vocabulary, the startup-unmatchable set, or the deferred set, and
+        // no classification set contains a non-variant.
+        for variant in ALL_CAMEL_ERROR_VARIANTS {
+            let hits = usize::from(vocab.contains(variant))
+                + usize::from(STARTUP_UNMATCHABLE_VARIANTS.contains(variant))
+                + usize::from(DEFERRED_VARIANTS.contains(variant));
+            assert_eq!(
+                hits, 1,
+                "CamelError variant '{variant}' must be classified in exactly one \
+                 of: the vocabulary, STARTUP_UNMATCHABLE_VARIANTS, DEFERRED_VARIANTS"
+            );
+        }
+        for entry in STARTUP_UNMATCHABLE_VARIANTS.iter().chain(DEFERRED_VARIANTS) {
+            assert!(
+                ALL_CAMEL_ERROR_VARIANTS.contains(entry),
+                "classification entry '{entry}' is not a CamelError variant"
+            );
+        }
     }
 
     #[test]
@@ -2560,6 +2678,200 @@ mod tests {
             )),
             "kind ProcessorError must not match AuthProviderUnavailable"
         );
+    }
+
+    #[test]
+    fn test_compile_error_handler_unsupported_media_type_matches() {
+        // rc-5u8co: UnsupportedMediaType (415-class) is raised in-pipeline
+        // by the media negotiation gate (media.rs / content_negotiation.rs)
+        // and reaches the route error handler — must be matchable by
+        // `kind:` clauses.
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("UnsupportedMediaType".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: None,
+                continued: None,
+            }]),
+            use_original_message: false,
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(
+            config.policies.len(),
+            1,
+            "kind UnsupportedMediaType should compile to one policy"
+        );
+        assert!(
+            (config.policies[0].matches)(&CamelError::UnsupportedMediaType {
+                consumed: "text/plain".into(),
+                declared: "application/json".into(),
+            }),
+            "kind UnsupportedMediaType should match its CamelError variant"
+        );
+        assert!(
+            !(config.policies[0].matches)(&CamelError::Io("other".into())),
+            "kind UnsupportedMediaType should not match unrelated variants"
+        );
+    }
+
+    #[test]
+    fn test_compile_error_handler_not_acceptable_matches() {
+        // rc-5u8co: NotAcceptable (406-class) is raised in-pipeline by the
+        // media negotiation gate (media.rs) and reaches the route error
+        // handler — must be matchable by `kind:` clauses.
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("NotAcceptable".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: None,
+                continued: None,
+            }]),
+            use_original_message: false,
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(
+            config.policies.len(),
+            1,
+            "kind NotAcceptable should compile to one policy"
+        );
+        assert!(
+            (config.policies[0].matches)(&CamelError::NotAcceptable {
+                accept: "application/xml".into(),
+                produced: "application/json".into(),
+            }),
+            "kind NotAcceptable should match its CamelError variant"
+        );
+        assert!(
+            !(config.policies[0].matches)(&CamelError::Io("other".into())),
+            "kind NotAcceptable should not match unrelated variants"
+        );
+    }
+
+    #[test]
+    fn test_compile_error_handler_processor_error_with_source_matches() {
+        // rc-5u8co: ProcessorErrorWithSource is raised in-pipeline by
+        // source-carrying producers (bean, exec, surrealdb). Own kind per
+        // the rc-2vm2y alias-distinction precedent: variant_name() aliases
+        // it to "ProcessorError" but on_exceptions matching is structural.
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("ProcessorErrorWithSource".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: None,
+                continued: None,
+            }]),
+            use_original_message: false,
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(
+            config.policies.len(),
+            1,
+            "kind ProcessorErrorWithSource should compile to one policy"
+        );
+        assert!(
+            (config.policies[0].matches)(&CamelError::ProcessorErrorWithSource(
+                "exec failed".into(),
+                std::sync::Arc::new(std::io::Error::other("boom")),
+            )),
+            "kind ProcessorErrorWithSource should match its CamelError variant"
+        );
+        assert!(
+            !(config.policies[0].matches)(&CamelError::Io("other".into())),
+            "kind ProcessorErrorWithSource should not match unrelated variants"
+        );
+    }
+
+    #[test]
+    fn test_compile_error_handler_processor_error_alias_distinction() {
+        // rc-2vm2y precedent, rc-5u8co extension: variant_name() aliases
+        // ProcessorErrorWithSource to "ProcessorError" (doTry
+        // catch-by-variant compat), but on_exceptions matching is
+        // structural — the alias must not extend to kind matching.
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("ProcessorError".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: None,
+                continued: None,
+            }]),
+            use_original_message: false,
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(
+            config.policies.len(),
+            1,
+            "kind ProcessorError should compile to one policy"
+        );
+        assert!(
+            !(config.policies[0].matches)(&CamelError::ProcessorErrorWithSource(
+                "exec failed".into(),
+                std::sync::Arc::new(std::io::Error::other("boom")),
+            )),
+            "kind ProcessorError must not match ProcessorErrorWithSource"
+        );
+        assert!(
+            (config.policies[0].matches)(&CamelError::ProcessorError("plain".into())),
+            "kind ProcessorError must still match CamelError::ProcessorError"
+        );
+    }
+
+    #[test]
+    fn test_compile_error_handler_startup_and_deferred_kinds_still_rejected() {
+        // rc-5u8co: ConfigValidation and EndpointUri are startup fail-fast
+        // kinds — they never reach the route error handler, so they stay
+        // rejected as on_exceptions kinds. TemplateReload is deferred:
+        // lifecycle-command paths bypass handlers (pending bd). The
+        // unknown-kind error must list the supported vocabulary.
+        for kind in ["ConfigValidation", "EndpointUri", "TemplateReload"] {
+            let result = compile_error_handler(DeclarativeErrorHandler {
+                dead_letter_channel: None,
+                retry: None,
+                on_exceptions: Some(vec![DeclarativeOnException {
+                    kind: Some(kind.into()),
+                    message_contains: None,
+                    retry: None,
+                    steps: vec![],
+                    handled: None,
+                    continued: None,
+                }]),
+                use_original_message: false,
+            });
+
+            // ErrorHandlerConfig is not Debug, so expect_err is unavailable.
+            let err = match result {
+                Err(e) => e,
+                Ok(_) => panic!("kind {kind}: startup/deferred kinds must stay rejected"),
+            };
+            let display = err.to_string();
+            assert!(
+                display.contains("unknown exception kind"),
+                "kind {kind}: error must name the unknown kind, got: {display}"
+            );
+            assert!(
+                display.contains("supported kinds:"),
+                "kind {kind}: error must list supported kinds, got: {display}"
+            );
+        }
     }
 
     #[test]

@@ -550,6 +550,12 @@ mod variant_name_tests {
     /// when a new variant is added to CamelError without updating variant_name().
     /// The enum is `#[non_exhaustive]` but this match lives in the same crate, so internal
     /// exhaustive matching is allowed.
+    ///
+    /// The table must list every variant exactly once (`cases.len()` is asserted
+    /// below). When adding a CamelError variant, also update
+    /// `test_exception_kind_vocabulary_classification_guard` in
+    /// crates/camel-dsl/src/compile.rs and make the register-or-document
+    /// decision (bd rc-5u8co).
     #[test]
     fn variant_name_covers_all_variants() {
         let cases: Vec<(CamelError, &str)> = vec![
@@ -592,6 +598,7 @@ mod variant_name_tests {
                 },
                 "HttpOperationFailed",
             ),
+            (CamelError::ConsumerStopping, "ConsumerStopping"),
             (CamelError::Config("x".into()), "Config"),
             (
                 CamelError::ConfigValidation(ConfigValidationError::ThrottlerMaxRequestsZero),
@@ -626,6 +633,13 @@ mod variant_name_tests {
                 "ProcessorError",
             ),
         ];
+
+        assert_eq!(
+            cases.len(),
+            25,
+            "variant_name_covers_all_variants must cover every CamelError variant; \
+             extend this table and the camel-dsl classification guard"
+        );
 
         for (err, expected) in cases {
             assert_eq!(
