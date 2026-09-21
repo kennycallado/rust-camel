@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::BytesMut;
+use camel_api::redact::redact_host;
 use camel_api::security_policy::AuthPrincipal;
 use camel_api::store_principal_properties;
 use camel_api::{Body, CamelError, Exchange, Message, Value};
@@ -72,19 +73,6 @@ fn kernel_request_auth(
         plan: kernel.plan.clone(),
         principal,
     })
-}
-
-/// Redact a config-influenced host or method path for logs (ADR-0076,
-/// `lint-log-redaction`). The grammar carries no userinfo, but the config
-/// fields are externally influenced, so any `@`-prefixed authority is
-/// masked defensively, through the LAST `@` (canonical doctrine:
-/// over-masking is safe, under-masking is not). Clean values pass through
-/// unchanged for diagnosability.
-fn redact_for_log(value: &str) -> String {
-    match value.rsplit_once('@') {
-        Some((_, after)) => format!("***@{after}"),
-        None => value.to_string(),
-    }
 }
 
 fn proto_cache() -> &'static ProtoCache {
@@ -502,8 +490,8 @@ impl GrpcConsumer {
         let in_flight = ctx.in_flight_counter();
 
         info!(
-            path = %redact_for_log(&path),
-            host = %redact_for_log(&host),
+            path = %redact_host(&path),
+            host = %redact_host(&host),
             port = port,
             mode = ?mode,
             "grpc consumer started, waiting for requests"
@@ -648,7 +636,7 @@ impl Consumer for GrpcConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
         self.validate_route_credential_sources()?;
         info!(
-            host = %redact_for_log(&self.host),
+            host = %redact_host(&self.host),
             port = self.port,
             service = %self.service_name,
             method = %self.method_name,
@@ -671,7 +659,7 @@ impl Consumer for GrpcConsumer {
 
     async fn stop(&mut self) -> Result<(), CamelError> {
         info!(
-            host = %redact_for_log(&self.host),
+            host = %redact_host(&self.host),
             port = self.port,
             service = %self.service_name,
             method = %self.method_name,
@@ -1117,6 +1105,14 @@ async fn process_bidi_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Thin local pin — the full matrix lives in camel-api's
+    /// `redact_host_masks_userinfo_keeps_clean_hosts`.
+    #[test]
+    fn canonical_redact_host_pinned() {
+        assert_eq!(redact_host("host.example:8080"), "host.example:8080");
+        assert_eq!(redact_host("a@b@c"), "***@c");
+    }
 
     #[test]
     fn grpc_credential_sources_uncarryable_rejected_at_load() {
