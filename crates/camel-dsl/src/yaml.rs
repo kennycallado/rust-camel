@@ -355,19 +355,45 @@ pub fn yaml_stream_has_non_printable(s: &str) -> bool {
     })
 }
 
+/// Resolve the `literal`/`header`/`property` alternative-source keys of a
+/// permission `resource`/`action` field (rc-gddb2 decision: reject on
+/// ambiguity).
+///
+/// Exactly one key may be set. Multi-key authoring is ambiguous intent on a
+/// security surface, so it errors loudly — matching the sibling value-source
+/// resolvers in this file (`parse_value_source`, `parse_predicate_block`)
+/// and the security_policy form selection, which also reject multi-source
+/// authoring instead of applying an implicit precedence.
 fn yaml_source_to_value_source(
+    field: &'static str,
     yaml: crate::route_ast::RouteDslPermissionValueSource,
 ) -> Result<camel_auth::PermissionValueSource, CamelError> {
-    if let Some(s) = yaml.literal {
-        Ok(camel_auth::PermissionValueSource::Literal(s))
-    } else if let Some(h) = yaml.header {
-        Ok(camel_auth::PermissionValueSource::Header(h))
-    } else if let Some(p) = yaml.property {
-        Ok(camel_auth::PermissionValueSource::Property(p))
-    } else {
-        Err(CamelError::RouteError(
-            "security_policy permission resource/action must specify exactly one of: literal, header, or property".into(),
-        ))
+    let found: Vec<&str> = [
+        yaml.literal.as_ref().map(|_| "literal"),
+        yaml.header.as_ref().map(|_| "header"),
+        yaml.property.as_ref().map(|_| "property"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if found.len() != 1 {
+        let found = if found.is_empty() {
+            "none set".to_string()
+        } else {
+            found.join(", ")
+        };
+        return Err(CamelError::RouteError(format!(
+            "security_policy permission {field} must specify exactly one of: literal, header, or property (set: {found})"
+        )));
+    }
+
+    match (yaml.literal, yaml.header, yaml.property) {
+        (Some(s), None, None) => Ok(camel_auth::PermissionValueSource::Literal(s)),
+        (None, Some(h), None) => Ok(camel_auth::PermissionValueSource::Header(h)),
+        (None, None, Some(p)) => Ok(camel_auth::PermissionValueSource::Property(p)),
+        // Unreachable: exactly-one count enforced above.
+        _ => unreachable!("exactly-one source count enforced above"),
     }
 }
 
@@ -635,12 +661,20 @@ pub(crate) fn route_dsl_to_declarative_route(
                 }
                 Ok(DeclarativeSecurityPolicy::Permission {
                     policy: perm.policy,
-                    resource: perm.resource.map(yaml_source_to_value_source).transpose()?.unwrap_or(
-                        camel_auth::PermissionValueSource::Header("x-resource".into()),
-                    ),
-                    action: perm.action.map(yaml_source_to_value_source).transpose()?.unwrap_or(
-                        camel_auth::PermissionValueSource::Header("x-action".into()),
-                    ),
+                    resource: perm
+                        .resource
+                        .map(|src| yaml_source_to_value_source("resource", src))
+                        .transpose()?
+                        .unwrap_or(camel_auth::PermissionValueSource::Header(
+                            "x-resource".into(),
+                        )),
+                    action: perm
+                        .action
+                        .map(|src| yaml_source_to_value_source("action", src))
+                        .transpose()?
+                        .unwrap_or(camel_auth::PermissionValueSource::Header(
+                            "x-action".into(),
+                        )),
                     scopes: perm.scopes.unwrap_or_default(),
                     context: perm
                         .context
@@ -3590,6 +3624,137 @@ routes:
         // Both fields can coexist in YAML AST — validation happens in step_resolution
         let result = parse_yaml_to_declarative(yaml);
         assert!(result.is_ok());
+    }
+
+    // ── rc-gddb2: value-source multi-key authoring must error loudly ──
+    //
+    // `literal`, `header`, and `property` are alternative sources for the
+    // same permission field. Setting more than one is ambiguous authoring:
+    // the compiler must reject it, never resolve it silently.
+
+    #[test]
+    fn parse_security_policy_permission_multi_key_resource_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      permission:
+        policy: "keycloak-uma"
+        resource:
+          literal: "invoice"
+          header: "X-Resource-Id"
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("security_policy permission resource"),
+            "got: {err}"
+        );
+        assert!(err.contains("exactly one"), "got: {err}");
+        assert!(err.contains("literal"), "got: {err}");
+        assert!(err.contains("header"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_security_policy_permission_multi_key_action_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      permission:
+        policy: "keycloak-uma"
+        action:
+          header: "X-Action"
+          property: "route.action"
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("security_policy permission action"),
+            "got: {err}"
+        );
+        assert!(err.contains("exactly one"), "got: {err}");
+        assert!(err.contains("header"), "got: {err}");
+        assert!(err.contains("property"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_security_policy_permission_all_three_source_keys_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      permission:
+        policy: "keycloak-uma"
+        resource:
+          literal: "invoice"
+          header: "X-Resource-Id"
+          property: "route.resource"
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("security_policy permission resource"),
+            "got: {err}"
+        );
+        assert!(err.contains("literal"), "got: {err}");
+        assert!(err.contains("header"), "got: {err}");
+        assert!(err.contains("property"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_security_policy_permission_no_source_key_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      permission:
+        policy: "keycloak-uma"
+        resource: {}
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("security_policy permission resource"),
+            "got: {err}"
+        );
+        assert!(err.contains("exactly one"), "got: {err}");
+        assert!(err.contains("none set"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_security_policy_permission_property_single_key_resolves() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      permission:
+        policy: "keycloak-uma"
+        resource:
+          property: "route.resource"
+    steps:
+      - to: log:info
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let sp = routes[0].security_policy.as_ref().unwrap();
+        match sp {
+            DeclarativeSecurityPolicy::Permission { resource, .. } => {
+                assert_eq!(
+                    resource,
+                    &camel_auth::PermissionValueSource::Property("route.resource".into())
+                );
+            }
+            _ => panic!("expected Permission"),
+        }
     }
 
     #[test]
