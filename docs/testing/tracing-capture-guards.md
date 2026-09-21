@@ -70,9 +70,9 @@ binary are harmless: each copy has its own `OnceLock`, exactly one
 `Err`. The guard is per-binary state; per-binary duplication is
 inherent and accepted.
 
-## Inventory (20 guard sites)
+## Inventory (22 guard sites)
 
-### Natural homes (4)
+### Natural homes (5)
 
 | Location | Serves |
 | --- | --- |
@@ -80,6 +80,7 @@ inherent and accepted.
 | `camel-config/src/config.rs` (`log_capture`) | `config_tests/parity_golden_tests.rs` call site |
 | `camel-config/tests/common/mod.rs` | `tests/cache_repo_config.rs` call site (consolidated here by rc-puo4f) |
 | `camel-component-wasm/tests/common/mod.rs` | `tests/source_bind_gate.rs` call site (consolidated here by rc-puo4f) |
+| `camel-core/tests/route_interception/common.rs` | `tests/route_interception/support.rs` `capture_tracing` call site (floor added by rc-6jarb) |
 
 ### Per-file copies, no natural home in the binary (11)
 
@@ -104,9 +105,11 @@ recorders):
 - `src/intercept_compose.rs`
 - `src/multicast_segment_tests.rs`
 
-### Per-file copies, sole copy in their binary (5)
+### Per-file copies, sole copy in their binary (6)
 
 - `camel-bundles/src/lib.rs` (inline in `logquiet_regression_tests`)
+- `camel-component-cxf/src/pool_env_test.rs` (inline in `capture_sink`;
+  floor added by rc-6jarb)
 - `camel-integration-test/src/doc_parse_test.rs`
 - `camel-ws/src/lib.rs`
 - `camel-otel/src/service.rs`
@@ -116,9 +119,11 @@ recorders):
 Count note: `36ca7c73` changed 22 files — 19 guard bodies plus 3
 call-site-only edits (`discovery.rs`, `env_int_probe.rs`,
 `parity_golden_tests.rs`). `network_retry_tests.rs` predates it
-(`c3853198`, pattern origin), and this change relocated the
+(`c3853198`, pattern origin), and rc-puo4f relocated the
 `cache_repo_config` and `source_bind_gate` bodies into their crates'
-`tests/common` — 20 bodies total today. Any new capture test reuses
+`tests/common`. rc-6jarb then added the two floors for the
+previously-uncovered `route_interception_test` and camel-cxf lib
+binaries — 22 bodies total today. Any new capture test reuses
 its binary's existing guard or follows this table's classification.
 
 Not this pattern: `camel-component-mcp/tests/common/mod.rs` installs a
