@@ -58,7 +58,7 @@ impl TlsReloadHandler for HttpReloadHandler {
                 self.tls_config.reload_from_config(Arc::new(server_cfg));
                 tracing::info!(
                     scheme = %self.scheme,
-                    host = %self.host,
+                    host = %camel_api::redact::redact_host(&self.host),
                     port = self.port,
                     "HTTP TLS cert reloaded"
                 );
@@ -67,7 +67,7 @@ impl TlsReloadHandler for HttpReloadHandler {
             Err(e) => {
                 tracing::warn!(
                     scheme = %self.scheme,
-                    host = %self.host,
+                    host = %camel_api::redact::redact_host(&self.host),
                     port = self.port,
                     error = %e,
                     "HTTP TLS cert reload failed — keeping old cert"

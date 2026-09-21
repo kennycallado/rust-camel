@@ -45,7 +45,7 @@ impl TlsReloadHandler for GrpcReloadHandler {
                 self.acceptor.store(Arc::new(new_acceptor));
                 tracing::info!(
                     scheme = %self.scheme,
-                    host = %self.host,
+                    host = %camel_api::redact::redact_host(&self.host),
                     port = self.port,
                     "gRPC TLS cert reloaded"
                 );
@@ -54,7 +54,7 @@ impl TlsReloadHandler for GrpcReloadHandler {
             Err(e) => {
                 tracing::warn!(
                     scheme = %self.scheme,
-                    host = %self.host,
+                    host = %camel_api::redact::redact_host(&self.host),
                     port = self.port,
                     error = %e,
                     "gRPC TLS cert reload failed — keeping old cert"
