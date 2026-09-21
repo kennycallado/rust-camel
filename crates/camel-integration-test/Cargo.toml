@@ -33,11 +33,11 @@ camel-config.workspace = true
 # DirectStimulus delivers route stimulus through the booted context's
 # producer path — the same mechanism camel-test / camel run use.
 camel-component-api.workspace = true
-# Shared SEDA retry-classification predicates for the DirectStimulus
-# retry loop (adapters.rs): is_direct_startup_race classifies the
-# direct-startup race as retryable (rc-utx98), while the
-# no-active-consumers gate fails fast instead of retrying
-# (rc-tgaxf, adopting rc-zjrx's landed predicate).
+# Shared SEDA retry classification for the DirectStimulus retry loop
+# (adapters.rs): is_direct_startup_race (rc-utx98) classifies the
+# direct-startup race as retryable, and its definition excludes the
+# no-active-consumers gate so gate errors fail fast
+# (rc-tgaxf, rc-zjrx's landed predicate).
 camel-component-seda.workspace = true
 tower.workspace = true
 # HTTP partner adapter (feature `http`): the same hyper 1 stack that

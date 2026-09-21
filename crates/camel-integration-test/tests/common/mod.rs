@@ -126,6 +126,17 @@ pub fn wired_refs(doc: &camel_integration_test::ScenarioDocument) -> Vec<Endpoin
         .collect()
 }
 
+/// A single-entry router over one adapter, keyed by endpoint URI —
+/// the integration-side twin of the lib's cfg(test)
+/// `test_util::router_for` (rc-kkznl): that module is not visible to
+/// test binaries, so the incantation is single-sourced per side.
+pub fn router_for<A: PartnerAdapter + 'static>(uri: &str, adapter: A) -> PartnerRouter {
+    PartnerRouter::new(BTreeMap::from([(
+        uri.to_string(),
+        Box::new(adapter) as Box<dyn PartnerAdapter>,
+    )]))
+}
+
 /// Binds one partner per harness `http` reference (scripted where the
 /// document declares a matching `partners:` entry, permissive 200
 /// otherwise) and returns the router with the per-endpoint recorders

@@ -12,10 +12,14 @@ use std::sync::Arc;
 
 use camel_integration_test::DocumentOutcome;
 use camel_integration_test::{
-    DirectStimulus, LayeredEnv, PartnerAdapter, PartnerRouter, ScenarioDocument, ScenarioFailure,
-    ScenarioVerdict, ambient_std, boot_scenario, parse_scenario_document, run_scenario_document,
+    DirectStimulus, LayeredEnv, ScenarioDocument, ScenarioFailure, ScenarioVerdict, ambient_std,
+    boot_scenario, parse_scenario_document, run_scenario_document,
 };
 use tokio::sync::Mutex;
+
+mod common;
+
+use common::router_for;
 
 /// Writes a temporary project — a minimal `Camel.toml`, the echo
 /// route file, and the scenario document — and parses the document.
@@ -39,10 +43,7 @@ async fn run_direct(doc: &ScenarioDocument, root: &Path) -> DocumentOutcome {
         .await
         .expect("scenario boots");
     let ctx = Arc::new(Mutex::new(run.ctx));
-    let router = PartnerRouter::new(BTreeMap::from([(
-        "direct:echo".to_string(),
-        Box::new(DirectStimulus::new(Arc::clone(&ctx))) as Box<dyn PartnerAdapter>,
-    )]));
+    let router = router_for("direct:echo", DirectStimulus::new(Arc::clone(&ctx)));
     let mut vars = camel_integration_test::ScenarioVars::new();
     let mut outcome = run_scenario_document(doc, &router, &mut vars, None).await;
     // The boot result carries the inbound listener's bound address

@@ -14,7 +14,11 @@ use camel_api::Value;
 use camel_integration_test::adapters::{
     IncomingMessage, OutgoingMessage, ReceiveError, TransportError,
 };
-use camel_integration_test::{HttpPartner, PartnerAdapter, PartnerRouter, ScriptedResponse};
+use camel_integration_test::{HttpPartner, PartnerRouter, ScriptedResponse};
+
+mod common;
+
+use common::router_for;
 
 /// One client-role send message: POST with a string body.
 fn send_msg(body: &str) -> OutgoingMessage {
@@ -54,10 +58,7 @@ async fn failed_send_does_not_poison_later_receive() {
     // interpolated URI literally, so the send picks the wire target.
     let lane_key = orders_uri(&partner);
     let bound = partner.bound_addr();
-    let router = PartnerRouter::new(BTreeMap::from([(
-        lane_key.clone(),
-        Box::new(partner) as Box<dyn PartnerAdapter>,
-    )]));
+    let router = router_for(&lane_key, partner);
 
     // The dead wire target: a bound port whose listener is gone.
     let dead = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -173,10 +174,7 @@ async fn same_key_sends_park_fifo() {
     .await
     .expect("partner binds 127.0.0.1:0");
     let lane_key = orders_uri(&partner);
-    let router = PartnerRouter::new(BTreeMap::from([(
-        lane_key.clone(),
-        Box::new(partner) as Box<dyn PartnerAdapter>,
-    )]));
+    let router = router_for(&lane_key, partner);
 
     for body in ["a", "b", "c"] {
         router
@@ -220,10 +218,7 @@ async fn lane_fifo_overflow_is_apparatus() {
     .expect("partner binds 127.0.0.1:0");
     let lane_key = orders_uri(&partner);
     let recorder = partner.recorder();
-    let router = PartnerRouter::new(BTreeMap::from([(
-        lane_key.clone(),
-        Box::new(partner) as Box<dyn PartnerAdapter>,
-    )]));
+    let router = router_for(&lane_key, partner);
 
     for _ in 0..64 {
         router
