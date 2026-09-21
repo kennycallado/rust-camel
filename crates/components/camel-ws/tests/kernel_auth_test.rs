@@ -273,3 +273,63 @@ async fn ws_public_route_passes_without_extraction() {
 
     server.abort();
 }
+
+/// Plan-only context (rc-hb8g): the controller's plan-only delivery arm
+/// hands DSL routes without a policy declaration a context built by
+/// `SecurityContext::from_plan` — `policy` absent, plan + providers
+/// present. The ws kernel path must run end-to-end on that shape: this
+/// pins that dropping the write-only `policy` field cannot regress the
+/// transport (the audit probe — field removed, `cargo check --workspace`
+/// clean — showed no production reader exists).
+#[tokio::test]
+async fn ws_kernel_handshake_with_plan_only_context() {
+    let sec_ctx =
+        SecurityContext::from_plan(authenticated_plan()).with_providers(provider_registry());
+    assert!(
+        sec_ctx.policy.is_none(),
+        "plan-only context must carry no policy"
+    );
+    let (state, mut rx) = make_app_state(PATH, sec_ctx);
+    let (port, server) = spawn_server(state).await;
+
+    // Valid token: upgrade completes, message flows, carrier mints.
+    let builder = ClientRequestBuilder::new(upgrade_uri(port))
+        .with_header("Authorization", format!("Bearer {TOKEN}"));
+    let (mut client, response) = tokio_tungstenite::connect_async(builder).await.unwrap();
+    assert_eq!(response.status(), 101, "plan-only handshake must authorize");
+
+    client
+        .send(ClientMessage::Text("plan-only".into()))
+        .await
+        .unwrap();
+    let envelope = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("plan-only envelope dispatched")
+        .expect("dispatch channel open");
+    assert_eq!(
+        envelope.exchange.input.body.as_text(),
+        Some("plan-only"),
+        "plan-only body must reach the route"
+    );
+    let carrier =
+        read_carrier(&envelope.exchange).expect("typed carrier missing on plan-only exchange");
+    assert_eq!(carrier.provider_id(), PROVIDER);
+    assert_eq!(carrier.principal().subject, SUBJECT);
+
+    // Invalid token: the denial branch also runs without the field.
+    let builder = ClientRequestBuilder::new(upgrade_uri(port))
+        .with_header("Authorization", "Bearer wrong-token");
+    match tokio_tungstenite::connect_async(builder).await {
+        Err(WsError::Http(response)) => {
+            assert_eq!(
+                response.status().as_u16(),
+                401,
+                "plan-only kernel denial status"
+            );
+        }
+        Err(e) => panic!("expected HTTP denial, got: {e}"),
+        Ok(_) => panic!("invalid token must not complete a plan-only handshake"),
+    }
+
+    server.abort();
+}
