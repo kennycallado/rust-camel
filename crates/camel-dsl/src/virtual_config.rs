@@ -109,8 +109,9 @@ pub(crate) fn build_virtual_config(
     // The configuration document above the includes: strip `include`
     // keys from every declaring location (top-level, `[default]`, and
     // the selected profile sections), enforce the strict unknown-profile
-    // rule (a configuration with `[default]` must carry every selected
-    // profile section — the filesystem loader's error), then apply the
+    // rule (a configuration with `[default]` must carry at least one
+    // of the selected profile sections; the error fires only when none
+    // is present — the filesystem loader's error), then apply the
     // profile-section selection and merge.
     if let Some(path) = &refs.config {
         let text = virtual_config_text(store, path)?;
