@@ -205,7 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn lint_clean_route_exits_zero() {
-        let yaml = "id: r1\nfrom: timer:foo?period=1s\nsteps:\n  - to: log:bar\n";
+        let yaml = "id: r1\nfrom: timer:foo?period=1000\nsteps:\n  - to: log:bar\n";
         let mut tmp = tempfile::NamedTempFile::new().unwrap(); // allow-unwrap
         write!(tmp, "{yaml}").unwrap(); // allow-unwrap
 
@@ -273,7 +273,7 @@ mod tests {
 
     #[tokio::test]
     async fn lint_routes_normal_yaml_unchanged() {
-        let yaml = "id: r1\nfrom: timer:foo?period=1s\nsteps:\n  - to: log:bar\n";
+        let yaml = "id: r1\nfrom: timer:foo?period=1000\nsteps:\n  - to: log:bar\n";
         let mut tmp = tempfile::NamedTempFile::new().unwrap(); // allow-unwrap
         write!(tmp, "{yaml}").unwrap(); // allow-unwrap
 
