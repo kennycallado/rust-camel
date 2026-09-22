@@ -10,6 +10,7 @@ pub mod hover;
 pub mod route_view;
 pub mod rule;
 pub mod rules;
+pub mod schema_context;
 
 pub use completion::*;
 pub use diagnostic::*;

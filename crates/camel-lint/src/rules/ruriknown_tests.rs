@@ -1538,3 +1538,164 @@ fn all_three_sources_single_diagnostic() {
         source.rfind("period").expect("step-level key present")
     );
 }
+
+// -----------------------------------------------------------------------
+// Free-form rest response headers are opaque (bd rc-ni8qu) + cross-document
+// isolation — Task 1.3 rule-level regressions
+// -----------------------------------------------------------------------
+
+#[test]
+fn rest_response_header_uri_value_not_uri_linted() {
+    // bd rc-ni8qu: a REST response header NAMED `uri` is an ordinary
+    // free-form header entry, not an endpoint URI. Its value
+    // `timer:bar?frequency=1s` must not reach R-URI-known. The walk still
+    // validates the operation-level AND the nested `to:` in ONE document:
+    // exactly two UnknownOptions — the operation `to:` (first `frequency`)
+    // and the nested steps `to:` (`bogus`) — while the header value yields
+    // nothing, not even an UnverifiedScheme note on an empty catalog.
+    let catalog = StubCatalog::empty().with(
+        "timer",
+        meta_with_options(
+            "timer",
+            vec![UriOption::new("period", "period", OptionKind::Duration)],
+        ),
+    );
+    let source = "\
+rest:
+  - operations:
+      - method: GET
+        to: timer:foo?frequency=1s
+        steps:
+          - to: timer:bar?bogus=1
+        response:
+          headers:
+            uri: timer:bar?frequency=1s
+";
+    let diags = analyze(source, &catalog);
+    assert_eq!(
+        count_subcode(&diags, UriKnownSubCode::UnknownOption),
+        2,
+        "expected exactly two UnknownOptions (operation + nested `to:`); got: {:?}",
+        ruriknown_only(&diags)
+            .iter()
+            .map(|d| (&d.code, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let unknown: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::UnknownOption))
+        .collect();
+    let op = unknown
+        .iter()
+        .find(|d| slice(source, &d.span) == "frequency")
+        .expect("operation `to:` UnknownOption present");
+    assert_eq!(slice(source, &op.span), "frequency");
+    assert_eq!(
+        op.span.start,
+        source
+            .find("frequency")
+            .expect("operation `to:` query present"),
+        "span must be the operation `to:` occurrence, not the header value"
+    );
+    assert_eq!(op.severity, Severity::Error);
+    let nested = unknown
+        .iter()
+        .find(|d| slice(source, &d.span) == "bogus")
+        .expect("nested steps `to:` UnknownOption present");
+    assert_eq!(
+        nested.span.start,
+        source.find("bogus").expect("nested `bogus` query present"),
+        "span must be the nested steps `to:` occurrence"
+    );
+    assert_eq!(nested.severity, Severity::Error);
+    // NO diagnostic of any code may reference the header value. The nested
+    // steps URI legitimately produces diagnostics, so anchor on the LAST
+    // `timer:bar` — the header entry (the nested one precedes it).
+    let header_value_start = source.rfind("timer:bar").expect("header value present");
+    let offending: Vec<_> = diags
+        .iter()
+        .filter(|x| x.span.start >= header_value_start)
+        .map(|x| (&x.code, slice(source, &x.span)))
+        .collect();
+    assert!(
+        offending.is_empty(),
+        "no diagnostic may reference the header value; got: {:?}",
+        offending
+    );
+
+    // Empty-catalog variant: BOTH walked URIs are still noted — exactly two
+    // UnverifiedScheme, first-occurrence anchored — but the header value
+    // must not add a third.
+    let diags_empty = analyze(source, &StubCatalog::empty());
+    let note_starts: Vec<_> = diags_empty
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                DiagnosticCode::RUriKnown(UriKnownSubCode::UnverifiedScheme)
+            )
+        })
+        .map(|d| d.span.start)
+        .collect();
+    assert_eq!(
+        note_starts,
+        vec![
+            source
+                .find("timer:foo")
+                .expect("operation `to:` URI present"),
+            source.find("timer:bar").expect("nested `to:` URI present"),
+        ],
+        "UnverifiedScheme must cover exactly the walked URIs, not the header value"
+    );
+}
+
+#[test]
+fn poisoned_document_does_not_affect_clean_document_lint() {
+    // The walk holds no per-document global state (cross-document
+    // isolation): linting a poisoned rest document — free-form
+    // `response.headers` full of URI-shaped values under `uri`/`to`/
+    // `endpoints` — immediately before a clean document must leave the
+    // clean document's diagnostics identical to a fresh lint on a
+    // freshly built engine/catalog.
+    let poisoned = "\
+rest:
+  - operations:
+      - method: GET
+        to: timer:foo?frequency=1s
+        response:
+          headers:
+            uri: timer:bar?frequency=1s
+            to: log:out
+            endpoints: [direct:a, direct:b]
+";
+    let clean = "from: direct:start\nsteps:\n  - to: timer:foo?frequency=1s\n";
+    let catalog = StubCatalog::empty().with(
+        "timer",
+        meta_with_options(
+            "timer",
+            vec![UriOption::new("period", "period", OptionKind::Duration)],
+        ),
+    );
+    let _poisoned_diags = analyze(poisoned, &catalog);
+    let clean_after_poisoned = analyze(clean, &catalog);
+
+    let fresh_catalog = StubCatalog::empty().with(
+        "timer",
+        meta_with_options(
+            "timer",
+            vec![UriOption::new("period", "period", OptionKind::Duration)],
+        ),
+    );
+    let clean_fresh = analyze(clean, &fresh_catalog);
+
+    let fingerprint = |diags: &[Diagnostic]| -> Vec<String> {
+        let mut reprs: Vec<String> = diags.iter().map(|d| format!("{d:?}")).collect();
+        reprs.sort();
+        reprs
+    };
+    assert_eq!(
+        fingerprint(&clean_after_poisoned),
+        fingerprint(&clean_fresh),
+        "a poisoned document must not influence a subsequent clean document's diagnostics"
+    );
+}

@@ -161,6 +161,12 @@ syntax-breaking edit returns `Err(LintError::Internal(..))` and leaves the docum
 The route view extracted from the parsed document. `LintRoute` holds endpoint URIs;
 `Endpoint` holds a parsed URI + option list; `LintOption` holds a key-value pair with
 source spans. Used by R-URI-known, R-SECRET, and R-DEPRECATED to walk route structure.
+The walk is schema-context scoped (bd rc-ni8qu): each mapping key is interpreted
+against the candidate subschemas describing its node. A declared key dispatches on
+its own subschema. Free-form maps (REST `response.headers`, `security_policy.config`,
+`parameters:` maps) are opaque leaves — their entries are user data, never endpoint
+URIs. An undeclared key the schema permits is opaque. Only a key every candidate
+rejects falls back to the legacy global-name interpretation (`URI_KEYS`/`CONTAINER_KEYS`).
 _Avoid_: route AST, parsed route (use route_view or LintRoute for the struct)
 
 **ComponentMetadataCatalog**:

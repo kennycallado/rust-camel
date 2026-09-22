@@ -3,18 +3,20 @@
 //! Parsing ALWAYS yields a [`Document`] (never `Err`): a syntax error is
 //! data surfaced through [`ParseFailure`] for the R-SYN rule, not an engine
 //! error. On success the noyalib CST is walked to build [`LintRoute`],
-//! capturing every URI-bearing location with byte-exact spans.
-
-use std::collections::HashSet;
-use std::sync::LazyLock;
+//! capturing every URI-bearing location with byte-exact spans. Mapping keys
+//! are interpreted against the schema candidates resolved by
+//! [`crate::schema_context`].
 
 use noyalib::Value;
 use noyalib::cst;
 
-use crate::ROUTE_SCHEMA;
 use crate::diagnostic::{Fix, Span};
 use crate::error::LintError;
 use crate::route_view::{Endpoint, LintNode, LintOption, LintRoute, OptionOrigin, Spanned};
+use crate::schema_context::{
+    CONTAINER_KEYS, SCHEMA, container_child_ctx, is_container, is_free_form, items_ctx,
+    key_permitted, lookup_property, mapping_candidates, root_context, typed_ap_schemas,
+};
 
 // ---------------------------------------------------------------------------
 // ParseFailure + Document
@@ -51,6 +53,7 @@ impl Document {
                 // queries (which may repopulate the cache on the fallback
                 // path) never conflict with a held borrow.
                 let root: Value = (*noya_doc.as_value()).clone();
+                let ctx = root_context(&root);
                 let mut from = None;
                 let mut from_parameters = Vec::new();
                 let nodes = walk(
@@ -61,6 +64,7 @@ impl Document {
                     &mut from_parameters,
                     &[],
                     OptionOrigin::StepParameters,
+                    &ctx,
                 );
                 Document {
                     raw,
@@ -194,7 +198,7 @@ fn failure_span(err: &noyalib::Error, source: &str) -> (Span, String) {
 }
 
 // ---------------------------------------------------------------------------
-// URI keys (allowlist) + container keys (schema-derived)
+// URI keys (allowlist)
 // ---------------------------------------------------------------------------
 
 /// The closed set of field names whose string value is an endpoint URI
@@ -215,142 +219,35 @@ const URI_KEYS: &[&str] = &[
     "dead_letter_channel", // RouteDslErrorHandler — dead-letter endpoint URI
 ];
 
-/// Container property names derived from [`ROUTE_SCHEMA`]: object or
-/// array-of-object fields that hold nested steps or sub-config. Re-deriving
-/// from the embedded schema means a new container is picked up by re-syncing
-/// the schema copy — no code change needed.
-static CONTAINER_KEYS: LazyLock<HashSet<String>> = LazyLock::new(|| {
-    let schema: serde_json::Value =
-        serde_json::from_str(ROUTE_SCHEMA).expect("embedded route schema is valid JSON"); // allow-unwrap
-    container_keys(&schema)
-});
-
-/// Collect every container property name from the schema. Resolves local
-/// `$ref` pointers into `$defs`.
-fn container_keys(schema: &serde_json::Value) -> HashSet<String> {
-    let mut container = HashSet::new();
-    let mut visited_refs = HashSet::new();
-    descend_schema(schema, schema, &mut container, &mut visited_refs);
-    container
-}
-
-/// Resolve a local `$ref` (e.g. `#/$defs/step`) against the schema root.
-/// Returns the original node when there is no `$ref`. Chained refs resolve
-/// recursively.
-fn resolve_ref<'a>(
-    node: &'a serde_json::Value,
-    root: &'a serde_json::Value,
-) -> &'a serde_json::Value {
-    if let Some(rf) = node.get("$ref").and_then(|v| v.as_str())
-        && let Some(frag) = rf.strip_prefix("#/")
-    {
-        let mut cur = root;
-        for part in frag.split('/') {
-            cur = cur.get(part).unwrap_or(&serde_json::Value::Null);
-        }
-        return resolve_ref(cur, root);
-    }
-    node
-}
-
-/// Recursively descend through `properties`, `items`, `additionalProperties`,
-/// and the composition keywords (`anyOf`/`oneOf`/`allOf`), classifying each
-/// named property that is a container. `visited_refs` guards against
-/// recursive `$ref` cycles.
-fn descend_schema(
-    node: &serde_json::Value,
-    root: &serde_json::Value,
-    container: &mut HashSet<String>,
-    visited_refs: &mut HashSet<String>,
-) {
-    // Cycle guard on raw $ref nodes.
-    if let Some(rf) = node.get("$ref").and_then(|v| v.as_str())
-        && !visited_refs.insert(rf.to_string())
-    {
-        return;
-    }
-
-    let r = resolve_ref(node, root);
-
-    // Composition keywords: descend each subschema (raw, so $ref tracking
-    // fires) but do NOT classify the composition node itself.
-    for kw in ["allOf", "anyOf", "oneOf"] {
-        if let Some(arr) = r.get(kw).and_then(|v| v.as_array()) {
-            for sub in arr {
-                descend_schema(sub, root, container, visited_refs);
-            }
-        }
-    }
-
-    if let Some(props) = r.get("properties").and_then(|v| v.as_object()) {
-        for (name, sub) in props {
-            let resolved = resolve_ref(sub, root);
-            if is_container(resolved, root) {
-                container.insert(name.clone());
-            }
-            // Recurse into the property's subschema (raw) to find nested keys.
-            descend_schema(sub, root, container, visited_refs);
-        }
-    }
-
-    if let Some(items) = r.get("items") {
-        descend_schema(items, root, container, visited_refs);
-    }
-
-    if let Some(ap) = r.get("additionalProperties")
-        && ap.is_object()
-    {
-        descend_schema(ap, root, container, visited_refs);
-    }
-}
-
-/// True when the subschema is an object, or an array whose items are objects,
-/// or a composition leading to an object — i.e. it holds further steps.
-fn is_container(node: &serde_json::Value, root: &serde_json::Value) -> bool {
-    let r = resolve_ref(node, root);
-    if r.get("type") == Some(&serde_json::Value::String("object".into()))
-        || r.get("properties").is_some()
-    {
-        return true;
-    }
-    if r.get("type") == Some(&serde_json::Value::String("array".into()))
-        && let Some(items) = r.get("items")
-    {
-        let ri = resolve_ref(items, root);
-        if ri.get("type") == Some(&serde_json::Value::String("object".into()))
-            || ri.get("properties").is_some()
-            || ri.get("$ref").is_some()
-            || ["anyOf", "oneOf", "allOf"]
-                .iter()
-                .any(|kw| ri.get(kw).is_some())
-        {
-            return true;
-        }
-    }
-    for kw in ["anyOf", "oneOf", "allOf"] {
-        if let Some(subs) = r.get(kw).and_then(|v| v.as_array())
-            && subs.iter().any(|s| is_container(s, root))
-        {
-            return true;
-        }
-    }
-    false
-}
-
 // ---------------------------------------------------------------------------
 // CST walker
 // ---------------------------------------------------------------------------
 
-/// Build the spanned node list for `value`, emitting endpoints for [`URI_KEYS`]
-/// and recursing through container keys discovered from the schema. `from`
-/// captures the route-level `from` URI (first occurrence wins) so it is not
-/// also emitted as a step node; `from_parameters` captures the sibling
-/// `parameters:` entries attached to that `from`. `inherited` carries any
-/// step-level `parameters:` entries into an object-form URI key (e.g.
-/// `enrich: { uri: ... }`) and is CONCATENATED with the inner config's own
-/// `parameters:` map, so entries from both reach the nested `uri` endpoint
-/// (the DSL lowerer merges disjoint keys, so dropping either side would miss
-/// rules and could false-flag `MissingRequiredOption`).
+/// Build the spanned node list for `value`. Each mapping key is interpreted
+/// against `ctx` — the candidate subschemas describing the current node,
+/// resolved from the embedded [`SCHEMA`]:
+///
+/// - a DECLARED key dispatches on its own subschema: URI-bearing leaves
+///   reach endpoint emission, structured containers recurse as Branches,
+///   and FREE-FORM maps ([`is_free_form`] — REST `response.headers`,
+///   `security_policy.config`) are OPAQUE leaves, never interpreted;
+/// - an UNDECLARED key the active candidates PERMIT (`additionalProperties`
+///   absent/`true`/typed) is legitimate user data — dispatched on the typed
+///   schema when present, opaque otherwise;
+/// - an UNDECLARED key every candidate REJECTS falls back to the legacy
+///   global-name interpretation ([`URI_KEYS`]/[`CONTAINER_KEYS`]) for
+///   schema-invalid-but-tolerated shapes, with the empty ctx propagating
+///   that fallback to children.
+///
+/// `from` captures the route-level `from` URI (first occurrence wins) so it
+/// is not also emitted as a step node; `from_parameters` captures the
+/// sibling `parameters:` entries attached to that `from`. `inherited`
+/// carries any step-level `parameters:` entries into an object-form URI key
+/// (e.g. `enrich: { uri: ... }`) and is CONCATENATED with the inner
+/// config's own `parameters:` map, so entries from both reach the nested
+/// `uri` endpoint (the DSL lowerer merges disjoint keys, so dropping either
+/// side would miss rules and could false-flag `MissingRequiredOption`).
+#[allow(clippy::too_many_arguments)] // recursive walker: one slot per threaded input
 fn walk(
     value: &Value,
     path: &str,
@@ -359,6 +256,7 @@ fn walk(
     from_parameters: &mut Vec<LintOption>,
     inherited: &[LintOption],
     local_origin: OptionOrigin,
+    ctx: &[&serde_json::Value],
 ) -> Vec<Spanned<LintNode>> {
     let mut nodes = Vec::new();
     match value {
@@ -418,49 +316,127 @@ fn walk(
                     *from_parameters = effective.clone();
                     continue;
                 }
-                if URI_KEYS.contains(&k) {
-                    if matches!(child, Value::Mapping(_)) {
-                        // Object form (e.g. enrich: { uri: ... }): recurse to
-                        // find the nested `uri`, which is itself a URI key,
-                        // carrying the step-level parameters alongside the
-                        // inner config's own `parameters:` map. The inner
-                        // map's entries are ConfigParameters.
-                        nodes.extend(walk(
+                // Schema-context dispatch: a key declared by the current
+                // node's candidates dispatches on its own subschema; an
+                // undeclared-but-permitted key is user data; only a key
+                // every candidate rejects keeps the legacy global-name
+                // fallback (schema-invalid shape tolerance).
+                match lookup_property(ctx, k) {
+                    Some(ps) if URI_KEYS.contains(&k) => {
+                        if matches!(child, Value::Mapping(_)) {
+                            // Object form (e.g. `enrich: { uri: ... }`, or
+                            // the tolerated object-form `from`): recurse to
+                            // find the nested URI, carrying the step-level
+                            // parameters alongside the inner config's own
+                            // `parameters:` map (ConfigParameters origin).
+                            // The child ctx is the property's mapping-capable
+                            // branches — EMPTY for scalar-declared keys
+                            // (object-form `from`), so the nested walk runs
+                            // in legacy global-name mode and today's capture
+                            // is preserved.
+                            let child_ctx = mapping_candidates(std::slice::from_ref(&ps));
+                            nodes.extend(walk(
+                                child,
+                                &cpath,
+                                doc,
+                                from_slot,
+                                from_parameters,
+                                &effective,
+                                OptionOrigin::ConfigParameters,
+                                &child_ctx,
+                            ));
+                        } else {
+                            emit_endpoints(child, &cpath, doc, &mut nodes, &effective);
+                        }
+                    }
+                    Some(ps) if is_container(ps, &SCHEMA) => {
+                        // Structured container: Branch recursion with the
+                        // declared shape as child ctx.
+                        nodes.push(branch_node(
+                            key,
                             child,
                             &cpath,
                             doc,
                             from_slot,
                             from_parameters,
-                            &effective,
-                            OptionOrigin::ConfigParameters,
+                            &container_child_ctx(ps),
                         ));
-                    } else {
-                        emit_endpoints(child, &cpath, doc, &mut nodes, &effective);
                     }
-                } else if CONTAINER_KEYS.contains(k) {
-                    let children = walk(
-                        child,
-                        &cpath,
-                        doc,
-                        from_slot,
-                        from_parameters,
-                        &[],
-                        OptionOrigin::StepParameters,
-                    );
-                    let kind = Spanned {
-                        value: key.clone(),
-                        span: key_span_for(doc, &cpath),
-                    };
-                    let span = value_span_for(doc, &cpath);
-                    nodes.push(Spanned {
-                        value: LintNode::Branch { kind, children },
-                        span,
-                    });
+                    Some(ps) if is_free_form(ps) => {
+                        // FREE-FORM map (e.g. `response.headers`,
+                        // `security_policy.config`): an OPAQUE leaf — user
+                        // data, never interpreted, never walked (the
+                        // bd rc-ni8qu false positives lived here).
+                    }
+                    // Declared scalar/other leaf: not an endpoint author.
+                    Some(_) => {}
+                    None => {
+                        if key_permitted(ctx) {
+                            // UNDECLARED but PERMITTED: legitimate user
+                            // data. A typed `additionalProperties` schema
+                            // dispatches the value on THAT schema (only
+                            // structured containers recurse; a scalar-typed
+                            // AP such as `config`'s `{type: string}` stays
+                            // opaque — a string entry named `to` is data,
+                            // not an endpoint). AP absent or `true`: opaque
+                            // — no global interpretation. Exactly ONE
+                            // dispatch: the FIRST container AP wins, so two
+                            // mapping-capable candidates carrying typed APs
+                            // can never emit duplicate endpoints.
+                            if let Some(ap) = typed_ap_schemas(ctx)
+                                .into_iter()
+                                .find(|ap| is_container(ap, &SCHEMA))
+                            {
+                                nodes.push(branch_node(
+                                    key,
+                                    child,
+                                    &cpath,
+                                    doc,
+                                    from_slot,
+                                    from_parameters,
+                                    &container_child_ctx(ap),
+                                ));
+                            }
+                        } else if URI_KEYS.contains(&k) {
+                            // LEGACY fallback (schema-invalid shape
+                            // tolerance): exactly today's behavior, with the
+                            // empty ctx so children also resolve via
+                            // fallback.
+                            if matches!(child, Value::Mapping(_)) {
+                                nodes.extend(walk(
+                                    child,
+                                    &cpath,
+                                    doc,
+                                    from_slot,
+                                    from_parameters,
+                                    &effective,
+                                    OptionOrigin::ConfigParameters,
+                                    &[],
+                                ));
+                            } else {
+                                emit_endpoints(child, &cpath, doc, &mut nodes, &effective);
+                            }
+                        } else if CONTAINER_KEYS.contains(k) {
+                            nodes.push(branch_node(
+                                key,
+                                child,
+                                &cpath,
+                                doc,
+                                from_slot,
+                                from_parameters,
+                                &[],
+                            ));
+                        }
+                    }
                 }
-                // Non-URI, non-container keys are ignored.
             }
         }
         Value::Sequence(seq) => {
+            // Items get the ctx's `items` subschemas when declared (e.g.
+            // `steps:` → RouteDslStep per item); otherwise the same ctx —
+            // shape tolerance for direct-sequence container forms.
+            let item_ctx = items_ctx(ctx);
+            let eff_ctx: &[&serde_json::Value] = if item_ctx.is_empty() { ctx } else { &item_ctx };
             for (i, item) in seq.iter().enumerate() {
                 let ipath = format!("{path}[{i}]");
                 nodes.extend(walk(
@@ -471,12 +447,47 @@ fn walk(
                     from_parameters,
                     &[],
                     OptionOrigin::StepParameters,
+                    eff_ctx,
                 ));
             }
         }
         _ => {}
     }
     nodes
+}
+
+/// Recurse into a container child and wrap the result in a [`LintNode::Branch`]
+/// node keyed by the mapping key. `child_ctx` is the schema context for the
+/// nested walk (empty = legacy global-name mode).
+fn branch_node(
+    key: &str,
+    child: &Value,
+    cpath: &str,
+    doc: &cst::Document,
+    from_slot: &mut Option<Spanned<String>>,
+    from_parameters: &mut Vec<LintOption>,
+    child_ctx: &[&serde_json::Value],
+) -> Spanned<LintNode> {
+    let children = walk(
+        child,
+        cpath,
+        doc,
+        from_slot,
+        from_parameters,
+        &[],
+        OptionOrigin::StepParameters,
+        child_ctx,
+    );
+    Spanned {
+        value: LintNode::Branch {
+            kind: Spanned {
+                value: key.to_string(),
+                span: key_span_for(doc, cpath),
+            },
+            children,
+        },
+        span: value_span_for(doc, cpath),
+    }
 }
 
 /// Collect the entries of a `parameters:` mapping into [`LintOption`]s, each
@@ -1437,5 +1448,167 @@ steps:
             .collect();
         assert_eq!(secret.len(), 1, "expected one RSecret; got: {diags:?}");
         assert_eq!(slice_at(source, &secret[0].span), "hunter2");
+    }
+
+    // ---- namebloat Task 1.2: walk-level opacity + capture regressions ----
+
+    #[test]
+    fn rest_response_headers_named_uri_to_endpoints_are_opaque() {
+        // `response.headers` is a free-form map (arbitrary header names →
+        // values). Header entries named `uri`, `to`, and `endpoints` are
+        // user DATA, not DSL keys: none may reach endpoint emission.
+        let source = "rest:\n  - operations:\n      - method: GET\n        to: direct:ok\n        response:\n          headers:\n            uri: timer:foo?frequency=1s\n            to: log:out\n            endpoints:\n              - direct:a\n              - direct:b\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let uris: Vec<_> = doc
+            .route_view
+            .endpoints()
+            .into_iter()
+            .map(|e| e.uri.value)
+            .collect();
+        assert_eq!(
+            uris,
+            vec!["direct:ok"],
+            "only the operation-level `to` is an endpoint"
+        );
+    }
+
+    #[test]
+    fn security_policy_config_map_is_opaque() {
+        // Retention pin: `security_policy.config` is a free-form map, so a
+        // `to:` entry inside it is user data. Passes before AND after the
+        // Task 1.1 rewrite — the pin guards the rewrite from newly walking it.
+        let source = "from: direct:start\nsecurity_policy:\n  config:\n    to: log:leak\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let uris: Vec<_> = doc
+            .route_view
+            .endpoints()
+            .into_iter()
+            .map(|e| e.uri.value)
+            .collect();
+        assert_eq!(uris, vec!["direct:start"], "only `from` is an endpoint");
+    }
+
+    #[test]
+    fn permissive_root_stray_keys_are_opaque() {
+        // The envelope root permits undeclared keys; a stray root-level
+        // `response:` block is user data, not DSL to interpret.
+        let source = "routes:\n  - from: direct:start\nresponse:\n  to: log:stray\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let uris: Vec<_> = doc
+            .route_view
+            .endpoints()
+            .into_iter()
+            .map(|e| e.uri.value)
+            .collect();
+        assert_eq!(
+            uris,
+            vec!["direct:start"],
+            "only the route `from` is an endpoint; the stray root `to` must not leak"
+        );
+    }
+
+    #[test]
+    fn rest_operation_to_and_steps_still_captured() {
+        let source = "rest:\n  - operations:\n      - method: GET\n        to: timer:op\n        steps:\n          - to: timer:nested\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let endpoints = doc.route_view.endpoints();
+        let op = endpoints
+            .iter()
+            .find(|e| e.uri.value == "timer:op")
+            .expect("operation-level `to` must be captured");
+        let nested = endpoints
+            .iter()
+            .find(|e| e.uri.value == "timer:nested")
+            .expect("nested steps `to` must be captured");
+        assert_eq!(slice_at(&doc.raw, &op.uri.span), "timer:op");
+        assert_eq!(slice_at(&doc.raw, &nested.uri.span), "timer:nested");
+        assert_ne!(op.uri.span, nested.uri.span, "spans must be distinct");
+    }
+
+    #[test]
+    fn nested_steps_to_captured_across_root_forms() {
+        // Envelope, bare-route, and legacy array roots must all capture a
+        // nested `steps[].to` with its own byte-exact span.
+        let sources = [
+            "routes:\n  - steps:\n      - to: log:nested\n",
+            "steps:\n  - to: log:nested\n",
+            "- steps:\n    - to: log:nested\n",
+        ];
+        for source in sources {
+            let doc = Document::parse(source);
+            assert!(
+                doc.parse_failure.is_none(),
+                "expected clean parse: {source:?}"
+            );
+            let nested = doc
+                .route_view
+                .endpoints()
+                .into_iter()
+                .find(|e| e.uri.value == "log:nested")
+                .unwrap_or_else(|| panic!("`log:nested` must be captured in: {source:?}"));
+            assert_eq!(slice_at(&doc.raw, &nested.uri.span), "log:nested");
+        }
+    }
+
+    #[test]
+    fn recursive_dotry_nested_to_captured() {
+        // `do_try` inside `do_try` revisits RouteDslStep through
+        // DoTryData.steps; the innermost `to` must still be captured.
+        let source = "steps:\n  - do_try:\n      steps:\n        - do_try:\n            steps:\n              - to: log:deep\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let deep = doc
+            .route_view
+            .endpoints()
+            .into_iter()
+            .find(|e| e.uri.value == "log:deep")
+            .expect("innermost `to: log:deep` must be captured");
+        assert_eq!(slice_at(&doc.raw, &deep.uri.span), "log:deep");
+    }
+
+    #[test]
+    fn multicast_direct_sequence_explicit() {
+        // Explicit sibling of `nested_child_step_uri_captured`: the
+        // multicast direct-sequence form is schema-invalid but tolerated
+        // through the rejected-key legacy fallback, so its child endpoint
+        // stays captured.
+        let source = "from: direct:start\nsteps:\n  - multicast:\n      - to: log:nested\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none());
+        let nested = doc
+            .route_view
+            .endpoints()
+            .into_iter()
+            .find(|e| e.uri.value == "log:nested")
+            .expect("tolerated multicast child `to` must be captured");
+        assert_eq!(slice_at(&doc.raw, &nested.uri.span), "log:nested");
+    }
+
+    #[test]
+    fn object_form_from_uri_still_captured() {
+        // Object-form `from` has no declared structure in the schema; the
+        // legacy fallback must keep capturing both its nested `uri` and a
+        // sibling step `to`.
+        let source = "from:\n    uri: direct:start\nsteps:\n  - to: log:out\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let uris: Vec<_> = doc
+            .route_view
+            .endpoints()
+            .into_iter()
+            .map(|e| e.uri.value)
+            .collect();
+        assert!(
+            uris.iter().any(|u| u == "direct:start"),
+            "object-form `from.uri` must be captured"
+        );
+        assert!(
+            uris.iter().any(|u| u == "log:out"),
+            "sibling step `to` must be captured"
+        );
     }
 }
