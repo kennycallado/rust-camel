@@ -196,7 +196,7 @@ impl Rule for RSchemaRule {
                             format!("{parent}.{key}")
                         };
                         let span = crate::document::key_span_for(&parsed, &key_path);
-                        diagnostics.push(diagnostic_for(span, err.to_string()));
+                        diagnostics.push(diagnostic_for(span, diagnostic_message(&err)));
                     }
                 }
                 // A failed anyOf surfaces as ONE collapsed error at the
@@ -321,7 +321,7 @@ impl Rule for RSchemaRule {
                         // diagnostic at the anyOf node.
                         let noya_path = instance_path_to_noyalib(instance_path, envelope_depth);
                         let span = crate::document::value_span_for(&parsed, &noya_path);
-                        diagnostics.push(diagnostic_for(span, err.to_string()));
+                        diagnostics.push(diagnostic_for(span, diagnostic_message(&err)));
                     } else {
                         for nested in pattern_errors {
                             let noya_path = instance_path_to_noyalib(
@@ -329,7 +329,7 @@ impl Rule for RSchemaRule {
                                 envelope_depth,
                             );
                             let span = crate::document::value_span_for(&parsed, &noya_path);
-                            diagnostics.push(diagnostic_for(span, nested.to_string()));
+                            diagnostics.push(diagnostic_for(span, diagnostic_message(nested)));
                         }
                     }
                 }
@@ -337,7 +337,7 @@ impl Rule for RSchemaRule {
                 _ => {
                     let noya_path = instance_path_to_noyalib(instance_path, envelope_depth);
                     let span = crate::document::value_span_for(&parsed, &noya_path);
-                    diagnostics.push(diagnostic_for(span, err.to_string()));
+                    diagnostics.push(diagnostic_for(span, diagnostic_message(&err)));
                 }
             }
         }
@@ -417,6 +417,60 @@ fn diagnostic_for(span: Span, message: String) -> Diagnostic {
         span,
         message,
         fix: None,
+    }
+}
+
+/// Serialize a JSON value with recursively sorted object keys.
+///
+/// jsonschema's `Display` echoes the instance via `serde_json`, whose
+/// map ordering depends on the `preserve_order` feature. Workspace-wide
+/// builds unify that feature ON through unrelated crates (the siumai
+/// stack), which echoes instances in authored key order and makes the
+/// lint diagnostics depend on the build graph. Canonical sorting keeps
+/// every diagnostic byte-identical across build configurations; the
+/// pinned byte-exact regression tests fail loudly if this ever drifts.
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let body: Vec<String> = keys
+                .into_iter()
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::Value::String(k.clone()),
+                        canonical_json(&map[k])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        serde_json::Value::Array(items) => {
+            let body: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", body.join(","))
+        }
+        // Primitives echo identically to `serde_json::to_string`.
+        prim => prim.to_string(),
+    }
+}
+
+/// Message for a validation error, with a build-independent instance
+/// echo for the collapsed `anyOf`/`oneOf` shapes — the only kinds whose
+/// `Display` embeds the whole instance. Every other kind keeps
+/// jsonschema's `Display` verbatim (its echoes are scalar or
+/// single-keyed and cannot reorder).
+fn diagnostic_message(err: &ValidationError<'_>) -> String {
+    match err.kind() {
+        ValidationErrorKind::AnyOf { .. } => format!(
+            "{} is not valid under any of the schemas listed in the 'anyOf' keyword",
+            canonical_json(err.instance())
+        ),
+        ValidationErrorKind::OneOfNotValid { .. } => format!(
+            "{} is not valid under any of the schemas listed in the 'oneOf' keyword",
+            canonical_json(err.instance())
+        ),
+        _ => err.to_string(),
     }
 }
 
