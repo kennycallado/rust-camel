@@ -762,3 +762,57 @@ remaining flagged surface:
   note appears (LSP shares the lint engine; completions/hover still see the literal
   placeholder via the raw CST entrypoint)
 
+### Requirement: R-SCHEMA rejects blank MCP TLS path values with runtime parity
+
+The generated ROUTE_SCHEMA MUST reject empty and whitespace-only values
+for `mcp[].server.tls.cert_path` and `mcp[].server.tls.key_path`,
+mirroring the runtime `non_empty_path` deserializer (trim + reject
+empty). The rejection MUST surface as an R-SCHEMA Error anchored on the
+offending value (the anchor pins the offending field), carrying a
+pattern-violation message. Values that are non-empty after trimming
+MUST NOT be flagged (runtime trims and accepts them).
+
+#### Scenario: Empty cert_path is rejected and anchored on the value
+
+- **Given** an `mcp:` block whose `server.tls.cert_path` is the empty
+  string `""` and `key_path` is a valid path
+- **When** R-SCHEMA analyzes the document
+- **Then** exactly one R-SCHEMA Error is emitted, anchored on the blank
+  `cert_path` value with a pattern-violation message, and no Error is
+  anchored on `key_path`
+
+#### Scenario: Whitespace-only key_path is rejected
+
+- **Given** an `mcp:` block whose `server.tls.key_path` is
+  whitespace-only (e.g. `"   "`) and `cert_path` is a valid path
+- **When** R-SCHEMA analyzes the document
+- **Then** exactly one R-SCHEMA Error is emitted, anchored on the blank
+  `key_path` value with a pattern-violation message, and no Error is
+  anchored on `cert_path`
+
+#### Scenario: Blank path via empty env default is rejected
+
+- **Given** an `mcp:` block whose `server.tls.cert_path` is the
+  whole-scalar token `${env:CERT:-}` (empty default)
+- **When** R-SCHEMA analyzes the document against the interpolated copy
+- **Then** an R-SCHEMA Error is emitted, anchored on the authored token,
+  for the blank substituted value (boot substitutes then rejects it —
+  parity)
+
+#### Scenario: Trimmed-valid path stays silent
+
+- **Given** an `mcp:` block whose `server.tls.cert_path` is
+  `" /etc/certs/crm.pem "` (leading/trailing spaces around a real path)
+- **When** R-SCHEMA analyzes the document
+- **Then** no R-SCHEMA diagnostic is emitted for that value (runtime
+  trims and accepts)
+
+#### Scenario: Corpus negative fixture is baselined as failing
+
+- **Given** the corpus fixture
+  `crates/camel-cli/tests/fixtures/lint-corpus/mcp-tls-blank-paths.yaml`
+  carrying a blank `cert_path` and a whitespace-only `key_path`
+- **When** the `corpus_zero_false_positives` gate runs
+- **Then** the fixture emits `("R-SCHEMA", "error")` exactly as recorded
+  in the baseline with a justification, and the gate passes
+
