@@ -49,6 +49,14 @@ _Avoid_: tracing middleware, header copier
   tasks.
 - **Sampling is root-only.** The configured sampler decides ROOT spans only; children inherit the parent sampling decision. An unsampled parent records nothing, while a sampled inbound parent records children even under AlwaysOff.
 
+## Test layout
+
+Unit tests for `OtelService` live in `src/service_tests.rs`, wired as
+`#[cfg(test)] #[path] mod tests` beside `sampler_tests.rs`. The bounded-stop
+stall repros (`rc-q74u`, `rc-6ju71`) share the `bounded_repro` helper defined
+there. New provider-path stall repros (e.g. logs) must reuse it instead of
+copying the thread/channel scaffold.
+
 ## `#[non_exhaustive]` posture
 
 ADR-0049 does not place `camel-otel` in its mandatory contract-crate set. Its
@@ -70,5 +78,5 @@ Rule 3 framework therefore applies case by case, not as a blanket requirement.
 
 | File | Line | Category | Reason |
 |------|------|----------|--------|
-| `src/service.rs` | 288 | `system-broken` | Lifecycle service start failure — config validation failed |
-| `src/service.rs` | ~430 | `system-broken` | `OtelService` dropped without `stop()` — best-effort provider shutdown |
+| `src/service.rs` | 380 | `system-broken` | Lifecycle service start failure — config validation failed |
+| `src/service.rs` | 537 | `system-broken` | `OtelService` dropped without `stop()` — best-effort provider shutdown |
