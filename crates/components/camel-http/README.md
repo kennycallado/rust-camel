@@ -43,8 +43,8 @@ https://host:port/path[?options]
 |--------|---------|-------------|
 | Host/path from URI | - | e.g., `http://0.0.0.0:8080/api` |
 | `maxRequestBody` | `2097152` (2 MB) | If request `Content-Length` exceeds this value, responds 413 before opening the stream. Chunked uploads without `Content-Length` are not limited at the consumer level. |
-| `maxInflightRequests` | `1024` | Maximum concurrently in-flight requests per `(host,port)` server. When saturated, the handler returns HTTP 503 immediately (before enqueueing into the consumer channel). |
-| `maxResponseBody` | `16777216` (16MB) | Maximum response body size for materialized replies (Bytes, Text, Xml, Json). Returns HTTP 500 if exceeded. `Body::Stream` is excluded. |
+| `maxInflightRequests` | `1024` | Maximum concurrently in-flight requests per `(host,port)` server. When saturated, the handler returns HTTP 503 immediately (before enqueueing into the consumer channel). Upper bound `tokio::sync::Semaphore::MAX_PERMITS` (2^61-1 on 64-bit targets); oversized values fail configuration with a typed error instead of panicking. |
+| `maxResponseBody` | `10485760` (10MB) | Maximum response body size for materialized replies (Bytes, Text, Xml, Json). Returns HTTP 500 if exceeded. `Body::Stream` is excluded. |
 
 ## Producer Options (Client)
 

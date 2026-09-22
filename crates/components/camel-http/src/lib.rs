@@ -688,6 +688,10 @@ pub struct HttpServerConfig {
     /// Maximum response body size for materializing streams in bytes.
     pub max_response_body: usize,
     /// Maximum number of in-flight requests handled concurrently by this server.
+    /// bd rc-ns3yc: values above `tokio::sync::Semaphore::MAX_PERMITS` are
+    /// rejected at parse, `create_consumer`, start, and `spawn_entry` (the
+    /// inflight semaphore panics above that bound); `0` remains a
+    /// representable reject-everything value.
     pub max_inflight_requests: usize,
     /// HTTP method this consumer handles (e.g. `"GET"`). When `Some`,
     /// the consumer registers as a method-aware REST endpoint and the
@@ -774,6 +778,10 @@ impl UriConfig for HttpServerConfig {
             .get("maxInflightRequests")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(1024);
+        // bd rc-ns3yc: reject values above the semaphore primitive's bound
+        // at parse time — `Semaphore::new` panics above MAX_PERMITS
+        // (mirror of grpc consumer_concurrency_limit, commit 101327e5).
+        let max_inflight_requests = max_inflight_requests_limit(max_inflight_requests)?;
 
         // Uppercase-normalize so a hand-written `httpMethod=get` matches the
         // uppercase method the dispatcher compares against (axum's
@@ -1236,6 +1244,12 @@ async fn spawn_entry(
     route_id: String,
     tls_config: Option<crate::config::ServerTlsConfig>,
 ) -> Result<Arc<ServerHandle>, CamelError> {
+    // bd rc-ns3yc: defense-in-depth — validate before any listener side
+    // effect (fresh bind or staged-listener consumption), before the
+    // registry/CancellationToken work, and immediately guarding the
+    // `tokio::sync::Semaphore::new` construction below (panics above
+    // MAX_PERMITS).
+    max_inflight_requests_limit(max_inflight_requests)?;
     let rt = Arc::clone(&runtime);
     let rid = route_id.clone();
     let (host_owned, port) = key;
@@ -1780,6 +1794,30 @@ fn envelope_channel_capacity(max_inflight_requests: usize) -> usize {
     max_inflight_requests.max(1)
 }
 
+/// Upper bound check for `maxInflightRequests`.
+///
+/// bd rc-ns3yc: `tokio::sync::Semaphore::new` panics for permit counts above
+/// [`tokio::sync::Semaphore::MAX_PERMITS`], so any representable `usize`
+/// above that bound must be rejected fail-closed with a typed configuration
+/// error naming the parameter, the configured value, and the limit — before
+/// the semaphore primitive is ever constructed. Enforced at URI parse,
+/// `create_consumer`, consumer start, and `spawn_entry` (defense-in-depth);
+/// mirror of the grpc `consumer_concurrency_limit` fix (commit 101327e5).
+///
+/// `0` is deliberately NOT normalized here (rc-3y6j): it remains a
+/// representable reject-everything value (`envelope_channel_capacity`
+/// separately guards the one primitive — the envelope channel — that
+/// cannot take 0).
+pub(crate) fn max_inflight_requests_limit(configured: usize) -> Result<usize, CamelError> {
+    if configured > tokio::sync::Semaphore::MAX_PERMITS {
+        return Err(CamelError::Config(format!(
+            "maxInflightRequests {configured} exceeds the supported upper bound {} (tokio::sync::Semaphore::MAX_PERMITS)",
+            tokio::sync::Semaphore::MAX_PERMITS
+        )));
+    }
+    Ok(configured)
+}
+
 pub struct HttpConsumer {
     config: HttpServerConfig,
     /// Runtime observability handle for ADR-0012 metrics and health calls.
@@ -1804,6 +1842,12 @@ impl HttpConsumer {
 impl Consumer for HttpConsumer {
     async fn start(&mut self, ctx: camel_component_api::ConsumerContext) -> Result<(), CamelError> {
         use camel_component_api::{Body, Exchange, Message};
+
+        // bd rc-ns3yc: fail-closed BEFORE shared-server registry
+        // interaction, listener binding, envelope-channel construction, or
+        // inflight-semaphore construction — an oversized value must never
+        // reach Semaphore::new (panic).
+        max_inflight_requests_limit(self.config.max_inflight_requests)?;
 
         let registry = ServerRegistry::global()
             .get_or_spawn(
@@ -2777,6 +2821,11 @@ impl Endpoint for HttpEndpoint {
                 "http:// is incompatible with tlsCert/tlsKey — use https:// for TLS".to_string(),
             ));
         }
+        // bd rc-ns3yc: fail-closed BEFORE any HttpConsumer is constructed —
+        // a directly-built HttpServerConfig never passed the parse seam, and
+        // the inflight semaphore panics above the primitive bound
+        // (mirror of grpc consumer_concurrency_limit, commit 101327e5).
+        max_inflight_requests_limit(self.server_config.max_inflight_requests)?;
         Ok(Box::new(HttpConsumer::new(self.server_config.clone(), rt)))
     }
 
@@ -8037,6 +8086,177 @@ mod tests {
 
         token.cancel();
         let _ = start_handle.await;
+    }
+
+    // -----------------------------------------------------------------------
+    // maxInflightRequests upper bound (bd rc-ns3yc — mirror of the grpc
+    // consumer_concurrency_limit fix, commit 101327e5)
+    // -----------------------------------------------------------------------
+
+    /// bd rc-ns3yc: `L-1` and `L` are accepted unchanged, `L+1` is rejected
+    /// with a typed config error naming the parameter, the configured value,
+    /// and the limit, and `0` stays a representable reject-everything value
+    /// (no `.max(1)` normalization — rc-3y6j). A semaphore of exactly L
+    /// permits must construct without panicking: the accepted bound is
+    /// exactly the primitive's bound.
+    #[test]
+    fn test_max_inflight_requests_limit_boundary() {
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        assert_eq!(max_inflight_requests_limit(l - 1).unwrap(), l - 1);
+        assert_eq!(max_inflight_requests_limit(l).unwrap(), l);
+        assert_eq!(max_inflight_requests_limit(0).unwrap(), 0);
+        match max_inflight_requests_limit(l + 1) {
+            Err(CamelError::Config(msg)) => {
+                assert!(msg.contains("maxInflightRequests"), "message was: {msg}");
+                assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+                assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got: {other:?}"),
+        }
+        let _ = tokio::sync::Semaphore::new(l);
+    }
+
+    /// bd rc-ns3yc: the accepted upper bound is exactly
+    /// `tokio::sync::Semaphore::MAX_PERMITS`; URI parse must accept L
+    /// unchanged. Boundary-regression guard (green before and after the
+    /// fix — red-first is not definable for an accepted value).
+    #[test]
+    fn test_parse_http_uri_max_inflight_at_limit_accepted() {
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        let uri = format!("http://localhost:8080/api?maxInflightRequests={l}");
+        let cfg = HttpServerConfig::from_uri(&uri).unwrap();
+        assert_eq!(cfg.max_inflight_requests, l);
+    }
+
+    /// bd rc-ns3yc: values above `tokio::sync::Semaphore::MAX_PERMITS` are
+    /// rejected at parse with a typed config error naming the parameter,
+    /// the configured value, and the limit.
+    #[test]
+    fn test_parse_http_uri_max_inflight_above_limit_rejected() {
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        let uri = format!("http://localhost:8080/api?maxInflightRequests={}", l + 1);
+        match HttpServerConfig::from_uri(&uri) {
+            Err(CamelError::Config(msg)) => {
+                assert!(msg.contains("maxInflightRequests"), "message was: {msg}");
+                assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+                assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got: {other:?}"),
+        }
+    }
+
+    /// bd rc-ns3yc: an oversized maxInflightRequests must be rejected at
+    /// create_consumer even when the endpoint's HttpServerConfig was
+    /// constructed directly (not via URI parse). Mirrors the
+    /// https_consumer_without_tls_cert_errors direct-endpoint fixture.
+    #[test]
+    fn test_create_consumer_rejects_oversized_max_inflight() {
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        let endpoint = HttpEndpoint {
+            uri: "http://0.0.0.0:8080/api".to_string(),
+            config: HttpEndpointConfig::from_uri("http://0.0.0.0:8080/api").unwrap(),
+            server_config: HttpServerConfig {
+                scheme: "http".to_string(),
+                host: "0.0.0.0".to_string(),
+                port: 8080,
+                path: "/api".to_string(),
+                max_request_body: 2 * 1024 * 1024,
+                max_response_body: 10 * 1024 * 1024,
+                max_inflight_requests: l + 1,
+                method: None,
+                tls_config: None,
+            },
+            client: reqwest::Client::new(),
+            pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+                PINNED_CLIENT_TTL,
+                PINNED_CLIENT_MAX_ENTRIES,
+            )),
+            http_config: HttpConfig::default(),
+        };
+        match endpoint.create_consumer(rt()) {
+            Err(CamelError::Config(msg)) => {
+                assert!(msg.contains("maxInflightRequests"), "message was: {msg}");
+                assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+                assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+            }
+            Err(other) => panic!("expected CamelError::Config, got: {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    /// bd rc-ns3yc: `start` must reject an oversized maxInflightRequests
+    /// BEFORE shared-server registry interaction, listener binding,
+    /// envelope-channel construction, or semaphore construction — a typed
+    /// config error, no panic. Mirrors the
+    /// test_http_consumer_start_with_zero_max_inflight_rejects_503 fixture.
+    #[tokio::test]
+    async fn test_http_consumer_start_rejects_oversized_before_spawn() {
+        use camel_component_api::ConsumerContext;
+
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
+            host: "127.0.0.1".to_string(),
+            port,
+            path: "/ping".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 10 * 1024 * 1024,
+            max_inflight_requests: l + 1,
+            method: None,
+            tls_config: None,
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+        match consumer.start(ctx).await {
+            Err(CamelError::Config(msg)) => {
+                assert!(msg.contains("maxInflightRequests"), "message was: {msg}");
+                assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+                assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got: {other:?}"),
+        }
+        token.cancel();
+    }
+
+    /// bd rc-ns3yc: defense-in-depth — `spawn_entry` must reject an
+    /// oversized max_inflight_requests before any listener side effect and
+    /// before `tokio::sync::Semaphore::new` is reached (which would panic).
+    #[tokio::test]
+    async fn test_spawn_entry_rejects_oversized_before_semaphore() {
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let key: ServerKey = (addr.ip().to_string(), addr.port());
+
+        let result = spawn_entry(
+            key,
+            ListenerSource::Staged(listener),
+            1,
+            1,
+            l + 1,
+            test_rt(),
+            "route-test".into(),
+            None,
+        )
+        .await;
+
+        match result {
+            Err(CamelError::Config(msg)) => {
+                assert!(msg.contains("maxInflightRequests"), "message was: {msg}");
+                assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+                assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+            }
+            Err(other) => panic!("expected CamelError::Config, got: {other:?}"),
+            Ok(_) => panic!("expected CamelError::Config, got Ok"),
+        }
     }
 
     /// rc-w1u9: HttpConsumer MUST declare Explicit startup_mode so the runtime

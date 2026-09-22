@@ -16,7 +16,10 @@ The in-flight semaphore (`maxInflightRequests`) is the single intake
 backpressure point. The per-route `RequestEnvelope` channel capacity derives
 from the same limit (`envelope_channel_capacity`, minimum 1), so the channel
 can never become a second, hidden inflight cap; `0` rejects every request with
-503 instead of panicking at consumer start.
+503 instead of panicking at consumer start. Values above
+`tokio::sync::Semaphore::MAX_PERMITS` are rejected with a typed configuration
+error at parse, create, start, and spawn seams (bd rc-ns3yc, mirroring
+rc-9kgtm); `0` keeps its reject-everything meaning.
 
 ### Credential redaction
 
