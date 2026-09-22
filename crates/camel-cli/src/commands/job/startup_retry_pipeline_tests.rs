@@ -224,7 +224,10 @@ routes:
     let result = send_with_startup_retry(&ctx, &send, "direct:jobs", &[]).await;
     let elapsed = started.elapsed();
 
-    racer.await.expect("route-registration task");
+    tokio::time::timeout(Duration::from_secs(2), racer)
+        .await
+        .expect("route-registration task within 2s")
+        .expect("route-registration task");
     match result {
         Ok(_) => {}
         Err(SendError::Pipeline(e)) => {

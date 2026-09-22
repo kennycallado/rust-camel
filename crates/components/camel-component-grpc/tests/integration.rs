@@ -1923,3 +1923,649 @@ async fn wait_for_total(
     .await;
     counter.load(std::sync::atomic::Ordering::Acquire) == target
 }
+
+/// rc-orr73 (task 1.4): open a bidi call and forward every response item —
+/// including the terminal `Err(status)` — to `item_tx`, so callers can
+/// observe stream termination. Holding the returned request sender keeps
+/// the call open; dropping it ends the call.
+async fn open_bidi_call(
+    mut client: StreamServiceClient<tonic::transport::Channel>,
+    item_tx: tokio::sync::mpsc::Sender<Result<streaming::EchoResponse, tonic::Status>>,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::Sender<streaming::EchoRequest>,
+) {
+    let (echo_tx, echo_rx) = tokio::sync::mpsc::channel::<streaming::EchoRequest>(4);
+    let handle = tokio::spawn(async move {
+        let response = client
+            .bidi_echo(tonic::Request::new(
+                tokio_stream::wrappers::ReceiverStream::new(echo_rx),
+            ))
+            .await
+            .expect("bidi open");
+        let mut stream = response.into_inner();
+        while let Some(item) = tokio_stream::StreamExt::next(&mut stream).await {
+            let _ = item_tx.send(item).await;
+        }
+    });
+    (handle, echo_tx)
+}
+
+/// rc-orr73 (task 1.4): a saturated consumer (concurrency 1, client A holds
+/// THE permit, client B dequeued and blocked on the permit wait) must exit
+/// cleanly on cancellation: the consumer task joins within 2s, B is failed
+/// with `Unavailable`, A's stream terminates, and all claims release.
+#[tokio::test]
+async fn grpc_consumer_shutdown_during_saturated_permit_wait_exits_cleanly() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/streaming.proto");
+
+    let mut consumer = GrpcConsumer::new(
+        "127.0.0.1".to_string(),
+        port,
+        "/streaming.StreamService/BidiEcho".to_string(),
+        proto_path,
+        "streaming.StreamService".to_string(),
+        "BidiEcho".to_string(),
+        GrpcMode::Bidi,
+        test_rt(),
+        GrpcServerConfig::default(),
+        1,
+    );
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
+    let cancel_token = CancellationToken::new();
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-permit-shutdown-route".to_string(),
+    )
+    .with_in_flight_counter(std::sync::Arc::clone(&counter));
+
+    let consumer_task = tokio::spawn(async move {
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("consumer start");
+    });
+
+    // Gated bidi responder: per envelope — take the claim, take the stream
+    // observer, signal arrival, WAIT for release, emit one echo via the
+    // observer, then drop the claim. Holding the claim across the gate keeps
+    // every counter value below stable, not transient.
+    let (arrived_tx, mut arrived_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let (release_tx, mut release_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let pipeline_task = tokio::spawn(async move {
+        loop {
+            match timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(mut envelope)) => {
+                    let claim = envelope.in_flight_claim.take();
+                    let observer = take_stream_observer(&envelope.exchange)
+                        .expect("bidi exchange must carry a stream observer");
+                    arrived_tx.send(()).await.expect("test alive");
+                    timeout(Duration::from_secs(2), release_rx.recv())
+                        .await
+                        .expect("release gate within 2s")
+                        .expect("gate channel alive");
+                    let _ = observer
+                        .on_next(serde_json::json!({"message": "echo", "sequence": 1}))
+                        .await;
+                    drop(claim);
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // allow-test-sleep: readiness for saturated-permit consumer test (rc-orr73)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Client A: open the bidi call and send one chunk; A's processor holds
+    // THE single permit while the gate is closed.
+    let channel_a = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let (a_item_tx, mut a_item_rx) = tokio::sync::mpsc::channel(16);
+    let (_a_call, a_echo_tx) = open_bidi_call(StreamServiceClient::new(channel_a), a_item_tx).await;
+    a_echo_tx
+        .send(streaming::EchoRequest {
+            message: "a".to_string(),
+        })
+        .await
+        .expect("send a");
+    tokio::time::timeout(Duration::from_secs(5), arrived_rx.recv())
+        .await
+        .expect("A exchange must arrive within 5s")
+        .expect("route channel open");
+    assert!(
+        wait_for_total(&counter, 2, Duration::from_secs(5)).await,
+        "A call-scoped claim + A chunk-exchange claim, both held stable by the gate"
+    );
+
+    release_tx.send(()).await.expect("responder alive");
+    let a_echo = timeout(Duration::from_secs(5), a_item_rx.recv())
+        .await
+        .expect("A echo within 5s");
+    assert!(
+        matches!(a_echo, Some(Ok(ref resp)) if resp.message == "echo"),
+        "A must receive its echo"
+    );
+    assert!(
+        wait_for_total(&counter, 1, Duration::from_secs(5)).await,
+        "A call-scoped claim alone: A's processor holds THE single permit"
+    );
+
+    // Client B: dequeued, then blocked on the saturated permit wait.
+    let channel_b = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let (b_item_tx, mut b_item_rx) = tokio::sync::mpsc::channel(16);
+    let (_b_call, _b_echo_tx) =
+        open_bidi_call(StreamServiceClient::new(channel_b), b_item_tx).await;
+    assert!(
+        wait_for_total(&counter, 2, Duration::from_secs(5)).await,
+        "B acceptance claim proves B was dequeued and is blocked on the permit wait"
+    );
+
+    // ACT: cancel while B is blocked on the permit wait.
+    cancel_token.cancel();
+    timeout(Duration::from_secs(2), consumer_task)
+        .await
+        .expect("consumer must exit within 2s")
+        .expect("clean consumer exit");
+
+    let b_item = timeout(Duration::from_secs(2), b_item_rx.recv())
+        .await
+        .expect("B call must terminate within 2s");
+    assert!(
+        matches!(
+            b_item,
+            Some(Err(ref status)) if status.code() == tonic::Code::Unavailable
+        ),
+        "B must receive Unavailable"
+    );
+    // rc-qq8zz: bidi response streams end only when the client closes its
+    // request side (pre-existing BidiHandler behavior); the consumer-side
+    // hang this test pins is fixed by the permit wait rework.
+    drop(a_echo_tx);
+    let a_next = timeout(Duration::from_secs(2), a_item_rx.recv())
+        .await
+        .expect("A stream must terminate within 2s");
+    assert!(
+        matches!(a_next, None | Some(Err(_))),
+        "A stream must be terminal after the drained echo"
+    );
+    assert!(
+        wait_for_total(&counter, 0, Duration::from_secs(2)).await,
+        "all claims released exactly once"
+    );
+
+    // Spare gate token in case a late envelope arrives during teardown;
+    // then let the responder break on route-channel close.
+    let _ = release_tx.send(()).await;
+    drop(release_tx);
+    let _ = timeout(Duration::from_secs(2), pipeline_task).await;
+}
+
+/// rc-orr73 (task 1.4): aborting a consumer while a call is blocked mid
+/// permit-wait must fail that call (any terminal outcome) and leave the
+/// path re-registrable: a fresh consumer on the same host/port/path starts
+/// without a duplicate-path error and serves new traffic.
+#[tokio::test]
+async fn grpc_consumer_abort_mid_permit_wait_allows_same_path_restart() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/streaming.proto");
+    let proto_path2 = proto_path.clone();
+
+    let mut consumer = GrpcConsumer::new(
+        "127.0.0.1".to_string(),
+        port,
+        "/streaming.StreamService/BidiEcho".to_string(),
+        proto_path,
+        "streaming.StreamService".to_string(),
+        "BidiEcho".to_string(),
+        GrpcMode::Bidi,
+        test_rt(),
+        GrpcServerConfig::default(),
+        1,
+    );
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
+    let cancel_token = CancellationToken::new();
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-permit-abort-route".to_string(),
+    )
+    .with_in_flight_counter(std::sync::Arc::clone(&counter));
+
+    let consumer_task = tokio::spawn(async move {
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("consumer start");
+    });
+
+    // Gated bidi responder (see the shutdown test for the rationale).
+    let (arrived_tx, mut arrived_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let (release_tx, mut release_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let pipeline_task = tokio::spawn(async move {
+        loop {
+            match timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(mut envelope)) => {
+                    let claim = envelope.in_flight_claim.take();
+                    let observer = take_stream_observer(&envelope.exchange)
+                        .expect("bidi exchange must carry a stream observer");
+                    arrived_tx.send(()).await.expect("test alive");
+                    timeout(Duration::from_secs(2), release_rx.recv())
+                        .await
+                        .expect("release gate within 2s")
+                        .expect("gate channel alive");
+                    let _ = observer
+                        .on_next(serde_json::json!({"message": "echo", "sequence": 1}))
+                        .await;
+                    drop(claim);
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // allow-test-sleep: readiness for saturated-permit consumer test (rc-orr73)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Client A holds THE single permit once its echo is drained.
+    let channel_a = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let (a_item_tx, mut a_item_rx) = tokio::sync::mpsc::channel(16);
+    let (_a_call, a_echo_tx) = open_bidi_call(StreamServiceClient::new(channel_a), a_item_tx).await;
+    a_echo_tx
+        .send(streaming::EchoRequest {
+            message: "a".to_string(),
+        })
+        .await
+        .expect("send a");
+    tokio::time::timeout(Duration::from_secs(5), arrived_rx.recv())
+        .await
+        .expect("A exchange must arrive within 5s")
+        .expect("route channel open");
+    assert!(
+        wait_for_total(&counter, 2, Duration::from_secs(5)).await,
+        "A call-scoped claim + A chunk-exchange claim, both held stable by the gate"
+    );
+
+    release_tx.send(()).await.expect("responder alive");
+    let a_echo = timeout(Duration::from_secs(5), a_item_rx.recv())
+        .await
+        .expect("A echo within 5s");
+    assert!(
+        matches!(a_echo, Some(Ok(ref resp)) if resp.message == "echo"),
+        "A must receive its echo"
+    );
+    assert!(
+        wait_for_total(&counter, 1, Duration::from_secs(5)).await,
+        "A call-scoped claim alone: A's processor holds THE single permit"
+    );
+
+    // Client B: dequeued, then blocked on the saturated permit wait.
+    let channel_b = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let (b_item_tx, mut b_item_rx) = tokio::sync::mpsc::channel(16);
+    let (_b_call, b_echo_tx) = open_bidi_call(StreamServiceClient::new(channel_b), b_item_tx).await;
+    assert!(
+        wait_for_total(&counter, 2, Duration::from_secs(5)).await,
+        "B acceptance claim proves B was dequeued and is blocked on the permit wait"
+    );
+
+    // ACT: abort mid permit-wait.
+    consumer_task.abort();
+    let _ = timeout(Duration::from_secs(2), consumer_task).await;
+
+    // rc-qq8zz: bidi response streams end only when the client closes its
+    // request side (pre-existing BidiHandler behavior); the consumer-side
+    // hang this test pins is fixed by the permit wait rework.
+    drop(b_echo_tx);
+
+    let b_outcome = timeout(Duration::from_secs(2), b_item_rx.recv())
+        .await
+        .expect("B call must terminate within 2s after abort");
+    assert!(
+        matches!(b_outcome, Some(Err(_)) | None),
+        "B call must terminate with any outcome"
+    );
+
+    let _ = release_tx.send(()).await;
+    drop(release_tx);
+    let _ = timeout(Duration::from_secs(2), pipeline_task).await;
+
+    // RESTART: same host/port/path; the port is still bound by the
+    // process-lifetime server, so `start()` reuses the registry dispatch.
+    let mut consumer2 = GrpcConsumer::new(
+        "127.0.0.1".to_string(),
+        port,
+        "/streaming.StreamService/BidiEcho".to_string(),
+        proto_path2,
+        "streaming.StreamService".to_string(),
+        "BidiEcho".to_string(),
+        GrpcMode::Bidi,
+        test_rt(),
+        GrpcServerConfig::default(),
+        1,
+    );
+    let (route_tx2, mut route_rx2) = tokio::sync::mpsc::channel(16);
+    let cancel_token2 = CancellationToken::new();
+    let ctx2 = ConsumerContext::new(
+        route_tx2,
+        cancel_token2.clone(),
+        "grpc-permit-abort-route-2".to_string(),
+    );
+    let (arrived2_tx, mut arrived2_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let (release2_tx, mut release2_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let responder2_task = tokio::spawn(async move {
+        loop {
+            match timeout(Duration::from_secs(2), route_rx2.recv()).await {
+                Ok(Some(mut envelope)) => {
+                    let claim = envelope.in_flight_claim.take();
+                    let observer = take_stream_observer(&envelope.exchange)
+                        .expect("bidi exchange must carry a stream observer");
+                    arrived2_tx.send(()).await.expect("test alive");
+                    timeout(Duration::from_secs(2), release2_rx.recv())
+                        .await
+                        .expect("release gate within 2s")
+                        .expect("gate channel alive");
+                    let _ = observer
+                        .on_next(serde_json::json!({"message": "echo", "sequence": 1}))
+                        .await;
+                    drop(claim);
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+    let consumer2_task = tokio::spawn(async move {
+        consumer2.start(ctx2).await.expect("start consumer2");
+    });
+
+    // allow-test-sleep: readiness for saturated-permit consumer test (rc-orr73)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !consumer2_task.is_finished(),
+        "restart must not fail with a duplicate-path error"
+    );
+
+    // Client C: the restarted consumer must serve new traffic.
+    let channel_c = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let (c_item_tx, mut c_item_rx) = tokio::sync::mpsc::channel(16);
+    let (_c_call, c_echo_tx) = open_bidi_call(StreamServiceClient::new(channel_c), c_item_tx).await;
+    c_echo_tx
+        .send(streaming::EchoRequest {
+            message: "c".to_string(),
+        })
+        .await
+        .expect("send c");
+    tokio::time::timeout(Duration::from_secs(5), arrived2_rx.recv())
+        .await
+        .expect("C exchange must arrive within 5s")
+        .expect("route channel open");
+    release2_tx.send(()).await.expect("responder2 alive");
+    let c_echo = timeout(Duration::from_secs(2), c_item_rx.recv())
+        .await
+        .expect("C echo within 2s");
+    assert!(
+        matches!(c_echo, Some(Ok(ref resp)) if resp.message == "echo"),
+        "C must receive its echo"
+    );
+    assert!(
+        !consumer2_task.is_finished(),
+        "consumer2 must still be serving"
+    );
+
+    cancel_token2.cancel();
+    timeout(Duration::from_secs(2), consumer2_task)
+        .await
+        .expect("consumer2 must exit within 2s")
+        .expect("clean consumer2 exit");
+    let _ = release2_tx.send(()).await;
+    drop(release2_tx);
+    let _ = timeout(Duration::from_secs(2), responder2_task).await;
+}
+
+/// rc-orr73 (task 1.4): graceful stop under saturation (client B blocked on
+/// the permit wait) must complete within 2s, fail B with `Unavailable`, and
+/// allow a fresh consumer to re-register the same host/port/path and serve
+/// new traffic.
+#[tokio::test]
+async fn grpc_consumer_saturated_stop_then_restart_reregisters_same_path() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/streaming.proto");
+    let proto_path2 = proto_path.clone();
+
+    let mut consumer = GrpcConsumer::new(
+        "127.0.0.1".to_string(),
+        port,
+        "/streaming.StreamService/BidiEcho".to_string(),
+        proto_path,
+        "streaming.StreamService".to_string(),
+        "BidiEcho".to_string(),
+        GrpcMode::Bidi,
+        test_rt(),
+        GrpcServerConfig::default(),
+        1,
+    );
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
+    let cancel_token = CancellationToken::new();
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-permit-restart-route".to_string(),
+    )
+    .with_in_flight_counter(std::sync::Arc::clone(&counter));
+
+    let consumer_task = tokio::spawn(async move {
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("consumer start");
+    });
+
+    // Gated bidi responder (see the shutdown test for the rationale).
+    let (arrived_tx, mut arrived_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let (release_tx, mut release_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let pipeline_task = tokio::spawn(async move {
+        loop {
+            match timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(mut envelope)) => {
+                    let claim = envelope.in_flight_claim.take();
+                    let observer = take_stream_observer(&envelope.exchange)
+                        .expect("bidi exchange must carry a stream observer");
+                    arrived_tx.send(()).await.expect("test alive");
+                    timeout(Duration::from_secs(2), release_rx.recv())
+                        .await
+                        .expect("release gate within 2s")
+                        .expect("gate channel alive");
+                    let _ = observer
+                        .on_next(serde_json::json!({"message": "echo", "sequence": 1}))
+                        .await;
+                    drop(claim);
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // allow-test-sleep: readiness for saturated-permit consumer test (rc-orr73)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Client A holds THE single permit once its echo is drained.
+    let channel_a = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let (a_item_tx, mut a_item_rx) = tokio::sync::mpsc::channel(16);
+    let (_a_call, a_echo_tx) = open_bidi_call(StreamServiceClient::new(channel_a), a_item_tx).await;
+    a_echo_tx
+        .send(streaming::EchoRequest {
+            message: "a".to_string(),
+        })
+        .await
+        .expect("send a");
+    tokio::time::timeout(Duration::from_secs(5), arrived_rx.recv())
+        .await
+        .expect("A exchange must arrive within 5s")
+        .expect("route channel open");
+    assert!(
+        wait_for_total(&counter, 2, Duration::from_secs(5)).await,
+        "A call-scoped claim + A chunk-exchange claim, both held stable by the gate"
+    );
+
+    release_tx.send(()).await.expect("responder alive");
+    let a_echo = timeout(Duration::from_secs(5), a_item_rx.recv())
+        .await
+        .expect("A echo within 5s");
+    assert!(
+        matches!(a_echo, Some(Ok(ref resp)) if resp.message == "echo"),
+        "A must receive its echo"
+    );
+    assert!(
+        wait_for_total(&counter, 1, Duration::from_secs(5)).await,
+        "A call-scoped claim alone: A's processor holds THE single permit"
+    );
+
+    // Client B: dequeued, then blocked on the saturated permit wait.
+    let channel_b = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let (b_item_tx, mut b_item_rx) = tokio::sync::mpsc::channel(16);
+    let (_b_call, _b_echo_tx) =
+        open_bidi_call(StreamServiceClient::new(channel_b), b_item_tx).await;
+    assert!(
+        wait_for_total(&counter, 2, Duration::from_secs(5)).await,
+        "B acceptance claim proves B was dequeued and is blocked on the permit wait"
+    );
+
+    // ACT: graceful stop while B is blocked on the permit wait.
+    cancel_token.cancel();
+    timeout(Duration::from_secs(2), consumer_task)
+        .await
+        .expect("consumer must exit within 2s")
+        .expect("clean consumer exit");
+
+    let b_item = timeout(Duration::from_secs(2), b_item_rx.recv())
+        .await
+        .expect("B call must terminate within 2s");
+    assert!(
+        matches!(
+            b_item,
+            Some(Err(ref status)) if status.code() == tonic::Code::Unavailable
+        ),
+        "B must receive Unavailable"
+    );
+
+    let _ = release_tx.send(()).await;
+    drop(release_tx);
+    let _ = timeout(Duration::from_secs(2), pipeline_task).await;
+
+    // RESTART: same host/port/path; the port is still bound by the
+    // process-lifetime server, so `start()` reuses the registry dispatch.
+    let mut consumer2 = GrpcConsumer::new(
+        "127.0.0.1".to_string(),
+        port,
+        "/streaming.StreamService/BidiEcho".to_string(),
+        proto_path2,
+        "streaming.StreamService".to_string(),
+        "BidiEcho".to_string(),
+        GrpcMode::Bidi,
+        test_rt(),
+        GrpcServerConfig::default(),
+        1,
+    );
+    let (route_tx2, mut route_rx2) = tokio::sync::mpsc::channel(16);
+    let cancel_token2 = CancellationToken::new();
+    let ctx2 = ConsumerContext::new(
+        route_tx2,
+        cancel_token2.clone(),
+        "grpc-permit-restart-route-2".to_string(),
+    );
+    let (arrived2_tx, mut arrived2_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let (release2_tx, mut release2_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let responder2_task = tokio::spawn(async move {
+        loop {
+            match timeout(Duration::from_secs(2), route_rx2.recv()).await {
+                Ok(Some(mut envelope)) => {
+                    let claim = envelope.in_flight_claim.take();
+                    let observer = take_stream_observer(&envelope.exchange)
+                        .expect("bidi exchange must carry a stream observer");
+                    arrived2_tx.send(()).await.expect("test alive");
+                    timeout(Duration::from_secs(2), release2_rx.recv())
+                        .await
+                        .expect("release gate within 2s")
+                        .expect("gate channel alive");
+                    let _ = observer
+                        .on_next(serde_json::json!({"message": "echo", "sequence": 1}))
+                        .await;
+                    drop(claim);
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+    let consumer2_task = tokio::spawn(async move {
+        consumer2.start(ctx2).await.expect("start consumer2");
+    });
+
+    // allow-test-sleep: readiness for saturated-permit consumer test (rc-orr73)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !consumer2_task.is_finished(),
+        "restart must not fail with a duplicate-path error"
+    );
+
+    // Client C: the restarted consumer must serve new traffic.
+    let channel_c = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let (c_item_tx, mut c_item_rx) = tokio::sync::mpsc::channel(16);
+    let (_c_call, c_echo_tx) = open_bidi_call(StreamServiceClient::new(channel_c), c_item_tx).await;
+    c_echo_tx
+        .send(streaming::EchoRequest {
+            message: "c".to_string(),
+        })
+        .await
+        .expect("send c");
+    tokio::time::timeout(Duration::from_secs(5), arrived2_rx.recv())
+        .await
+        .expect("C exchange must arrive within 5s")
+        .expect("route channel open");
+    release2_tx.send(()).await.expect("responder2 alive");
+    let c_echo = timeout(Duration::from_secs(2), c_item_rx.recv())
+        .await
+        .expect("C echo within 2s");
+    assert!(
+        matches!(c_echo, Some(Ok(ref resp)) if resp.message == "echo"),
+        "C must receive its echo"
+    );
+
+    cancel_token2.cancel();
+    timeout(Duration::from_secs(2), consumer2_task)
+        .await
+        .expect("consumer2 must exit within 2s")
+        .expect("clean consumer2 exit");
+    let _ = release2_tx.send(()).await;
+    drop(release2_tx);
+    let _ = timeout(Duration::from_secs(2), responder2_task).await;
+}

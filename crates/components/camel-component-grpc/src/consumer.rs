@@ -25,6 +25,7 @@ use tracing::{debug, info};
 
 use crate::config::GrpcServerConfig;
 use crate::mode::GrpcMode;
+use crate::server::GrpcDispatchEntry;
 use crate::server::GrpcDispatchTable;
 use crate::server::GrpcKernelAuth;
 use crate::server::GrpcServerRegistry;
@@ -237,6 +238,169 @@ pub(crate) enum GrpcRequestEnvelope {
         reply_tx: mpsc::Sender<GrpcStreamItem>,
         kernel_principal: Option<AuthenticatedPrincipal>,
     },
+}
+
+/// Outcome of a cancellation-safe dispatcher-permit wait (bd rc-orr73).
+///
+/// A saturated permit wait must not pin the consumer loop past shutdown:
+/// either the permit arrives, or the cancellation token fires first.
+enum PermitWait {
+    Granted(tokio::sync::OwnedSemaphorePermit),
+    Cancelled,
+}
+
+/// Wait for a dispatcher permit, waking immediately on cancellation.
+///
+/// `biased` polls the cancellation branch first so a token already
+/// cancelled before entry resolves `Cancelled` even when a permit is
+/// simultaneously available — shutdown wins the race (bd rc-orr73).
+async fn acquire_permit_cancel_safe(
+    sem: std::sync::Arc<tokio::sync::Semaphore>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<PermitWait, CamelError> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Ok(PermitWait::Cancelled),
+        permit = sem.acquire_owned() => permit
+            .map(PermitWait::Granted)
+            .map_err(|_| CamelError::ChannelClosed),
+    }
+}
+
+/// Best-effort UNAVAILABLE reply for an envelope dropped at shutdown.
+///
+/// Unary-style envelopes answer on the oneshot; streaming envelopes get a
+/// non-blocking `try_send`. Both are best-effort: a gone or full receiver
+/// is ignored, never awaited — the shutdown path must not block.
+fn reply_unavailable(envelope: GrpcRequestEnvelope) {
+    const SHUTDOWN_STATUS: &str = "consumer shutting down";
+    debug!(path = "grpc consumer", "reply unavailable on shutdown");
+    match envelope {
+        GrpcRequestEnvelope::Unary { reply_tx, .. }
+        | GrpcRequestEnvelope::ClientStreaming { reply_tx, .. } => {
+            let _ = reply_tx.send(GrpcReply::Err(Status::unavailable(SHUTDOWN_STATUS)));
+        }
+        GrpcRequestEnvelope::ServerStreaming { reply_tx, .. }
+        | GrpcRequestEnvelope::Bidi { reply_tx, .. } => {
+            let _ = reply_tx.try_send(GrpcStreamItem::Error(Status::unavailable(SHUTDOWN_STATUS)));
+        }
+    }
+}
+
+// ── Identity-owned dispatch registration (bd rc-orr73, Task 1.2) ──────────
+
+/// Remove a dispatch entry only when it is still owned by `env_tx`.
+///
+/// Identity check: the guard is the *registration owner*, not the path
+/// owner. When Task 1.3's insert overwrites the path with a newer
+/// registration on a fresh channel, the stale owner must leave the
+/// replacement untouched.
+fn remove_owned_entry(
+    table: &mut tokio::sync::RwLockWriteGuard<
+        '_,
+        std::collections::HashMap<String, GrpcDispatchEntry>,
+    >,
+    path: &str,
+    env_tx: &mpsc::Sender<GrpcRequestEnvelope>,
+) {
+    if table
+        .get(path)
+        .is_some_and(|entry| entry.0.same_channel(env_tx))
+    {
+        table.remove(path);
+    }
+}
+
+/// Identity-owned registration in the server's dispatch table.
+///
+/// The consumer registers its envelope sender under its route path in
+/// `start_inner`; this guard owns that registration and removes it on
+/// `cleanup` or drop. Removal is identity-checked (`remove_owned_entry`),
+/// so a replacement registration on the same path is never destroyed by
+/// a stale owner.
+struct DispatchRegistrationGuard {
+    dispatch: GrpcDispatchTable,
+    path: String,
+    env_tx: mpsc::Sender<GrpcRequestEnvelope>,
+    armed: bool,
+}
+
+impl DispatchRegistrationGuard {
+    fn arm(
+        dispatch: GrpcDispatchTable,
+        path: String,
+        env_tx: mpsc::Sender<GrpcRequestEnvelope>,
+    ) -> Self {
+        Self {
+            dispatch,
+            path,
+            env_tx,
+            armed: true,
+        }
+    }
+
+    /// Remove this guard's registration, then disarm the guard.
+    async fn cleanup(&mut self) {
+        let mut table = self.dispatch.write().await;
+        remove_owned_entry(&mut table, &self.path, &self.env_tx);
+        // Disarm while still holding the write guard: no `.await` between
+        // removal and disarm, so a racing Drop cannot re-run removal.
+        self.armed = false;
+    }
+}
+
+impl Drop for DispatchRegistrationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match self.dispatch.try_write() {
+            // Uncontended: remove synchronously, no runtime needed.
+            Ok(mut table) => remove_owned_entry(&mut table, &self.path, &self.env_tx),
+            Err(_) => {
+                // Contended on a live runtime: defer to a spawned task.
+                // No runtime (teardown): the entry's sender closes once
+                // the consumer's receiver drops, and a new registration
+                // replaces the path wholesale — doing nothing is safe.
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let dispatch = Arc::clone(&self.dispatch);
+                    let path = self.path.clone();
+                    let env_tx = self.env_tx.clone();
+                    handle.spawn(async move {
+                        let mut table = dispatch.write().await;
+                        remove_owned_entry(&mut table, &path, &env_tx);
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Register a consumer's envelope sender under its route path.
+///
+/// A live entry (sender not closed) fails as a duplicate, unchanged from
+/// the previous inline check. An entry whose sender is closed is a stale
+/// registration left behind by a forced abort or runtime teardown (bd
+/// rc-orr73): its consumer is gone and nothing will ever remove it, so it
+/// is replaceable — the fresh sender overwrites it instead of the path
+/// being poisoned forever.
+fn insert_dispatch_entry(
+    table: &mut tokio::sync::RwLockWriteGuard<
+        '_,
+        std::collections::HashMap<String, GrpcDispatchEntry>,
+    >,
+    path: &str,
+    env_tx: mpsc::Sender<GrpcRequestEnvelope>,
+    mode: GrpcMode,
+    kernel: Option<Arc<GrpcKernelAuth>>,
+) -> Result<(), CamelError> {
+    if table.get(path).is_some_and(|entry| !entry.0.is_closed()) {
+        return Err(CamelError::EndpointCreationFailed(format!(
+            "duplicate gRPC consumer path: {path}"
+        )));
+    }
+    table.insert(path.to_string(), (env_tx, mode, kernel));
+    Ok(())
 }
 
 // ── Observer registry ──────────────────────────────────────────────────────
@@ -512,18 +676,18 @@ impl GrpcConsumer {
             .as_ref()
             .and_then(GrpcKernelAuth::from_security_context)
             .map(Arc::new);
+        let path = self.path.clone();
+        // Clone BEFORE the insert: the registration guard needs a
+        // `same_channel`-comparable clone of the sender that actually
+        // lands in the table (bd rc-orr73).
+        let env_tx_for_guard = env_tx.clone();
         {
             let mut table = dispatch.write().await;
-            if table.contains_key(&self.path) {
-                return Err(CamelError::EndpointCreationFailed(format!(
-                    "duplicate gRPC consumer path: {}",
-                    self.path
-                )));
-            }
-            table.insert(self.path.clone(), (env_tx, mode, kernel.clone()));
+            insert_dispatch_entry(&mut table, &path, env_tx, mode, kernel.clone())?;
         }
+        let mut registration =
+            DispatchRegistrationGuard::arm(Arc::clone(&dispatch), path.clone(), env_tx_for_guard);
 
-        let path = self.path.clone();
         let host = self.host.clone();
         let port = self.port;
         let sender = ctx.sender();
@@ -577,8 +741,26 @@ impl GrpcConsumer {
                     // grpc_consumer_client_streaming_holds_claim_across_idle_gap).
                     let claim = in_flight.as_ref().map(InFlightClaim::attach);
 
-                    let sem = semaphore.clone();
-                    let permit = sem.acquire_owned().await.map_err(|_| CamelError::ChannelClosed)?;
+                    // rc-orr73: a saturated permit wait must not pin the
+                    // loop past shutdown — cancellation wins the race, the
+                    // dropped envelope gets a best-effort UNAVAILABLE, and
+                    // the registration guard drops (removing the entry).
+                    let permit = match acquire_permit_cancel_safe(
+                        semaphore.clone(),
+                        ctx.cancel_token(),
+                    )
+                    .await
+                    {
+                        Ok(PermitWait::Granted(permit)) => permit,
+                        Ok(PermitWait::Cancelled) => {
+                            reply_unavailable(envelope);
+                            break;
+                        }
+                        Err(e) => {
+                            reply_unavailable(envelope);
+                            return Err(e);
+                        }
+                    };
                     let req_desc = req_desc.clone();
                     let resp_desc = resp_desc.clone();
                     let sender = sender.clone();
@@ -665,9 +847,9 @@ impl GrpcConsumer {
 
         join_set.shutdown().await;
 
-        GrpcServerRegistry::global()
-            .unregister(&host, port, &path)
-            .await;
+        // rc-orr73: identity-checked, awaited removal of THIS consumer's
+        // dispatch registration (disarm happens under the write lock).
+        registration.cleanup().await;
 
         info!(
             path = %path,
@@ -1349,5 +1531,241 @@ mod tests {
             Ok(()) => panic!("readiness must not be signalled for a rejected start"),
         }
         Ok(())
+    }
+
+    // ── rc-orr73: cancel-safe permit wait + UNAVAILABLE shutdown reply ────
+
+    /// A free semaphore grants the permit immediately, well inside the
+    /// timeout.
+    #[tokio::test]
+    async fn permit_wait_cancel_safe_grants_permit_when_free() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let token = CancellationToken::new();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            acquire_permit_cancel_safe(sem, token),
+        )
+        .await
+        .expect("free permit must be granted promptly");
+
+        assert!(matches!(outcome, Ok(PermitWait::Granted(_))));
+    }
+
+    /// A saturated semaphore wait resolves `Cancelled` promptly once the
+    /// token fires — the core rc-orr73 guarantee.
+    #[tokio::test]
+    async fn permit_wait_cancel_safe_returns_cancelled_on_token_cancel() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let _held = sem.clone().acquire_owned().await.unwrap();
+        let token = CancellationToken::new();
+
+        let handle = tokio::spawn(acquire_permit_cancel_safe(sem, token.clone()));
+        token.cancel();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(500), handle)
+            .await
+            .expect("cancelled wait must resolve promptly")
+            .expect("task must not panic");
+
+        assert!(matches!(outcome, Ok(PermitWait::Cancelled)));
+    }
+
+    /// Unary and ClientStreaming envelopes answer on the oneshot with an
+    /// UNAVAILABLE `GrpcReply::Err`.
+    #[tokio::test]
+    async fn reply_unavailable_unary_and_client_streaming_send_reply_err() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        reply_unavailable(GrpcRequestEnvelope::Unary {
+            metadata: tonic::metadata::MetadataMap::new(),
+            body: Vec::new(),
+            reply_tx: tx,
+            kernel_principal: None,
+        });
+        assert!(matches!(
+            rx.await,
+            Ok(GrpcReply::Err(ref status)) if status.code() == tonic::Code::Unavailable
+        ));
+
+        let (_body_tx, body_rx) = mpsc::channel(1);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        reply_unavailable(GrpcRequestEnvelope::ClientStreaming {
+            metadata: tonic::metadata::MetadataMap::new(),
+            body_rx,
+            reply_tx: tx,
+            kernel_principal: None,
+        });
+        assert!(matches!(
+            rx.await,
+            Ok(GrpcReply::Err(ref status)) if status.code() == tonic::Code::Unavailable
+        ));
+    }
+
+    /// Streaming envelopes get a best-effort `try_send` of a
+    /// `GrpcStreamItem::Error`; a full channel is dropped silently instead
+    /// of blocking the shutdown path.
+    #[tokio::test]
+    async fn reply_unavailable_streaming_try_sends_error_item() {
+        let (tx, mut rx) = mpsc::channel::<GrpcStreamItem>(1);
+        reply_unavailable(GrpcRequestEnvelope::ServerStreaming {
+            metadata: tonic::metadata::MetadataMap::new(),
+            body: Vec::new(),
+            reply_tx: tx,
+            kernel_principal: None,
+        });
+        assert!(matches!(
+            rx.recv().await,
+            Some(GrpcStreamItem::Error(ref status)) if status.code() == tonic::Code::Unavailable
+        ));
+
+        let (_body_tx, body_rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel::<GrpcStreamItem>(1);
+        reply_unavailable(GrpcRequestEnvelope::Bidi {
+            metadata: tonic::metadata::MetadataMap::new(),
+            body_rx,
+            reply_tx: tx,
+            kernel_principal: None,
+        });
+        assert!(matches!(
+            rx.recv().await,
+            Some(GrpcStreamItem::Error(ref status)) if status.code() == tonic::Code::Unavailable
+        ));
+
+        // Full channel: `reply_unavailable` must return synchronously
+        // without panicking, dropping the reply best-effort.
+        let (tx, mut rx) = mpsc::channel::<GrpcStreamItem>(1);
+        tx.send(GrpcStreamItem::Done).await.unwrap();
+        reply_unavailable(GrpcRequestEnvelope::ServerStreaming {
+            metadata: tonic::metadata::MetadataMap::new(),
+            body: Vec::new(),
+            reply_tx: tx,
+            kernel_principal: None,
+        });
+        assert!(matches!(rx.recv().await, Some(GrpcStreamItem::Done)));
+        assert!(rx.recv().await.is_none());
+    }
+
+    // ── Task 1.2 (rc-orr73): identity-owned dispatch registration guard ──
+
+    /// Dropping an armed guard removes its own registration from the
+    /// dispatch table. Removal is observed by polling under a deadline
+    /// because the contended-lock fallback defers removal to a spawned
+    /// task.
+    #[tokio::test]
+    async fn dispatch_guard_drop_removes_owned_entry() {
+        let table: GrpcDispatchTable =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let path = "/t/S/M".to_string();
+        let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        table
+            .write()
+            .await
+            .insert(path.clone(), (tx.clone(), GrpcMode::Unary, None));
+
+        let guard = DispatchRegistrationGuard::arm(table.clone(), path.clone(), tx);
+        drop(guard);
+
+        let removal = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while table.read().await.contains_key(&path) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await; // allow-test-sleep: poll for spawned drop-cleanup task
+            }
+        })
+        .await;
+        assert!(
+            removal.is_ok() && !table.read().await.contains_key(&path),
+            "dispatch entry for {path} must be removed within 1s"
+        );
+    }
+
+    /// `cleanup` removes only the entry the guard itself owns: a
+    /// replacement registration on the same path (different channel,
+    /// Task 1.3's insert) survives, and a disarmed second cleanup is a
+    /// no-op.
+    #[tokio::test]
+    async fn dispatch_guard_cleanup_spares_replacement_entry() {
+        let table: GrpcDispatchTable =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let path = "/t/S/M".to_string();
+        let (tx1, _rx1) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let (tx2, _rx2) = mpsc::channel::<GrpcRequestEnvelope>(1);
+
+        let mut guard = DispatchRegistrationGuard::arm(table.clone(), path.clone(), tx1);
+        table
+            .write()
+            .await
+            .insert(path.clone(), (tx2.clone(), GrpcMode::Unary, None));
+
+        guard.cleanup().await;
+
+        {
+            let table = table.read().await;
+            let entry = table
+                .get(&path)
+                .expect("replacement entry must survive cleanup of the stale owner");
+            assert!(
+                entry.0.same_channel(&tx2),
+                "surviving entry must be the replacement's channel"
+            );
+        }
+
+        // Disarmed: the second cleanup changes nothing.
+        guard.cleanup().await;
+        let table = table.read().await;
+        assert!(
+            table
+                .get(&path)
+                .is_some_and(|entry| entry.0.same_channel(&tx2)),
+            "disarmed cleanup must not touch the replacement entry"
+        );
+    }
+
+    /// Task 1.3 (rc-orr73): `insert_dispatch_entry` replaces a stale
+    /// entry whose sender is closed (receiver dropped after a forced
+    /// abort / runtime teardown) but still rejects a live duplicate.
+    #[tokio::test]
+    async fn dispatch_insert_replaces_closed_sender_entry() {
+        let table: GrpcDispatchTable =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let path = "/t/S/M".to_string();
+
+        // Stale entry: its receiver was dropped, so `tx.is_closed()` is true.
+        let (stale_tx, stale_rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        drop(stale_rx);
+        assert!(stale_tx.is_closed());
+        table
+            .write()
+            .await
+            .insert(path.clone(), (stale_tx, GrpcMode::Unary, None));
+
+        // A fresh live sender replaces the closed entry.
+        let (fresh_tx, _fresh_rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        {
+            let mut guard = table.write().await;
+            insert_dispatch_entry(&mut guard, &path, fresh_tx.clone(), GrpcMode::Unary, None)
+                .expect("closed stale entry must be replaceable");
+        }
+        {
+            let table = table.read().await;
+            let entry = table
+                .get(&path)
+                .expect("entry must exist after replacement");
+            assert!(
+                entry.0.same_channel(&fresh_tx),
+                "stored entry must be the fresh sender, not the stale one"
+            );
+        }
+
+        // A live entry still fails as a duplicate, entry unchanged.
+        let (other_tx, _other_rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let mut guard = table.write().await;
+        let err = insert_dispatch_entry(&mut guard, &path, other_tx, GrpcMode::Unary, None)
+            .expect_err("live duplicate registration must be rejected");
+        assert!(err.to_string().contains("duplicate"), "message was: {err}");
+        assert!(
+            guard
+                .get(&path)
+                .is_some_and(|entry| entry.0.same_channel(&fresh_tx)),
+            "rejected duplicate must leave the live entry unchanged"
+        );
     }
 }
