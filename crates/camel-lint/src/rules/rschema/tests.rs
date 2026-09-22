@@ -551,6 +551,244 @@ mcp:
 }
 
 #[test]
+fn rschema_mcp_tls_blank_cert_path_empty_rejected() {
+    // mcpcert: ROUTE_SCHEMA carries `\S` patterns on the MCP TLS path
+    // fields, so a blank `cert_path` (empty string) is a pattern
+    // violation. With `key_path` valid, the only possible error site is
+    // cert_path. The span anchors on the raw YAML token INCLUDING the
+    // quotes (`""`), and the message carries jsonschema's pattern shape
+    // (`does not match`) — never a field name.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: \"\"
+        key_path: /etc/certs/crm-key.pem
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the blank cert_path; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    let raw = slice(source, &d.span);
+    assert_eq!(raw, "\"\"", "span must anchor on the raw quoted token");
+    assert!(
+        raw.trim_matches('"').trim().is_empty(),
+        "the anchored value must be blank; sliced: {raw:?}"
+    );
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+}
+
+#[test]
+fn rschema_mcp_tls_blank_cert_path_whitespace_rejected() {
+    // Same defect shape as the empty cert_path, but the blank is three
+    // spaces inside quotes: the raw slice is `"   "` (quote + 3 spaces +
+    // quote) and must be blank after quote/whitespace trimming.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: \"   \"
+        key_path: /etc/certs/crm-key.pem
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the whitespace cert_path; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    let raw = slice(source, &d.span);
+    assert_eq!(raw, "\"   \"", "span must anchor on the raw quoted token");
+    assert!(
+        raw.trim_matches('"').trim().is_empty(),
+        "the anchored value must be blank; sliced: {raw:?}"
+    );
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+}
+
+#[test]
+fn rschema_mcp_tls_blank_key_path_empty_rejected() {
+    // Mirror of the empty-cert_path pin: with `cert_path` valid, the only
+    // possible error site is key_path, so the single diagnostic pins the
+    // blank `""` key value.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: /etc/certs/crm.pem
+        key_path: \"\"
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the blank key_path; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    let raw = slice(source, &d.span);
+    assert_eq!(raw, "\"\"", "span must anchor on the raw quoted token");
+    assert!(
+        raw.trim_matches('"').trim().is_empty(),
+        "the anchored value must be blank; sliced: {raw:?}"
+    );
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+}
+
+#[test]
+fn rschema_mcp_tls_blank_key_path_whitespace_rejected() {
+    // Mirror of the whitespace cert_path pin for key_path: `"   "` is a
+    // pattern violation anchored on the raw quoted token.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: /etc/certs/crm.pem
+        key_path: \"   \"
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the whitespace key_path; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    let raw = slice(source, &d.span);
+    assert_eq!(raw, "\"   \"", "span must anchor on the raw quoted token");
+    assert!(
+        raw.trim_matches('"').trim().is_empty(),
+        "the anchored value must be blank; sliced: {raw:?}"
+    );
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+}
+
+#[test]
+fn rschema_mcp_tls_padded_valid_path_stays_silent() {
+    // Trimmed-valid pin: a real path wrapped in leading/trailing spaces
+    // still matches `\S` (the pattern is not anchored), and boot trims
+    // and accepts — so the lint must stay completely silent.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: \" /etc/certs/crm.pem \"
+        key_path: /etc/certs/crm-key.pem
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "a padded-but-valid cert_path must produce no diagnostics; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_tls_blank_cert_path_empty_env_default_rejected() {
+    // Boot parity through the env canon: a whole-scalar
+    // `${env:CERT:-}` token (EMPTY default) substitutes to `""` in the
+    // validation copy, which fails the `\S` pattern — the diagnostic
+    // anchors on the AUTHORED token (boot substitutes then rejects
+    // there too). With `key_path` valid, no error may anchor anywhere
+    // else.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: ${env:CERT:-}
+        key_path: /etc/certs/crm-key.pem
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        !errors.is_empty(),
+        "expected at least one Error for the empty-default cert token; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|d| slice(source, &d.span).contains("${env:CERT:-}")
+                && d.message.contains("does not match")),
+        "expected a pattern Error anchored on the authored token; got: {:?}",
+        errors
+            .iter()
+            .map(|d| (slice(source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        errors
+            .iter()
+            .all(|d| slice(source, &d.span).contains("${env:CERT:-}")),
+        "no error may anchor outside the blank cert token; got: {:?}",
+        errors
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn rschema_mcp_form_unknown_key_reports_key() {
     // `deny_unknown_fields` on `RouteDslMcpServer`: the DSL carries no
     // session/protocol-version keys, so an undeclared server key is an

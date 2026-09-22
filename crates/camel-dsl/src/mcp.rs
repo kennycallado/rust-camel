@@ -57,9 +57,11 @@ where
 #[serde(deny_unknown_fields)]
 pub struct RouteDslMcpTlsConfig {
     /// PEM-encoded server certificate chain.
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"\S")))]
     #[serde(deserialize_with = "deserialize_cert_path")]
     pub cert_path: String,
     /// PEM-encoded server private key.
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"\S")))]
     #[serde(deserialize_with = "deserialize_key_path")]
     pub key_path: String,
 }

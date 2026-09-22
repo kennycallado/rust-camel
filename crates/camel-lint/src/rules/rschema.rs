@@ -33,7 +33,7 @@
 //!
 //! The compiled validator is cached in a process-wide [`OnceLock`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use camel_api::component_metadata::ComponentMetadataCatalog;
@@ -193,6 +193,63 @@ impl Rule for RSchemaRule {
                         };
                         let span = crate::document::key_span_for(&parsed, &key_path);
                         diagnostics.push(diagnostic_for(span, err.to_string()));
+                    }
+                }
+                // A failed anyOf surfaces as ONE collapsed error at the
+                // branch node, burying the offending leaf (pre-existing
+                // collapse limitation). De-collapse PATTERN violations
+                // only — the schema's only pattern keywords are the two
+                // MCP TLS path fields (rc-n3t73) — by reporting each
+                // nested, strictly-deeper pattern error on its own leaf.
+                // KNOWN LIMITATION: when a pattern violation co-occurs
+                // with a non-pattern defect in the SAME failed anyOf
+                // (e.g. a blank cert_path plus an unknown tls key), the
+                // replace-when-present branch reports only the pattern
+                // leaves — the collapsed diagnostic that carried the
+                // sibling defect is dropped (first-error-wins, mirroring
+                // serde's stop-at-first deserialization error; fix the
+                // flagged blank and re-lint to surface the sibling).
+                // When NO nested pattern surfaces, the collapsed anyOf
+                // diagnostic keeps today's shape byte-identically.
+                ValidationErrorKind::AnyOf { context } => {
+                    let segment_depth = |p: &str| p.split('/').filter(|s| !s.is_empty()).count();
+                    let own_depth = segment_depth(instance_path);
+                    let mut seen = HashSet::new();
+                    let mut pattern_errors = Vec::new();
+                    for branch in context {
+                        for nested in branch {
+                            let ValidationErrorKind::Pattern { pattern } = nested.kind() else {
+                                continue;
+                            };
+                            let nested_path = nested.instance_path().as_str();
+                            let nested_depth = segment_depth(nested_path);
+                            if nested_depth <= own_depth {
+                                continue;
+                            }
+                            // Branches retry the same subschema shapes, so
+                            // the same (path, pattern) defect can surface
+                            // more than once; report each one once.
+                            if seen.insert((nested_path.to_string(), pattern.clone())) {
+                                pattern_errors.push(nested);
+                            }
+                        }
+                    }
+                    if pattern_errors.is_empty() {
+                        // No leaf-anchored pattern violation inside the
+                        // collapse: keep today's collapsed anyOf
+                        // diagnostic at the anyOf node.
+                        let noya_path = instance_path_to_noyalib(instance_path, envelope_depth);
+                        let span = crate::document::value_span_for(&parsed, &noya_path);
+                        diagnostics.push(diagnostic_for(span, err.to_string()));
+                    } else {
+                        for nested in pattern_errors {
+                            let noya_path = instance_path_to_noyalib(
+                                nested.instance_path().as_str(),
+                                envelope_depth,
+                            );
+                            let span = crate::document::value_span_for(&parsed, &noya_path);
+                            diagnostics.push(diagnostic_for(span, nested.to_string()));
+                        }
                     }
                 }
                 // Every other keyword anchors on the resolved instance node.

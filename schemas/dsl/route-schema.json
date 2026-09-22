@@ -1714,10 +1714,12 @@
       "properties": {
         "cert_path": {
           "description": "PEM-encoded server certificate chain.",
+          "pattern": "\\S",
           "type": "string"
         },
         "key_path": {
           "description": "PEM-encoded server private key.",
+          "pattern": "\\S",
           "type": "string"
         }
       },

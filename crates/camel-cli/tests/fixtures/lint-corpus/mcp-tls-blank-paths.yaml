@@ -1,0 +1,15 @@
+# Corpus fixture (rc-n3t73): negative witness — blank TLS paths must FAIL
+# R-SCHEMA. Negative sibling of mixed-routes-rest-mcp.yaml (rc-ysvjl,
+# 39fd3bc5): that file proves the mcp form lints CLEAN, this one proves
+# blank `cert_path`/`key_path` are rejected by the route schema (both
+# blank classes in one file: empty string and whitespace-only). The
+# runtime `non_empty_path` check rejects both, so the lint-side Error is
+# an agreed real defect, hence baselined. R-URI walk skips the mcp
+# subtree; no other rule fires on an mcp-only document.
+mcp:
+  - server:
+      name: crm
+      bind: "127.0.0.1:9100"
+      tls:
+        cert_path: ""
+        key_path: "   "

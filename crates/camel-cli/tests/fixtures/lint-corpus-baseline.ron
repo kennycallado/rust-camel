@@ -195,6 +195,14 @@
         [("R-SECRET", "warning")],
     ),
 
+    // Blank cert_path + whitespace key_path are real defects: the runtime
+    // non_empty_path check rejects both, so the lint-side R-SCHEMA Error is
+    // honest semantics. Pinning the rejection end to end (rc-n3t73).
+    (
+        "crates/camel-cli/tests/fixtures/lint-corpus/mcp-tls-blank-paths.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+
     // Outbound-bridge scenario fixture (integration-tier-contract, Task 3.2).
     // The producer URI is `${env:PARTNER}/orders`: the scheme head is an
     // interpolation placeholder, so the catalog cannot verify it and
