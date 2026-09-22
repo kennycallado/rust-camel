@@ -71,7 +71,10 @@ pinned clients propagate build errors and fail closed at request time; errors
 are never cached. On Linux a valid configured CA rescues the platform
 verifier, so the fallback-with-valid-material path is genuinely reachable only
 on platforms where the verifier build hard-errors (e.g. Android/Termux — the
-Termux case of rc-3j4mq).
+Termux case of rc-3j4mq). When the webpki fallback client rebuild itself fails,
+the shared rebuild terminal also fails closed under `tls.strict` with the
+`tls.strict/webpki-fallback:` typed error, while a non-strict config keeps the
+material-free emergency-client degrade (rc-3x5qj).
 
 The Producer attaches the exchange body only for entity-enclosing methods
 (POST, PUT, PATCH). GET, HEAD, DELETE, OPTIONS, and TRACE send no body and log

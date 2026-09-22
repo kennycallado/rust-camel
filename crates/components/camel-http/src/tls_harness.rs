@@ -289,6 +289,42 @@ pub(crate) fn force_webpki_fallback<R>(body: impl FnOnce() -> R) -> R {
     body()
 }
 
+/// Runs `body` with BOTH fallback seams armed: on this thread,
+/// `build_client` skips the platform-verifier primary
+/// (`FORCE_WEBPKI_FALLBACK`) AND the webpki fallback's successful
+/// preconfigured-backend build is treated as a rebuild failure
+/// (`FORCE_FALLBACK_REBUILD_FAIL`), hermetically routing the call
+/// through [`crate::webpki_fallback_client`]'s shared second-error
+/// terminal. That terminal is unreachable through real triggers on
+/// reqwest 0.13.4, so the seam is the only way to exercise its
+/// strict-fail-closed and emergency-degrade outcomes. BOTH flags are
+/// ALWAYS reset, even when `body` panics: the Drop guard below runs
+/// during unwinding, mirroring [`force_webpki_fallback`]'s
+/// restore-on-panic discipline. Assertions belong AFTER this helper
+/// returns.
+pub(crate) fn force_webpki_fallback_rebuild_failure<R>(body: impl FnOnce() -> R) -> R {
+    /// Resets BOTH seam flags on scope exit — normal or panicking — so
+    /// a failing test cannot leak forced-fallback mode into siblings.
+    struct ResetBoth;
+    impl Drop for ResetBoth {
+        fn drop(&mut self) {
+            crate::FORCE_WEBPKI_FALLBACK.with(|c| c.set(false));
+            crate::FORCE_FALLBACK_REBUILD_FAIL.with(|c| c.set(false));
+        }
+    }
+
+    let rebuild_already_armed = crate::FORCE_FALLBACK_REBUILD_FAIL.with(std::cell::Cell::get);
+    let fallback_already_armed = crate::FORCE_WEBPKI_FALLBACK.with(std::cell::Cell::get);
+    assert!(
+        !rebuild_already_armed && !fallback_already_armed,
+        "force_webpki_fallback_rebuild_failure must not nest — a seam flag was already armed"
+    );
+    crate::FORCE_FALLBACK_REBUILD_FAIL.with(|c| c.set(true));
+    crate::FORCE_WEBPKI_FALLBACK.with(|c| c.set(true));
+    let _reset = ResetBoth;
+    body()
+}
+
 /// `reqwest::Client::new()` panics when the TLS backend cannot
 /// initialize — including when another test's forced CA-less env
 /// window ([`forced_fallback_env`]) happens to have emptied the

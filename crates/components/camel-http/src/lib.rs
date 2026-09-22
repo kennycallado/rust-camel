@@ -2296,6 +2296,15 @@ thread_local! {
     /// [`FallbackTrigger::Forced`]). Always manipulated through the
     /// panic-safe [`crate::tls_harness::force_webpki_fallback`] guard.
     static FORCE_WEBPKI_FALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test seam arming the shared second-error terminal in
+    /// [`webpki_fallback_client`]: a successful preconfigured-backend
+    /// build is then treated as a rebuild failure, exercising the
+    /// terminal hermetically (it is unreachable through real triggers
+    /// on reqwest 0.13.4). Always manipulated through the panic-safe
+    /// [`crate::tls_harness::force_webpki_fallback_rebuild_failure`]
+    /// guard.
+    static FORCE_FALLBACK_REBUILD_FAIL: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// Shared builder assembly for [`build_client`]: everything except the
@@ -2770,6 +2779,30 @@ impl std::fmt::Display for FallbackTrigger {
     }
 }
 
+/// Shared terminal for a failed webpki fallback client rebuild —
+/// `build_with_backend`'s `Err` arm and its `cfg(test)` seam twin:
+/// always emits the system-broken error line, then fails closed with a
+/// typed error under `tls.strict`, or degrades to the material-free
+/// [`emergency_webpki_client`] otherwise.
+fn fallback_rebuild_failed(
+    config: &HttpConfig,
+    failure: &dyn std::fmt::Display,
+) -> Result<reqwest::Client, CamelError> {
+    // log-policy: system-broken
+    tracing::error!(
+        error = %failure,
+        "webpki fallback client build failed — TLS stack broken process-wide"
+    );
+    if config.tls.as_ref().is_some_and(|tls| tls.strict) {
+        Err(CamelError::EndpointCreationFailed(format!(
+            "tls.strict/webpki-fallback: webpki fallback client rebuild failed — \
+             refusing material-free emergency client under tls.strict: {failure}"
+        )))
+    } else {
+        Ok(emergency_webpki_client())
+    }
+}
+
 /// Fallback path when the platform-verifier client build fails (typical
 /// trigger: a platform without a system CA store at the probed paths,
 /// e.g. Android/Termux — the eager `HttpComponent::new()` in the BASE
@@ -2783,8 +2816,10 @@ impl std::fmt::Display for FallbackTrigger {
 /// activates when native roots load.
 ///
 /// `Err` is typed and strict-only by construction: [`fallback_client_config`]
-/// fails closed only under `tls.strict`, so a permissive config always
-/// leaves here with a built (possibly item-downgraded) client.
+/// fails closed only under `tls.strict`, and the shared second-error
+/// rebuild terminal ([`fallback_rebuild_failed`]) fails closed the same
+/// way — so a permissive config always leaves here with a built
+/// (possibly item-downgraded, possibly material-free emergency) client.
 fn webpki_fallback_client(
     config: &HttpConfig,
     resolve_override: Option<(&str, &[std::net::SocketAddr])>,
@@ -2808,21 +2843,28 @@ fn webpki_fallback_client(
     // which this workspace does not enable). Kept as an honest,
     // loudly-logged terminal instead of silently re-panicking: reaching
     // it means the TLS stack is broken process-wide, CA store or not.
+    // Strict-fail-closed: under `tls.strict` the rebuild failure is a
+    // typed `Err` (`fallback_rebuild_failed`); non-strict keeps the
+    // material-free emergency-client degrade. The `cfg(test)` seam in
+    // the `Ok` arm routes the forced-rebuild-failure twin through the
+    // same terminal so both outcomes stay test-hermetic.
     let build_with_backend =
         |backend: rustls::ClientConfig| -> Result<reqwest::Client, CamelError> {
             match client_builder(config, resolve_override)
                 .tls_backend_preconfigured(backend)
                 .build()
             {
-                Ok(client) => Ok(client),
-                Err(second_error) => {
-                    // log-policy: system-broken
-                    tracing::error!(
-                        error = %second_error,
-                        "webpki fallback client build failed — TLS stack broken process-wide"
-                    );
-                    Ok(emergency_webpki_client())
+                Ok(client) => {
+                    #[cfg(test)]
+                    if FORCE_FALLBACK_REBUILD_FAIL.with(std::cell::Cell::get) {
+                        return fallback_rebuild_failed(
+                            config,
+                            &"forced webpki fallback rebuild failure (test)",
+                        );
+                    }
+                    Ok(client)
                 }
+                Err(second_error) => fallback_rebuild_failed(config, &second_error),
             }
         };
 
@@ -2860,8 +2902,10 @@ fn webpki_fallback_client(
 /// build retries on bundled Mozilla roots honoring the configured TLS
 /// material (see [`webpki_fallback_client`]) instead of panicking
 /// (rc-3j4mq). `Err` is strict-only by construction: it means the
-/// configured CA/mTLS material failed to load under `tls.strict` and the
-/// caller must fail closed rather than serve with a degraded client.
+/// configured CA/mTLS material failed to load under `tls.strict`, or —
+/// in the broken-TLS-stack corner — the webpki fallback client rebuild
+/// failed under `tls.strict`, and the caller must fail closed rather
+/// than serve with a degraded client.
 pub(crate) fn build_client(
     config: &HttpConfig,
     resolve_override: Option<(&str, &[std::net::SocketAddr])>,
@@ -14204,6 +14248,42 @@ mod tests {
         (dir, ca_path.display().to_string())
     }
 
+    /// Valid strict TLS material fixtures (rc-3x5qj): a rcgen one-root
+    /// CA written to `ca.pem` plus a CA-signed client identity written
+    /// to `client-cert.pem`/`client-key.pem`, all inside a fresh
+    /// tempdir. The CA itself is returned too, so handshake tests can
+    /// sign a server leaf from the SAME CA the config carries — the
+    /// rebuild-failure tests' precondition (VALID material throughout,
+    /// so no material error can precede the terminal under test).
+    /// Named fields for the strict TLS material fixtures (rc-3x5qj):
+    /// position-only PathBufs in a tuple invited silent cert/key swaps.
+    struct StrictMaterial {
+        dir: tempfile::TempDir,
+        ca: TestCa,
+        ca_path: std::path::PathBuf,
+        cert_path: std::path::PathBuf,
+        key_path: std::path::PathBuf,
+    }
+
+    fn strict_material_fixtures() -> StrictMaterial {
+        let ca = gen_test_ca();
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, ca.ca_pem.as_bytes()).expect("write ca pem"); // allow-unwrap(test)
+        let (client_cert_pem, client_key_pem) = gen_client_identity(&ca);
+        let cert_path = dir.path().join("client-cert.pem");
+        std::fs::write(&cert_path, client_cert_pem.as_bytes()).expect("write client cert"); // allow-unwrap(test)
+        let key_path = dir.path().join("client-key.pem");
+        std::fs::write(&key_path, client_key_pem.as_bytes()).expect("write client key"); // allow-unwrap(test)
+        StrictMaterial {
+            dir,
+            ca,
+            ca_path,
+            cert_path,
+            key_path,
+        }
+    }
+
     /// Assert `err` is `EndpointCreationFailed` whose message contains
     /// every `fragment`.
     fn assert_strict_fallback_error(err: CamelError, fragments: &[&str]) {
@@ -15223,6 +15303,209 @@ mod tests {
             ),
         };
         assert_strict_fallback_error(err, &["tls.strict/webpki-fallback"]);
+    }
+
+    #[test]
+    fn strict_rebuild_failure_returns_typed_error() {
+        let StrictMaterial {
+            dir: _dir,
+            ca_path,
+            cert_path,
+            key_path,
+            ..
+        } = strict_material_fixtures();
+
+        // VALID material throughout: no material error can precede the
+        // rebuild terminal, so any typed Err must come from the
+        // strict-fail-closed second-error terminal itself.
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                client_cert_path: Some(cert_path.display().to_string()),
+                client_key_path: Some(key_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let fallbacks_before = build_client_fallback_count();
+        let err = match force_webpki_fallback_rebuild_failure(|| build_client(&config, None)) {
+            Err(e) => e,
+            Ok(_) => panic!(
+                "strict mode must fail closed when the webpki fallback client \
+                 rebuild fails — never the material-free emergency client"
+            ),
+        };
+        assert_eq!(
+            build_client_fallback_count() - fallbacks_before,
+            1,
+            "the rebuild-failure call must route through the webpki fallback exactly once"
+        );
+        assert_strict_fallback_error(
+            err,
+            &[
+                "tls.strict/webpki-fallback:",
+                "webpki fallback client rebuild failed",
+                "forced webpki fallback rebuild failure",
+            ],
+        );
+    }
+
+    #[test]
+    fn non_strict_rebuild_failure_returns_emergency_client() {
+        let StrictMaterial {
+            dir: _dir,
+            ca_path,
+            cert_path,
+            key_path,
+            ..
+        } = strict_material_fixtures();
+
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: false,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                client_cert_path: Some(cert_path.display().to_string()),
+                client_key_path: Some(key_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let fallbacks_before = build_client_fallback_count();
+        let _client = force_webpki_fallback_rebuild_failure(|| build_client(&config, None))
+            .expect("non-strict rebuild failure must degrade to the emergency client"); // allow-unwrap(test)
+        assert_eq!(
+            build_client_fallback_count() - fallbacks_before,
+            1,
+            "the rebuild-failure call must route through the webpki fallback exactly once"
+        );
+    }
+
+    #[test]
+    fn strict_rebuild_failure_surfaces_at_endpoint_creation() {
+        let StrictMaterial {
+            dir: _dir,
+            ca_path,
+            cert_path,
+            key_path,
+            ..
+        } = strict_material_fixtures();
+
+        // VALID strict config: no material error can precede the
+        // rebuild terminal, so any folded Err must come from the
+        // strict-fail-closed rebuild terminal itself.
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                client_cert_path: Some(cert_path.display().to_string()),
+                client_key_path: Some(key_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let endpoint_err = force_webpki_fallback_rebuild_failure(|| {
+            // Construction must complete without panic; the rebuild-
+            // failure error folds into strict_tls_error and surfaces at
+            // endpoint creation (mirrors the forced-fallback fold test).
+            let component = HttpComponent::with_config(config);
+            component
+                .create_endpoint("http://h/p", &NoOpComponentContext)
+                .err()
+        });
+
+        let err = endpoint_err.expect("folded rebuild failure must fail endpoint creation"); // allow-unwrap(test)
+        assert_strict_fallback_error(
+            err,
+            &[
+                "tls.strict/webpki-fallback:",
+                "webpki fallback client rebuild failed",
+            ],
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn non_strict_rebuild_failure_drops_custom_trust() {
+        let StrictMaterial {
+            dir: _dir,
+            ca,
+            ca_path,
+            ..
+        } = strict_material_fixtures();
+
+        // Server certified ONLY by the same CA the config carries: a
+        // material-carrying fallback build completes this handshake,
+        // the emergency client cannot.
+        let (server_cert, server_key) =
+            gen_leaf_signed_by_ca(&ca, "127.0.0.1".parse().expect("loopback ip")); // allow-unwrap(test)
+        let (addr, server) = spawn_tls_server(&server_cert, &server_key, None).await;
+
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: false,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // Arrange phase — build BOTH clients first, each inside its own
+        // seam guard scope (the guards must not nest); requests run
+        // AFTER both scopes close, matching the isolation pattern of
+        // the parity tests.
+        //
+        // CONTROL: forced fallback WITHOUT the rebuild-failure seam —
+        // the normal fallback build honors ca_cert_path, so this client
+        // carries the CA and verifies the server.
+        let control = force_webpki_fallback(|| {
+            build_client(&config, None).expect("control client must build") // allow-unwrap(test)
+        });
+        // EMERGENCY: both seams armed — the rebuild-failure
+        // substitution drops the custom trust, leaving Mozilla roots
+        // only.
+        let client = force_webpki_fallback_rebuild_failure(|| {
+            build_client(&config, None).expect("emergency client must build") // allow-unwrap(test)
+        });
+
+        // Assert phase — same server, and the ONLY delta between the
+        // two clients is the rebuild-failure substitution: control
+        // succeeds (positive control), emergency fails (causal trust
+        // loss, not any incidental network condition).
+        let control_resp = tokio::time::timeout(
+            Duration::from_secs(15),
+            control.get(format!("https://{addr}/")).send(),
+        )
+        .await
+        .expect("request must complete within the harness timeout") // allow-unwrap(test)
+        .expect("the control client carries the CA — the CA-signed handshake must succeed"); // allow-unwrap(test)
+        assert_eq!(control_resp.status().as_u16(), 200);
+
+        let send_result = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.get(format!("https://{addr}/")).send(),
+        )
+        .await
+        .expect("request must complete within the harness timeout"); // allow-unwrap(test)
+        assert!(
+            send_result.is_err(),
+            "the emergency client carries Mozilla roots only — the configured \
+             CA trust is provably dropped, so the CA-signed handshake must fail"
+        );
+
+        // The rebuild terminal's system-broken error line is unchanged
+        // by this change. Scope-filtered `logs_contain` (injected by
+        // #[traced_test]) so sibling tests' events cannot pollute.
+        assert!(
+            logs_contain("webpki fallback client build failed — TLS stack broken process-wide"),
+            "the rebuild-failure terminal must log the system-broken diagnosis"
+        );
+
+        server.abort();
     }
 
     #[tracing_test::traced_test]
