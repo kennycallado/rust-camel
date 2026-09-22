@@ -276,6 +276,13 @@ NOT resolve `--arg` pairs, apply defaults, interpolate, or validate
 execution values (timeout duration, send scheme). Resolution, structural,
 and declaration failures SHALL exit 2 with the existing loud diagnostics.
 
+#### Scenario: nested job help shows the invocable path
+
+- **GIVEN** `daily/ingest.job.yaml` exists nested in a configured root
+- **WHEN** `camel job daily/ingest --help` runs
+- **THEN** the first stdout line is `daily/ingest.job.yaml` — the same
+  spelling the listing shows — and the exit code is 0
+
 #### Scenario: help with a job name renders the declared interface
 
 - **GIVEN** a discovered job whose document declares `args:` with a
