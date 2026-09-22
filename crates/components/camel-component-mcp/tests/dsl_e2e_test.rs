@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use camel_api::Body;
 use camel_component_api::consumer::ExchangeEnvelope;
@@ -38,6 +39,7 @@ use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 /// The tool's input schema: `{"id": string}` required.
@@ -199,10 +201,10 @@ async fn dsl_block_runs_end_to_end() {
     // Route pipelines (the processing step): answer one invocation each with a
     // deterministic body.
     let tool_route = tokio::spawn(async move {
-        let envelope = tool_rx
-            .recv()
+        let envelope = timeout(Duration::from_secs(2), tool_rx.recv())
             .await
-            .expect("tool route must receive the invocation");
+            .expect("tool route must receive the invocation within 2s")
+            .expect("tool route channel alive");
         assert_eq!(
             envelope.exchange.input.body,
             Body::Json(serde_json::json!({ "id": "42" }))
@@ -217,10 +219,10 @@ async fn dsl_block_runs_end_to_end() {
     });
 
     let customers_route = tokio::spawn(async move {
-        let envelope = customers_rx
-            .recv()
+        let envelope = timeout(Duration::from_secs(2), customers_rx.recv())
             .await
-            .expect("resource route must receive the read");
+            .expect("resource route must receive the read within 2s")
+            .expect("resource route channel alive");
         let mut out = envelope.exchange;
         out.input.body = Body::Text("customers-ok".to_string());
         out.input.set_header("Content-Type", "text/plain");

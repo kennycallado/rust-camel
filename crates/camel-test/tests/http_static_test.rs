@@ -25,6 +25,7 @@ use camel_component_http::{
     ServerRegistry,
 };
 use tokio::sync::{Notify, mpsc};
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
 
@@ -135,15 +136,21 @@ async fn http_static_shared_port_api_and_static() {
 
     let (api_tx, mut api_rx) = mpsc::channel::<RequestEnvelope>(16);
     tokio::spawn(async move {
-        while let Some(envelope) = api_rx.recv().await {
-            let reply = camel_component_http::HttpReply {
-                status: 200,
-                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-                body: camel_component_http::HttpReplyBody::Bytes(bytes::Bytes::from(
-                    "hello from api",
-                )),
-            };
-            let _ = envelope.reply_tx.send(reply);
+        loop {
+            match timeout(Duration::from_secs(2), api_rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    let reply = camel_component_http::HttpReply {
+                        status: 200,
+                        headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+                        body: camel_component_http::HttpReplyBody::Bytes(bytes::Bytes::from(
+                            "hello from api",
+                        )),
+                    };
+                    let _ = envelope.reply_tx.send(reply);
+                }
+                Ok(None) => break, // closed: drain complete
+                Err(_) => break,   // stalled: drainer ends
+            }
         }
     });
 

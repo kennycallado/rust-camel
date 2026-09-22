@@ -2617,27 +2617,33 @@ mod tests {
         consumer.start_with_listener(ctx, listener).await.unwrap();
 
         let route_task = tokio::spawn(async move {
-            if let Some(envelope) = route_rx.recv().await {
-                let payload = envelope
-                    .exchange
-                    .input
-                    .body
-                    .as_text()
-                    .unwrap_or_default()
-                    .to_string();
-                let key = envelope
-                    .exchange
-                    .input
-                    .header("CamelWsConnectionKey")
-                    .and_then(|v| v.as_str())
-                    .unwrap()
-                    .to_string();
+            match tokio::time::timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    let payload = envelope
+                        .exchange
+                        .input
+                        .body
+                        .as_text()
+                        .unwrap_or_default()
+                        .to_string();
+                    let key = envelope
+                        .exchange
+                        .input
+                        .header("CamelWsConnectionKey")
+                        .and_then(|v| v.as_str())
+                        .unwrap()
+                        .to_string();
 
-                let mut response = Exchange::new(CamelMessage::new(CamelBody::Text(payload)));
-                response
-                    .input
-                    .set_header("CamelWsConnectionKey", serde_json::Value::String(key));
-                producer.oneshot(response).await.unwrap();
+                    let mut response = Exchange::new(CamelMessage::new(CamelBody::Text(payload)));
+                    response
+                        .input
+                        .set_header("CamelWsConnectionKey", serde_json::Value::String(key));
+                    producer.oneshot(response).await.unwrap();
+                }
+                // Channel closed: route task ends as today.
+                Ok(None) => {}
+                // Stalled: route task ends.
+                Err(_) => {}
             }
         });
 

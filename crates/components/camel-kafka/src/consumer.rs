@@ -660,6 +660,8 @@ mod tests {
     use rdkafka::Timestamp;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::time::timeout;
 
     /// No-op `RuntimeObservability` for tests. Returns `NoOpMetrics` and
     /// `NoOpHealthCheckRegistry` so `stop()` paths that call
@@ -1227,8 +1229,14 @@ mod tests {
 
         // Spawn a handler that sleeps longer than any reasonable timeout
         let handle = tokio::spawn(async move {
-            while let Some(_req) = rx.recv().await {
-                tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(_req)) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
             }
         });
 
@@ -1470,9 +1478,15 @@ mod tests {
         // ConsumerContext with a downstream that always fails the pipeline.
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Err(CamelError::ProcessorError("boom".into())));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Err(CamelError::ProcessorError("boom".into())));
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
             }
         });
@@ -1530,9 +1544,15 @@ mod tests {
         // ConsumerContext with a downstream that always succeeds.
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
             }
         });
@@ -1573,9 +1593,15 @@ mod tests {
         // the commit step).
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
             }
         });
@@ -1619,9 +1645,15 @@ mod tests {
         let (rt, _errors) = recording_rt();
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Err(CamelError::ProcessorError("boom".into())));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Err(CamelError::ProcessorError("boom".into())));
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
             }
         });
@@ -1739,16 +1771,22 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
             let mut n = 0u32;
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    if n == 0 {
-                        let _ = reply_tx.send(Ok(env.exchange));
-                    } else {
-                        let _ =
-                            reply_tx.send(Err(CamelError::ProcessorError("second boom".into())));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            if n == 0 {
+                                let _ = reply_tx.send(Ok(env.exchange));
+                            } else {
+                                let _ = reply_tx
+                                    .send(Err(CamelError::ProcessorError("second boom".into())));
+                            }
+                        }
+                        n += 1;
                     }
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
-                n += 1;
             }
         });
         let ctx =

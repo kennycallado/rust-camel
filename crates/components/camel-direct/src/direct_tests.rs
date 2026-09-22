@@ -282,12 +282,18 @@ async fn test_direct_producer_consumer_roundtrip() {
 
     // Spawn a pipeline simulator that reads envelopes and replies Ok.
     tokio::spawn(async move {
-        while let Some(envelope) = route_rx.recv().await {
-            let ExchangeEnvelope {
-                exchange, reply_tx, ..
-            } = envelope;
-            if let Some(tx) = reply_tx {
-                let _ = tx.send(Ok(exchange));
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    let ExchangeEnvelope {
+                        exchange, reply_tx, ..
+                    } = envelope;
+                    if let Some(tx) = reply_tx {
+                        let _ = tx.send(Ok(exchange));
+                    }
+                }
+                Ok(None) => break, // closed: drain complete
+                Err(_) => break,   // stalled: drainer ends
             }
         }
     });
@@ -331,9 +337,15 @@ async fn test_direct_propagates_error_when_no_handler() {
 
     // Pipeline simulator that replies with Err (simulates no error handler).
     tokio::spawn(async move {
-        while let Some(envelope) = route_rx.recv().await {
-            if let Some(tx) = envelope.reply_tx {
-                let _ = tx.send(Err(CamelError::ProcessorError("subroute failed".into())));
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    if let Some(tx) = envelope.reply_tx {
+                        let _ = tx.send(Err(CamelError::ProcessorError("subroute failed".into())));
+                    }
+                }
+                Ok(None) => break, // closed: drain complete
+                Err(_) => break,   // stalled: drainer ends
             }
         }
     });
@@ -623,14 +635,20 @@ async fn call_blocks_on_semaphore_until_release() {
     let release_signal = Arc::clone(&release);
     tokio::spawn(async move {
         let mut first = true;
-        while let Some(envelope) = route_rx.recv().await {
-            if first {
-                first = false;
-                parked_signal.notify_one();
-                release_signal.notified().await;
-            }
-            if let Some(tx) = envelope.reply_tx {
-                let _ = tx.send(Ok(envelope.exchange));
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    if first {
+                        first = false;
+                        parked_signal.notify_one();
+                        release_signal.notified().await;
+                    }
+                    if let Some(tx) = envelope.reply_tx {
+                        let _ = tx.send(Ok(envelope.exchange));
+                    }
+                }
+                Ok(None) => break, // closed: drain complete
+                Err(_) => break,   // stalled: drainer ends
             }
         }
     });
@@ -782,8 +800,12 @@ async fn test_direct_producer_timeout() {
     // Drain envelopes but hold them so the producer never gets a reply
     tokio::spawn(async move {
         let mut held: Vec<ExchangeEnvelope> = Vec::new();
-        while let Some(envelope) = route_rx.recv().await {
-            held.push(envelope);
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(envelope)) => held.push(envelope),
+                Ok(None) => break, // closed: drain complete
+                Err(_) => break,   // stalled: drainer ends
+            }
         }
         drop(held);
     });
@@ -839,11 +861,17 @@ async fn test_send_and_wait_error_increments_errors_metric() {
 
     // Route pipeline: reply with Err for every incoming exchange
     tokio::spawn(async move {
-        while let Some(envelope) = route_rx.recv().await {
-            if let Some(tx) = envelope.reply_tx {
-                let _ = tx.send(Err(CamelError::ProcessorError(
-                    "pipeline failure".to_string(),
-                )));
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    if let Some(tx) = envelope.reply_tx {
+                        let _ = tx.send(Err(CamelError::ProcessorError(
+                            "pipeline failure".to_string(),
+                        )));
+                    }
+                }
+                Ok(None) => break, // closed: drain complete
+                Err(_) => break,   // stalled: drainer ends
             }
         }
     });
@@ -1372,10 +1400,16 @@ async fn inline_falls_back_when_capability_absent() {
     let submitted = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&submitted);
     tokio::spawn(async move {
-        while let Some(envelope) = route_rx.recv().await {
-            counter.fetch_add(1, Ordering::SeqCst);
-            if let Some(tx) = envelope.reply_tx {
-                let _ = tx.send(Ok(envelope.exchange));
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    if let Some(tx) = envelope.reply_tx {
+                        let _ = tx.send(Ok(envelope.exchange));
+                    }
+                }
+                Ok(None) => break, // closed: drain complete
+                Err(_) => break,   // stalled: drainer ends
             }
         }
     });

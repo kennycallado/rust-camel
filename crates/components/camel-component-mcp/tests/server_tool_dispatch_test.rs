@@ -16,6 +16,7 @@ mod common;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use camel_component_api::consumer::ExchangeEnvelope;
 use camel_component_api::{
@@ -36,6 +37,7 @@ use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 /// The schema every registered tool uses: `{"id": string}` required.
@@ -194,7 +196,10 @@ async fn valid_args_reach_route() {
     // Route handler: answer one invocation, then hand its name/arguments
     // back for asserts.
     let route = tokio::spawn(async move {
-        let invocation = rx.recv().await.expect("route must receive the invocation");
+        let invocation = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("route must receive the invocation within 2s")
+            .expect("tool route channel alive");
         let McpToolInvocation {
             name,
             arguments,
@@ -369,7 +374,10 @@ async fn error_shaped_success_content_stays_success_and_flag_drives_error() {
     // content for an "error" key.
     let route = tokio::spawn(async move {
         for is_error in [false, true] {
-            let invocation = rx.recv().await.expect("route must receive the invocation");
+            let invocation = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("route must receive the invocation within 2s")
+                .expect("tool route channel alive");
             invocation
                 .reply
                 .send(McpToolResult {

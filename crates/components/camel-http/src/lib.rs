@@ -8315,16 +8315,24 @@ mod tests {
             let mut first_seen_tx = Some(first_seen_tx);
             let mut unblock_first_rx = Some(unblock_first_rx);
 
-            while let Some(envelope) = rx.recv().await {
-                if let Some(tx) = first_seen_tx.take() {
-                    let _ = tx.send(());
-                    if let Some(rx_unblock) = unblock_first_rx.take() {
-                        let _ = rx_unblock.await;
-                    }
-                }
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(envelope)) => {
+                        if let Some(tx) = first_seen_tx.take() {
+                            let _ = tx.send(());
+                            if let Some(rx_unblock) = unblock_first_rx.take() {
+                                let _ = rx_unblock.await;
+                            }
+                        }
 
-                if let Some(reply_tx) = envelope.reply_tx {
-                    let _ = reply_tx.send(Ok(envelope.exchange));
+                        if let Some(reply_tx) = envelope.reply_tx {
+                            let _ = reply_tx.send(Ok(envelope.exchange));
+                        }
+                    }
+                    // Channel closed: drainer ends.
+                    Ok(None) => break, // closed: drain complete
+                    // Stalled: drainer ends.
+                    Err(_) => break, // stalled: drainer ends
                 }
             }
         });
@@ -11683,13 +11691,19 @@ mod tests {
         // Spawn a responder that echoes the captured id back in the body
         // so the test can verify the param was set.
         let handle = tokio::spawn(async move {
-            if let Some(envelope) = rx.recv().await {
-                let id = envelope.path_params.get("id").cloned().unwrap_or_default();
-                let _ = envelope.reply_tx.send(HttpReply {
-                    status: 200,
-                    headers: vec![],
-                    body: HttpReplyBody::Bytes(bytes::Bytes::from(format!("id={id}"))),
-                });
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    let id = envelope.path_params.get("id").cloned().unwrap_or_default();
+                    let _ = envelope.reply_tx.send(HttpReply {
+                        status: 200,
+                        headers: vec![],
+                        body: HttpReplyBody::Bytes(bytes::Bytes::from(format!("id={id}"))),
+                    });
+                }
+                // Channel closed: task ends as today.
+                Ok(None) => {}
+                // Stalled: responder ends.
+                Err(_) => {}
             }
         });
 
@@ -11728,7 +11742,13 @@ mod tests {
         // doesn't block (we don't expect any envelopes here).
         let drain = tokio::spawn(async move {
             let mut get_rx = get_rx;
-            while get_rx.recv().await.is_some() {}
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), get_rx.recv()).await {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
+                }
+            }
         });
 
         let client = reqwest::Client::new();
@@ -11754,12 +11774,18 @@ mod tests {
         registry.register_api_route("/legacy/path".into(), tx).await;
 
         let handle = tokio::spawn(async move {
-            if let Some(envelope) = rx.recv().await {
-                let _ = envelope.reply_tx.send(HttpReply {
-                    status: 200,
-                    headers: vec![],
-                    body: HttpReplyBody::Bytes(bytes::Bytes::from("legacy ok")),
-                });
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    let _ = envelope.reply_tx.send(HttpReply {
+                        status: 200,
+                        headers: vec![],
+                        body: HttpReplyBody::Bytes(bytes::Bytes::from("legacy ok")),
+                    });
+                }
+                // Channel closed: task ends as today.
+                Ok(None) => {}
+                // Stalled: responder ends.
+                Err(_) => {}
             }
         });
 
@@ -11856,7 +11882,13 @@ mod tests {
         // Drain GET in the background (no requests expected after deregister).
         let drain = tokio::spawn(async move {
             let mut get_rx = get_rx;
-            while get_rx.recv().await.is_some() {}
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), get_rx.recv()).await {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
+                }
+            }
         });
 
         // Deregister ONLY the GET endpoint — the C1 bug used to drop POST too.
@@ -11912,12 +11944,18 @@ mod tests {
         // until the test runtime tears down.
         let _tpl_drain = tokio::spawn(async move {
             let mut tpl_rx = tpl_rx;
-            if let Some(env) = tpl_rx.recv().await {
-                let _ = env.reply_tx.send(HttpReply {
-                    status: 200,
-                    headers: vec![],
-                    body: HttpReplyBody::Bytes(bytes::Bytes::from("template-leak")),
-                });
+            match tokio::time::timeout(Duration::from_secs(2), tpl_rx.recv()).await {
+                Ok(Some(env)) => {
+                    let _ = env.reply_tx.send(HttpReply {
+                        status: 200,
+                        headers: vec![],
+                        body: HttpReplyBody::Bytes(bytes::Bytes::from("template-leak")),
+                    });
+                }
+                // Channel closed: task ends as today.
+                Ok(None) => {}
+                // Stalled: responder ends.
+                Err(_) => {}
             }
         });
 

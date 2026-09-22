@@ -1,6 +1,7 @@
 mod support;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use camel_component_api::NoOpComponentContext;
 use camel_component_api::test_support::tls;
@@ -19,6 +20,7 @@ use futures::StreamExt;
 use http::uri::PathAndQuery;
 use prost::Message as ProstMessage;
 use tokio::net::TcpListener;
+use tokio::time::timeout;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
@@ -257,11 +259,15 @@ async fn grpc_consumer_roundtrip_json() {
     });
 
     let pipeline_task = tokio::spawn(async move {
-        if let Some(envelope) = route_rx.recv().await {
-            let resp = Exchange::new(Message::new(Body::Json(
-                serde_json::json!({"message": "Hello World"}),
-            )));
-            let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+        match timeout(Duration::from_secs(2), route_rx.recv()).await {
+            Ok(Some(envelope)) => {
+                let resp = Exchange::new(Message::new(Body::Json(
+                    serde_json::json!({"message": "Hello World"}),
+                )));
+                let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+            }
+            Ok(None) => {} // closed: task ends as today
+            Err(_) => {}   // stalled: responder ends
         }
     });
 
@@ -428,8 +434,15 @@ async fn grpc_consumer_unknown_path_returns_unimplemented() {
             .expect("start");
     });
 
-    let pipeline_task =
-        tokio::spawn(async move { while let Some(_envelope) = route_rx.recv().await {} });
+    let pipeline_task = tokio::spawn(async move {
+        loop {
+            match timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(_envelope)) => {}
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -493,11 +506,15 @@ async fn grpc_consumer_stop_then_request_returns_unimplemented() {
     });
 
     let pipeline_task = tokio::spawn(async move {
-        if let Some(envelope) = route_rx.recv().await {
-            let resp = Exchange::new(Message::new(Body::Json(
-                serde_json::json!({"message": "ok"}),
-            )));
-            let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+        match timeout(Duration::from_secs(2), route_rx.recv()).await {
+            Ok(Some(envelope)) => {
+                let resp = Exchange::new(Message::new(Body::Json(
+                    serde_json::json!({"message": "ok"}),
+                )));
+                let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+            }
+            Ok(None) => {} // closed: task ends as today
+            Err(_) => {}   // stalled: responder ends
         }
     });
 
@@ -567,11 +584,17 @@ async fn grpc_consumer_multiple_paths_same_port() {
     });
 
     let pipeline1_task = tokio::spawn(async move {
-        while let Some(envelope) = route_rx1.recv().await {
-            let resp = Exchange::new(Message::new(Body::Json(
-                serde_json::json!({"message": "hello from path1"}),
-            )));
-            let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+        loop {
+            match timeout(Duration::from_secs(2), route_rx1.recv()).await {
+                Ok(Some(envelope)) => {
+                    let resp = Exchange::new(Message::new(Body::Json(
+                        serde_json::json!({"message": "hello from path1"}),
+                    )));
+                    let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
         }
     });
 
@@ -601,11 +624,17 @@ async fn grpc_consumer_multiple_paths_same_port() {
     });
 
     let pipeline2_task = tokio::spawn(async move {
-        while let Some(envelope) = route_rx2.recv().await {
-            let resp = Exchange::new(Message::new(Body::Json(
-                serde_json::json!({"message": "hello from path2"}),
-            )));
-            let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+        loop {
+            match timeout(Duration::from_secs(2), route_rx2.recv()).await {
+                Ok(Some(envelope)) => {
+                    let resp = Exchange::new(Message::new(Body::Json(
+                        serde_json::json!({"message": "hello from path2"}),
+                    )));
+                    let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
         }
     });
 
@@ -689,8 +718,15 @@ async fn grpc_consumer_invalid_body_returns_error() {
             .expect("start");
     });
 
-    let pipeline_task =
-        tokio::spawn(async move { while let Some(_envelope) = route_rx.recv().await {} });
+    let pipeline_task = tokio::spawn(async move {
+        loop {
+            match timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(_envelope)) => {}
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -760,8 +796,15 @@ async fn grpc_consumer_duplicate_path_fails() {
             .expect("start consumer1");
     });
 
-    let pipeline1_task =
-        tokio::spawn(async move { while let Some(_envelope) = route_rx1.recv().await {} });
+    let pipeline1_task = tokio::spawn(async move {
+        loop {
+            match timeout(Duration::from_secs(2), route_rx1.recv()).await {
+                Ok(Some(_envelope)) => {}
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -846,8 +889,12 @@ async fn grpc_consumer_pipeline_error_returns_internal() {
 
     // Pipeline drops the reply (simulates error) — receive envelope but don't send reply
     let pipeline_task = tokio::spawn(async move {
-        if let Some(_envelope) = route_rx.recv().await {
-            // Drop the envelope without sending a reply — simulates pipeline error
+        match timeout(Duration::from_secs(2), route_rx.recv()).await {
+            Ok(Some(_envelope)) => {
+                // Drop the envelope without sending a reply — simulates pipeline error
+            }
+            Ok(None) => {} // closed: task ends as today
+            Err(_) => {}   // stalled: responder ends
         }
     });
 
@@ -919,20 +966,26 @@ async fn grpc_consumer_server_streaming_roundtrip() {
 
     // Pipeline: receive exchange, take observer, send items via on_next, then on_completed
     let pipeline_task = tokio::spawn(async move {
-        if let Some(envelope) = route_rx.recv().await {
-            let exchange = &envelope.exchange;
-            if let Some(observer) = take_stream_observer(exchange) {
-                // Send 5 items
-                for i in 0..5 {
-                    let item =
-                        serde_json::json!({ "index": i, "name": format!("pipeline-item-{i}") });
-                    if let Err(e) = observer.on_next(item).await {
-                        eprintln!("on_next error: {e}");
-                        break;
+        match timeout(Duration::from_secs(2), route_rx.recv()).await {
+            Ok(Some(envelope)) => {
+                let exchange = &envelope.exchange;
+                if let Some(observer) = take_stream_observer(exchange) {
+                    // Send 5 items
+                    for i in 0..5 {
+                        let item = serde_json::json!({
+                            "index": i,
+                            "name": format!("pipeline-item-{i}")
+                        });
+                        if let Err(e) = observer.on_next(item).await {
+                            eprintln!("on_next error: {e}");
+                            break;
+                        }
                     }
+                    observer.on_completed().await;
                 }
-                observer.on_completed().await;
             }
+            Ok(None) => {} // closed: task ends as today
+            Err(_) => {}   // stalled: responder ends
         }
     });
 
@@ -1564,11 +1617,17 @@ async fn grpc_plaintext_server_does_not_register_reload_handler() {
     });
 
     let pipeline_task = tokio::spawn(async move {
-        while let Some(envelope) = route_rx.recv().await {
-            let resp = Exchange::new(Message::new(Body::Json(serde_json::json!(
-                {"message": "ok"}
-            ))));
-            let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+        loop {
+            match timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    let resp = Exchange::new(Message::new(Body::Json(serde_json::json!(
+                        {"message": "ok"}
+                    ))));
+                    let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
         }
     });
 
@@ -1641,18 +1700,20 @@ async fn grpc_consumer_unary_dispatch_carries_in_flight_claim() {
     // Stand-in pipeline: take the claim out of the envelope, reply, and hand
     // the claim back for exact-total assertions in the test body.
     let pipeline_task = tokio::spawn(async move {
-        if let Some(mut envelope) = route_rx.recv().await {
-            let claim = envelope.in_flight_claim.take();
-            let reply_tx = envelope.reply_tx.take();
-            let resp = Exchange::new(Message::new(Body::Json(
-                serde_json::json!({"message": "Hello Claim"}),
-            )));
-            if let Some(tx) = reply_tx {
-                let _ = tx.send(Ok(resp));
+        match timeout(Duration::from_secs(2), route_rx.recv()).await {
+            Ok(Some(mut envelope)) => {
+                let claim = envelope.in_flight_claim.take();
+                let reply_tx = envelope.reply_tx.take();
+                let resp = Exchange::new(Message::new(Body::Json(
+                    serde_json::json!({"message": "Hello Claim"}),
+                )));
+                if let Some(tx) = reply_tx {
+                    let _ = tx.send(Ok(resp));
+                }
+                claim
             }
-            claim
-        } else {
-            None
+            Ok(None) => None, // closed: task ends as today
+            Err(_) => None,   // stalled: responder ends
         }
     });
 
@@ -1743,19 +1804,30 @@ async fn grpc_consumer_client_streaming_holds_claim_across_idle_gap() {
     let seen_claims = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen_claims_task = std::sync::Arc::clone(&seen_claims);
     let pipeline_task = tokio::spawn(async move {
-        while let Some(mut envelope) = route_rx.recv().await {
-            let claim = envelope.in_flight_claim.take();
-            if claim.is_some() {
-                seen_claims_task.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        loop {
+            match timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(mut envelope)) => {
+                    let claim = envelope.in_flight_claim.take();
+                    if claim.is_some() {
+                        seen_claims_task.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    }
+                    let reply_tx = envelope.reply_tx.take();
+                    arrived_tx.send(()).await.expect("test alive");
+                    timeout(Duration::from_secs(2), release_rx.recv())
+                        .await
+                        .expect("release gate within 2s")
+                        .expect("gate channel alive");
+                    let resp = Exchange::new(Message::new(Body::Json(serde_json::json!(
+                        {"total": 1}
+                    ))));
+                    if let Some(tx) = reply_tx {
+                        let _ = tx.send(Ok(resp));
+                    }
+                    drop(claim);
+                }
+                Ok(None) => break,
+                Err(_) => break,
             }
-            let reply_tx = envelope.reply_tx.take();
-            arrived_tx.send(()).await.expect("test alive");
-            release_rx.recv().await.expect("test alive");
-            let resp = Exchange::new(Message::new(Body::Json(serde_json::json!({"total": 1}))));
-            if let Some(tx) = reply_tx {
-                let _ = tx.send(Ok(resp));
-            }
-            drop(claim);
         }
     });
 

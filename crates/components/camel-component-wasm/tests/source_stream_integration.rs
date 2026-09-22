@@ -23,6 +23,7 @@ use camel_component_api::Consumer;
 use camel_component_api::consumer::{ConsumerContext, ExchangeEnvelope};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use camel_component_wasm::config::WasmConfig;
@@ -534,9 +535,15 @@ async fn backpressure_propagates_to_http_client() {
     // purely through the capacity-1 control channels, same as non-streaming.
     let pipeline_handle = tokio::spawn(async move {
         let mut received = Vec::new();
-        while let Some(envelope) = rx.recv().await {
-            received.push(envelope.exchange);
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        loop {
+            match timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    received.push(envelope.exchange);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Ok(None) => break, // closed: drain complete
+                Err(_) => break,   // stalled: drainer ends
+            }
         }
         received
     });

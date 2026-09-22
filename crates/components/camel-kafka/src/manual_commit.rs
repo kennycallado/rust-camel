@@ -113,7 +113,9 @@ impl std::fmt::Debug for KafkaManualCommit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tokio::sync::mpsc;
+    use tokio::time::timeout;
 
     #[test]
     fn test_accessors() {
@@ -136,7 +138,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         let mc = KafkaManualCommit::new("t".into(), 0, 5, tx);
         mc.commit_async().await.unwrap();
-        let req = rx.recv().await.unwrap();
+        let req = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("manual-commit request within 2s")
+            .expect("commit channel alive");
         assert_eq!(req.topic, "t");
         assert_eq!(req.offset, 5);
         assert!(req.reply_tx.is_none());
@@ -157,11 +162,15 @@ mod tests {
 
         // Spawn a fake commit handler
         tokio::spawn(async move {
-            if let Some(req) = rx.recv().await {
-                assert_eq!(req.offset, 10);
-                if let Some(reply_tx) = req.reply_tx {
-                    let _ = reply_tx.send(Ok(()));
+            match timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(req)) => {
+                    assert_eq!(req.offset, 10);
+                    if let Some(reply_tx) = req.reply_tx {
+                        let _ = reply_tx.send(Ok(()));
+                    }
                 }
+                Ok(None) => {} // closed: task ends as today
+                Err(_) => {}   // stalled: responder ends
             }
         });
 
@@ -183,9 +192,13 @@ mod tests {
 
         // Handler receives but drops reply without responding
         tokio::spawn(async move {
-            if let Some(req) = rx.recv().await {
-                // Intentionally drop reply_tx without sending
-                drop(req.reply_tx);
+            match timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(req)) => {
+                    // Intentionally drop reply_tx without sending
+                    drop(req.reply_tx);
+                }
+                Ok(None) => {} // closed: task ends as today
+                Err(_) => {}   // stalled: responder ends
             }
         });
 

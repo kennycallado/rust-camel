@@ -901,6 +901,7 @@ mod tests {
     use camel_api::{BoxProcessor, IdentityProcessor};
     use camel_api::{RuntimeCommand, RuntimeCommandResult, SyncBoxProcessor};
     use tokio::sync::oneshot;
+    use tokio::time::timeout;
 
     struct FailingConsumer {
         message: &'static str,
@@ -1097,10 +1098,10 @@ mod tests {
 
         handle.await.expect("consumer task should join cleanly");
 
-        let notification = crash_rx
-            .recv()
+        let notification = timeout(Duration::from_secs(2), crash_rx.recv())
             .await
-            .expect("crash notification should be sent");
+            .expect("crash notification should be sent within 2s")
+            .expect("crash channel alive");
         assert_eq!(notification.route_id, "route-resume");
         assert!(notification.error.contains("resume start failed"));
     }
@@ -1183,7 +1184,10 @@ mod tests {
 
         handle.await.expect("outer task should complete");
 
-        let notification = crash_rx.recv().await.expect("crash notification expected");
+        let notification = timeout(Duration::from_secs(2), crash_rx.recv())
+            .await
+            .expect("crash notification expected within 2s")
+            .expect("crash channel alive");
         assert_eq!(notification.route_id, "route-deferred");
         assert!(notification.error.contains("broker lost"));
     }

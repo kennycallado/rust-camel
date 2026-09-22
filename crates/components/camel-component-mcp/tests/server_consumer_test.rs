@@ -21,6 +21,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use camel_api::security_policy::{AccessMode, RouteSecurityPlan, TransportId};
 use camel_api::{Body, CamelError};
@@ -35,6 +36,7 @@ use camel_component_mcp::config::{McpGlobalConfig, McpServerConfig, McpTlsConfig
 use camel_component_mcp::types::{McpResourceRead, McpToolInvocation};
 use common::warn_capture;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 /// Trivial schema shared by the cap tests.
@@ -200,7 +202,10 @@ async fn tool_consumer_serves_invocation() {
         .expect("invocation enqueue");
 
     // The route: identity/set-body processor.
-    let envelope = route_rx.recv().await.expect("route received the exchange");
+    let envelope = timeout(Duration::from_secs(2), route_rx.recv())
+        .await
+        .expect("route received the exchange within 2s")
+        .expect("route channel alive");
     assert_eq!(
         envelope.exchange.input.body,
         Body::Json(serde_json::json!({ "id": "42" }))
@@ -723,10 +728,10 @@ async fn aborted_bridge_and_dropped_consumer_same_name_restart_succeeds() {
         })
         .await
         .expect("invocation enqueue");
-    let envelope = tool_route_rx
-        .recv()
+    let envelope = timeout(Duration::from_secs(2), tool_route_rx.recv())
         .await
-        .expect("route received the exchange");
+        .expect("route received the exchange within 2s")
+        .expect("tool route channel alive");
     let mut out = envelope.exchange;
     out.input.body = Body::Text("takeover-ok".to_string());
     envelope
@@ -757,10 +762,10 @@ async fn aborted_bridge_and_dropped_consumer_same_name_restart_succeeds() {
         })
         .await
         .expect("read enqueue");
-    let envelope = resource_route_rx
-        .recv()
+    let envelope = timeout(Duration::from_secs(2), resource_route_rx.recv())
         .await
-        .expect("route received the exchange");
+        .expect("route received the exchange within 2s")
+        .expect("resource route channel alive");
     assert_eq!(
         envelope.exchange.input.body,
         Body::Text("crm://x".to_string()),

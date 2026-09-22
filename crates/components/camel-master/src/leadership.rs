@@ -495,10 +495,10 @@ mod tests {
             .expect("bridge task should not panic");
 
         for i in 0..3 {
-            let env = pipeline_rx
-                .recv()
+            let env = timeout(Duration::from_secs(2), pipeline_rx.recv())
                 .await
-                .expect("envelope should arrive after drain");
+                .expect("envelope should arrive after drain within 2s")
+                .expect("pipeline channel alive");
             let epoch = env
                 .exchange
                 .properties
@@ -536,7 +536,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let env = pipeline_rx.recv().await.unwrap();
+        let env = timeout(Duration::from_secs(2), pipeline_rx.recv())
+            .await
+            .expect("envelope within 2s")
+            .expect("pipeline channel alive");
         let stamped = env
             .exchange
             .properties
@@ -571,10 +574,10 @@ mod tests {
             .expect("bridge should finish within 1s")
             .expect("bridge task should not panic");
 
-        let env = pipeline_rx
-            .recv()
+        let env = timeout(Duration::from_secs(2), pipeline_rx.recv())
             .await
-            .expect("stamped envelope should arrive");
+            .expect("stamped envelope should arrive within 2s")
+            .expect("pipeline channel alive");
         let stamped = env
             .exchange
             .properties
@@ -766,7 +769,10 @@ mod tests {
             .expect("bridge should finish within 1s")
             .expect("bridge task should not panic");
 
-        let mut received = pipeline_rx.recv().await.expect("envelope must arrive");
+        let mut received = timeout(Duration::from_secs(2), pipeline_rx.recv())
+            .await
+            .expect("envelope must arrive within 2s")
+            .expect("pipeline channel alive");
         let claim = received
             .in_flight_claim
             .take()
@@ -807,7 +813,10 @@ mod tests {
             .expect("bridge should finish within 1s")
             .expect("bridge task should not panic");
 
-        let mut received = pipeline_rx.recv().await.expect("envelope must arrive");
+        let mut received = timeout(Duration::from_secs(2), pipeline_rx.recv())
+            .await
+            .expect("envelope must arrive within 2s")
+            .expect("pipeline channel alive");
         let claim = received
             .in_flight_claim
             .take()

@@ -4475,10 +4475,10 @@ async fn timer_emission_during_start_does_not_corrupt_sibling() {
     // the proxy's recording while B's start() is still parked on the hold
     // — the emission provably lands inside B's uncommitted start window.
     emit_gate_tx.send_replace(true);
-    let dispatched = dispatched_rx
-        .recv()
+    let dispatched = tokio::time::timeout(Duration::from_secs(2), dispatched_rx.recv())
         .await
-        .expect("the emission must dispatch StopRoute through the proxy");
+        .expect("the emission must dispatch StopRoute through the proxy within 2s")
+        .expect("dispatched channel alive");
     assert_eq!(
         dispatched, "StopRoute:reentrancy-sibling-b",
         "unexpected proxied dispatch: {dispatched}"

@@ -30,7 +30,6 @@
 # (read/write/flush awaits) is deferred to a later detector revision;
 # adding it is a deliberate, review-visible ceiling bump.
 #
-# Loopsweep burn-down (2026-09-21, bd rc-w32w7): 32 converted (23 enclosing-timeout R-P1 + 9 retry-wrap R-P3), 5 allow-test-wait markers (spawned accept-loop servers); 548 -> 511.
 # Unadjudicated inventory at seed (2026-09-21), one entry per site —
 # - crates/camel-cli/src/commands/test/scenario_tests.rs:575
 # - crates/camel-core/src/health_registry.rs:614
@@ -543,4 +542,4 @@
 # - crates/services/camel-bridge/src/process.rs:1129
 # - crates/services/camel-bridge/src/process.rs:1221
 # - crates/services/camel-prometheus/tests/integration_test.rs:61
-511
+394

@@ -1,5 +1,7 @@
 use super::*;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tokio::time::timeout;
 
 // --- InFlightClaim / drainclaim tests ---
 
@@ -34,7 +36,10 @@ async fn send_attaches_claim_when_counter_installed() {
     ctx.send(Exchange::new(camel_api::Message::new("payload")))
         .await
         .expect("send must succeed");
-    let envelope = rx.recv().await.expect("envelope must arrive");
+    let envelope = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("envelope must arrive within 2s")
+        .expect("envelope channel alive");
     assert!(envelope.in_flight_claim.is_some());
     assert_eq!(counter.load(Ordering::Acquire), 1);
     drop(envelope);
@@ -48,7 +53,10 @@ async fn send_without_counter_carries_none() {
     ctx.send(Exchange::new(camel_api::Message::new("payload")))
         .await
         .expect("send must succeed");
-    let envelope = rx.recv().await.expect("envelope must arrive");
+    let envelope = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("envelope must arrive within 2s")
+        .expect("envelope channel alive");
     assert!(envelope.in_flight_claim.is_none());
 }
 
@@ -89,7 +97,10 @@ async fn raw_sender_path_stays_uncounted() {
         })
         .await
         .expect("raw push must succeed");
-    let envelope = rx.recv().await.expect("envelope must arrive");
+    let envelope = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("envelope must arrive within 2s")
+        .expect("envelope channel alive");
     assert!(envelope.in_flight_claim.is_none());
     assert_eq!(counter.load(Ordering::Acquire), 0);
 }

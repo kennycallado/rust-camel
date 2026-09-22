@@ -518,6 +518,8 @@ impl ResequencePolicy for PassthroughPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use tokio::time::timeout;
     use tower::ServiceExt;
 
     /// A test continuation that sends received exchanges through an mpsc channel.
@@ -782,8 +784,14 @@ mod tests {
         let mut second = seq_exchange(1);
         second.in_flight_claim = Some(camel_api::InFlightClaim::attach(&counter));
         let _ = service.clone().oneshot(second).await.unwrap();
-        let _ = capture_rx.recv().await;
-        let _ = capture_rx.recv().await;
+        timeout(Duration::from_secs(2), capture_rx.recv())
+            .await
+            .expect("resequencer first capture within 2s")
+            .expect("capture channel alive");
+        timeout(Duration::from_secs(2), capture_rx.recv())
+            .await
+            .expect("resequencer second capture within 2s")
+            .expect("capture channel alive");
         await_in_flight(&counter, 0).await;
 
         service
@@ -809,7 +817,10 @@ mod tests {
             .shutdown(StepShutdownReason::RouteStop)
             .await
             .expect("shutdown");
-        let _ = capture_rx.recv().await;
+        timeout(Duration::from_secs(2), capture_rx.recv())
+            .await
+            .expect("resequencer shutdown capture within 2s")
+            .expect("capture channel alive");
         await_in_flight(&counter, 0).await;
     }
 

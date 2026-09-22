@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use camel_api::security_policy::{
@@ -37,6 +38,7 @@ use camel_component_grpc::config::GrpcServerConfig;
 use camel_component_grpc::consumer::GrpcConsumer;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -259,7 +261,10 @@ async fn grpc_named_header_credential_authenticates() {
     let (port, mut route_rx) = start_secured_consumer(plan, providers).await;
 
     let pipeline = tokio::spawn(async move {
-        let envelope = route_rx.recv().await.expect("exchange reaches route");
+        let envelope = timeout(Duration::from_secs(2), route_rx.recv())
+            .await
+            .expect("exchange reaches route within 2s")
+            .expect("route channel alive");
         let subject = envelope
             .exchange
             .property(PRINCIPAL_SUBJECT_KEY)
@@ -305,7 +310,10 @@ async fn grpc_carrier_present_on_second_request_fresh_exchange() {
     let pipeline = tokio::spawn(async move {
         let mut carried = 0usize;
         for _ in 0..2 {
-            let envelope = route_rx.recv().await.expect("exchange reaches route");
+            let envelope = timeout(Duration::from_secs(2), route_rx.recv())
+                .await
+                .expect("exchange reaches route within 2s")
+                .expect("route channel alive");
             if let Some(carrier) = read_carrier(&envelope.exchange) {
                 assert_eq!(carrier.provider_id(), PROVIDER_ID);
                 assert_eq!(carrier.principal().subject, "svc-grpc");
@@ -387,10 +395,10 @@ async fn grpc_public_no_extraction_counted_provider() {
     let (port, mut route_rx) = start_consumer(Some(sec_ctx)).await;
 
     let pipeline = tokio::spawn(async move {
-        let envelope = route_rx
-            .recv()
+        let envelope = timeout(Duration::from_secs(2), route_rx.recv())
             .await
-            .expect("public pass-through reaches route");
+            .expect("public pass-through reaches route within 2s")
+            .expect("route channel alive");
         if let Some(tx) = envelope.reply_tx {
             let _ = tx.send(Ok(ok_reply()));
         }
@@ -440,10 +448,10 @@ async fn grpc_kernel_auth_policy_denied_regression() {
     let (port, mut route_rx) = start_consumer(Some(sec_ctx)).await;
 
     let pipeline = tokio::spawn(async move {
-        let envelope = route_rx
-            .recv()
+        let envelope = timeout(Duration::from_secs(2), route_rx.recv())
             .await
-            .expect("kernel-authenticated request must reach the route pipeline");
+            .expect("kernel-authenticated request must reach the route pipeline within 2s")
+            .expect("route channel alive");
         // Pipeline-side enforcement stand-in (SecurityPolicyService
         // denies with Unauthorized): the pipeline policy denial idiom.
         if let Some(tx) = envelope.reply_tx {
@@ -499,10 +507,10 @@ async fn grpc_server_streaming_pipeline_denial_regression() {
         start_streaming_consumer(Some(sec_ctx), "ServerList", GrpcMode::ServerStreaming).await;
 
     let pipeline = tokio::spawn(async move {
-        let envelope = route_rx
-            .recv()
+        let envelope = timeout(Duration::from_secs(2), route_rx.recv())
             .await
-            .expect("kernel-authenticated request must reach the route pipeline");
+            .expect("kernel-authenticated request must reach the route pipeline within 2s")
+            .expect("route channel alive");
         // Pipeline-side enforcement stand-in (SecurityPolicyService
         // denies with Unauthorized): the pipeline policy denial idiom.
         if let Some(tx) = envelope.reply_tx {
@@ -644,10 +652,10 @@ async fn grpc_bidi_pipeline_denial_regression() {
         start_streaming_consumer(Some(sec_ctx), "BidiEcho", GrpcMode::Bidi).await;
 
     let pipeline = tokio::spawn(async move {
-        let envelope = route_rx
-            .recv()
+        let envelope = timeout(Duration::from_secs(2), route_rx.recv())
             .await
-            .expect("kernel-authenticated request must reach the route pipeline");
+            .expect("kernel-authenticated request must reach the route pipeline within 2s")
+            .expect("route channel alive");
         // Pipeline-side enforcement stand-in (SecurityPolicyService
         // denies with Unauthorized): the pipeline policy denial idiom.
         if let Some(tx) = envelope.reply_tx {

@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
@@ -35,6 +36,7 @@ use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 /// Non-UTF-8 PNG-flavoured bytes for the binary resource round-trip.
@@ -158,10 +160,10 @@ async fn host_discovers_lists_calls_and_reads() {
     // Route pipelines (identity/set-body): answer one invocation each with a
     // deterministic body.
     let tool_route = tokio::spawn(async move {
-        let envelope = tool_rx
-            .recv()
+        let envelope = timeout(Duration::from_secs(2), tool_rx.recv())
             .await
-            .expect("tool route must receive the invocation");
+            .expect("tool route must receive the invocation within 2s")
+            .expect("tool route channel alive");
         assert_eq!(
             envelope.exchange.input.body,
             Body::Json(serde_json::json!({ "id": "42" }))
@@ -176,10 +178,10 @@ async fn host_discovers_lists_calls_and_reads() {
     });
 
     let customers_route = tokio::spawn(async move {
-        let envelope = customers_rx
-            .recv()
+        let envelope = timeout(Duration::from_secs(2), customers_rx.recv())
             .await
-            .expect("customers route must receive the read");
+            .expect("customers route must receive the read within 2s")
+            .expect("customers route channel alive");
         let mut out = envelope.exchange;
         out.input.body = Body::Text("customers-ok".to_string());
         out.input.set_header("Content-Type", "text/plain");
@@ -191,10 +193,10 @@ async fn host_discovers_lists_calls_and_reads() {
     });
 
     let logo_route = tokio::spawn(async move {
-        let envelope = logo_rx
-            .recv()
+        let envelope = timeout(Duration::from_secs(2), logo_rx.recv())
             .await
-            .expect("logo route must receive the read");
+            .expect("logo route must receive the read within 2s")
+            .expect("logo route channel alive");
         let mut out = envelope.exchange;
         out.input.body = Body::from(LOGO_BYTES.to_vec());
         out.input.set_header("Content-Type", "image/png");
@@ -335,10 +337,10 @@ async fn two_consumers_share_one_listener() {
 
     // Route pipelines answer one invocation each.
     let tool_route = tokio::spawn(async move {
-        let envelope = tool_rx
-            .recv()
+        let envelope = timeout(Duration::from_secs(2), tool_rx.recv())
             .await
-            .expect("tool route must receive the invocation");
+            .expect("tool route must receive the invocation within 2s")
+            .expect("tool route channel alive");
         let mut out = envelope.exchange;
         out.input.body = Body::Text("t-ok".to_string());
         envelope
@@ -349,10 +351,10 @@ async fn two_consumers_share_one_listener() {
     });
 
     let resource_route = tokio::spawn(async move {
-        let envelope = resource_rx
-            .recv()
+        let envelope = timeout(Duration::from_secs(2), resource_rx.recv())
             .await
-            .expect("resource route must receive the read");
+            .expect("resource route must receive the read within 2s")
+            .expect("resource route channel alive");
         let mut out = envelope.exchange;
         out.input.body = Body::Text("r-ok".to_string());
         out.input.set_header("Content-Type", "text/plain");

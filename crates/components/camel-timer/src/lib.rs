@@ -528,10 +528,16 @@ mod tests {
 
         // Collect exchanges
         let mut received = Vec::new();
-        while let Some(envelope) = rx.recv().await {
-            received.push(envelope.exchange);
-            if received.len() == 3 {
-                break;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    received.push(envelope.exchange);
+                    if received.len() == 3 {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => panic!("timer rx drain stalled past 2s"),
             }
         }
 

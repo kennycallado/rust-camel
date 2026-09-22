@@ -43,6 +43,7 @@ use futures::StreamExt;
 use futures::stream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 use tower::ServiceExt;
 
 use common::{
@@ -509,7 +510,12 @@ async fn client_disconnect_during_streamed_reply_keeps_server_healthy() {
     // get a plain materialized reply.
     let handler = tokio::spawn(async move {
         let mut first = true;
-        while let Some(mut envelope) = rx.recv().await {
+        loop {
+            let mut envelope = match timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(envelope)) => envelope,
+                Ok(None) => break, // closed: drain complete
+                Err(_) => break,   // stalled: drainer ends
+            };
             if first {
                 first = false;
                 let s = stream::once(async {

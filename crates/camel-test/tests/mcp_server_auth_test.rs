@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use camel_api::AuthPrincipal;
 use camel_api::Body;
@@ -31,6 +32,7 @@ use camel_component_mcp::component::McpComponent;
 use camel_component_mcp::config::{McpGlobalConfig, McpServerConfig};
 use camel_test::{CamelTestContext, SecurityConfigFixture};
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 /// Fixture provider name (`SecurityConfigFixture::single_static_provider`).
@@ -261,7 +263,10 @@ async fn request_headers_reach_exchange() {
 
     // The route: assert the carried header reached the Exchange, then answer.
     let route = tokio::spawn(async move {
-        let envelope = route_rx.recv().await.expect("route received the exchange");
+        let envelope = timeout(Duration::from_secs(2), route_rx.recv())
+            .await
+            .expect("route received the exchange within 2s")
+            .expect("route channel alive");
         assert_eq!(
             envelope.exchange.input.header_ic("X-Probe"),
             Some(&serde_json::Value::String("abc".to_string())),

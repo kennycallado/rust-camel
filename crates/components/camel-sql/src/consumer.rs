@@ -634,6 +634,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
     use tokio::sync::mpsc;
+    use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
 
     // -----------------------------------------------------------------------
@@ -773,9 +774,15 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
             }
         });
@@ -818,10 +825,16 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ =
-                        reply_tx.send(Err(CamelError::ProcessorError("downstream boom".into())));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx
+                                .send(Err(CamelError::ProcessorError("downstream boom".into())));
+                        }
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
             }
         });
@@ -864,10 +877,16 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ =
-                        reply_tx.send(Err(CamelError::ProcessorError("downstream boom".into())));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx
+                                .send(Err(CamelError::ProcessorError("downstream boom".into())));
+                        }
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
             }
         });
@@ -919,9 +938,15 @@ mod tests {
         );
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
             }
         });
@@ -1004,9 +1029,15 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
             }
         });
@@ -1039,9 +1070,15 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
             }
         });
@@ -1092,10 +1129,16 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ =
-                        reply_tx.send(Err(CamelError::ProcessorError("downstream boom".into())));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx
+                                .send(Err(CamelError::ProcessorError("downstream boom".into())));
+                        }
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
             }
         });
@@ -1138,12 +1181,18 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(4);
         tokio::spawn(async move {
             #[allow(clippy::never_loop)]
-            while let Some(env) = rx.recv().await {
-                assert!(env.exchange.error.is_some(), "exchange must carry error");
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        assert!(env.exchange.error.is_some(), "exchange must carry error");
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                        break;
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
-                break;
             }
         });
 
@@ -1177,9 +1226,15 @@ mod tests {
         // and does NOT emit its own error!.
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(4);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
             }
         });
@@ -1240,9 +1295,15 @@ mod tests {
         // Downstream that returns Err — simulates unhandled route failure.
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Err(CamelError::ProcessorError("boom".into())));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Err(CamelError::ProcessorError("boom".into())));
+                        }
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
             }
         });
@@ -1280,9 +1341,15 @@ mod tests {
         // Healthy downstream task; should not be reached for this poll-failure path.
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(4);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
             }
         });
@@ -1321,11 +1388,15 @@ mod tests {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Exchange>();
         tokio::spawn(async move {
             let mut rx = rx;
-            if let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange.clone()));
+            match timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(env)) => {
+                    if let Some(reply_tx) = env.reply_tx {
+                        let _ = reply_tx.send(Ok(env.exchange.clone()));
+                    }
+                    let _ = result_tx.send(env.exchange);
                 }
-                let _ = result_tx.send(env.exchange);
+                Ok(None) => {}
+                Err(_) => {}
             }
         });
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
@@ -1396,12 +1467,18 @@ mod tests {
         let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
             #[allow(clippy::never_loop)]
-            while let Some(env) = mpsc_rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange.clone()));
+            loop {
+                match timeout(Duration::from_secs(2), mpsc_rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange.clone()));
+                        }
+                        let _ = tx.send(env.exchange);
+                        break;
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
-                let _ = tx.send(env.exchange);
-                break;
             }
         });
         let ctx = ConsumerContext::new(
@@ -1558,9 +1635,15 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
-            while let Some(env) = rx.recv().await {
-                if let Some(reply_tx) = env.reply_tx {
-                    let _ = reply_tx.send(Ok(env.exchange));
+            loop {
+                match timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(env)) => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
                 }
             }
         });

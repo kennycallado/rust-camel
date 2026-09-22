@@ -483,8 +483,18 @@ async fn resequencer_buffer_residency_counted_until_emission() {
     second.input.set_header("id", "k");
     let _ = ctx.send_and_wait(second).await.expect("second ack");
     let mut emitted = Vec::new();
-    emitted.push(emitted_rx.recv().await.expect("first emission"));
-    emitted.push(emitted_rx.recv().await.expect("second emission"));
+    emitted.push(
+        timeout(Duration::from_secs(2), emitted_rx.recv())
+            .await
+            .expect("first emission within 2s")
+            .expect("emission channel alive"),
+    );
+    emitted.push(
+        timeout(Duration::from_secs(2), emitted_rx.recv())
+            .await
+            .expect("second emission within 2s")
+            .expect("emission channel alive"),
+    );
     emitted.sort();
     assert_eq!(emitted, vec!["reseq-1", "reseq-2"]);
     await_total(&controller.in_flight_total, 0).await;
@@ -557,7 +567,10 @@ async fn embedded_aggregator_stash_counted_until_completion() {
         second.property("CamelAggregatorPending").is_none(),
         "second exchange must complete the bucket"
     );
-    let _ = emitted_rx.recv().await.expect("aggregated emission");
+    let _ = timeout(Duration::from_secs(2), emitted_rx.recv())
+        .await
+        .expect("aggregated emission within 2s")
+        .expect("emission channel alive");
     await_total(&controller.in_flight_total, 0).await;
 
     controller

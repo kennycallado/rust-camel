@@ -816,6 +816,7 @@ mod tests {
     use camel_component_api::HealthCheckRegistry;
     use futures::{Stream, StreamExt};
     use tokio::sync::mpsc;
+    use tokio::time::timeout;
     use tonic::Status;
     use tonic::server::{ServerStreamingService, UnaryService};
     use tower::Service;
@@ -1119,9 +1120,11 @@ mod tests {
             }
             _ => panic!("expected ServerStreaming"),
         }
-        match reply_rx.recv().await {
-            Some(GrpcStreamItem::Message(b)) => assert_eq!(b, vec![42]),
-            _ => panic!("expected Message(42)"),
+        match timeout(Duration::from_secs(2), reply_rx.recv()).await {
+            Ok(Some(GrpcStreamItem::Message(b))) => assert_eq!(b, vec![42]),
+            Ok(Some(_)) => panic!("expected Message(42)"),
+            Ok(None) => panic!("reply channel closed"),
+            Err(_) => panic!("reply within 2s"),
         }
         assert!(matches!(reply_rx.recv().await, Some(GrpcStreamItem::Done)));
     }
@@ -1182,9 +1185,11 @@ mod tests {
             }
         });
         body_tx.send(vec![10]).await.unwrap();
-        match reply_rx.recv().await {
-            Some(GrpcStreamItem::Message(b)) => assert_eq!(b, vec![20]),
-            _ => panic!("expected Message(20)"),
+        match timeout(Duration::from_secs(2), reply_rx.recv()).await {
+            Ok(Some(GrpcStreamItem::Message(b))) => assert_eq!(b, vec![20]),
+            Ok(Some(_)) => panic!("expected Message(20)"),
+            Ok(None) => panic!("reply channel closed"),
+            Err(_) => panic!("reply within 2s"),
         }
         handle.await.unwrap();
     }
@@ -1406,7 +1411,10 @@ mod tests {
 
         let handle = tokio::spawn(fut);
 
-        let envelope = rx.recv().await.unwrap();
+        let envelope = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("envelope within 2s")
+            .expect("route channel alive");
         match envelope {
             GrpcRequestEnvelope::Unary { reply_tx, .. } => {
                 drop(reply_tx);
@@ -1432,7 +1440,10 @@ mod tests {
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
 
-        let envelope = rx.recv().await.unwrap();
+        let envelope = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("envelope within 2s")
+            .expect("route channel alive");
         match envelope {
             GrpcRequestEnvelope::Unary { reply_tx, body, .. } => {
                 assert_eq!(body, vec![10, 20, 30]);
@@ -1457,7 +1468,10 @@ mod tests {
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
 
-        let envelope = rx.recv().await.unwrap();
+        let envelope = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("envelope within 2s")
+            .expect("route channel alive");
         match envelope {
             GrpcRequestEnvelope::Unary { reply_tx, .. } => {
                 let _ = reply_tx.send(GrpcReply::Err(Status::not_found("not found")));
@@ -1482,7 +1496,10 @@ mod tests {
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
 
-        let envelope = rx.recv().await.unwrap();
+        let envelope = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("envelope within 2s")
+            .expect("route channel alive");
         match envelope {
             GrpcRequestEnvelope::ServerStreaming { reply_tx, body, .. } => {
                 assert_eq!(body, vec![1, 2]);
@@ -1513,7 +1530,10 @@ mod tests {
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
 
-        let envelope = rx.recv().await.unwrap();
+        let envelope = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("envelope within 2s")
+            .expect("route channel alive");
         match envelope {
             GrpcRequestEnvelope::ServerStreaming { reply_tx, .. } => {
                 reply_tx
@@ -1551,8 +1571,10 @@ mod tests {
         let send_result = handler.sender.send(envelope_for_test).await;
         assert!(send_result.is_ok());
 
-        let received = rx.recv().await;
-        assert!(received.is_some());
+        let received = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("stream receive within 2s");
+        assert!(received.is_some(), "stream channel closed");
 
         body_tx.send(vec![10]).await.unwrap();
         body_tx.send(vec![20]).await.unwrap();
@@ -1731,7 +1753,10 @@ mod tests {
             .insert("authorization", "Bearer test-token".parse().unwrap());
 
         let handle = tokio::spawn(async move {
-            let envelope = rx.recv().await.unwrap();
+            let envelope = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("envelope within 2s")
+                .expect("route channel alive");
             match envelope {
                 GrpcRequestEnvelope::Unary {
                     kernel_principal,
@@ -1771,7 +1796,10 @@ mod tests {
             .insert("x-api-key", "secret-key".parse().unwrap());
 
         let handle = tokio::spawn(async move {
-            let envelope = rx.recv().await.unwrap();
+            let envelope = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("envelope within 2s")
+                .expect("route channel alive");
             match envelope {
                 GrpcRequestEnvelope::Unary {
                     kernel_principal,
@@ -1808,7 +1836,10 @@ mod tests {
             .insert("authorization", "Bearer test-token".parse().unwrap());
 
         let handle = tokio::spawn(async move {
-            let envelope = rx.recv().await.unwrap();
+            let envelope = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("envelope within 2s")
+                .expect("route channel alive");
             match envelope {
                 GrpcRequestEnvelope::Unary {
                     kernel_principal,
@@ -1907,7 +1938,10 @@ mod tests {
         let request = Request::new(vec![]);
 
         let handle = tokio::spawn(async move {
-            let envelope = rx.recv().await.unwrap();
+            let envelope = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("envelope within 2s")
+                .expect("route channel alive");
             match envelope {
                 GrpcRequestEnvelope::Unary {
                     kernel_principal,

@@ -471,6 +471,7 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::sleep;
+    use tokio::time::timeout;
 
     fn build_actor_with_components() -> (RouteControllerHandle, tokio::task::JoinHandle<()>) {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
@@ -618,7 +619,10 @@ mod tests {
 
         let task = tokio::spawn(async move { handle.start_route("route-a").await });
 
-        let command = rx.recv().await.expect("command should be received");
+        let command = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("command should be received within 2s")
+            .expect("command channel alive");
         match command {
             RouteControllerCommand::StartRoute { route_id, reply } => {
                 assert_eq!(route_id, "route-a");
@@ -907,7 +911,10 @@ mod tests {
             let h = handle.clone();
             async move { h.stop_route("r-1").await }
         });
-        let cmd = rx.recv().await.expect("stop command");
+        let cmd = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("stop command within 2s")
+            .expect("command channel alive");
         match cmd {
             RouteControllerCommand::StopRoute { route_id, reply } => {
                 assert_eq!(route_id, "r-1");
@@ -921,7 +928,10 @@ mod tests {
             let h = handle.clone();
             async move { h.route_exists("r-2").await }
         });
-        let cmd = rx.recv().await.expect("exists command");
+        let cmd = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("exists command within 2s")
+            .expect("command channel alive");
         match cmd {
             RouteControllerCommand::RouteExists { route_id, reply } => {
                 assert_eq!(route_id, "r-2");
@@ -935,7 +945,10 @@ mod tests {
             let h = handle.clone();
             async move { h.route_source_hash("r-3").await }
         });
-        let cmd = rx.recv().await.expect("hash command");
+        let cmd = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("hash command within 2s")
+            .expect("command channel alive");
         match cmd {
             RouteControllerCommand::RouteSourceHash { route_id, reply } => {
                 assert_eq!(route_id, "r-3");
@@ -958,7 +971,10 @@ mod tests {
             let h = handle.clone();
             async move { h.route_count().await }
         });
-        let cmd = rx.recv().await.expect("route_count command");
+        let cmd = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("route_count command within 2s")
+            .expect("command channel alive");
         match cmd {
             RouteControllerCommand::RouteCount { reply } => drop(reply),
             _ => panic!("unexpected command"),
@@ -972,7 +988,10 @@ mod tests {
             let h = handle.clone();
             async move { h.stop_route("x").await }
         });
-        let cmd = rx.recv().await.expect("stop command");
+        let cmd = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("stop command within 2s")
+            .expect("command channel alive");
         match cmd {
             RouteControllerCommand::StopRoute { reply, .. } => drop(reply),
             _ => panic!("unexpected command"),
@@ -986,7 +1005,10 @@ mod tests {
             let h = handle.clone();
             async move { h.route_source_hash("x").await }
         });
-        let cmd = rx.recv().await.expect("hash command");
+        let cmd = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("hash command within 2s")
+            .expect("command channel alive");
         match cmd {
             RouteControllerCommand::RouteSourceHash { reply, .. } => drop(reply),
             _ => panic!("unexpected command"),

@@ -2237,9 +2237,15 @@ mod consumer_producer_tests {
         let counter = Arc::new(AtomicU64::new(0));
         let counter_clone = counter.clone();
         let recv_handle = tokio::spawn(async move {
-            while let Some(envelope) = rx.recv().await {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-                let _ = envelope;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(envelope)) => {
+                        counter_clone.fetch_add(1, Ordering::SeqCst);
+                        let _ = envelope;
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
+                }
             }
         });
 
@@ -2364,13 +2370,19 @@ mod consumer_producer_tests {
         // Spawn a concurrent pipeline: each envelope gets its own task so
         // parallel processing is measurable even with InOut exchanges.
         tokio::spawn(async move {
-            while let Some(envelope) = route_rx.recv().await {
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    if let Some(reply_tx) = envelope.reply_tx {
-                        let _ = reply_tx.send(Ok(envelope.exchange));
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), route_rx.recv()).await {
+                    Ok(Some(envelope)) => {
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            if let Some(reply_tx) = envelope.reply_tx {
+                                let _ = reply_tx.send(Ok(envelope.exchange));
+                            }
+                        });
                     }
-                });
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
+                }
             }
         });
 
@@ -2970,9 +2982,15 @@ mod queue_depth_tests {
         let b_drained = Arc::new(AtomicUsize::new(0));
         let drained_clone = Arc::clone(&b_drained);
         tokio::spawn(async move {
-            while let Some(env) = rx_b.recv().await {
-                drained_clone.fetch_add(1, Ordering::SeqCst);
-                let _ = env;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), rx_b.recv()).await {
+                    Ok(Some(env)) => {
+                        drained_clone.fetch_add(1, Ordering::SeqCst);
+                        let _ = env;
+                    }
+                    Ok(None) => break, // closed: drain complete
+                    Err(_) => break,   // stalled: drainer ends
+                }
             }
         });
 
@@ -3222,7 +3240,10 @@ mod in_flight_tests {
         let (got_tx, got_rx) = oneshot::channel::<()>();
         let (release_tx, release_rx) = oneshot::channel::<()>();
         let pipeline = tokio::spawn(async move {
-            let held = route_rx.recv().await.expect("pipeline receives exchange");
+            let held = tokio::time::timeout(Duration::from_secs(2), route_rx.recv())
+                .await
+                .expect("pipeline receives exchange within 2s")
+                .expect("route channel alive");
             let _ = got_tx.send(());
             let _ = release_rx.await;
             drop(held); // pipeline completion releases the claim
@@ -3279,7 +3300,10 @@ mod in_flight_tests {
         let (got_a_tx, got_a_rx) = oneshot::channel::<()>();
         let (release_a_tx, release_a_rx) = oneshot::channel::<()>();
         let pipe_a = tokio::spawn(async move {
-            let held = rx_a.recv().await.expect("subscriber A copy");
+            let held = tokio::time::timeout(Duration::from_secs(2), rx_a.recv())
+                .await
+                .expect("subscriber A copy within 2s")
+                .expect("fan-a channel alive");
             let _ = got_a_tx.send(());
             let _ = release_a_rx.await;
             drop(held);
@@ -3287,7 +3311,10 @@ mod in_flight_tests {
         let (got_b_tx, got_b_rx) = oneshot::channel::<()>();
         let (release_b_tx, release_b_rx) = oneshot::channel::<()>();
         let pipe_b = tokio::spawn(async move {
-            let held = rx_b.recv().await.expect("subscriber B copy");
+            let held = tokio::time::timeout(Duration::from_secs(2), rx_b.recv())
+                .await
+                .expect("subscriber B copy within 2s")
+                .expect("fan-b channel alive");
             let _ = got_b_tx.send(());
             let _ = release_b_rx.await;
             drop(held);
@@ -3354,14 +3381,20 @@ mod in_flight_tests {
         let (release_tx, release_rx) = oneshot::channel::<()>();
         let pipeline = tokio::spawn(async move {
             // E1: take-and-hold on the gate.
-            let e1 = route_rx.recv().await.expect("pipeline receives E1");
+            let e1 = tokio::time::timeout(Duration::from_secs(2), route_rx.recv())
+                .await
+                .expect("pipeline receives E1 within 2s")
+                .expect("route channel alive");
             let _ = got_e1_tx.send(());
             let _ = release_rx.await;
             drop(e1);
             // Post-gate: complete E2 and E3 (exactly two successor
             // envelopes are behind the gate), then end the pipeline.
             for _ in 0..2 {
-                let _ = route_rx.recv().await.expect("successor envelope");
+                let _ = tokio::time::timeout(Duration::from_secs(2), route_rx.recv())
+                    .await
+                    .expect("successor envelope within 2s")
+                    .expect("dispatch channel alive");
             }
         });
 
