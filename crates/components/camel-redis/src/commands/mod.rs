@@ -258,8 +258,7 @@ mod tests {
             // so the command fails with a real redis::RedisError.
             let err = string::dispatch(&RedisCommand::Get, &mut conn, &mut exchange)
                 .await
-                .err()
-                .expect("GET against a closed peer must fail");
+                .expect_err("GET against a closed peer must fail");
 
             assert!(
                 is_transient_redis_error(&err),

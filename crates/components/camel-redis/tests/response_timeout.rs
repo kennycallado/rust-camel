@@ -163,10 +163,22 @@ async fn response_timeout_does_not_alter_connect_timeout() {
         .await
         .expect_err("handshake never completes");
     match err {
-        CamelError::ProcessorError(msg) => assert!(
-            msg.contains("timed out after 1s"),
-            "component connect-timeout message must govern, got: {msg}"
-        ),
-        other => panic!("expected ProcessorError, got: {other:?}"),
+        // Since the structural transience classification (rediserr),
+        // the connect-timeout wrap carries the typed transport marker:
+        // `ProcessorErrorWithSource(msg, TransportTimeout { stage })`.
+        // The message must still be governed by the component's 1s
+        // connect timeout (not the 100ms response deadline).
+        CamelError::ProcessorErrorWithSource(msg, source) => {
+            assert!(
+                msg.contains("timed out after 1s"),
+                "component connect-timeout message must govern, got: {msg}"
+            );
+            let rendered = source.to_string();
+            assert!(
+                rendered.contains("transport timeout at stage executor connect"),
+                "connect timeout must carry the typed transport marker; got: {rendered}"
+            );
+        }
+        other => panic!("expected ProcessorErrorWithSource, got: {other:?}"),
     }
 }
