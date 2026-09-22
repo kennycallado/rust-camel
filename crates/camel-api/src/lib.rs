@@ -80,7 +80,9 @@ pub use delayer::{DEFAULT_MAX_DELAY_MS, DelayConfig};
 pub use dynamic_router::{DynamicRouterConfig, RouterExpression};
 pub use endpoint_pipeline::{CAMEL_SLIP_ENDPOINT, EndpointPipelineConfig, EndpointResolver};
 pub use endpoint_uri::EndpointUri;
-pub use error::{CIRCUIT_OPEN, CamelError, ConfigValidationError, EndpointUriError};
+pub use error::{
+    CIRCUIT_OPEN, CamelError, ConfigValidationError, EndpointUriError, OpaqueErrorSource,
+};
 pub use error_handler::{
     BoundaryKind, ErrorHandlerConfig, ExceptionDisposition, ExceptionPolicy,
     ExceptionPolicyBuilder, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER,

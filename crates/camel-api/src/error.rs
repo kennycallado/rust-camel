@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -72,8 +73,90 @@ pub enum EndpointUriError {
     InvalidParamKey { key: String },
 }
 
+/// Opaque handle to an underlying error, preserving its source chain without
+/// exposing the concrete type.
+///
+/// The opacity contract: the pointee is reachable only through
+/// [`std::error::Error::source()`] (returned directly — no `Arc` wrapper hop),
+/// the inner handle is private, there is no public `Clone`, and provenance
+/// cannot be extracted outside camel-api (short of `unsafe`). Crate internals
+/// duplicate the handle via `OpaqueErrorSource::clone_handle` when cloning a
+/// [`CamelError`].
+///
+/// # Examples
+///
+/// The inner handle cannot be destructured out of the wrapper (private field):
+///
+/// ```compile_fail
+/// use camel_api::OpaqueErrorSource;
+///
+/// #[derive(Debug)]
+/// struct MyError;
+///
+/// impl std::fmt::Display for MyError {
+///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         f.write_str("my error")
+///     }
+/// }
+///
+/// impl std::error::Error for MyError {}
+///
+/// let OpaqueErrorSource(inner) = OpaqueErrorSource::new(std::sync::Arc::new(MyError));
+/// ```
+///
+/// The wrapper is deliberately not `Clone`, so callers cannot copy the handle
+/// out of camel-api:
+///
+/// ```compile_fail
+/// use camel_api::OpaqueErrorSource;
+///
+/// #[derive(Debug)]
+/// struct MyError;
+///
+/// impl std::fmt::Display for MyError {
+///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         f.write_str("my error")
+///     }
+/// }
+///
+/// impl std::error::Error for MyError {}
+///
+/// let s = OpaqueErrorSource::new(std::sync::Arc::new(MyError));
+/// let _ = s.clone();
+/// ```
+#[derive(Debug)]
+pub struct OpaqueErrorSource(Arc<dyn std::error::Error + Send + Sync>);
+
+impl OpaqueErrorSource {
+    /// Wrap an existing error as an opaque source.
+    pub fn new(source: Arc<dyn std::error::Error + Send + Sync>) -> Self {
+        Self(source)
+    }
+
+    /// Duplicate the inner handle for the manual `Clone` impl on
+    /// [`CamelError`]. Crate-private by design: the wrapper itself is not
+    /// `Clone`, so external code cannot duplicate provenance out of camel-api.
+    fn clone_handle(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl fmt::Display for OpaqueErrorSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for OpaqueErrorSource {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // Pointee directly — NO Arc wrapper hop, so `downcast_ref` on the
+        // returned trait object reaches the wrapped error itself.
+        Some(self.0.as_ref())
+    }
+}
+
 /// Core error type for the Camel framework.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CamelError {
     #[error("Component not found: {0}")]
@@ -81,6 +164,11 @@ pub enum CamelError {
 
     #[error("Endpoint creation failed: {0}")]
     EndpointCreationFailed(String),
+
+    /// Like `EndpointCreationFailed` but preserves the source error chain
+    /// for downstream inspection (e.g. typed gate-rejection classification).
+    #[error("Endpoint creation failed: {0}")]
+    EndpointCreationFailedWithSource(String, #[source] OpaqueErrorSource),
 
     #[error("Processor error: {0}")]
     ProcessorError(String),
@@ -176,6 +264,66 @@ pub enum CamelError {
     NotAcceptable { accept: String, produced: String },
 }
 
+/// Manual `Clone` impl: every arm clones its fields normally, except
+/// `EndpointCreationFailedWithSource`, which duplicates the opaque source
+/// handle via the crate-private `OpaqueErrorSource::clone_handle` (the wrapper
+/// itself is deliberately not `Clone`). Exhaustive like `variant_name()` — a
+/// new variant without an arm fails compilation.
+impl Clone for CamelError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::ComponentNotFound(msg) => Self::ComponentNotFound(msg.clone()),
+            Self::EndpointCreationFailed(msg) => Self::EndpointCreationFailed(msg.clone()),
+            Self::EndpointCreationFailedWithSource(msg, source) => {
+                Self::EndpointCreationFailedWithSource(msg.clone(), source.clone_handle())
+            }
+            Self::ProcessorError(msg) => Self::ProcessorError(msg.clone()),
+            Self::ProcessorErrorWithSource(msg, source) => {
+                Self::ProcessorErrorWithSource(msg.clone(), Arc::clone(source))
+            }
+            Self::TypeConversionFailed(msg) => Self::TypeConversionFailed(msg.clone()),
+            Self::InvalidUri(msg) => Self::InvalidUri(msg.clone()),
+            Self::ChannelClosed => Self::ChannelClosed,
+            Self::RouteError(msg) => Self::RouteError(msg.clone()),
+            Self::Io(msg) => Self::Io(msg.clone()),
+            Self::DeadLetterChannelFailed(msg) => Self::DeadLetterChannelFailed(msg.clone()),
+            Self::CircuitOpen(msg) => Self::CircuitOpen(msg.clone()),
+            Self::HttpOperationFailed {
+                method,
+                url,
+                status_code,
+                status_text,
+                response_body,
+            } => Self::HttpOperationFailed {
+                method: method.clone(),
+                url: url.clone(),
+                status_code: *status_code,
+                status_text: status_text.clone(),
+                response_body: response_body.clone(),
+            },
+            Self::ConsumerStopping => Self::ConsumerStopping,
+            Self::Config(msg) => Self::Config(msg.clone()),
+            Self::ConfigValidation(e) => Self::ConfigValidation(e.clone()),
+            Self::AlreadyConsumed => Self::AlreadyConsumed,
+            Self::StreamLimitExceeded(limit) => Self::StreamLimitExceeded(*limit),
+            Self::Unauthenticated(msg) => Self::Unauthenticated(msg.clone()),
+            Self::Unauthorized(msg) => Self::Unauthorized(msg.clone()),
+            Self::AuthProviderUnavailable(msg) => Self::AuthProviderUnavailable(msg.clone()),
+            Self::ValidationError(msg) => Self::ValidationError(msg.clone()),
+            Self::TemplateReload(msg) => Self::TemplateReload(msg.clone()),
+            Self::EndpointUri(e) => Self::EndpointUri(e.clone()),
+            Self::UnsupportedMediaType { consumed, declared } => Self::UnsupportedMediaType {
+                consumed: consumed.clone(),
+                declared: declared.clone(),
+            },
+            Self::NotAcceptable { accept, produced } => Self::NotAcceptable {
+                accept: accept.clone(),
+                produced: produced.clone(),
+            },
+        }
+    }
+}
+
 /// Classification marker for `CamelError::CircuitOpen`.
 ///
 /// Shared named constant so the pipeline tracer's circuit-open exclusion
@@ -188,9 +336,10 @@ impl CamelError {
         #[allow(unreachable_patterns)]
         match self {
             Self::ComponentNotFound(_) => "component",
-            Self::EndpointCreationFailed(_) | Self::InvalidUri(_) | Self::EndpointUri(_) => {
-                "endpoint"
-            }
+            Self::EndpointCreationFailed(_)
+            | Self::EndpointCreationFailedWithSource(_, _)
+            | Self::InvalidUri(_)
+            | Self::EndpointUri(_) => "endpoint",
             Self::ProcessorError(_)
             | Self::ProcessorErrorWithSource(_, _)
             | Self::AuthProviderUnavailable(_) => "processor",
@@ -217,8 +366,10 @@ impl CamelError {
     /// Stable variant name used by `doTry` catch-by-variant matchers.
     ///
     /// `ProcessorErrorWithSource` and `AuthProviderUnavailable` alias to
-    /// `"ProcessorError"` — the variants are not distinguishable by name in MVP (see spec §5.4),
-    /// so existing `doTry` catch handlers keep matching.
+    /// `"ProcessorError"`, and `EndpointCreationFailedWithSource` aliases to
+    /// `"EndpointCreationFailed"` — the aliased variants are not distinguishable
+    /// by name in MVP (see spec §5.4), so existing `doTry` catch handlers keep
+    /// matching.
     ///
     /// The enum is `#[non_exhaustive]`; this match lives in the defining crate (camel-api),
     /// so internal exhaustive matching is allowed. Adding a new variant without updating
@@ -227,6 +378,7 @@ impl CamelError {
         match self {
             Self::ComponentNotFound(_) => "ComponentNotFound",
             Self::EndpointCreationFailed(_) => "EndpointCreationFailed",
+            Self::EndpointCreationFailedWithSource(_, _) => "EndpointCreationFailed",
             Self::ProcessorError(_) => "ProcessorError",
             Self::ProcessorErrorWithSource(_, _) => "ProcessorError",
             Self::AuthProviderUnavailable(_) => "ProcessorError",
@@ -281,11 +433,30 @@ impl From<EndpointUriError> for CamelError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `super::*` brings in thiserror's `Error` derive macro; import the trait
+    // anonymously so `source()` is callable in tests.
+    use std::error::Error as _;
+
+    /// Minimal source error for opaque-provenance tests.
+    #[derive(Debug)]
+    struct SampleSource;
+
+    impl fmt::Display for SampleSource {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("sample source")
+        }
+    }
+
+    impl std::error::Error for SampleSource {}
 
     fn all_error_samples() -> Vec<CamelError> {
         vec![
             CamelError::ComponentNotFound("x".to_string()),
             CamelError::EndpointCreationFailed("x".to_string()),
+            CamelError::EndpointCreationFailedWithSource(
+                "x".to_string(),
+                OpaqueErrorSource::new(Arc::new(SampleSource)),
+            ),
             CamelError::ProcessorError("x".to_string()),
             CamelError::ProcessorErrorWithSource(
                 "x".to_string(),
@@ -539,11 +710,54 @@ mod tests {
         assert!(not_acceptable_msg.contains("application/xml"));
         assert!(not_acceptable_msg.contains("application/json"));
     }
+
+    #[test]
+    fn opaque_error_source_exposes_only_pointee() {
+        let src = OpaqueErrorSource::new(Arc::new(SampleSource));
+        let pointee = src.source().unwrap();
+        assert!(pointee.downcast_ref::<SampleSource>().is_some());
+    }
+
+    #[test]
+    fn endpoint_creation_failed_with_source_aliases_to_plain() {
+        let e = CamelError::EndpointCreationFailedWithSource(
+            "d".to_string(),
+            OpaqueErrorSource::new(Arc::new(SampleSource)),
+        );
+        assert_eq!(e.variant_name(), "EndpointCreationFailed");
+        assert_eq!(e.classify(), "endpoint");
+        assert_eq!(e.to_string(), "Endpoint creation failed: d");
+    }
+
+    #[test]
+    fn clone_preserves_variant_identity_for_all_error_samples() {
+        for e in all_error_samples() {
+            let c = e.clone();
+            assert_eq!(c.variant_name(), e.variant_name());
+            assert_eq!(c.classify(), e.classify());
+            assert_eq!(c.to_string(), e.to_string());
+        }
+    }
+
+    #[test]
+    fn camel_error_clone_preserves_source_provenance() {
+        let e = CamelError::EndpointCreationFailedWithSource(
+            "d".to_string(),
+            OpaqueErrorSource::new(Arc::new(SampleSource)),
+        );
+        let c = e.clone();
+        // `CamelError::source()` (thiserror #[source]) yields the wrapper
+        // itself; the pointee is one more `source()` hop away — that hop is
+        // the pointee-only mechanism under test (no Arc wrapper in between).
+        let wrapper = c.source().unwrap();
+        let pointee = wrapper.source().unwrap();
+        assert!(pointee.downcast_ref::<SampleSource>().is_some());
+    }
 }
 
 #[cfg(test)]
 mod variant_name_tests {
-    use super::{CamelError, ConfigValidationError, EndpointUriError};
+    use super::{CamelError, ConfigValidationError, EndpointUriError, OpaqueErrorSource};
     use std::sync::Arc;
 
     /// Representative value for each enum variant. This test fails to compile
@@ -566,6 +780,13 @@ mod variant_name_tests {
             (
                 CamelError::EndpointCreationFailed("x".into()),
                 "EndpointCreationFailed",
+            ),
+            (
+                CamelError::EndpointCreationFailedWithSource(
+                    "x".into(),
+                    OpaqueErrorSource::new(Arc::new(std::io::Error::other("y"))),
+                ),
+                "EndpointCreationFailed", // aliased
             ),
             (CamelError::ProcessorError("x".into()), "ProcessorError"),
             (
@@ -636,7 +857,7 @@ mod variant_name_tests {
 
         assert_eq!(
             cases.len(),
-            25,
+            26,
             "variant_name_covers_all_variants must cover every CamelError variant; \
              extend this table and the camel-dsl classification guard"
         );

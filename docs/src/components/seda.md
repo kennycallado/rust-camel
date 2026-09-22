@@ -120,7 +120,7 @@ Reach for `direct:` when two routes must share a call stack and ordering is stri
 
 ## Error handling
 
-A producer that targets an endpoint with no active consumer returns `EndpointCreationFailed`. The message tracks the endpoint mode:
+A producer that targets an endpoint with no active consumer returns `EndpointCreationFailed`. The gate returns the source-preserving `EndpointCreationFailedWithSource` form; `Display` and the `doTry`/metrics families are unchanged via aliasing, and chain-aware diagnostics additionally render the marker's non-canonical source text. The message tracks the endpoint mode:
 
 - `SedaMode::Single` (default): `SEDA endpoint '<name>' has no active consumers`.
 - `SedaMode::Fanout` (`multipleConsumers=true`): `SEDA endpoint '<name>' has no active subscribers`.

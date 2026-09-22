@@ -942,7 +942,16 @@ fn exception_kind_matches(kind: &str, err: &CamelError) -> bool {
         // Reserved wildcard token: matches every CamelError variant.
         "*" => true,
         "ComponentNotFound" => matches!(err, CamelError::ComponentNotFound(_)),
-        "EndpointCreationFailed" => matches!(err, CamelError::EndpointCreationFailed(_)),
+        // sedamatch dsl delta: the "EndpointCreationFailed" kind value
+        // denotes the endpoint-creation failure family — both variants are
+        // grouped under it. Intentional exception to the variant-exact
+        // ProcessorErrorWithSource precedent: no distinct kind value exists
+        // for the source-carrying variant.
+        "EndpointCreationFailed" => matches!(
+            err,
+            CamelError::EndpointCreationFailed(_)
+                | CamelError::EndpointCreationFailedWithSource(..)
+        ),
         "ProcessorError" => matches!(err, CamelError::ProcessorError(_)),
         "TypeConversionFailed" => matches!(err, CamelError::TypeConversionFailed(_)),
         "InvalidUri" => matches!(err, CamelError::InvalidUri(_)),
@@ -2498,6 +2507,7 @@ mod tests {
         "ConsumerStopping",
         "DeadLetterChannelFailed",
         "EndpointCreationFailed",
+        "EndpointCreationFailedWithSource",
         "EndpointUri",
         "HttpOperationFailed",
         "InvalidUri",
@@ -2525,11 +2535,18 @@ mod tests {
     /// raise path is decided on.
     const DEFERRED_VARIANTS: &[&str] = &["TemplateReload"];
 
+    /// Variants grouped under an existing kind value (sedamatch dsl delta):
+    /// the kind value matches the whole failure family via
+    /// `exception_kind_matches`, so no distinct kind value exists for the
+    /// grouped variant.
+    const GROUPED_UNDER_KIND: &[(&str, &str)] =
+        &[("EndpointCreationFailedWithSource", "EndpointCreationFailed")];
+
     #[test]
     fn test_exception_kind_vocabulary_classification_guard() {
         assert_eq!(
             ALL_CAMEL_ERROR_VARIANTS.len(),
-            25,
+            26,
             "ALL_CAMEL_ERROR_VARIANTS must enumerate every CamelError variant"
         );
         assert_eq!(
@@ -2537,8 +2554,8 @@ mod tests {
                 .iter()
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            25
-        ); // dupe+omission swap would keep len==25
+            26
+        ); // dupe+omission swap would keep len==26
 
         let vocab = supported_exception_kinds();
 
@@ -2552,16 +2569,37 @@ mod tests {
         }
 
         // Disjoint union: every variant is classified in exactly one of the
-        // vocabulary, the startup-unmatchable set, or the deferred set, and
-        // no classification set contains a non-variant.
+        // vocabulary, the startup-unmatchable set, the deferred set, or the
+        // grouped-under-kind set, and no classification set contains a
+        // non-variant.
         for variant in ALL_CAMEL_ERROR_VARIANTS {
             let hits = usize::from(vocab.contains(variant))
                 + usize::from(STARTUP_UNMATCHABLE_VARIANTS.contains(variant))
-                + usize::from(DEFERRED_VARIANTS.contains(variant));
+                + usize::from(DEFERRED_VARIANTS.contains(variant))
+                + usize::from(GROUPED_UNDER_KIND.iter().any(|(name, _)| *name == *variant));
             assert_eq!(
                 hits, 1,
                 "CamelError variant '{variant}' must be classified in exactly one \
-                 of: the vocabulary, STARTUP_UNMATCHABLE_VARIANTS, DEFERRED_VARIANTS"
+                 of: the vocabulary, STARTUP_UNMATCHABLE_VARIANTS, DEFERRED_VARIANTS, \
+                 GROUPED_UNDER_KIND"
+            );
+        }
+        // Every grouped variant and its target kind value must be real, and
+        // the target must remain an ACCEPTED kind value — a future demotion
+        // of the grouped target out of the vocabulary would leave the
+        // grouping pointing at an unmatchable kind.
+        for (variant, kind) in GROUPED_UNDER_KIND {
+            assert!(
+                ALL_CAMEL_ERROR_VARIANTS.contains(variant),
+                "classification entry '{variant}' is not a CamelError variant"
+            );
+            assert!(
+                ALL_CAMEL_ERROR_VARIANTS.contains(kind),
+                "grouped kind value '{kind}' is not a CamelError variant"
+            );
+            assert!(
+                vocab.contains(kind),
+                "grouped kind value '{kind}' is not an accepted on_exceptions kind"
             );
         }
         for entry in STARTUP_UNMATCHABLE_VARIANTS.iter().chain(DEFERRED_VARIANTS) {
@@ -2872,6 +2910,42 @@ mod tests {
                 "kind {kind}: error must list supported kinds, got: {display}"
             );
         }
+    }
+
+    #[test]
+    fn endpoint_creation_failed_with_source_kind_value_rejected() {
+        // sedamatch-4 regression pin: there is no distinct
+        // "EndpointCreationFailedWithSource" kind value — it stays an
+        // unknown kind; the endpoint-creation failure family is selected
+        // via the "EndpointCreationFailed" kind value.
+        let result = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("EndpointCreationFailedWithSource".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: None,
+                continued: None,
+            }]),
+            use_original_message: false,
+        });
+
+        // ErrorHandlerConfig is not Debug, so expect_err is unavailable.
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("EndpointCreationFailedWithSource kind must stay rejected"),
+        };
+        let display = err.to_string();
+        assert!(
+            display.contains("unknown exception kind"),
+            "error must name the unknown kind, got: {display}"
+        );
+        assert!(
+            display.contains("supported kinds:"),
+            "error must list supported kinds, got: {display}"
+        );
     }
 
     #[test]
@@ -3647,6 +3721,33 @@ mod tests {
             "ConsumerStopping",
             &CamelError::ProcessorError("x".into())
         ));
+    }
+
+    /// Minimal error-source double for constructing
+    /// `CamelError::EndpointCreationFailedWithSource` in tests.
+    #[derive(Debug)]
+    struct DslTestSource;
+
+    impl std::fmt::Display for DslTestSource {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "dsl test source")
+        }
+    }
+
+    impl std::error::Error for DslTestSource {}
+
+    #[test]
+    fn endpoint_creation_failed_kind_matches_both_variants() {
+        // sedamatch-4: the "EndpointCreationFailed" kind value denotes the
+        // endpoint-creation failure family — it must match both the plain
+        // variant and the source-carrying one.
+        let plain = CamelError::EndpointCreationFailed("d".into());
+        let with_src = CamelError::EndpointCreationFailedWithSource(
+            "d".into(),
+            camel_api::OpaqueErrorSource::new(std::sync::Arc::new(DslTestSource)),
+        );
+        assert!(exception_kind_matches("EndpointCreationFailed", &plain));
+        assert!(exception_kind_matches("EndpointCreationFailed", &with_src));
     }
 
     #[test]

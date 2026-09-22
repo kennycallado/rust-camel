@@ -217,6 +217,7 @@ pub fn camel_error_to_wasm_error(error: CamelError) -> WasmError {
         CamelError::Io(msg) => WasmError::Io(msg),
         CamelError::ComponentNotFound(msg)
         | CamelError::EndpointCreationFailed(msg)
+        | CamelError::EndpointCreationFailedWithSource(msg, _)
         | CamelError::ProcessorError(msg)
         | CamelError::InvalidUri(msg)
         | CamelError::RouteError(msg)

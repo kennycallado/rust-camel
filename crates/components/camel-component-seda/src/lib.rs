@@ -21,13 +21,27 @@ fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
     std::sync::Arc::new(NoopRuntimeObservability)
 }
 
+/// Byte-exact wording assertion for producer rejections: the captured
+/// error must carry exactly `expected` as its endpoint-failure payload
+/// (rc-3px7o — wording assertions are equality, never substring).
+#[cfg(test)]
+fn assert_endpoint_failure_payload(err: CamelError, expected: &str) {
+    match err {
+        CamelError::EndpointCreationFailed(detail)
+        | CamelError::EndpointCreationFailedWithSource(detail, _) => {
+            assert_eq!(detail, expected, "gate payload must be byte-exact");
+        }
+        other => panic!("unexpected rejection variant: {other}"),
+    }
+}
+
 use async_trait::async_trait;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
-use camel_api::BoxProcessorExt;
+use camel_api::{BoxProcessorExt, OpaqueErrorSource};
 use camel_component_api::UriConfig;
 use camel_component_api::parse_uri;
 use camel_component_api::{
@@ -533,36 +547,162 @@ fn spawn_queue_depth_sampler(
 // SedaComponent
 // ---------------------------------------------------------------------------
 
-/// True for the SEDA producer's startup-race rejections: the pre-enqueue
-/// gate that fires when no consumer has started yet — Single mode's "has
-/// no active consumers" and Fanout mode's "has no active subscribers" (the
-/// error variant is shared `EndpointCreationFailed`, so the wording is the
-/// discriminator; this crate owns the message text). Both reject BEFORE
-/// enqueue but INSIDE the caller's pipeline: steps that already ran (e.g.
-/// route-interception divert copies) have executed, so RETRYING the send
-/// duplicates their side effects. Senders that must not retry use this
+/// Provenance marker for the SEDA producer's no-active-consumers gate
+/// (rc-3px7o): the producer embeds this crate-private value in a gate
+/// rejection's source chain and [`is_no_active_consumers_gate`] classifies
+/// by downcasting along that chain. Its `Display` is deliberately
+/// NON-canonical diagnostic text — it never participates in classification
+/// and never equals a canonical gate message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NoActiveConsumersGate {
+    Single,
+    Fanout,
+}
+
+impl std::fmt::Display for NoActiveConsumersGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Single => f.write_str("seda no-active-consumers gate rejection (single mode)"),
+            Self::Fanout => f.write_str("seda no-active-consumers gate rejection (fanout mode)"),
+        }
+    }
+}
+
+impl std::error::Error for NoActiveConsumersGate {}
+
+impl NoActiveConsumersGate {
+    /// The canonical gate detail for `endpoint_name` — the wording this
+    /// crate owns and the only text a gate rejection carries.
+    fn detail(&self, endpoint_name: &str) -> String {
+        match self {
+            Self::Single => {
+                format!("SEDA endpoint '{endpoint_name}' has no active consumers")
+            }
+            Self::Fanout => {
+                format!("SEDA endpoint '{endpoint_name}' has no active subscribers")
+            }
+        }
+    }
+
+    /// Build the typed gate rejection: canonical detail plus THIS marker
+    /// kind as the opaque source, so classification rides on typed
+    /// provenance rather than Display text (rc-3px7o).
+    fn rejection(&self, endpoint_name: &str) -> CamelError {
+        CamelError::EndpointCreationFailedWithSource(
+            self.detail(endpoint_name),
+            OpaqueErrorSource::new(Arc::new(self.clone())),
+        )
+    }
+}
+
+/// Single-mode pre-enqueue gate rejection (`SedaMode::Single` producer
+/// entry).
+fn single_mode_gate_rejection(name: &str) -> CamelError {
+    NoActiveConsumersGate::Single.rejection(name)
+}
+
+/// Fanout-mode pre-enqueue gate rejection (`SedaMode::Fanout` producer
+/// entry).
+fn fanout_preenqueue_gate_rejection(name: &str) -> CamelError {
+    NoActiveConsumersGate::Fanout.rejection(name)
+}
+
+/// Fanout-mode subscriber-list gate rejection (empty subscriber list at
+/// dispatch).
+fn fanout_subscriber_list_gate_rejection(name: &str) -> CamelError {
+    NoActiveConsumersGate::Fanout.rejection(name)
+}
+
+/// Bound on the [`is_no_active_consumers_gate`] provenance walk: the
+/// marker must sit within this many source hops of the rejection.
+const MAX_SOURCE_HOPS: usize = 8;
+
+/// Unwrap the `Arc<dyn Error + Send + Sync>` source-chain wrapper that std
+/// (rustc 1.98+) inserts into source chains.
+///
+/// std implements `Error for Arc<T: Error + ?Sized>`, so a source hop
+/// stored as such an Arc surfaces as a wrapper object that delegates
+/// Display/Debug/source but fails `downcast_ref::<T>()` for the wrapped
+/// `T`. Semantics copied from camel-redis `transport_error.rs`
+/// (db512039); the wrapper's own `source()` delegates to the pointee's
+/// `source()`, so unwrapping never skips a chain node.
+fn unwrap_arc_dyn_error<'a>(
+    src: &'a (dyn std::error::Error + 'static),
+) -> &'a (dyn std::error::Error + 'static) {
+    match src.downcast_ref::<Arc<dyn std::error::Error + Send + Sync>>() {
+        Some(arc) => &**arc,
+        None => src,
+    }
+}
+
+/// Extract the crate-private gate marker from a rejection's source chain,
+/// if present.
+///
+/// Classification is by TYPED PROVENANCE: only a
+/// [`CamelError::EndpointCreationFailedWithSource`] whose source chain
+/// carries a [`NoActiveConsumersGate`] within [`MAX_SOURCE_HOPS`] hops
+/// matches. Display text never participates — a foreign error whose
+/// message contains the canonical gate wording is NOT a gate (rc-3px7o;
+/// same doctrine as camel-redis's retryclass/rediserr walks). The walk
+/// starts from the variant's own source pointee — thiserror surfaces the
+/// `#[source] OpaqueErrorSource` field as the wrapper node itself, whose
+/// `source()` is the wrapped chain start (hop 1) — and probes each hop
+/// after unwrapping any std `Arc<dyn Error>` wrapper.
+fn gate_from_error(err: &CamelError) -> Option<NoActiveConsumersGate> {
+    let CamelError::EndpointCreationFailedWithSource(_, source) = err else {
+        return None;
+    };
+    let mut node: &(dyn std::error::Error + 'static) = std::error::Error::source(source)?;
+    for _ in 0..MAX_SOURCE_HOPS {
+        let probe = unwrap_arc_dyn_error(node);
+        if let Some(gate) = probe.downcast_ref::<NoActiveConsumersGate>() {
+            return Some(gate.clone());
+        }
+        node = probe.source()?;
+    }
+    None
+}
+
+/// True for the SEDA producer's startup-race gate rejections: the
+/// pre-enqueue gate that fires when no consumer has started yet, in both
+/// endpoint modes. Classification is by TYPED PROVENANCE, not wording: the
+/// producer embeds a crate-private `NoActiveConsumersGate` marker in the
+/// rejection's source chain and this predicate runs a bounded walk (at
+/// most `MAX_SOURCE_HOPS` = 8 source hops) over that chain (rc-3px7o; the
+/// retryclass/rediserr doctrine). Display text never classifies — a
+/// foreign error whose message merely contains a gate wording is NOT a
+/// gate. Both gate kinds reject
+/// BEFORE enqueue but INSIDE the caller's pipeline: steps that already ran
+/// (e.g. route-interception divert copies) have executed, so RETRYING the
+/// send duplicates their side effects. Senders that must not retry use this
 /// predicate to fail fast instead (rc-zjrx); readiness probing with
 /// [`SedaComponent::has_active_consumer`] avoids the error up front.
 pub fn is_no_active_consumers_gate(err: &CamelError) -> bool {
-    matches!(err, CamelError::EndpointCreationFailed(msg) if msg.contains("has no active consumers"))
-        || matches!(err, CamelError::EndpointCreationFailed(msg) if msg.contains("has no active subscribers"))
+    gate_from_error(err).is_some()
 }
 
 /// True for the consumer-startup race a sender may safely retry: an
-/// [`CamelError::EndpointCreationFailed`] that is NOT the SEDA
-/// no-active-consumers gate. The direct component reports its startup
-/// race ("direct endpoint '{}' not registered" at poll_ready, "no
-/// consumer registered for direct:{name}" at call) under this variant,
-/// so the variant — not the Display wording — carries the
-/// classification (rc-fr20u doctrine). The gate shares the variant but
-/// must FAIL FAST: it rejects pre-enqueue yet INSIDE the caller's
-/// pipeline, so a retry duplicates already-executed side effects
-/// (rc-tgaxf) — [`is_no_active_consumers_gate`] is the exclusion
-/// discriminator this crate owns. Boundary (rc-utx98): a text-carrying
-/// `ProcessorError` ("… not registered") is NOT a startup race —
-/// terminal, never retried; only the variant decides.
+/// endpoint-creation failure that is NOT the SEDA no-active-consumers
+/// gate. The direct component reports its startup race ("direct endpoint
+/// '{}' not registered" at poll_ready, "no consumer registered for
+/// direct:{name}" at call) under [`CamelError::EndpointCreationFailed`],
+/// and any other typed endpoint failure
+/// ([`CamelError::EndpointCreationFailedWithSource`]) whose source chain
+/// lacks the gate marker is equally a plain creation race — the structure,
+/// not the Display wording, carries the classification (rc-fr20u
+/// doctrine). The gate shares the failure family but must FAIL FAST: it
+/// rejects pre-enqueue yet INSIDE the caller's pipeline, so a retry
+/// duplicates already-executed side effects (rc-tgaxf) —
+/// [`is_no_active_consumers_gate`] is the exclusion discriminator this
+/// crate owns. Boundary (rc-utx98): a text-carrying `ProcessorError`
+/// ("… not registered") is NOT a startup race — terminal, never retried;
+/// only the variant decides.
 pub fn is_direct_startup_race(err: &CamelError) -> bool {
-    !is_no_active_consumers_gate(err) && matches!(err, CamelError::EndpointCreationFailed(_))
+    match err {
+        CamelError::EndpointCreationFailed(_) => true,
+        CamelError::EndpointCreationFailedWithSource(..) => !is_no_active_consumers_gate(err),
+        _ => false,
+    }
 }
 
 type SedaRegistry = Arc<Mutex<HashMap<String, Arc<SedaEndpointState>>>>;
@@ -1091,23 +1231,20 @@ impl Service<Exchange> for SedaProducer {
                     if producer_config.discard_if_no_consumers {
                         return Ok(exchange);
                     }
-                    // The gate wording tracks the endpoint mode: Single
-                    // rejects with "has no active consumers", Fanout with
-                    // "has no active subscribers" (rc-tgaxf). The shared
-                    // [`is_no_active_consumers_gate`] predicate matches
-                    // both, so classification is identical — only the
-                    // diagnostic text differs.
-                    let detail = match &state.mode {
-                        SedaMode::Single { .. } => format!(
-                            "SEDA endpoint '{}' has no active consumers",
-                            state.config.name
-                        ),
-                        SedaMode::Fanout { .. } => format!(
-                            "SEDA endpoint '{}' has no active subscribers",
-                            state.config.name
-                        ),
-                    };
-                    return Err(CamelError::EndpointCreationFailed(detail));
+                    // The gate is typed per endpoint mode: Single rejects
+                    // via [`single_mode_gate_rejection`], Fanout via
+                    // [`fanout_preenqueue_gate_rejection`] (rc-tgaxf). The
+                    // shared [`is_no_active_consumers_gate`] predicate
+                    // classifies both by typed provenance in the source
+                    // chain (rc-3px7o) — only the diagnostic text differs.
+                    return Err(match &state.mode {
+                        SedaMode::Single { .. } => {
+                            single_mode_gate_rejection(&state.config.name)
+                        }
+                        SedaMode::Fanout { .. } => {
+                            fanout_preenqueue_gate_rejection(&state.config.name)
+                        }
+                    });
                 }
 
                 let should_wait = match producer_config.wait_for_task_to_complete {
@@ -1193,10 +1330,13 @@ impl Service<Exchange> for SedaProducer {
                                 if producer_config.discard_if_no_consumers {
                                     return Ok(original);
                                 }
-                                return Err(CamelError::EndpointCreationFailed(format!(
-                                    "SEDA endpoint '{}' has no active subscribers",
-                                    state.config.name
-                                )));
+                                // Typed provenance gate (rc-3px7o): same
+                                // marker kind as the pre-enqueue fanout
+                                // gate, distinct site for the empty
+                                // subscriber list at dispatch.
+                                return Err(fanout_subscriber_list_gate_rejection(
+                                    &state.config.name,
+                                ));
                             }
                             subs_guard.values().cloned().collect()
                         };
@@ -1595,12 +1735,9 @@ mod consumer_producer_tests {
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let result = producer.oneshot(Exchange::new(Message::new("test"))).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("no active consumers")
+        assert_endpoint_failure_payload(
+            result.expect_err("send without consumers must be rejected"),
+            "SEDA endpoint 'nocons' has no active consumers",
         );
     }
 
@@ -1755,12 +1892,9 @@ mod consumer_producer_tests {
         let result = producer
             .oneshot(Exchange::new(Message::new("after stop")))
             .await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("no active consumers")
+        assert_endpoint_failure_payload(
+            result.expect_err("send after consumer stop must be rejected"),
+            "SEDA endpoint 'stop' has no active consumers",
         );
     }
 
@@ -2464,26 +2598,39 @@ mod consumer_producer_tests {
         consumer.stop().await.unwrap();
     }
 
-    /// `is_no_active_consumers_gate` recognizes exactly both gate wordings
-    /// (Single and Fanout) and no other `EndpointCreationFailed` — other
-    /// messages must stay eligible for callers' startup-race retries.
+    /// Plain `EndpointCreationFailed` literals — even byte-exact
+    /// reproductions of the canonical gate wording — never classify as the
+    /// gate under typed provenance (rc-3px7o): only the marker in the
+    /// source chain classifies, so such text stays a retryable startup
+    /// race. The canonical-string rows mirror
+    /// `foreign_text_never_classifies_gate` rows c/d; the negative rows
+    /// below keep other variants ineligible.
     #[test]
     fn gate_predicate_matches_both_modes_only() {
-        assert!(is_no_active_consumers_gate(
+        assert!(!is_no_active_consumers_gate(
             &CamelError::EndpointCreationFailed(
                 "SEDA endpoint 'x' has no active consumers".to_string()
             )
         ));
-        assert!(is_no_active_consumers_gate(
+        assert!(is_direct_startup_race(&CamelError::EndpointCreationFailed(
+            "SEDA endpoint 'x' has no active consumers".to_string()
+        )));
+        assert!(!is_no_active_consumers_gate(
             &CamelError::EndpointCreationFailed(
                 "SEDA endpoint 'x' has no active subscribers".to_string()
             )
         ));
+        assert!(is_direct_startup_race(&CamelError::EndpointCreationFailed(
+            "SEDA endpoint 'x' has no active subscribers".to_string()
+        )));
         assert!(!is_no_active_consumers_gate(
             &CamelError::EndpointCreationFailed(
                 "endpoint 'x' already has a registered consumer".to_string()
             )
         ));
+        assert!(is_direct_startup_race(&CamelError::EndpointCreationFailed(
+            "endpoint 'x' already has a registered consumer".to_string()
+        )));
         assert!(!is_no_active_consumers_gate(&CamelError::Config(
             "unrelated".to_string()
         )));
@@ -2505,9 +2652,9 @@ mod consumer_producer_tests {
             .oneshot(Exchange::new(Message::new("no consumers")))
             .await
             .expect_err("send without consumers must be rejected");
-        assert!(
-            err.to_string().contains("has no active consumers"),
-            "unexpected gate wording: {err}"
+        assert_endpoint_failure_payload(
+            err,
+            "SEDA endpoint 'wording-single' has no active consumers",
         );
     }
 
@@ -2528,9 +2675,9 @@ mod consumer_producer_tests {
             .oneshot(Exchange::new(Message::new("no subscribers")))
             .await
             .expect_err("send without subscribers must be rejected");
-        assert!(
-            err.to_string().contains("has no active subscribers"),
-            "unexpected gate wording: {err}"
+        assert_endpoint_failure_payload(
+            err,
+            "SEDA endpoint 'wording-fanout' has no active subscribers",
         );
     }
 
@@ -2565,25 +2712,43 @@ mod consumer_producer_tests {
         )));
     }
 
-    /// The SEDA Single-mode gate wording fails fast — retrying duplicates
-    /// already-executed side effects (rc-tgaxf).
-    #[test]
-    fn seda_gate_single_fails_fast() {
-        assert!(!is_direct_startup_race(
-            &CamelError::EndpointCreationFailed(
-                "SEDA endpoint 'x' has no active consumers".to_string()
-            )
-        ));
+    /// The genuine Single-mode typed gate fails fast — retrying duplicates
+    /// already-executed side effects (rc-tgaxf). The gate is captured
+    /// behaviorally from a real consumerless SEDA endpoint, so the typed
+    /// provenance marker must be present for classification (rc-3px7o).
+    #[tokio::test]
+    async fn seda_gate_single_fails_fast() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint("seda:gate-single", &NoOpComponentContext)
+            .unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
+        let err = producer
+            .oneshot(Exchange::new(Message::new("gate")))
+            .await
+            .expect_err("send without consumers must be rejected");
+        assert!(!is_direct_startup_race(&err));
+        assert!(is_no_active_consumers_gate(&err));
     }
 
-    /// The SEDA Fanout-mode gate wording fails fast (rc-tgaxf).
-    #[test]
-    fn seda_gate_fanout_fails_fast() {
-        assert!(!is_direct_startup_race(
-            &CamelError::EndpointCreationFailed(
-                "SEDA endpoint 'x' has no active subscribers".to_string()
+    /// The genuine Fanout-mode typed gate fails fast (rc-tgaxf); behavioral
+    /// capture as in [`seda_gate_single_fails_fast`].
+    #[tokio::test]
+    async fn seda_gate_fanout_fails_fast() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint(
+                "seda:gate-fanout?multipleConsumers=true",
+                &NoOpComponentContext,
             )
-        ));
+            .unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
+        let err = producer
+            .oneshot(Exchange::new(Message::new("gate")))
+            .await
+            .expect_err("send without subscribers must be rejected");
+        assert!(!is_direct_startup_race(&err));
+        assert!(is_no_active_consumers_gate(&err));
     }
 
     /// The 187-doctrine boundary: the former text sniff retried a
@@ -2614,6 +2779,267 @@ mod consumer_producer_tests {
         assert!(!is_direct_startup_race(&CamelError::Config(
             "unrelated".to_string()
         )));
+    }
+
+    // --- Typed gate provenance (rc-3px7o) ---
+
+    static GATE_MARKER: NoActiveConsumersGate = NoActiveConsumersGate::Single;
+
+    /// Marker-chain wrapper pair: `WrapA` → `WrapB` → gate marker.
+    #[derive(Debug)]
+    struct WrapA;
+
+    impl std::fmt::Display for WrapA {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("wrap a")
+        }
+    }
+
+    impl std::error::Error for WrapA {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&WrapB)
+        }
+    }
+
+    /// Tail of the marker chain: its source is the gate marker.
+    #[derive(Debug)]
+    struct WrapB;
+
+    impl std::fmt::Display for WrapB {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("wrap b")
+        }
+    }
+
+    impl std::error::Error for WrapB {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&GATE_MARKER)
+        }
+    }
+
+    /// A foreign source chain head that never reaches the gate marker.
+    #[derive(Debug)]
+    struct ForeignSource;
+
+    impl std::fmt::Display for ForeignSource {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("foreign source")
+        }
+    }
+
+    impl std::error::Error for ForeignSource {}
+
+    /// Linked wrapper chain: `ChainHop(n)` links through `n` wrappers to
+    /// the gate marker, so `ChainHop(7)` places the marker exactly at the
+    /// walk limit. Nodes are tiny leaked test fixtures.
+    #[derive(Debug)]
+    struct ChainHop(u16);
+
+    impl std::fmt::Display for ChainHop {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "chain hop {}", self.0)
+        }
+    }
+
+    impl std::error::Error for ChainHop {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            if self.0 <= 1 {
+                Some(&GATE_MARKER)
+            } else {
+                Some(Box::leak(Box::new(ChainHop(self.0 - 1))))
+            }
+        }
+    }
+
+    /// A Single-mode gate rejection round-trips through both classifiers:
+    /// typed provenance marks the gate (fail fast) and the Display carries
+    /// the canonical Single-mode wording.
+    #[test]
+    fn gate_rejection_single_round_trip() {
+        let e = single_mode_gate_rejection("q");
+        assert!(is_no_active_consumers_gate(&e));
+        assert!(!is_direct_startup_race(&e));
+        assert_eq!(
+            e.to_string(),
+            "Endpoint creation failed: SEDA endpoint 'q' has no active consumers"
+        );
+    }
+
+    /// A Fanout-mode gate rejection round-trips through both classifiers
+    /// with the canonical Fanout wording.
+    #[test]
+    fn gate_rejection_fanout_round_trip() {
+        let e = fanout_preenqueue_gate_rejection("q");
+        assert!(is_no_active_consumers_gate(&e));
+        assert!(!is_direct_startup_race(&e));
+        assert_eq!(
+            e.to_string(),
+            "Endpoint creation failed: SEDA endpoint 'q' has no active subscribers"
+        );
+    }
+
+    /// A gate marker deeper in the source chain (behind foreign wrappers)
+    /// still classifies within the bounded walk.
+    #[test]
+    fn gate_rejection_nested_source_chain_classifies_within_bound() {
+        let e = CamelError::EndpointCreationFailedWithSource(
+            "outer".to_string(),
+            OpaqueErrorSource::new(Arc::new(WrapA)),
+        );
+        assert!(is_no_active_consumers_gate(&e));
+        assert!(!is_direct_startup_race(&e));
+    }
+
+    /// Seven wrappers place the marker at exactly hop depth 8 (1 = the
+    /// variant's own source, 2-8 = the wrapper chain) — the walk limit.
+    #[test]
+    fn gate_rejection_at_hop_limit_classifies() {
+        let e = CamelError::EndpointCreationFailedWithSource(
+            "outer".to_string(),
+            OpaqueErrorSource::new(Arc::new(ChainHop(7))),
+        );
+        assert!(is_no_active_consumers_gate(&e));
+        assert!(!is_direct_startup_race(&e));
+    }
+
+    /// Eight wrappers push the marker to hop depth 9 — beyond the limit —
+    /// so the typed failure stays a retryable startup race.
+    #[test]
+    fn gate_rejection_beyond_hop_limit_stays_retryable() {
+        let e = CamelError::EndpointCreationFailedWithSource(
+            "outer".to_string(),
+            OpaqueErrorSource::new(Arc::new(ChainHop(8))),
+        );
+        assert!(!is_no_active_consumers_gate(&e));
+        assert!(is_direct_startup_race(&e));
+    }
+
+    /// The marker's Display is deliberately non-canonical diagnostic text:
+    /// it never equals a canonical gate message, so text can never stand in
+    /// for provenance.
+    #[test]
+    fn marker_display_is_non_canonical() {
+        let single = single_mode_gate_rejection("q");
+        let fanout = fanout_preenqueue_gate_rejection("q");
+        let single_marker = gate_from_error(&single).expect("single gate marker");
+        let fanout_marker = gate_from_error(&fanout).expect("fanout gate marker");
+        assert_eq!(
+            single_marker.to_string(),
+            "seda no-active-consumers gate rejection (single mode)"
+        );
+        assert_eq!(
+            fanout_marker.to_string(),
+            "seda no-active-consumers gate rejection (fanout mode)"
+        );
+        assert_ne!(
+            single_marker.to_string(),
+            "SEDA endpoint 'q' has no active consumers"
+        );
+        assert_ne!(
+            single_marker.to_string(),
+            "SEDA endpoint 'q' has no active subscribers"
+        );
+    }
+
+    /// Foreign messages containing the consumer/subscriber wordings —
+    /// including byte-exact imitations of both canonical strings — never
+    /// classify as the gate and stay retryable startup races.
+    #[test]
+    fn foreign_text_never_classifies_gate() {
+        let foreign_wordings = [
+            "kafka topic 'orders' has no active consumers (broker=1)",
+            "ws channel 'ch' has no active subscribers upstream",
+            "SEDA endpoint 'q' has no active consumers",
+            "SEDA endpoint 'q' has no active subscribers",
+            "WARNING: SEDA endpoint 'q' has no active consumers (attempt 1)",
+            "SEDA endpoint 'q' has no active consumers and 2 more issues",
+            "seda endpoint 'q' HAS NO ACTIVE CONSUMERS",
+            "SEDA endpoint '' has no active consumers",
+        ];
+        for wording in foreign_wordings {
+            let err = CamelError::EndpointCreationFailed(wording.to_string());
+            assert!(
+                !is_no_active_consumers_gate(&err),
+                "foreign wording must not classify as gate: {wording}"
+            );
+            assert!(
+                is_direct_startup_race(&err),
+                "foreign wording must stay retryable: {wording}"
+            );
+        }
+    }
+
+    /// A typed endpoint failure whose source chain lacks the gate marker
+    /// stays a retryable startup race.
+    #[test]
+    fn typed_non_gate_source_stays_retryable() {
+        let e = CamelError::EndpointCreationFailedWithSource(
+            "foreign".to_string(),
+            OpaqueErrorSource::new(Arc::new(ForeignSource)),
+        );
+        assert!(!is_no_active_consumers_gate(&e));
+        assert!(is_direct_startup_race(&e));
+    }
+
+    /// Other SEDA endpoint-creation failures stay retryable — regression
+    /// pin that the gate never widens over sibling wordings.
+    #[test]
+    fn other_seda_wordings_stay_retryable() {
+        let other_wordings = [
+            "SEDA queue 'q' is full (size=1)",
+            "SEDA producer timeout enqueueing on 'q' (1000ms)",
+            "SEDA fanout timeout on 'q' (1000ms)",
+            "multipleConsumers=true with waitForTaskToComplete != Never is not \
+             supported — a single request cannot have N valid replies without \
+             aggregator semantics",
+        ];
+        for wording in other_wordings {
+            let err = CamelError::EndpointCreationFailed(wording.to_string());
+            assert!(
+                !is_no_active_consumers_gate(&err),
+                "sibling wording must not classify as gate: {wording}"
+            );
+            assert!(
+                is_direct_startup_race(&err),
+                "sibling wording must stay retryable: {wording}"
+            );
+        }
+    }
+
+    /// The Single-mode site function produces the byte-exact canonical
+    /// Single-mode detail and classifies as the gate.
+    #[test]
+    fn single_gate_site_detail_byte_exact() {
+        let e = single_mode_gate_rejection("site-q");
+        assert_eq!(
+            e.to_string(),
+            "Endpoint creation failed: SEDA endpoint 'site-q' has no active consumers"
+        );
+        assert!(is_no_active_consumers_gate(&e));
+    }
+
+    /// The Fanout pre-enqueue site function produces the byte-exact
+    /// canonical Fanout detail and classifies as the gate.
+    #[test]
+    fn fanout_preenqueue_gate_site_detail_byte_exact() {
+        let e = fanout_preenqueue_gate_rejection("site-q");
+        assert_eq!(
+            e.to_string(),
+            "Endpoint creation failed: SEDA endpoint 'site-q' has no active subscribers"
+        );
+        assert!(is_no_active_consumers_gate(&e));
+    }
+
+    /// The Fanout subscriber-list site function produces the byte-exact
+    /// canonical Fanout detail and classifies as the gate.
+    #[test]
+    fn fanout_subscriber_list_gate_site_detail_byte_exact() {
+        let e = fanout_subscriber_list_gate_rejection("site-q");
+        assert_eq!(
+            e.to_string(),
+            "Endpoint creation failed: SEDA endpoint 'site-q' has no active subscribers"
+        );
+        assert!(is_no_active_consumers_gate(&e));
     }
 
     /// `has_active_consumer` is the readiness-probe signal for senders that
@@ -3519,10 +3945,7 @@ mod in_flight_tests {
             .oneshot(Exchange::new(Message::new("rejected")))
             .await
             .unwrap_err();
-        assert!(
-            err.to_string().contains("no active consumers"),
-            "unexpected rejection: {err}"
-        );
+        assert_endpoint_failure_payload(err, "SEDA endpoint 'noc' has no active consumers");
         assert_eq!(
             counter.load(Ordering::Acquire),
             0,
