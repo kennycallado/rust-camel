@@ -47,6 +47,9 @@ mod tests;
 #[cfg(test)]
 mod startup_retry_classification_tests;
 
+#[cfg(test)]
+mod startup_retry_pipeline_tests;
+
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -1465,21 +1468,25 @@ fn load_route_definitions(
 }
 
 /// Structural classification of send-phase pipeline failures that are
-/// safe to retry: the consumer-startup race, via the existing error
-/// taxonomy only (rc-fr20u — no Display-text sniffing):
+/// safe to retry: the consumer-startup race, by error variant plus the
+/// seda crate's owner-controlled wording discriminator (rc-fr20u — no
+/// CALLER-side Display sniffing; the text match lives in the crate that
+/// owns the message). Delegates to
+/// [`camel_component_seda::is_direct_startup_race`]: an
+/// `EndpointCreationFailed` that is NOT the SEDA no-active-consumers
+/// gate.
 ///
-/// - the SEDA no-active-consumers gate, through seda's own predicate
-///   (single "has no active consumers" / fanout "has no active
-///   subscribers" wordings over `EndpointCreationFailed`);
-/// - every `EndpointCreationFailed` — the variant under which the
-///   direct component reports its "direct endpoint '…' not registered"
-///   startup race (camel-direct owns the wording, the variant carries
-///   the classification).
-///
-/// The seda disjunct is currently subsumed by the `EndpointCreationFailed`
-/// match (the gate shares that variant); it is kept as seda's ownership
-/// marker so the classifier stays correct the day the gate gets its own
-/// variant.
+/// The SEDA gate wordings ("has no active consumers" single mode, "has
+/// no active subscribers" fanout mode) are NON-retryable: the rejection
+/// fires pre-enqueue but inside the caller's pipeline, so a retry
+/// re-executes already-run route steps and duplicates their side
+/// effects (rc-ucemm; fail-fast ruling rc-tgaxf). Every non-gate
+/// `EndpointCreationFailed` stays retryable — the direct component's
+/// "direct endpoint '…' not registered" startup race (camel-direct owns
+/// the wording, the variant carries the classification), plus the
+/// documented residual: SEDA queue-full and bounded enqueue/fanout
+/// timeout errors share the variant and are NOT excluded (bd rc-ucemm
+/// scope).
 ///
 /// The former `to_string().contains("not registered")` sniff matched no
 /// reachable error outside `EndpointCreationFailed`: the direct race is
@@ -1488,17 +1495,20 @@ fn load_route_definitions(
 /// `function:not_registered:` (underscore), which the sniff never
 /// matched either. Generic pipeline failures stay non-retryable.
 fn is_retryable_startup_failure(e: &CamelError) -> bool {
-    camel_component_seda::is_no_active_consumers_gate(e)
-        || matches!(e, CamelError::EndpointCreationFailed(_))
+    camel_component_seda::is_direct_startup_race(e)
 }
 
 /// Send the job's single exchange, retrying the consumer-startup race
-/// (the `deliver_input` discipline: `EndpointCreationFailed` /
-/// not-registered races, plus the SEDA no-active-consumers gate — safe
-/// to retry here because a gate rejection is pre-enqueue and the job
-/// send is the first and only send, so no side effects can have run).
-/// A persistent failure maps to [`SendError::Pipeline`] when the
-/// pipeline itself failed, [`SendError::Transport`] otherwise.
+/// (the `deliver_input` discipline): non-gate `EndpointCreationFailed`
+/// errors — the direct registration race family and the SEDA queue-full
+/// residual — are retried every [`SEND_RETRY_SLEEP`] up to
+/// [`SEND_RETRY_WINDOW`]. The SEDA no-active-consumers gate is NOT
+/// retried: it rejects pre-enqueue but inside the caller's pipeline, so
+/// a retry would replay already-executed route steps and duplicate their
+/// side effects (rc-ucemm) — a gate error returns
+/// [`SendError::Pipeline`] on the first attempt without sleeping. A
+/// persistent failure maps to [`SendError::Pipeline`] when the pipeline
+/// itself failed, [`SendError::Transport`] otherwise.
 async fn send_with_startup_retry(
     ctx: &camel_core::CamelContext,
     send: &document::JobSendAction,

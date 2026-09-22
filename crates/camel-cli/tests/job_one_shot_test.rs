@@ -536,6 +536,70 @@ routeFiles:
     );
 }
 
+/// Exactly-once side effect before a never-activating seda consumer
+/// (spec "pre-SEDA side effect executes exactly once"): the entry route
+/// appends the body to a file, then targets `seda:worker` — a queue no
+/// route consumes. The single-mode SEDA gate must fail the send
+/// immediately (exit 1, `Failed` report naming the gate) with the
+/// pre-SEDA file write executed exactly once: a retry replay of the
+/// pipeline would leave `"ticktick"` in the file, so exact bytes are the
+/// only discriminating assertion. No `duration_ms` check — the run is
+/// boot-dominated and the wall-clock proof lives in the in-process
+/// fail-fast tests.
+#[test]
+fn seda_gate_side_effect_executes_exactly_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    let routes = format!(
+        r#"routes:
+  - id: "job-gate"
+    from: "direct:jobs"
+    steps:
+      - to: "file:{base}?fileName=count.txt&fileExist=append"
+      - to: "seda:worker"
+"#,
+        base = dir.path().display()
+    );
+    std::fs::write(dir.path().join("routes/job-route.yaml"), routes).expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: direct:jobs
+    body: "tick"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
+    assert_eq!(
+        code, 1,
+        "expected exit 1 (pipeline failure);\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Failed", "report: {report}");
+    assert!(
+        report["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("has no active consumers")),
+        "report must name the seda gate; report: {report}"
+    );
+    // The file write is synchronous with the send, so a plain read
+    // after process exit suffices.
+    let count = std::fs::read_to_string(dir.path().join("count.txt"))
+        .expect("count.txt must hold the pre-SEDA side effect");
+    assert_eq!(
+        count, "tick",
+        "side effect must execute exactly once (a replay would read \"ticktick\"); got: {count:?}"
+    );
+}
+
 /// The mandatory overall timeout: a slow route plus `timeout: 1s`
 /// reports `Timeout` and exits 2, within a bounded wall clock (boot +
 /// 1 s timeout + the 5 s shutdown floor; generously bounded at 15 s).

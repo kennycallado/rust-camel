@@ -1091,10 +1091,23 @@ impl Service<Exchange> for SedaProducer {
                     if producer_config.discard_if_no_consumers {
                         return Ok(exchange);
                     }
-                    return Err(CamelError::EndpointCreationFailed(format!(
-                        "SEDA endpoint '{}' has no active consumers",
-                        state.config.name
-                    )));
+                    // The gate wording tracks the endpoint mode: Single
+                    // rejects with "has no active consumers", Fanout with
+                    // "has no active subscribers" (rc-tgaxf). The shared
+                    // [`is_no_active_consumers_gate`] predicate matches
+                    // both, so classification is identical — only the
+                    // diagnostic text differs.
+                    let detail = match &state.mode {
+                        SedaMode::Single { .. } => format!(
+                            "SEDA endpoint '{}' has no active consumers",
+                            state.config.name
+                        ),
+                        SedaMode::Fanout { .. } => format!(
+                            "SEDA endpoint '{}' has no active subscribers",
+                            state.config.name
+                        ),
+                    };
+                    return Err(CamelError::EndpointCreationFailed(detail));
                 }
 
                 let should_wait = match producer_config.wait_for_task_to_complete {
@@ -2474,6 +2487,51 @@ mod consumer_producer_tests {
         assert!(!is_no_active_consumers_gate(&CamelError::Config(
             "unrelated".to_string()
         )));
+    }
+
+    /// The producer emits the Single-mode gate wording when the endpoint has
+    /// no active consumers — the predicate tests above pin classification,
+    /// these pin the message text the producer actually produces (rc-fr20u:
+    /// the crate owns its message text).
+    #[tokio::test]
+    async fn producer_gate_wording_single_mode() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint("seda:wording-single", &NoOpComponentContext)
+            .unwrap();
+
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
+        let err = producer
+            .oneshot(Exchange::new(Message::new("no consumers")))
+            .await
+            .expect_err("send without consumers must be rejected");
+        assert!(
+            err.to_string().contains("has no active consumers"),
+            "unexpected gate wording: {err}"
+        );
+    }
+
+    /// The producer emits the Fanout-mode gate wording when the endpoint has
+    /// no active subscribers (rc-fr20u).
+    #[tokio::test]
+    async fn producer_gate_wording_fanout_mode() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint(
+                "seda:wording-fanout?multipleConsumers=true",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
+        let err = producer
+            .oneshot(Exchange::new(Message::new("no subscribers")))
+            .await
+            .expect_err("send without subscribers must be rejected");
+        assert!(
+            err.to_string().contains("has no active subscribers"),
+            "unexpected gate wording: {err}"
+        );
     }
 
     /// `is_direct_startup_race` is the shared structural classification for

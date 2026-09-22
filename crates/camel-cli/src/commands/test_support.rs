@@ -9,8 +9,8 @@
 /// harness `DirectStimulus` does (crates/camel-integration-test
 /// adapters.rs): a fresh endpoint + producer per send through the
 /// component registry, one `oneshot` per exchange, retrying the
-/// consumer-startup race (`EndpointCreationFailed`) on a bounded
-/// deadline.
+/// consumer-startup race (non-gate `EndpointCreationFailed`; the SEDA
+/// no-active-consumers gate is excluded) on a bounded deadline.
 pub(crate) async fn direct_oneshot(
     ctx: &camel_core::CamelContext,
     uri: &str,

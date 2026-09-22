@@ -6,6 +6,12 @@
 //! structural replacement of the `"not registered"` text sniff cannot
 //! regress any reachable outcome.
 //!
+//! The SEDA no-active-consumers gate is NON-retryable (rc-ucemm): the
+//! rejection fires pre-enqueue but inside the caller's pipeline, so a
+//! retry re-executes already-run route steps and duplicates their side
+//! effects. Every non-gate `EndpointCreationFailed` stays retryable —
+//! the direct registration race and the documented queue-full residual.
+//!
 //! Reachability (production sources of a space-separated
 //! "not registered" wording in a pipeline error at send time):
 //! - `camel-direct`'s startup race — and it arrives AS
@@ -19,10 +25,16 @@
 use super::is_retryable_startup_failure;
 use camel_api::CamelError;
 
+/// The single-mode gate wording: "has no active consumers". The
+/// rejection is pre-enqueue yet inside the caller's pipeline — a retry
+/// would replay already-executed route steps (rc-ucemm).
 fn gate_single() -> CamelError {
     CamelError::EndpointCreationFailed("SEDA endpoint 'jobs' has no active consumers".into())
 }
 
+/// The fanout-mode gate wording: "has no active subscribers". Same
+/// pre-enqueue-inside-pipeline rejection as the single-mode gate
+/// (rc-ucemm).
 fn gate_fanout() -> CamelError {
     CamelError::EndpointCreationFailed("SEDA endpoint 'jobs' has no active subscribers".into())
 }
@@ -31,21 +43,37 @@ fn direct_startup_race() -> CamelError {
     CamelError::EndpointCreationFailed("direct endpoint 'out' not registered".into())
 }
 
-// ---- retryable: the consumer-startup race family -------------------------
+// ---- non-retryable: the SEDA gate fails fast (rc-ucemm) ------------------
 
 #[test]
-fn seda_single_mode_gate_is_retryable() {
+fn seda_single_mode_gate_is_not_retryable() {
     assert!(
-        is_retryable_startup_failure(&gate_single()),
-        "SEDA single-mode gate must stay retryable (job send is pre-enqueue-safe)"
+        !is_retryable_startup_failure(&gate_single()),
+        "SEDA single-mode gate must fail fast: a retry replays the caller's \
+         pipeline and duplicates pre-SEDA side effects (rc-ucemm)"
     );
 }
 
 #[test]
-fn seda_fanout_gate_is_retryable() {
+fn seda_fanout_gate_is_not_retryable() {
     assert!(
-        is_retryable_startup_failure(&gate_fanout()),
-        "SEDA fanout-mode gate must stay retryable"
+        !is_retryable_startup_failure(&gate_fanout()),
+        "SEDA fanout-mode gate must fail fast: a retry replays the caller's \
+         pipeline and duplicates pre-SEDA side effects (rc-ucemm)"
+    );
+}
+
+// ---- retryable: the consumer-startup race family -------------------------
+
+#[test]
+fn seda_queue_full_is_retryable() {
+    // Documented residual (bd rc-ucemm scope): queue-full shares the
+    // EndpointCreationFailed variant and is NOT one of the excluded gate
+    // wordings, so it stays retryable.
+    let e = CamelError::EndpointCreationFailed("SEDA queue 'jobs' is full (size=10)".into());
+    assert!(
+        is_retryable_startup_failure(&e),
+        "SEDA queue-full is not a gate wording and must stay retryable"
     );
 }
 

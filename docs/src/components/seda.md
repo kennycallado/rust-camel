@@ -120,7 +120,12 @@ Reach for `direct:` when two routes must share a call stack and ordering is stri
 
 ## Error handling
 
-A producer that targets an endpoint with no active consumer returns `EndpointCreationFailed` with the message `SEDA endpoint '<name>' has no active consumers`. Set `discardIfNoConsumers=true` to drop silently in this case.
+A producer that targets an endpoint with no active consumer returns `EndpointCreationFailed`. The message tracks the endpoint mode:
+
+- `SedaMode::Single` (default): `SEDA endpoint '<name>' has no active consumers`.
+- `SedaMode::Fanout` (`multipleConsumers=true`): `SEDA endpoint '<name>' has no active subscribers`.
+
+Set `discardIfNoConsumers=true` to drop silently in this case.
 
 A full queue with `blockWhenFull=false` returns `EndpointCreationFailed` with the queue name and configured size. Set `blockWhenFull=true` to wait up to `timeout`.
 
