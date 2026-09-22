@@ -25,13 +25,20 @@
 //!   `JoinSet::spawn(..)`) and `.await` on a binding whose initializer is
 //!   such a call (JoinHandle waits);
 //! - `tokio::net::TcpStream::connect(..)` awaited as a free-fn call;
-//! - a `loop` whose body contains an `.await` in test-body scope and
-//!   that has no deadline anywhere (readiness polling / retry loops).
+//! - a `loop` whose body contains an `.await` in test-body scope that
+//!   is not bounded per site (readiness polling / retry loops); only
+//!   classified wait sites count — awaited calls in WAIT_METHODS,
+//!   awaited free-fn calls resolving to WAIT_CALL_TARGETS, and awaited
+//!   spawn handles; awaited calls resolving to the finite-call targets
+//!   (`tokio::time::sleep`, `tokio::task::yield_now`) are dropped;
+//!   opaque/unclassified await bases stay sites.
 //!
 //! Stream I/O reads/writes (`.read().await`, `.write().await`,
-//! `.flush().await`) are deliberately deferred to a later detector
-//! revision: they are the highest-volume class and would drown the seed
-//! ceiling. Adding them later is a review-visible ratchet bump. Sync
+//! `.flush().await`) and other out-of-class method awaits (`accept`,
+//! `send`, `notified`, `on_next`) are deliberately deferred to a later
+//! detector revision: they are the highest-volume class and would drown
+//! the seed ceiling. Adding them later is a review-visible ratchet
+//! bump. Sync
 //! blocking waits (`child.wait()` on a std process, `blocking_lock`,
 //! thread `join()`) are deferred with them, as are method-form deadlines
 //! (`fut.timeout(d)` via `FutureExt`) and custom bounded helpers: none of
@@ -92,11 +99,15 @@
 //! to the same crate; a non-identity masquerade is corpus-zero and
 //! adversarial-only. Detection is immune (any-hit).
 //!
-//! A `loop` additionally counts as bounded when ANY `timeout` call site
-//! lies inside its subtree (the per-iteration deadline pattern:
-//! `loop { match timeout(d, rx.recv()).await { .. } }`). When a `loop`
-//! is reported, contained wait findings are subsumed (one defect, one
-//! ratchet entry).
+//! A `loop` is bounded when EVERY await site in its body is individually
+//! bounded: its span lies inside a timeout future region, its base is
+//! itself a bounding timeout call (per-iteration deadline pattern:
+//! `loop { match timeout(d, rx.recv()).await { .. } }`), or its base is a
+//! local whose only binding in the loop subtree is `let f = <bounding
+//! call>`. A timeout call that wraps none of the sites — a sibling
+//! statement, a disjoint branch, a closure-internal call — bounds
+//! nothing. When a `loop` is reported, contained wait findings are
+//! subsumed (one defect, one ratchet entry).
 //!
 //! The visitor has no type information: `.recv().await` is flagged
 //! regardless of receiver type. ADR-0069 R1 accepts this — "a narrow
@@ -266,6 +277,11 @@ impl Imports {
 
 /// Awaited method calls that wait for externally driven progress.
 const WAIT_METHODS: [&str; 6] = ["recv", "lock", "acquire", "wait", "join_next", "connect"];
+
+/// Awaited free-fn calls that are finite by contract: awaiting them
+/// never blocks indefinitely, so they are not unbounded-wait sites
+/// (loop per-site check only; the standalone rule never sees them).
+const FINITE_CALL_TARGETS: [&str; 2] = ["tokio::time::sleep", "tokio::task::yield_now"];
 
 /// Non-awaited method calls that block without a deadline.
 const BLOCKING_METHODS: [&str; 1] = ["blocking_recv"];
@@ -916,12 +932,27 @@ trait ResolvesPaths {
 
     /// True when `path` denotes a timeout target (bounding).
     fn is_bounding_path(&self, path: &syn::Path) -> bool {
+        self.resolves_to_target(path, &TIMEOUT_TARGETS)
+    }
+
+    /// True when `path` denotes an awaited free-fn call that is finite
+    /// by contract (`tokio::time::sleep`, `tokio::task::yield_now`):
+    /// awaiting it never blocks indefinitely, so it is never an
+    /// unbounded-wait site.
+    fn is_finite_call_path(&self, path: &syn::Path) -> bool {
+        self.resolves_to_target(path, &FINITE_CALL_TARGETS)
+    }
+
+    /// Resolve `path` through the import chain (same precedence rules
+    /// as bounding) and report whether any surviving reading lands in
+    /// `targets`.
+    fn resolves_to_target(&self, path: &syn::Path, targets: &[&str]) -> bool {
         let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         let qualified = segments.join("::");
 
         // Leading colon bypasses aliases
         if path.leading_colon.is_some() {
-            return TIMEOUT_TARGETS.contains(&qualified.as_str());
+            return targets.contains(&qualified.as_str());
         }
 
         let candidates: Vec<Candidate> = if segments.len() == 1 {
@@ -1003,7 +1034,7 @@ trait ResolvesPaths {
             });
             if !glob_blocks {
                 let normalized = c.path.strip_prefix("::").unwrap_or(&c.path);
-                if TIMEOUT_TARGETS.contains(&normalized) {
+                if targets.contains(&normalized) {
                     return true;
                 }
             }
@@ -1013,7 +1044,7 @@ trait ResolvesPaths {
         if named.is_empty() && !literals.is_empty() {
             for c in &literals {
                 let normalized = c.path.strip_prefix("::").unwrap_or(&c.path);
-                if TIMEOUT_TARGETS.contains(&normalized) {
+                if targets.contains(&normalized) {
                     return true;
                 }
             }
@@ -1027,7 +1058,7 @@ trait ResolvesPaths {
             if all_glob && globs.len() == 1 {
                 let c = globs[0];
                 let normalized = c.path.strip_prefix("::").unwrap_or(&c.path);
-                if TIMEOUT_TARGETS.contains(&normalized) {
+                if targets.contains(&normalized) {
                     return true;
                 }
             }
@@ -1404,36 +1435,41 @@ impl Visit<'_> for TimeoutCollector<'_> {
     }
 }
 
-/// True when an `.await` occurs in test-body scope (closures, nested fn
-/// items, and associated fns pruned — an await inside a closure runs in
-/// another task, not the test body).
-struct AwaitSeeker {
-    found: bool,
+/// Base expression classification of an await site inside a loop body,
+/// used for per-site loop boundedness.
+enum SiteBase {
+    /// The awaited expression is itself a bounding timeout call
+    /// (`tokio::time::timeout(..).await` — per-iteration deadline).
+    TimeoutCall,
+    /// The awaited expression is a bare local (`f.await`).
+    Ident(String),
+    /// Any other base expression shape.
+    Other,
 }
 
-impl Visit<'_> for AwaitSeeker {
-    fn visit_expr_closure(&mut self, _c: &syn::ExprClosure) {}
-    fn visit_item_fn(&mut self, _f: &ItemFn) {}
-    fn visit_impl_item_fn(&mut self, _f: &syn::ImplItemFn) {}
-    fn visit_trait_item_fn(&mut self, _f: &syn::TraitItemFn) {}
-
-    fn visit_expr_await(&mut self, _e: &syn::ExprAwait) {
-        self.found = true;
-    }
-}
-
-/// True when a timeout call site occurs anywhere in `expr`'s subtree,
-/// closures included (a per-iteration deadline bounds the loop even when
-/// the call sits inside a nested closure body).
-struct TimeoutSeeker<'a> {
+/// Collect the await sites of a loop body with their base classification,
+/// plus the local bindings needed for sole-binding provenance: a
+/// `let x = <bounding call>` local whose pattern is a single ident marks
+/// that ident bounded; any other binding of the same ident in the loop
+/// subtree marks it shadowed, so a later `x.await` can no longer prove a
+/// timeout base. Shadowing sources beyond `let` statements: for-loop
+/// patterns (`for f in ys`), match-arm patterns (`Some(f) => ..`), and
+/// let-conditions of `if`/`while` including every segment of a let-chain
+/// (`if let Some(f) = n && go()`). Scope pruning as in the test-body
+/// rule — closures, nested fn items, and associated fns are pruned
+/// (their awaits run in another scope); async blocks and nested loops
+/// are traversed (their sites belong to the loop subtree).
+struct LoopAwaitCollector<'a> {
     chain: &'a [Imports],
     body_top: &'a Imports,
     body_nested: &'a [(Imports, usize)],
     non_terminal_locals: &'a HashSet<String>,
-    found: bool,
+    sites: Vec<(Span, SiteBase)>,
+    bound_idents: HashSet<String>,
+    shadowed_idents: HashSet<String>,
 }
 
-impl ResolvesPaths for TimeoutSeeker<'_> {
+impl ResolvesPaths for LoopAwaitCollector<'_> {
     fn chain(&self) -> &[Imports] {
         self.chain
     }
@@ -1448,14 +1484,105 @@ impl ResolvesPaths for TimeoutSeeker<'_> {
     }
 }
 
-impl Visit<'_> for TimeoutSeeker<'_> {
-    fn visit_expr_call(&mut self, call: &syn::ExprCall) {
-        if let syn::Expr::Path(pe) = call.func.as_ref()
-            && self.is_bounding_path(&pe.path)
-        {
-            self.found = true;
+impl Visit<'_> for LoopAwaitCollector<'_> {
+    fn visit_expr_closure(&mut self, _c: &syn::ExprClosure) {}
+    fn visit_item_fn(&mut self, _f: &ItemFn) {}
+    fn visit_impl_item_fn(&mut self, _f: &syn::ImplItemFn) {}
+    fn visit_trait_item_fn(&mut self, _f: &syn::TraitItemFn) {}
+
+    /// `for f in ys`: the loop pattern rebinds `f` without any bounding
+    /// call, so its idents shadow any outer `let f = <bounding call>`.
+    fn visit_expr_for_loop(&mut self, f: &syn::ExprForLoop) {
+        let mut names = HashSet::new();
+        PatIdents { names: &mut names }.visit_pat(&f.pat);
+        self.shadowed_idents.extend(names);
+        visit::visit_expr_for_loop(self, f);
+    }
+
+    /// `match n { Some(f) => .. }`: arm patterns rebind without any
+    /// bounding call.
+    fn visit_arm(&mut self, arm: &syn::Arm) {
+        let mut names = HashSet::new();
+        PatIdents { names: &mut names }.visit_pat(&arm.pat);
+        self.shadowed_idents.extend(names);
+        visit::visit_arm(self, arm);
+    }
+
+    /// `if let Some(f) = n` / `while let Some(f) = it.next()` / let-chain
+    /// segments: the condition pattern rebinds without any bounding call.
+    /// syn 2 represents each segment of a let-chain as its own `ExprLet`
+    /// node nested inside the chain's binary structure, so the default
+    /// traversal reaches every segment.
+    fn visit_expr_let(&mut self, e: &syn::ExprLet) {
+        let mut names = HashSet::new();
+        PatIdents { names: &mut names }.visit_pat(&e.pat);
+        self.shadowed_idents.extend(names);
+        visit::visit_expr_let(self, e);
+    }
+
+    fn visit_expr_await(&mut self, e: &syn::ExprAwait) {
+        // Method-call bases are class-checked: `send`/`notified`-style
+        // awaits are outside the wait class (same class the standalone
+        // rule reports) and never make a site. Call bases are bounding
+        // (timeout), finite by contract (`tokio::time::sleep`,
+        // `yield_now`), or opaque — a free fn can await arbitrarily
+        // inside, so it stays a candidate site. Single-ident bases are
+        // opaque (spawned handle, bound future, oneshot receiver —
+        // unknowable) and always stay candidates.
+        let base = match strip_parens(&e.base) {
+            syn::Expr::MethodCall(mc) => {
+                if WAIT_METHODS.contains(&mc.method.to_string().as_str()) || mc.method == "spawn" {
+                    Some(SiteBase::Other)
+                } else {
+                    None
+                }
+            }
+            syn::Expr::Call(c) => match c.func.as_ref() {
+                syn::Expr::Path(pe) if self.is_bounding_path(&pe.path) => {
+                    Some(SiteBase::TimeoutCall)
+                }
+                // `tokio::time::sleep(..)` / `yield_now()` are finite by
+                // contract — awaiting them never blocks indefinitely.
+                syn::Expr::Path(pe) if self.is_finite_call_path(&pe.path) => None,
+                _ => Some(SiteBase::Other),
+            },
+            syn::Expr::Path(pe) if pe.path.segments.len() == 1 => {
+                Some(SiteBase::Ident(pe.path.segments[0].ident.to_string()))
+            }
+            _ => Some(SiteBase::Other),
+        };
+        if let Some(base) = base {
+            self.sites.push((span_of(e), base));
         }
-        visit::visit_expr_call(self, call);
+        visit::visit_expr_await(self, e);
+    }
+
+    fn visit_local(&mut self, local: &syn::Local) {
+        let mut names = HashSet::new();
+        PatIdents { names: &mut names }.visit_pat(&local.pat);
+        let bounding_init =
+            local
+                .init
+                .as_ref()
+                .is_some_and(|init| match strip_parens(&init.expr) {
+                    syn::Expr::Call(c) => match c.func.as_ref() {
+                        syn::Expr::Path(pe) => self.is_bounding_path(&pe.path),
+                        _ => false,
+                    },
+                    _ => false,
+                });
+        // Spec rule (c) requires a single-ident local `let x = <bounding
+        // call>`; destructuring patterns (`let S { x } = ..`,
+        // `let Ok(x) = ..`) bind but do not bound — their idents are
+        // shadowed like any non-bounding binding. `@`-subpats
+        // (`let x @ Some(y) = ..`) bind more than one ident and are
+        // likewise excluded: only a plain single-ident pattern bounds.
+        if matches!(local.pat, syn::Pat::Ident(_)) && names.len() == 1 && bounding_init {
+            self.bound_idents.extend(names);
+        } else {
+            self.shadowed_idents.extend(names);
+        }
+        visit::visit_local(self, local);
     }
 }
 
@@ -1544,28 +1671,43 @@ impl Visit<'_> for WaitFinder<'_> {
     fn visit_expr_loop(&mut self, e: &syn::ExprLoop) {
         let sp = span_of(e);
         if !self.bounded(sp) && !self.subsumed(sp) {
-            let mut seeker = AwaitSeeker { found: false };
-            seeker.visit_block(&e.body);
-            if seeker.found {
-                // Per-iteration deadline pattern: any timeout call site
-                // inside the loop subtree bounds each wait, so the loop is
-                // not an unbounded readiness spin.
-                let mut tseeker = TimeoutSeeker {
-                    chain: self.chain,
-                    body_top: self.body_top,
-                    body_nested: self.body_nested,
-                    non_terminal_locals: self.non_terminal_locals,
-                    found: false,
-                };
-                tseeker.visit_block(&e.body);
-                if !tseeker.found {
-                    // The loop is one unbounded-wait defect whether or not
-                    // a marker suppresses its own finding: contained waits
-                    // are subsumed either way.
-                    self.loop_spans.push(sp);
-                    if !self.suppressed(sp.0.line, sp.1.line) {
-                        self.findings.push(Finding { line: sp.0.line });
+            let mut collector = LoopAwaitCollector {
+                chain: self.chain,
+                body_top: self.body_top,
+                body_nested: self.body_nested,
+                non_terminal_locals: self.non_terminal_locals,
+                sites: Vec::new(),
+                bound_idents: HashSet::new(),
+                shadowed_idents: HashSet::new(),
+            };
+            collector.visit_block(&e.body);
+            // Per-site boundedness: every wait-class await site in the
+            // loop body must be individually bounded — region enclosure
+            // (a), an await-on-timeout base (b), or sole-binding
+            // provenance (c). A timeout call that wraps none of the
+            // sites — sibling statement, disjoint branch, spawned
+            // closure — bounds nothing. Awaits on wait-class methods
+            // only: `sleep`/`send`-style method calls are finite by
+            // contract and never unbound a loop; opaque call and ident
+            // bases stay candidate sites.
+            let all_bounded = collector.sites.iter().all(|(site_sp, base)| {
+                self.bounded(*site_sp)
+                    || match base {
+                        SiteBase::TimeoutCall => true,
+                        SiteBase::Ident(n) => {
+                            collector.bound_idents.contains(n)
+                                && !collector.shadowed_idents.contains(n)
+                        }
+                        SiteBase::Other => false,
                     }
+            });
+            if !all_bounded {
+                // The loop is one unbounded-wait defect whether or not
+                // a marker suppresses its own finding: contained waits
+                // are subsumed either way.
+                self.loop_spans.push(sp);
+                if !self.suppressed(sp.0.line, sp.1.line) {
+                    self.findings.push(Finding { line: sp.0.line });
                 }
             }
         }
@@ -1758,6 +1900,127 @@ mod tests {
     fn loop_with_per_iteration_timeout_not_reported() {
         let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        match tokio::time::timeout(d, rx.recv()).await {\n            Ok(v) => { drop(v); }\n            Err(_) => break,\n        }\n    }\n}\n";
         assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn dropped_sibling_timeout_does_not_bound_loop_waits() {
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        let _ = tokio::time::timeout(d, async { tick(); });\n        rx.recv().await;\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn timeout_in_disjoint_branch_does_not_bound_loop_waits() {
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        if go() {\n            tokio::time::timeout(d, a()).await;\n        } else {\n            rx.recv().await;\n        }\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn inner_timeout_not_enclosing_loop_waits_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        let _ = tokio::time::timeout(d, other()).await;\n        rx.recv().await;\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn rebound_local_timeout_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        let f = tokio::time::timeout(d, rx.recv());\n        let f = other();\n        f.await;\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn loop_awaits_timeout_local_binding_not_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        let f = tokio::time::timeout(d, rx.recv());\n        match f.await {\n            Ok(v) => { drop(v); }\n            Err(_) => break,\n        }\n    }\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn for_loop_rebinding_of_timeout_local_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        let f = tokio::time::timeout(d, x());\n        for f in ys {\n            f.await;\n        }\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn match_arm_rebinding_of_timeout_local_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        let f = tokio::time::timeout(d, x());\n        match n {\n            Some(f) => {\n                f.await;\n            }\n            None => {}\n        }\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn destructured_timeout_binding_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        let S { f } = tokio::time::timeout(d, x());\n        f.await;\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn at_subpat_timeout_binding_reported() {
+        // `let x @ Some(f) = <bounding call>` is a `Pat::Ident` with a
+        // subpat: it binds two idents, so neither is a plain
+        // single-ident bound and `f.await` stays reported.
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        let x @ Some(f) = tokio::time::timeout(d, x());\n        f.await;\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn loop_sleep_beside_timeout_recv_not_reported() {
+        // `sleep` is outside the wait class: the per-iteration check
+        // evaluates only wait-class method bases, and the recv is
+        // timeout-bound.
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        match tokio::time::timeout(d, rx.recv()).await {\n            Ok(Some(v)) => { tokio::time::sleep(d).await; }\n            _ => break,\n        }\n    }\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn loop_send_beside_timeout_recv_not_reported() {
+        // `send` on a bounded channel is outside the wait class (same as
+        // the standalone rule).
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        match tokio::time::timeout(d, rx.recv()).await {\n            Ok(Some(v)) => { tx.send(v).await; }\n            _ => break,\n        }\n    }\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn loop_opaque_ident_await_still_reported() {
+        // An ident-base await is opaque (oneshot receiver, bound future,
+        // spawned handle — unknowable), so it stays a candidate site.
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        match tokio::time::timeout(d, rx.recv()).await {\n            Ok(Some(v)) => { let _ = gate.await; }\n            _ => break,\n        }\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn loop_spawned_handle_ident_still_reported() {
+        // An awaited spawned-handle binding by ident IS wait-class: with
+        // no timeout wrapping it, the loop stays a finding.
+        let src = "#[tokio::test]\nasync fn t() {\n    let h = tokio::spawn(async { x().await });\n    loop {\n        h.await;\n    }\n}\n";
+        assert_eq!(findings(src), vec![4]);
+    }
+
+    #[test]
+    fn loop_only_out_of_class_awaits_not_reported() {
+        // A loop whose every await is outside the wait class (`accept`,
+        // stream `read`/`write`) has no site at all: the per-site rule
+        // is vacuously satisfied. Stream I/O stays a documented blind
+        // spot (module doc), not a loop-level defect.
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        if let Ok((mut s, _)) = l.accept().await {\n            let _ = s.read(&mut b).await;\n        }\n    }\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn if_let_chain_rebinding_of_timeout_local_reported() {
+        // syn 2 represents each segment of a let-chain as its own
+        // `ExprLet` node (`Binary { left: Let(P1, a), op: &&, right: ... }`),
+        // so the `visit_expr_let` collector reaches every chain segment.
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        let f = tokio::time::timeout(d, x());\n        if let Some(f) = n && go() {\n            f.await;\n        }\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn timeout_inside_spawned_closure_does_not_bound_loop() {
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        tokio::spawn(async {\n            let _ = tokio::time::timeout(d, tick()).await;\n        });\n        rx.recv().await;\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn await_in_unenclosed_async_block_in_loop_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        let b = async {\n            rx.recv().await;\n        };\n        b;\n        tokio::time::timeout(d, other()).await;\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
     }
 
     #[test]

@@ -8,13 +8,16 @@
 # recv/lock/acquire/wait/join_next/connect method calls, blocking_recv,
 # tokio::spawn/spawn_blocking/JoinSet::spawn awaits (incl. awaited
 # spawned-handle bindings), tokio::net::TcpStream::connect awaits, and
-# await-carrying `loop`s with no deadline. A wait inside the future
-# argument of tokio::time::timeout/timeout_at is bounded per three
-# precedence rules over provenance-tagged readings (named import from
-# body_top/module chain beats same-or-outer globs; the as-written
+# `loop`s whose wait-class await sites are not individually
+# deadline-bounded (a site is bounded by timeout future-argument
+# enclosure, an await-on-timeout base, or an awaited sole
+# `let x = timeout(..)` binding; out-of-class awaits — send/notified/
+# on_next/accept and stream I/O — are not sites). A wait inside the
+# future argument of tokio::time::timeout/timeout_at is bounded per
+# three precedence rules over provenance-tagged readings (named import
+# from body_top/module chain beats same-or-outer globs; the as-written
 # qualified literal bounds unless a named or local reading exists; a
-# glob-only singleton target bounds); a loop with a per-iteration
-# timeout call is bounded.
+# glob-only singleton target bounds).
 # Sites marked `// allow-test-wait: <reason>` (ADR-0069 R1 normative
 # marker) are suppressed at scan time and never count toward the ceiling.
 # Known blind spots (documented in the module doc): stream I/O
@@ -556,4 +559,38 @@
 # the same tree, zero removals). Bounding now follows precedence rules
 # (design.md aliaswait §3); no site was suppressed.
 # - crates/components/camel-component-wasm/tests/source_stream_integration.rs:278
-395
+#
+# Lower 395 -> 393 (2026-09-22, OpenSpec change `subsume` task 1.2, bd
+# rc-ohddw): the per-site loop rule (1.1) required EVERY awaited site in
+# a loop to be bounded, including awaits outside the V1 defect class
+# (method bases like send/notified/on_next; free-fn bases like
+# tokio::time::sleep). The loop site collector now class-checks
+# method-call bases against WAIT_METHODS/spawn, drops finite-by-contract
+# free-fn calls (tokio::time::sleep, tokio::task::yield_now), and keeps
+# opaque bases (free-fn calls, single-ident) as sites. Base-vs-new
+# finding-list diff on the same tree (baseline 72630b7c vs this commit):
+# - 12 loop-level false positives fixed (their wait-class sites were
+#   already timeout-wrapped; only out-of-class awaits unbound them):
+#   crates/camel-test/tests/error_semantics_test.rs:193 (sleep),
+#   crates/components/camel-component-grpc/tests/integration.rs:1807,
+#   2001, 2158, 2273, 2389, 2506 (send/on_next method awaits),
+#   crates/components/camel-component-seda/src/lib.rs:2520 (sleep in a
+#   spawned block), crates/components/camel-component-wasm/tests/
+#   source_integration.rs:344 and tests/source_stream_integration.rs:538
+#   (sleep), crates/components/camel-direct/src/direct_tests.rs:638
+#   (notified), crates/components/camel-kafka/src/consumer.rs:1232
+#   (sleep)
+# - 1 loop-level false positive of the old coarse rule fixed: loops
+#   whose only awaits are out-of-class (listener.accept(), stream
+#   read/write) have no wait-class site at all and are no longer
+#   findings — crates/components/camel-http/src/lib.rs:6993 and :7046
+# - 1 TRUE finding bounded in-tree: the oneshot unblock gate
+#   crates/components/camel-http/src/lib.rs:8998 now wraps
+#   rx_unblock.await in tokio::time::timeout(Duration::from_secs(2), ..)
+#   with a loud expect, matching the recv deadline two lines above
+# All other 395 baseline findings preserved verbatim (five shift +5
+# lines from the in-tree bound). Ratchet philosophy: the number may
+# only decrease; 2 coarse-rule false positives reclassified
+# out-of-class (camel-http accept/IO-only loops) and no marker was
+# added.
+393

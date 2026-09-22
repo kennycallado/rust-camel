@@ -8993,7 +8993,12 @@ mod tests {
                         if let Some(tx) = first_seen_tx.take() {
                             let _ = tx.send(());
                             if let Some(rx_unblock) = unblock_first_rx.take() {
-                                let _ = rx_unblock.await;
+                                // Deadline-bound like the recv above: a
+                                // parked first exchange fails loudly
+                                // instead of hanging the pipeline task.
+                                let _ = tokio::time::timeout(Duration::from_secs(2), rx_unblock)
+                                    .await
+                                    .expect("first exchange unblock within 2s");
                             }
                         }
 
