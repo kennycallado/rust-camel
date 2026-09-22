@@ -227,8 +227,8 @@ polled; the boot-buffer guarantee applies to Unix SIGINT/SIGTERM streams.
 
 ### Requirement: job discovery and no-argument listing
 
-The system SHALL accept a `[jobs]` table with ordered `dirs`, defaulting to `["jobs"]`, and reject unknown keys. Legacy `dir` SHALL fold into one `dirs` entry. Each root SHALL resolve against the `Camel.toml` root. A bare name SHALL probe only `<name>.job.yaml`, report a miss with the probed path, and use the first matching root when exactly one match exists. Multiple matching roots SHALL produce an exit-2 collision naming all paths. Explicit paths and recognized document suffixes SHALL bypass root probing. A job SHALL retain its mandatory explicit route source and SHALL never inherit `routes/` discovery. No-argument listing SHALL show `.job.yaml` and `.job.yml` stems, descriptions or `(no description)`, replace embedded newlines with spaces, tolerate malformed siblings as `(unparseable)`, print the existing creation hint for absent or empty roots, and reject listing-only report options with exit 2. Listing and run reports SHALL never co-occur.
-When both `dir` and `dirs` are present, `dirs` SHALL take precedence and `dir` SHALL not add a duplicate root. Recursive listing SHALL preserve the existing root-level output line for files directly under a configured root. For nested files, it SHALL prefix the stem with the configured-root-relative path as `<relative-path>: <stem> — <description>`. Bare-name resolution SHALL remain root-level only.
+The system SHALL accept a `[jobs]` table with ordered `dirs`, defaulting to `["jobs"]`, and reject unknown keys. Legacy `dir` SHALL fold into one `dirs` entry. Each root SHALL resolve against the `Camel.toml` root. A bare name SHALL probe only `<name>.job.yaml` at the root level of every configured root, report a miss with the probed path, and use the first matching root when exactly one match exists. Multiple matching roots SHALL produce an exit-2 collision naming all paths. Bare names SHALL never consult the current working directory. Document-argument resolution beyond bare names SHALL follow the named job resolution requirement; an explicit-class argument that exists relative to the current working directory SHALL bypass root probing. A job SHALL retain its mandatory explicit route source and SHALL never inherit `routes/` discovery. No-argument listing SHALL show `.job.yaml` and `.job.yml` stems, descriptions or `(no description)`, replace embedded newlines with spaces, tolerate malformed siblings as `(unparseable)`, print the existing creation hint for absent or empty roots, and reject listing-only report options with exit 2. Listing and run reports SHALL never co-occur.
+When both `dir` and `dirs` are present, `dirs` SHALL take precedence and `dir` SHALL not add a duplicate root. Recursive listing SHALL preserve the existing root-level output line for files directly under a configured root (the bare stem). For nested files, it SHALL show the configured-root-relative path as `<relative-path> — <description>` — the exact spelling that resolves as a document argument, so the displayed name is invocable verbatim. Bare-name resolution SHALL remain root-level only: a bare name never resolves a document nested below a root.
 
 #### Scenario: lists found jobs with exit 0
 
@@ -600,7 +600,7 @@ The system SHALL recursively inspect each configured root up to depth 8 and 512 
 - **TEST:** `job_listing_recurses_and_skips_test_documents`
 - **SETUP:** Create nested `.job.yaml` and `.test.yaml` files under one root.
 - **ACTION:** Run `cargo test -p camel-cli --test job_signal_test job_listing_recurses_and_skips_test_documents`.
-- **ASSERT:** Exact stdout line is `domain/report.job.yaml: report — nested job`; test document is absent; exit is 0.
+- **ASSERT:** Exact stdout line is `domain/report.job.yaml — nested job`; test document is absent; exit is 0.
 
 #### Scenario: Depth cap is non-fatal per root
 
@@ -618,7 +618,7 @@ The system SHALL recursively inspect each configured root up to depth 8 and 512 
 - **WHEN** `camel job` lists jobs
 - **THEN** files within the limit are processed, the additional file is excluded, one warning contains `listing truncated at 512; narrow [jobs].dirs`, and exit is 0
 - **TEST:** `job_listing_stops_at_512_files`
-- **SETUP:** Configure roots `first` and `second`. In `first`, create lexical files `000.txt` through `510.txt`, `511.job.yaml`, and `512.job.yaml`. The first job is file 512 and the second is file 513. Put a valid job in `second`.
+- **SETUP:** Configure roots `first` and `second`. In `first`, create lexical files `000.txt` through `510.txt`, `511.job.yaml`, and `512.job.yaml`. The first job is file 512 and the second job is file 513. Put a valid job in `second`.
 - **ACTION:** Run `cargo test -p camel-cli --test job_signal_test job_listing_stops_at_512_files`.
 - **ASSERT:** File-512 job and second-root job appear, file-513 job does not, one warning names `first`, exit is 0.
 
@@ -654,7 +654,7 @@ The system SHALL recursively inspect each configured root up to depth 8 and 512 
 
 ### Requirement: named job resolution
 
-The system SHALL probe `<name>.job.yaml` in every configured root, detect cross-root stem collisions as exit 2 errors naming all matching files, and otherwise select the first match in declared root order.
+The system SHALL resolve a document argument through an ordered ladder. An absolute argument SHALL be used as-is without root probing. An explicit-class argument — one containing a path separator or ending (case-insensitively) in `.yaml`, `.yml`, or `.json` — that exists relative to the current working directory SHALL be used as-is: an explicit CWD-relative path wins over root probing. A bare name SHALL never consult the current working directory and SHALL instead probe every configured root with exactly one probe per root, appending `.job.yaml`: the bare-name probe is `<root>/<name>.job.yaml`, root level only. An explicit-class argument that misses the CWD SHALL probe every configured root with exactly one probe per root, joined from the argument as spelled: an argument ending (case-insensitively) in `.yaml`, `.yml`, or `.json` probes `<root>/<argument>` verbatim, and a separator-bearing argument without such a suffix probes `<root>/<argument>.job.yaml`. Probing SHALL perform no normalization and no confinement: probes are plain joins of the argument as spelled, so arguments containing `.` or `..` components or trailing separators probe exactly as joined and appear verbatim in diagnostics. The system SHALL collect every match before selection: exactly one match resolves; zero matches exit 2 with a miss diagnostic naming every probed path; two or more matches exit 2 with a collision diagnostic naming every matching path. Bare-name probing stays `.job.yaml`-only: a bare name never resolves a document nested below a root, and `.job.yml` stays display-only for bare lookup.
 
 #### Scenario: Cross-root collision
 
@@ -665,6 +665,96 @@ The system SHALL probe `<name>.job.yaml` in every configured root, detect cross-
 - **SETUP:** Create `Camel.toml` with `dirs = ["first", "second"]`. Put valid `report.job.yaml` files in both roots with distinct route output markers `first-marker` and `second-marker`.
 - **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test named_job_collision_reports_all_matching_paths`.
 - **ASSERT:** Stderr names both exact files and exit status is 2.
+
+#### Scenario: Nested stem path resolves
+
+- **GIVEN** `daily/ingest.job.yaml` exists nested in a configured root
+- **WHEN** `camel job daily/ingest` runs from the project root
+- **THEN** the nested document loads and runs, and the exit code is 0
+- **TEST:** `nested_stem_path_resolves_across_root`
+- **SETUP:** Create `Camel.toml` with `dirs = ["jobs"]` and a valid `jobs/daily/ingest.job.yaml` with an output marker.
+- **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test nested_stem_path_resolves_across_root`.
+- **ASSERT:** Report outcome is `Completed`, the report's document field names `jobs/daily/ingest.job.yaml`, stderr is empty, and exit status is 0.
+
+#### Scenario: Nested document path resolves verbatim
+
+- **GIVEN** `daily/ingest.job.yaml` exists nested in a configured root and no such path exists relative to the CWD
+- **WHEN** `camel job daily/ingest.job.yaml` runs from the project root
+- **THEN** the displayed listing spelling resolves verbatim — the probe is `<root>/daily/ingest.job.yaml` — and the exit code is 0
+- **TEST:** `nested_document_path_resolves_verbatim`
+- **SETUP:** Same fixture as `nested_stem_path_resolves_across_root`.
+- **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test nested_document_path_resolves_verbatim`.
+- **ASSERT:** Report outcome is `Completed` and exit status is 0.
+
+#### Scenario: CWD-relative existence wins over root probe
+
+- **GIVEN** a separator-bearing argument names an existing file relative to the CWD and the same relative spelling also exists under a configured root, with distinct route output markers
+- **WHEN** `camel job <that-path>` runs
+- **THEN** the CWD-relative file loads (its marker, not the root copy) and the exit code is 0
+- **TEST:** `cwd_relative_existence_wins_over_root_probe`
+- **SETUP:** Create a CWD-relative `local/echo.job.yaml` and a same-spelled `jobs/local/echo.job.yaml` with different markers.
+- **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test cwd_relative_existence_wins_over_root_probe`.
+- **ASSERT:** The report proves the CWD copy ran; the root copy's marker is absent.
+
+#### Scenario: Relative-path cross-root collision names every match
+
+- **GIVEN** `daily/ingest.job.yaml` exists under both configured roots
+- **WHEN** `camel job daily/ingest` runs
+- **THEN** stderr names both matching nested paths as an ambiguity and the exit code is 2
+- **TEST:** `nested_relative_path_collision_names_every_match`
+- **SETUP:** Create `Camel.toml` with `dirs = ["first", "second"]` and valid `daily/ingest.job.yaml` files in both roots.
+- **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test nested_relative_path_collision_names_every_match`.
+- **ASSERT:** Stderr names `first/daily/ingest.job.yaml` and `second/daily/ingest.job.yaml`; exit status is 2.
+
+#### Scenario: Relative-path miss names every probed file
+
+- **GIVEN** no probe for the argument exists in any configured root and the argument does not exist relative to the CWD
+- **WHEN** `camel job daily/missing` runs
+- **THEN** stderr names every probed path (`<root>/daily/missing.job.yaml` for each root) and the exit code is 2
+- **TEST:** `nested_relative_path_miss_names_probes`
+- **SETUP:** Create `Camel.toml` with `dirs = ["first", "second"]` and no matching nested documents.
+- **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test nested_relative_path_miss_names_probes`.
+- **ASSERT:** Stderr names `first/daily/missing.job.yaml` and `second/daily/missing.job.yaml`; exit status is 2.
+
+#### Scenario: An absolute argument is used as-is without root probing
+
+- **GIVEN** a job document exists at an absolute path outside every configured root
+- **WHEN** `camel job /abs/path/echo.job.yaml` runs with that absolute argument
+- **THEN** the absolute document loads as-is, no root probe occurs, and the exit code is 0; an absolute argument that does not exist fails with the filesystem diagnostic for that path (never a root-probe miss diagnostic)
+- **TEST:** `absolute_argument_is_used_as_is_without_probing`
+- **SETUP:** Create `Camel.toml` with `dirs = ["jobs"]` and a job document at a tempdir absolute path outside `jobs/`.
+- **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test absolute_argument_is_used_as_is_without_probing`.
+- **ASSERT:** The absolute document runs (exit 0); a second run with a nonexistent absolute path exits 2 with stderr naming that path and no configured-root probe path.
+
+#### Scenario: Bare names stay root-level
+
+- **GIVEN** only `daily/ingest.job.yaml` exists nested in a configured root and no root-level `ingest.job.yaml` exists
+- **WHEN** `camel job ingest` runs
+- **THEN** the probe stays root-level (`<root>/ingest.job.yaml`), the miss diagnostic names those probes, and the exit code is 2
+- **TEST:** `bare_name_does_not_descend_into_subdirectories`
+- **SETUP:** Create `Camel.toml` with `dirs = ["jobs"]` and only the nested document.
+- **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test bare_name_does_not_descend_into_subdirectories`.
+- **ASSERT:** Stderr names `jobs/ingest.job.yaml` and does not name `daily/ingest.job.yaml`; exit status is 2.
+
+#### Scenario: A bare name never consults the CWD
+
+- **GIVEN** a CWD-relative file named `report` (no extension) exists while a valid root-level `report.job.yaml` also exists in a configured root
+- **WHEN** `camel job report` runs
+- **THEN** the root document loads — the CWD file is ignored — and the exit code is 0
+- **TEST:** `bare_name_ignores_cwd_entries`
+- **SETUP:** Create `Camel.toml` with `dirs = ["jobs"]`, a valid `jobs/report.job.yaml`, and a decoy file named `report` in the CWD.
+- **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test bare_name_ignores_cwd_entries`.
+- **ASSERT:** The report proves the root document ran; the decoy was never read; exit status is 0.
+
+#### Scenario: Arguments probe as spelled, without normalization or confinement
+
+- **GIVEN** an explicit-class argument containing `..` components exists neither relative to the CWD nor at the joined probe location
+- **WHEN** `camel job ../outside/ingest` runs
+- **THEN** the miss diagnostic names the probe joined exactly as spelled (for example `first/../outside/ingest.job.yaml`) and the exit code is 2
+- **TEST:** `probe_is_joined_as_spelled_without_normalization`
+- **SETUP:** Create `Camel.toml` with `dirs = ["first"]` and no matching document at the joined probe location.
+- **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test probe_is_joined_as_spelled_without_normalization`.
+- **ASSERT:** Stderr names `first/../outside/ingest.job.yaml` verbatim; exit status is 2.
 
 ### Requirement: metadata-only listing boundary
 
@@ -831,8 +921,11 @@ code SHALL be added.
 
 `camel job <NAME> --help` SHALL render the job's declared interface from
 the parsed job document instead of clap's subcommand help. The output SHALL
-show the resolved document's file stem, the document `description` (or
-`(no description)`), the execution mode, the send target as authored, and
+show the resolved document's display name — the configured-root-relative
+path when the resolved path lexically strips against a configured root
+with more than one remaining component, the file stem otherwise —, the
+document `description` (or `(no description)`), the execution mode, the
+send target as authored, and
 the declared arguments ordered lexically by argument name, one line per
 argument, each carrying the argument name, the declared type rendered as
 `string` (also when `type:` is omitted), `int`, `bool`, or `enum[...]`
@@ -843,7 +936,11 @@ LF characters inside a `default` value or `description` SHALL render as a
 single space. The type column SHALL pad to the widest rendered type in
 that job, using the same per-job width strategy as the name column. A
 document whose top-level `args:` block is absent or empty SHALL print
-`(no arguments)` in place of the argument table. The `job` subcommand
+`(no arguments)` in place of the argument table. Display-name matching
+SHALL be lexical on the resolved path spelling before canonicalization
+and SHALL share the listing's construction, so the two surfaces cannot
+drift within one spelling; symlink aliasing SHALL NOT be
+identity-resolved. The `job` subcommand
 SHALL suppress clap's automatic `--help`/`-h` handling so a present
 positional name always reaches the job-scoped path; `--help` without a
 name SHALL print the `camel job` usage text, and bare `camel job` SHALL
@@ -865,11 +962,18 @@ with the existing loud diagnostics.
   required argument with a description and an optional argument with a
   default
 - **WHEN** `camel job <name> --help` runs
-- **THEN** stdout shows the document's file stem, the document
+- **THEN** stdout shows the document's display name, the document
   description, the mode, the send target, and one line per declared
   argument with name, the declared type, `required`/`optional`, the
   default when declared, and the description when present, and the exit
   code is 0
+
+#### Scenario: nested job help shows the invocable path
+
+- **GIVEN** `daily/ingest.job.yaml` exists nested in a configured root
+- **WHEN** `camel job daily/ingest --help` runs
+- **THEN** the first stdout line is `daily/ingest.job.yaml` — the same
+  spelling the listing shows — and the exit code is 0
 
 #### Scenario: help renders the enum member list
 
@@ -907,7 +1011,7 @@ with the existing loud diagnostics.
 - **GIVEN** a discovered job whose document has no top-level `args:`
   block, or an empty `args: {}` block
 - **WHEN** `camel job <name> --help` runs
-- **THEN** stdout shows the file stem, the description, the mode, the
+- **THEN** stdout shows the display name, the description, the mode, the
   send target, and the line `(no arguments)` under `Arguments:`, and the
   exit code is 0
 
