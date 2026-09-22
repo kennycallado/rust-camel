@@ -1,0 +1,15 @@
+# Corpus fixture (rc-lkbqi): negative witness — a permission value spec with
+# ZERO sources must FAIL R-SCHEMA. `resource: {}` sets no source key at all,
+# so the exactly-one oneOf contract of RouteDslPermissionValueSource fails
+# with zero valid branches; the runtime `yaml_source_to_value_source` rejects
+# it the same way (rc-gddb2). The route skeleton is otherwise schema-clean:
+# the ONLY diagnostic is the targeted R-SCHEMA Error on the value-spec
+# mapping. Baselined as an agreed real defect.
+routes:
+  - id: r1
+    from: direct:start
+    steps: []
+    security_policy:
+      permission:
+        policy: keycloak-uma
+        resource: {}

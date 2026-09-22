@@ -203,6 +203,17 @@
         [("R-SCHEMA", "error")],
     ),
 
+    // permission value source contract — mirrors runtime
+    // yaml_source_to_value_source exactly-one (rc-gddb2, bd rc-lkbqi).
+    (
+        "crates/camel-cli/tests/fixtures/lint-corpus/permission-value-source-zero.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+    (
+        "crates/camel-cli/tests/fixtures/lint-corpus/permission-value-source-multi.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+
     // Outbound-bridge scenario fixture (integration-tier-contract, Task 3.2).
     // The producer URI is `${env:PARTNER}/orders`: the scheme head is an
     // interpolation placeholder, so the catalog cannot verify it and

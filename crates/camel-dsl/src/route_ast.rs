@@ -318,7 +318,14 @@ pub struct RouteDslPermissionPolicy {
     pub cache_negative_ttl_secs: Option<u64>,
 }
 
+/// Permission value source for a route permission: exactly one of `literal`,
+/// `header`, or `property` must be non-null (the other two absent or null).
+/// Runtime anchor: `yaml_source_to_value_source` in `camel-dsl/src/yaml.rs`
+/// (rc-gddb2, reject-on-ambiguity).
+// NOTE: must stay below the `derive(schemars::JsonSchema, ..)` line — a derive
+// helper attribute is rejected above the derive that introduces it.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[cfg_attr(feature = "schema", schemars(transform = permission_value_source_oneof))]
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RouteDslPermissionValueSource {
@@ -328,6 +335,42 @@ pub struct RouteDslPermissionValueSource {
     pub header: Option<String>,
     #[serde(default)]
     pub property: Option<String>,
+}
+
+/// Encodes the exactly-one-non-null contract of `RouteDslPermissionValueSource`
+/// into its generated JSON Schema node: exactly one of `literal`, `header`, or
+/// `property` must be present and non-null.
+#[cfg(feature = "schema")]
+fn permission_value_source_oneof(schema: &mut schemars::Schema) {
+    schema.insert(
+        "oneOf".to_owned(),
+        serde_json::json!([
+            {
+                "properties": {
+                    "literal": {"type": "string"},
+                    "header": {"type": "null"},
+                    "property": {"type": "null"}
+                },
+                "required": ["literal"]
+            },
+            {
+                "properties": {
+                    "literal": {"type": "null"},
+                    "header": {"type": "string"},
+                    "property": {"type": "null"}
+                },
+                "required": ["header"]
+            },
+            {
+                "properties": {
+                    "literal": {"type": "null"},
+                    "header": {"type": "null"},
+                    "property": {"type": "string"}
+                },
+                "required": ["property"]
+            }
+        ]),
+    );
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

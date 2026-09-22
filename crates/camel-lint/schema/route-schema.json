@@ -1889,6 +1889,57 @@
     },
     "RouteDslPermissionValueSource": {
       "additionalProperties": false,
+      "description": "Permission value source for a route permission: exactly one of `literal`,\n`header`, or `property` must be non-null (the other two absent or null).\nRuntime anchor: `yaml_source_to_value_source` in `camel-dsl/src/yaml.rs`\n(rc-gddb2, reject-on-ambiguity).",
+      "oneOf": [
+        {
+          "properties": {
+            "header": {
+              "type": "null"
+            },
+            "literal": {
+              "type": "string"
+            },
+            "property": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "literal"
+          ]
+        },
+        {
+          "properties": {
+            "header": {
+              "type": "string"
+            },
+            "literal": {
+              "type": "null"
+            },
+            "property": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "header"
+          ]
+        },
+        {
+          "properties": {
+            "header": {
+              "type": "null"
+            },
+            "literal": {
+              "type": "null"
+            },
+            "property": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "property"
+          ]
+        }
+      ],
       "properties": {
         "header": {
           "default": null,

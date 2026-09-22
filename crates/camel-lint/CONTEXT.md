@@ -66,6 +66,16 @@ any value position — boot hard-fails on the unresolved variable, so lint
 must not stay silent even where the literal placeholder is a valid string.
 Comment tokens produce no diagnostics (comments have no value leaf in the
 instance; tokens without a resolvable value-leaf span are skipped).
+
+**R-SCHEMA permission value sources (rc-gddb2, rc-lkbqi)**: the schema
+requires exactly one non-null `literal`/`header`/`property` source per
+`security_policy.permission` `resource`/`action` value spec (explicit null
+siblings count as absent, mirroring serde). Failures render as ONE
+targeted Error per value spec — message matches the runtime error wording
+(`yaml_source_to_value_source`) — via a recursive walk of collapsed
+Option-wrapper `anyOf` error contexts; non-permission oneOf failures keep
+their generic collapsed diagnostics.
+
 Per-token semantics: a whole-document error fallback is forbidden. The
 interpolator lives in `src/env_interpolation.rs` — a SYNC mirror of the
 whole-text splice arm of `camel-dsl::env_interpolation`, because crate

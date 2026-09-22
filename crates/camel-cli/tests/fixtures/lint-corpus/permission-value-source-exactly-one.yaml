@@ -1,0 +1,14 @@
+# Corpus fixture (rc-lkbqi): positive witness — a permission value spec with
+# EXACTLY ONE source must lint CLEAN. `resource: {header: x-resource-id}`
+# satisfies the exactly-one oneOf contract of RouteDslPermissionValueSource,
+# mirroring what the runtime `yaml_source_to_value_source` accepts (rc-gddb2).
+# No baseline entry: the gate only registers files WITH diagnostics, and this
+# file must emit none.
+routes:
+  - id: r1
+    from: direct:start
+    steps: []
+    security_policy:
+      permission:
+        policy: keycloak-uma
+        resource: {header: x-resource-id}

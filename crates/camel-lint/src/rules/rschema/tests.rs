@@ -1649,3 +1649,660 @@ steps:
             .collect::<Vec<_>>()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Permission value-source exactly-one diagnostics (permsrc).
+//
+// `RouteDslPermissionValueSource` (the `resource`/`action` values of a
+// `security_policy.permission`) carries an exactly-one oneOf contract:
+// exactly one of `literal`/`header`/`property` must be non-null. The
+// failure surfaces through THREE nested Option-wrapper anyOf levels
+// (security_policy -> permission -> resource/action) before the oneOf,
+// so the pre-change renderer collapsed it into one generic AnyOf error
+// at the `security_policy` node. These tests pin the TARGETED rendering:
+// field context, canonical found-set, and leaf anchoring on the
+// value-spec mapping — plus regressions keeping every non-permission
+// oneOf shape byte-identically generic.
+// ---------------------------------------------------------------------------
+
+/// Route skeleton with a permission value-spec under the given field
+/// (`resource` or `action`), in flow style so spans slice predictably.
+fn permission_route(field: &str, value_spec: &str) -> String {
+    format!(
+        "id: r1\nfrom: direct:start\nsteps: []\nsecurity_policy:\n  permission:\n    policy: keycloak-uma\n    {field}: {value_spec}\n"
+    )
+}
+
+#[test]
+fn rschema_permission_zero_sources_reports_exactly_one_error() {
+    // `resource: {}` — no source key at all: the exactly-one oneOf fails
+    // with zero valid branches. Exactly ONE targeted Error must anchor on
+    // the value-spec mapping, naming the field and reporting `none set`.
+    let source = permission_route("resource", "{}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "zero sources must yield exactly one R-SCHEMA diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(&source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert!(
+        d.message
+            .contains("must specify exactly one of: literal, header, or property"),
+        "message must carry the exactly-one contract; got: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("(set: none set)"),
+        "message must report the empty found-set; got: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("resource"),
+        "message must name the `resource` field context; got: {}",
+        d.message
+    );
+    assert!(
+        slice(&source, &d.span).contains('{'),
+        "span must anchor on the value-spec mapping; sliced: {:?}",
+        slice(&source, &d.span)
+    );
+}
+
+#[test]
+fn rschema_permission_all_null_sources_reports_exactly_one_error() {
+    // All three keys present but ALL null: every oneOf branch fails on
+    // its non-null source key, the boot anchor rejects it exactly like
+    // the zero-source case — one targeted Error with `(set: none set)`.
+    let source = permission_route("resource", "{literal: null, header: null, property: null}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "all-null sources must yield exactly one R-SCHEMA diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(&source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert!(
+        d.message
+            .contains("must specify exactly one of: literal, header, or property"),
+        "message must carry the exactly-one contract; got: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("(set: none set)"),
+        "null keys must not count as set; got: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("resource"),
+        "message must name the `resource` field context; got: {}",
+        d.message
+    );
+}
+
+#[test]
+fn rschema_permission_multi_sources_reports_found_set() {
+    // Two non-null sources: every oneOf branch fails (each types the
+    // other source keys as null) — one targeted Error listing the found
+    // set in canonical order.
+    let source = permission_route("resource", "{literal: orders, header: x-resource-id}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "multi sources must yield exactly one R-SCHEMA diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(&source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert!(
+        d.message.contains("resource"),
+        "message must name the `resource` field context; got: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("(set: literal, header)"),
+        "message must list the found sources; got: {}",
+        d.message
+    );
+    assert!(
+        slice(&source, &d.span).contains('{'),
+        "span must anchor on the value-spec mapping; sliced: {:?}",
+        slice(&source, &d.span)
+    );
+}
+
+#[test]
+fn rschema_permission_all_three_sources_canonical_order() {
+    // All three sources authored in NON-canonical key order: the found
+    // set still renders in the canonical literal, header, property order.
+    let source = permission_route("resource", "{property: p, header: h, literal: l}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "three sources must yield exactly one R-SCHEMA diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(&source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema[0]
+            .message
+            .contains("(set: literal, header, property)"),
+        "found set must render in canonical order regardless of authored order; got: {}",
+        rschema[0].message
+    );
+}
+
+#[test]
+fn rschema_permission_action_field_context() {
+    // The `action` ref-site of RouteDslPermissionValueSource gets the
+    // same targeted rendering with its own field context.
+    let source = permission_route("action", "{literal: read, property: perms}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "multi-source action must yield exactly one R-SCHEMA diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(&source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert!(
+        d.message.contains("action"),
+        "message must name the `action` field context; got: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("(set: literal, property)"),
+        "message must list the found sources; got: {}",
+        d.message
+    );
+    assert!(
+        slice(&source, &d.span).contains('{'),
+        "span must anchor on the action value-spec mapping; sliced: {:?}",
+        slice(&source, &d.span)
+    );
+}
+
+#[test]
+fn rschema_permission_exactly_one_clean() {
+    // Exactly one non-null source: the oneOf passes cleanly — no
+    // R-SCHEMA diagnostic at all.
+    let source = permission_route("resource", "{header: x-resource-id}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "a single-source value spec must validate cleanly; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(&source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_permission_one_source_null_siblings_clean() {
+    // One non-null source with explicit null siblings (serde's Option
+    // round-trip shape): branch `literal` matches — no diagnostic.
+    let source = permission_route(
+        "resource",
+        "{literal: orders, header: null, property: null}",
+    );
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "one source with null siblings must validate cleanly; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(&source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_permission_single_malformed_numeric_value_stays_generic() {
+    // Exactly one non-null source whose VALUE is malformed (`literal:
+    // 123`): the exactly-one cardinality HOLDS — the defect is the
+    // value type. The targeted "must specify exactly one" diagnostic
+    // would contradict the authored shape, so the generic collapsed
+    // anyOf form must be kept.
+    let source = permission_route("resource", "{literal: 123}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        !rschema.is_empty(),
+        "the malformed value must still be flagged (generically)"
+    );
+    assert!(
+        rschema.iter().any(|d| d
+            .message
+            .contains("is not valid under any of the schemas listed in the 'anyOf' keyword")),
+        "the value-type defect must keep the generic collapsed anyOf form; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema.iter().all(|d| !d
+            .message
+            .contains("exactly one of: literal, header, or property")),
+        "no targeted exactly-one diagnostic may fire for a single malformed source; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_permission_single_malformed_boolean_value_stays_generic() {
+    // Same single-source value-type failure with a boolean (`header:
+    // true`): generic collapsed anyOf form, never the targeted
+    // exactly-one diagnostic.
+    let source = permission_route("resource", "{header: true}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        !rschema.is_empty(),
+        "the malformed value must still be flagged (generically)"
+    );
+    assert!(
+        rschema.iter().any(|d| d
+            .message
+            .contains("is not valid under any of the schemas listed in the 'anyOf' keyword")),
+        "the value-type defect must keep the generic collapsed anyOf form; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema.iter().all(|d| !d
+            .message
+            .contains("exactly one of: literal, header, or property")),
+        "no targeted exactly-one diagnostic may fire for a single malformed source; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_permission_single_malformed_object_value_stays_generic() {
+    // Same single-source value-type failure with a mapping (`property:
+    // {a: b}`): generic collapsed anyOf form, never the targeted
+    // exactly-one diagnostic.
+    let source = permission_route("resource", "{property: {a: b}}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        !rschema.is_empty(),
+        "the malformed value must still be flagged (generically)"
+    );
+    assert!(
+        rschema.iter().any(|d| d
+            .message
+            .contains("is not valid under any of the schemas listed in the 'anyOf' keyword")),
+        "the value-type defect must keep the generic collapsed anyOf form; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema.iter().all(|d| !d
+            .message
+            .contains("exactly one of: literal, header, or property")),
+        "no targeted exactly-one diagnostic may fire for a single malformed source; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_permission_multi_with_one_malformed_still_targeted() {
+    // Two non-null sources with one malformed value (`literal: 123`
+    // beside `header: x-r`): the cardinality is genuinely violated, so
+    // the targeted exactly-one diagnostic must STILL fire — the
+    // single-source value-type suppression must not over-reach.
+    let source = permission_route("resource", "{literal: 123, header: x-r}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "multi sources with one malformed value must yield exactly one \
+         targeted R-SCHEMA diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(&source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert!(
+        d.message
+            .contains("must specify exactly one of: literal, header, or property"),
+        "the targeted exactly-one diagnostic must fire for a violated \
+         cardinality; got: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("(set: literal, header)"),
+        "message must list the found sources; got: {}",
+        d.message
+    );
+}
+
+#[test]
+fn rschema_permission_diagnostic_count_zero_and_multi() {
+    // BOTH fields defective in one route: the walker dedups the two
+    // sibling oneOf matches under the single collapsed anyOf and emits
+    // exactly TWO targeted Errors — one per field.
+    let source = "\
+id: r1
+from: direct:start
+steps: []
+security_policy:
+  permission:
+    policy: keycloak-uma
+    resource: {}
+    action: {literal: a, header: b}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        2,
+        "zero+multi across two fields must yield exactly two R-SCHEMA diagnostics; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema
+            .iter()
+            .any(|d| d.message.contains("permission resource")),
+        "one diagnostic must carry the `resource` field context; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema
+            .iter()
+            .any(|d| d.message.contains("permission action")),
+        "one diagnostic must carry the `action` field context; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_permission_unknown_key_stays_collapsed_anyof() {
+    // The oneOf PASSES (`literal` satisfies branch 0); the defect is the
+    // unknown `bogus` key, whose AdditionalProperties error surfaces only
+    // inside the collapsed Option-wrapper anyOf. No targeted exactly-one
+    // diagnostic may fire — the top-level emission keeps the generic
+    // collapsed anyOf form.
+    let source = permission_route("resource", "{literal: orders, bogus: x}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        !rschema.is_empty(),
+        "the unknown key must still be flagged (generically)"
+    );
+    assert!(
+        rschema.iter().any(|d| d
+            .message
+            .contains("is not valid under any of the schemas listed in the 'anyOf' keyword")),
+        "top-level emission must keep the generic collapsed anyOf form; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema.iter().all(|d| !d
+            .message
+            .contains("exactly one of: literal, header, or property")),
+        "no targeted exactly-one diagnostic may fire; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_permission_unknown_key_only_fires_targeted() {
+    // Zero sources AND an unknown key: the targeted exactly-one
+    // diagnostic fires and subsumes the nested AdditionalProperties
+    // signal (documented first-error-wins de-collapse rule) — exactly
+    // ONE diagnostic, not a cascade.
+    let source = permission_route("resource", "{bogus: x}");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "zero sources + unknown key must yield exactly one R-SCHEMA diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(&source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema[0].message.contains("resource") && rschema[0].message.contains("(set: none set)"),
+        "the single diagnostic must be the targeted exactly-one Error; got: {}",
+        rschema[0].message
+    );
+}
+
+#[test]
+fn rschema_permission_scalar_value_stays_generic() {
+    // A scalar value spec: the oneOf-level failure kind is
+    // OneOfMultipleValid (the branches are vacuously valid against a
+    // non-object), NOT OneOfNotValid — the walker must not match, so
+    // the generic collapsed anyOf diagnostic is kept (anchored at the
+    // collapsed `security_policy` node, whose span covers the scalar).
+    let source = permission_route("resource", "orders");
+    let diags = analyze(&source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        !rschema.is_empty(),
+        "the scalar value spec must still be flagged (generically)"
+    );
+    assert!(
+        rschema.iter().any(|d| d
+            .message
+            .contains("is not valid under any of the schemas listed in the 'anyOf' keyword")),
+        "the scalar defect must keep the generic message form; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema
+            .iter()
+            .any(|d| slice(&source, &d.span).contains("orders")),
+        "a diagnostic must cover the authored scalar; got spans: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(&source, &d.span))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema.iter().all(|d| !d
+            .message
+            .contains("exactly one of: literal, header, or property")),
+        "no targeted exactly-one diagnostic may fire; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_credential_oneof_top_level_stays_generic() {
+    // Byte-exact regression: a type error inside CredentialSourceDsl's
+    // oneOf (no Option anyOf wrapper around the array items) must keep
+    // its generic message byte-identically — no permission machinery
+    // may touch it.
+    let source = "\
+id: r1
+from: direct:start
+steps: []
+security_policy:
+  credential_sources:
+    - cookie:
+        name: 123
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    const GENERIC: &str = "{\"credential_sources\":[{\"cookie\":{\"name\":123}}]} is not valid under any of the schemas listed in the 'anyOf' keyword";
+    assert!(
+        rschema.iter().any(|d| d.message == GENERIC),
+        "the credential oneOf failure must keep its byte-exact generic message; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema
+            .iter()
+            .all(|d| !d.message.contains("security_policy permission")
+                && !d
+                    .message
+                    .contains("exactly one of: literal, header, or property")),
+        "no targeted permission text may leak into the credential diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_exception_disposition_oneof_unchanged() {
+    // Byte-exact regression: `disposition: bogus` fails
+    // ExceptionDisposition's const-branch oneOf nested under the step
+    // oneOf. The generic collapsed message (anchored at the step node,
+    // covering the whole do_try mapping) must stay byte-identical.
+    let source = "\
+id: r1
+from: direct:start
+steps:
+  - do_try: {steps: [{to: log:info}], catch: [{steps: [{to: log:info}], disposition: bogus}]}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    const GENERIC: &str = "{\"do_try\":{\"catch\":[{\"disposition\":\"bogus\",\"steps\":[{\"to\":\"log:info\"}]}],\"steps\":[{\"to\":\"log:info\"}]}} is not valid under any of the schemas listed in the 'anyOf' keyword";
+    assert!(
+        rschema.iter().any(|d| d.message == GENERIC),
+        "the disposition oneOf failure must keep its byte-exact generic message; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema
+            .iter()
+            .any(|d| d.message == GENERIC && slice(source, &d.span).contains("disposition: bogus")),
+        "the generic diagnostic must cover the authored `disposition: bogus` text; got spans: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema.iter().all(|d| !d
+            .message
+            .contains("exactly one of: literal, header, or property")),
+        "no targeted permission text may leak into the disposition diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_rest_binding_oneof_unchanged() {
+    // Byte-exact regression: RouteDslRestOperation.binding is
+    // anyOf-wrapped, so `binding: bogus` exercises the AnyOf arm's
+    // no-match fall-through — the collapsed diagnostic keeps its
+    // byte-exact generic message, anchored on the binding value node.
+    let source = "\
+rest:
+  - path: /demo
+    operations:
+      - method: get
+        binding: bogus
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    const GENERIC: &str =
+        "\"bogus\" is not valid under any of the schemas listed in the 'anyOf' keyword";
+    assert!(
+        rschema.iter().any(|d| d.message == GENERIC),
+        "the binding anyOf failure must keep its byte-exact generic message; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema
+            .iter()
+            .any(|d| d.message == GENERIC && slice(source, &d.span) == "bogus"),
+        "the generic diagnostic must anchor on the binding value; got spans: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rschema.iter().all(|d| !d
+            .message
+            .contains("exactly one of: literal, header, or property")),
+        "no targeted permission text may leak into the binding diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}

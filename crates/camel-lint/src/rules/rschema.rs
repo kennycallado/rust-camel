@@ -30,6 +30,10 @@
 //!   object, so the default anchoring is correct.
 //! - `additionalProperties` anchors on each offending KEY, extracted from
 //!   [`ValidationErrorKind::AdditionalProperties { unexpected }`].
+//! - A collapsed anyOf burying an exactly-one permission value-source
+//!   oneOf failure (`security_policy.permission` `resource`/`action`)
+//!   de-collapses into ONE targeted diagnostic per field, anchored on
+//!   the value-spec mapping (see the `AnyOf` arm in [`RSchemaRule`]).
 //!
 //! The compiled validator is cached in a process-wide [`OnceLock`].
 
@@ -37,7 +41,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use camel_api::component_metadata::ComponentMetadataCatalog;
-use jsonschema::{Validator, error::ValidationErrorKind};
+use jsonschema::{Validator, error::ValidationError, error::ValidationErrorKind};
 use noyalib::cst;
 
 use crate::ROUTE_SCHEMA;
@@ -197,21 +201,98 @@ impl Rule for RSchemaRule {
                 }
                 // A failed anyOf surfaces as ONE collapsed error at the
                 // branch node, burying the offending leaf (pre-existing
-                // collapse limitation). De-collapse PATTERN violations
-                // only — the schema's only pattern keywords are the two
-                // MCP TLS path fields (rc-n3t73) — by reporting each
-                // nested, strictly-deeper pattern error on its own leaf.
-                // KNOWN LIMITATION: when a pattern violation co-occurs
-                // with a non-pattern defect in the SAME failed anyOf
-                // (e.g. a blank cert_path plus an unknown tls key), the
-                // replace-when-present branch reports only the pattern
-                // leaves — the collapsed diagnostic that carried the
-                // sibling defect is dropped (first-error-wins, mirroring
-                // serde's stop-at-first deserialization error; fix the
-                // flagged blank and re-lint to surface the sibling).
+                // collapse limitation). Two de-collapse passes run, in
+                // order:
+                //
+                // 1. TARGETED exactly-one permission value-source
+                //    diagnostics: a `security_policy.permission`
+                //    `resource`/`action` value spec with zero or several
+                //    non-null sources among `literal`/`header`/`property`
+                //    fails the exactly-one oneOf buried under THREE
+                //    Option-wrapper anyOf levels (security_policy ->
+                //    permission -> resource/action), collapsing into the
+                //    generic message at this node. The walker
+                //    (`collect_permission_oneof_paths`) recovers each
+                //    buried oneOf failure and re-anchors ONE diagnostic
+                //    per field on the value-spec mapping, naming the
+                //    field and the found set.
+                //
+                //    KNOWN LIMITATION (mirrors the pattern pass below):
+                //    once a targeted diagnostic fires for this error, any
+                //    SIBLING defect inside the same collapsed anyOf
+                //    (e.g. an unknown value-spec key next to a zero
+                //    source) is subsumed — first-error-wins, like serde's
+                //    stop-at-first deserialization error; fix the flagged
+                //    source set and re-lint to surface the sibling.
+                //
+                // 2. PATTERN de-collapse — the schema's only pattern
+                //    keywords are the two MCP TLS path fields (rc-n3t73)
+                //    — reporting each nested, strictly-deeper pattern
+                //    error on its own leaf.
+                //
+                // KNOWN LIMITATION (pattern pass): when a pattern
+                // violation co-occurs with a non-pattern defect in the
+                // SAME failed anyOf (e.g. a blank cert_path plus an
+                // unknown tls key), the replace-when-present branch
+                // reports only the pattern leaves — the collapsed
+                // diagnostic that carried the sibling defect is dropped.
                 // When NO nested pattern surfaces, the collapsed anyOf
                 // diagnostic keeps today's shape byte-identically.
                 ValidationErrorKind::AnyOf { context } => {
+                    // Pass 1: targeted permission value-source exactly-one
+                    // diagnostics. Branches retry the same subschema
+                    // shapes, so the same oneOf failure can surface more
+                    // than once; dedup preserving first-occurrence order
+                    // (a two-field route yields two SIBLING matches under
+                    // this one collapsed anyOf — both reported).
+                    let mut permission_paths: Vec<String> = Vec::new();
+                    collect_permission_oneof_paths(&err, &mut permission_paths);
+                    let mut seen_paths = HashSet::new();
+                    let mut emitted_targeted = false;
+                    for path in &permission_paths {
+                        if !seen_paths.insert(path.clone()) {
+                            continue;
+                        }
+                        // A tail that is neither `resource` nor `action`
+                        // is a non-match: skip it (defensive — the marker
+                        // already scopes the def to its only two
+                        // ref-sites).
+                        let Some(field) = permission_value_source_field(path) else {
+                            continue;
+                        };
+                        // The instance path IS a JSON pointer; a miss
+                        // (defensive) reports `none set`.
+                        let value_at = instance.pointer(path).unwrap_or(&serde_json::Value::Null);
+                        // Exactly one non-null recognized source means
+                        // the oneOf failed on the value's TYPE (e.g.
+                        // `literal: 123`; serde's deserializer rejects
+                        // the same shape with `expected string`), not
+                        // on the cardinality — a "must specify exactly
+                        // one" diagnostic would contradict the authored
+                        // shape. Treat as non-match: the error falls
+                        // through to the generic collapsed-anyOf form.
+                        if non_null_source_keys(value_at).len() == 1 {
+                            continue;
+                        }
+                        let noya_path = instance_path_to_noyalib(path, envelope_depth);
+                        let span = crate::document::value_span_for(&parsed, &noya_path);
+                        diagnostics.push(diagnostic_for(
+                            span,
+                            format!(
+                                "security_policy permission {field} must specify exactly one \
+                                 of: literal, header, or property (set: {})",
+                                found_sources(value_at)
+                            ),
+                        ));
+                        emitted_targeted = true;
+                    }
+                    if emitted_targeted {
+                        // Remaining nested non-permission errors of this
+                        // same collapsed anyOf are intentionally subsumed
+                        // (first-error-wins, see the arm comment).
+                        continue;
+                    }
+                    // Pass 2: pattern de-collapse (unchanged).
                     let segment_depth = |p: &str| p.split('/').filter(|s| !s.is_empty()).count();
                     let own_depth = segment_depth(instance_path);
                     let mut seen = HashSet::new();
@@ -336,6 +417,97 @@ fn diagnostic_for(span: Span, message: String) -> Diagnostic {
         span,
         message,
         fix: None,
+    }
+}
+
+/// Schema-path substring identifying the exactly-one oneOf failure of
+/// `RouteDslPermissionValueSource` (probe-confirmed against jsonschema
+/// 0.52.1 with the injected oneOf: the nested `OneOfNotValid` error's
+/// schema path is `/$defs/RouteDslPermissionValueSource/oneOf`). The
+/// targeted tests fail loudly if a future version changes the form.
+const PERMISSION_VALUE_SOURCE_ONEOF_MARKER: &str = "RouteDslPermissionValueSource/oneOf";
+
+/// The `RouteDslPermissionPolicy` child key a validator instance path
+/// ends with (`resource` or `action`), if any — the field context for a
+/// targeted exactly-one permission value-source diagnostic.
+///
+/// Splits the raw validator instance path on `/` (dropping the empty
+/// first segment) and matches the LAST segment. Only
+/// `RouteDslPermissionPolicy` carries these child keys, so the tail IS
+/// the field context regardless of the prefix (envelope depth, route
+/// index, rest/mcp nesting).
+fn permission_value_source_field(instance_path: &str) -> Option<&'static str> {
+    let mut last = "";
+    for segment in instance_path.split('/').filter(|s| !s.is_empty()) {
+        last = segment;
+    }
+    match last {
+        "resource" => Some("resource"),
+        "action" => Some("action"),
+        _ => None,
+    }
+}
+
+/// Render the found-set of a permission value-source instance: the keys
+/// among `literal`, `header`, `property` whose value is non-null, joined
+/// in that canonical order (regardless of authored order); `none set`
+/// when the collection is empty (a non-object or missing instance
+/// reports `none set` too — `Value::get` yields `None` there).
+fn found_sources(value: &serde_json::Value) -> String {
+    let found = non_null_source_keys(value);
+    if found.is_empty() {
+        "none set".to_string()
+    } else {
+        found.join(", ")
+    }
+}
+
+/// The keys among `literal`, `header`, `property` whose value is
+/// non-null in a permission value-source instance, in that canonical
+/// order (regardless of authored order). The count drives the
+/// targeted-diagnostic gate: exactly one means the oneOf failed on the
+/// value's TYPE, zero or several on the cardinality.
+fn non_null_source_keys(value: &serde_json::Value) -> Vec<&'static str> {
+    let mut found: Vec<&'static str> = Vec::new();
+    for key in ["literal", "header", "property"] {
+        if value.get(key).is_some_and(|v| !v.is_null()) {
+            found.push(key);
+        }
+    }
+    found
+}
+
+/// Recursively collect the instance paths of every exactly-one oneOf
+/// failure of `RouteDslPermissionValueSource` buried inside a collapsed
+/// error tree (jsonschema 0.52 nests branch errors as owned
+/// `ValidationError<'static>` inside the `AnyOf`/`OneOfNotValid`
+/// contexts, so owned paths avoid borrowed-error gymnastics).
+///
+/// - a `OneOfNotValid` whose schema path contains
+///   [`PERMISSION_VALUE_SOURCE_ONEOF_MARKER`] is a match: push its
+///   instance path and stop descending (the branch errors below it are
+///   per-branch `required` noise);
+/// - any other `AnyOf`/`OneOfNotValid` may still bury a match deeper:
+///   recurse into every nested error of every branch;
+/// - every other kind cannot bury a permission oneOf failure: skip.
+fn collect_permission_oneof_paths(err: &ValidationError<'_>, out: &mut Vec<String>) {
+    match err.kind() {
+        ValidationErrorKind::OneOfNotValid { .. }
+            if err
+                .schema_path()
+                .as_str()
+                .contains(PERMISSION_VALUE_SOURCE_ONEOF_MARKER) =>
+        {
+            out.push(err.instance_path().as_str().to_owned());
+        }
+        ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
+            for branch in context {
+                for nested in branch {
+                    collect_permission_oneof_paths(nested, out);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
