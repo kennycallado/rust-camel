@@ -2450,9 +2450,7 @@ fn webpki_root_client_config() -> rustls::ClientConfig {
         // safe default TLS versions; this config is static, not input- or
         // platform-dependent.
         .expect("stock rustls provider supports the safe default protocol versions") // allow-unwrap
-        .with_root_certificates(rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        })
+        .with_root_certificates(mozilla_only())
         .with_no_client_auth()
     // No ALPN override: the workspace reqwest builds without the http2
     // feature, so the primary path negotiates plain HTTP/1.1. Sending no
@@ -2548,9 +2546,9 @@ fn fallback_root_store(
     Ok(store)
 }
 
-/// The bundled Mozilla webpki anchors alone — the no-CA root set and
-/// the target of every non-strict degrade path in
-/// [`fallback_root_store`].
+/// The bundled Mozilla webpki anchors alone — the no-CA root set, the
+/// target of every non-strict degrade path in [`fallback_root_store`],
+/// and the root store behind [`webpki_root_client_config`].
 fn mozilla_only() -> rustls::RootCertStore {
     rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
