@@ -2463,18 +2463,29 @@ fn webpki_root_client_config() -> rustls::ClientConfig {
 /// Root store for the CA-less-platform fallback that UNIONS the bundled
 /// Mozilla anchors with any configured custom CA, instead of the
 /// primary path's system-roots-plus-CA scheme (which cannot load on a
-/// CA-less platform — that is what triggered the fallback). Strict mode
-/// fails closed on every CA load/parse/reject failure; non-strict warns
-/// and degrades to Mozilla-only.
+/// CA-less platform — that is what triggered the fallback). Order
+/// contract: accepted custom anchors come FIRST, then the bundled
+/// Mozilla anchors — parity with the primary `add_root_certificate`
+/// path's extra-roots-before-platform-roots order (rustls-platform-
+/// verifier 0.7.0 `src/verification/others.rs:61-93` adds extra roots
+/// before native certs). The no-CA path and the non-strict degrade
+/// paths (unreadable file, zero PEM sections, zero roots accepted)
+/// return Mozilla-only stores. Strict mode fails closed on every CA
+/// load/parse/reject failure; non-strict warns and degrades to
+/// Mozilla-only.
 fn fallback_root_store(
     custom_ca: Option<&str>,
     strict: bool,
 ) -> Result<rustls::RootCertStore, CamelError> {
-    let mut store = rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
+    // Start EMPTY, not Mozilla-seeded: the custom anchors must land
+    // before the Mozilla tail, so the bundle is appended only on the
+    // success path (and served verbatim by `mozilla_only()` elsewhere).
+    // A missed early-return rewrite would otherwise hand back an empty
+    // store and break every handshake, which the degrade arms below
+    // must never do.
+    let mut store = rustls::RootCertStore::empty();
     let Some(ca_path) = custom_ca else {
-        return Ok(store);
+        return Ok(mozilla_only());
     };
     let ca_bytes = match std::fs::read(ca_path) {
         Ok(bytes) => bytes,
@@ -2489,7 +2500,7 @@ fn fallback_root_store(
                 error = %e,
                 "configured CA certificate file unreadable — falling back to bundled Mozilla roots"
             );
-            return Ok(store);
+            return Ok(mozilla_only());
         }
     };
     let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::Cursor::new(&ca_bytes))
@@ -2507,7 +2518,7 @@ fn fallback_root_store(
             "configured CA certificate contains no parseable PEM CERTIFICATE section — \
              falling back to bundled Mozilla roots"
         );
-        return Ok(store);
+        return Ok(mozilla_only());
     }
     let certs_len = certs.len();
     let (added, _ignored) = store.add_parsable_certificates(certs);
@@ -2523,9 +2534,27 @@ fn fallback_root_store(
             "configured CA certificate was rejected by the TLS root store — \
              falling back to bundled Mozilla roots"
         );
-        return Ok(store);
+        return Ok(mozilla_only());
     }
+    // Custom anchors first, then the bundled Mozilla anchors — the
+    // same extra-roots-before-platform-roots order the primary path
+    // produces (rustls-platform-verifier 0.7.0
+    // `src/verification/others.rs:61-93`). Order does not affect
+    // accept/reject (webpki tries anchors until one validates), so
+    // this is parity hygiene, not a security boundary.
+    store
+        .roots
+        .extend_from_slice(webpki_roots::TLS_SERVER_ROOTS);
     Ok(store)
+}
+
+/// The bundled Mozilla webpki anchors alone — the no-CA root set and
+/// the target of every non-strict degrade path in
+/// [`fallback_root_store`].
+fn mozilla_only() -> rustls::RootCertStore {
+    rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    }
 }
 
 /// Server-cert verifier that accepts any certificate without validation
@@ -14297,6 +14326,17 @@ mod tests {
         }
     }
 
+    /// Order is hygiene-only for verification, not load-bearing:
+    /// rustls 0.23.45 `src/webpki/verify.rs:245-263` passes
+    /// `&roots.roots` to webpki in store order, and rustls-webpki
+    /// 0.103.15 `src/verify_cert.rs:66-73` +
+    /// `loop_while_non_fatal_error` (`:757-774`) returns on the FIRST
+    /// anchor that validates and continues past non-fatal misses, so
+    /// accept/reject cannot depend on order. Custom-first is pinned
+    /// anyway for parity with the primary path
+    /// (rustls-platform-verifier 0.7.0
+    /// `src/verification/others.rs:81-93` adds extra roots before
+    /// native certs).
     #[test]
     fn test_fallback_root_store_union_custom_and_mozilla() {
         let (_dir, ca_path) = fallback_test_ca();
@@ -14305,6 +14345,43 @@ mod tests {
             store.roots.len(),
             webpki_roots::TLS_SERVER_ROOTS.len() + 1,
             "custom CA must UNION with the Mozilla anchors, not replace them"
+        );
+        let ca_pem = std::fs::read_to_string(&ca_path).expect("read ca pem back"); // allow-unwrap(test)
+        let der = rustls_pemfile::certs(&mut std::io::Cursor::new(ca_pem.as_bytes()))
+            .next()
+            .expect("exactly one CERTIFICATE section in test CA") // allow-unwrap(test)
+            .expect("parse test CA pem"); // allow-unwrap(test)
+        // Rebuild the expected anchor the same way the production store
+        // accepts it, so the equality below is construction-identical.
+        let mut scratch = rustls::RootCertStore::empty();
+        let (added, _ignored) = scratch.add_parsable_certificates(vec![der]);
+        assert_eq!(added, 1, "scratch root store must accept the test CA");
+        let expected_anchor = scratch.roots[0].clone();
+        assert_eq!(
+            store.roots.first(),
+            Some(&expected_anchor),
+            "custom anchor must sit at index 0 — parity with the primary path's \
+             extra-roots-before-platform-roots order"
+        );
+        assert_eq!(
+            store.roots[1..],
+            *webpki_roots::TLS_SERVER_ROOTS,
+            "everything after the custom anchor must be exactly the bundled Mozilla anchors"
+        );
+        let first_custom = store
+            .roots
+            .iter()
+            .position(|anchor| anchor == &expected_anchor)
+            .expect("custom anchor present in store"); // allow-unwrap(test)
+        let first_mozilla = store
+            .roots
+            .iter()
+            .position(|anchor| webpki_roots::TLS_SERVER_ROOTS.contains(anchor))
+            .expect("Mozilla anchors present in store"); // allow-unwrap(test)
+        assert!(
+            first_custom < first_mozilla,
+            "first custom anchor (index {first_custom}) must precede the first \
+             Mozilla anchor (index {first_mozilla})"
         );
     }
 
@@ -14315,6 +14392,12 @@ mod tests {
             store.roots.len(),
             webpki_roots::TLS_SERVER_ROOTS.len(),
             "no configured CA must leave the bundled Mozilla anchors untouched"
+        );
+        assert_eq!(
+            store.roots,
+            *webpki_roots::TLS_SERVER_ROOTS,
+            "with no configured CA the whole store IS the bundled Mozilla anchors, \
+             byte-for-byte"
         );
     }
 
