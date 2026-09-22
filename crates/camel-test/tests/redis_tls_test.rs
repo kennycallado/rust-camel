@@ -14,7 +14,9 @@ mod support;
 
 use std::time::Duration;
 
+use camel_api::ComponentMetrics;
 use camel_api::cache::{CacheEntry, CacheRepository, ContentType};
+use camel_api::metrics::MetricsHandle;
 use camel_redis_repo::{RedisCacheRepository, RedisEndpointConfig};
 use support::install_crypto_provider;
 use support::redis::{shared_redis, shared_redis_tls};
@@ -90,7 +92,14 @@ async fn rediss_round_trip_through_cache_repository() {
 
     let repo = tokio::time::timeout(
         ROUND_TRIP_DEADLINE,
-        RedisCacheRepository::connect("tls-live", &endpoint, "tlstest", Duration::from_secs(300)),
+        RedisCacheRepository::connect(
+            "tls-live",
+            &endpoint,
+            "tlstest",
+            Duration::from_secs(300),
+            // Live suite: lever-off facade, compile-only wiring.
+            ComponentMetrics::new(std::sync::Arc::new(MetricsHandle::new()), false),
+        ),
     )
     .await
     .expect("connect must finish within the deadline")
@@ -181,7 +190,14 @@ async fn wrong_ca_is_rejected() {
 
     let err = tokio::time::timeout(
         NEGATIVE_DEADLINE,
-        RedisCacheRepository::connect("tls-live", &endpoint, "tlstest", Duration::from_secs(300)),
+        RedisCacheRepository::connect(
+            "tls-live",
+            &endpoint,
+            "tlstest",
+            Duration::from_secs(300),
+            // Live suite: lever-off facade, compile-only wiring.
+            ComponentMetrics::new(std::sync::Arc::new(MetricsHandle::new()), false),
+        ),
     )
     .await
     .expect("connect must finish within the deadline, not hang")

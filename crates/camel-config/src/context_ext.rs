@@ -8,8 +8,8 @@ use crate::discovery::discover_routes_with_threshold;
 use async_trait::async_trait;
 use camel_api::cache::CacheRepository;
 use camel_api::{
-    CamelError, HealthReport, HealthSource, HealthStatus, PlatformService as PlatformServiceTrait,
-    ServiceHealth, ServiceStatus,
+    CamelError, ComponentMetrics, HealthReport, HealthSource, HealthStatus,
+    PlatformService as PlatformServiceTrait, ServiceHealth, ServiceStatus,
 };
 use camel_core::CamelContext;
 use camel_core::OutputFormat;
@@ -290,12 +290,23 @@ fn redis_endpoint_from_fields(
     Ok(endpoint)
 }
 
+/// Snapshot the `[observability.metrics].components` lever from the same
+/// config the context itself snapshots, wrapping the shared late-bound
+/// metrics handle in the facade the redis repositories emit through.
+fn redis_repo_component_metrics(
+    metrics: std::sync::Arc<dyn camel_api::MetricsCollector>,
+    config: &CamelConfig,
+) -> ComponentMetrics {
+    ComponentMetrics::new(metrics, config.observability.metrics.components_enabled())
+}
+
 /// Build the redis-backed cache repository from a validated `CacheRepoConfig`.
 ///
 /// Mirrors the redb path: stale retention defaults to 7 days when unset and a
 /// malformed duration is never silently coerced.
 async fn build_redis_cache_repo(
     ccfg: &CacheRepoConfig,
+    metrics: ComponentMetrics,
 ) -> Result<RedisCacheRepository, CamelError> {
     let endpoint = redis_endpoint_from_cache_repo(ccfg)?;
     let stale_retention = parse_stale_retention(ccfg)?;
@@ -305,6 +316,7 @@ async fn build_redis_cache_repo(
         &endpoint,
         key_prefix,
         stale_retention,
+        metrics,
     )
     .await
     .map_err(|e| CamelError::Config(format!("cache_repo: {e}")))
@@ -373,10 +385,11 @@ fn wrap_disk_offload(
 /// (distinct from the cache repository's `"camel:cache"` default).
 async fn build_redis_idempotent_repo(
     icfg: &IdempotentRepoConfig,
+    metrics: ComponentMetrics,
 ) -> Result<RedisIdempotentRepository, CamelError> {
     let endpoint = redis_endpoint_from_idempotent_repo(icfg)?;
     let key_prefix = icfg.key_prefix.as_deref().unwrap_or("camel:idem");
-    RedisIdempotentRepository::connect(&idempotent_repo_name(icfg), &endpoint, key_prefix)
+    RedisIdempotentRepository::connect(&idempotent_repo_name(icfg), &endpoint, key_prefix, metrics)
         .await
         .map_err(|e| CamelError::Config(format!("idempotent_repo: {e}")))
 }
@@ -526,7 +539,11 @@ impl CamelConfig {
                 }
                 "redis" => {
                     let name = idempotent_repo_name(icfg);
-                    let repo = build_redis_idempotent_repo(icfg).await?;
+                    let repo = build_redis_idempotent_repo(
+                        icfg,
+                        redis_repo_component_metrics(ctx.metrics(), config),
+                    )
+                    .await?;
                     ctx.register_idempotent_repository(&name, Arc::new(repo))
                         .map_err(|e| {
                             CamelError::Config(format!(
@@ -558,7 +575,11 @@ impl CamelConfig {
                 }
                 "redis" => {
                     let name = cache_repo_name(ccfg);
-                    let bare = build_redis_cache_repo(ccfg).await?;
+                    let bare = build_redis_cache_repo(
+                        ccfg,
+                        redis_repo_component_metrics(ctx.metrics(), config),
+                    )
+                    .await?;
                     let repo = wrap_disk_offload(ccfg, Arc::new(bare), ctx.shutdown_token())?;
                     ctx.register_cache_repository(&name, repo).map_err(|e| {
                         CamelError::Config(format!(
@@ -2309,5 +2330,98 @@ mod tests {
             err.to_string().contains("mutually exclusive"),
             "url + sentinel_nodes must be rejected: {err}"
         );
+    }
+
+    /// Local recording double mirroring camel-api's `RecordingComponentMetrics`:
+    /// captures error-family and component-op emissions.
+    struct RecordingCollector {
+        errors: std::sync::Mutex<Vec<(String, String)>>,
+        ops: std::sync::Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl RecordingCollector {
+        fn new() -> Self {
+            Self {
+                errors: std::sync::Mutex::new(Vec::new()),
+                ops: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl camel_api::metrics::MetricsCollector for RecordingCollector {
+        fn record_exchange_duration(&self, _route_id: &str, _duration: Duration) {}
+        fn increment_errors(&self, route_id: &str, error_type: &str) {
+            self.errors
+                .lock()
+                .expect("errors lock")
+                .push((route_id.to_string(), error_type.to_string()));
+        }
+        fn increment_exchanges(&self, _route_id: &str) {}
+        fn set_queue_depth(&self, _queue: &str, _depth: usize) {}
+        fn record_circuit_breaker_change(&self, _route_id: &str, _from: &str, _to: &str) {}
+        fn record_component_operation(&self, component: &str, operation: &str, outcome: &str) {
+            self.ops.lock().expect("ops lock").push((
+                component.to_string(),
+                operation.to_string(),
+                outcome.to_string(),
+            ));
+        }
+    }
+
+    fn config_with_lever(components_on: bool) -> CamelConfig {
+        let mut config = CamelConfig::default();
+        config.observability.metrics = camel_core::MetricsLeversConfig {
+            enabled: true,
+            exchange: true,
+            duration: true,
+            components: components_on,
+        };
+        config
+    }
+
+    /// Task 2.1: the `[observability.metrics].components` lever gates ONLY
+    /// the component-operations family through the builder helper's facade;
+    /// error-family forwarding is unconditional. The facade is constructed
+    /// BEFORE the collector is registered on the handle, exercising the
+    /// late-bound contract: a collector registered after facade
+    /// construction is still observed.
+    #[test]
+    fn redis_repo_component_metrics_gates_operations_by_lever() {
+        for lever_on in [true, false] {
+            let config = config_with_lever(lever_on);
+            let handle = Arc::new(camel_api::metrics::MetricsHandle::new());
+            // Facade FIRST, registration SECOND (late-bound contract).
+            let facade = redis_repo_component_metrics(
+                handle.clone() as Arc<dyn camel_api::MetricsCollector>,
+                &config,
+            );
+            let collector = Arc::new(RecordingCollector::new());
+            handle.register(Arc::clone(&collector) as Arc<dyn camel_api::MetricsCollector>);
+
+            facade.observe("redis", "get", true);
+
+            assert_eq!(
+                collector.errors.lock().expect("errors lock").clone(),
+                vec![("redis".to_string(), "e:redis:get".to_string())],
+                "failure must hit the error family regardless of the lever"
+            );
+            let ops = collector.ops.lock().expect("ops lock").clone();
+            if lever_on {
+                assert_eq!(
+                    ops,
+                    vec![(
+                        "redis".to_string(),
+                        "get".to_string(),
+                        "failure".to_string()
+                    )],
+                    "lever on must record the component op through the late-bound collector"
+                );
+            } else {
+                assert!(
+                    ops.is_empty(),
+                    "lever off must suppress component ops, got {ops:?}"
+                );
+            }
+        }
     }
 }

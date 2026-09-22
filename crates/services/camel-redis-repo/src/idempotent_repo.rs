@@ -17,6 +17,7 @@ use crate::namespaced;
 use crate::validate_namespace_token;
 use async_trait::async_trait;
 use camel_api::CamelError;
+use camel_api::ComponentMetrics;
 use camel_api::IdempotentRepository;
 use camel_component_redis::RedisEndpointConfig;
 use std::sync::Arc;
@@ -26,6 +27,7 @@ pub struct RedisIdempotentRepository {
     name: String,
     key_prefix: String,
     executor: Arc<dyn RepoCommandExecutor>,
+    metrics: ComponentMetrics,
     /// Outcome-bearing commands lost to a transient failure (rc-2or1): each
     /// increment is one `add` whose SET NX answer is unknown and whose
     /// connection was refreshed for the NEXT call. An operator watching this
@@ -38,23 +40,25 @@ impl RedisIdempotentRepository {
     ///
     /// Validates `name` and `key_prefix` before any network I/O, then
     /// eagerly connects (one topology resolution — see `connection`).
+    /// `metrics` — component-operations facade used to observe transient
+    /// classifications on this repository's paths.
     pub async fn connect(
         name: &str,
         endpoint: &RedisEndpointConfig,
         key_prefix: &str,
+        metrics: ComponentMetrics,
     ) -> Result<Self, CamelError> {
         validate_namespace_token("repository name", name)?;
         validate_namespace_token("key_prefix", key_prefix)?;
         let executor = connection::connect_executor(endpoint).await?;
-        Self::with_executor(name, key_prefix, Arc::new(executor))
+        Self::with_executor(name, key_prefix, Arc::new(executor), metrics)
     }
 
-    /// Number of outcome-bearing `add` commands lost to transient failures
-    /// so far (rc-2or1). Each count refreshed the connection for the next
-    /// call. Introspection accessor for tests and operators holding the
-    /// repository handle; the live operator surface is the `tracing::debug!`
-    /// on the same branch, and wiring this counter into the metrics
-    /// collector family is tracked on the redis sweep bd (rc-pleop).
+    /// Per-instance count of outcome-bearing `add` commands lost to
+    /// transient failures (rc-2or1); each count refreshed the connection for
+    /// the next call. The fleet-wide view is the component-operations family
+    /// counter emitted through the [`ComponentMetrics`] facade threaded at
+    /// construction; this accessor remains for direct inspection and tests.
     pub fn transient_refresh_count(&self) -> u64 {
         self.transient_refreshes
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -64,11 +68,13 @@ impl RedisIdempotentRepository {
     ///
     /// Sync and network-free; validates both namespace tokens first — the
     /// name is part of every SCAN pattern, so glob metacharacters in it
-    /// would break `clear` scoping.
+    /// would break `clear` scoping. `metrics` — component-operations facade
+    /// used to observe transient classifications on this repository's paths.
     pub(crate) fn with_executor(
         name: &str,
         key_prefix: &str,
         executor: Arc<dyn RepoCommandExecutor>,
+        metrics: ComponentMetrics,
     ) -> Result<Self, CamelError> {
         validate_namespace_token("repository name", name)?;
         validate_namespace_token("key_prefix", key_prefix)?;
@@ -76,6 +82,7 @@ impl RedisIdempotentRepository {
             name: name.to_string(),
             key_prefix: key_prefix.to_string(),
             executor,
+            metrics,
             transient_refreshes: std::sync::atomic::AtomicU64::new(0),
         })
     }
@@ -128,6 +135,7 @@ impl IdempotentRepository for RedisIdempotentRepository {
                 // SET NX is never re-issued (see the doc comment above).
                 self.transient_refreshes
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics.observe("redis", "add", true);
                 tracing::debug!(
                     repository = %self.name,
                     error = %err,
@@ -146,7 +154,7 @@ impl IdempotentRepository for RedisIdempotentRepository {
             .arg(namespaced(&self.key_prefix, &self.name, key));
         // EXISTS is a safe-to-re-issue read, so the retry-safe path is
         // correct here — unlike add (see add's doc comment).
-        match execute_retry_safe(&self.executor, cmd).await? {
+        match execute_retry_safe(&self.executor, cmd, &self.metrics, "contains").await? {
             redis::Value::Int(n) => Ok(n > 0),
             other => Err(CamelError::Io(format!(
                 "unexpected EXISTS reply: {other:?}"
@@ -159,7 +167,7 @@ impl IdempotentRepository for RedisIdempotentRepository {
         cmd.arg("UNLINK")
             .arg(namespaced(&self.key_prefix, &self.name, key));
         // UNLINK is idempotent, so the retry-safe path is correct here.
-        match execute_retry_safe(&self.executor, cmd).await? {
+        match execute_retry_safe(&self.executor, cmd, &self.metrics, "remove").await? {
             redis::Value::Nil | redis::Value::Int(_) => Ok(()),
             other => Err(CamelError::Io(format!(
                 "unexpected UNLINK reply: {other:?}"
@@ -171,6 +179,8 @@ impl IdempotentRepository for RedisIdempotentRepository {
         scan_unlink_pattern(
             &self.executor,
             &format!("{}:{}:*", self.key_prefix, self.name),
+            &self.metrics,
+            "clear",
         )
         .await?;
         Ok(())
@@ -196,12 +206,24 @@ mod tests {
     use crate::executor::test_support::arg_after;
     use crate::executor::test_support::cmd_args;
     use crate::executor::test_support::scan_reply;
+    use crate::test_metrics::RecordingMetrics;
     use camel_api::CamelError;
+    use camel_api::ComponentMetrics;
     use camel_api::IdempotentRepository;
+    use camel_api::metrics::MetricsCollector;
     use std::sync::Arc;
 
+    /// Lever-off no-op facade so existing tests exercise the unchanged
+    /// retry semantics with metrics emission disabled.
+    fn test_facade() -> ComponentMetrics {
+        ComponentMetrics::new(
+            std::sync::Arc::new(camel_api::metrics::MetricsHandle::new()),
+            false,
+        )
+    }
+
     fn repo(executor: Arc<FakeRepoExecutor>) -> RedisIdempotentRepository {
-        RedisIdempotentRepository::with_executor("default", "camel:idem", executor)
+        RedisIdempotentRepository::with_executor("default", "camel:idem", executor, test_facade())
             .expect("valid constructor arguments")
     }
 
@@ -320,6 +342,7 @@ mod tests {
             "my*idem",
             "camel:idem",
             Arc::new(FakeRepoExecutor::new()),
+            test_facade(),
         )
         .expect_err("glob metacharacters in the repository name must fail construction");
         match &err {
@@ -428,5 +451,42 @@ mod tests {
         );
         assert_eq!(fake.execute_count(), 2, "command executed twice");
         assert_eq!(fake.refresh_count(), 1, "connection refreshed once");
+    }
+
+    // C1 emission evidence: a transient add records exactly one failure
+    // observation, forwards to the error family, and keeps the atomic
+    // lost-outcome counter — the SET NX is never re-issued.
+    #[tokio::test]
+    async fn transient_add_records_failure_and_keeps_atomic_counter() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let recorder = Arc::new(RecordingMetrics::new());
+        let repo = RedisIdempotentRepository::with_executor(
+            "default",
+            "camel:idem",
+            fake.clone(),
+            ComponentMetrics::new(Arc::clone(&recorder) as Arc<dyn MetricsCollector>, true),
+        )
+        .expect("valid constructor arguments");
+        fake.push_result(Err(CamelError::Io("connection reset by peer".into())));
+
+        assert!(
+            repo.add("k").await.is_err(),
+            "transient add surfaces as Err (unknown SET NX outcome)"
+        );
+        assert_eq!(
+            recorder.ops(),
+            vec!["redis:add:failure".to_string()],
+            "exactly one failure observation, no success entry"
+        );
+        assert_eq!(
+            recorder.errors(),
+            vec![("redis".to_string(), "e:redis:add".to_string())],
+            "the transient classification must forward to the error family"
+        );
+        assert_eq!(
+            repo.transient_refresh_count(),
+            1,
+            "the C1 lost-outcome branch must count the refresh"
+        );
     }
 }

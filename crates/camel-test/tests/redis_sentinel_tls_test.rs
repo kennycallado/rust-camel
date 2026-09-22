@@ -19,7 +19,9 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
+use camel_api::ComponentMetrics;
 use camel_api::cache::{CacheEntry, CacheRepository, ContentType};
+use camel_api::metrics::MetricsHandle;
 use camel_redis_repo::{RedisCacheRepository, RedisEndpointConfig};
 use support::install_crypto_provider;
 use testcontainers::core::{ContainerPort, WaitFor};
@@ -287,6 +289,8 @@ async fn rediss_sentinel_round_trip_through_cache_repository() {
             &endpoint(fixture),
             "sentlstls",
             Duration::from_secs(300),
+            // Live suite: lever-off facade, compile-only wiring.
+            ComponentMetrics::new(Arc::new(MetricsHandle::new()), false),
         ),
     )
     .await

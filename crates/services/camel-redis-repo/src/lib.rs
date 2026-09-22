@@ -16,6 +16,8 @@ pub mod error;
 pub(crate) mod executor;
 pub(crate) mod idempotent_repo;
 pub mod keyspace;
+#[cfg(test)]
+pub(crate) mod test_metrics;
 
 pub use cache_repo::RedisCacheRepository;
 // Re-export for internal use only: the executor and idempotent repository

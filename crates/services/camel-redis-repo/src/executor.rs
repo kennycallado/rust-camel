@@ -16,6 +16,7 @@ use crate::is_transient_redis_error;
 use crate::to_camel_error;
 use async_trait::async_trait;
 use camel_api::CamelError;
+use camel_api::ComponentMetrics;
 use camel_component_redis::MultiplexedExecutor;
 #[cfg(test)]
 use camel_component_redis::RedisTopology;
@@ -94,14 +95,19 @@ impl MultiplexedRepoExecutor {
 /// failover is picked up) and the SAME command is re-issued exactly once;
 /// a second failure surfaces unchanged. Non-transient errors return
 /// immediately. Only call this with commands that are safe to re-issue
-/// (last-writer-wins SET, idempotent GET/SCAN/UNLINK).
+/// (last-writer-wins SET, idempotent GET/SCAN/UNLINK). Every transient
+/// classification emits one component-operations observation through
+/// `metrics` under `operation`.
 pub(crate) async fn execute_retry_safe(
     ex: &Arc<dyn RepoCommandExecutor>,
     cmd: redis::Cmd,
+    metrics: &ComponentMetrics,
+    operation: &'static str,
 ) -> Result<redis::Value, CamelError> {
     match ex.execute(cmd.clone()).await {
         Ok(value) => Ok(value),
         Err(err) if is_transient_redis_error(&err) => {
+            metrics.observe("redis", operation, true);
             ex.refresh().await?;
             ex.execute(cmd).await
         }
@@ -120,6 +126,8 @@ pub(crate) async fn execute_retry_safe(
 pub(crate) async fn scan_unlink_pattern(
     ex: &Arc<dyn RepoCommandExecutor>,
     pattern: &str,
+    metrics: &ComponentMetrics,
+    operation: &'static str,
 ) -> Result<u64, CamelError> {
     const PAGE: usize = 100;
     let mut cursor: u64 = 0;
@@ -132,7 +140,7 @@ pub(crate) async fn scan_unlink_pattern(
             .arg(pattern)
             .arg("COUNT")
             .arg(PAGE);
-        let reply = execute_retry_safe(ex, scan).await?;
+        let reply = execute_retry_safe(ex, scan, metrics, operation).await?;
         let (next, keys): (u64, Vec<String>) = from_redis_value(reply)
             .map_err(|e| CamelError::Io(format!("SCAN reply parse: {e}")))?;
         for batch in keys.chunks(PAGE) {
@@ -144,7 +152,7 @@ pub(crate) async fn scan_unlink_pattern(
             for key in batch {
                 unlink.arg(key);
             }
-            let reply = execute_retry_safe(ex, unlink).await?;
+            let reply = execute_retry_safe(ex, unlink, metrics, operation).await?;
             removed += from_redis_value::<u64>(reply)
                 .map_err(|e| CamelError::Io(format!("UNLINK reply parse: {e}")))?;
         }
@@ -597,10 +605,21 @@ mod tests {
     use super::execute_retry_safe;
     use super::is_transient_redis_error;
     use camel_api::CamelError;
+    use camel_api::ComponentMetrics;
     use camel_component_redis::MultiplexedExecutor;
     use camel_component_redis::RedisEndpointConfig;
     use std::sync::Arc;
     use std::time::Duration;
+
+    /// Lever-off no-op facade for direct `execute_retry_safe` calls in
+    /// these tests (the repositories' own test modules build theirs the
+    /// same way).
+    fn test_facade() -> ComponentMetrics {
+        ComponentMetrics::new(
+            std::sync::Arc::new(camel_api::metrics::MetricsHandle::new()),
+            false,
+        )
+    }
 
     /// Standalone config with a short connect timeout so dead-address tests
     /// fail fast (same pattern as the component's executor tests).
@@ -734,7 +753,7 @@ mod tests {
         fake.push_result(Ok(redis::Value::SimpleString("PONG".into())));
         let ex: Arc<dyn RepoCommandExecutor> = fake.clone();
 
-        let reply = execute_retry_safe(&ex, cmd("PING"))
+        let reply = execute_retry_safe(&ex, cmd("PING"), &test_facade(), "ping")
             .await
             .expect("retry-safe re-issues once after the transient timeout");
         assert!(

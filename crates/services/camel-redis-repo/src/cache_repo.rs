@@ -13,6 +13,7 @@ use crate::executor::scan_unlink_pattern;
 use crate::namespaced;
 use crate::validate_namespace_token;
 use camel_api::CamelError;
+use camel_api::ComponentMetrics;
 use camel_api::cache::CacheEntry;
 use camel_api::cache::CacheRepository;
 use camel_api::cache::CacheStats;
@@ -37,6 +38,7 @@ pub struct RedisCacheRepository {
     stale_retention: Duration,
     clock: ClockFn,
     executor: Arc<dyn RepoCommandExecutor>,
+    metrics: ComponentMetrics,
     hits: std::sync::atomic::AtomicU64,
     misses: std::sync::atomic::AtomicU64,
 }
@@ -46,12 +48,14 @@ impl RedisCacheRepository {
     ///
     /// Validates `name` and `key_prefix` before any network I/O, then
     /// eagerly connects (one topology resolution — see `connection`).
-    /// Uses the production clock.
+    /// Uses the production clock. `metrics` — component-operations facade
+    /// used to observe transient classifications on this repository's paths.
     pub async fn connect(
         name: &str,
         endpoint: &RedisEndpointConfig,
         key_prefix: &str,
         stale_retention: Duration,
+        metrics: ComponentMetrics,
     ) -> Result<Self, CamelError> {
         validate_namespace_token("repository name", name)?;
         validate_namespace_token("key_prefix", key_prefix)?;
@@ -62,18 +66,22 @@ impl RedisCacheRepository {
             stale_retention,
             default_clock(),
             Arc::new(executor),
+            metrics,
         )
     }
 
     /// Test seam: build the repository around an injected executor and clock.
     ///
     /// Sync and network-free; validates both namespace tokens first.
+    /// `metrics` — component-operations facade used to observe transient
+    /// classifications on this repository's paths.
     pub(crate) fn with_executor(
         name: &str,
         key_prefix: &str,
         stale_retention: Duration,
         clock: ClockFn,
         executor: Arc<dyn RepoCommandExecutor>,
+        metrics: ComponentMetrics,
     ) -> Result<Self, CamelError> {
         validate_namespace_token("repository name", name)?;
         validate_namespace_token("key_prefix", key_prefix)?;
@@ -83,6 +91,7 @@ impl RedisCacheRepository {
             stale_retention,
             clock,
             executor,
+            metrics,
             hits: std::sync::atomic::AtomicU64::new(0),
             misses: std::sync::atomic::AtomicU64::new(0),
         })
@@ -122,7 +131,9 @@ impl RedisCacheRepository {
         if let Some(secs) = exat_secs {
             cmd.arg(SetOptions::default().with_expiration(SetExpiry::EXAT(secs)));
         }
-        execute_retry_safe(&self.executor, cmd).await.map(|_| ())
+        execute_retry_safe(&self.executor, cmd, &self.metrics, "set")
+            .await
+            .map(|_| ())
     }
 
     /// Fetch `key`, enforcing the in-band expiry: an entry whose
@@ -175,7 +186,7 @@ impl RedisCacheRepository {
         let mut cmd = redis::Cmd::new();
         cmd.arg("UNLINK")
             .arg(namespaced(&self.key_prefix, &self.name, key));
-        match execute_retry_safe(&self.executor, cmd).await? {
+        match execute_retry_safe(&self.executor, cmd, &self.metrics, "remove").await? {
             redis::Value::Nil | redis::Value::Int(_) => Ok(()),
             other => Err(CamelError::Io(format!(
                 "unexpected UNLINK reply: {other:?}"
@@ -189,7 +200,7 @@ impl RedisCacheRepository {
         let mut cmd = redis::Cmd::new();
         cmd.arg("GET")
             .arg(namespaced(&self.key_prefix, &self.name, key));
-        match execute_retry_safe(&self.executor, cmd).await? {
+        match execute_retry_safe(&self.executor, cmd, &self.metrics, "get").await? {
             redis::Value::Nil => Ok(None),
             redis::Value::BulkString(bytes) => {
                 let entry: CacheEntry = serde_json::from_slice(&bytes)
@@ -262,6 +273,8 @@ impl CacheRepository for RedisCacheRepository {
         scan_unlink_pattern(
             &self.executor,
             &format!("{}:{}:*", self.key_prefix, self.name),
+            &self.metrics,
+            "clear",
         )
         .await?;
         Ok(())
@@ -272,6 +285,8 @@ impl CacheRepository for RedisCacheRepository {
         scan_unlink_pattern(
             &self.executor,
             &format!("{}:{}:{}*", self.key_prefix, self.name, prefix),
+            &self.metrics,
+            "invalidate_prefix",
         )
         .await
     }
@@ -303,13 +318,25 @@ mod tests {
     use crate::executor::test_support::arg_after;
     use crate::executor::test_support::cmd_args;
     use crate::executor::test_support::scan_reply;
+    use crate::test_metrics::RecordingMetrics;
     use camel_api::CamelError;
+    use camel_api::ComponentMetrics;
     use camel_api::cache::CacheEntry;
     use camel_api::cache::ContentType;
+    use camel_api::metrics::MetricsCollector;
     use std::sync::Arc;
     use std::time::Duration;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
+
+    /// Lever-off no-op facade so existing tests exercise the unchanged
+    /// retry semantics with metrics emission disabled.
+    fn test_facade() -> ComponentMetrics {
+        ComponentMetrics::new(
+            std::sync::Arc::new(camel_api::metrics::MetricsHandle::new()),
+            false,
+        )
+    }
 
     /// Deterministic test epoch: 2023-11-14T22:13:20Z.
     fn now() -> SystemTime {
@@ -336,6 +363,7 @@ mod tests {
             Duration::from_secs(10),
             clock,
             executor,
+            test_facade(),
         )
         .expect("valid constructor arguments")
     }
@@ -348,6 +376,7 @@ mod tests {
             Duration::from_secs(1),
             default_clock(),
             Arc::new(FakeRepoExecutor::new()),
+            test_facade(),
         )
         .expect_err("glob metacharacters in the repository name must fail construction");
         match &err {
@@ -367,6 +396,7 @@ mod tests {
             Duration::from_secs(1),
             default_clock(),
             Arc::new(FakeRepoExecutor::new()),
+            test_facade(),
         );
         assert!(result.is_err(), "empty key_prefix must fail construction");
     }
@@ -672,5 +702,125 @@ mod tests {
         assert_eq!(stats.misses, 1);
         assert_eq!(stats.entries, 0);
         assert_eq!(stats.evictions, 0);
+    }
+
+    /// Build a repository whose metrics facade wraps `recorder` with the
+    /// given components lever, so tests can assert on exact emission.
+    fn recording_repo(
+        executor: Arc<FakeRepoExecutor>,
+        recorder: &Arc<RecordingMetrics>,
+        lever: bool,
+    ) -> RedisCacheRepository {
+        RedisCacheRepository::with_executor(
+            "default",
+            "camel:cache",
+            Duration::from_secs(10),
+            default_clock(),
+            executor,
+            ComponentMetrics::new(Arc::clone(recorder) as Arc<dyn MetricsCollector>, lever),
+        )
+        .expect("valid constructor arguments")
+    }
+
+    // C1 emission evidence: a transient GET failure records exactly one
+    // failure observation (no success entry) and forwards to the error
+    // family, even though the retry then succeeds.
+    #[tokio::test]
+    async fn transient_get_records_one_operation_and_error() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let recorder = Arc::new(RecordingMetrics::new());
+        let repo = recording_repo(fake.clone(), &recorder, true);
+        fake.push_result(Err(transient("connection reset by peer")));
+        fake.push_result(Ok(redis::Value::Nil));
+
+        let got = repo.get("k").await.expect("get must succeed after retry");
+
+        assert_eq!(got, None, "Nil reply is a miss");
+        assert_eq!(
+            recorder.ops(),
+            vec!["redis:get:failure".to_string()],
+            "exactly one failure observation, no success entry"
+        );
+        assert_eq!(
+            recorder.errors(),
+            vec![("redis".to_string(), "e:redis:get".to_string())],
+            "the transient classification must forward to the error family"
+        );
+    }
+
+    // C1 emission evidence: a non-transient error is not a transport
+    // classification, so it must record nothing on either family.
+    #[tokio::test]
+    async fn non_transient_error_records_nothing() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let recorder = Arc::new(RecordingMetrics::new());
+        let repo = recording_repo(fake.clone(), &recorder, true);
+        fake.push_result(Err(CamelError::Config("non-transient".into())));
+
+        assert!(
+            repo.get("k").await.is_err(),
+            "non-transient error must surface immediately"
+        );
+        assert!(
+            recorder.ops().is_empty(),
+            "non-transient error must not record a component operation"
+        );
+        assert!(
+            recorder.errors().is_empty(),
+            "non-transient error must not record an error-family entry"
+        );
+    }
+
+    // C1 emission evidence: a transient UNLINK batch failure records one
+    // clear observation even though the SCAN page succeeded — one
+    // observation per transient classification, not per command.
+    #[tokio::test]
+    async fn clear_transient_unlink_batch_records_clear_observation() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let recorder = Arc::new(RecordingMetrics::new());
+        let repo = recording_repo(fake.clone(), &recorder, true);
+        fake.push_result(Ok(scan_reply(0, &["camel:cache:default:a"])));
+        fake.push_result(Err(transient("connection reset by peer")));
+        fake.push_result(Ok(redis::Value::Int(1)));
+
+        repo.clear()
+            .await
+            .expect("clear must succeed after one retry");
+
+        assert_eq!(
+            recorder.ops(),
+            vec!["redis:clear:failure".to_string()],
+            "one failure observation for the transient UNLINK batch"
+        );
+        assert_eq!(
+            recorder.errors(),
+            vec![("redis".to_string(), "e:redis:clear".to_string())],
+            "the transient UNLINK classification must forward to the error family"
+        );
+    }
+
+    // C1 emission evidence: the components lever gates ONLY the
+    // component-operations family; error-family forwarding is
+    // unconditional.
+    #[tokio::test]
+    async fn lever_off_suppresses_operations_not_errors() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let recorder = Arc::new(RecordingMetrics::new());
+        let repo = recording_repo(fake.clone(), &recorder, false);
+        fake.push_result(Err(transient("connection reset by peer")));
+        fake.push_result(Ok(redis::Value::Nil));
+
+        let got = repo.get("k").await.expect("get must succeed after retry");
+
+        assert_eq!(got, None, "Nil reply is a miss");
+        assert!(
+            recorder.ops().is_empty(),
+            "component operations must be suppressed with the lever off"
+        );
+        assert_eq!(
+            recorder.errors(),
+            vec![("redis".to_string(), "e:redis:get".to_string())],
+            "error-family forwarding is never lever-gated"
+        );
     }
 }
