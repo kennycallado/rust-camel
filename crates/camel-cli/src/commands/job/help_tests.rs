@@ -7,7 +7,7 @@ use super::document::{
     JobArgType, JobArgumentDeclaration, JobArgumentDeclarations, JobDocError, JobHelpInfo,
     parse_job_document_for_help,
 };
-use super::help::render_job_help;
+use super::help::{FLAG_SPELLING_NOTE, render_job_help};
 
 /// The declared interface pinned by the full-render test: mode
 /// `one-shot`, send target `direct:ingest`, and two declarations —
@@ -53,6 +53,7 @@ Mode:      one-shot
 Sends to:  direct:ingest
 
 Arguments:
+  (settable as --<name> <VALUE>; bool as --<name> / --no-<name>; or --arg <name>=<value>)
   feed    string  required  Feed identifier
   region  string  optional  default=eu-west-1";
     assert_eq!(rendered, expected);
@@ -306,9 +307,60 @@ Mode:      one-shot
 Sends to:  direct:ingest
 
 Arguments:
+  (settable as --<name> <VALUE>; bool as --<name> / --no-<name>; or --arg <name>=<value>)
   feed    string  required  Feed identifier
   region  string  optional  default=eu-west-1";
     assert_eq!(rendered, expected);
+}
+
+/// With declared arguments, the flag-spelling note renders EXACTLY
+/// once — directly under `Arguments:`, before the first argument row —
+/// pinned byte-exact against the shared note constant.
+#[test]
+fn note_line_renders_once_with_arguments() {
+    let info = declared_interface_info();
+    let rendered = render_job_help("daily-sync", None, &info);
+    let expected = format!(
+        "\
+daily-sync
+
+(no description)
+
+Mode:      one-shot
+Sends to:  direct:ingest
+
+Arguments:
+{FLAG_SPELLING_NOTE}
+  feed    string  required  Feed identifier
+  region  string  optional  default=eu-west-1"
+    );
+    assert_eq!(rendered, expected);
+    assert_eq!(
+        rendered.matches(FLAG_SPELLING_NOTE).count(),
+        1,
+        "note must render exactly once; got:\n{rendered}"
+    );
+}
+
+/// A no-`args:` document keeps the `(no arguments)` row and the note
+/// string appears NOWHERE: the spelling guidance is meaningless when
+/// there is nothing to spell.
+#[test]
+fn note_line_absent_without_arguments() {
+    let absent = JobHelpInfo {
+        mode: "one-shot".to_string(),
+        send_to: "direct:ingest".to_string(),
+        args: None,
+    };
+    let rendered = render_job_help("daily-sync", None, &absent);
+    assert!(
+        rendered.contains("Arguments:\n  (no arguments)"),
+        "placeholder row must render; got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains(FLAG_SPELLING_NOTE),
+        "note must be absent without arguments; got:\n{rendered}"
+    );
 }
 
 #[test]

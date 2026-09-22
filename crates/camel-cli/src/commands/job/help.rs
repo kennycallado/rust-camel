@@ -6,6 +6,12 @@
 
 use super::document::{JobArgType, JobArgumentDeclaration, JobHelpInfo};
 
+/// The flag-spelling note under `Arguments:`: every declared argument
+/// is settable through its dynamic flag (bools through the
+/// presence/negation twin) or the legacy `--arg` pair.
+pub(crate) const FLAG_SPELLING_NOTE: &str =
+    "  (settable as --<name> <VALUE>; bool as --<name> / --no-<name>; or --arg <name>=<value>)";
+
 /// Render the declared interface of one job document as its
 /// `camel job <name> --help` text. Pure: no I/O, no process state; the
 /// result is `\n`-separated lines without a trailing newline (the
@@ -18,7 +24,8 @@ use super::document::{JobArgType, JobArgumentDeclaration, JobHelpInfo};
 /// Layout, in order: the display name; a blank line; the description
 /// (or `(no description)`); a blank line; the aligned `Mode:`/`Sends
 /// to:` pair (both values start at column 12); a blank line;
-/// `Arguments:`; then one row per declared argument in lexical order,
+/// `Arguments:`; then the flag-spelling note (only when arguments are
+/// declared) and one row per declared argument in lexical order,
 /// or the single row `  (no arguments)` when nothing is declared.
 /// CR/LF runs inside the description, default values, and argument
 /// descriptions flatten to one space so every help line stays one
@@ -47,6 +54,11 @@ pub(crate) fn render_job_help(
     out.push_str("Arguments:");
     match &info.args {
         Some(declarations) if !declarations.entries.is_empty() => {
+            // The flag-spelling note sits directly under the
+            // `Arguments:` header, before the first row; the
+            // `(no arguments)` arm gains nothing.
+            out.push('\n');
+            out.push_str(FLAG_SPELLING_NOTE);
             // Name column width: the widest declared name; names are
             // validated ASCII identifiers, so byte length is the
             // display width.

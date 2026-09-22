@@ -213,6 +213,9 @@ pub(crate) enum JobDocError {
     /// A top-level `args:` declaration contains a field outside the
     /// allowed `required`/`default`/`description`/`type` set.
     UnknownArgumentField { argument: String, field: String },
+    /// A top-level `args:` name collides with a static job-subcommand
+    /// flag (`help`, `config`, `report`, `arg`).
+    ReservedArgumentName { name: String },
     /// A top-level `args:` declaration carries a `type:` value that is
     /// neither `string`, `int`, `bool`, nor a well-formed `enum[...]`.
     InvalidArgumentType { argument: String, raw: String },
@@ -291,6 +294,10 @@ impl std::fmt::Display for JobDocError {
             Self::UnknownArgumentField { argument, field } => write!(
                 f,
                 "unknown field `{field}` in the declaration of argument `{argument}`: expected `required`, `default`, `description`, or `type`"
+            ),
+            Self::ReservedArgumentName { name } => write!(
+                f,
+                "argument name `{name}` is reserved by the job command's --{name} flag"
             ),
             Self::InvalidArgumentType { argument, raw } => write!(
                 f,
@@ -667,6 +674,10 @@ fn is_argument_identifier(name: &str) -> bool {
     }
 }
 
+/// Static job-subcommand flag names a top-level `args:` name must not
+/// collide with (`camel job --help/--config/--report/--arg`).
+const RESERVED_ARGUMENT_NAMES: [&str; 4] = ["help", "config", "report", "arg"];
+
 /// Normalize the raw top-level `args:` map: each name must match the
 /// identifier grammar and each declaration the strict
 /// `required`/`default`/`description`/`type` shape. An empty map stays
@@ -684,6 +695,9 @@ fn normalize_job_args(
     for (name, value) in raw {
         if !is_argument_identifier(&name) {
             return Err(JobDocError::InvalidArgumentName { name });
+        }
+        if RESERVED_ARGUMENT_NAMES.contains(&name.as_str()) {
+            return Err(JobDocError::ReservedArgumentName { name });
         }
         let declaration = job_argument_declaration(&name, &value)?;
         // Typed-default load check: rejection only. The declaration

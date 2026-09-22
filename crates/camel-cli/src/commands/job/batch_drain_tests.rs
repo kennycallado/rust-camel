@@ -53,6 +53,7 @@ routeFiles:
         report: Some(report_path.clone()),
         config: dir.path().join("Camel.toml").display().to_string(),
         args: Vec::new(),
+        dynamic: Vec::new(),
     };
 
     let code = super::run_job(&args).await;

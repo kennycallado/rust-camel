@@ -554,6 +554,112 @@ routes:
 }
 
 #[test]
+fn reserved_argument_name_rejected_all_four() {
+    // Arrange: a declaration keyed by each static job-subcommand flag,
+    // one at a time.
+    for name in ["help", "config", "report", "arg"] {
+        let text = format!(
+            r#"
+args:
+  {name}:
+    required: true
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#
+        );
+        // Act
+        let err = document::parse_job_document_with_args(&doc_path(), &text, &[]).unwrap_err();
+        // Assert: the diagnostic names the reserved name; the CLI maps
+        // every job-document load failure to exit 2 before boot.
+        match &err {
+            JobDocError::ReservedArgumentName { name: reserved } => assert_eq!(reserved, name),
+            other => panic!("expected ReservedArgumentName, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("reserved") && msg.contains(name),
+            "reserved-name diagnostic must name the argument; got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn reserved_argument_name_rejected_on_help_parse() {
+    // Arrange: the same declaration for `report`.
+    let text = r#"
+args:
+  report:
+    required: true
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let err = document::parse_job_document_for_help(&doc_path(), text).unwrap_err();
+    // Assert: both parse paths reject identically.
+    match &err {
+        JobDocError::ReservedArgumentName { name } => assert_eq!(name, "report"),
+        other => panic!("expected ReservedArgumentName, got {other:?}"),
+    }
+}
+
+#[test]
+fn non_reserved_flag_like_name_accepted() {
+    // Arrange: a declaration whose name merely CONTAINS a reserved word.
+    let text = r#"
+args:
+  helpers:
+    required: true
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let doc = document::parse_job_document(&doc_path(), text).expect("parses");
+    // Assert: the guard is exact-match only.
+    assert!(
+        doc.args
+            .as_ref()
+            .expect("declarations carried")
+            .entries
+            .contains_key("helpers")
+    );
+}
+
+#[test]
+fn reserved_argument_name_rejected_at_compile_validation() {
+    // Arrange: an `args:` block declaring the static flag name `config`.
+    let text = r#"
+args:
+  config: {}
+"#;
+    // Act
+    let err = document::validate_job_declarations_for_compile(text).unwrap_err();
+    // Assert: the compile-time declaration check rejects the reserved
+    // name through the same shared normalization.
+    match &err {
+        JobDocError::ReservedArgumentName { name } => assert_eq!(name, "config"),
+        other => panic!("expected ReservedArgumentName, got {other:?}"),
+    }
+}
+
+#[test]
 fn reject_non_boolean_required() {
     // Arrange: a declaration whose `required` field is a string.
     let text = r#"

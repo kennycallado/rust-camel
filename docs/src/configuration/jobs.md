@@ -39,7 +39,7 @@ dirs = ["jobs/production"]   # same key: replaces the default list
 
 A job document can declare its interface with a top-level `args:` map. Each entry names one argument and admits four keys: `type` (one of `string`, `int`, `bool`, or `enum[a,b,c]`), `required` (boolean), `default`, and `description` (strings).
 
-The declaration is part of the document, not of `Camel.toml`, so it travels with the job. `camel job` resolves `--arg NAME=VALUE` pairs against it, applies defaults, coerces typed values, and interpolates the results through `${arg:NAME}` tokens in the document's `to`, `body`, `headers`, and `timeout`. A required argument without a default must arrive on the command line, or the run fails before boot.
+The declaration is part of the document, not of `Camel.toml`, so it travels with the job. `camel job` resolves the supplied arguments against it — `--arg NAME=VALUE` pairs and the derived `--<name> VALUE` flags lower to the same channel — applies defaults, coerces typed values, and interpolates the results through `${arg:NAME}` tokens in the document's `to`, `body`, `headers`, and `timeout`. A required argument without a default must arrive on the command line, or the run fails before boot.
 
 See [camel job](../cli/job.md) for the full grammar, coercion rules, and the `--help` interface renderer. Authority: the `cli-jobs` canonical spec and [`crates/camel-cli/CONTEXT.md`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-cli/CONTEXT.md).
 

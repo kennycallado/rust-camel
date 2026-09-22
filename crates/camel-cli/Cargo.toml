@@ -26,7 +26,7 @@ path = "src/main.rs"
 async-trait.workspace = true
 blake3.workspace = true
 chrono.workspace = true
-clap = { workspace = true, features = ["derive", "env"] }
+clap = { workspace = true, features = ["derive", "env", "string"] }
 config.workspace = true
 glob.workspace = true
 humantime.workspace = true

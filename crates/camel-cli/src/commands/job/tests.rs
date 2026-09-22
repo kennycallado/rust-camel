@@ -635,6 +635,199 @@ routeFiles:
     );
 }
 
+// ---- jobflags Task 1.2: phase-1 tail capture -----------------------------
+//
+// The phase-1 argv contract: tokens after the document reference land
+// raw in the `dynamic` tail (which starts at the FIRST unknown token),
+// so a later phase can re-parse the tail once the document's declared
+// flags are known. The tests pin the probed clap 4.x semantics against
+// the REAL parse surface — the top-level dispatch with its `job`
+// subcommand, not a bare `JobArgs` parse (the flag-before-document
+// unknown-argument error and the tail-free bare/doc-only shapes only
+// exist under subcommand dispatch). The real `Cli` is private to the
+// binary crate and unreachable from lib unit tests, so the harness
+// mirrors main.rs's dispatch shape exactly (`Commands::Job(JobArgs)`
+// at the same nesting depth; house precedent: the `TestCli` harnesses
+// in `commands::journal` and `commands::plugin`).
+
+use clap::{Parser, Subcommand};
+
+use super::{tail_config_override, tail_has_help};
+
+/// Test-local mirror of main.rs's `Cli`: one subcommand slot holding
+/// the real `JobArgs` under the real `job` variant shape.
+#[derive(Parser, Debug)]
+struct TestCli {
+    #[command(subcommand)]
+    command: TestCommands,
+}
+
+/// Test-local mirror of main.rs's `Commands` job variant.
+#[derive(Subcommand, Debug)]
+enum TestCommands {
+    Job(JobArgs),
+}
+
+/// Destructure the mirror's job invocation: the only variant the
+/// phase-1 contract speaks about.
+fn job_of(cli: TestCli) -> JobArgs {
+    match cli.command {
+        TestCommands::Job(args) => args,
+    }
+}
+
+/// Build the `&[OsString]` tail the pre-scans take from a `&[&str]`
+/// literal (the tests never exercise non-UTF-8 tails; the pre-scans
+/// skip those by contract).
+fn tail(tokens: &[&str]) -> Vec<std::ffi::OsString> {
+    tokens
+        .iter()
+        .map(|token| std::ffi::OsStr::new(token).to_os_string())
+        .collect()
+}
+
+/// Static flags after the document reference parse STATICALLY (native
+/// back-compat): `--arg`, `--config`, `--report`, and `--help` keep
+/// their meaning and the raw tail stays empty.
+#[test]
+fn phase1_static_flags_after_path_parse_statically() {
+    let cli = TestCli::try_parse_from([
+        "camel",
+        "job",
+        "doc.job.yaml",
+        "--arg",
+        "name=x",
+        "--config",
+        "c.toml",
+        "--report",
+        "r.json",
+        "--help",
+    ])
+    .expect("expected parse success");
+    let args = job_of(cli);
+    assert_eq!(args.args, [("name".to_string(), "x".to_string())]);
+    assert_eq!(args.config, "c.toml");
+    assert_eq!(args.report.as_deref(), Some(std::path::Path::new("r.json")));
+    assert!(args.help);
+    assert!(
+        args.dynamic.is_empty(),
+        "static flags must leave the tail empty; got {:?}",
+        args.dynamic
+    );
+}
+
+/// Unknown flags after the document reference open the raw tail: from
+/// the FIRST unknown token on, everything (later static flags
+/// included) is captured raw for the tail re-parse.
+#[test]
+fn phase1_flags_after_path_land_in_dynamic_tail() {
+    let cli = TestCli::try_parse_from([
+        "camel",
+        "job",
+        "doc.job.yaml",
+        "--name",
+        "world",
+        "--name=flat",
+    ])
+    .expect("expected parse success");
+    let args = job_of(cli);
+    assert_eq!(
+        args.document.as_deref(),
+        Some(std::path::Path::new("doc.job.yaml"))
+    );
+    let dynamic: Vec<String> = args
+        .dynamic
+        .iter()
+        .map(|token| token.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(dynamic, ["--name", "world", "--name=flat"]);
+}
+
+/// The tail starts at the FIRST unknown token: `--arg` before it still
+/// parses statically, while the later static `--report` is already
+/// part of the raw tail.
+#[test]
+fn phase1_tail_starts_at_first_unknown_token() {
+    let cli = TestCli::try_parse_from([
+        "camel",
+        "job",
+        "doc.job.yaml",
+        "--arg",
+        "a=1",
+        "--name",
+        "w",
+        "--report",
+        "r.json",
+    ])
+    .expect("expected parse success");
+    let args = job_of(cli);
+    assert_eq!(args.args, [("a".to_string(), "1".to_string())]);
+    let dynamic: Vec<String> = args
+        .dynamic
+        .iter()
+        .map(|token| token.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(dynamic, ["--name", "w", "--report", "r.json"]);
+}
+
+/// A flag BEFORE the document reference is a phase-1
+/// unknown-argument error (owner decision: path first, flags after —
+/// the natural clap shape).
+#[test]
+fn phase1_flag_before_document_is_unknown_argument() {
+    let err = TestCli::try_parse_from(["camel", "job", "--name", "world", "doc.job.yaml"])
+        .expect_err("flag before the document must be an unknown-argument error");
+    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+}
+
+/// Flagless invocation shapes are unchanged: bare `camel job` and the
+/// document-only form both parse with an empty tail.
+#[test]
+fn phase1_bare_and_doc_only_unchanged() {
+    let cli = TestCli::try_parse_from(["camel", "job"]).expect("expected parse success");
+    let args = job_of(cli);
+    assert!(args.document.is_none());
+    assert!(
+        args.dynamic.is_empty(),
+        "bare invocation must have no tail; got {:?}",
+        args.dynamic
+    );
+
+    let cli =
+        TestCli::try_parse_from(["camel", "job", "doc.job.yaml"]).expect("expected parse success");
+    let args = job_of(cli);
+    assert!(
+        args.dynamic.is_empty(),
+        "document-only invocation must have no tail; got {:?}",
+        args.dynamic
+    );
+}
+
+/// The tail `--config` pre-scan returns the LAST match, in either
+/// spelling (`--config X` and `--config=X`); a tail without config
+/// tokens yields `None`.
+#[test]
+fn tail_config_override_last_wins() {
+    let both = tail_config_override(&tail(&[
+        "--name",
+        "w",
+        "--config",
+        "b.toml",
+        "--config=a.toml",
+    ]));
+    assert_eq!(both.as_deref(), Some("a.toml"));
+    assert_eq!(tail_config_override(&tail(&["--name", "w"])), None);
+}
+
+/// The tail help pre-scan matches exact tokens only: `--help` and
+/// `-h` count, a near-miss dynamic flag (`--helpp`) does not.
+#[test]
+fn tail_has_help_exact_token() {
+    assert!(tail_has_help(&tail(&["--name", "x", "--help"])));
+    assert!(!tail_has_help(&tail(&["--name", "--helpp"])));
+    assert!(tail_has_help(&tail(&["-h"])));
+}
+
 #[cfg(test)]
 #[path = "batch_drain_tests.rs"]
 mod batch_drain_tests;
@@ -963,6 +1156,572 @@ fn help_short_flag_behaves_like_long() {
         short_stdout, long_stdout,
         "-h and --help must render identically"
     );
+}
+
+// ---- jobflags Task 1.5: phase-2 `run_job` wiring -------------------------
+//
+// The dynamic-flag contract spans the whole binary — phase-1 tail
+// capture, the hoisted interface parse, tail lowering, and the
+// report/report-path merge — so the tests act through the same
+// subprocess harness as the jobargs family.
+
+/// The declared-args tap job shared by the dynamic-flag execution
+/// tests: one required string argument interpolated into the reply
+/// body through `${arg:name}` (the jobargs-family fixture shape: the
+/// tap route echoes body and headers back into the report).
+fn write_declared_name_job(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("job.job.yaml"),
+        r#"args:
+  name:
+    required: true
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:tap
+    body: "hello ${arg:name}"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+}
+
+/// The declared-bool tap job: `verbose` defaults to `false` and the
+/// canonicalized value lands in the reply body.
+fn write_declared_bool_job(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("job.job.yaml"),
+        r#"args:
+  verbose:
+    type: bool
+    default: "false"
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:tap
+    body: "verbose=${arg:verbose}"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+}
+
+/// A dynamic flag and the equivalent `--arg` pair are interchangeable:
+/// both spellings exit 0 and the report shows the same interpolated
+/// body.
+#[test]
+fn binary_dynamic_flag_runs_identical_to_arg() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_tap_route(dir.path());
+    write_declared_name_job(dir.path());
+    let report = dir.path().join("report.json");
+
+    // Dynamic flag form.
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &[
+            "job.job.yaml",
+            "--name",
+            "world",
+            "--report",
+            report.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(code, 0, "dynamic-flag run must complete; stderr:\n{stderr}");
+    let json = read_report(&report);
+    assert_eq!(json["outcome"], "Completed", "report: {json}");
+    assert_eq!(json["reply"]["body"], "hello world", "report: {json}");
+
+    // `--arg` form: identical outcome.
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &[
+            "job.job.yaml",
+            "--arg",
+            "name=world",
+            "--report",
+            report.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(code, 0, "--arg run must complete; stderr:\n{stderr}");
+    let json = read_report(&report);
+    assert_eq!(json["outcome"], "Completed", "report: {json}");
+    assert_eq!(json["reply"]["body"], "hello world", "report: {json}");
+}
+
+/// A dynamic flag works through bare-name resolution: `hello` probes
+/// `jobs/hello.job.yaml` in the default root and `--name` fills the
+/// declared argument.
+#[test]
+fn binary_bare_name_with_dynamic_flag() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_jobs_root_document(
+        dir.path(),
+        "hello",
+        r#"args:
+  name:
+    required: true
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:tap
+    body: "hello ${arg:name}"
+routes:
+  - id: "job-tap"
+    from: "direct:tap"
+"#,
+    );
+    let report = dir.path().join("report.json");
+
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &[
+            "hello",
+            "--name",
+            "world",
+            "--report",
+            report.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(code, 0, "bare-name run must complete; stderr:\n{stderr}");
+    let json = read_report(&report);
+    assert_eq!(json["outcome"], "Completed", "report: {json}");
+    assert_eq!(json["reply"]["body"], "hello world", "report: {json}");
+}
+
+/// Bool dynamic flags end to end: `--verbose` lowers `true`,
+/// `--no-verbose` lowers `false`, and an omitted flag falls through to
+/// the declared default — all three visible in the interpolated body.
+#[test]
+fn binary_bool_spellings_end_to_end() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_tap_route(dir.path());
+    write_declared_bool_job(dir.path());
+    let report = dir.path().join("report.json");
+
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &[
+            "job.job.yaml",
+            "--verbose",
+            "--report",
+            report.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(code, 0, "bare-bool run must complete; stderr:\n{stderr}");
+    assert_eq!(
+        read_report(&report)["reply"]["body"],
+        "verbose=true",
+        "--verbose must lower true"
+    );
+
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &[
+            "job.job.yaml",
+            "--no-verbose",
+            "--report",
+            report.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(code, 0, "negated run must complete; stderr:\n{stderr}");
+    assert_eq!(
+        read_report(&report)["reply"]["body"],
+        "verbose=false",
+        "--no-verbose must lower false"
+    );
+
+    // No flag: the declared default (`false`) applies downstream.
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &["job.job.yaml", "--report", report.to_str().expect("utf8")],
+    );
+    assert_eq!(code, 0, "default run must complete; stderr:\n{stderr}");
+    assert_eq!(
+        read_report(&report)["reply"]["body"],
+        "verbose=false",
+        "the declared default must apply when the flag is omitted"
+    );
+}
+
+/// A declared bool given in value form (`--verbose=false`) is a usage
+/// error (exit 2) whose targeted diagnostic names all three valid
+/// spellings — not clap's own render.
+#[test]
+fn binary_bool_value_form_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_tap_route(dir.path());
+    write_declared_bool_job(dir.path());
+
+    let (code, _stdout, stderr) = run_camel_job(dir.path(), &["job.job.yaml", "--verbose=false"]);
+    assert_eq!(code, 2, "bool value form must exit 2; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("--verbose"),
+        "diagnostic must name the bare spelling; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--no-verbose"),
+        "diagnostic must name the negated spelling; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--arg verbose=false"),
+        "diagnostic must name the pair spelling; stderr:\n{stderr}"
+    );
+}
+
+/// One argument given through BOTH forms (dynamic flag + `--arg`
+/// pair) is ambiguous input: a usage error naming the argument and
+/// both forms.
+#[test]
+fn binary_cross_form_conflict() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_tap_route(dir.path());
+    write_declared_name_job(dir.path());
+
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &["job.job.yaml", "--name", "a", "--arg", "name=b"],
+    );
+    assert_eq!(
+        code, 2,
+        "cross-form conflict must exit 2; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("'name'"),
+        "diagnostic must name the argument; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--name"),
+        "diagnostic must name the flag form; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--arg name=VALUE"),
+        "diagnostic must name the pair form; stderr:\n{stderr}"
+    );
+}
+
+/// A dynamic flag on a legacy (no-`args:`) document is a usage error
+/// that steers toward `args:` and `--arg` — and is NOT misread as the
+/// legacy `--arg`-header behavior (no deprecation note).
+#[test]
+fn binary_dynamic_on_legacy_document_errors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_jobs_root_document(
+        dir.path(),
+        "legacy",
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: direct:tap
+    body: "ping"
+routes:
+  - id: "job-tap"
+    from: "direct:tap"
+"#,
+    );
+
+    let (code, _stdout, stderr) = run_camel_job(dir.path(), &["legacy", "--name", "x"]);
+    assert_eq!(
+        code, 2,
+        "dynamic flag on a legacy document must exit 2; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("args:"),
+        "diagnostic must point at the args block; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--arg"),
+        "diagnostic must offer the --arg fallback; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("deprecated"),
+        "a dynamic flag is not the legacy --arg path; stderr:\n{stderr}"
+    );
+}
+
+/// `--arg` back-compat in both positions on a legacy document: after
+/// the path (phase-1 static) and before the path, both deliver the raw
+/// header (overriding the document header, last-wins) and the
+/// deprecation note — unchanged by the tail work.
+#[test]
+fn binary_arg_backcompat_positions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_tap_route(dir.path());
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:tap
+    body: "ping"
+    headers:
+      name: Doc
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+    let report = dir.path().join("report.json");
+
+    // After the path.
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &[
+            "job.job.yaml",
+            "--arg",
+            "name=x",
+            "--report",
+            report.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "post-path --arg run must complete; stderr:\n{stderr}"
+    );
+    let json = read_report(&report);
+    assert_eq!(json["reply"]["headers"]["name"], "x", "report: {json}");
+    assert!(
+        stderr.contains("deprecated"),
+        "deprecation note must carry; stderr:\n{stderr}"
+    );
+
+    // Before the path.
+    let (code, _stdout, stderr) = run_camel_job(
+        dir.path(),
+        &[
+            "--arg",
+            "name=x",
+            "job.job.yaml",
+            "--report",
+            report.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "pre-path --arg run must complete; stderr:\n{stderr}"
+    );
+    let json = read_report(&report);
+    assert_eq!(json["reply"]["headers"]["name"], "x", "report: {json}");
+    assert!(
+        stderr.contains("deprecated"),
+        "deprecation note must carry; stderr:\n{stderr}"
+    );
+}
+
+/// A tail `--help` wins over flag processing: the declared interface
+/// renders, nothing executes (no report write), and the signal
+/// streams stay unarmed (no marker with the opt-in env set).
+#[test]
+fn binary_tail_help_recovered() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_tap_route(dir.path());
+    write_declared_name_job(dir.path());
+    let report = dir.path().join("out.json");
+
+    let (code, stdout, stderr) = run_camel_job_env(
+        dir.path(),
+        &[
+            "job.job.yaml",
+            "--name",
+            "x",
+            "--help",
+            "--report",
+            report.to_str().expect("utf8"),
+        ],
+        &[(
+            std::ffi::OsString::from("CAMEL_JOB_SIGNAL_MARKER"),
+            std::ffi::OsString::from("1"),
+        )],
+    );
+    assert_eq!(code, 0, "tail --help must exit 0; stderr:\n{stderr}");
+    assert!(
+        stdout.starts_with("job"),
+        "stdout renders the declared interface; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Arguments:"),
+        "argument rows must render; stdout:\n{stdout}"
+    );
+    assert!(
+        !report.exists(),
+        "help must not execute or write the report; stdout:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("signal streams armed"),
+        "tail help installs no signal streams; stderr:\n{stderr}"
+    );
+}
+
+/// A tail `--report` is recovered and used: the run completes and the
+/// report file carries the interpolated body (the report goes to the
+/// file, not stdout).
+#[test]
+fn binary_tail_report_recovered() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_job_fixture_config(dir.path());
+    write_tap_route(dir.path());
+    write_declared_name_job(dir.path());
+    let report = dir.path().join("r.json");
+
+    let (code, stdout, stderr) = run_camel_job(
+        dir.path(),
+        &[
+            "job.job.yaml",
+            "--name",
+            "x",
+            "--report",
+            report.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "tail --report run must complete; stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("\"outcome\""),
+        "the report goes to the tail --report file, not stdout; stdout:\n{stdout}"
+    );
+    let json = read_report(&report);
+    assert_eq!(json["outcome"], "Completed", "report: {json}");
+    assert_eq!(json["reply"]["body"], "hello x", "report: {json}");
+}
+
+/// A tail `--config` re-anchors resolution: run from project A, the
+/// tail `--config` selects project B's config, whose `[jobs].dirs`
+/// root resolves `pick` to B's document — B's body lands in the
+/// report.
+#[test]
+fn binary_tail_config_selects_jobs_root() {
+    let project_a = tempfile::tempdir().expect("tempdir");
+    let project_b = tempfile::tempdir().expect("tempdir");
+    for (project, dirs, marker) in [
+        (project_a.path(), "ajobs", "A"),
+        (project_b.path(), "bjobs", "B"),
+    ] {
+        std::fs::write(
+            project.join("Camel.toml"),
+            format!(
+                // Flat config (no `[default]` profile section): a
+                // profile structure would make `apply_profile` keep
+                // ONLY `[default]`, silently dropping the `[jobs]`
+                // table.
+                r#"log_level = "off"
+watch = false
+
+[jobs]
+dirs = ["{dirs}"]
+"#
+            ),
+        )
+        .expect("write Camel.toml");
+        let jobs = project.join(dirs);
+        std::fs::create_dir_all(&jobs).expect("mkdir jobs root");
+        std::fs::write(
+            jobs.join("pick.job.yaml"),
+            format!(
+                r#"args:
+  tag:
+    required: true
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:tap
+    body: "{marker}-${{arg:tag}}"
+routes:
+  - id: "job-tap"
+    from: "direct:tap"
+"#
+            ),
+        )
+        .expect("write pick job");
+    }
+
+    let (code, stdout, stderr) = run_camel_job(
+        project_a.path(),
+        &[
+            "pick",
+            "--tag",
+            "t",
+            "--config",
+            project_b.path().join("Camel.toml").to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "tail --config run must complete; stderr:\n{stderr}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(json["outcome"], "Completed", "report: {json}");
+    assert_eq!(
+        json["reply"]["body"], "B-t",
+        "project B's document must be selected; report: {json}"
+    );
+    let document = json["document"].as_str().expect("document string");
+    assert!(
+        document.contains("bjobs"),
+        "the resolved document must live in B's root; report: {json}"
+    );
+}
+
+/// The help path shares the load-time reserved-name guard with
+/// execution: a document declaring one of the four static
+/// job-subcommand flag names fails the `--help` render pre-boot with
+/// exit 2 and the reserved-name diagnostic naming the argument —
+/// identically for all four names.
+#[test]
+fn binary_reserved_name_help_rejected() {
+    for name in ["help", "config", "report", "arg"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_job_fixture_config(dir.path());
+        let document = format!(
+            r#"args:
+  {name}:
+    required: true
+execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: direct:tap
+    body: "ping"
+routes:
+  - id: "job-tap"
+    from: "direct:tap"
+"#
+        );
+        write_jobs_root_document(dir.path(), "rsv", &document);
+
+        let (code, _stdout, stderr) = run_camel_job(dir.path(), &["rsv", "--help"]);
+        assert_eq!(
+            code, 2,
+            "`{name}` must be rejected on the help path too; stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("reserved") && stderr.contains(name),
+            "reserved-name diagnostic must name `{name}`; stderr:\n{stderr}"
+        );
+    }
 }
 
 mod exit_code_tests {

@@ -14,6 +14,7 @@ camel job report-nightly      # run <root>/report-nightly.job.yaml
 camel job jobs/report-nightly.job.yaml   # run by explicit path
 camel job report-nightly --help          # show the declared interface
 camel job report-nightly --arg env=prod --arg retries=3
+camel job report-nightly --env prod --retries 3   # flags from the args: declarations
 ```
 
 | Flag | Description |
@@ -21,6 +22,7 @@ camel job report-nightly --arg env=prod --arg retries=3
 | `<FILE>` (positional, optional) | Job document path or bare job name. Omitted, the command lists the discovery set. |
 | `--help`, `-h` | With a name, print the job's declared interface. Without a name, print usage. |
 | `--arg <NAME=VALUE>` | Supply one declared argument. Repeat the flag for several pairs. |
+| `--<NAME> <VALUE>` | Flag form of one declared argument, spelled as declared: `--env prod` or `--env=prod`; repeats are last-wins. Bools take bare `--<NAME>` / `--no-<NAME>`. |
 | `--report <FILE>` | Write the JSON report to this path instead of stdout. |
 | `--config <FILE>` | Path to `Camel.toml` (default: `Camel.toml`). Also read from `CAMEL_CONFIG_FILE`; an explicit `--config` wins. |
 
@@ -88,7 +90,7 @@ A top-level `args:` map declares the job's interface. Each entry admits four key
 | `default` | string | The value applied when the CLI omits the argument. |
 | `description` | string | Author documentation, shown by `--help`. |
 
-Argument names match `[A-Za-z_][A-Za-z0-9_]*`. Unknown keys fail at load.
+Argument names match `[A-Za-z_][A-Za-z0-9_]*`. Unknown keys fail at load. The names `help`, `config`, `report`, and `arg` are reserved: a document declaring one fails at load (exit 2) on execution, `--help`, and `camel compile` — the collision with the static flags is caught before it can bite.
 
 Typed values are coerced to a canonical form before use:
 
@@ -97,7 +99,13 @@ Typed values are coerced to a canonical form before use:
 - `enum` members match exactly, case-sensitive.
 - `string` keeps the value verbatim.
 
-Resolution order: an unknown `--arg` name fails first, then a missing `required` argument, then a coercion failure. A repeated `--arg` takes the last value. An explicit pair always wins over a `default`.
+Each declared argument also accepts a dedicated `--<name> <VALUE>` flag, spelled exactly as declared (underscores stay underscores; long-only, no short form). `--env prod` and `--env=prod` are both accepted, and repeats are last-wins. The flags go after the document reference (path or bare name); a flag before it is a standard unknown-argument error. Both forms lower to the same value channel, under one contract:
+
+- A **bool** argument takes no value: bare `--flag` means true, bare `--no-flag` means false, and absence keeps the document default. A value spelling (`--flag=false`, `--no-flag=false`) is a hard error naming the accepted spellings (`--flag`, `--no-flag`, `--arg flag=false`); a stray token (`--flag false`) fails as an unexpected positional. Supplying both spellings of one bool (`--flag --no-flag`) is an exit-2 conflict naming the argument, not last-wins.
+- Supplying the same key through both forms in one invocation (`--env prod --arg env=staging`) is an exit-2 conflict error naming the key.
+- An undeclared flag fails with the standard clap unknown-argument error, including a suggestion for a close name.
+
+Resolution order: an unknown argument name fails first (either form), then a missing `required` argument, then a coercion failure. A repeated flag or pair takes the last value. An explicit value always wins over a `default`.
 
 Resolved values reach the document through `${arg:NAME}` tokens in `to`, `body`, `headers`, and `timeout`:
 
@@ -107,11 +115,11 @@ Resolved values reach the document through `${arg:NAME}` tokens in `to`, `body`,
 
 ### Legacy documents
 
-A document without an `args:` map keeps the legacy behavior. Each `--arg NAME=VALUE` pair becomes a message header at send time, applied after the document headers. The command prints a deprecation note to stderr. Declare `args:` in new documents.
+A document without an `args:` map keeps the legacy behavior. Each `--arg NAME=VALUE` pair becomes a message header at send time, applied after the document headers. The command prints a deprecation note to stderr. A dynamic `--<name>` flag on such a document is a hard error (exit 2) pointing at `args:` and `--arg`. Declare `args:` in new documents.
 
 ## camel job \<name\> --help
 
-The `--help` flag with a job name renders the declared interface: the description, the mode, the send target, and one row per argument with its type, requirement flag, default, and description. The renderer flattens line breaks so each row stays on one line.
+The `--help` flag with a job name renders the declared interface: the description, the mode, the send target, and one row per argument with its type, requirement flag, default, and description. The renderer flattens line breaks so each row stays on one line. When arguments exist, the Arguments table carries one note line: `(settable as --<name> <VALUE>; bool as --<name> / --no-<name>; or --arg <name>=<value>)`.
 
 ## Reports and exit codes
 

@@ -955,6 +955,205 @@ fn report_without_document_is_usage_error() {
     );
 }
 
+/// The declared-args tap job shared by the dynamic-flag e2e tests: one
+/// required string argument interpolated into the reply body through
+/// `${arg:name}` (the tap route echoes the body back into the report).
+fn write_declared_name_fixture(dir: &Path) {
+    write_config(dir);
+    std::fs::create_dir(dir.join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-tap"
+    from: "direct:tap"
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.join("job.job.yaml"),
+        r#"args:
+  name:
+    required: true
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:tap
+    body: "hello ${arg:name}"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+}
+
+/// A declared argument set through the dynamic-flag form and through
+/// the legacy `--arg` form records the same run: both exit 0 and the
+/// two JSON reports match on the evidence fields exactly (`duration_ms`
+/// is timing noise and excluded).
+#[test]
+fn dynamic_flag_one_shot_matches_arg_form() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_declared_name_fixture(dir.path());
+
+    let (flag_code, flag_stdout, flag_stderr) =
+        run_job_args(dir.path(), &["job.job.yaml", "--name", "world"]);
+    assert_eq!(
+        flag_code, 0,
+        "dynamic-flag run must complete;\nstdout:\n{flag_stdout}\nstderr:\n{flag_stderr}"
+    );
+    let (arg_code, arg_stdout, arg_stderr) =
+        run_job_args(dir.path(), &["job.job.yaml", "--arg", "name=world"]);
+    assert_eq!(
+        arg_code, 0,
+        "--arg run must complete;\nstdout:\n{arg_stdout}\nstderr:\n{arg_stderr}"
+    );
+
+    let flag_report: serde_json::Value = serde_json::from_str(flag_stdout.trim())
+        .expect("stdout is the JSON report; got:\n{flag_stdout}");
+    let arg_report: serde_json::Value = serde_json::from_str(arg_stdout.trim())
+        .expect("stdout is the JSON report; got:\n{arg_stdout}");
+    for field in ["outcome", "mode", "terminated_early", "reply"] {
+        assert_eq!(
+            flag_report[field], arg_report[field],
+            "reports must match on `{field}`;\nflag form:\n{flag_report}\narg form:\n{arg_report}"
+        );
+    }
+    assert_eq!(flag_report["outcome"], "Completed", "report: {flag_report}");
+    assert_eq!(
+        flag_report["reply"]["body"], "hello world",
+        "the interpolated ${{arg:name}} body must carry; report: {flag_report}"
+    );
+}
+
+/// A misspelled dynamic flag is clap's unknown-argument usage error:
+/// exit 2, stderr carries clap's diagnostic with the `--name`
+/// did-you-mean suggestion, and nothing executes (no report on stdout).
+#[test]
+fn dynamic_flag_unknown_exits_two() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_declared_name_fixture(dir.path());
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--nmae", "x"]);
+    assert_eq!(
+        code, 2,
+        "unknown dynamic flag must exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unexpected argument '--nmae' found"),
+        "stderr must carry clap's unknown-argument text; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("similar argument exists: '--name'"),
+        "stderr must suggest the declared `--name`; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "usage error is stderr-only; got:\n{stdout}"
+    );
+}
+
+/// The `--` argv terminator survives neither phase intact: clap strips
+/// it before tail capture but keeps it inside an already-started tail,
+/// so the boundary is recomputed from RAW argv. Post-terminator tokens
+/// are literals — never help, never a config re-anchor, never dynamic
+/// or static flags — and the first one fails as an unexpected
+/// positional (exit 2). A terminator with nothing after it is
+/// harmless: the run proceeds (flags spelled before it keep their
+/// meaning).
+#[test]
+fn binary_terminator_preserved() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_declared_name_fixture(dir.path());
+
+    // Stripped terminator (`doc -- --name x` captures the tail raw):
+    // the post-`--` `--name` is a literal, not a flag.
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--", "--name", "x"]);
+    assert_eq!(
+        code, 2,
+        "post-terminator tokens are not flags;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unexpected positional '--name'"),
+        "the first literal is named;\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "usage error is stderr-only; got:\n{stdout}"
+    );
+
+    // Surviving terminator (`doc --name w -- --literal`): the flags
+    // before it lower normally; everything after it is literal.
+    let (code, stdout, stderr) = run_job_args(
+        dir.path(),
+        &["job.job.yaml", "--name", "w", "--", "--literal"],
+    );
+    assert_eq!(
+        code, 2,
+        "post-terminator literals exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unexpected positional"),
+        "the literal is named;\nstderr:\n{stderr}"
+    );
+
+    // Terminator before the path (`-- doc.yaml --name w`): the whole
+    // captured tail is post-terminator.
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["--", "job.job.yaml", "--name", "w"]);
+    assert_eq!(
+        code, 2,
+        "a terminator before the path literalizes the tail;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unexpected positional '--name'"),
+        "the first literal is named;\nstderr:\n{stderr}"
+    );
+
+    // A terminator with NOTHING after it is harmless: the run proceeds
+    // and flags spelled before the surviving `--` keep their meaning.
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--name", "w", "--"]);
+    assert_eq!(
+        code, 0,
+        "a bare trailing `--` must not fail;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(
+        report["reply"]["body"], "hello w",
+        "pre-terminator `--name w` lowers normally; report: {report}"
+    );
+
+    // Post-terminator `--help` does NOT render help.
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--", "--help"]);
+    assert_eq!(
+        code, 2,
+        "post-terminator help is a literal;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unexpected positional '--help'"),
+        "the literal is named;\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "no help on stdout;\nstdout:\n{stdout}"
+    );
+
+    // A trailing stripped terminator on an args-less document runs
+    // fine (empty tail, empty literals).
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_bare_name_fixture(dir.path());
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["jobs/job.job.yaml", "--"]);
+    assert_eq!(
+        code, 0,
+        "`doc --` alone must run;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("\"Completed\""),
+        "the job executed; stdout:\n{stdout}"
+    );
+}
+
 // ── No-argument listing (job-ux-reshape) ───────────────────────────────
 
 #[test]
