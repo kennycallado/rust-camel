@@ -51,6 +51,28 @@ certificate rotation is not a supported feature (consumer-side TLS has a
 hot-reload path via `TlsReloadRegistry` in `src/tls_reload.rs`; the producer
 has no equivalent).
 
+On a platform without a usable system CA store (for example Android/Termux),
+the client build retries on bundled Mozilla webpki roots instead of panicking
+(rc-3j4mq). The fallback carries the configured TLS material: the custom CA
+merges into the Mozilla anchors (union parity with the primary path's
+`add_root_certificate`), and the mTLS identity is applied. Valid material is
+carried regardless of `tls.strict`. Under `tls.strict`, any material rejection
+class — unreadable path, zero PEM `CERTIFICATE` sections, zero roots accepted
+by the root store, unparseable private key, PEM-valid key rejected at
+client-auth configuration — fails closed at endpoint creation with a typed
+`CamelError::EndpointCreationFailed` prefixed `tls.strict/webpki-fallback:`
+(rc-hl9cn). Construction never panics on CA-less platforms. Without strict
+mode, material failures degrade item-wise with warns: a failed CA item falls
+back to the bundled Mozilla roots; a failed identity item leaves the client
+certificate unused (permissive F2-7 semantics). `tls.insecure` /
+`verify_peer=false` keep primary-path parity in the fallback through a
+no-verify server-cert verifier (danger). `build_client` returns `Result`;
+pinned clients propagate build errors and fail closed at request time; errors
+are never cached. On Linux a valid configured CA rescues the platform
+verifier, so the fallback-with-valid-material path is genuinely reachable only
+on platforms where the verifier build hard-errors (e.g. Android/Termux — the
+Termux case of rc-3j4mq).
+
 The Producer attaches the exchange body only for entity-enclosing methods
 (POST, PUT, PATCH). GET, HEAD, DELETE, OPTIONS, and TRACE send no body and log
 one `warn!` when a non-empty body (or any stream body) is dropped. The body
@@ -123,6 +145,9 @@ Per ADR-0012, this component's `error!` sites are categorized as:
 
 - **(a) handler-owned** (lib.rs, `build_client()`, warn "HTTP TLS verification disabled"): TLS verification disabled via `insecure=true` or `verify_peer=false` in `TlsConfig`. `warn!` with `// log-policy: handler-owned`. No metric call — the operator is responsible for this config.
 - **(a) handler-owned** (lib.rs, `HttpProducer::call`, warn "dropping request body" x2, stream arm and non-empty-bytes arm): request body dropped for a non-entity-enclosing HTTP method (GET, HEAD, DELETE, OPTIONS, TRACE) in the Producer send path. Emitted when the exchange body is non-empty (or any stream body) for such a method. `warn!` with `// log-policy: handler-owned`. No metric call — the route author controls the method and body.
+- **(a) handler-owned** (lib.rs, `fallback_root_store()`, warn "falling back to bundled Mozilla roots" x3, unreadable / no parseable PEM CERTIFICATE section / rejected by the TLS root store): configured CA item fails to load in the webpki fallback under non-strict TLS. `warn!` with `// log-policy: handler-owned`. No metric call — the operator controls the CA path and strict mode.
+- **(a) handler-owned** (lib.rs, `fallback_client_config()`, warn "client certificate NOT used" x5, no parseable PEM CERTIFICATE section / rejected by the TLS backend / no parseable private key section / unreadable cert-key files / half-configured pair): configured mTLS identity fails to load in the webpki fallback under non-strict TLS. `warn!` with `// log-policy: handler-owned`. No metric call — the operator controls the identity paths and strict mode.
+- **(a) handler-owned** (lib.rs, `webpki_fallback_client()`, info "platform CA store unavailable — webpki fallback carries configured TLS material"): strict-mode note that the fallback honored the configured TLS material. `info!` with `// log-policy: handler-owned`. No metric call.
 
 Reviewer: r_glm5.1 verifies these classifications against source at Phase C review time.
 

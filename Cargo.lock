@@ -1667,6 +1667,7 @@ dependencies = [
  "futures",
  "http",
  "moka",
+ "rcgen",
  "reqwest",
  "rustls",
  "rustls-pemfile",

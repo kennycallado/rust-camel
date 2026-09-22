@@ -64,7 +64,8 @@ fn pinned_key(host: &str, addrs: &[SocketAddr]) -> PinnedKey {
 ///
 /// One client per `(host, canonicalized pinned address set)` pair, built on
 /// first use and reused until TTL expiry or capacity eviction. Concurrent
-/// callers for one key share a single build (moka `get_with` single-flight).
+/// callers for one key share a single build (moka `try_get_with`
+/// single-flight); a failed build is propagated, not cached.
 pub(crate) struct PinnedClientCache {
     cache: Cache<PinnedKey, reqwest::Client>,
     build_counter: AtomicU64,
@@ -95,23 +96,26 @@ impl PinnedClientCache {
     }
 
     /// Returns the cached client for `(host, addrs)` or builds and inserts
-    /// one via `build`. Only actual builds increment the build counter; the
-    /// increment sits inside the init future. When wired, each call emits a
-    /// miss (this caller ran the single-flight build) or a hit (served by an
-    /// existing entry) plus the current cache size; unwired caches stay
-    /// silent.
+    /// one via `build`. A failed build propagates as `Err` and is NOT
+    /// cached — the next call retries the build (moka `try_get_with`
+    /// single-flight; `CamelError: Clone` maps the shared `Arc` back to
+    /// an owned error). Only actual builds increment the build counter;
+    /// the increment sits inside the init future. When wired, each call
+    /// emits a miss (this caller ran the single-flight build) or a hit
+    /// (served by an existing entry) plus the current cache size;
+    /// unwired caches stay silent.
     pub(crate) async fn get_or_build(
         &self,
         host: &str,
         addrs: &[SocketAddr],
-        build: impl FnOnce() -> reqwest::Client,
-    ) -> reqwest::Client {
+        build: impl FnOnce() -> Result<reqwest::Client, camel_api::CamelError>,
+    ) -> Result<reqwest::Client, camel_api::CamelError> {
         let key = pinned_key(host, addrs);
         let built = AtomicBool::new(false);
         let built_flag = &built;
-        let client = self
+        let result = self
             .cache
-            .get_with(key, async move {
+            .try_get_with(key, async move {
                 self.build_counter.fetch_add(1, Ordering::Relaxed);
                 built_flag.store(true, Ordering::Relaxed);
                 build()
@@ -125,7 +129,7 @@ impl PinnedClientCache {
             }
             metrics.set_pinned_client_cache_size(kind.as_str(), self.cache.entry_count());
         }
-        client
+        result.map_err(|e| (*e).clone())
     }
 
     /// Number of clients actually built (cache misses), test-only.
@@ -152,6 +156,7 @@ impl PinnedClientCache {
 mod tests {
     use super::*;
     use crate::config::HttpConfig;
+    use crate::tls_harness::plain_http_test_client;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use tokio::io::AsyncWriteExt;
@@ -248,12 +253,12 @@ mod tests {
     #[tokio::test]
     async fn hit_within_ttl_builds_once() {
         let cache = PinnedClientCache::new(Duration::from_millis(50), 64);
-        let builder = || reqwest::Client::new();
+        let builder = || Ok(plain_http_test_client());
         let addr_a = addr("127.0.0.1:8081");
-        cache
+        let _ = cache
             .get_or_build("api.example.com", &[addr_a], builder)
             .await;
-        cache
+        let _ = cache
             .get_or_build("api.example.com", &[addr_a], builder)
             .await;
         assert_eq!(cache.build_count(), 1);
@@ -263,12 +268,12 @@ mod tests {
     async fn ttl_expiry_rebuilds() {
         let cache = PinnedClientCache::new(Duration::from_millis(50), 64);
         let addr_a = addr("127.0.0.1:8081");
-        let builder = || reqwest::Client::new();
-        cache
+        let builder = || Ok(plain_http_test_client());
+        let _ = cache
             .get_or_build("api.example.com", &[addr_a], builder)
             .await;
         tokio::time::sleep(Duration::from_millis(80)).await;
-        cache
+        let _ = cache
             .get_or_build("api.example.com", &[addr_a], builder)
             .await;
         assert_eq!(
@@ -306,7 +311,8 @@ mod tests {
             .get_or_build("localhost", &[addr_b], || {
                 crate::build_client(&HttpConfig::default(), Some(("localhost", &[addr_b])))
             })
-            .await;
+            .await
+            .expect("pinned client build"); // allow-unwrap(test)
 
         assert_eq!(cache.build_count(), 2);
 
@@ -334,12 +340,12 @@ mod tests {
         let cache = PinnedClientCache::new(Duration::from_millis(50), 64);
         let addr_a = addr("127.0.0.1:8081");
         let addr_b = addr("127.0.0.1:8082");
-        let builder = || reqwest::Client::new();
-        cache
+        let builder = || Ok(plain_http_test_client());
+        let _ = cache
             .get_or_build("api.example.com", &[addr_a, addr_b], builder)
             .await;
         // Duplicated and reordered addresses canonicalize to the same key.
-        cache
+        let _ = cache
             .get_or_build("api.example.com", &[addr_b, addr_a, addr_a], builder)
             .await;
         assert_eq!(cache.build_count(), 1);
@@ -353,9 +359,13 @@ mod tests {
         for _ in 0..8 {
             let cache = Arc::clone(&cache);
             joins.push(tokio::spawn(async move {
-                cache
-                    .get_or_build("api.example.com", &[addr_a], reqwest::Client::new)
-                    .await
+                let _ = cache
+                    .get_or_build(
+                        "api.example.com",
+                        &[addr_a],
+                        || Ok(plain_http_test_client()),
+                    )
+                    .await;
             }));
         }
         for join in joins {
@@ -368,7 +378,7 @@ mod tests {
     async fn unwired_cache_emission_is_silent_noop() {
         let cache = PinnedClientCache::new(Duration::from_millis(50), 64);
         let addr_a = addr("127.0.0.1:8081");
-        let builder = || reqwest::Client::new();
+        let builder = || Ok(plain_http_test_client());
         let first = cache
             .get_or_build("api.example.com", &[addr_a], builder)
             .await;
@@ -378,6 +388,7 @@ mod tests {
         // Both calls must return a usable client handle without the cache
         // panicking or erroring over absent metrics wiring.
         let _ = (first.clone(), second.clone());
+        assert!(first.is_ok() && second.is_ok());
         assert_eq!(cache.build_count(), 1);
     }
 
@@ -391,9 +402,13 @@ mod tests {
         for _ in 0..4 {
             let cache = std::sync::Arc::clone(&cache);
             joins.push(tokio::spawn(async move {
-                cache
-                    .get_or_build("api.example.com", &[addr_a], reqwest::Client::new)
-                    .await
+                let _ = cache
+                    .get_or_build(
+                        "api.example.com",
+                        &[addr_a],
+                        || Ok(plain_http_test_client()),
+                    )
+                    .await;
             }));
         }
         for join in joins {
@@ -418,15 +433,15 @@ mod tests {
         let cache = PinnedClientCache::new(Duration::from_millis(50), 64);
         cache.wire(HttpComponentKind::Http, double.clone());
         let addr_a = addr("127.0.0.1:8081");
-        let builder = || reqwest::Client::new();
-        cache
+        let builder = || Ok(plain_http_test_client());
+        let _ = cache
             .get_or_build("api.example.com", &[addr_a], builder)
             .await;
         cache.run_pending_tasks().await;
-        cache
+        let _ = cache
             .get_or_build("api.example.com", &[addr_a], builder)
             .await;
-        cache
+        let _ = cache
             .get_or_build("api.example.com", &[addr_a], builder)
             .await;
         assert_eq!(double.count("miss:camel-http"), 1, "one cold miss");
@@ -457,8 +472,12 @@ mod tests {
         cache.wire(HttpComponentKind::Http, first.clone());
         cache.wire(HttpComponentKind::Http, second.clone());
         let addr_a = addr("127.0.0.1:8081");
-        cache
-            .get_or_build("api.example.com", &[addr_a], reqwest::Client::new)
+        let _ = cache
+            .get_or_build(
+                "api.example.com",
+                &[addr_a],
+                || Ok(plain_http_test_client()),
+            )
             .await;
         assert_eq!(first.count("miss:camel-http"), 1, "first handle captures");
         assert_eq!(second.total(), 0, "second handle is a no-op");
@@ -472,9 +491,9 @@ mod tests {
             ("two.example.com", [127, 0, 0, 1]),
             ("three.example.com", [127, 0, 0, 1]),
         ] {
-            cache
+            let _ = cache
                 .get_or_build(host, &[SocketAddr::from((ip, 8081))], || {
-                    reqwest::Client::new()
+                    Ok(plain_http_test_client())
                 })
                 .await;
         }
@@ -483,6 +502,38 @@ mod tests {
         assert!(
             cache.entry_count() <= 2,
             "max_capacity must bound retained entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pinned_get_or_build_propagates_error_without_caching() {
+        let cache = PinnedClientCache::new(Duration::from_millis(50), 64);
+        let addr_a = addr("127.0.0.1:8081");
+        let result = cache
+            .get_or_build("api.example.com", &[addr_a], || {
+                Err(camel_api::CamelError::Config(
+                    "pinned build failed".to_string(),
+                ))
+            })
+            .await;
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("a failed pinned build must propagate, not degrade"),
+        };
+        assert!(
+            err.to_string().contains("pinned build failed"),
+            "the propagated error must be the build error itself: {err}"
+        );
+        assert_eq!(
+            cache.build_count(),
+            1,
+            "the failed build still counts as one build"
+        );
+        cache.run_pending_tasks().await;
+        assert_eq!(
+            cache.entry_count(),
+            0,
+            "a failed build must not be cached — the next call retries"
         );
     }
 }

@@ -9,6 +9,8 @@ pub(crate) mod ssrf;
 pub mod static_config;
 pub mod static_dispatch;
 pub mod static_endpoint;
+#[cfg(test)]
+mod tls_harness;
 pub(crate) mod tls_reload;
 use crate::config::parse_ok_status_code_range;
 pub use bundle::HttpBundle;
@@ -2289,6 +2291,11 @@ pub struct HttpComponent {
 thread_local! {
     static BUILD_CLIENT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static BUILD_CLIENT_FALLBACKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test seam arming [`build_client`] to skip the platform-verifier
+    /// primary and enter [`webpki_fallback_client`] directly (see
+    /// [`FallbackTrigger::Forced`]). Always manipulated through the
+    /// panic-safe [`crate::tls_harness::force_webpki_fallback`] guard.
+    static FORCE_WEBPKI_FALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Shared builder assembly for [`build_client`]: everything except the
@@ -2444,87 +2451,442 @@ fn webpki_root_client_config() -> rustls::ClientConfig {
     // duplicating reqwest feature knowledge in this crate.
 }
 
+/// Root store for the CA-less-platform fallback that UNIONS the bundled
+/// Mozilla anchors with any configured custom CA, instead of the
+/// primary path's system-roots-plus-CA scheme (which cannot load on a
+/// CA-less platform — that is what triggered the fallback). Strict mode
+/// fails closed on every CA load/parse/reject failure; non-strict warns
+/// and degrades to Mozilla-only.
+fn fallback_root_store(
+    custom_ca: Option<&str>,
+    strict: bool,
+) -> Result<rustls::RootCertStore, CamelError> {
+    let mut store = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let Some(ca_path) = custom_ca else {
+        return Ok(store);
+    };
+    let ca_bytes = match std::fs::read(ca_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            if strict {
+                return Err(CamelError::EndpointCreationFailed(format!(
+                    "tls.strict/webpki-fallback: configured CA certificate '{ca_path}' is unreadable: {e}"
+                )));
+            }
+            // log-policy: handler-owned
+            tracing::warn!(
+                error = %e,
+                "configured CA certificate file unreadable — falling back to bundled Mozilla roots"
+            );
+            return Ok(store);
+        }
+    };
+    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::Cursor::new(&ca_bytes))
+        .filter_map(|r| r.ok())
+        .collect();
+    if certs.is_empty() {
+        if strict {
+            return Err(CamelError::EndpointCreationFailed(format!(
+                "tls.strict/webpki-fallback: configured CA certificate '{ca_path}' has no \
+                 parseable PEM CERTIFICATE section"
+            )));
+        }
+        // log-policy: handler-owned
+        tracing::warn!(
+            "configured CA certificate contains no parseable PEM CERTIFICATE section — \
+             falling back to bundled Mozilla roots"
+        );
+        return Ok(store);
+    }
+    let certs_len = certs.len();
+    let (added, _ignored) = store.add_parsable_certificates(certs);
+    if added == 0 {
+        if strict {
+            return Err(CamelError::EndpointCreationFailed(format!(
+                "tls.strict/webpki-fallback: configured CA certificate '{ca_path}' was \
+                 rejected by the TLS root store (0 of {certs_len} accepted)"
+            )));
+        }
+        // log-policy: handler-owned
+        tracing::warn!(
+            "configured CA certificate was rejected by the TLS root store — \
+             falling back to bundled Mozilla roots"
+        );
+        return Ok(store);
+    }
+    Ok(store)
+}
+
+/// Server-cert verifier that accepts any certificate without validation
+/// — the preconfigured-backend stand-in for reqwest's
+/// `danger_accept_invalid_certs(true)` knob (that knob does not exist on
+/// the `tls_backend_preconfigured` path). Mirrors reqwest 0.13.4's
+/// internal `NoVerifier` exactly, scheme list included.
+#[derive(Debug)]
+struct NoVerifyServerCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerifyServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        // danger_accept_invalid_certs parity: no validation whatsoever.
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        // Mirrors reqwest 0.13.4 NoVerifier (src/tls.rs): SHA1-legacy and
+        // P-521 included, ED448 included.
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA1,
+            rustls::SignatureScheme::ECDSA_SHA1_Legacy,
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::ED448,
+        ]
+    }
+}
+
+/// Full rustls `ClientConfig` for the CA-less-platform fallback when the
+/// configured TLS material must be honored: custom CA union store
+/// (fallback_root_store), optional no-verify mode (insecure /
+/// verify_peer=false), and mTLS client auth. Returns `Ok(None)` when the
+/// plain `webpki_root_client_config()` suffices (TLS on, no material,
+/// verification on) — callers resolve `config.tls` presence before
+/// calling. Strict mode fails closed on every material failure;
+/// non-strict warns and degrades per item.
+fn fallback_client_config(
+    tls: &crate::config::TlsConfig,
+) -> Result<Option<rustls::ClientConfig>, CamelError> {
+    if !tls.enabled {
+        return Ok(None);
+    }
+    let material = tls.ca_cert_path.is_some()
+        || tls.client_cert_path.is_some()
+        || tls.client_key_path.is_some();
+    let verification_disabled = tls.insecure || !tls.verify_peer;
+    if !material && !verification_disabled {
+        return Ok(None);
+    }
+    // Mirror reqwest's own provider resolution (async_impl/client.rs):
+    // process-default provider when the host installed one (camel-cli
+    // installs ring), else the aws-lc-rs default reqwest's `rustls`
+    // feature falls back to.
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+    // Computed ALWAYS: strict material validation must happen even when
+    // the danger verifier would bypass the roots; `Err` propagates only
+    // under strict by construction of `fallback_root_store`.
+    let store = fallback_root_store(tls.ca_cert_path.as_deref(), tls.strict)?;
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        // Stock rustls providers (ring, aws-lc-rs) always support the
+        // safe default TLS versions; this config is static, not input- or
+        // platform-dependent.
+        .expect("stock rustls provider supports the safe default protocol versions") // allow-unwrap
+        ;
+    let builder = if verification_disabled {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(NoVerifyServerCertVerifier))
+    } else {
+        builder.with_root_certificates(store)
+    };
+    let config = match (&tls.client_cert_path, &tls.client_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            match (std::fs::read(cert_path), std::fs::read(key_path)) {
+                (Ok(cert_bytes), Ok(key_bytes)) => {
+                    let chain: Vec<_> =
+                        rustls_pemfile::certs(&mut std::io::Cursor::new(&cert_bytes))
+                            .filter_map(|r| r.ok())
+                            .collect();
+                    if chain.is_empty() {
+                        if tls.strict {
+                            return Err(CamelError::EndpointCreationFailed(format!(
+                                "tls.strict/webpki-fallback: configured client certificate \
+                                 chain '{cert_path}' has no parseable PEM CERTIFICATE section"
+                            )));
+                        }
+                        // log-policy: handler-owned
+                        tracing::warn!(
+                            "configured client certificate chain has no parseable PEM \
+                             CERTIFICATE section — client certificate NOT used"
+                        );
+                        builder.with_no_client_auth()
+                    } else {
+                        match rustls_pemfile::private_key(&mut std::io::Cursor::new(&key_bytes)) {
+                            // Clone-on-attempt: rustls consumes the builder
+                            // in `with_client_auth_cert`, but a rejection
+                            // must fall back to `with_no_client_auth` on
+                            // the SAME builder state.
+                            Ok(Some(key)) => {
+                                match builder.clone().with_client_auth_cert(chain, key) {
+                                    Ok(config) => config,
+                                    Err(e) => {
+                                        if tls.strict {
+                                            return Err(CamelError::EndpointCreationFailed(
+                                                format!(
+                                                    "tls.strict/webpki-fallback: configured mTLS \
+                                             identity was rejected by the TLS backend: {e}"
+                                                ),
+                                            ));
+                                        }
+                                        // log-policy: handler-owned
+                                        tracing::warn!(
+                                            error = %e,
+                                            "configured mTLS identity was rejected by the TLS \
+                                             backend — client certificate NOT used"
+                                        );
+                                        builder.with_no_client_auth()
+                                    }
+                                }
+                            }
+                            // `Ok(None)` (no private-key section) and `Err`
+                            // (malformed section) are the same failure for
+                            // our purposes: no usable key.
+                            Ok(None) | Err(_) => {
+                                if tls.strict {
+                                    return Err(CamelError::EndpointCreationFailed(format!(
+                                        "tls.strict/webpki-fallback: configured client key \
+                                         '{key_path}' has no parseable private key section"
+                                    )));
+                                }
+                                // log-policy: handler-owned
+                                tracing::warn!(
+                                    "configured client key has no parseable private key \
+                                     section — client certificate NOT used"
+                                );
+                                builder.with_no_client_auth()
+                            }
+                        }
+                    }
+                }
+                (cert_r, key_r) => {
+                    if tls.strict {
+                        return Err(CamelError::EndpointCreationFailed(
+                            "tls.strict/webpki-fallback: configured mTLS cert/key files are \
+                             unreadable"
+                                .to_string(),
+                        ));
+                    }
+                    // log-policy: handler-owned
+                    tracing::warn!(
+                        cert_ok = cert_r.is_ok(),
+                        key_ok = key_r.is_ok(),
+                        "configured mTLS cert/key file unreadable — client certificate NOT used"
+                    );
+                    builder.with_no_client_auth()
+                }
+            }
+        }
+        // Half-configured mTLS pair (cert XOR key) — mirror of
+        // strict_tls_error's half-pair rejection.
+        (Some(_), None) | (None, Some(_)) => {
+            if tls.strict {
+                return Err(CamelError::EndpointCreationFailed(
+                    "tls.strict/webpki-fallback: mTLS requires BOTH client_cert_path and \
+                     client_key_path"
+                        .to_string(),
+                ));
+            }
+            // log-policy: handler-owned
+            tracing::warn!(
+                "mTLS requires BOTH client_cert_path and client_key_path — \
+                 client certificate NOT used"
+            );
+            builder.with_no_client_auth()
+        }
+        (None, None) => builder.with_no_client_auth(),
+    };
+    Ok(Some(config))
+}
+
+/// Last-resort client for the (unreachable-on-reqwest-0.13.4) second
+/// build error inside [`webpki_fallback_client`]: no proxy, no
+/// redirects, webpki roots. Reaching the `expect` means the TLS stack
+/// is broken process-wide, CA store or not — the caller logs
+/// system-broken before delegating here.
+fn emergency_webpki_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .tls_backend_preconfigured(webpki_root_client_config())
+        .build()
+        .expect("preconfigured webpki-rooted client build has no fallible stage") // allow-unwrap
+}
+
+/// Why the webpki fallback was entered: a real platform-verifier
+/// build failure, or (tests only) a forced entry to exercise the
+/// fallback path hermetically on hosts where a valid configured CA
+/// rescues the primary verifier (e_glm adjudication, rc-hl9cn).
+enum FallbackTrigger {
+    Platform(reqwest::Error),
+    #[cfg(test)]
+    Forced,
+}
+
+impl std::fmt::Display for FallbackTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Same rendering as the pre-seam `error = %first_error`
+            // field, so operator-facing logs are unchanged.
+            FallbackTrigger::Platform(e) => std::fmt::Display::fmt(e, f),
+            #[cfg(test)]
+            FallbackTrigger::Forced => f.write_str("forced webpki fallback entry (test)"),
+        }
+    }
+}
+
 /// Fallback path when the platform-verifier client build fails (typical
 /// trigger: a platform without a system CA store at the probed paths,
 /// e.g. Android/Termux — the eager `HttpComponent::new()` in the BASE
 /// flavor used to panic there, rc-3j4mq). Startup must never panic on
 /// CA-less platforms, so the retry swaps the TLS backend for the bundled
-/// Mozilla root set. The fallback is ONLY reachable through a failed
-/// primary build — it never activates when native roots load.
+/// Mozilla root set — and, unlike the preconfigured backend of old, the
+/// retry HONORS the configured TLS material (custom CA union, mTLS
+/// identity, no-verify mode) via [`fallback_client_config`]. The
+/// fallback is ONLY reachable through a failed primary build (or, under
+/// `cfg(test)`, a [`FallbackTrigger::Forced`] seam entry) — it never
+/// activates when native roots load.
+///
+/// `Err` is typed and strict-only by construction: [`fallback_client_config`]
+/// fails closed only under `tls.strict`, so a permissive config always
+/// leaves here with a built (possibly item-downgraded) client.
 fn webpki_fallback_client(
     config: &HttpConfig,
     resolve_override: Option<(&str, &[std::net::SocketAddr])>,
-    first_error: reqwest::Error,
-) -> reqwest::Client {
+    trigger: FallbackTrigger,
+) -> Result<reqwest::Client, CamelError> {
     #[cfg(test)]
     BUILD_CLIENT_FALLBACKS.with(|c| c.set(c.get() + 1));
 
     // log-policy: handler-owned
     tracing::warn!(
-        error = %first_error,
+        error = %trigger,
         "HTTP client build failed on platform TLS roots — the platform CA store \
          is missing or unreadable (typical on Android/Termux). Retrying with \
          bundled Mozilla root certificates; platform trust settings do not \
          apply to this client"
     );
-    if let Some(tls) = &config.tls
-        && tls.enabled
-        && (tls.ca_cert_path.is_some()
-            || tls.client_cert_path.is_some()
-            || tls.client_key_path.is_some())
-    {
-        // The preconfigured backend ignores reqwest's per-builder TLS
-        // material; only a load failure in the primary build can reach
-        // here with material configured, so name the degradation.
-        // log-policy: handler-owned
-        tracing::warn!(
-            "configured TLS material (custom CA / mTLS identity) is not carried \
-             into the webpki fallback client — the material failed to load or \
-             the platform verifier rejected it"
-        );
-    }
 
-    match client_builder(config, resolve_override)
-        .tls_backend_preconfigured(webpki_root_client_config())
-        .build()
-    {
-        Ok(client) => client,
-        Err(second_error) => {
-            // Unreachable on reqwest 0.13.4: the preconfigured backend has
-            // no fallible stage (no platform verifier, no root-store
-            // parse) unless the http3 feature is on, which this workspace
-            // does not enable. Kept as an honest, loudly-logged terminal
-            // instead of silently re-panicking: reaching it means the TLS
-            // stack is broken process-wide, CA store or not.
-            // log-policy: system-broken
-            tracing::error!(
-                error = %second_error,
-                "webpki fallback client build failed — TLS stack broken process-wide"
-            );
-            reqwest::Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .tls_backend_preconfigured(webpki_root_client_config())
+    // Shared second-error terminal: unreachable on reqwest 0.13.4 (the
+    // preconfigured backend has no fallible stage — no platform
+    // verifier, no root-store parse — unless the http3 feature is on,
+    // which this workspace does not enable). Kept as an honest,
+    // loudly-logged terminal instead of silently re-panicking: reaching
+    // it means the TLS stack is broken process-wide, CA store or not.
+    let build_with_backend =
+        |backend: rustls::ClientConfig| -> Result<reqwest::Client, CamelError> {
+            match client_builder(config, resolve_override)
+                .tls_backend_preconfigured(backend)
                 .build()
-                .expect("preconfigured webpki-rooted client build has no fallible stage") // allow-unwrap
+            {
+                Ok(client) => Ok(client),
+                Err(second_error) => {
+                    // log-policy: system-broken
+                    tracing::error!(
+                        error = %second_error,
+                        "webpki fallback client build failed — TLS stack broken process-wide"
+                    );
+                    Ok(emergency_webpki_client())
+                }
+            }
+        };
+
+    // The strict carry note is accurate only when material is actually
+    // configured: in the strict + insecure/verify_peer=false + zero-material
+    // corner the fallback config exists solely for the danger verifier and
+    // carries nothing.
+    let material_configured = config.tls.as_ref().is_some_and(|tls| {
+        tls.ca_cert_path.is_some()
+            || tls.client_cert_path.is_some()
+            || tls.client_key_path.is_some()
+    });
+
+    match config.tls.as_ref().map(fallback_client_config) {
+        // No TLS config, TLS off, or verification-on with no material:
+        // the plain webpki-rooted backend is the parity configuration.
+        None | Some(Ok(None)) => build_with_backend(webpki_root_client_config()),
+        Some(Ok(Some(strict_or_parity_config))) => {
+            if material_configured && config.tls.as_ref().is_some_and(|tls| tls.strict) {
+                // log-policy: handler-owned
+                tracing::info!(
+                    "platform CA store unavailable — webpki fallback carries \
+                     configured TLS material"
+                );
+            }
+            build_with_backend(strict_or_parity_config)
         }
+        // Typed fail-closed conflict (strict-only by construction).
+        Some(Err(e)) => Err(e),
     }
 }
 
-/// Build the shared/dns-pinned reqwest client. Infallible at call sites:
-/// on a platform whose CA store cannot be loaded the build retries on
-/// bundled Mozilla roots (see [`webpki_fallback_client`]) instead of
-/// panicking (rc-3j4mq).
+/// Build the shared/dns-pinned reqwest client. Primary path is the
+/// platform verifier; on a platform whose CA store cannot be loaded the
+/// build retries on bundled Mozilla roots honoring the configured TLS
+/// material (see [`webpki_fallback_client`]) instead of panicking
+/// (rc-3j4mq). `Err` is strict-only by construction: it means the
+/// configured CA/mTLS material failed to load under `tls.strict` and the
+/// caller must fail closed rather than serve with a degraded client.
 pub(crate) fn build_client(
     config: &HttpConfig,
     resolve_override: Option<(&str, &[std::net::SocketAddr])>,
-) -> reqwest::Client {
+) -> Result<reqwest::Client, CamelError> {
     #[cfg(test)]
     BUILD_CLIENT_CALLS.with(|c| c.set(c.get() + 1));
 
+    // Test seam (e_glm adjudication, rc-hl9cn): on hosts where a valid
+    // configured CA rescues the primary verifier build
+    // (rustls-platform-verifier merges extra roots first), the fallback
+    // path with VALID material is unreachable through real triggers;
+    // armed tests enter the fallback directly. Release builds are
+    // unchanged.
+    #[cfg(test)]
+    if FORCE_WEBPKI_FALLBACK.with(std::cell::Cell::get) {
+        return webpki_fallback_client(config, resolve_override, FallbackTrigger::Forced);
+    }
+
     match client_builder(config, resolve_override).build() {
-        Ok(client) => client,
-        Err(first_error) => webpki_fallback_client(config, resolve_override, first_error),
+        Ok(client) => Ok(client),
+        Err(first_error) => webpki_fallback_client(
+            config,
+            resolve_override,
+            FallbackTrigger::Platform(first_error),
+        ),
     }
 }
 
@@ -2611,31 +2973,44 @@ pub(crate) fn build_client_fallback_count() -> u64 {
     BUILD_CLIENT_FALLBACKS.with(|c| c.get())
 }
 
+/// Shared constructor fold: build the client, or — when the strict
+/// webpki fallback fails closed — pair an emergency webpki client
+/// (never issues a request; `create_endpoint` fails first via the
+/// folded error) with the typed build error (rc-hl9cn).
+fn client_or_emergency(config: &HttpConfig) -> (reqwest::Client, Option<CamelError>) {
+    match build_client(config, None) {
+        Ok(c) => (c, None),
+        Err(e) => (emergency_webpki_client(), Some(e)),
+    }
+}
+
 impl HttpComponent {
     pub fn new() -> Self {
         let config = HttpConfig::default();
         let strict_err = strict_tls_error(&config);
+        let (client, build_err) = client_or_emergency(&config);
         Self {
-            client: build_client(&config, None),
+            client,
             config,
             pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
             )),
-            strict_tls_error: strict_err,
+            strict_tls_error: strict_err.or(build_err),
         }
     }
 
     pub fn with_config(config: HttpConfig) -> Self {
         let strict_err = strict_tls_error(&config);
+        let (client, build_err) = client_or_emergency(&config);
         Self {
-            client: build_client(&config, None),
+            client,
             config,
             pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
             )),
-            strict_tls_error: strict_err,
+            strict_tls_error: strict_err.or(build_err),
         }
     }
 
@@ -2704,27 +3079,29 @@ impl HttpsComponent {
     pub fn new() -> Self {
         let config = HttpConfig::default();
         let strict_err = strict_tls_error(&config);
+        let (client, build_err) = client_or_emergency(&config);
         Self {
-            client: build_client(&config, None),
+            client,
             config,
             pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
             )),
-            strict_tls_error: strict_err,
+            strict_tls_error: strict_err.or(build_err),
         }
     }
 
     pub fn with_config(config: HttpConfig) -> Self {
         let strict_err = strict_tls_error(&config);
+        let (client, build_err) = client_or_emergency(&config);
         Self {
-            client: build_client(&config, None),
+            client,
             config,
             pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
             )),
-            strict_tls_error: strict_err,
+            strict_tls_error: strict_err.or(build_err),
         }
     }
 
@@ -3369,11 +3746,14 @@ impl Service<Exchange> for HttpProducer {
                 )
                 .await?;
                 let client: reqwest::Client = if let Some((ref host, ref addrs)) = resolved {
+                    // A failed pinned build (strict fail-closed material
+                    // conflict) propagates into the request error path —
+                    // no degraded client is built or served.
                     pinned_cache
                         .get_or_build(host.as_str(), addrs, || {
                             build_client(&http_config, Some((host.as_str(), addrs)))
                         })
-                        .await
+                        .await?
                 } else {
                     shared_client.clone()
                 };
@@ -4089,6 +4469,7 @@ mod tests {
     use super::*;
     use crate::config::TlsConfig;
     use crate::rest_match::PathSegment;
+    use crate::tls_harness::*;
     use camel_component_api::{Message, NoOpComponentContext};
     use std::sync::Arc;
     use std::time::Duration;
@@ -5382,7 +5763,7 @@ mod tests {
             uri: uri.clone(),
             config,
             server_config: HttpServerConfig::from_uri(&uri).expect("server config parses"),
-            client: reqwest::Client::new(),
+            client: plain_http_test_client(),
             pinned_cache: Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
@@ -7914,7 +8295,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp_future = client
             .post(format!("http://127.0.0.1:{port}/ping"))
             .body("hello world")
@@ -7986,7 +8367,7 @@ mod tests {
             .expect("startup must resolve within 5s")
             .expect("startup must be Ok");
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let (http_result, claim) = tokio::join!(
             client
                 .post(format!("http://127.0.0.1:{port}/claim"))
@@ -8075,7 +8456,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp = client
             .post(format!("http://127.0.0.1:{port}/ping"))
             .body("hello world")
@@ -8557,7 +8938,7 @@ mod tests {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let first_req = {
             let client = client.clone();
             async move {
@@ -8623,7 +9004,7 @@ mod tests {
             .collect();
         let stream_body = reqwest::Body::wrap_stream(futures::stream::iter(chunks));
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client
             .post(format!("http://127.0.0.1:{port}/chunked-cap"))
             .body(stream_body)
@@ -8692,7 +9073,7 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client
             .get(format!("http://127.0.0.1:{port}/limit-bytes"))
             .send();
@@ -8744,7 +9125,7 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client
             .get(format!("http://127.0.0.1:{port}/limit-json"))
             .send();
@@ -8797,7 +9178,7 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client
             .get(format!("http://127.0.0.1:{port}/limit-xml"))
             .send();
@@ -8853,7 +9234,7 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client
             .get(format!("http://127.0.0.1:{port}/limit-stream"))
             .send();
@@ -8917,7 +9298,7 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client
             .post(format!("http://127.0.0.1:{port}/echo"))
             .header("Content-Type", "text/plain")
@@ -8988,7 +9369,7 @@ mod tests {
         tokio::spawn(async move { consumer_b.start(ctx_b).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
 
         // Request to /hello
         let fut_hello = client.get(format!("http://127.0.0.1:{port}/hello")).send();
@@ -9067,7 +9448,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp = client
             .get(format!("http://127.0.0.1:{port}/not-there"))
             .send()
@@ -9222,7 +9603,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
             // Send request with traceparent header
-            let client = reqwest::Client::new();
+            let client = plain_http_test_client();
             let send_fut = client
                 .post(format!("http://127.0.0.1:{port}/trace"))
                 .header(
@@ -9288,7 +9669,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
             // Send request with MIXED-CASE TraceParent header (not lowercase)
-            let client = reqwest::Client::new();
+            let client = plain_http_test_client();
             let send_fut = client
                 .post(format!("http://127.0.0.1:{port}/trace"))
                 .header(
@@ -9433,7 +9814,7 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client
             .post(format!("http://127.0.0.1:{port}/upload"))
             .body("hello streaming world")
@@ -9503,7 +9884,7 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client.get(format!("http://127.0.0.1:{port}/stream")).send();
 
         let (http_result, _) = tokio::join!(send_fut, async {
@@ -9560,7 +9941,7 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp = client
             .post(format!("http://127.0.0.1:{port}/upload"))
             .header("Content-Length", "1000") // declares 1000 bytes, limit is 100
@@ -9606,7 +9987,7 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
 
         // Use wrap_stream so reqwest sends chunked transfer encoding WITHOUT a
         // Content-Length header. 100 bytes exceeds the 10-byte maxRequestBody limit,
@@ -10654,7 +11035,7 @@ mod tests {
         config.allow_internal = true; // test server binds 127.0.0.1
         let producer = HttpProducer {
             config: Arc::new(config),
-            client: build_client(&HttpConfig::default(), None),
+            client: build_client(&HttpConfig::default(), None).expect("client must build"), // allow-unwrap(test)
             pinned_cache: Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
@@ -10907,7 +11288,7 @@ mod tests {
     async fn test_content_type_inferred_for_json_body() {
         let (port, mut rx, token) = setup_consumer_on_free_port("/json").await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client.get(format!("http://127.0.0.1:{port}/json")).send();
 
         let (http_result, _) = tokio::join!(send_fut, async {
@@ -10937,7 +11318,11 @@ mod tests {
     async fn test_content_type_inferred_for_text_body() {
         let (port, mut rx, token) = setup_consumer_on_free_port("/text").await;
 
-        let client = reqwest::Client::new();
+        // build_client (not bare plain_http_test_client()): CA-store test
+        // windows are process-visible and Client::new() panics when the
+        // native store loads zero roots; the crate builder falls back to
+        // webpki roots instead.
+        let client = build_client(&HttpConfig::default(), None).expect("client must build"); // allow-unwrap(test)
         let send_fut = client.get(format!("http://127.0.0.1:{port}/text")).send();
 
         let (http_result, _) = tokio::join!(send_fut, async {
@@ -10967,7 +11352,7 @@ mod tests {
     async fn test_content_type_inferred_for_xml_body() {
         let (port, mut rx, token) = setup_consumer_on_free_port("/xml").await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client.get(format!("http://127.0.0.1:{port}/xml")).send();
 
         let (http_result, _) = tokio::join!(send_fut, async {
@@ -10997,7 +11382,7 @@ mod tests {
     async fn test_no_content_type_for_empty_body() {
         let (port, mut rx, token) = setup_consumer_on_free_port("/empty").await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client.get(format!("http://127.0.0.1:{port}/empty")).send();
 
         let (http_result, _) = tokio::join!(send_fut, async {
@@ -11023,7 +11408,7 @@ mod tests {
     async fn test_no_content_type_for_raw_bytes_body() {
         let (port, mut rx, token) = setup_consumer_on_free_port("/bytes").await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client.get(format!("http://127.0.0.1:{port}/bytes")).send();
 
         let (http_result, _) = tokio::join!(send_fut, async {
@@ -11053,7 +11438,7 @@ mod tests {
 
         let (port, mut rx, token) = setup_consumer_on_free_port("/stream-ct").await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client
             .get(format!("http://127.0.0.1:{port}/stream-ct"))
             .send();
@@ -11094,7 +11479,7 @@ mod tests {
     async fn test_user_content_type_overrides_inferred() {
         let (port, mut rx, token) = setup_consumer_on_free_port("/override-ct").await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client
             .get(format!("http://127.0.0.1:{port}/override-ct"))
             .send();
@@ -11131,7 +11516,7 @@ mod tests {
     async fn test_user_content_type_with_bytes_body() {
         let (port, mut rx, token) = setup_consumer_on_free_port("/bytes-ct").await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client
             .get(format!("http://127.0.0.1:{port}/bytes-ct"))
             .send();
@@ -11864,7 +12249,7 @@ mod tests {
         let get_handle = spawn_responder(get_rx, 200, "list".into());
         let post_handle = spawn_responder(post_rx, 201, "create".into());
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
 
         // GET /users → list route
         let resp = client
@@ -11927,7 +12312,7 @@ mod tests {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp = client
             .get(format!("http://127.0.0.1:{port}/users/42"))
             .send()
@@ -11971,7 +12356,7 @@ mod tests {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp = client
             .delete(format!("http://127.0.0.1:{port}/users"))
             .send()
@@ -12009,7 +12394,7 @@ mod tests {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp = client
             .get(format!("http://127.0.0.1:{port}/legacy/path"))
             .send()
@@ -12117,7 +12502,7 @@ mod tests {
 
         let post_handle = spawn_responder(post_rx, 201, "create".into());
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         // POST /users must still reach its consumer after GET was removed.
         let resp = client
             .post(format!("http://127.0.0.1:{port}/users"))
@@ -12179,7 +12564,7 @@ mod tests {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp = client
             .get(format!("http://127.0.0.1:{port}/api/users"))
             .send()
@@ -12224,7 +12609,7 @@ mod tests {
             )
             .await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp = client
             .get(format!("http://127.0.0.1:{port}/users/42"))
             .send()
@@ -12421,7 +12806,7 @@ mod tests {
             uri: "https://0.0.0.0:8443/api".to_string(),
             config: HttpEndpointConfig::from_uri("https://0.0.0.0:8443/api").unwrap(),
             server_config: HttpServerConfig::from_uri("https://0.0.0.0:8443/api").unwrap(),
-            client: reqwest::Client::new(),
+            client: plain_http_test_client(),
             pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
@@ -12446,7 +12831,7 @@ mod tests {
                 "http://0.0.0.0:8080/api?tlsCert=/x.pem&tlsKey=/y.pem",
             )
             .unwrap(),
-            client: reqwest::Client::new(),
+            client: plain_http_test_client(),
             pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
@@ -12477,7 +12862,7 @@ mod tests {
             config: HttpEndpointConfig::from_uri("https://0.0.0.0:8443/api?tlsCert=/x.pem")
                 .unwrap(),
             server_config,
-            client: reqwest::Client::new(),
+            client: plain_http_test_client(),
             pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
                 PINNED_CLIENT_TTL,
                 PINNED_CLIENT_MAX_ENTRIES,
@@ -12622,7 +13007,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Client WITHOUT CA cert — must fail TLS verification
-        let client = reqwest::Client::builder().build().unwrap();
+        let client = plain_http_test_client();
 
         let result = client
             .get(format!("https://localhost:{port}/test"))
@@ -13109,7 +13494,7 @@ mod tests {
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let send_fut = client.get(format!("http://127.0.0.1:{port}/cache")).send();
 
         // Route sets Cache-Control on the outbound reply (exchange.input is
@@ -13263,7 +13648,7 @@ mod tests {
         )
         .await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp = client
             // allow-secret: `token` is the declared query-source param name, not a credential
             .get(format!(
@@ -13306,7 +13691,7 @@ mod tests {
         )
         .await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp = client
             .get(format!("http://127.0.0.1:{port}/secure-cookie"))
             .header("Cookie", format!("session={SENTINEL_CKY_7}"))
@@ -13340,7 +13725,7 @@ mod tests {
         )
         .await;
 
-        let client = reqwest::Client::new();
+        let client = plain_http_test_client();
         let resp = client
             .get(format!("http://127.0.0.1:{port}/secure-bad"))
             .header("Cookie", format!("session={SENTINEL_BAD_1}"))
@@ -13466,7 +13851,7 @@ mod tests {
             uri: uri.clone(),
             config: HttpEndpointConfig::from_uri(&uri).expect("producer endpoint config parses"),
             server_config: HttpServerConfig::from_uri(&uri).expect("server config parses"),
-            client: reqwest::Client::new(),
+            client: plain_http_test_client(),
             pinned_cache: Arc::clone(pinned_cache),
             http_config: HttpConfig::default(),
         }
@@ -13803,6 +14188,246 @@ mod tests {
         );
     }
 
+    /// rcgen self-signed one-root CA, written to `ca.pem` inside a fresh
+    /// tempdir (rcgen 0.14 shapes per camel-component-api test_support).
+    fn fallback_test_ca() -> (tempfile::TempDir, String) {
+        let ca_key = rcgen::KeyPair::generate().expect("ca keygen"); // allow-unwrap(test)
+        let mut ca_params = rcgen::CertificateParams::default();
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Fallback test CA");
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("ca self-sign"); // allow-unwrap(test)
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, ca_cert.pem()).expect("write ca pem"); // allow-unwrap(test)
+        (dir, ca_path.display().to_string())
+    }
+
+    /// Assert `err` is `EndpointCreationFailed` whose message contains
+    /// every `fragment`.
+    fn assert_strict_fallback_error(err: CamelError, fragments: &[&str]) {
+        match err {
+            CamelError::EndpointCreationFailed(msg) => {
+                for fragment in fragments {
+                    assert!(msg.contains(fragment), "message: {msg}");
+                }
+            }
+            other => panic!("expected EndpointCreationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fallback_root_store_union_custom_and_mozilla() {
+        let (_dir, ca_path) = fallback_test_ca();
+        let store = fallback_root_store(Some(&ca_path), true).expect("union root store must build"); // allow-unwrap(test)
+        assert_eq!(
+            store.roots.len(),
+            webpki_roots::TLS_SERVER_ROOTS.len() + 1,
+            "custom CA must UNION with the Mozilla anchors, not replace them"
+        );
+    }
+
+    #[test]
+    fn test_fallback_root_store_no_ca_is_mozilla_only() {
+        let store = fallback_root_store(None, true).expect("mozilla-only store must build"); // allow-unwrap(test)
+        assert_eq!(
+            store.roots.len(),
+            webpki_roots::TLS_SERVER_ROOTS.len(),
+            "no configured CA must leave the bundled Mozilla anchors untouched"
+        );
+    }
+
+    #[test]
+    fn test_fallback_root_store_strict_unreadable_ca_fails_closed() {
+        let err = match fallback_root_store(Some("/nonexistent/ca-bundle.pem"), true) {
+            Err(e) => e,
+            Ok(_) => panic!("strict mode must fail closed on an unreadable CA file"),
+        };
+        assert_strict_fallback_error(err, &["tls.strict/webpki-fallback", "unreadable"]);
+    }
+
+    #[test]
+    fn test_fallback_root_store_strict_zero_pem_sections_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("key-only.pem");
+        std::fs::write(
+            &ca_path,
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+        )
+        .expect("write key-only pem"); // allow-unwrap(test)
+        let path = ca_path.display().to_string();
+        let err = match fallback_root_store(Some(&path), true) {
+            Err(e) => e,
+            Ok(_) => panic!("strict mode must fail closed on a CA with no CERTIFICATE section"),
+        };
+        assert_strict_fallback_error(err, &["no parseable PEM CERTIFICATE"]);
+    }
+
+    #[test]
+    fn test_fallback_root_store_strict_zero_roots_accepted_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("garbage-cert.pem");
+        std::fs::write(
+            &ca_path,
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write garbage cert pem"); // allow-unwrap(test)
+        let path = ca_path.display().to_string();
+        let err = match fallback_root_store(Some(&path), true) {
+            Err(e) => e,
+            Ok(_) => panic!("strict mode must fail closed when the root store rejects the CA"),
+        };
+        assert_strict_fallback_error(err, &["rejected by the TLS root store"]);
+    }
+
+    #[test]
+    fn test_fallback_root_store_nonstrict_bad_ca_degrades_to_mozilla() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("garbage.pem");
+        std::fs::write(&ca_path, "this is not a certificate\n").expect("write garbage pem"); // allow-unwrap(test)
+        let path = ca_path.display().to_string();
+        let store = fallback_root_store(Some(&path), false)
+            .expect("non-strict garbage CA must degrade to Mozilla-only"); // allow-unwrap(test)
+        assert_eq!(
+            store.roots.len(),
+            webpki_roots::TLS_SERVER_ROOTS.len(),
+            "non-strict bad CA must degrade to the bundled Mozilla anchors"
+        );
+    }
+
+    #[test]
+    fn test_fallback_client_config_disabled_tls_returns_none() {
+        let tls = TlsConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(
+            fallback_client_config(&tls)
+                .expect("disabled TLS is infallible") // allow-unwrap(test)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_fallback_client_config_no_material_verifying_returns_none() {
+        let tls = TlsConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(
+            fallback_client_config(&tls)
+                .expect("plain verifying TLS is infallible") // allow-unwrap(test)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_fallback_client_config_strict_identity_garbage_key_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let client_key = rcgen::KeyPair::generate().expect("client keygen"); // allow-unwrap(test)
+        let client_params = rcgen::CertificateParams::default();
+        let client_cert = client_params
+            .self_signed(&client_key)
+            .expect("client cert self-sign"); // allow-unwrap(test)
+        let cert_path = dir.path().join("client.pem");
+        std::fs::write(&cert_path, client_cert.pem()).expect("write client pem"); // allow-unwrap(test)
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&key_path, "garbage not a key at all\n").expect("write garbage key"); // allow-unwrap(test)
+        let tls = TlsConfig {
+            enabled: true,
+            strict: true,
+            client_cert_path: Some(cert_path.display().to_string()),
+            client_key_path: Some(key_path.display().to_string()),
+            ..Default::default()
+        };
+        let err = match fallback_client_config(&tls) {
+            Err(e) => e,
+            Ok(_) => panic!("strict mode must fail closed on a garbage client key"),
+        };
+        assert_strict_fallback_error(err, &["no parseable private key"]);
+    }
+
+    #[test]
+    fn test_fallback_client_config_strict_rustls_rejected_key_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let client_key = rcgen::KeyPair::generate().expect("client keygen"); // allow-unwrap(test)
+        let client_params = rcgen::CertificateParams::default();
+        let client_cert = client_params
+            .self_signed(&client_key)
+            .expect("client cert self-sign"); // allow-unwrap(test)
+        let cert_path = dir.path().join("client.pem");
+        std::fs::write(&cert_path, client_cert.pem()).expect("write client pem"); // allow-unwrap(test)
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(
+            &key_path,
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+        )
+        .expect("write pkcs8-framed garbage key"); // allow-unwrap(test)
+        let tls = TlsConfig {
+            enabled: true,
+            strict: true,
+            client_cert_path: Some(cert_path.display().to_string()),
+            client_key_path: Some(key_path.display().to_string()),
+            ..Default::default()
+        };
+        let err = match fallback_client_config(&tls) {
+            Err(e) => e,
+            Ok(_) => panic!("strict mode must fail closed when rustls rejects the identity"),
+        };
+        assert_strict_fallback_error(err, &["rejected by the TLS backend"]);
+    }
+
+    #[test]
+    fn test_fallback_client_config_half_mtls_pair_strict_fails_nonstrict_no_auth() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let cert_path = dir.path().join("client.pem");
+        std::fs::write(&cert_path, "cert-only, key missing\n").expect("write placeholder pem"); // allow-unwrap(test)
+        let tls_strict = TlsConfig {
+            enabled: true,
+            strict: true,
+            client_cert_path: Some(cert_path.display().to_string()),
+            ..Default::default()
+        };
+        let err = match fallback_client_config(&tls_strict) {
+            Err(e) => e,
+            Ok(_) => panic!("strict mode must fail closed on a half-configured mTLS pair"),
+        };
+        assert_strict_fallback_error(err, &["BOTH client_cert_path"]);
+        let tls_permissive = TlsConfig {
+            enabled: true,
+            client_cert_path: Some(cert_path.display().to_string()),
+            ..Default::default()
+        };
+        assert!(
+            fallback_client_config(&tls_permissive)
+                .expect("non-strict half pair degrades to no-auth") // allow-unwrap(test)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_no_verify_verifier_accepts_any_certificate() {
+        use rustls::client::danger::ServerCertVerifier;
+
+        let verifier = NoVerifyServerCertVerifier;
+        let garbage = rustls::pki_types::CertificateDer::from(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let server_name =
+            rustls::pki_types::ServerName::try_from("localhost").expect("localhost dns name"); // allow-unwrap(test)
+        assert!(
+            verifier
+                .verify_server_cert(
+                    &garbage,
+                    &[],
+                    &server_name,
+                    &[],
+                    rustls::pki_types::UnixTime::now()
+                )
+                .is_ok(),
+            "no-verify verifier must accept any certificate without validation"
+        );
+    }
+
     #[test]
     fn test_build_client_falls_back_on_empty_platform_ca_store() {
         // Serialize against the primary-path test: the env window below
@@ -13838,7 +14463,7 @@ mod tests {
 
         let result = std::panic::catch_unwind(|| {
             let fallbacks_before = build_client_fallback_count();
-            let _client = build_client(&HttpConfig::default(), None);
+            let _client = build_client(&HttpConfig::default(), None).expect("client must build"); // allow-unwrap(test)
             build_client_fallback_count() - fallbacks_before
         });
 
@@ -13916,7 +14541,7 @@ mod tests {
         };
 
         let fallbacks_before = build_client_fallback_count();
-        let _client = build_client(&HttpConfig::default(), None);
+        let _client = build_client(&HttpConfig::default(), None).expect("client must build"); // allow-unwrap(test)
         let fallbacks_taken = build_client_fallback_count() - fallbacks_before;
 
         // Safety: restoring the previously-captured values.
@@ -13937,5 +14562,758 @@ mod tests {
              use the platform-verifier primary path, never the webpki \
              fallback"
         );
+    }
+
+    #[test]
+    fn test_build_client_forced_fallback_strict_store_rejected_ca_returns_typed_error() {
+        // pemfile-ok / store-rejected CA: the PEM section base64-decodes
+        // (rustls-pemfile does not validate DER), so only the root store
+        // rejects it — the store-rejection class through the full
+        // build_client fallback path.
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("garbage-cert.pem");
+        std::fs::write(
+            &ca_path,
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write garbage cert pem"); // allow-unwrap(test)
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let (err, fallbacks_taken) = forced_fallback_env(|| {
+            let fallbacks_before = build_client_fallback_count();
+            let err = match build_client(&config, None) {
+                Err(e) => e,
+                Ok(_) => panic!("strict mode must fail closed when the root store rejects the CA"),
+            };
+            (err, build_client_fallback_count() - fallbacks_before)
+        });
+
+        assert_strict_fallback_error(
+            err,
+            &[
+                "tls.strict/webpki-fallback",
+                "rejected by the TLS root store",
+            ],
+        );
+        assert_eq!(
+            fallbacks_taken, 1,
+            "the typed error must come from exactly one webpki fallback entry"
+        );
+    }
+
+    #[test]
+    fn test_build_client_forced_fallback_strict_material_rejection_classes() {
+        // One fixture set, four strict rejection classes, each routed
+        // through the full build_client fallback path.
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+
+        // (a) CA material with zero PEM CERTIFICATE sections.
+        let plain_text_ca = dir.path().join("plain-text.pem");
+        std::fs::write(&plain_text_ca, "this is not a certificate\n").expect("write plain text ca"); // allow-unwrap(test)
+
+        // Valid rcgen client identity shared by the mTLS classes.
+        let client_key = rcgen::KeyPair::generate().expect("client keygen"); // allow-unwrap(test)
+        let client_cert = rcgen::CertificateParams::default()
+            .self_signed(&client_key)
+            .expect("client self-sign"); // allow-unwrap(test)
+        let cert_path = dir.path().join("client-cert.pem");
+        std::fs::write(&cert_path, client_cert.pem()).expect("write client cert"); // allow-unwrap(test)
+        let valid_key_path = dir.path().join("client-key.pem");
+        std::fs::write(&valid_key_path, client_key.serialize_pem()).expect("write client key"); // allow-unwrap(test)
+        let garbage_key_path = dir.path().join("garbage-key.pem");
+        std::fs::write(&garbage_key_path, "not a key\n").expect("write garbage key"); // allow-unwrap(test)
+        // PEM section parses; rustls rejects the bytes at client-auth
+        // configuration.
+        let rejected_key_path = dir.path().join("rejected-key.pem");
+        std::fs::write(
+            &rejected_key_path,
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+        )
+        .expect("write rejected key"); // allow-unwrap(test)
+
+        struct RejectionCase {
+            name: &'static str,
+            tls: TlsConfig,
+            fragment: &'static str,
+        }
+        let cases = [
+            RejectionCase {
+                name: "CA with zero PEM CERTIFICATE sections",
+                tls: TlsConfig {
+                    enabled: true,
+                    strict: true,
+                    ca_cert_path: Some(plain_text_ca.display().to_string()),
+                    ..Default::default()
+                },
+                fragment: "no parseable PEM CERTIFICATE section",
+            },
+            RejectionCase {
+                name: "client key with no parseable section",
+                tls: TlsConfig {
+                    enabled: true,
+                    strict: true,
+                    client_cert_path: Some(cert_path.display().to_string()),
+                    client_key_path: Some(garbage_key_path.display().to_string()),
+                    ..Default::default()
+                },
+                fragment: "no parseable private key section",
+            },
+            RejectionCase {
+                name: "client key rejected by the TLS backend",
+                tls: TlsConfig {
+                    enabled: true,
+                    strict: true,
+                    client_cert_path: Some(cert_path.display().to_string()),
+                    client_key_path: Some(rejected_key_path.display().to_string()),
+                    ..Default::default()
+                },
+                fragment: "rejected by the TLS backend",
+            },
+            RejectionCase {
+                name: "unreadable client cert",
+                tls: TlsConfig {
+                    enabled: true,
+                    strict: true,
+                    client_cert_path: Some("/nonexistent/client-cert.pem".to_string()),
+                    client_key_path: Some(valid_key_path.display().to_string()),
+                    ..Default::default()
+                },
+                fragment: "unreadable",
+            },
+        ];
+
+        for case in cases {
+            let config = HttpConfig {
+                tls: Some(case.tls),
+                ..Default::default()
+            };
+            let err = forced_fallback_env(|| match build_client(&config, None) {
+                Err(e) => e,
+                Ok(_) => panic!("strict case '{}' must fail closed", case.name),
+            });
+            assert_strict_fallback_error(err, &["tls.strict/webpki-fallback", case.fragment]);
+        }
+    }
+
+    #[test]
+    fn test_build_client_forced_fallback_nonstrict_bad_ca_still_builds() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("garbage.pem");
+        std::fs::write(&ca_path, "this is not a certificate\n").expect("write garbage pem"); // allow-unwrap(test)
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: false,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let (_client, fallbacks_taken) = forced_fallback_env(|| {
+            let fallbacks_before = build_client_fallback_count();
+            let client = build_client(&config, None)
+                .expect("non-strict bad CA must degrade per-item and still build"); // allow-unwrap(test)
+            (client, build_client_fallback_count() - fallbacks_before)
+        });
+
+        assert_eq!(
+            fallbacks_taken, 1,
+            "permissive item downgrade still routes exactly one build \
+             through the webpki fallback"
+        );
+    }
+
+    #[test]
+    fn test_http_component_with_config_folds_fallback_error_without_panic() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("garbage-cert.pem");
+        std::fs::write(
+            &ca_path,
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write garbage cert pem"); // allow-unwrap(test)
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let endpoint_err = forced_fallback_env(|| {
+            // Construction must complete without panic; the build error
+            // folds into strict_tls_error and surfaces at endpoint
+            // creation.
+            let component = HttpComponent::with_config(config);
+            component
+                .create_endpoint("http://h/p", &NoOpComponentContext)
+                .err()
+        });
+
+        let err = endpoint_err.expect("folded fallback error must fail endpoint creation"); // allow-unwrap(test)
+        assert!(
+            err.to_string().contains("rejected by the TLS root store"),
+            "folded error must carry the fallback diagnosis: {err}"
+        );
+    }
+
+    #[test]
+    fn test_http_component_new_no_panic_on_empty_ca_store() {
+        let endpoint = forced_fallback_env(|| {
+            let component = HttpComponent::new();
+            component
+                .create_endpoint("http://h/p", &NoOpComponentContext)
+                .ok()
+        });
+        let _endpoint = endpoint.expect("material-free webpki fallback must serve endpoints"); // allow-unwrap(test)
+    }
+
+    // ---- Forced-fallback loopback TLS handshake scenarios (castrict 1.3)
+    //
+    // Real TLS handshakes against a loopback rustls server prove that
+    // the configured TLS material is CARRIED into the webpki fallback
+    // backend: the strict material-free build demonstrably routes
+    // through the forced webpki fallback (its Mozilla roots reject the
+    // rcgen CA), while every material-carrying build completes a real
+    // handshake against a server certified ONLY by the configured CA.
+    //
+    // Path forcing (e_glm adjudication, rc-hl9cn — Task 1.3 deviation
+    // note in openspec/changes/castrict/tasks.md): rustls-platform-
+    // verifier 0.7.0 merges configured extra roots into the platform
+    // store FIRST and hard-errors only when the merged store is EMPTY,
+    // so on Linux an empty `SSL_CERT_FILE`/`SSL_CERT_DIR` window plus a
+    // valid configured CA keeps the PRIMARY build succeeding (extra-
+    // roots rescue); the fallback-with-valid-material path is real only
+    // on verifier-hard-error platforms (android/apple — the Termux
+    // case). The material-carrying tests below therefore run
+    // `build_client` under the `force_webpki_fallback` seam (primary
+    // skipped, fallback entered directly; the trigger warn's error
+    // field reads "forced webpki fallback entry (test)") and prove path
+    // control with a `build_client_fallback_count()` delta of exactly
+    // one. The material-free test keeps the REAL env window — no extra
+    // roots exist to rescue the verifier, so its fallback entry is
+    // genuine. Every send is timeout-bounded, so a broken harness
+    // fails fast instead of hanging.
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn tls_handshake_strict_custom_ca_carried() {
+        let ca = gen_test_ca();
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, ca.ca_pem.as_bytes()).expect("write ca pem"); // allow-unwrap(test)
+        let (server_cert, server_key) =
+            gen_leaf_signed_by_ca(&ca, "127.0.0.1".parse().expect("loopback ip")); // allow-unwrap(test)
+        let (addr, server) = spawn_tls_server(&server_cert, &server_key, None).await;
+
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = build_under_seam(&config);
+
+        let resp = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.get(format!("https://{addr}/")).send(),
+        )
+        .await
+        .expect("request must complete within the harness timeout") // allow-unwrap(test)
+        .expect("strict webpki fallback must carry the configured CA into the handshake"); // allow-unwrap(test)
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.expect("response body"); // allow-unwrap(test)
+        assert_eq!(body, "ok");
+
+        // Path control beyond the counter: the strict material-carried
+        // info log fires inside the fallback (scope-filtered
+        // `logs_contain`, injected by #[traced_test], so sibling tests'
+        // events cannot pollute this assertion).
+        assert!(
+            logs_contain("carries configured TLS material"),
+            "strict webpki fallback with configured material must log the carry"
+        );
+
+        server.abort();
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn tls_handshake_strict_material_free_fails_same_server() {
+        let ca = gen_test_ca();
+        let (server_cert, server_key) =
+            gen_leaf_signed_by_ca(&ca, "127.0.0.1".parse().expect("loopback ip")); // allow-unwrap(test)
+        let (addr, server) = spawn_tls_server(&server_cert, &server_key, None).await;
+
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = forced_fallback_env(|| {
+            build_client(&config, None).expect("client must build") // allow-unwrap(test)
+        });
+
+        let send_result = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.get(format!("https://{addr}/")).send(),
+        )
+        .await
+        .expect("request must complete within the harness timeout"); // allow-unwrap(test)
+        assert!(
+            send_result.is_err(),
+            "material-free strict fallback trusts only Mozilla roots, which do not \
+             trust the rcgen CA — the handshake must fail"
+        );
+
+        // No TLS material configured: no per-item degradation warns
+        // (spec scenario — material-free strict fallback). Scope-
+        // filtered `logs_contain` (injected by #[traced_test]) so
+        // sibling tests' mTLS-degrade warns cannot pollute the
+        // negations; the positive control proves capture works.
+        assert!(
+            logs_contain("HTTP client build failed on platform TLS roots"),
+            "positive control: this test's own fallback warn must be captured"
+        );
+        assert!(
+            !logs_contain("client certificate NOT used"),
+            "no identity was configured — the identity degrade warn must not fire"
+        );
+        assert!(
+            !logs_contain("falling back to bundled Mozilla roots"),
+            "no CA was configured — the CA degrade warn must not fire"
+        );
+
+        server.abort();
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn tls_handshake_strict_mtls_identity_carried() {
+        let ca = gen_test_ca();
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, ca.ca_pem.as_bytes()).expect("write ca pem"); // allow-unwrap(test)
+        let (client_cert_pem, client_key_pem) = gen_client_identity(&ca);
+        let client_cert_path = dir.path().join("client-cert.pem");
+        std::fs::write(&client_cert_path, client_cert_pem.as_bytes()).expect("write client cert"); // allow-unwrap(test)
+        let client_key_path = dir.path().join("client-key.pem");
+        std::fs::write(&client_key_path, client_key_pem.as_bytes()).expect("write client key"); // allow-unwrap(test)
+        let (server_cert, server_key) =
+            gen_leaf_signed_by_ca(&ca, "127.0.0.1".parse().expect("loopback ip")); // allow-unwrap(test)
+        // The server REQUIRES client certificates verified against the
+        // same CA that signed the identity.
+        let (addr, server) = spawn_tls_server(&server_cert, &server_key, Some(&ca.ca_pem)).await;
+
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                client_cert_path: Some(client_cert_path.display().to_string()),
+                client_key_path: Some(client_key_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = build_under_seam(&config);
+
+        let resp = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.get(format!("https://{addr}/")).send(),
+        )
+        .await
+        .expect("request must complete within the harness timeout") // allow-unwrap(test)
+        .expect("strict webpki fallback must carry the mTLS identity into the handshake"); // allow-unwrap(test)
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.expect("response body"); // allow-unwrap(test)
+        assert_eq!(body, "ok");
+
+        // Path control beyond the counter: the strict material-carried
+        // info log fires inside the fallback (scope-filtered
+        // `logs_contain`, injected by #[traced_test]).
+        assert!(
+            logs_contain("carries configured TLS material"),
+            "strict webpki fallback with configured material must log the carry"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tls_handshake_strict_mtls_less_client_rejected() {
+        let ca = gen_test_ca();
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, ca.ca_pem.as_bytes()).expect("write ca pem"); // allow-unwrap(test)
+        let (server_cert, server_key) =
+            gen_leaf_signed_by_ca(&ca, "127.0.0.1".parse().expect("loopback ip")); // allow-unwrap(test)
+        let (addr, server) = spawn_tls_server(&server_cert, &server_key, Some(&ca.ca_pem)).await;
+
+        // Same CA-carried strict config but WITHOUT the client
+        // identity: the handshake must fail server-side.
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = build_under_seam(&config);
+
+        let send_result = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.get(format!("https://{addr}/")).send(),
+        )
+        .await
+        .expect("request must complete within the harness timeout"); // allow-unwrap(test)
+        assert!(
+            send_result.is_err(),
+            "the server requires client certificates — an identity-less client \
+             must be rejected at the handshake"
+        );
+
+        server.abort();
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn tls_handshake_nonstrict_valid_ca_carried() {
+        let ca = gen_test_ca();
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, ca.ca_pem.as_bytes()).expect("write ca pem"); // allow-unwrap(test)
+        let (server_cert, server_key) =
+            gen_leaf_signed_by_ca(&ca, "127.0.0.1".parse().expect("loopback ip")); // allow-unwrap(test)
+        let (addr, server) = spawn_tls_server(&server_cert, &server_key, None).await;
+
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: false,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = build_under_seam(&config);
+
+        let resp = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.get(format!("https://{addr}/")).send(),
+        )
+        .await
+        .expect("request must complete within the harness timeout") // allow-unwrap(test)
+        .expect("non-strict webpki fallback must carry the valid configured CA into the handshake"); // allow-unwrap(test)
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.expect("response body"); // allow-unwrap(test)
+        assert_eq!(body, "ok");
+
+        // Loadable material never degrades: no per-item warns even
+        // outside strict mode (spec scenario — valid material carried
+        // regardless of strict). Scope-filtered `logs_contain`
+        // (injected by #[traced_test]) so sibling tests' mTLS-degrade
+        // warns cannot pollute the negations; the counter delta above
+        // is the positive path control. The platform warn DOES fire
+        // under the seam — that is the Forced-trigger notice, not a
+        // material warn; the negations below target the per-item
+        // material warns only.
+        assert!(
+            !logs_contain("client certificate NOT used"),
+            "no identity was configured — the identity degrade warn must not fire"
+        );
+        assert!(
+            !logs_contain("falling back to bundled Mozilla roots"),
+            "the CA loaded cleanly — the CA degrade warn must not fire"
+        );
+
+        server.abort();
+    }
+
+    /// Genuine-trigger anchor for the force seam (castrict 1.3-deviation,
+    /// Option C, weakened variant): strict mTLS identity WITHOUT
+    /// `ca_cert_path`, verification ON, under the REAL env window — no
+    /// force seam, and no extra roots exist to rescue the verifier, so
+    /// the primary genuinely fails. The prescribed 200-ok variant is
+    /// architecturally unreachable: reqwest's `!certs_verification`
+    /// branch constructs the NoVerifier verifier and never builds the
+    /// platform verifier, so a verify-off config cannot genuinely fail
+    /// the primary on ANY platform; and every verify-on genuine fallback
+    /// trusts only Mozilla ∪ custom roots, which cannot handshake with a
+    /// hermetic rcgen CA. Handshake-level identity proof therefore lives
+    /// in the seam tests, which share all downstream code from
+    /// `fallback_client_config` onward.
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn tls_handshake_mtls_identity_only_genuine_fallback_anchor() {
+        let ca = gen_test_ca();
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let (client_cert_pem, client_key_pem) = gen_client_identity(&ca);
+        let client_cert_path = dir.path().join("client-cert.pem");
+        std::fs::write(&client_cert_path, client_cert_pem.as_bytes()).expect("write client cert"); // allow-unwrap(test)
+        let client_key_path = dir.path().join("client-key.pem");
+        std::fs::write(&client_key_path, client_key_pem.as_bytes()).expect("write client key"); // allow-unwrap(test)
+
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                client_cert_path: Some(client_cert_path.display().to_string()),
+                client_key_path: Some(client_key_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (client, fallbacks_taken) = {
+            let fallbacks_before = build_client_fallback_count();
+            let client = forced_fallback_env(|| {
+                build_client(&config, None).expect("client must build") // allow-unwrap(test)
+            });
+            (client, build_client_fallback_count() - fallbacks_before)
+        };
+        assert_eq!(
+            fallbacks_taken, 1,
+            "the empty-store env window must genuinely fail the platform-verifier primary"
+        );
+
+        // The strict identity is carried into the fallback config
+        // (`with_client_auth_cert` accepted it) — the build is Ok, not
+        // fail-closed. No handshake is attempted: the fallback client
+        // trusts only Mozilla roots client-side, which cannot verify the
+        // hermetic rcgen CA, so a send would fail by design (see the
+        // comment above).
+        drop(client);
+
+        // Trigger authenticity: the REAL platform warn (not the Forced
+        // seam notice) fires inside the fallback. Scope-filtered
+        // `logs_contain` (injected by #[traced_test]) so sibling tests'
+        // events cannot pollute the assertion.
+        assert!(
+            logs_contain("HTTP client build failed on platform TLS roots"),
+            "the genuine env-window trigger must emit the real platform warn"
+        );
+    }
+
+    // Task 1.4 (castrict): verification-parity coverage. The two
+    // danger-mode parity tests prove a verify-off fallback config
+    // handshakes with a self-signed server the Mozilla/platform roots
+    // cannot trust; the remaining three prove strict material failures
+    // still fail closed, non-strict degradation stays item-wise, and a
+    // verifying fallback rejects the same self-signed server — the
+    // control showing the parity tests pass BECAUSE of the danger
+    // verifier, not because the harness skips verification. All five
+    // build under the FORCE_WEBPKI_FALLBACK seam: danger mode makes
+    // reqwest construct the NoVerifier branch and never build the
+    // platform verifier, so the primary cannot genuinely fail for
+    // verify-off configs on ANY platform (1.3-deviation note in
+    // openspec/changes/castrict/tasks.md).
+
+    /// Self-signed (NOT CA-signed) server leaf: signer unrelated to any
+    /// configured CA — exactly what the parity scenarios need.
+    #[tokio::test]
+    async fn tls_parity_insecure_self_signed_succeeds() {
+        let (server_cert, server_key) = gen_self_signed_server_cert();
+        let (addr, server) = spawn_tls_server(&server_cert, &server_key, None).await;
+
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: false,
+                insecure: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = build_under_seam(&config);
+
+        let resp = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.get(format!("https://{addr}/")).send(),
+        )
+        .await
+        .expect("request must complete within the harness timeout") // allow-unwrap(test)
+        .expect("verify-off (insecure) fallback must handshake with the self-signed server"); // allow-unwrap(test)
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.expect("response body"); // allow-unwrap(test)
+        assert_eq!(body, "ok");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tls_parity_verify_peer_false_self_signed_succeeds() {
+        let (server_cert, server_key) = gen_self_signed_server_cert();
+        let (addr, server) = spawn_tls_server(&server_cert, &server_key, None).await;
+
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: false,
+                verify_peer: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = build_under_seam(&config);
+
+        let resp = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.get(format!("https://{addr}/")).send(),
+        )
+        .await
+        .expect("request must complete within the harness timeout") // allow-unwrap(test)
+        .expect("verify_peer=false fallback must handshake with the self-signed server"); // allow-unwrap(test)
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.expect("response body"); // allow-unwrap(test)
+        assert_eq!(body, "ok");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tls_parity_insecure_strict_bad_material_still_fails_closed() {
+        // No server needed: the build must fail before any connection.
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        // Store-rejected fixture: a PEM CERTIFICATE section whose body
+        // is not base64 — the root store accepts 0 of 1 certs.
+        let ca_path = dir.path().join("rejected-ca.pem");
+        std::fs::write(
+            &ca_path,
+            b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write rejected ca fixture"); // allow-unwrap(test)
+
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                insecure: true,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // Raw force-guard + match: build_under_seam expects Ok, and the
+        // strict material failure must surface as Err before any send —
+        // verification-disable never masks strict material failure.
+        let err = match force_webpki_fallback(|| build_client(&config, None)) {
+            Err(e) => e,
+            Ok(_) => panic!(
+                "strict mode must fail closed on store-rejected CA material \
+                 even with insecure=true"
+            ),
+        };
+        assert_strict_fallback_error(err, &["tls.strict/webpki-fallback"]);
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn tls_parity_nonstrict_itemwise_valid_ca_bad_identity() {
+        let ca = gen_test_ca();
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, ca.ca_pem.as_bytes()).expect("write ca pem"); // allow-unwrap(test)
+        let (client_cert_pem, _client_key_pem) = gen_client_identity(&ca);
+        let client_cert_path = dir.path().join("client-cert.pem");
+        std::fs::write(&client_cert_path, client_cert_pem.as_bytes()).expect("write client cert"); // allow-unwrap(test)
+        let (server_cert, server_key) =
+            gen_leaf_signed_by_ca(&ca, "127.0.0.1".parse().expect("loopback ip")); // allow-unwrap(test)
+        // No client-auth requirement: the identity item's fate is
+        // client-side only.
+        let (addr, server) = spawn_tls_server(&server_cert, &server_key, None).await;
+
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: false,
+                ca_cert_path: Some(ca_path.display().to_string()),
+                client_cert_path: Some(client_cert_path.display().to_string()),
+                // UNREADABLE key path per the spec scenario: the mTLS
+                // pair cannot load, so the identity item degrades.
+                client_key_path: Some("/nonexistent/key.pem".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = build_under_seam(&config);
+
+        let resp = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.get(format!("https://{addr}/")).send(),
+        )
+        .await
+        .expect("request must complete within the harness timeout") // allow-unwrap(test)
+        .expect("the valid CA item must be carried despite the unreadable key"); // allow-unwrap(test)
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.expect("response body"); // allow-unwrap(test)
+        assert_eq!(body, "ok");
+
+        // Item-wise degradation: the identity item warned and was
+        // dropped; the CA item loaded cleanly — no Mozilla-roots
+        // downgrade. Scope-filtered `logs_contain` (injected by
+        // #[traced_test]) so sibling tests' events cannot pollute.
+        assert!(
+            logs_contain("client certificate NOT used"),
+            "the unreadable key must degrade the identity item with the mTLS warn"
+        );
+        assert!(
+            !logs_contain("falling back to bundled Mozilla roots"),
+            "the CA loaded cleanly — the CA degrade warn must not fire"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tls_parity_verifying_client_rejects_self_signed_without_insecure() {
+        let (server_cert, server_key) = gen_self_signed_server_cert();
+        let (addr, server) = spawn_tls_server(&server_cert, &server_key, None).await;
+
+        // Strict, NO material, verification ON: the fallback trusts
+        // only Mozilla roots, which cannot verify the self-signed
+        // server — the control proving the two parity tests above pass
+        // BECAUSE of the danger verifier, not because the harness
+        // skips verification.
+        let config = HttpConfig {
+            tls: Some(TlsConfig {
+                enabled: true,
+                strict: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let client = build_under_seam(&config);
+
+        let send_result = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.get(format!("https://{addr}/")).send(),
+        )
+        .await
+        .expect("request must complete within the harness timeout"); // allow-unwrap(test)
+        assert!(
+            send_result.is_err(),
+            "a verifying client must reject the self-signed server at the handshake"
+        );
+
+        server.abort();
     }
 }

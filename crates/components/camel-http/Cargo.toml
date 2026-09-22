@@ -54,6 +54,7 @@ camel-core = { workspace = true }
 tempfile = { workspace = true }
 flate2 = { workspace = true }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
+rcgen = { workspace = true }
 
 [lints]
 workspace = true

@@ -470,11 +470,14 @@ pub(crate) async fn send_with_ssrf_safe_redirects(
         if matches!(classify_host(&redirect_url), Some(ClassifiedHost::Ip(_))) {
             current_client = shared_client.clone();
         } else {
+            // A failed pinned build (strict fail-closed material
+            // conflict) propagates into the redirect error path — no
+            // degraded client is built or served.
             current_client = pinned_cache
                 .get_or_build(&redirect_host, &resolved_addrs, || {
                     build_client(http_config, Some((redirect_host.as_str(), &resolved_addrs)))
                 })
-                .await;
+                .await?;
         }
 
         current_method = new_method;
@@ -978,7 +981,7 @@ mod tests {
         let cache = PinnedClientCache::new(PINNED_CLIENT_TTL, PINNED_CLIENT_MAX_ENTRIES);
         // build_client sets redirect Policy::none(); a bare reqwest::Client
         // would auto-follow the 302 before the manual loop sees it.
-        let shared = build_client(&HttpConfig::default(), None);
+        let shared = build_client(&HttpConfig::default(), None).expect("client must build"); // allow-unwrap(test)
         let endpoint_config = HttpEndpointConfig::from_uri("http://localhost/?allowInternal=true")
             .expect("endpoint config parses");
 
@@ -1021,7 +1024,7 @@ mod tests {
         let entry_port = responder_port(&entry_base);
 
         let cache = PinnedClientCache::new(PINNED_CLIENT_TTL, PINNED_CLIENT_MAX_ENTRIES);
-        let shared = build_client(&HttpConfig::default(), None);
+        let shared = build_client(&HttpConfig::default(), None).expect("client must build"); // allow-unwrap(test)
         let endpoint_config = HttpEndpointConfig::from_uri("http://localhost/?allowInternal=true")
             .expect("endpoint config parses");
 
@@ -1062,7 +1065,7 @@ mod tests {
         let entry_port = responder_port(&entry_base);
 
         let cache = PinnedClientCache::new(PINNED_CLIENT_TTL, PINNED_CLIENT_MAX_ENTRIES);
-        let shared = build_client(&HttpConfig::default(), None);
+        let shared = build_client(&HttpConfig::default(), None).expect("client must build"); // allow-unwrap(test)
         // Fence allows only the entry origin (localhost, any port); the
         // hop target is the 127.0.0.1 literal — a different host.
         let endpoint_config = HttpEndpointConfig::from_uri(
@@ -1107,7 +1110,7 @@ mod tests {
         let entry_port = responder_port(&entry_base);
 
         let cache = PinnedClientCache::new(PINNED_CLIENT_TTL, PINNED_CLIENT_MAX_ENTRIES);
-        let shared = build_client(&HttpConfig::default(), None);
+        let shared = build_client(&HttpConfig::default(), None).expect("client must build"); // allow-unwrap(test)
         // Fence allows localhost entries (any port) — entry and hop both
         // qualify.
         let endpoint_config = HttpEndpointConfig::from_uri(
@@ -1202,7 +1205,7 @@ mod tests {
         let entry_port = responder_port(&entry_base);
 
         let cache = PinnedClientCache::new(PINNED_CLIENT_TTL, PINNED_CLIENT_MAX_ENTRIES);
-        let shared = build_client(&HttpConfig::default(), None);
+        let shared = build_client(&HttpConfig::default(), None).expect("client must build"); // allow-unwrap(test)
         let endpoint_config = HttpEndpointConfig::from_uri(
             "http://localhost/?allowInternal=true&allowCleartext=true",
         )
