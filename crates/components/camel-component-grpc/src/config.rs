@@ -323,6 +323,11 @@ pub struct GrpcConfig {
     /// in consumer.rs; camel-http `envelope_channel_capacity`, rc-3y6j
     /// pattern). Default 64 = the historical hardcoded value, so
     /// behavior is unchanged when the parameter is omitted.
+    /// bd rc-9kgtm: values above `tokio::sync::Semaphore::MAX_PERMITS`
+    /// are rejected at parse and at consumer creation/startup: the
+    /// dispatcher semaphore panics above this bound; the
+    /// channel==semaphore invariant derives both primitives from one
+    /// validated value.
     #[serde(default = "default_consumer_concurrency")]
     pub consumer_concurrency: usize,
 
@@ -606,12 +611,16 @@ fn parse_grpc_query_params(
         .unwrap_or_default();
 
     // rc-ey6v: consumer concurrency — derives both the envelope channel
-    // capacity and the dispatcher semaphore (see consumer.rs).
+    // capacity and the dispatcher semaphore (see consumer.rs). bd rc-9kgtm:
+    // values above `Semaphore::MAX_PERMITS` are rejected here at parse time
+    // (the dispatcher semaphore panics above that bound), and 0 normalizes
+    // to 1.
     let consumer_concurrency = map
         .remove("consumerConcurrency")
         .map(|v| parse_numeric_param(&v, "consumerConcurrency"))
         .transpose()?
         .unwrap_or_else(default_consumer_concurrency);
+    let consumer_concurrency = crate::consumer::consumer_concurrency_limit(consumer_concurrency)?;
 
     // Warn about any unrecognized params. SECURITY (audit 2026-08-31, F5-1):
     // log the KEY only — unknown params carry no metadata-driven redaction, so
@@ -857,6 +866,48 @@ mod tests {
                 .to_string()
                 .contains("invalid numeric value")
         );
+    }
+
+    /// bd rc-9kgtm: the accepted upper bound is exactly
+    /// `tokio::sync::Semaphore::MAX_PERMITS` — the dispatcher semaphore
+    /// panics above it, so the parse seam must accept L and reject L+1.
+    #[test]
+    fn test_parse_grpc_uri_consumer_concurrency_at_limit_accepted() {
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        let uri = format!(
+            "grpc://localhost:50051/pkg.Svc/Method?consumerConcurrency={l}&transport=plaintext"
+        );
+        let (_, _, _, _, config) = parse_grpc_uri(&uri).unwrap();
+        assert_eq!(config.consumer_concurrency, l);
+    }
+
+    /// bd rc-9kgtm: values above `Semaphore::MAX_PERMITS` are rejected at
+    /// parse with a typed config error naming the parameter, the value,
+    /// and the limit.
+    #[test]
+    fn test_parse_grpc_uri_consumer_concurrency_above_limit_rejected() {
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        let uri = format!(
+            "grpc://localhost:50051/pkg.Svc/Method?consumerConcurrency={}&transport=plaintext",
+            l + 1
+        );
+        match parse_grpc_uri(&uri) {
+            Err(CamelError::Config(msg)) => {
+                assert!(msg.contains("consumerConcurrency"));
+                assert!(msg.contains(&format!("{}", l + 1)));
+                assert!(msg.contains(&format!("{l}")));
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+    }
+
+    /// rc-ey6v: `consumerConcurrency=0` normalizes to 1 at parse time —
+    /// a 0-capacity channel and a 0-permit semaphore are not usable.
+    #[test]
+    fn test_parse_grpc_uri_consumer_concurrency_zero_normalizes_to_one() {
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?consumerConcurrency=0&transport=plaintext";
+        let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
+        assert_eq!(config.consumer_concurrency, 1);
     }
 
     #[test]

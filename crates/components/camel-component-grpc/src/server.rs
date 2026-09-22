@@ -96,6 +96,16 @@ impl GrpcServerRegistry {
         })
     }
 
+    /// Test-only probe: does a live server entry exist for (host, port)?
+    /// Lock poisoning propagates like the other lock sites.
+    #[cfg(test)]
+    pub(crate) fn contains_server(&self, host: &str, port: u16) -> Result<bool, CamelError> {
+        let guard = self.inner.lock().map_err(|_| {
+            CamelError::EndpointCreationFailed("GrpcServerRegistry lock poisoned".into())
+        })?;
+        Ok(guard.contains_key(&(host.to_string(), port)))
+    }
+
     pub(crate) async fn get_or_spawn(
         &'static self,
         host: &str,

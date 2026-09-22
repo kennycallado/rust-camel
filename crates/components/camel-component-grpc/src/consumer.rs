@@ -90,8 +90,19 @@ fn proto_cache() -> &'static ProtoCache {
 /// `.max(1)`: `consumerConcurrency=0` is representable, but
 /// `tokio::sync::mpsc::channel(0)` panics and a 0-permit semaphore
 /// would stall the consumer forever.
-fn consumer_concurrency_limit(configured: usize) -> usize {
-    configured.max(1)
+///
+/// Values above `tokio::sync::Semaphore::MAX_PERMITS` are rejected
+/// fail-closed (bd rc-9kgtm, ADR-0033): the dispatcher semaphore panics
+/// above that bound. The channel==semaphore invariant derives both
+/// primitives from this one validated value.
+pub(crate) fn consumer_concurrency_limit(configured: usize) -> Result<usize, CamelError> {
+    if configured > tokio::sync::Semaphore::MAX_PERMITS {
+        return Err(CamelError::Config(format!(
+            "consumerConcurrency {configured} exceeds the supported upper bound {} (tokio::sync::Semaphore::MAX_PERMITS)",
+            tokio::sync::Semaphore::MAX_PERMITS
+        )));
+    }
+    Ok(configured.max(1))
 }
 
 /// Map a pipeline error onto the transport denial idiom.
@@ -460,6 +471,10 @@ impl GrpcConsumer {
         listener: tokio::net::TcpListener,
     ) -> Result<(), CamelError> {
         self.validate_route_credential_sources()?;
+        // rc-9kgtm: fail-closed before registry mutation — an oversized
+        // value must never reach Semaphore::new (panic) or the shared
+        // server registry.
+        let _concurrency = consumer_concurrency_limit(self.consumer_concurrency)?;
         let dispatch = GrpcServerRegistry::global()
             .get_or_spawn_with_listener(
                 listener,
@@ -485,7 +500,7 @@ impl GrpcConsumer {
         // SAME `concurrency` value, so the channel can never become a
         // second, hidden backpressure point (camel-http
         // `envelope_channel_capacity`, rc-3y6j pattern).
-        let concurrency = consumer_concurrency_limit(self.consumer_concurrency);
+        let concurrency = consumer_concurrency_limit(self.consumer_concurrency)?;
         let (env_tx, mut env_rx) = mpsc::channel::<GrpcRequestEnvelope>(concurrency);
         // Kernel interceptor state is captured HERE, at dispatch-entry
         // construction, from the security context wired before start
@@ -667,6 +682,11 @@ impl GrpcConsumer {
 impl Consumer for GrpcConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
         self.validate_route_credential_sources()?;
+        // rc-9kgtm: fail-closed before the info! log, registry
+        // get_or_spawn (which binds the listener), and readiness
+        // signalling — an oversized value must never reach
+        // Semaphore::new (panic).
+        let _concurrency = consumer_concurrency_limit(self.consumer_concurrency)?;
         info!(
             host = %redact_host(&self.host),
             port = self.port,
@@ -1138,6 +1158,9 @@ async fn process_bidi_request(
 mod tests {
     use super::*;
 
+    use camel_component_api::StartupSignal;
+    use tokio_util::sync::CancellationToken;
+
     /// Thin local pin — the full matrix lives in camel-api's
     /// `redact_host_masks_userinfo_keeps_clean_hosts`.
     #[test]
@@ -1175,17 +1198,156 @@ mod tests {
         assert!(validate_credential_sources(&[]).is_ok());
     }
 
-    /// rc-ey6v: one configured value derives BOTH the envelope channel
-    /// capacity and the dispatcher semaphore (channel==semaphore
-    /// invariant). Clamps 0 to 1 — `mpsc::channel(0)` panics and a
-    /// 0-permit semaphore would stall the consumer. Mirrors camel-http's
-    /// `envelope_channel_capacity` tests (rc-3y6j).
+    /// rc-ey6v + rc-9kgtm: one configured value derives BOTH the envelope
+    /// channel capacity and the dispatcher semaphore (channel==semaphore
+    /// invariant). Normalizes 0 to 1 — `mpsc::channel(0)` panics and a
+    /// 0-permit semaphore would stall the consumer. Values above
+    /// `tokio::sync::Semaphore::MAX_PERMITS` are rejected fail-closed
+    /// because the dispatcher semaphore panics above that bound. Mirrors
+    /// camel-http's `envelope_channel_capacity` tests (rc-3y6j).
     #[test]
-    fn consumer_concurrency_limit_clamps_zero_and_follows_config() {
-        assert_eq!(consumer_concurrency_limit(0), 1);
-        assert_eq!(consumer_concurrency_limit(1), 1);
-        assert_eq!(consumer_concurrency_limit(7), 7);
-        assert_eq!(consumer_concurrency_limit(64), 64);
-        assert_eq!(consumer_concurrency_limit(1024), 1024);
+    fn consumer_concurrency_limit_normalizes_zero_and_rejects_beyond_limit() {
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        assert!(matches!(consumer_concurrency_limit(0), Ok(1)));
+        assert!(matches!(consumer_concurrency_limit(1), Ok(1)));
+        assert!(matches!(consumer_concurrency_limit(7), Ok(7)));
+        assert!(matches!(consumer_concurrency_limit(l - 1), Ok(v) if v == l - 1));
+        assert!(matches!(consumer_concurrency_limit(l), Ok(v) if v == l));
+        match consumer_concurrency_limit(l + 1) {
+            Err(CamelError::Config(msg)) => {
+                assert!(msg.contains("consumerConcurrency"), "message was: {msg}");
+                assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+                assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got: {other:?}"),
+        }
+    }
+
+    /// rc-9kgtm: the accepted upper bound is exactly the primitives' real
+    /// bound — a semaphore of L permits and a bounded channel of capacity L
+    /// must both construct without panicking.
+    #[test]
+    fn tokio_primitives_accept_exactly_the_limit() {
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        let _semaphore = tokio::sync::Semaphore::new(l);
+        let (_tx, _rx) = tokio::sync::mpsc::channel::<()>(l);
+    }
+
+    /// rc-9kgtm: `start()` rejects an oversized `consumer_concurrency`
+    /// before registry insertion, listener binding, or readiness
+    /// signalling — the port must remain free afterwards.
+    #[tokio::test]
+    async fn start_rejects_oversized_concurrency_before_registry_bind_or_readiness()
+    -> Result<(), CamelError> {
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        let unused_port = {
+            let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| {
+                CamelError::EndpointCreationFailed(format!("port probe bind failed: {e}"))
+            })?;
+            let port = probe
+                .local_addr()
+                .map_err(|e| {
+                    CamelError::EndpointCreationFailed(format!("port probe local_addr failed: {e}"))
+                })?
+                .port();
+            drop(probe);
+            port
+        };
+        let (signal, receiver) = StartupSignal::pair();
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "concpanic-test".into())
+            .with_startup(signal);
+        let mut consumer = GrpcConsumer::new(
+            "127.0.0.1".into(),
+            unused_port,
+            "/helloworld.Greeter/SayHello".into(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto"),
+            "helloworld.Greeter".into(),
+            "SayHello".into(),
+            GrpcMode::Unary,
+            Arc::new(camel_component_api::NoOpComponentContext),
+            GrpcServerConfig::default(),
+            l + 1,
+        );
+
+        let result = consumer.start(ctx).await;
+
+        match result {
+            Err(CamelError::Config(msg)) => {
+                assert!(msg.contains("consumerConcurrency"), "message was: {msg}");
+                assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+                assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got: {other:?}"),
+        }
+        assert!(
+            !GrpcServerRegistry::global().contains_server("127.0.0.1", unused_port)?,
+            "registry must not contain a server entry for the rejected start"
+        );
+        match receiver.await_ready().await {
+            Err(_) => {}
+            Ok(()) => panic!("readiness must not be signalled for a rejected start"),
+        }
+        assert!(
+            std::net::TcpListener::bind(("127.0.0.1", unused_port)).is_ok(),
+            "port {unused_port} must remain free after the rejected start"
+        );
+        Ok(())
+    }
+
+    /// rc-9kgtm: `start_with_listener()` rejects an oversized
+    /// `consumer_concurrency` before shared-server registry mutation or
+    /// readiness signalling.
+    #[tokio::test]
+    async fn start_with_listener_rejects_oversized_concurrency_before_registry_mutation()
+    -> Result<(), CamelError> {
+        let l = tokio::sync::Semaphore::MAX_PERMITS;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .map_err(|e| {
+                CamelError::EndpointCreationFailed(format!("listener bind failed: {e}"))
+            })?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| {
+                CamelError::EndpointCreationFailed(format!("listener local_addr failed: {e}"))
+            })?
+            .port();
+        let (signal, receiver) = StartupSignal::pair();
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "concpanic-test".into())
+            .with_startup(signal);
+        let mut consumer = GrpcConsumer::new(
+            "127.0.0.1".into(),
+            port,
+            "/helloworld.Greeter/SayHello".into(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto"),
+            "helloworld.Greeter".into(),
+            "SayHello".into(),
+            GrpcMode::Unary,
+            Arc::new(camel_component_api::NoOpComponentContext),
+            GrpcServerConfig::default(),
+            l + 1,
+        );
+
+        let result = consumer.start_with_listener(ctx, listener).await;
+
+        match result {
+            Err(CamelError::Config(msg)) => {
+                assert!(msg.contains("consumerConcurrency"), "message was: {msg}");
+                assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+                assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got: {other:?}"),
+        }
+        assert!(
+            !GrpcServerRegistry::global().contains_server("127.0.0.1", port)?,
+            "registry must not contain a server entry for the rejected start"
+        );
+        match receiver.await_ready().await {
+            Err(_) => {}
+            Ok(()) => panic!("readiness must not be signalled for a rejected start"),
+        }
+        Ok(())
     }
 }
