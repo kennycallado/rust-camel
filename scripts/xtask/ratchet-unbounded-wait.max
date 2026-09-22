@@ -9,8 +9,12 @@
 # tokio::spawn/spawn_blocking/JoinSet::spawn awaits (incl. awaited
 # spawned-handle bindings), tokio::net::TcpStream::connect awaits, and
 # await-carrying `loop`s with no deadline. A wait inside the future
-# argument of tokio::time::timeout/timeout_at is bounded (imports and
-# aliases resolved); a loop with a per-iteration timeout call is bounded.
+# argument of tokio::time::timeout/timeout_at is bounded per three
+# precedence rules over provenance-tagged readings (named import from
+# body_top/module chain beats same-or-outer globs; the as-written
+# qualified literal bounds unless a named or local reading exists; a
+# glob-only singleton target bounds); a loop with a per-iteration
+# timeout call is bounded.
 # Sites marked `// allow-test-wait: <reason>` (ADR-0069 R1 normative
 # marker) are suppressed at scan time and never count toward the ceiling.
 # Known blind spots (documented in the module doc): stream I/O
@@ -542,4 +546,14 @@
 # - crates/services/camel-bridge/src/process.rs:1129
 # - crates/services/camel-bridge/src/process.rs:1221
 # - crates/services/camel-prometheus/tests/integration_test.rs:61
-394
+#
+# Raise 394 -> 395 (2026-09-22, bd rc-t9h9n / mission 224 aliaswait):
+# the candidate-set resolver fixed the rc-t9h9n false-negative class —
+# awaited wait calls through a named module import (use
+# tokio::net::TcpStream; TcpStream::connect(..).await) were compared
+# literally and missed. One new TRUE finding, inventoried below; every
+# other base finding is preserved (base-vs-new finding-list diff on
+# the same tree, zero removals). Bounding now follows precedence rules
+# (design.md aliaswait §3); no site was suppressed.
+# - crates/components/camel-component-wasm/tests/source_stream_integration.rs:278
+395
