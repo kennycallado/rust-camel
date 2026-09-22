@@ -208,7 +208,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .sadd(&key, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SADD failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SADD", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Srem => {
@@ -216,7 +216,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .srem(&key, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SREM failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SREM", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Smembers => {
@@ -224,7 +224,7 @@ pub async fn dispatch(
             let members: Vec<String> = conn
                 .smembers(&key)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SMEMBERS failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SMEMBERS", e))?;
             json_from_members(members)
         }
         RedisCommand::Scard => {
@@ -232,7 +232,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .scard(&key)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SCARD failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SCARD", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Sismember => {
@@ -240,7 +240,7 @@ pub async fn dispatch(
             let ok: bool = conn
                 .sismember(&key, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SISMEMBER failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SISMEMBER", e))?;
             serde_json::json!(ok)
         }
         RedisCommand::Spop => {
@@ -248,7 +248,7 @@ pub async fn dispatch(
             let val: Option<String> = conn
                 .spop(&key)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SPOP failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SPOP", e))?;
             json_from_optional_member(val)
         }
         RedisCommand::Smove => {
@@ -256,7 +256,7 @@ pub async fn dispatch(
             let ok: bool = conn
                 .smove(&key, dest, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SMOVE failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SMOVE", e))?;
             serde_json::json!(ok)
         }
         RedisCommand::Sinter => {
@@ -264,7 +264,7 @@ pub async fn dispatch(
             let members: Vec<String> = conn
                 .sinter(&keys)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SINTER failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SINTER", e))?;
             json_from_members(members)
         }
         RedisCommand::Sunion => {
@@ -272,7 +272,7 @@ pub async fn dispatch(
             let members: Vec<String> = conn
                 .sunion(&keys)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SUNION failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SUNION", e))?;
             json_from_members(members)
         }
         RedisCommand::Sdiff => {
@@ -280,21 +280,23 @@ pub async fn dispatch(
             let members: Vec<String> = conn
                 .sdiff(&keys)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SDIFF failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SDIFF", e))?;
             json_from_members(members)
         }
         RedisCommand::Sinterstore => {
             let (dest, keys) = resolve_store_operands(exchange)?;
-            let n: i64 = conn.sinterstore(dest, &keys).await.map_err(|e| {
-                CamelError::ProcessorError(format!("Redis SINTERSTORE failed: {e}"))
-            })?;
+            let n: i64 = conn
+                .sinterstore(dest, &keys)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SINTERSTORE", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Sunionstore => {
             let (dest, keys) = resolve_store_operands(exchange)?;
-            let n: i64 = conn.sunionstore(dest, &keys).await.map_err(|e| {
-                CamelError::ProcessorError(format!("Redis SUNIONSTORE failed: {e}"))
-            })?;
+            let n: i64 = conn
+                .sunionstore(dest, &keys)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SUNIONSTORE", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Sdiffstore => {
@@ -302,7 +304,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .sdiffstore(dest, &keys)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SDIFFSTORE failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SDIFFSTORE", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Srandmember => {
@@ -314,13 +316,13 @@ pub async fn dispatch(
                         .srandmember_multiple(&key, c as isize)
                         .await
                         .map_err(|e| {
-                            CamelError::ProcessorError(format!("Redis SRANDMEMBER failed: {e}"))
+                            crate::transport_error::redis_error_to_camel("SRANDMEMBER", e)
                         })?;
                     serde_json::json!(members)
                 }
                 None => {
                     let member: Option<String> = conn.srandmember(&key).await.map_err(|e| {
-                        CamelError::ProcessorError(format!("Redis SRANDMEMBER failed: {e}"))
+                        crate::transport_error::redis_error_to_camel("SRANDMEMBER", e)
                     })?;
                     json_from_optional_member(member)
                 }

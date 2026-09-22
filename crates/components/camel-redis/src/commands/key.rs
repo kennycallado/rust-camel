@@ -187,127 +187,131 @@ pub async fn dispatch(
         return Err(CamelError::ProcessorError("Not a key command".into()));
     }
 
-    let result: serde_json::Value =
-        match cmd {
-            RedisCommand::Exists => {
-                let key = require_key(exchange)?;
-                let n: bool = conn
-                    .exists(&key)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis EXISTS failed: {e}")))?;
-                serde_json::json!(n)
-            }
-            RedisCommand::Del => {
-                let keys = resolve_del_keys(exchange)?;
-                let n: i64 = conn
-                    .del(&keys)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis DEL failed: {e}")))?;
-                serde_json::json!(n)
-            }
-            RedisCommand::Expire => {
-                let key = require_key(exchange)?;
-                let secs = resolve_expire_timeout(exchange);
-                let ok: bool = conn
-                    .expire(&key, secs)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis EXPIRE failed: {e}")))?;
-                serde_json::json!(ok)
-            }
-            RedisCommand::Expireat => {
-                let key = require_key(exchange)?;
-                let ts = resolve_expire_timestamp(exchange);
-                let ok: bool = conn.expire_at(&key, ts).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis EXPIREAT failed: {e}"))
-                })?;
-                serde_json::json!(ok)
-            }
-            RedisCommand::Pexpire => {
-                let key = require_key(exchange)?;
-                let ms = resolve_expire_timeout(exchange);
-                let ok: bool = conn.pexpire(&key, ms).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis PEXPIRE failed: {e}"))
-                })?;
-                serde_json::json!(ok)
-            }
-            RedisCommand::Pexpireat => {
-                let key = require_key(exchange)?;
-                let ts = resolve_expire_timestamp(exchange);
-                let ok: bool = conn.pexpire_at(&key, ts).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis PEXPIREAT failed: {e}"))
-                })?;
-                serde_json::json!(ok)
-            }
-            RedisCommand::Ttl => {
-                let key = require_key(exchange)?;
-                let n: i64 = conn
-                    .ttl(&key)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis TTL failed: {e}")))?;
-                serde_json::json!(n)
-            }
-            RedisCommand::Keys => {
-                let pattern = resolve_keys_pattern(exchange);
-                let keys: Vec<String> = conn
-                    .keys(pattern)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis KEYS failed: {e}")))?;
-                serde_json::json!(keys)
-            }
-            RedisCommand::Rename => {
-                let (key, dest) = resolve_rename_operands(exchange)?;
-                conn.rename::<_, _, ()>(&key, dest)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis RENAME failed: {e}")))?;
-                serde_json::Value::Null
-            }
-            RedisCommand::Renamenx => {
-                let (key, dest) = resolve_rename_operands(exchange)?;
-                let ok: bool = conn.rename_nx(&key, dest).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis RENAMENX failed: {e}"))
-                })?;
-                serde_json::json!(ok)
-            }
-            RedisCommand::Type => {
-                let key = require_key(exchange)?;
-                // redis-rs returns a String for TYPE
-                let t: String = redis::cmd("TYPE")
-                    .arg(&key)
-                    .query_async(conn)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis TYPE failed: {e}")))?;
-                serde_json::Value::String(t)
-            }
-            RedisCommand::Persist => {
-                let key = require_key(exchange)?;
-                let ok: bool = conn.persist(&key).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis PERSIST failed: {e}"))
-                })?;
-                serde_json::json!(ok)
-            }
-            RedisCommand::Move => {
-                let (key, db) = resolve_move_operands(exchange)?;
-                // MOVE is not directly exposed in AsyncCommands, use raw command
-                let ok: i64 = redis::cmd("MOVE")
-                    .arg(&key)
-                    .arg(db)
-                    .query_async(conn)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis MOVE failed: {e}")))?;
-                json_from_move_result(ok)
-            }
-            RedisCommand::Sort => {
-                let key = require_key(exchange)?;
-                // Basic SORT — returns sorted list using raw command
-                let vals: Vec<String> = redis::cmd("SORT")
-                    .arg(&key)
-                    .query_async(conn)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis SORT failed: {e}")))?;
-                serde_json::json!(vals)
-            }
-            _ => unreachable!("non-key commands rejected above"),
-        };
+    let result: serde_json::Value = match cmd {
+        RedisCommand::Exists => {
+            let key = require_key(exchange)?;
+            let n: bool = conn
+                .exists(&key)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("EXISTS", e))?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Del => {
+            let keys = resolve_del_keys(exchange)?;
+            let n: i64 = conn
+                .del(&keys)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("DEL", e))?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Expire => {
+            let key = require_key(exchange)?;
+            let secs = resolve_expire_timeout(exchange);
+            let ok: bool = conn
+                .expire(&key, secs)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("EXPIRE", e))?;
+            serde_json::json!(ok)
+        }
+        RedisCommand::Expireat => {
+            let key = require_key(exchange)?;
+            let ts = resolve_expire_timestamp(exchange);
+            let ok: bool = conn
+                .expire_at(&key, ts)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("EXPIREAT", e))?;
+            serde_json::json!(ok)
+        }
+        RedisCommand::Pexpire => {
+            let key = require_key(exchange)?;
+            let ms = resolve_expire_timeout(exchange);
+            let ok: bool = conn
+                .pexpire(&key, ms)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("PEXPIRE", e))?;
+            serde_json::json!(ok)
+        }
+        RedisCommand::Pexpireat => {
+            let key = require_key(exchange)?;
+            let ts = resolve_expire_timestamp(exchange);
+            let ok: bool = conn
+                .pexpire_at(&key, ts)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("PEXPIREAT", e))?;
+            serde_json::json!(ok)
+        }
+        RedisCommand::Ttl => {
+            let key = require_key(exchange)?;
+            let n: i64 = conn
+                .ttl(&key)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("TTL", e))?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Keys => {
+            let pattern = resolve_keys_pattern(exchange);
+            let keys: Vec<String> = conn
+                .keys(pattern)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("KEYS", e))?;
+            serde_json::json!(keys)
+        }
+        RedisCommand::Rename => {
+            let (key, dest) = resolve_rename_operands(exchange)?;
+            conn.rename::<_, _, ()>(&key, dest)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("RENAME", e))?;
+            serde_json::Value::Null
+        }
+        RedisCommand::Renamenx => {
+            let (key, dest) = resolve_rename_operands(exchange)?;
+            let ok: bool = conn
+                .rename_nx(&key, dest)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("RENAMENX", e))?;
+            serde_json::json!(ok)
+        }
+        RedisCommand::Type => {
+            let key = require_key(exchange)?;
+            // redis-rs returns a String for TYPE
+            let t: String = redis::cmd("TYPE")
+                .arg(&key)
+                .query_async(conn)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("TYPE", e))?;
+            serde_json::Value::String(t)
+        }
+        RedisCommand::Persist => {
+            let key = require_key(exchange)?;
+            let ok: bool = conn
+                .persist(&key)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("PERSIST", e))?;
+            serde_json::json!(ok)
+        }
+        RedisCommand::Move => {
+            let (key, db) = resolve_move_operands(exchange)?;
+            // MOVE is not directly exposed in AsyncCommands, use raw command
+            let ok: i64 = redis::cmd("MOVE")
+                .arg(&key)
+                .arg(db)
+                .query_async(conn)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("MOVE", e))?;
+            json_from_move_result(ok)
+        }
+        RedisCommand::Sort => {
+            let key = require_key(exchange)?;
+            // Basic SORT — returns sorted list using raw command
+            let vals: Vec<String> = redis::cmd("SORT")
+                .arg(&key)
+                .query_async(conn)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SORT", e))?;
+            serde_json::json!(vals)
+        }
+        _ => unreachable!("non-key commands rejected above"),
+    };
     exchange.input.body = Body::Json(result);
     Ok(())
 }

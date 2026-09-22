@@ -96,7 +96,7 @@ pub async fn dispatch(
             let receivers: i64 = conn
                 .publish(&channel, &message)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis PUBLISH failed: {}", e)))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("PUBLISH", e))?;
 
             serde_json::json!(receivers)
         }

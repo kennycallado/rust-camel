@@ -17,12 +17,14 @@ use futures_util::StreamExt;
 use redis::Msg;
 use std::future::Future;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::retry::{retry_budget_exhausted, transient_retry_step};
 use crate::topology::{RedisTopology, ServerKind};
+use crate::transport_error::{TransientByProse, TransportTimeout, marker_camel};
 
 /// Injectable I/O seam for the pub/sub consumer's reconnect loop.
 ///
@@ -64,13 +66,20 @@ impl PubSubIo for RedisPubSubIo {
         )
         .await
         .map_err(|_| {
-            CamelError::ProcessorError(format!(
-                "PubSub connection timed out after {}s",
-                self.timeout_secs
-            ))
+            marker_camel(
+                format!("PubSub connection timed out after {}s", self.timeout_secs),
+                TransportTimeout {
+                    stage: "pubsub connect",
+                },
+            )
         })?
         .map_err(|e| {
-            CamelError::ProcessorError(format!("Failed to create PubSub connection: {}", e))
+            marker_camel(
+                format!("Failed to create PubSub connection: {}", e),
+                TransientByProse {
+                    site: "pubsub connect",
+                },
+            )
         })?;
         self.pubsub = Some(pubsub);
         Ok(())
@@ -78,19 +87,35 @@ impl PubSubIo for RedisPubSubIo {
 
     async fn subscribe(&mut self, ch: &str) -> Result<(), CamelError> {
         let pubsub = self.pubsub.as_mut().ok_or_else(|| {
-            CamelError::ProcessorError("PubSub connection not established".into())
+            marker_camel(
+                "PubSub connection not established".into(),
+                TransientByProse {
+                    site: "pubsub guard",
+                },
+            )
         })?;
         pubsub.subscribe(ch).await.map_err(|e| {
-            CamelError::ProcessorError(format!("Failed to subscribe to channel {}: {}", ch, e))
+            CamelError::ProcessorErrorWithSource(
+                format!("Failed to subscribe to channel {}: {}", ch, e),
+                Arc::new(e),
+            )
         })
     }
 
     async fn psubscribe(&mut self, pat: &str) -> Result<(), CamelError> {
         let pubsub = self.pubsub.as_mut().ok_or_else(|| {
-            CamelError::ProcessorError("PubSub connection not established".into())
+            marker_camel(
+                "PubSub connection not established".into(),
+                TransientByProse {
+                    site: "pubsub guard",
+                },
+            )
         })?;
         pubsub.psubscribe(pat).await.map_err(|e| {
-            CamelError::ProcessorError(format!("Failed to subscribe to pattern {}: {}", pat, e))
+            CamelError::ProcessorErrorWithSource(
+                format!("Failed to subscribe to pattern {}: {}", pat, e),
+                Arc::new(e),
+            )
         })
     }
 
@@ -256,6 +281,10 @@ where
                             // replay subscriptions, bounded by the retry budget.
                             attempt += 1;
                             if !policy.should_retry(attempt) {
+                                // audit (task 2.3): the only error construction
+                                // inside the session loops; already structural —
+                                // retry.rs attaches the
+                                // TransientRetryBudgetExhausted marker.
                                 return Err(retry_budget_exhausted(
                                     policy,
                                     "reconnecting after PubSub stream end",
@@ -280,6 +309,18 @@ mod tests {
     use super::*;
     use crate::config::{RedisEndpointConfig, is_transient_redis_error};
     use crate::topology::{FakeTopology, StandaloneTopology};
+    use crate::transport_error::{io_refused_error, redis_error_raw};
+
+    fn io_refused() -> CamelError {
+        redis_error_raw(io_refused_error())
+    }
+
+    fn wrongtype_error() -> redis::RedisError {
+        redis::RedisError::from((
+            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+            "WRONGTYPE Operation against a key holding the wrong kind of value",
+        ))
+    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Instant;
@@ -508,9 +549,7 @@ mod tests {
     #[tokio::test]
     async fn pubsub_returns_err_on_budget_exhaustion() {
         let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
-        let mut io = FakePubSubIo::new(vec![Err(CamelError::ProcessorError(
-            "connection refused".into(),
-        ))]);
+        let mut io = FakePubSubIo::new(vec![Err(io_refused())]);
         let cancel = CancellationToken::new();
 
         let result = pubsub_session(
@@ -558,6 +597,84 @@ mod tests {
         );
     }
 
+    // Task 2.3: the connect-failure wrap attaches the TransientByProse
+    // marker — the legacy prose word "connection" made this site
+    // always-transient regardless of the inner kind. The production path is
+    // driven for real: a closed loopback port makes `get_async_pubsub` fail
+    // into the marker-wrapping map_err arm (no broker needed).
+    #[tokio::test]
+    async fn pubsub_connect_failure_is_transient_by_prose() {
+        let client =
+            redis::Client::open("redis://127.0.0.1:1/").expect("client opens without network");
+        let mut io = RedisPubSubIo::new(1);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            io.connect(&client).await
+        })
+        .await;
+        let err = outcome
+            .unwrap_or_else(|_elapsed| panic!("pubsub connect test timed out after 5s"))
+            .expect_err("a closed loopback port must refuse the pubsub connect");
+        assert!(
+            err.to_string()
+                .contains("Failed to create PubSub connection: "),
+            "production wrap text must stay byte-identical: {err}"
+        );
+        assert!(
+            is_transient_redis_error(&err),
+            "marker-wrapped pubsub connect failure must be transient: {err}"
+        );
+
+        // Same-expression twin carrying a NON-transient inner text: the
+        // verdict comes from the site marker (legacy prose-word identity),
+        // never from the inner display.
+        let synthetic = marker_camel(
+            "Failed to create PubSub connection: WRONGPASS invalid username-password pair".into(),
+            TransientByProse {
+                site: "pubsub connect",
+            },
+        );
+        assert!(
+            is_transient_redis_error(&synthetic),
+            "the site marker alone must make the wrap transient: {synthetic}"
+        );
+    }
+
+    // Task 2.3: the subscribe wraps keep the redis::RedisError in the
+    // source chain, so classification follows the inner kind even though
+    // the wrap prose contains no classifier word. Same expression as the
+    // production wrap — driving the real subscribe needs a live pubsub
+    // connection.
+    #[test]
+    fn pubsub_subscribe_failure_classifies_by_inner_kind() {
+        let refused = CamelError::ProcessorErrorWithSource(
+            format!(
+                "Failed to subscribe to channel {}: {}",
+                "ch",
+                io_refused_error()
+            ),
+            Arc::new(io_refused_error()),
+        );
+        assert!(
+            is_transient_redis_error(&refused),
+            "refused io kind behind the subscribe wrap must be transient: {refused}"
+        );
+
+        // Twin: a WRONGTYPE server reply through the same wrap stays
+        // non-transient.
+        let wrongtype = CamelError::ProcessorErrorWithSource(
+            format!(
+                "Failed to subscribe to channel {}: {}",
+                "ch",
+                wrongtype_error()
+            ),
+            Arc::new(wrongtype_error()),
+        );
+        assert!(
+            !is_transient_redis_error(&wrongtype),
+            "WRONGTYPE behind the subscribe wrap must not be transient: {wrongtype}"
+        );
+    }
+
     // Task 2.3: the intentional PubSub stream-end behavior change. A real
     // StandaloneTopology feeds the reconnect loop, which re-resolves the same
     // fixed connection and returns Err on budget exhaustion (NOT graceful
@@ -568,9 +685,7 @@ mod tests {
         let cfg = RedisEndpointConfig::from_uri("redis://127.0.0.1:6379?command=SUBSCRIBE")
             .expect("valid uri");
         let topology = StandaloneTopology::new(&cfg);
-        let mut io = FakePubSubIo::new(vec![Err(CamelError::ProcessorError(
-            "connection refused".into(),
-        ))]);
+        let mut io = FakePubSubIo::new(vec![Err(io_refused())]);
         let cancel = CancellationToken::new();
 
         let result = pubsub_session(
@@ -916,9 +1031,7 @@ mod tests {
     // (ADR-0007) — startup stays fail-fast, not fail-silent.
     #[tokio::test]
     async fn reconnect_budget_exhaustion_is_transient() {
-        let topology = FakeTopology::new(vec![Err(CamelError::ProcessorError(
-            "connection refused".into(),
-        ))]);
+        let topology = FakeTopology::new(vec![Err(io_refused())]);
         let mut io = FakePubSubIo::new(vec![]);
         let cancel = CancellationToken::new();
         let policy = NetworkRetryPolicy {

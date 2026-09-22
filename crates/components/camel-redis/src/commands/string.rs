@@ -185,7 +185,7 @@ pub async fn dispatch(
             let value = require_value(exchange)?;
             conn.set::<_, _, ()>(&key, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SET failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SET", e))?;
             serde_json::Value::Null
         }
         RedisCommand::Get => {
@@ -193,7 +193,7 @@ pub async fn dispatch(
             let val: Option<String> = conn
                 .get(&key)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis GET failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("GET", e))?;
             json_from_optional_string(val)
         }
         RedisCommand::Getset => {
@@ -202,7 +202,7 @@ pub async fn dispatch(
             let old: Option<String> = conn
                 .getset(&key, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis GETSET failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("GETSET", e))?;
             json_from_optional_string(old)
         }
         RedisCommand::Setnx => {
@@ -211,7 +211,7 @@ pub async fn dispatch(
             let ok: bool = conn
                 .set_nx(&key, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SETNX failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SETNX", e))?;
             serde_json::Value::Bool(ok)
         }
         RedisCommand::Setex => {
@@ -220,7 +220,7 @@ pub async fn dispatch(
             let ttl = resolve_timeout_seconds(exchange);
             conn.set_ex::<_, _, ()>(&key, value_to_redis_arg(&value), ttl)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis SETEX failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SETEX", e))?;
             serde_json::Value::Null
         }
         RedisCommand::Mget => {
@@ -228,14 +228,14 @@ pub async fn dispatch(
             let vals: Vec<Option<String>> = conn
                 .mget(&keys)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis MGET failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("MGET", e))?;
             json_array_from_optional_strings(vals)
         }
         RedisCommand::Mset => {
             let values = resolve_mset_values(exchange)?;
             conn.mset::<_, _, ()>(&values)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis MSET failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("MSET", e))?;
             serde_json::Value::Null
         }
         RedisCommand::Incr => {
@@ -243,7 +243,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .incr(&key, 1i64)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis INCR failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("INCR", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Incrby => {
@@ -252,7 +252,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .incr(&key, by)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis INCRBY failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("INCRBY", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Decr => {
@@ -260,7 +260,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .decr(&key, 1i64)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis DECR failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("DECR", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Decrby => {
@@ -269,7 +269,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .decr(&key, by)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis DECRBY failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("DECRBY", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Append => {
@@ -278,7 +278,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .append(&key, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis APPEND failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("APPEND", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Strlen => {
@@ -286,7 +286,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .strlen(&key)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis STRLEN failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("STRLEN", e))?;
             serde_json::json!(n)
         }
         _ => unreachable!("non-string commands rejected above"),

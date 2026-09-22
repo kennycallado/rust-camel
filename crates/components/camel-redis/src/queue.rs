@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::retry::transient_retry_step;
 use crate::topology::{RedisTopology, ServerKind};
+use crate::transport_error::{TransientByProse, TransportTimeout, marker_camel, redis_error_raw};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueuePopCommand {
@@ -69,12 +70,21 @@ impl QueueIo for RedisQueueIo {
         )
         .await
         .map_err(|_| {
-            CamelError::ProcessorError(format!(
-                "Queue connection timed out after {}s",
-                self.timeout_secs
-            ))
+            marker_camel(
+                format!("Queue connection timed out after {}s", self.timeout_secs),
+                TransportTimeout {
+                    stage: "queue connect",
+                },
+            )
         })?
-        .map_err(|e| CamelError::ProcessorError(format!("Failed to create connection: {}", e)))?;
+        .map_err(|e| {
+            marker_camel(
+                format!("Failed to create connection: {}", e),
+                TransientByProse {
+                    site: "queue connect",
+                },
+            )
+        })?;
         self.conn = Some(conn);
         Ok(())
     }
@@ -84,17 +94,21 @@ impl QueueIo for RedisQueueIo {
         key: &str,
         timeout_secs: u64,
     ) -> Result<Option<(String, String)>, CamelError> {
-        let conn = self
-            .conn
-            .as_mut()
-            .ok_or_else(|| CamelError::ProcessorError("Queue connection not established".into()))?;
+        let conn = self.conn.as_mut().ok_or_else(|| {
+            marker_camel(
+                "Queue connection not established".into(),
+                TransientByProse {
+                    site: "queue blpop guard",
+                },
+            )
+        })?;
         let cmd = redis::cmd(queue_command_name(self.pop_command))
             .arg(key)
             .arg(timeout_secs)
             .to_owned();
         cmd.query_async::<Option<(String, String)>>(conn)
             .await
-            .map_err(|e| CamelError::ProcessorError(e.to_string()))
+            .map_err(redis_error_raw)
     }
 }
 
@@ -184,6 +198,22 @@ mod tests {
     use super::*;
     use crate::config::is_transient_redis_error;
     use crate::topology::FakeTopology;
+    use crate::transport_error::{io_refused_error, io_reset_error, redis_error_raw};
+
+    fn io_reset() -> CamelError {
+        redis_error_raw(io_reset_error())
+    }
+
+    fn io_refused() -> CamelError {
+        redis_error_raw(io_refused_error())
+    }
+
+    fn wrongtype_error() -> redis::RedisError {
+        redis::RedisError::from((
+            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+            "WRONGTYPE Operation against a key holding the wrong kind of value",
+        ))
+    }
 
     /// What `blpop` does once the current connection's outcomes have been
     /// consumed AND no further outcome batches remain.
@@ -301,14 +331,8 @@ mod tests {
     #[tokio::test]
     async fn queue_recovers_after_connection_loss() {
         let topology = FakeTopology::addrs(vec!["redis://a:6379".into(), "redis://b:6379".into()]);
-        let mut io = FakeQueueIo::new(
-            vec![
-                Err(CamelError::ProcessorError("connection reset".into())),
-                Ok(()),
-            ],
-            vec![],
-        )
-        .with_blpop_per_connect(vec![vec![item("v")]]);
+        let mut io = FakeQueueIo::new(vec![Err(io_reset()), Ok(())], vec![])
+            .with_blpop_per_connect(vec![vec![item("v")]]);
         let cancel = CancellationToken::new();
 
         let delivered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -348,10 +372,7 @@ mod tests {
     #[tokio::test]
     async fn queue_returns_err_when_failover_budget_exhausted() {
         let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
-        let mut io = FakeQueueIo::new(
-            vec![Err(CamelError::ProcessorError("connection refused".into()))],
-            vec![],
-        );
+        let mut io = FakeQueueIo::new(vec![Err(io_refused())], vec![]);
         let cancel = CancellationToken::new();
 
         let result = queue_session(
@@ -374,10 +395,7 @@ mod tests {
     #[tokio::test]
     async fn queue_budget_exhaustion_classified_transient() {
         let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
-        let mut io = FakeQueueIo::new(
-            vec![Ok(())],
-            vec![Err(CamelError::ProcessorError("connection reset".into()))],
-        );
+        let mut io = FakeQueueIo::new(vec![Ok(())], vec![Err(io_reset())]);
         let cancel = CancellationToken::new();
 
         let result = queue_session(
@@ -405,10 +423,8 @@ mod tests {
     #[tokio::test]
     async fn queue_recovers_after_blpop_transient_error() {
         let topology = FakeTopology::addrs(vec!["redis://a:6379".into(), "redis://b:6379".into()]);
-        let mut io = FakeQueueIo::new(vec![Ok(()), Ok(())], vec![]).with_blpop_per_connect(vec![
-            vec![Err(CamelError::ProcessorError("connection reset".into()))],
-            vec![item("v")],
-        ]);
+        let mut io = FakeQueueIo::new(vec![Ok(()), Ok(())], vec![])
+            .with_blpop_per_connect(vec![vec![Err(io_reset())], vec![item("v")]]);
         let cancel = CancellationToken::new();
 
         let delivered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -548,5 +564,45 @@ mod tests {
         // 3 timeouts + 1 item, plus (racily) one final poll that pends until
         // the cancel branch of the session's select wins.
         assert!(io.blpop_count >= 4);
+    }
+
+    // Task 2.3: the connect-timeout wrap attaches the TransportTimeout
+    // marker, so the error classifies transient without text sniffing.
+    // Constructed with the same marker_camel expression as the production
+    // connect wrap — forcing the tokio timeout arm deterministically would
+    // need a pending-handshake server, so the real arm is not driven here.
+    #[test]
+    fn queue_connect_timeout_is_transient() {
+        let err = marker_camel(
+            format!("Queue connection timed out after {}s", 5),
+            TransportTimeout {
+                stage: "queue connect",
+            },
+        );
+        assert!(
+            is_transient_redis_error(&err),
+            "timeout-marked queue connect error must be transient: {err}"
+        );
+    }
+
+    // Task 2.3: the blpop passthrough (`redis_error_raw`) keeps the
+    // redis::RedisError in the source chain, so classification follows the
+    // inner kind. Same expression as the production wrap — driving the real
+    // blpop needs a live broker connection.
+    #[test]
+    fn queue_blpop_passthrough_refused_is_transient() {
+        let err = redis_error_raw(io_refused_error());
+        assert!(
+            is_transient_redis_error(&err),
+            "refused io kind through the passthrough wrap must be transient: {err}"
+        );
+
+        // Twin: a WRONGTYPE server reply through the same wrap stays
+        // non-transient (business error, not a transport hiccup).
+        let wrongtype = redis_error_raw(wrongtype_error());
+        assert!(
+            !is_transient_redis_error(&wrongtype),
+            "WRONGTYPE through the passthrough wrap must not be transient: {wrongtype}"
+        );
     }
 }

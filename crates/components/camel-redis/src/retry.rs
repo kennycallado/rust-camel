@@ -8,34 +8,44 @@
 //!
 //! # ADR-0012 invariant
 //!
-//! The terminal (budget-exhaustion) error built here contains the word
-//! "connection" — exactly once, in [`retry_budget_exhausted`] — because
+//! The terminal (budget-exhaustion) error built here carries the
+//! `TransientRetryBudgetExhausted` marker in its source chain, so
 //! [`is_transient_redis_error`](crate::config::is_transient_redis_error)
-//! matches it. That classification routes budget exhaustion to the consumer's
-//! `e:redis:message-transient-budget` metric instead of
-//! `e:redis:message-non-transient`. Do not reword these messages.
+//! classifies it structurally. That classification routes budget
+//! exhaustion to the consumer's `e:redis:message-transient-budget` metric
+//! instead of `e:redis:message-non-transient`. The word "connection"
+//! stays in the message text for operator continuity; it is no longer
+//! load-bearing.
 
 use camel_component_api::{CamelError, NetworkRetryPolicy};
 use std::ops::ControlFlow;
 use tracing::warn;
 
 use crate::config::is_transient_redis_error;
+use crate::transport_error::{TransientRetryBudgetExhausted, marker_camel};
 
 /// Terminal error when the transient-retry budget is exhausted.
 ///
-/// The word "connection" is load-bearing (see the module docs): it makes
-/// `is_transient_redis_error` classify this error as transient so the
-/// consumer's Err-branch fires the transient-budget metric (ADR-0012) and
-/// Route supervision restarts the route (ADR-0007).
+/// The `TransientRetryBudgetExhausted` marker is load-bearing (see the
+/// module docs): `is_transient_redis_error` classifies this error as
+/// transient through the marker, so the consumer's Err-branch fires the
+/// transient-budget metric (ADR-0012) and Route supervision restarts the
+/// route (ADR-0007).
 pub(crate) fn retry_budget_exhausted(
     policy: &NetworkRetryPolicy,
     stage: &str,
     cause: &str,
 ) -> CamelError {
-    CamelError::ProcessorError(format!(
-        "connection lost while {stage} (retry budget exhausted after {} attempts): {cause}",
-        policy.max_attempts
-    ))
+    marker_camel(
+        format!(
+            "connection lost while {stage} (retry budget exhausted after {} attempts): {cause}",
+            policy.max_attempts
+        ),
+        TransientRetryBudgetExhausted {
+            stage: stage.into(),
+            attempts: policy.max_attempts,
+        },
+    )
 }
 
 /// One classify → budget → warn → backoff step of a bounded reconnect loop.
@@ -83,6 +93,7 @@ pub(crate) async fn transient_retry_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport_error::{io_refused_error, redis_error_raw};
     use std::time::Duration;
 
     fn fast_policy(max_attempts: u32) -> NetworkRetryPolicy {
@@ -93,16 +104,15 @@ mod tests {
         }
     }
 
+    fn refused() -> CamelError {
+        redis_error_raw(io_refused_error())
+    }
+
     #[tokio::test]
     async fn continues_within_budget_and_advances_attempt() {
         let mut attempt = 0;
-        let flow = transient_retry_step(
-            &fast_policy(2),
-            &mut attempt,
-            CamelError::ProcessorError("connection refused".into()),
-            "connecting",
-        )
-        .await;
+        let flow =
+            transient_retry_step(&fast_policy(2), &mut attempt, refused(), "connecting").await;
 
         assert!(matches!(flow, ControlFlow::Continue(())));
         assert_eq!(
@@ -111,15 +121,16 @@ mod tests {
         );
     }
 
-    // ADR-0012: the exhaustion error must contain "connection" so it
-    // classifies transient (transient-budget metric path, not non-transient).
+    // ADR-0012: the exhaustion error carries the budget-exhaustion marker
+    // so it classifies transient (transient-budget metric path, not
+    // non-transient).
     #[tokio::test]
     async fn exhaustion_error_classifies_transient_and_names_stage() {
         let mut attempt = 0;
         let err = match transient_retry_step(
             &fast_policy(1),
             &mut attempt,
-            CamelError::ProcessorError("connection refused".into()),
+            refused(),
             "connecting for PubSub",
         )
         .await

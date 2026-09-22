@@ -97,10 +97,12 @@ impl RedisCommandExecutor for FakeExecutor {
             Ok(()) => Ok(()),
             Err(fake_err) => {
                 if fake_err.is_transient {
-                    Err(CamelError::ProcessorError(format!(
-                        "Connection error: {}",
-                        fake_err.message
-                    )))
+                    Err(crate::transport_error::marker_camel(
+                        format!("Connection error: {}", fake_err.message),
+                        crate::transport_error::TransientByProse {
+                            site: "FakeExecutor transient seam",
+                        },
+                    ))
                 } else {
                     Err(CamelError::ProcessorError(fake_err.message))
                 }
@@ -341,19 +343,27 @@ impl MultiplexedExecutor {
         let new_conn = tokio::time::timeout(Duration::from_secs(timeout_secs), connect)
             .await
             .map_err(|_| {
-                CamelError::ProcessorError(format!(
-                    "Redis connection to '{}' timed out after {}s",
-                    redis_url_safe, timeout_secs
-                ))
+                crate::transport_error::marker_camel(
+                    format!(
+                        "Redis connection to '{}' timed out after {}s",
+                        redis_url_safe, timeout_secs
+                    ),
+                    crate::transport_error::TransportTimeout {
+                        stage: "executor connect",
+                    },
+                )
             })?
             .map_err(|e| {
                 // rc-swzq: name the credential plane on data-node auth
                 // failures so a sentinel_password/password mixup is
                 // diagnosable from the error alone.
-                CamelError::ProcessorError(crate::config::enrich_data_auth_error(format!(
-                    "Failed to connect to Redis at '{}': {}",
-                    redis_url_safe, e
-                )))
+                CamelError::ProcessorErrorWithSource(
+                    crate::config::enrich_data_auth_error(format!(
+                        "Failed to connect to Redis at '{}': {}",
+                        redis_url_safe, e
+                    )),
+                    Arc::new(e),
+                )
             })?;
 
         let mut guard = self.conn.lock().await;
@@ -729,9 +739,36 @@ mod tests {
             "topology should be resolved on first execute_command"
         );
         // Connecting to a dead port (127.0.0.1:1) must fail deterministically.
+        // Both wraps are acceptable: the auth-enriched connect error carries
+        // the inner redis error as source (ProcessorErrorWithSource).
         assert!(
-            matches!(result, Err(CamelError::ProcessorError(_))),
+            matches!(
+                result,
+                Err(CamelError::ProcessorError(_))
+                    | Err(CamelError::ProcessorErrorWithSource(_, _))
+            ),
             "expected ProcessorError connecting to dead port, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn connect_timeout_classifies_transient() {
+        // Same marker_camel call shape as the production get_conn
+        // connect-timeout wrap.
+        let redis_url_safe = "redis://localhost:6379";
+        let timeout_secs = 1u64;
+        let err = crate::transport_error::marker_camel(
+            format!(
+                "Redis connection to '{}' timed out after {}s",
+                redis_url_safe, timeout_secs
+            ),
+            crate::transport_error::TransportTimeout {
+                stage: "executor connect",
+            },
+        );
+        assert!(
+            is_transient_redis_error(&err),
+            "executor connect timeout must classify transient: {err}"
         );
     }
 

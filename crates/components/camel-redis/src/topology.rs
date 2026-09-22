@@ -5,6 +5,7 @@
 
 use crate::config::RedisEndpointConfig;
 use crate::sentinel_config::TopologyKind;
+use crate::transport_error::{TransientByProse, marker_camel};
 use async_trait::async_trait;
 use camel_component_api::CamelError;
 use redis::{Client, IntoConnectionInfo};
@@ -119,7 +120,15 @@ impl RedisTopology for StandaloneTopology {
             .clone()
             .into_connection_info()
             .map_err(|e| {
-                CamelError::ProcessorError(format!("failed to build Redis connection info: {e}"))
+                // Legacy prose contains the classifier word "connection",
+                // so this site was always transient regardless of the inner
+                // defect — the marker preserves that verdict.
+                marker_camel(
+                    format!("failed to build Redis connection info: {e}"),
+                    TransientByProse {
+                        site: "topology connection info",
+                    },
+                )
             })?
             .set_redis_settings(self.settings.clone());
 
@@ -137,11 +146,20 @@ impl RedisTopology for StandaloneTopology {
                     root_cert: self.ca_pem.clone(),
                 },
             )
-            .map_err(|e| CamelError::ProcessorError(format!("failed to open Redis client: {e}")));
+            .map_err(|e| {
+                CamelError::ProcessorErrorWithSource(
+                    format!("failed to open Redis client: {e}"),
+                    Arc::new(e),
+                )
+            });
         }
 
-        Client::open(info)
-            .map_err(|e| CamelError::ProcessorError(format!("failed to open Redis client: {e}")))
+        Client::open(info).map_err(|e| {
+            CamelError::ProcessorErrorWithSource(
+                format!("failed to open Redis client: {e}"),
+                Arc::new(e),
+            )
+        })
     }
 }
 
@@ -200,7 +218,10 @@ impl RedisTopology for FakeTopology {
 
         match outcome {
             Ok(addr) => Client::open(addr.as_str()).map_err(|e| {
-                CamelError::ProcessorError(format!("failed to open Redis client: {e}"))
+                CamelError::ProcessorErrorWithSource(
+                    format!("failed to open Redis client: {e}"),
+                    Arc::new(e),
+                )
             }),
             Err(e) => Err(e),
         }
@@ -344,7 +365,12 @@ impl SentinelTopology {
             node_conn_info,
             redis::sentinel::SentinelServerType::Master,
         )
-        .map_err(|e| CamelError::ProcessorError(format!("failed to build sentinel client: {e}")))?;
+        .map_err(|e| {
+            CamelError::ProcessorErrorWithSource(
+                format!("failed to build sentinel client: {e}"),
+                Arc::new(e),
+            )
+        })?;
 
         Ok(Self {
             client: Arc::new(std::sync::Mutex::new(client)),
@@ -485,21 +511,38 @@ impl RedisTopology for SentinelTopology {
                 // held only briefly inside the blocking thread.
                 let arc = self.client.clone();
                 let client = tokio::task::spawn_blocking(move || match arc.lock() {
-                    Ok(mut guard) => guard
-                        .get_client()
-                        .map_err(|e| format!("sentinel resolve: {e}")),
-                    Err(_) => Err("sentinel mutex poisoned".to_string()),
+                    Ok(mut guard) => guard.get_client().map_err(|e| {
+                        // rc-swzq: name the credential plane on sentinel-side
+                        // auth failures so a sentinel_password/password mixup
+                        // is diagnosable from the error alone. The enriched
+                        // text is byte-identical to the legacy wrap; keeping
+                        // the RedisError as source lets the structural
+                        // classifier read it (the flat-String boundary would
+                        // have dropped it).
+                        let enriched = crate::config::enrich_sentinel_auth_error(format!(
+                            "sentinel resolve: {e}"
+                        ));
+                        CamelError::ProcessorErrorWithSource(enriched, Arc::new(e))
+                    }),
+                    // audit: no classifier word in static prose -> rule 6
+                    // reproduces the legacy false verdict.
+                    Err(_) => Err(CamelError::ProcessorError("sentinel mutex poisoned".into())),
                 })
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("sentinel resolve join: {e}")))?
                 .map_err(|e| {
-                    // rc-swzq: name the credential plane on sentinel-side
-                    // auth failures so a sentinel_password/password mixup is
-                    // diagnosable from the error alone.
-                    CamelError::ProcessorError(crate::config::enrich_sentinel_auth_error(e))
+                    // JoinError Display ("task N panicked" / "task was
+                    // cancelled") carries no classifier word, so the legacy
+                    // verdict was false — source-preservation keeps it false.
+                    CamelError::ProcessorErrorWithSource(
+                        format!("sentinel resolve join: {e}"),
+                        Arc::new(e),
+                    )
                 })?;
+                let client = client?;
                 Ok(client)
             }
+            // audit: no classifier word in static prose -> rule 6
+            // reproduces the legacy false verdict.
             ServerKind::Replica => Err(CamelError::ProcessorError(
                 "replica reads not yet supported".into(),
             )),

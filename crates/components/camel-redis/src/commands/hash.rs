@@ -186,116 +186,117 @@ pub async fn dispatch(
         return Err(CamelError::ProcessorError("Not a hash command".into()));
     }
 
-    let result: serde_json::Value =
-        match cmd {
-            RedisCommand::Hset => {
-                let key = require_key(exchange)?;
-                let field = resolve_hash_field(exchange)?;
-                let value = require_value(exchange)?;
-                let n: i64 = conn
-                    .hset(&key, field, value_to_redis_arg(&value))
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis HSET failed: {e}")))?;
-                serde_json::json!(n)
+    let result: serde_json::Value = match cmd {
+        RedisCommand::Hset => {
+            let key = require_key(exchange)?;
+            let field = resolve_hash_field(exchange)?;
+            let value = require_value(exchange)?;
+            let n: i64 = conn
+                .hset(&key, field, value_to_redis_arg(&value))
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HSET", e))?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Hget => {
+            let (key, field) = resolve_hash_field_operands(exchange)?;
+            let val: Option<String> = conn
+                .hget(&key, field)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HGET", e))?;
+            json_from_optional_hash_value(val)
+        }
+        RedisCommand::Hsetnx => {
+            let key = require_key(exchange)?;
+            let field = resolve_hash_field(exchange)?;
+            let value = require_value(exchange)?;
+            let ok: bool = conn
+                .hset_nx(&key, field, value_to_redis_arg(&value))
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HSETNX", e))?;
+            serde_json::json!(ok)
+        }
+        RedisCommand::Hmset => {
+            let key = require_key(exchange)?;
+            let values = resolve_hash_values_map(exchange)?;
+            conn.hset_multiple::<_, _, _, ()>(&key, &values)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HMSET", e))?;
+            serde_json::Value::Null
+        }
+        RedisCommand::Hmget => {
+            let key = require_key(exchange)?;
+            let fields = resolve_hash_fields(exchange)?;
+            // Use raw command for HMGET since AsyncCommands::hget only supports single field
+            let mut cmd = redis::cmd("HMGET");
+            cmd.arg(&key);
+            for field in &fields {
+                cmd.arg(field);
             }
-            RedisCommand::Hget => {
-                let (key, field) = resolve_hash_field_operands(exchange)?;
-                let val: Option<String> = conn
-                    .hget(&key, field)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis HGET failed: {e}")))?;
-                json_from_optional_hash_value(val)
-            }
-            RedisCommand::Hsetnx => {
-                let key = require_key(exchange)?;
-                let field = resolve_hash_field(exchange)?;
-                let value = require_value(exchange)?;
-                let ok: bool = conn
-                    .hset_nx(&key, field, value_to_redis_arg(&value))
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis HSETNX failed: {e}")))?;
-                serde_json::json!(ok)
-            }
-            RedisCommand::Hmset => {
-                let key = require_key(exchange)?;
-                let values = resolve_hash_values_map(exchange)?;
-                conn.hset_multiple::<_, _, _, ()>(&key, &values)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis HMSET failed: {e}")))?;
-                serde_json::Value::Null
-            }
-            RedisCommand::Hmget => {
-                let key = require_key(exchange)?;
-                let fields = resolve_hash_fields(exchange)?;
-                // Use raw command for HMGET since AsyncCommands::hget only supports single field
-                let mut cmd = redis::cmd("HMGET");
-                cmd.arg(&key);
-                for field in &fields {
-                    cmd.arg(field);
-                }
-                let vals: Vec<Option<String>> = cmd
-                    .query_async(conn)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis HMGET failed: {e}")))?;
-                json_from_optional_hash_values(vals)
-            }
-            RedisCommand::Hdel => {
-                let (key, field) = resolve_hash_field_operands(exchange)?;
-                let n: i64 = conn
-                    .hdel(&key, field)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis HDEL failed: {e}")))?;
-                serde_json::json!(n)
-            }
-            RedisCommand::Hexists => {
-                let (key, field) = resolve_hash_field_operands(exchange)?;
-                let ok: bool = conn.hexists(&key, field).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis HEXISTS failed: {e}"))
-                })?;
-                serde_json::json!(ok)
-            }
-            RedisCommand::Hlen => {
-                let key = require_key(exchange)?;
-                let n: i64 = conn
-                    .hlen(&key)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis HLEN failed: {e}")))?;
-                serde_json::json!(n)
-            }
-            RedisCommand::Hkeys => {
-                let key = require_key(exchange)?;
-                let keys: Vec<String> = conn
-                    .hkeys(&key)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis HKEYS failed: {e}")))?;
-                serde_json::json!(keys)
-            }
-            RedisCommand::Hvals => {
-                let key = require_key(exchange)?;
-                let vals: Vec<String> = conn
-                    .hvals(&key)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis HVALS failed: {e}")))?;
-                serde_json::json!(vals)
-            }
-            RedisCommand::Hgetall => {
-                let key = require_key(exchange)?;
-                let map: std::collections::HashMap<String, String> =
-                    conn.hgetall(&key).await.map_err(|e| {
-                        CamelError::ProcessorError(format!("Redis HGETALL failed: {e}"))
-                    })?;
-                serde_json::json!(map)
-            }
-            RedisCommand::Hincrby => {
-                let (key, field) = resolve_hash_field_operands(exchange)?;
-                let by = resolve_hash_increment(exchange);
-                let n: i64 = conn.hincr(&key, field, by).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis HINCRBY failed: {e}"))
-                })?;
-                serde_json::json!(n)
-            }
-            _ => unreachable!("non-hash commands rejected above"),
-        };
+            let vals: Vec<Option<String>> = cmd
+                .query_async(conn)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HMGET", e))?;
+            json_from_optional_hash_values(vals)
+        }
+        RedisCommand::Hdel => {
+            let (key, field) = resolve_hash_field_operands(exchange)?;
+            let n: i64 = conn
+                .hdel(&key, field)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HDEL", e))?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Hexists => {
+            let (key, field) = resolve_hash_field_operands(exchange)?;
+            let ok: bool = conn
+                .hexists(&key, field)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HEXISTS", e))?;
+            serde_json::json!(ok)
+        }
+        RedisCommand::Hlen => {
+            let key = require_key(exchange)?;
+            let n: i64 = conn
+                .hlen(&key)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HLEN", e))?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Hkeys => {
+            let key = require_key(exchange)?;
+            let keys: Vec<String> = conn
+                .hkeys(&key)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HKEYS", e))?;
+            serde_json::json!(keys)
+        }
+        RedisCommand::Hvals => {
+            let key = require_key(exchange)?;
+            let vals: Vec<String> = conn
+                .hvals(&key)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HVALS", e))?;
+            serde_json::json!(vals)
+        }
+        RedisCommand::Hgetall => {
+            let key = require_key(exchange)?;
+            let map: std::collections::HashMap<String, String> = conn
+                .hgetall(&key)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HGETALL", e))?;
+            serde_json::json!(map)
+        }
+        RedisCommand::Hincrby => {
+            let (key, field) = resolve_hash_field_operands(exchange)?;
+            let by = resolve_hash_increment(exchange);
+            let n: i64 = conn
+                .hincr(&key, field, by)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HINCRBY", e))?;
+            serde_json::json!(n)
+        }
+        _ => unreachable!("non-hash commands rejected above"),
+    };
     exchange.input.body = Body::Json(result);
     Ok(())
 }

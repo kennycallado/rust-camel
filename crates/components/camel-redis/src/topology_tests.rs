@@ -936,3 +936,56 @@ fn sentinel_ca_with_mixed_scheme_node_list_fails_closed() {
     )
     .expect("mixed-scheme sentinel list without a CA must stay buildable");
 }
+
+// ── rediserr task 2.2: topology wrap classification ──────────────────────────
+// The resolve/connect boundary wraps must classify identically to the
+// legacy substring sniffer. These tests pin the exact wrap shapes the
+// converted production sites produce.
+
+#[test]
+fn connection_info_failure_is_transient_by_prose() {
+    // The `failed to build Redis connection info` wrap's static prose
+    // contains the classifier word "connection", so the legacy verdict was
+    // ALWAYS transient regardless of the inner defect — including a
+    // non-transient inner text like the TLS-feature-absent failure below.
+    // The structural wrap attaches the TransientByProse marker to
+    // preserve that always-transient verdict.
+    let err = crate::transport_error::marker_camel(
+        "failed to build Redis connection info: can't connect with TLS, the feature is not enabled"
+            .to_string(),
+        crate::transport_error::TransientByProse {
+            site: "topology connection info",
+        },
+    );
+    assert!(
+        crate::config::is_transient_redis_error(&err),
+        "connection-info wrap prose was always transient; the marker must keep it so: {err}"
+    );
+}
+
+#[test]
+fn client_open_failure_classifies_by_inner_kind() {
+    // "failed to open Redis client" prose carries no classifier word, so
+    // the legacy verdict came from the inner RedisError Display — the
+    // source-preserving wrap must let the structural rules read it.
+    let transient = CamelError::ProcessorErrorWithSource(
+        "failed to open Redis client: x".into(),
+        Arc::new(crate::transport_error::io_refused_error()),
+    );
+    assert!(
+        crate::config::is_transient_redis_error(&transient),
+        "io-refused inner error must stay transient: {transient}"
+    );
+
+    let fatal = CamelError::ProcessorErrorWithSource(
+        "failed to open Redis client: x".into(),
+        Arc::new(redis::RedisError::from((
+            redis::ErrorKind::AuthenticationFailed,
+            "WRONGPASS invalid username-password pair",
+        ))),
+    );
+    assert!(
+        !crate::config::is_transient_redis_error(&fatal),
+        "auth-failure inner error must stay non-transient: {fatal}"
+    );
+}

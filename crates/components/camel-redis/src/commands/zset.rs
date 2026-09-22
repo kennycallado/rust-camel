@@ -282,7 +282,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .zadd(&key, value_to_redis_arg(&member), score)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis ZADD failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZADD", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Zrem => {
@@ -291,7 +291,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .zrem(&key, value_to_redis_arg(&member))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis ZREM failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZREM", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Zrange => {
@@ -302,13 +302,13 @@ pub async fn dispatch(
                 let vals: Vec<(String, f64)> = conn
                     .zrange_withscores(&key, start, end)
                     .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis ZRANGE failed: {e}")))?;
+                    .map_err(|e| crate::transport_error::redis_error_to_camel("ZRANGE", e))?;
                 json_from_scored_members(vals)
             } else {
                 let vals: Vec<String> = conn
                     .zrange(&key, start, end)
                     .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis ZRANGE failed: {e}")))?;
+                    .map_err(|e| crate::transport_error::redis_error_to_camel("ZRANGE", e))?;
                 serde_json::json!(vals)
             }
         }
@@ -320,14 +320,13 @@ pub async fn dispatch(
                 let vals: Vec<(String, f64)> = conn
                     .zrevrange_withscores(&key, start, end)
                     .await
-                    .map_err(|e| {
-                        CamelError::ProcessorError(format!("Redis ZREVRANGE failed: {e}"))
-                    })?;
+                    .map_err(|e| crate::transport_error::redis_error_to_camel("ZREVRANGE", e))?;
                 json_from_scored_members(vals)
             } else {
-                let vals: Vec<String> = conn.zrevrange(&key, start, end).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis ZREVRANGE failed: {e}"))
-                })?;
+                let vals: Vec<String> = conn
+                    .zrevrange(&key, start, end)
+                    .await
+                    .map_err(|e| crate::transport_error::redis_error_to_camel("ZREVRANGE", e))?;
                 serde_json::json!(vals)
             }
         }
@@ -337,7 +336,7 @@ pub async fn dispatch(
             let rank: Option<i64> = conn
                 .zrank(&key, value_to_redis_arg(&member))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis ZRANK failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZRANK", e))?;
             json_from_optional_rank(rank)
         }
         RedisCommand::Zrevrank => {
@@ -346,7 +345,7 @@ pub async fn dispatch(
             let rank: Option<i64> = conn
                 .zrevrank(&key, value_to_redis_arg(&member))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis ZREVRANK failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZREVRANK", e))?;
             json_from_optional_rank(rank)
         }
         RedisCommand::Zscore => {
@@ -355,7 +354,7 @@ pub async fn dispatch(
             let score: Option<f64> = conn
                 .zscore(&key, value_to_redis_arg(&member))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis ZSCORE failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZSCORE", e))?;
             json_from_optional_score(score)
         }
         RedisCommand::Zcard => {
@@ -363,7 +362,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .zcard(&key)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis ZCARD failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZCARD", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Zincrby => {
@@ -373,7 +372,7 @@ pub async fn dispatch(
             let new_score: f64 = conn
                 .zincr(&key, value_to_redis_arg(&member), increment)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis ZINCRBY failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZINCRBY", e))?;
             serde_json::json!(new_score)
         }
         RedisCommand::Zcount => {
@@ -382,7 +381,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .zcount(&key, min, max)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis ZCOUNT failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZCOUNT", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Zrangebyscore => {
@@ -394,12 +393,12 @@ pub async fn dispatch(
                     .zrangebyscore_withscores(&key, min, max)
                     .await
                     .map_err(|e| {
-                        CamelError::ProcessorError(format!("Redis ZRANGEBYSCORE failed: {e}"))
+                        crate::transport_error::redis_error_to_camel("ZRANGEBYSCORE", e)
                     })?;
                 json_from_scored_members(vals)
             } else {
                 let vals: Vec<String> = conn.zrangebyscore(&key, min, max).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis ZRANGEBYSCORE failed: {e}"))
+                    crate::transport_error::redis_error_to_camel("ZRANGEBYSCORE", e)
                 })?;
                 serde_json::json!(vals)
             }
@@ -413,13 +412,13 @@ pub async fn dispatch(
                     .zrevrangebyscore_withscores(&key, max, min)
                     .await
                     .map_err(|e| {
-                        CamelError::ProcessorError(format!("Redis ZREVRANGEBYSCORE failed: {e}"))
+                        crate::transport_error::redis_error_to_camel("ZREVRANGEBYSCORE", e)
                     })?;
                 json_from_scored_members(vals)
             } else {
                 let vals: Vec<String> =
                     conn.zrevrangebyscore(&key, max, min).await.map_err(|e| {
-                        CamelError::ProcessorError(format!("Redis ZREVRANGEBYSCORE failed: {e}"))
+                        crate::transport_error::redis_error_to_camel("ZREVRANGEBYSCORE", e)
                     })?;
                 serde_json::json!(vals)
             }
@@ -427,9 +426,10 @@ pub async fn dispatch(
         RedisCommand::Zremrangebyrank => {
             let key = require_key(exchange)?;
             let (start, end) = resolve_zremrange_rank_bounds(exchange);
-            let n: usize = conn.zremrangebyrank(&key, start, end).await.map_err(|e| {
-                CamelError::ProcessorError(format!("Redis ZREMRANGEBYRANK failed: {e}"))
-            })?;
+            let n: usize = conn
+                .zremrangebyrank(&key, start, end)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZREMRANGEBYRANK", e))?;
             serde_json::json!(n as i64)
         }
         RedisCommand::Zremrangebyscore => {
@@ -442,23 +442,23 @@ pub async fn dispatch(
                 .arg(max)
                 .query_async(conn)
                 .await
-                .map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis ZREMRANGEBYSCORE failed: {e}"))
-                })?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZREMRANGEBYSCORE", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Zunionstore => {
             let (dest, keys) = resolve_zstore_operands(exchange)?;
-            let n: i64 = conn.zunionstore(dest, &keys).await.map_err(|e| {
-                CamelError::ProcessorError(format!("Redis ZUNIONSTORE failed: {e}"))
-            })?;
+            let n: i64 = conn
+                .zunionstore(dest, &keys)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZUNIONSTORE", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Zinterstore => {
             let (dest, keys) = resolve_zstore_operands(exchange)?;
-            let n: i64 = conn.zinterstore(dest, &keys).await.map_err(|e| {
-                CamelError::ProcessorError(format!("Redis ZINTERSTORE failed: {e}"))
-            })?;
+            let n: i64 = conn
+                .zinterstore(dest, &keys)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ZINTERSTORE", e))?;
             serde_json::json!(n)
         }
         _ => unreachable!("non-zset commands rejected above"),

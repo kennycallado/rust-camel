@@ -930,9 +930,10 @@ impl RedisEndpointConfig {
     /// creation instead of the redis crate's raw feature error inside a
     /// reconnect loop.
     ///
-    /// The messages deliberately avoid transient-classifier words such as
-    /// "connection" so `is_transient_redis_error` never treats them as
-    /// retryable (ADR-0012), and embed no host or URL (ADR-0051).
+    /// The messages avoid transient-classifier words such as "connection"
+    /// for defense in depth, though `is_transient_redis_error` now rejects
+    /// `Config` errors structurally before any text is inspected
+    /// (ADR-0012), and they embed no host or URL (ADR-0051).
     pub fn validate_tls(&self) -> Result<(), CamelError> {
         if self.is_ssl_enabled() && !cfg!(feature = "tls") {
             return Err(CamelError::Config(
@@ -1058,29 +1059,16 @@ pub(crate) fn sentinel_node_url_requires_tls(node: &str) -> bool {
 /// Returns true if the error is a transient transport failure that may be
 /// resolved by reconnecting (e.g. connection reset, timeout, I/O error).
 ///
-/// Business errors (WRONGTYPE, NOSCRIPT, etc.) and config errors are NOT transient.
+/// Classification is STRUCTURAL (see the `transport_error` module): Config
+/// errors are never transient, `Io` errors always are, and everything else
+/// is decided by typed markers or the first `redis::RedisError` in the
+/// source chain — never by sniffing this variant's message text. Business
+/// errors (WRONGTYPE, NOSCRIPT, auth failures) are not transient.
 ///
-/// `Config` errors early-return false before substring matching (ADR-0012
-/// error-family boundaries): a Config error is a setup defect, never a
-/// transport hiccup, so retrying cannot resolve it. This also keeps
-/// transient-looking substrings embedded in Config messages (e.g. a CA file
-/// path containing "readonly") from misclassifying the fail-closed CA-read
-/// error as transient.
-pub fn is_transient_redis_error(err: &CamelError) -> bool {
-    if matches!(err, CamelError::Config(_)) {
-        return false;
-    }
-    let msg = err.to_string().to_lowercase();
-    msg.contains("connection")
-        || msg.contains("io error")
-        || msg.contains("timed out")
-        || msg.contains("broken pipe")
-        || msg.contains("connection reset")
-        || msg.contains("eof")
-        || msg.contains("refused")
-        || msg.contains("readonly")
-        || msg.contains("read only")
-}
+/// Re-exported here (not defined here) so the public path
+/// `camel_component_redis::config::is_transient_redis_error` stays stable
+/// for `camel-redis-repo`.
+pub use crate::transport_error::is_transient_redis_error;
 
 // ── Auth-failure credential-plane guidance ──────────────────────────────────
 
@@ -2039,74 +2027,10 @@ mod tests {
         );
     }
 
-    // REDIS-002: Transient error detection
-    #[test]
-    fn test_is_transient_redis_error_detects_connection_errors() {
-        assert!(is_transient_redis_error(&CamelError::ProcessorError(
-            "Connection refused".into()
-        )));
-        assert!(is_transient_redis_error(&CamelError::ProcessorError(
-            "connection reset by peer".into()
-        )));
-        assert!(is_transient_redis_error(&CamelError::ProcessorError(
-            "IO error: broken pipe".into()
-        )));
-        assert!(is_transient_redis_error(&CamelError::ProcessorError(
-            "timed out".into()
-        )));
-        assert!(is_transient_redis_error(&CamelError::ProcessorError(
-            "EOF".into()
-        )));
-    }
-
-    #[test]
-    fn is_transient_redis_error_detects_readonly_role() {
-        assert!(is_transient_redis_error(&CamelError::ProcessorError(
-            "READONLY: You can't write against a read only replica".into()
-        )));
-    }
-
-    #[test]
-    fn is_transient_redis_error_detects_read_only_with_space() {
-        assert!(is_transient_redis_error(&CamelError::ProcessorError(
-            "You can't write against a read only replica".into()
-        )));
-    }
-
-    #[test]
-    fn test_is_transient_redis_error_rejects_business_errors() {
-        assert!(!is_transient_redis_error(&CamelError::ProcessorError(
-            "WRONGTYPE".into()
-        )));
-        assert!(!is_transient_redis_error(&CamelError::ProcessorError(
-            "NOSCRIPT".into()
-        )));
-        assert!(!is_transient_redis_error(&CamelError::InvalidUri(
-            "bad uri".into()
-        )));
-        assert!(!is_transient_redis_error(&CamelError::Config(
-            "bad config".into()
-        )));
-    }
-
-    // rc-ezi0f: Config errors are never transient, even when their message
-    // embeds transient-looking substrings (e.g. a CA file path containing
-    // "readonly"). Without the Config early-return the fail-closed CA-read
-    // error feeds the retry loop, breaking its fail-closed guarantee.
-    #[test]
-    fn is_transient_redis_error_rejects_config_errors_with_transient_substrings() {
-        // Fail-closed CA-read error shape (topology.rs embeds the path).
-        assert!(!is_transient_redis_error(&CamelError::Config(
-            "failed to read TLS CA cert file /mnt/readonly/ca.pem".into()
-        )));
-        // Other transient-looking substrings inside Config messages.
-        assert!(!is_transient_redis_error(&CamelError::Config(
-            "connection info missing for eof recovery".into()
-        )));
-        assert!(!is_transient_redis_error(&CamelError::Config(
-            "tls connect refused by policy: timed out waiting for config".into()
-        )));
-    }
+    // REDIS-002: transient error detection. The behavioral tests for
+    // `is_transient_redis_error` live in `transport_error.rs` (structural
+    // classification: verdict-pin table over structured fixtures); this
+    // module now only re-exports the classifier.
 
     // rc-swzq: auth-failure errors must name the credential plane that
     // failed and hint at the sentinel_password/password mixup.
@@ -2199,11 +2123,11 @@ mod tests {
         let result = RedisEndpointConfig::from_uri("redis://localhost:abc?command=GET");
         assert!(result.is_err(), "non-numeric port should error");
         let err = result.unwrap_err();
-        let msg = err.to_string();
+        let text = err.to_string();
         assert!(
-            msg.contains("invalid port"),
+            text.contains("invalid port"),
             "error should mention invalid port: {}",
-            msg
+            text
         );
     }
 
@@ -2220,11 +2144,11 @@ mod tests {
             RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&timeout=abc");
         assert!(result.is_err(), "non-numeric timeout should error");
         let err = result.unwrap_err();
-        let msg = err.to_string();
+        let text = err.to_string();
         assert!(
-            msg.contains("invalid timeout"),
+            text.contains("invalid timeout"),
             "error should mention invalid timeout: {}",
-            msg
+            text
         );
     }
 
@@ -2240,11 +2164,11 @@ mod tests {
         let result = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&db=abc");
         assert!(result.is_err(), "non-numeric db should error");
         let err = result.unwrap_err();
-        let msg = err.to_string();
+        let text = err.to_string();
         assert!(
-            msg.contains("invalid db"),
+            text.contains("invalid db"),
             "error should mention invalid db: {}",
-            msg
+            text
         );
     }
 
@@ -2253,11 +2177,11 @@ mod tests {
         // db accepts 0-16383 (Redis limit); 16384 must be rejected
         let result = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&db=16384");
         assert!(result.is_err(), "out-of-range db should error");
-        let msg = result.unwrap_err().to_string();
+        let text = result.unwrap_err().to_string();
         assert!(
-            msg.contains("0-16383"),
+            text.contains("0-16383"),
             "error should name the 16383 limit: {}",
-            msg
+            text
         );
     }
 
@@ -2266,11 +2190,11 @@ mod tests {
         let result = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&ssl=yes");
         assert!(result.is_err(), "non-boolean ssl should error");
         let err = result.unwrap_err();
-        let msg = err.to_string();
+        let text = err.to_string();
         assert!(
-            msg.contains("invalid ssl"),
+            text.contains("invalid ssl"),
             "error should mention invalid ssl: {}",
-            msg
+            text
         );
     }
 
@@ -2567,10 +2491,10 @@ mod tests {
         config.resolve_defaults();
         let err = config.validate_tls().unwrap_err();
         match &err {
-            CamelError::Config(msg) => {
+            CamelError::Config(text) => {
                 assert!(
-                    msg.contains("without TLS support"),
-                    "error must name the missing feature: {msg}"
+                    text.contains("without TLS support"),
+                    "error must name the missing feature: {text}"
                 );
             }
             other => panic!("expected Config error, got {other:?}"),
@@ -2616,10 +2540,10 @@ mod tests {
             config.resolve_defaults();
             let err = config.validate_tls().unwrap_err();
             match &err {
-                CamelError::Config(msg) => {
+                CamelError::Config(text) => {
                     assert!(
-                        msg.contains("TLS scheme"),
-                        "error must name the TLS node URL scheme: {msg}"
+                        text.contains("TLS scheme"),
+                        "error must name the TLS node URL scheme: {text}"
                     );
                 }
                 other => panic!("expected Config error, got {other:?}"),

@@ -55,7 +55,7 @@ pub async fn dispatch(
             let response: String = redis::cmd("PING")
                 .query_async(conn)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis PING failed: {}", e)))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("PING", e))?;
 
             // REDIS-013: Validate PING response is exactly "PONG"
             if response != "PONG" {
@@ -74,7 +74,7 @@ pub async fn dispatch(
                 .arg(message)
                 .query_async(conn)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis ECHO failed: {}", e)))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("ECHO", e))?;
 
             serde_json::Value::String(response)
         }

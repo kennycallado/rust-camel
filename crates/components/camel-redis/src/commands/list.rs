@@ -229,7 +229,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .lpush(&key, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis LPUSH failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("LPUSH", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Rpush => {
@@ -238,7 +238,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .rpush(&key, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis RPUSH failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("RPUSH", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Lpushx => {
@@ -247,7 +247,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .lpush_exists(&key, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis LPUSHX failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("LPUSHX", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Rpushx => {
@@ -256,7 +256,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .rpush_exists(&key, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis RPUSHX failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("RPUSHX", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Lpop => {
@@ -264,7 +264,7 @@ pub async fn dispatch(
             let val: Option<String> = conn
                 .lpop(&key, None)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis LPOP failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("LPOP", e))?;
             json_from_optional_string(val)
         }
         RedisCommand::Rpop => {
@@ -272,7 +272,7 @@ pub async fn dispatch(
             let val: Option<String> = conn
                 .rpop(&key, None)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis RPOP failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("RPOP", e))?;
             json_from_optional_string(val)
         }
         RedisCommand::Blpop => {
@@ -281,7 +281,7 @@ pub async fn dispatch(
             let val: Option<(String, String)> = conn
                 .blpop(&key, timeout)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis BLPOP failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("BLPOP", e))?;
             json_from_optional_pair_value(val)
         }
         RedisCommand::Brpop => {
@@ -290,7 +290,7 @@ pub async fn dispatch(
             let val: Option<(String, String)> = conn
                 .brpop(&key, timeout)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis BRPOP failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("BRPOP", e))?;
             json_from_optional_pair_value(val)
         }
         RedisCommand::Llen => {
@@ -298,7 +298,7 @@ pub async fn dispatch(
             let n: i64 = conn
                 .llen(&key)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis LLEN failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("LLEN", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Lrange => {
@@ -307,7 +307,7 @@ pub async fn dispatch(
             let vals: Vec<String> = conn
                 .lrange(&key, start, end)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis LRANGE failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("LRANGE", e))?;
             serde_json::json!(vals)
         }
         RedisCommand::Lindex => {
@@ -316,7 +316,7 @@ pub async fn dispatch(
             let val: Option<String> = conn
                 .lindex(&key, idx)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis LINDEX failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("LINDEX", e))?;
             json_from_optional_string(val)
         }
         RedisCommand::Linsert => {
@@ -331,7 +331,7 @@ pub async fn dispatch(
                 .arg(value_to_redis_arg(&value))
                 .query_async(conn)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis LINSERT failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("LINSERT", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Lset => {
@@ -340,7 +340,7 @@ pub async fn dispatch(
             let value = require_value(exchange)?;
             conn.lset::<_, _, ()>(&key, idx, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis LSET failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("LSET", e))?;
             serde_json::Value::Null
         }
         RedisCommand::Lrem => {
@@ -350,7 +350,7 @@ pub async fn dispatch(
             let n: usize = conn
                 .lrem(&key, count, value_to_redis_arg(&value))
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis LREM failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("LREM", e))?;
             serde_json::json!(n as i64)
         }
         RedisCommand::Ltrim => {
@@ -358,7 +358,7 @@ pub async fn dispatch(
             let (start, end) = resolve_range_bounds(exchange);
             conn.ltrim::<_, ()>(&key, start, end)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis LTRIM failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("LTRIM", e))?;
             serde_json::Value::Null
         }
         RedisCommand::Rpoplpush => {
@@ -367,7 +367,7 @@ pub async fn dispatch(
             let val: Option<String> = conn
                 .rpoplpush(&key, dest)
                 .await
-                .map_err(|e| CamelError::ProcessorError(format!("Redis RPOPLPUSH failed: {e}")))?;
+                .map_err(|e| crate::transport_error::redis_error_to_camel("RPOPLPUSH", e))?;
             json_from_optional_string(val)
         }
         _ => unreachable!("non-list commands rejected above"),

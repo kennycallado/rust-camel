@@ -34,8 +34,10 @@ Per ADR-0012, this component's `error!` sites are categorized as:
   in-progress retry signal; budget exhaustion surfaces as the `error!` in
   `consumer.rs` (system-broken) when the loop returns `Err`. The
   budget-exhaustion error text is built only by
-  `retry.rs::retry_budget_exhausted` — the word "connection" in that message
-  is what makes `is_transient_redis_error` classify it transient (ADR-0012).
+  `retry.rs::retry_budget_exhausted`, which attaches the
+  `TransientRetryBudgetExhausted` marker. The marker is what makes
+  `is_transient_redis_error` classify it transient (ADR-0012); the word
+  "connection" stays in the text for operator continuity only.
 
 Line numbers can drift between revisions. The inline `// log-policy: <category>`
 annotation before each `error!` and `scripts/xtask/allowlist-log-levels.txt` are
@@ -63,7 +65,7 @@ Auto-enables TLS for non-loopback hosts when nothing explicit is set. Precedence
 
 ### `RedisEndpointConfig::validate_tls()` (`fn validate_tls`, config.rs; wired in `fn topology_from_config`, topology.rs)
 
-Fail-closed TLS feature guard on the single client-building choke point (producer, PubSub consumer, queue consumer, health check, sentinel). Two TLS sources trip it: the endpoint's resolved `ssl` flag, and a `rediss://` sentinel node URL in a structured sentinel block (which encrypts at the redis-crate layer regardless of the endpoint `ssl` flag). When either requires TLS but the `tls` cargo feature is absent, `topology_from_config` returns a `Config` error at endpoint creation. The messages avoid transient-classifier words (no "connection") so `is_transient_redis_error` never retries them (ADR-0012), and embed no host or URL (ADR-0051). Before bd rc-ayy11 the PubSub path surfaced the redis crate's raw `InvalidClientConfig` feature error inside the bounded reconnect loop.
+Fail-closed TLS feature guard on the single client-building choke point (producer, PubSub consumer, queue consumer, health check, sentinel). Two TLS sources trip it: the endpoint's resolved `ssl` flag, and a `rediss://` sentinel node URL in a structured sentinel block (which encrypts at the redis-crate layer regardless of the endpoint `ssl` flag). When either requires TLS but the `tls` cargo feature is absent, `topology_from_config` returns a `Config` error at endpoint creation. The `Config` variant early-returns false in `is_transient_redis_error` (rule 1, ADR-0012), so these errors never enter the retry loop regardless of their text; the messages also embed no host or URL (ADR-0051). Before bd rc-ayy11 the PubSub path surfaced the redis crate's raw `InvalidClientConfig` feature error inside the bounded reconnect loop.
 
 ### `tls_ca_cert` trust (`fn read_tls_ca_pem`, topology.rs; `StandaloneTopology::new_with_ca` + `Client::build_with_tls`; `SentinelTopology::new_with_ca` + `SentinelClientBuilder`)
 

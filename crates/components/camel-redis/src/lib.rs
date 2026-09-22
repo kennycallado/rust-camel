@@ -39,6 +39,7 @@ pub(crate) mod retry;
 pub mod sentinel_component;
 pub mod sentinel_config;
 pub mod topology;
+mod transport_error;
 
 use camel_component_api::{BoxProcessor, CamelError, ComponentMetadata};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
