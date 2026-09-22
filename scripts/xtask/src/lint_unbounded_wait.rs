@@ -564,8 +564,11 @@ fn expand_inner(
         return cached.clone();
     }
 
+    // splitn(2, "..") always yields at least one part, but spell the
+    // invariant out instead of unwrapping (lint-unwrap discipline).
     let mut parts = path.splitn(2, "::");
-    let leading = parts.next().unwrap();
+    let leading = parts.next().unwrap_or_default();
+    debug_assert!(!leading.is_empty(), "splitn yields a first part");
     let rest = parts.next();
 
     // Cycle detection
