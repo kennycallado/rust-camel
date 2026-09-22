@@ -773,6 +773,20 @@ enumerated `CamelError` variant SHALL be classified as matchable,
 intentionally unmatchable, or deferred-pending-decision, so vocabulary and
 classification stay consistent.
 
+The source-preserving endpoint-creation failure
+(`EndpointCreationFailedWithSource`) SHALL be matched by the existing
+`EndpointCreationFailed` kind value: that kind value denotes the
+endpoint-creation failure family, so existing catch clauses keep catching
+endpoint-creation failures when a producer migrates to the
+source-preserving variant. This compatibility grouping is an intentional
+exception to the variant-exact `ProcessorErrorWithSource` precedent (which
+matches only its own kind value and is NOT matched by `ProcessorError`);
+the exception exists because endpoint-creation catch clauses predate the
+variant split and must not silently stop firing. No distinct
+`EndpointCreationFailedWithSource` kind value SHALL exist. The inventory
+guard test SHALL classify the variant as grouped under
+`EndpointCreationFailed`.
+
 #### Scenario: UnsupportedMediaType is matchable
 
 - **GIVEN** an `on_exceptions` clause with `kind: "UnsupportedMediaType"`
@@ -801,6 +815,23 @@ classification stay consistent.
   `"ProcessorError"` (doTry catch-by-variant compat) does not extend to
   structural `on_exceptions` matching
 
+#### Scenario: EndpointCreationFailed kind matches both endpoint-creation variants
+
+- **GIVEN** an `on_exceptions` clause with `kind: "EndpointCreationFailed"`
+- **WHEN** the clause is evaluated against a plain
+  `CamelError::EndpointCreationFailed(d)` and against a
+  `CamelError::EndpointCreationFailedWithSource(d, source)`
+- **THEN** the clause matches both errors (compatibility grouping — the
+  kind value denotes the endpoint-creation failure family)
+
+#### Scenario: no distinct EndpointCreationFailedWithSource kind value
+
+- **GIVEN** an `on_exceptions` clause with
+  `kind: "EndpointCreationFailedWithSource"`
+- **WHEN** the route compiles
+- **THEN** compilation fails with the unknown-kind error listing the
+  supported kinds
+
 #### Scenario: intentionally unmatchable kinds stay rejected
 
 - **GIVEN** `on_exceptions` clauses with `kind: "ConfigValidation"`,
@@ -821,4 +852,13 @@ classification stay consistent.
   consistent for the enumerated inventory; keeping the inventory itself
   current for newly added variants is a reviewed manual step anchored by
   the camel-api exhaustive `variant_name` test
+
+#### Scenario: inventory guard classifies the grouped endpoint-creation variant
+
+- **GIVEN** the classification test table enumerating every `CamelError`
+  variant
+- **WHEN** the `EndpointCreationFailedWithSource` variant is checked
+- **THEN** the table classifies it as grouped under the
+  `EndpointCreationFailed` kind value, so a future variant added without
+  a classification entry fails the guard
 
