@@ -28,11 +28,13 @@ Flag definitions live in `crates/camel-cli/src/commands/job/mod.rs`.
 
 ## Document resolution
 
-The positional argument accepts three forms:
+The positional argument resolves through an ordered ladder:
 
-- **Omitted.** The command lists every job document under the `[jobs].dirs` roots. Listing is a query, not an error: absent roots and empty sets exit 0. Each row shows the job name and its `description:` key.
-- **Bare name** (no path separator, no `.yaml` suffix). The command probes `<name>.job.yaml` at the top level of every discovery root. A stem that matches in two roots fails with an error that names every match. A miss names every probed file.
-- **Explicit path** (any path separator, or a `.yaml`/`.yml`/`.json` suffix). The command uses the path as given.
+- **Omitted.** The command lists every job document under the `[jobs].dirs` roots. Listing is a query, not an error: absent roots and empty sets exit 0. Root-level rows show the bare name; nested rows show the root-relative path exactly as invocable (`daily/ingest.job.yaml — description`). Each row shows its `description:` key.
+- **Absolute path.** The command uses the path as given.
+- **Explicit path** (any path separator, or a `.yaml`/`.yml`/`.json` suffix) that exists relative to the current working directory. The command uses the path as given.
+- **CWD miss.** The command probes every discovery root: a stem path (a path separator, no suffix) appends `.job.yaml`; a suffixed path probes verbatim — the spelling the listing shows. A stem that matches in two roots fails with an error that names every match. A miss names every probed file.
+- **Bare name** (no path separator, no suffix). The command probes `<name>.job.yaml` at the top level of every discovery root and never consults the current working directory. Ambiguity and miss handling match the CWD-miss case.
 
 See [Jobs discovery](../configuration/jobs.md) for the `[jobs]` table and its bounded walk.
 

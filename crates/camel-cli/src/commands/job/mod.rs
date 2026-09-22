@@ -1,7 +1,9 @@
 //! `camel job <FILE>` — one-shot route execution from a `*.job.yaml`
-//! document declaring a top-level `execute:` section. A bare name
-//! probes `<name>.job.yaml` across the ordered `[jobs].dirs` roots;
-//! no argument lists the discovery set.
+//! document declaring a top-level `execute:` section. Document
+//! arguments resolve through an ordered ladder: absolute paths as-is;
+//! explicit-class CWD existence wins; otherwise relative arguments
+//! probe the ordered `[jobs].dirs` roots; no argument lists the
+//! discovery set.
 //!
 //! The job boots the REAL composition root (the same seams `camel run`
 //! uses: config load, security compile context, bind-exposure acks, the
@@ -90,9 +92,12 @@ const MIN_SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 #[command(disable_help_flag = true)]
 pub struct JobArgs {
     /// Path to the job document (`*.job.yaml` with an `execute:`
-    /// section). A bare name (no separator, no suffix) probes
-    /// `<name>.job.yaml` in every `[jobs].dirs` root; omitted lists
-    /// the discovery set.
+    /// section). Absolute paths are used as-is; an explicit path
+    /// (separator or `.yaml`/`.yml`/`.json` suffix) existing relative
+    /// to the CWD wins as-is; otherwise relative arguments probe the
+    /// `[jobs].dirs` roots (`<arg>.job.yaml` for bare names and stem
+    /// paths, verbatim for suffixed arguments); omitted lists the
+    /// discovery set.
     #[arg(value_name = "FILE")]
     pub document: Option<PathBuf>,
     /// With a job name it renders the job's declared interface;
@@ -236,28 +241,48 @@ fn jobs_roots(
         })
 }
 
-/// Resolve a document argument. An explicit path (any path separator,
-/// or a `.yaml`/`.yml`/`.json` suffix) is used as-is — including an
-/// explicit `.job.yml`. A bare name probes exactly
-/// `<root>/<name>.job.yaml` in every configured root (one
-/// deterministic spelling, no alternate-suffix probing, root-level
-/// only — nested documents are never bare-resolved), collecting ALL
-/// matches before selection so a cross-root stem collision is an
-/// explicit error naming every matching path instead of a silent
-/// first win; a miss names every probed file.
+/// Resolve a document argument through an ordered ladder. An absolute
+/// path is used as-is. An explicit path (any `/` in the spelling —
+/// including a trailing separator or a trailing `.` — or a
+/// `.yaml`/`.yml`/`.json` suffix) that exists relative to the CWD is
+/// used as-is — including an explicit `.job.yml`. Everything else
+/// probes the configured roots: one probe per root by plain
+/// `Path::join` of the argument as spelled (no normalization, no
+/// confinement) — `<root>/<arg>.job.yaml` for bare names and
+/// separator-bearing stem paths, `<root>/<arg>` verbatim for suffixed
+/// arguments. All existing probes are collected before selection so a
+/// cross-root collision is an explicit error naming every matching
+/// path instead of a silent first win; a miss names every probed file.
+/// Bare names never consult the CWD and never descend into
+/// subdirectories (root-level only, one deterministic spelling).
 fn resolve_job_path(raw: &Path, roots: &[(String, PathBuf)]) -> Result<PathBuf, String> {
     let name = raw.to_string_lossy();
     let lower = name.to_lowercase();
-    let explicit = raw.components().count() > 1
-        || lower.ends_with(".yaml")
-        || lower.ends_with(".yml")
-        || lower.ends_with(".json");
-    if explicit {
+    let suffixed = lower.ends_with(".yaml") || lower.ends_with(".yml") || lower.ends_with(".json");
+    // The explicit class is SYNTACTIC — decided by the argument's
+    // spelling, not its normalized form. `Path::components()` strips
+    // trailing separators and trailing `.` components, so a component
+    // count would misclassify spellings like `local/` or `local/.` as
+    // bare names and send them to root probing; the spec classifies by
+    // separator presence in the spelling. Multiple components always
+    // imply a `/` in the spelling, so `has_separator` subsumes the old
+    // component-count check.
+    let has_separator = name.contains('/');
+    let explicit_class = has_separator || suffixed;
+    if raw.is_absolute() {
         return Ok(raw.to_path_buf());
     }
+    if explicit_class && raw.exists() {
+        return Ok(raw.to_path_buf());
+    }
+    let probe_name = if suffixed {
+        raw.to_path_buf()
+    } else {
+        PathBuf::from(format!("{name}.job.yaml"))
+    };
     let probes: Vec<PathBuf> = roots
         .iter()
-        .map(|(_, root)| root.join(format!("{name}.job.yaml")))
+        .map(|(_, root)| root.join(&probe_name))
         .collect();
     let matches: Vec<PathBuf> = probes
         .iter()
@@ -315,17 +340,49 @@ fn probe_description(path: &Path) -> Option<Option<String>> {
 
 /// The display stem of a job document file name: the name with its
 /// `.job.yaml`/`.job.yml` suffix stripped, or the full name when
-/// neither suffix is present. Shared by the listing display names and
-/// the `--help` interface header so the two surfaces cannot drift.
+/// neither suffix is present. The fallback value call sites use when
+/// [`root_relative_display`] yields `None` — the cross-surface
+/// guarantee lives in the shared relative-path rule.
 fn job_stem(name: &str) -> &str {
     name.strip_suffix(".job.yaml")
         .or_else(|| name.strip_suffix(".job.yml"))
         .unwrap_or(name)
 }
 
+/// The display name of a job document relative to one root — the ONE
+/// shared display rule for both surfaces (the listing walk and the
+/// `--help` header): `Some(configured-root-relative path)` when the
+/// document is nested (more than one path component below `root`),
+/// `None` otherwise. Lexical only — never canonicalize inside; the
+/// comparison is pure `strip_prefix` spelling.
+fn root_relative_display(path: &Path, root: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    (relative.components().count() > 1).then(|| relative.display().to_string())
+}
+
+/// The `--help` header name for a resolved job document: the
+/// configured-root-relative path for nested documents (the invocable
+/// spelling the listing shows), the file stem otherwise. Lexical only,
+/// computed from the PRE-canonicalize resolved path — never
+/// canonicalized inside, so symlink aliasing is not identity-resolved.
+/// Both the listing and this helper go through
+/// [`root_relative_display`], so the two surfaces cannot drift.
+fn job_display_name(resolved: &Path, roots: &[(String, PathBuf)]) -> String {
+    for (_, root) in roots {
+        if let Some(display) = root_relative_display(resolved, root) {
+            return display;
+        }
+    }
+    resolved
+        .file_name()
+        .map(|name| job_stem(&name.to_string_lossy()).to_string())
+        .unwrap_or_else(|| resolved.display().to_string())
+}
+
 /// One listed job document: the display name (the bare stem for files
-/// directly under the configured root, `relative/path: stem` for
-/// nested ones) and the probed description.
+/// directly under the configured root, the configured-root-relative
+/// path for nested ones — the exact spelling that resolves as a
+/// document argument) and the probed description.
 struct ListedJob {
     display: String,
     description: Option<Option<String>>,
@@ -442,14 +499,7 @@ fn walk_level(
         }
         let name = name.to_string_lossy().into_owned();
         let stem = job_stem(&name).to_string();
-        let display = match path.strip_prefix(root) {
-            // Nested documents carry their configured-root-relative
-            // path; root-level documents keep the bare stem.
-            Ok(relative) if relative.components().count() > 1 => {
-                format!("{}: {}", relative.display(), stem)
-            }
-            _ => stem,
-        };
+        let display = root_relative_display(&path, root).unwrap_or(stem);
         scan.jobs.push(ListedJob {
             display,
             description: probe_description(&path),
@@ -614,15 +664,11 @@ pub async fn run_job(args: &JobArgs) -> i32 {
                 return 2;
             }
         };
-        let file_name = document_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| document_path.display().to_string());
         let description = probe_description_str(&text);
         println!(
             "{}",
             help::render_job_help(
-                job_stem(&file_name),
+                &job_display_name(&resolved, &jobs_roots),
                 description.flatten().as_deref(),
                 &info
             )

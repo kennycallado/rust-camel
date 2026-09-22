@@ -58,6 +58,19 @@ Arguments:
     assert_eq!(rendered, expected);
 }
 
+/// The renderer accepts ANY header string and prints it verbatim as
+/// line 1 — including a nested invocable path. This pins the renderer
+/// contract; the call-site WIRING (which passes the display name) is
+/// proven by the `nested_job_help_header_shows_invocable_path`
+/// integration test.
+#[test]
+fn render_nested_display_name_verbatim() {
+    let info = declared_interface_info();
+    let rendered = render_job_help("daily/ingest.job.yaml", Some("Ingest"), &info);
+    let header = rendered.lines().next().expect("header line exists");
+    assert_eq!(header, "daily/ingest.job.yaml");
+}
+
 #[test]
 fn render_no_description_placeholder() {
     let info = declared_interface_info();

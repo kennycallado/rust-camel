@@ -11,16 +11,25 @@ use super::document::{JobArgType, JobArgumentDeclaration, JobHelpInfo};
 /// result is `\n`-separated lines without a trailing newline (the
 /// caller prints with `println!`).
 ///
-/// Layout, in order: the job stem; a blank line; the description (or
-/// `(no description)`); a blank line; the aligned `Mode:`/`Sends to:`
-/// pair (both values start at column 12); a blank line; `Arguments:`;
-/// then one row per declared argument in lexical order, or the single
-/// row `  (no arguments)` when nothing is declared. CR/LF runs inside
-/// the description, default values, and argument descriptions flatten
-/// to one space so every help line stays one physical line.
-pub(crate) fn render_job_help(stem: &str, description: Option<&str>, info: &JobHelpInfo) -> String {
+/// The first parameter is the job's display name — the invocable
+/// spelling: the configured-root-relative path for nested documents,
+/// the file stem otherwise — rendered verbatim as the header line.
+///
+/// Layout, in order: the display name; a blank line; the description
+/// (or `(no description)`); a blank line; the aligned `Mode:`/`Sends
+/// to:` pair (both values start at column 12); a blank line;
+/// `Arguments:`; then one row per declared argument in lexical order,
+/// or the single row `  (no arguments)` when nothing is declared.
+/// CR/LF runs inside the description, default values, and argument
+/// descriptions flatten to one space so every help line stays one
+/// physical line.
+pub(crate) fn render_job_help(
+    display_name: &str,
+    description: Option<&str>,
+    info: &JobHelpInfo,
+) -> String {
     let mut out = String::new();
-    out.push_str(stem);
+    out.push_str(display_name);
     out.push_str("\n\n");
     match description {
         Some(description) => out.push_str(&flatten_line_breaks(description)),

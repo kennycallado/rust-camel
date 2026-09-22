@@ -413,7 +413,7 @@ fn job_listing_recurses_and_skips_test_documents() {
     assert!(
         stdout
             .lines()
-            .any(|l| l == "domain/report.job.yaml: report — nested job"),
+            .any(|l| l == "domain/report.job.yaml — nested job"),
         "exact nested line; got:\n{stdout}"
     );
     assert!(
@@ -447,7 +447,7 @@ fn job_listing_stops_at_depth_eight() {
         "truncated listing still exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("d1/d2/d3/d4/d5/d6/d7/d8/eight.job.yaml: eight — depth eight"),
+        stdout.contains("d1/d2/d3/d4/d5/d6/d7/d8/eight.job.yaml — depth eight"),
         "depth-8 job listed; got:\n{stdout}"
     );
     assert!(
@@ -542,8 +542,8 @@ fn job_listing_walks_directory_with_many_subdirs() {
     assert_eq!(
         rows,
         vec![
-            "d0000/early.job.yaml: early — early job",
-            "d1029/late.job.yaml: late — late job",
+            "d0000/early.job.yaml — early job",
+            "d1029/late.job.yaml — late job",
             "top — top job",
         ],
         "every job of the wide directory is listed in lexical order; got:\n{stdout}"

@@ -1439,11 +1439,102 @@ fn job_listing_is_lexical_and_does_not_follow_directory_symlinks() {
         stdout.lines().collect::<Vec<_>>(),
         vec![
             "Jobs in jobs/:",
-            "a/aa.job.yaml: aa — a dir job",
-            "b/bb.job.yaml: bb — b dir job",
+            "a/aa.job.yaml — a dir job",
+            "b/bb.job.yaml — b dir job",
         ],
         "lexical nested order, no symlinked-directory traversal; got:\n{stdout}"
     );
+}
+
+/// `--help` on a nested job renders the same invocable spelling the
+/// listing shows: the configured-root-relative path as the header,
+/// not the bare canonicalized file stem.
+#[test]
+fn nested_job_help_header_shows_invocable_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"jobs\"]");
+    std::fs::create_dir_all(dir.path().join("jobs/daily")).expect("mkdir daily");
+    std::fs::write(
+        dir.path().join("jobs/daily/ingest.job.yaml"),
+        "description: Daily ingest\nexecute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:transform\nroutes:\n  - id: \"ingest\"\n    from: \"direct:noop\"\n",
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["daily/ingest", "--help"]);
+    assert_eq!(
+        code, 0,
+        "--help exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout.lines().next(),
+        Some("daily/ingest.job.yaml"),
+        "help header is the invocable path; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Daily ingest"),
+        "help carries the description; got:\n{stdout}"
+    );
+}
+
+/// The listing row's display name IS the invocable spelling: taking
+/// the exact text before the ` — ` descriptor and running it as the
+/// document argument completes the job — display and resolution can
+/// never drift.
+#[test]
+fn listing_display_is_invocable_verbatim() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-transform"
+    from: "direct:transform"
+    steps:
+      - set_body:
+          value: "job-done"
+"#,
+    )
+    .expect("write route");
+    std::fs::create_dir_all(dir.path().join("jobs/daily")).expect("mkdir daily");
+    std::fs::write(
+        dir.path().join("jobs/daily/ingest.job.yaml"),
+        r#"description: Daily ingest
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: "ping"
+routeFilesFromRoot:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let display = stdout
+        .lines()
+        .find_map(|l| l.strip_suffix(" — Daily ingest"))
+        .unwrap_or_else(|| panic!("nested listing row present; got:\n{stdout}"));
+    assert_eq!(
+        display, "daily/ingest.job.yaml",
+        "nested row is the root-relative path; got:\n{stdout}"
+    );
+
+    let (code, stdout, stderr) = run_job(dir.path(), display);
+    assert_eq!(
+        code, 0,
+        "the listed spelling resolves and completes;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
 }
 
 /// The same bare name in two roots is an exit-2 ambiguity naming every
@@ -1557,6 +1648,459 @@ routeFilesFromRoot:
     assert!(
         stdout.trim().is_empty(),
         "no report on a miss; got:\n{stdout}"
+    );
+}
+
+// ---- Relative document-path resolution ladder (jobpath, rc-r63b1) --
+
+/// One transform route for the resolution fixtures: `from` target,
+/// constant reply body. Written under `routes/` (or beside an outside
+/// document) and referenced from the job document.
+fn write_resolution_route(path: &Path, id: &str, target: &str, value: &str) {
+    std::fs::write(
+        path,
+        format!(
+            "routes:\n  - id: \"{id}\"\n    from: \"{target}\"\n    steps:\n      - set_body:\n          value: \"{value}\"\n"
+        ),
+    )
+    .expect("write route");
+}
+
+/// One minimal one-shot job document with `capture-reply`: sends to
+/// `to` and loads its route from `route` (`routeFilesFromRoot`
+/// spelling, anchored at the Camel.toml root).
+fn write_resolution_job(path: &Path, to: &str, route: &str) {
+    std::fs::write(
+        path,
+        format!(
+            "execute:\n  mode: one-shot\n  timeout: 60s\n  capture-reply: true\n  send:\n    to: {to}\n    body: \"ping\"\nrouteFilesFromRoot:\n  - {route}\n"
+        ),
+    )
+    .expect("write job doc");
+}
+
+/// A stem path with a separator (`daily/ingest`) must probe
+/// `<root>/daily/ingest.job.yaml`: the report's `document` field ends
+/// with the nested path and stderr stays empty.
+#[test]
+fn nested_stem_path_resolves_across_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"jobs\"]");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::create_dir_all(dir.path().join("jobs/daily")).expect("mkdir jobs/daily");
+    write_resolution_route(
+        &dir.path().join("routes/job-route.yaml"),
+        "job-transform",
+        "direct:transform",
+        "job-done",
+    );
+    write_resolution_job(
+        &dir.path().join("jobs/daily/ingest.job.yaml"),
+        "direct:transform",
+        "routes/job-route.yaml",
+    );
+
+    let (code, stdout, stderr) = run_job(dir.path(), "daily/ingest");
+    assert_eq!(
+        code, 0,
+        "nested stem path must resolve;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stderr.is_empty(), "stderr must be empty; got:\n{stderr}");
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    let document = report["document"].as_str().expect("document field");
+    assert!(
+        document.ends_with("jobs/daily/ingest.job.yaml"),
+        "document field must name the nested document; got: {document}"
+    );
+}
+
+/// The suffixed spelling of the same nested document probes verbatim
+/// (`jobs/daily/ingest.job.yaml`) and completes.
+#[test]
+fn nested_document_path_resolves_verbatim() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"jobs\"]");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::create_dir_all(dir.path().join("jobs/daily")).expect("mkdir jobs/daily");
+    write_resolution_route(
+        &dir.path().join("routes/job-route.yaml"),
+        "job-transform",
+        "direct:transform",
+        "job-done",
+    );
+    write_resolution_job(
+        &dir.path().join("jobs/daily/ingest.job.yaml"),
+        "direct:transform",
+        "routes/job-route.yaml",
+    );
+
+    let (code, stdout, stderr) = run_job(dir.path(), "daily/ingest.job.yaml");
+    assert_eq!(
+        code, 0,
+        "suffixed nested path must probe verbatim;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+}
+
+/// An explicit-class argument that exists relative to the CWD wins
+/// before any root probing: the CWD copy runs, the same-named root
+/// document never does.
+#[test]
+fn cwd_relative_existence_wins_over_root_probe() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"jobs\"]");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::create_dir_all(dir.path().join("local")).expect("mkdir local");
+    std::fs::create_dir_all(dir.path().join("jobs/local")).expect("mkdir jobs/local");
+    write_resolution_route(
+        &dir.path().join("routes/cwd-route.yaml"),
+        "cwd-transform",
+        "direct:cwd-echo",
+        "cwd-marker",
+    );
+    write_resolution_route(
+        &dir.path().join("routes/root-route.yaml"),
+        "root-transform",
+        "direct:root-echo",
+        "root-marker",
+    );
+    write_resolution_job(
+        &dir.path().join("local/echo.job.yaml"),
+        "direct:cwd-echo",
+        "routes/cwd-route.yaml",
+    );
+    write_resolution_job(
+        &dir.path().join("jobs/local/echo.job.yaml"),
+        "direct:root-echo",
+        "routes/root-route.yaml",
+    );
+
+    let (code, stdout, stderr) = run_job(dir.path(), "local/echo.job.yaml");
+    assert_eq!(
+        code, 0,
+        "CWD-relative explicit path must win;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(
+        report["reply"]["body"], "cwd-marker",
+        "the CWD copy must run, not the root copy; report: {report}"
+    );
+}
+
+/// A stem path matching nested documents in two roots is ambiguous:
+/// exit 2 and stderr names EVERY matching path.
+#[test]
+fn nested_relative_path_collision_names_every_match() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"first\", \"second\"]");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::create_dir_all(dir.path().join("first/daily")).expect("mkdir first/daily");
+    std::fs::create_dir_all(dir.path().join("second/daily")).expect("mkdir second/daily");
+    write_resolution_route(
+        &dir.path().join("routes/job-route.yaml"),
+        "job-transform",
+        "direct:transform",
+        "job-done",
+    );
+    write_resolution_job(
+        &dir.path().join("first/daily/ingest.job.yaml"),
+        "direct:transform",
+        "routes/job-route.yaml",
+    );
+    write_resolution_job(
+        &dir.path().join("second/daily/ingest.job.yaml"),
+        "direct:transform",
+        "routes/job-route.yaml",
+    );
+
+    let (code, stdout, stderr) = run_job(dir.path(), "daily/ingest");
+    assert_eq!(
+        code, 2,
+        "nested collision is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("ambiguous"),
+        "stderr must name the ambiguity; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("first/daily/ingest.job.yaml")
+            && stderr.contains("second/daily/ingest.job.yaml"),
+        "stderr must name every matching path; got:\n{stderr}"
+    );
+}
+
+/// A stem-path miss names every probed path, one per root.
+#[test]
+fn nested_relative_path_miss_names_probes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"first\", \"second\"]");
+    std::fs::create_dir_all(dir.path().join("first")).expect("mkdir first");
+    std::fs::create_dir_all(dir.path().join("second")).expect("mkdir second");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "daily/missing");
+    assert_eq!(
+        code, 2,
+        "nested miss is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no job `daily/missing`"),
+        "stderr must carry the miss error; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("first/daily/missing.job.yaml")
+            && stderr.contains("second/daily/missing.job.yaml"),
+        "stderr must name every probed path; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "no report on a miss; got:\n{stdout}"
+    );
+}
+
+/// Bare names probe root level only: a nested document is invisible to
+/// the bare-name probe (`jobs/ingest.job.yaml` is named, the nested
+/// path never appears).
+#[test]
+fn bare_name_does_not_descend_into_subdirectories() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"jobs\"]");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::create_dir_all(dir.path().join("jobs/daily")).expect("mkdir jobs/daily");
+    write_resolution_route(
+        &dir.path().join("routes/job-route.yaml"),
+        "job-transform",
+        "direct:transform",
+        "job-done",
+    );
+    write_resolution_job(
+        &dir.path().join("jobs/daily/ingest.job.yaml"),
+        "direct:transform",
+        "routes/job-route.yaml",
+    );
+
+    let (code, stdout, stderr) = run_job(dir.path(), "ingest");
+    assert_eq!(
+        code, 2,
+        "bare name must not resolve a nested document;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("jobs/ingest.job.yaml"),
+        "stderr must name the root-level probe; got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("daily/ingest.job.yaml"),
+        "bare name must never descend; got:\n{stderr}"
+    );
+}
+
+/// A bare name never consults the CWD: a decoy file named exactly
+/// `report` in the CWD is ignored; the root document runs.
+#[test]
+fn bare_name_ignores_cwd_entries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"jobs\"]");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::create_dir_all(dir.path().join("jobs")).expect("mkdir jobs");
+    write_resolution_route(
+        &dir.path().join("routes/job-route.yaml"),
+        "job-transform",
+        "direct:transform",
+        "report-done",
+    );
+    write_resolution_job(
+        &dir.path().join("jobs/report.job.yaml"),
+        "direct:transform",
+        "routes/job-route.yaml",
+    );
+    std::fs::write(dir.path().join("report"), "decoy").expect("write decoy");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "report");
+    assert_eq!(
+        code, 0,
+        "bare name must resolve from the root only;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(
+        report["reply"]["body"], "report-done",
+        "the root document must run; the CWD decoy is never parsed; report: {report}"
+    );
+}
+
+/// Probes join as spelled: `../outside/ingest` under root `first`
+/// names the verbatim joined probe `first/../outside/ingest.job.yaml`
+/// — no normalization, no confinement.
+#[test]
+fn probe_is_joined_as_spelled_without_normalization() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"first\"]");
+    std::fs::create_dir_all(dir.path().join("first")).expect("mkdir first");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "../outside/ingest");
+    assert_eq!(
+        code, 2,
+        "unresolvable relative path is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("first/../outside/ingest.job.yaml"),
+        "stderr must name the verbatim joined probe; got:\n{stderr}"
+    );
+}
+
+/// Absolute arguments are used as-is: an existing document outside all
+/// roots runs; a nonexistent absolute path fails with that path named
+/// and never mentions root probing.
+#[test]
+fn absolute_argument_is_used_as_is_without_probing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"jobs\"]");
+    std::fs::create_dir_all(dir.path().join("jobs")).expect("mkdir jobs");
+
+    let outside = tempfile::tempdir().expect("tempdir");
+    write_resolution_route(
+        &outside.path().join("job-route.yaml"),
+        "outside-transform",
+        "direct:outside-transform",
+        "outside-done",
+    );
+    std::fs::write(
+        outside.path().join("job.job.yaml"),
+        "execute:\n  mode: one-shot\n  timeout: 60s\n  capture-reply: true\n  send:\n    to: direct:outside-transform\n    body: \"ping\"\nrouteFiles:\n  - job-route.yaml\n",
+    )
+    .expect("write job doc");
+    let doc_arg = outside.path().join("job.job.yaml").display().to_string();
+
+    let (code, stdout, stderr) = run_job(dir.path(), &doc_arg);
+    assert_eq!(
+        code, 0,
+        "absolute path is used as-is;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(
+        report["reply"]["body"], "outside-done",
+        "the outside document must run; report: {report}"
+    );
+
+    let missing = dir.path().join("nope/missing.job.yaml");
+    let missing_arg = missing.display().to_string();
+    let (code, stdout, stderr) = run_job(dir.path(), &missing_arg);
+    assert_eq!(
+        code, 2,
+        "nonexistent absolute path is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&missing_arg),
+        "stderr must name the absolute path; got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("in any configured root"),
+        "absolute arguments must never reach root probing; got:\n{stderr}"
+    );
+}
+
+/// A trailing-separator directory argument (`local/`) is explicit-class
+/// by its SPELLING and must be used as-is: the CWD directory fails loud
+/// at read (exit 2, `Is a directory`), and the valid hidden document
+/// `jobs/local/.job.yaml` is NEVER probed. Regression lock: the old
+/// classification used `Path::components().count() > 1`, which
+/// normalizes the trailing separator away and misclassified `local/` as
+/// a bare name.
+#[test]
+fn trailing_separator_dir_arg_fails_loud_not_probed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"jobs\"]");
+    std::fs::create_dir_all(dir.path().join("local")).expect("mkdir local (CWD dir)");
+    std::fs::create_dir_all(dir.path().join("jobs/local")).expect("mkdir jobs/local");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    write_resolution_route(
+        &dir.path().join("routes/probe-route.yaml"),
+        "probe-transform",
+        "direct:probe",
+        "probe-marker",
+    );
+    std::fs::write(
+        dir.path().join("jobs/local/.job.yaml"),
+        "execute:\n  mode: one-shot\n  timeout: 60s\n  capture-reply: true\n  send:\n    to: direct:probe\n    body: \"ping\"\nrouteFilesFromRoot:\n  - routes/probe-route.yaml\n",
+    )
+    .expect("write hidden probe doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "local/");
+    assert_eq!(
+        code, 2,
+        "trailing-separator dir must fail loud at read;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let local_dir = std::fs::canonicalize(dir.path().join("local")).expect("local dir exists");
+    assert!(
+        stderr.contains(&format!("{}: Is a directory", local_dir.display())),
+        "stderr must be the loud read failure for the directory; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "the probed hidden document must never run; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("probe-marker"),
+        "the probe-marker route output must never appear; got:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("in any configured root"),
+        "explicit-class args must never reach root probing; got:\n{stderr}"
+    );
+}
+
+/// A trailing `.` directory argument (`local/.`) behaves like the
+/// trailing-separator spelling: explicit-class by spelling, used as-is,
+/// loud read failure for the directory, no root probing, no hidden
+/// document run.
+#[test]
+fn trailing_dot_dir_arg_fails_loud_not_probed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"jobs\"]");
+    std::fs::create_dir_all(dir.path().join("local")).expect("mkdir local (CWD dir)");
+    std::fs::create_dir_all(dir.path().join("jobs/local")).expect("mkdir jobs/local");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    write_resolution_route(
+        &dir.path().join("routes/probe-route.yaml"),
+        "probe-transform",
+        "direct:probe",
+        "probe-marker",
+    );
+    std::fs::write(
+        dir.path().join("jobs/local/.job.yaml"),
+        "execute:\n  mode: one-shot\n  timeout: 60s\n  capture-reply: true\n  send:\n    to: direct:probe\n    body: \"ping\"\nrouteFilesFromRoot:\n  - routes/probe-route.yaml\n",
+    )
+    .expect("write hidden probe doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "local/.");
+    assert_eq!(
+        code, 2,
+        "trailing-dot dir must fail loud at read;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let local_dir = std::fs::canonicalize(dir.path().join("local")).expect("local dir exists");
+    assert!(
+        stderr.contains(&format!("{}: Is a directory", local_dir.display())),
+        "stderr must be the loud read failure for the directory; got:\n{stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "the probed hidden document must never run; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("probe-marker"),
+        "the probe-marker route output must never appear; got:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("in any configured root"),
+        "explicit-class args must never reach root probing; got:\n{stderr}"
     );
 }
 
