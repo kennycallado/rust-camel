@@ -15,7 +15,11 @@
     },
     "bash": {
       "*": "allow",
-      "git push*": "deny"
+      "git push*": "deny",
+      "*curl*": "deny",
+      "*wget*": "deny",
+      "*/dev/tcp*": "deny",
+      "*chmod 777*": "deny"
     }
   },
   "mcp": {
