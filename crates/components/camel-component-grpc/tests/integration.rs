@@ -1290,15 +1290,21 @@ async fn start_tls_consumer(
     });
 
     let pipeline_task = tokio::spawn(async move {
-        while let Some(envelope) = route_rx.recv().await {
-            let name = match &envelope.exchange.input.body {
-                Body::Json(v) => v["name"].as_str().unwrap_or("World").to_string(),
-                _ => "World".to_string(),
-            };
-            let resp = Exchange::new(Message::new(Body::Json(
-                serde_json::json!({"message": format!("Hello {name}")}),
-            )));
-            let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+        loop {
+            match timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    let name = match &envelope.exchange.input.body {
+                        Body::Json(v) => v["name"].as_str().unwrap_or("World").to_string(),
+                        _ => "World".to_string(),
+                    };
+                    let resp = Exchange::new(Message::new(Body::Json(
+                        serde_json::json!({"message": format!("Hello {name}")}),
+                    )));
+                    let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+                }
+                Ok(None) => break,      // channel closed: drain complete
+                Err(_elapsed) => break, // stalled producer: end the drain
+            }
         }
     });
 
