@@ -575,9 +575,12 @@ for any other reason.
   across the scanned trees
 - **WHEN** the alias/glob resolution fix lands and
   `cargo xtask lint-unbounded-wait` runs
-- **THEN** the count is exactly 395 — the precedence rules relieve
-  the 108 glob-ambiguity over-reports measured under the pure
-  singleton rule while suppressing nothing the base detector reported
+- **THEN** the count is exactly 395 at that landing — the precedence
+  rules relieve the 108 glob-ambiguity over-reports measured under
+  the pure singleton rule while suppressing nothing the base detector
+  reported (later tightenings — per-site loop bounding, inline-closure
+  analysis — lower the live ceiling below this point-in-time figure;
+  see the ratchet file for the current count)
   (verified by a base-vs-new finding-list diff on the same tree: +1
   site, 0 removals), and the single new site is the inventoried true
   finding (awaited `TcpStream::connect` through
