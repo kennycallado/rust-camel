@@ -203,6 +203,16 @@
         [("R-SCHEMA", "error")],
     ),
 
+    // Co-occurrence witness (rc-lys6a): blank cert_path + unknown
+    // rogue_key in the same tls map — the sibling additionalProperties
+    // defect must surface alongside the pattern leaf. Both are real
+    // boot failures (non_empty_path, deny_unknown_fields), hence
+    // baselined.
+    (
+        "crates/camel-cli/tests/fixtures/lint-corpus/mcp-tls-sibling-defects.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+
     // permission value source contract — mirrors runtime
     // yaml_source_to_value_source exactly-one (rc-gddb2, bd rc-lkbqi).
     (

@@ -1,0 +1,15 @@
+# Corpus fixture (rc-lys6a): co-occurrence witness — blank `cert_path`
+# plus an unknown `rogue_key` in the same `tls` map must FAIL R-SCHEMA
+# with BOTH diagnostics: the pattern leaf (non_empty_path) AND the
+# sibling additionalProperties leaf (deny_unknown_fields). Both defects
+# are real boot failures, so the R-SCHEMA Errors are agreed real
+# defects, hence baselined. R-URI walk skips the mcp subtree; no other
+# rule fires on an mcp-only document.
+mcp:
+  - server:
+      name: crm
+      bind: "127.0.0.1:9100"
+      tls:
+        cert_path: ""
+        key_path: /etc/certs/crm-key.pem
+        rogue_key: true

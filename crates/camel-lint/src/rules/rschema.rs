@@ -34,6 +34,12 @@
 //!   oneOf failure (`security_policy.permission` `resource`/`action`)
 //!   de-collapses into ONE targeted diagnostic per field, anchored on
 //!   the value-spec mapping (see the `AnyOf` arm in [`RSchemaRule`]).
+//! - A collapsed anyOf burying pattern violations (the MCP TLS path
+//!   fields) de-collapses into one diagnostic per pattern leaf, and a
+//!   non-pattern defect co-located in the SAME failed anyOf also
+//!   surfaces as its own sibling leaf diagnostic (the null-branch
+//!   whole-node type mismatch is excluded as branch noise); with no
+//!   nested pattern, the collapsed diagnostic keeps its shape.
 //!
 //! The compiled validator is cached in a process-wide [`OnceLock`].
 
@@ -217,8 +223,8 @@ impl Rule for RSchemaRule {
                 //    per field on the value-spec mapping, naming the
                 //    field and the found set.
                 //
-                //    KNOWN LIMITATION (mirrors the pattern pass below):
-                //    once a targeted diagnostic fires for this error, any
+                //    KNOWN LIMITATION: once a targeted diagnostic fires
+                //    for this error, any
                 //    SIBLING defect inside the same collapsed anyOf
                 //    (e.g. an unknown value-spec key next to a zero
                 //    source) is subsumed — first-error-wins, like serde's
@@ -230,14 +236,17 @@ impl Rule for RSchemaRule {
                 //    — reporting each nested, strictly-deeper pattern
                 //    error on its own leaf.
                 //
-                // KNOWN LIMITATION (pattern pass): when a pattern
-                // violation co-occurs with a non-pattern defect in the
-                // SAME failed anyOf (e.g. a blank cert_path plus an
-                // unknown tls key), the replace-when-present branch
-                // reports only the pattern leaves — the collapsed
-                // diagnostic that carried the sibling defect is dropped.
-                // When NO nested pattern surfaces, the collapsed anyOf
-                // diagnostic keeps today's shape byte-identically.
+                // When a pattern violation co-occurs with a
+                // non-pattern defect in the SAME failed anyOf (e.g. a
+                // blank cert_path plus an unknown tls key), the
+                // sibling defect also surfaces as its own leaf
+                // diagnostic (unknown keys anchor on the key, other
+                // kinds on their value node) instead of being subsumed
+                // by the collapsed diagnostic; the null-branch
+                // whole-node type mismatch is excluded as branch
+                // noise. When NO nested pattern surfaces, the
+                // collapsed anyOf diagnostic keeps today's shape
+                // byte-identically.
                 ValidationErrorKind::AnyOf { context } => {
                     // Pass 1: targeted permission value-source exactly-one
                     // diagnostics. Branches retry the same subschema
@@ -292,8 +301,7 @@ impl Rule for RSchemaRule {
                         // (first-error-wins, see the arm comment).
                         continue;
                     }
-                    // Pass 2: pattern de-collapse (unchanged).
-                    let segment_depth = |p: &str| p.split('/').filter(|s| !s.is_empty()).count();
+                    // Pass 2: pattern de-collapse.
                     let own_depth = segment_depth(instance_path);
                     let mut seen = HashSet::new();
                     let mut pattern_errors = Vec::new();
@@ -323,6 +331,13 @@ impl Rule for RSchemaRule {
                         let span = crate::document::value_span_for(&parsed, &noya_path);
                         diagnostics.push(diagnostic_for(span, diagnostic_message(&err)));
                     } else {
+                        // Co-located non-pattern defects of the same
+                        // collapsed anyOf surface next to the pattern
+                        // leaves (rc-lys6a) — collected only here, so
+                        // the empty-pattern collapsed branch above
+                        // stays untouched.
+                        let mut sibling_errors = Vec::new();
+                        collect_sibling_errors(&err, own_depth, &mut sibling_errors);
                         for nested in pattern_errors {
                             let noya_path = instance_path_to_noyalib(
                                 nested.instance_path().as_str(),
@@ -330,6 +345,38 @@ impl Rule for RSchemaRule {
                             );
                             let span = crate::document::value_span_for(&parsed, &noya_path);
                             diagnostics.push(diagnostic_for(span, diagnostic_message(nested)));
+                        }
+                        for nested in sibling_errors {
+                            if let ValidationErrorKind::AdditionalProperties { unexpected } =
+                                nested.kind()
+                            {
+                                // Mirror the top-level arm: the
+                                // offending key is NOT in instance_path
+                                // (which points at the parent object);
+                                // resolve each key's span by appending
+                                // it to the parent's path.
+                                let parent = instance_path_to_noyalib(
+                                    nested.instance_path().as_str(),
+                                    envelope_depth,
+                                );
+                                for key in unexpected {
+                                    let key_path = if parent.is_empty() {
+                                        key.clone()
+                                    } else {
+                                        format!("{parent}.{key}")
+                                    };
+                                    let span = crate::document::key_span_for(&parsed, &key_path);
+                                    diagnostics
+                                        .push(diagnostic_for(span, diagnostic_message(nested)));
+                                }
+                            } else {
+                                let noya_path = instance_path_to_noyalib(
+                                    nested.instance_path().as_str(),
+                                    envelope_depth,
+                                );
+                                let span = crate::document::value_span_for(&parsed, &noya_path);
+                                diagnostics.push(diagnostic_for(span, diagnostic_message(nested)));
+                            }
                         }
                     }
                 }
@@ -562,6 +609,59 @@ fn collect_permission_oneof_paths(err: &ValidationError<'_>, out: &mut Vec<Strin
             }
         }
         _ => {}
+    }
+}
+
+/// Count the non-empty `/` segments of a validator instance path —
+/// the nesting depth used by the anyOf de-collapse passes to separate
+/// leaf-level errors from errors reported at the collapsed node.
+fn segment_depth(path: &str) -> usize {
+    path.split('/').filter(|s| !s.is_empty()).count()
+}
+
+/// Collect the NON-pattern sibling defects co-located in a collapsed
+/// AnyOf error whose pattern leaves were already collected (rc-lys6a):
+/// the defects the old replace-when-present pass silently dropped.
+///
+/// Walks the same `context` branches as the pattern pass:
+/// - nested `Pattern` errors are skipped (owned by the pattern walk);
+/// - a nested `Type` error whose instance path equals the collapsed
+///   error's own path is branch noise, not a defect — the
+///   `{"type": "null"}` sibling branch failing because the instance is
+///   an object of the intended shape;
+/// - nested errors strictly SHALLOWER than the collapsed node are
+///   skipped (defensive; jsonschema reports nested branch errors with
+///   absolute deeper-or-equal paths);
+/// - dedup by `(instance_path, message)` preserving first-occurrence
+///   order (branches retry the same subschema shapes, so the same
+///   defect can surface more than once).
+fn collect_sibling_errors<'a>(
+    err: &'a ValidationError<'_>,
+    own_depth: usize,
+    out: &mut Vec<&'a ValidationError<'a>>,
+) {
+    let ValidationErrorKind::AnyOf { context } = err.kind() else {
+        return;
+    };
+    let own_path = err.instance_path().as_str();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    for branch in context {
+        for nested in branch {
+            if matches!(nested.kind(), ValidationErrorKind::Pattern { .. }) {
+                continue;
+            }
+            let nested_path = nested.instance_path().as_str();
+            if matches!(nested.kind(), ValidationErrorKind::Type { .. }) && nested_path == own_path
+            {
+                continue;
+            }
+            if segment_depth(nested_path) < own_depth {
+                continue;
+            }
+            if seen.insert((nested_path.to_string(), diagnostic_message(nested))) {
+                out.push(nested);
+            }
+        }
     }
 }
 

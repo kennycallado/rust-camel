@@ -709,6 +709,230 @@ mcp:
 }
 
 #[test]
+fn rschema_mcp_tls_blank_cert_path_unknown_key_sibling_both_reported() {
+    // A blank `cert_path` (pattern violation) co-occurring with an
+    // unknown `rogue_key` in the SAME failed anyOf reports BOTH: the
+    // pattern leaf on the blank token AND the sibling defect anchored
+    // on the unknown key. No collapsed container diagnostic and no
+    // null-branch noise may leak (the collapsed diagnostic that used
+    // to swallow the sibling is replaced by the leaves).
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: \"\"
+        key_path: /etc/certs/crm-key.pem
+        rogue_key: true
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        2,
+        "expected the pattern leaf plus the unknown-key sibling; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    let pattern = rschema[0];
+    assert_eq!(
+        slice(source, &pattern.span),
+        "\"\"",
+        "the pattern leaf must anchor on the raw quoted blank token"
+    );
+    assert!(
+        pattern.message.contains("does not match"),
+        "the first diagnostic must be the pattern leaf; got: {}",
+        pattern.message
+    );
+    let sibling = rschema[1];
+    assert!(
+        sibling
+            .message
+            .contains("Additional properties are not allowed"),
+        "the second diagnostic must be the unknown-key sibling; got: {}",
+        sibling.message
+    );
+    assert!(
+        slice(source, &sibling.span).contains("rogue_key"),
+        "the sibling must anchor on the unknown key; got: {:?}",
+        slice(source, &sibling.span)
+    );
+    assert!(
+        rschema
+            .iter()
+            .all(|d| !d.message.contains("is not valid under any of the schemas")),
+        "no collapsed container diagnostic may remain; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_tls_blank_cert_path_nonstring_key_path_sibling_both_reported() {
+    // A blank `cert_path` (pattern violation) co-occurring with a
+    // non-string `key_path` (type violation) in the SAME failed anyOf
+    // reports BOTH: the pattern leaf on the blank token AND the deeper
+    // Type sibling anchored on the offending `[]` value. No collapsed
+    // container diagnostic may remain.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: \"\"
+        key_path: []
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        2,
+        "expected the pattern leaf plus the type sibling; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    let pattern = rschema[0];
+    assert_eq!(
+        slice(source, &pattern.span),
+        "\"\"",
+        "the pattern leaf must anchor on the raw quoted blank token"
+    );
+    assert!(
+        pattern.message.contains("does not match"),
+        "the first diagnostic must be the pattern leaf; got: {}",
+        pattern.message
+    );
+    let sibling = rschema[1];
+    assert_eq!(
+        slice(source, &sibling.span),
+        "[]",
+        "the type sibling must anchor on the offending `[]` value"
+    );
+    assert!(
+        sibling.message.contains("is not of type") && sibling.message.contains("string"),
+        "the second diagnostic must be the Type sibling; got: {}",
+        sibling.message
+    );
+    assert!(
+        rschema
+            .iter()
+            .all(|d| !d.message.contains("is not valid under any of the schemas")),
+        "no collapsed container diagnostic may remain; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_tls_blank_paths_unknown_key_three_defects_reported() {
+    // Both TLS path fields blank (two pattern violations) plus one
+    // unknown key in the SAME failed anyOf: all THREE defects surface
+    // as leaf diagnostics — two `does not match` leaves on the quoted
+    // blank tokens plus one unknown-key sibling. No collapsed
+    // container diagnostic may remain.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: \"\"
+        key_path: \"   \"
+        rogue_key: 1
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        3,
+        "expected two pattern leaves plus the unknown-key sibling; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (slice(source, &d.span), d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+    let pattern_slices = [
+        slice(source, &rschema[0].span),
+        slice(source, &rschema[1].span),
+    ];
+    assert!(
+        pattern_slices.contains(&"\"\"") && pattern_slices.contains(&"\"   \""),
+        "the two pattern leaves must anchor on the quoted blank tokens; got: {:?}",
+        pattern_slices
+    );
+    assert!(
+        rschema[0].message.contains("does not match")
+            && rschema[1].message.contains("does not match"),
+        "the first two diagnostics must be the pattern leaves; got: {:?}",
+        [rschema[0].message.as_str(), rschema[1].message.as_str()]
+    );
+    assert!(
+        rschema[2]
+            .message
+            .contains("Additional properties are not allowed"),
+        "the third diagnostic must be the unknown-key sibling; got: {}",
+        rschema[2].message
+    );
+    assert!(
+        slice(source, &rschema[2].span).contains("rogue_key"),
+        "the sibling must anchor on the unknown key; got: {:?}",
+        slice(source, &rschema[2].span)
+    );
+    assert!(
+        rschema
+            .iter()
+            .all(|d| !d.message.contains("is not valid under any of the schemas")),
+        "no collapsed container diagnostic may remain; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_tls_unknown_key_alone_collapsed_unchanged() {
+    // Non-pattern-only anyOf failure (valid paths plus one unknown
+    // key): with NO nested pattern error, the collapsed anyOf
+    // diagnostic keeps today's byte-exact shape — the canonical_json
+    // instance echo of the whole tls mapping, anchored on that
+    // mapping. Regression guard for the sibling pass.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: /a.pem
+        key_path: /b.pem
+        rogue: true
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(rschema.len(), 1);
+    const GENERIC: &str = "{\"cert_path\":\"/a.pem\",\"key_path\":\"/b.pem\",\"rogue\":true} is not valid under any of the schemas listed in the 'anyOf' keyword";
+    assert_eq!(
+        rschema[0].message, GENERIC,
+        "the collapsed anyOf diagnostic must stay byte-identical"
+    );
+    assert!(
+        slice(source, &rschema[0].span).contains("rogue: true"),
+        "the collapsed diagnostic must anchor on the whole tls mapping"
+    );
+}
+
+#[test]
 fn rschema_mcp_tls_padded_valid_path_stays_silent() {
     // Trimmed-valid pin: a real path wrapped in leading/trailing spaces
     // still matches `\S` (the pattern is not anchored), and boot trims
