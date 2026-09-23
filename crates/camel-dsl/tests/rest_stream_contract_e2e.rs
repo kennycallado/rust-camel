@@ -37,6 +37,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use camel_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
+use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use camel_core::route::BuilderStep;
 use camel_dsl::parse_yaml;
 use futures::StreamExt;
@@ -247,7 +248,12 @@ fn sized_reply_stream(n: usize, content_type: &str) -> Body {
 
 #[tokio::test]
 async fn http_request_metadata_carries_content_type_and_length() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle {
         port,
         mut rx,
@@ -285,7 +291,12 @@ async fn http_request_metadata_carries_content_type_and_length() {
 
 #[tokio::test]
 async fn chunked_request_over_cap_fails_closed() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     // Cap 12 bytes; the request streams 16 content bytes in two chunks —
     // past the Content-Length pre-check, so only the mid-stream cap can
     // stop it, exactly on consumption.
@@ -325,7 +336,12 @@ async fn chunked_request_over_cap_fails_closed() {
 
 #[tokio::test]
 async fn in_route_double_consumption_surfaces_already_consumed() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle {
         port,
         mut rx,
@@ -369,7 +385,12 @@ async fn in_route_double_consumption_surfaces_already_consumed() {
 
 #[tokio::test]
 async fn consumed_reply_stream_returns_500() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle {
         port,
         mut rx,
@@ -404,7 +425,12 @@ async fn consumed_reply_stream_returns_500() {
 
 #[tokio::test]
 async fn materialized_reply_bytes_over_cap_replaced_with_500() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle {
         port,
         mut rx,
@@ -432,7 +458,12 @@ async fn materialized_reply_bytes_over_cap_replaced_with_500() {
 
 #[tokio::test]
 async fn streamed_reply_over_max_response_body_succeeds() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     // The decided limit policy: max_response_body caps materialized
     // (Bytes) replies only; a streamed reply flows uncapped end-to-end.
     let ServerHandle {
@@ -467,7 +498,12 @@ async fn streamed_reply_over_max_response_body_succeeds() {
 
 #[tokio::test]
 async fn reply_may_stream_original_request_body() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle {
         port,
         mut rx,
@@ -498,7 +534,12 @@ async fn reply_may_stream_original_request_body() {
 
 #[tokio::test]
 async fn client_disconnect_during_streamed_reply_keeps_server_healthy() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle {
         port,
         mut rx,

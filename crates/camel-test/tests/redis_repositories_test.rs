@@ -40,6 +40,7 @@ mod support;
 use support::install_crypto_provider;
 
 use camel_api::cache::{CacheEntry, ContentType};
+use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use camel_config::CamelConfig;
 use redis::AsyncCommands;
 use std::time::{Duration, Instant};
@@ -566,7 +567,12 @@ async fn sentinel_master_port() -> Option<u16> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_sentinel_selected_by_config_live() {
-    let _guard = SENTINEL_TOPOLOGY_LOCK.lock().await;
+    let _guard = acquire_deadline(
+        &SENTINEL_TOPOLOGY_LOCK,
+        "SENTINEL_TOPOLOGY_LOCK (redis repositories)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let _container = sentinel_topology().await;
     support::wait::wait_until(
         "sentinel tracks the master",
@@ -629,7 +635,12 @@ stale_retention = "30s"
 /// databases or suites sharing the node could inflate.
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_sentinel_db_select_live() {
-    let _guard = SENTINEL_TOPOLOGY_LOCK.lock().await;
+    let _guard = acquire_deadline(
+        &SENTINEL_TOPOLOGY_LOCK,
+        "SENTINEL_TOPOLOGY_LOCK (redis repositories)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let _container = sentinel_topology().await;
     support::wait::wait_until(
         "sentinel tracks the master",
@@ -827,7 +838,12 @@ async fn sentinel_auth_master_port() -> Option<u16> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_sentinel_data_auth_live() {
-    let _guard = SENTINEL_TOPOLOGY_LOCK.lock().await;
+    let _guard = acquire_deadline(
+        &SENTINEL_TOPOLOGY_LOCK,
+        "SENTINEL_TOPOLOGY_LOCK (redis repositories)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let _container = sentinel_auth_topology().await;
     support::wait::wait_until(
         "authenticated sentinel tracks the master",
@@ -1114,7 +1130,12 @@ async fn trigger_acl_failover() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_sentinel_acl_user_live() {
-    let _guard = SENTINEL_TOPOLOGY_LOCK.lock().await;
+    let _guard = acquire_deadline(
+        &SENTINEL_TOPOLOGY_LOCK,
+        "SENTINEL_TOPOLOGY_LOCK (redis repositories)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let _container = sentinel_acl_topology().await;
     support::wait::wait_until(
         "acl sentinel tracks the master",
@@ -1210,7 +1231,12 @@ stale_retention = "30s"
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_sentinel_failover_reauth_live() {
     let started = Instant::now();
-    let _guard = SENTINEL_TOPOLOGY_LOCK.lock().await;
+    let _guard = acquire_deadline(
+        &SENTINEL_TOPOLOGY_LOCK,
+        "SENTINEL_TOPOLOGY_LOCK (redis repositories)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let _container = sentinel_acl_topology().await;
     support::wait::wait_until(
         "acl sentinel tracks the master (failover test)",
@@ -1515,7 +1541,12 @@ async fn sentinel_ctrl_master_port() -> Option<u16> {
 /// BOTH are right.
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_sentinel_control_plane_auth_live() {
-    let _guard = SENTINEL_TOPOLOGY_LOCK.lock().await;
+    let _guard = acquire_deadline(
+        &SENTINEL_TOPOLOGY_LOCK,
+        "SENTINEL_TOPOLOGY_LOCK (redis repositories)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let _container = sentinel_ctrl_topology().await;
     install_crypto_provider();
     support::wait::wait_until(

@@ -150,6 +150,45 @@ impl RuntimeObservability for NoopRuntimeObservability {
     }
 }
 
+/// Uniform acquisition deadline for process-global test-serialization
+/// locks: 900 s. Derivation — a waiting test's healthy worst case is
+/// (holders − 1) × longest holder inside its single test binary; the
+/// largest chain is camel-ws `REGISTRY_TEST_LOCK` at 602 s (43 × 14 s,
+/// 5 s connect bound + short body per holder). 900 s ≈ 1.5× margin for
+/// CI load jitter, so an acquisition timeout indicates a stalled
+/// holder, not queue depth (bd rc-88old).
+pub const TEST_LOCK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(900);
+
+/// Acquire a process-global test-serialization lock with a deadline.
+///
+/// Test locks are empty `Mutex<()>` guards held for a whole test body.
+/// A stalled holder parks every queued test forever (bd rc-88old,
+/// rc-y24l camel-ws hang class). Bounding the acquisition turns the
+/// wedge into one failing test with a named lock + site.
+///
+/// The outer fn is synchronous and `#[track_caller]`: the caller site
+/// is captured into a local BEFORE the async block is returned — a
+/// fully well-defined sync capture, no reliance on `#[track_caller]`
+/// behavior across async polling. On timeout the acquisition panics
+/// naming the lock, the deadline, and the call site.
+#[track_caller]
+pub fn acquire_deadline<'a, T: ?Sized>(
+    lock: &'a tokio::sync::Mutex<T>,
+    what: &'a str,
+    deadline: std::time::Duration,
+) -> impl std::future::Future<Output = tokio::sync::MutexGuard<'a, T>> + 'a {
+    let caller = std::panic::Location::caller();
+    async move {
+        match tokio::time::timeout(deadline, lock.lock()).await {
+            Ok(guard) => guard,
+            Err(_) => panic!(
+                "test lock {what} not acquired within {deadline:?} \
+                 — holder stalled (bd rc-88old), site {caller}"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +237,133 @@ mod tests {
         let path = super::tls::write_pem_tmp("test-write.pem", "test content");
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "test content");
+    }
+}
+
+/// Unit tests for `acquire_deadline`: the uncontended fast path, the
+/// stalled-holder panic (lock + deadline named), and the `#[track_caller]`
+/// site capture. The stalled holder is by construction: it acquires
+/// THROUGH the helper while the lock is uncontended (so its 60 s holder
+/// deadline cannot fire), then parks on `pending()` — the wedge the
+/// helper exists to bound. No adjudicated waits in this module.
+#[cfg(test)]
+mod lock_deadline_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::Mutex;
+
+    use super::acquire_deadline;
+
+    #[tokio::test]
+    async fn acquire_deadline_uncontended_returns_guard() {
+        let lock = Mutex::new(());
+        let _guard = acquire_deadline(&lock, "UNIT_LOCK", Duration::from_secs(60)).await;
+        drop(_guard);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "test lock STALLED_UNIT_LOCK not acquired within 100ms")]
+    async fn acquire_deadline_stalled_holder_panics_naming_lock() {
+        let lock = Arc::new(Mutex::new(()));
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = {
+            let lock = Arc::clone(&lock);
+            tokio::spawn(async move {
+                // Holder dogfoods the helper: it acquires while the lock is
+                // uncontended (the test contends only after the ack), so the
+                // 60 s holder deadline cannot fire — the stall comes from
+                // pending() below, not from the acquisition.
+                let _guard =
+                    acquire_deadline(&lock, "unit fixture holder", Duration::from_secs(60)).await;
+                let _ = tx.send(());
+                std::future::pending::<()>().await;
+            })
+        };
+        // Await the ack FIRST so the holder provably holds the lock before
+        // the acquisition attempt (deterministic, race-free, sleep-free).
+        rx.await
+            .expect("stalled holder acks after acquiring the lock");
+        // Always panics at the deadline; `let _` because MutexGuard is
+        // #[must_use] and the guard can never be observed here.
+        let _ = acquire_deadline(&lock, "STALLED_UNIT_LOCK", Duration::from_millis(100)).await;
+        holder.abort(); // unreachable: the line above must panic
+    }
+
+    #[test]
+    fn acquire_deadline_panic_names_call_site() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("current-thread tokio runtime");
+        let lock = Arc::new(Mutex::new(()));
+        // The panic unwinds before the async block could return `site`, so
+        // the captured location is smuggled out through a Cell (`&'static
+        // Location` is Copy, and the set happens before the panicking await).
+        let captured_site: std::cell::Cell<Option<&'static std::panic::Location<'static>>> =
+            std::cell::Cell::new(None);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rt.block_on(async {
+                let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                let holder = {
+                    let lock = Arc::clone(&lock);
+                    tokio::spawn(async move {
+                        // Same dogfooding as above: uncontended helper
+                        // acquisition, then the deliberate pending() stall.
+                        let _guard =
+                            acquire_deadline(&lock, "unit fixture holder", Duration::from_secs(60))
+                                .await;
+                        let _ = tx.send(());
+                        std::future::pending::<()>().await;
+                    })
+                };
+                rx.await
+                    .expect("stalled holder acks after acquiring the lock");
+                // Regression-proof site capture: `checked_acquire` is
+                // #[track_caller] and caller state propagates through
+                // #[track_caller] calls, so `site` and the panic's embedded
+                // caller are the SAME Location (the `checked_acquire(...)`
+                // statement below). If `acquire_deadline` ever loses
+                // #[track_caller], the panic names its own body line and the
+                // assertion after the catch_unwind fails.
+                #[track_caller]
+                fn checked_acquire<'a, T: ?Sized>(
+                    lock: &'a tokio::sync::Mutex<T>,
+                    what: &'a str,
+                    deadline: std::time::Duration,
+                ) -> (
+                    &'static std::panic::Location<'static>,
+                    impl std::future::Future<Output = tokio::sync::MutexGuard<'a, T>> + 'a,
+                ) {
+                    let site = std::panic::Location::caller();
+                    let fut = acquire_deadline(lock, what, deadline);
+                    (site, fut)
+                }
+
+                let (site, fut) =
+                    checked_acquire(&lock, "STALLED_UNIT_LOCK", Duration::from_millis(100));
+                captured_site.set(Some(site));
+                let _ = std::pin::pin!(fut).await;
+                holder.abort(); // unreachable: the line above must panic
+            });
+        }));
+        let err = result.expect_err("stalled acquisition must panic");
+        let msg = err
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| err.downcast_ref::<&'static str>().copied())
+            .expect("panic payload downcasts to a string");
+        assert!(
+            msg.contains("STALLED_UNIT_LOCK"),
+            "panic must name the lock: {msg}"
+        );
+        assert!(msg.contains("100ms"), "panic must name the deadline: {msg}");
+        let site = captured_site
+            .get()
+            .expect("site captured before the stalled acquisition");
+        assert!(
+            msg.contains(&format!("site {site}")),
+            "panic must name the exact acquisition call site: {msg}"
+        );
     }
 }

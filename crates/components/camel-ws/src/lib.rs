@@ -2400,6 +2400,7 @@ mod tests {
 
     use super::*;
     use camel_component_api::NoOpComponentContext;
+    use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
     use std::time::Duration;
 
     use tokio::sync::mpsc;
@@ -2590,7 +2591,12 @@ mod tests {
 
     #[tokio::test]
     async fn echo_flow_round_trips_message_through_consumer_and_producer() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -2684,7 +2690,12 @@ mod tests {
     async fn server_frame_dispatch_carries_in_flight_claim() {
         use std::sync::atomic::AtomicU64;
 
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let uri = format!("ws://127.0.0.1:{port}/claim");
@@ -2796,7 +2807,12 @@ mod tests {
 
     #[tokio::test]
     async fn start_with_listener_round_trips_without_port_guess() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let uri = format!("ws://127.0.0.1:{}/echo", addr.port());
@@ -2842,7 +2858,12 @@ mod tests {
 
     #[tokio::test]
     async fn injected_entry_survives_consumer_stop() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -2917,7 +2938,12 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_stop_sends_close_1001() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -2993,7 +3019,12 @@ mod tests {
 
     #[tokio::test]
     async fn wss_consumer_start_fails_without_tls_cert() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -3015,7 +3046,12 @@ mod tests {
 
     #[tokio::test]
     async fn wss_consumer_start_fails_with_nonexistent_cert() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         // Ensure clean global state (process-lifetime servers may leak across tests).
         ServerRegistry::reset();
 
@@ -3042,7 +3078,12 @@ mod tests {
 
     #[tokio::test]
     async fn server_registry_returns_same_state_for_same_port() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         // One socket, two handles: clone at the std level BEFORE the tokio
         // conversion so both injected listeners report the same local port.
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3086,7 +3127,12 @@ mod tests {
 
     #[tokio::test]
     async fn with_listener_port_zero_returns_real_bound_addr() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3110,7 +3156,12 @@ mod tests {
 
     #[tokio::test]
     async fn with_listener_same_port_reuses_entry() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         // One socket, two handles: clone at the std level BEFORE the tokio
@@ -3147,7 +3198,12 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_get_or_spawn_after_injected_reuses_entry() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3174,7 +3230,12 @@ mod tests {
     async fn legacy_get_or_spawn_unchanged_after_refactor() {
         use camel_component_api::test_support::tls;
 
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
         let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -3239,7 +3300,12 @@ mod tests {
     async fn with_listener_tls_mismatch_errors() {
         use camel_component_api::test_support::tls;
 
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
         let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -3293,7 +3359,12 @@ mod tests {
 
     #[tokio::test]
     async fn reset_clears_injected_entry_allowing_rebind() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3344,7 +3415,12 @@ mod tests {
 
     #[tokio::test]
     async fn ws_staged_listener_consumed_on_vacant_entry() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3375,7 +3451,12 @@ mod tests {
 
     #[tokio::test]
     async fn ws_staged_not_consumed_when_entry_exists() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         // One socket, three handles: the entry is created from the original,
@@ -3430,7 +3511,12 @@ mod tests {
 
     #[tokio::test]
     async fn ws_wrong_host_staged_port_fails() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3468,7 +3554,12 @@ mod tests {
 
     #[tokio::test]
     async fn ws_duplicate_stage_rejected() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3504,7 +3595,12 @@ mod tests {
 
     #[tokio::test]
     async fn ws_distinct_keys_stage_independently() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         let std1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3564,7 +3660,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_handler_returns_404_for_unregistered_path() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (state, _addr, _, _) = ServerRegistry::global()
             .get_or_spawn_with_listener(listener, None, test_rt(), "test-route".into())
@@ -3633,7 +3734,12 @@ mod tests {
 
     #[tokio::test]
     async fn max_connections_rejects_with_close_1013() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -3683,7 +3789,12 @@ mod tests {
 
     #[tokio::test]
     async fn max_message_size_rejects_with_close_1009() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -3734,7 +3845,12 @@ mod tests {
 
     #[tokio::test]
     async fn max_message_size_rejects_binary_with_close_1009() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -3785,7 +3901,12 @@ mod tests {
 
     #[tokio::test]
     async fn origin_rejection_returns_403() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -3838,7 +3959,12 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_sends_to_all_connected_clients() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -3910,7 +4036,12 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_get_or_spawn_returns_same_state() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         // One socket, four handles: clone at the std level BEFORE the tokio
         // conversion so all injected listeners report the same local port.
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4099,7 +4230,12 @@ mod tests {
     // WS-006: Double-start must be rejected
     #[tokio::test]
     async fn consumer_double_start_returns_error() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -4139,7 +4275,12 @@ mod tests {
     // WS-005: Registry cleanup on stop + port reuse
     #[tokio::test]
     async fn registry_cleanup_on_consumer_stop() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -4187,7 +4328,12 @@ mod tests {
     // WS-003 + WS-004: poll_ready backpressure and server-send error handling
     #[tokio::test]
     async fn producer_server_send_returns_error_when_all_dropped() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -4249,7 +4395,12 @@ mod tests {
     // WS-012: Ping/pong round-trip in server mode
     #[tokio::test]
     async fn server_responds_to_client_ping_with_pong() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -4331,7 +4482,12 @@ mod tests {
     // WS-001: Server bind error is visible (fake server-start error test)
     #[tokio::test]
     async fn server_bind_error_is_reported() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         // Bind a port manually to cause a conflict
         let _listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = _listener.local_addr().unwrap().port();
@@ -4396,7 +4552,12 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_stop_returns_error_when_server_had_errors() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -4429,7 +4590,12 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_stop_succeeds_when_server_healthy() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -4475,7 +4641,12 @@ mod tests {
     /// down.
     #[tokio::test]
     async fn shared_server_death_fails_every_hosted_consumer() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         // One socket, two handles: both consumers host on the same port.
@@ -4662,7 +4833,12 @@ mod tests {
     /// actually rebind (parity with camel-http's eviction).
     #[tokio::test]
     async fn dead_shared_server_is_evicted_and_rebinds() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         // Two handles on one socket: first spawns, second is kept for the
@@ -4782,7 +4958,12 @@ mod tests {
     /// the reused port.
     #[tokio::test]
     async fn listened_then_dead_entry_is_not_joined_on_port_reuse() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         let (corpse_dispatch, corpse_route, port) = leave_listened_then_dead_entry("wsevict-owner");
@@ -4830,7 +5011,12 @@ mod tests {
     /// accepting traffic after the join.
     #[tokio::test]
     async fn live_shared_server_is_not_evicted_on_join() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -4874,7 +5060,12 @@ mod tests {
     /// the staged listener.
     #[tokio::test]
     async fn port_reuse_after_eviction_serves_staged_listener() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
 
         let (corpse_dispatch, corpse_route, port) =
@@ -5212,7 +5403,12 @@ mod tests {
         use camel_component_api::test_support::tls;
         use camel_component_api::tls_source::TlsReloadRegistry;
 
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let (cert_pem, key_pem) = {
@@ -5268,7 +5464,12 @@ mod tests {
         use camel_component_api::test_support::tls;
         use camel_component_api::tls_source::TlsReloadRegistry;
 
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let (cert_pem, key_pem) = {
@@ -5336,7 +5537,12 @@ mod tests {
     async fn ws_plaintext_does_not_register_tls_reload_handler() {
         use camel_component_api::tls_source::TlsReloadRegistry;
 
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         // Ensure clean global state (process-lifetime servers may leak across tests).
         ServerRegistry::reset();
 
@@ -5368,7 +5574,12 @@ mod tests {
         use camel_component_api::StartupSignal;
         use camel_component_api::test_support::{NoopRuntimeObservability, tls};
 
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let _ = rustls::crypto::ring::default_provider().install_default();
         // Clean global state (process-lifetime servers may leak across tests).
         ServerRegistry::reset();
@@ -5452,7 +5663,12 @@ mod tests {
     async fn wss_start_does_not_park_on_dead_registry_handle() {
         use camel_component_api::test_support::{NoopRuntimeObservability, tls};
 
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         ServerRegistry::reset();
         let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -5599,7 +5815,12 @@ mod tests {
 
     #[tokio::test]
     async fn ws_message_dispatch_failure_counts_b_prime() {
-        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _guard = acquire_deadline(
+            &REGISTRY_TEST_LOCK,
+            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
         let errors: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

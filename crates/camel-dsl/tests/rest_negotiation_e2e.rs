@@ -49,6 +49,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::Bytes;
 use camel_api::{Body, CamelError, Exchange, IdentityProcessor, Message, StreamMetadata};
 use camel_component_api::ExchangeEnvelope;
+use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use camel_core::route::BuilderStep;
 use camel_dsl::{ValueSourceDef, parse_yaml};
 use camel_processor::{SetHeader, SetHeaderIfAbsent};
@@ -358,7 +359,12 @@ fn assert_2xx(actual: u16, context: &str) {
 
 #[tokio::test]
 async fn e2e_post_wrong_content_type_415_and_sink_untouched() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/post", "POST").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -416,7 +422,12 @@ async fn e2e_post_wrong_content_type_415_and_sink_untouched() {
 
 #[tokio::test]
 async fn e2e_post_parameterized_matching_content_type_passes() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/post", "POST").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -449,7 +460,12 @@ async fn e2e_post_parameterized_matching_content_type_passes() {
 
 #[tokio::test]
 async fn e2e_post_plus_json_suffix_passes() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/post", "POST").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -477,7 +493,12 @@ async fn e2e_post_plus_json_suffix_passes() {
 
 #[tokio::test]
 async fn e2e_post_malformed_content_type_415() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/post", "POST").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -507,7 +528,12 @@ async fn e2e_post_malformed_content_type_415() {
 
 #[tokio::test]
 async fn e2e_post_wildcard_content_type_415() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/post", "POST").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -536,7 +562,12 @@ async fn e2e_post_wildcard_content_type_415() {
 
 #[tokio::test]
 async fn e2e_get_and_delete_no_content_type_check() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     // Body-less verbs keep the Accept-side gate but skip the
     // Content-Type side: a text/plain Content-Type on GET/DELETE must
     // not 415 — each op returns its own outcome.
@@ -605,7 +636,12 @@ async fn e2e_get_and_delete_no_content_type_check() {
 
 #[tokio::test]
 async fn e2e_accept_mismatch_406() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/get", "GET").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -650,7 +686,12 @@ async fn e2e_accept_mismatch_406() {
 
 #[tokio::test]
 async fn e2e_accept_q0_406() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/get", "GET").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -678,7 +719,12 @@ async fn e2e_accept_q0_406() {
 
 #[tokio::test]
 async fn e2e_accept_precedence_q0_406() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/get", "GET").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -710,7 +756,12 @@ async fn e2e_accept_precedence_q0_406() {
 
 #[tokio::test]
 async fn e2e_accept_tie_lowest_q_406() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/get", "GET").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -742,7 +793,12 @@ async fn e2e_accept_tie_lowest_q_406() {
 
 #[tokio::test]
 async fn e2e_accept_wildcard_passes() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/get", "GET").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -776,7 +832,12 @@ async fn e2e_accept_wildcard_passes() {
 
 #[tokio::test]
 async fn e2e_accept_multi_entry_passes() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/get", "GET").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -808,7 +869,12 @@ async fn e2e_accept_multi_entry_passes() {
 
 #[tokio::test]
 async fn e2e_accept_malformed_permissive() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/get", "GET").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -831,7 +897,12 @@ async fn e2e_accept_malformed_permissive() {
 
 #[tokio::test]
 async fn e2e_absent_headers_permissive_pinned_bytes() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/post", "POST").await;
     let sink = Arc::new(AtomicUsize::new(0));
 
@@ -872,7 +943,12 @@ async fn e2e_absent_headers_permissive_pinned_bytes() {
 
 #[tokio::test]
 async fn e2e_raw_stream_passthrough_with_negotiation() {
-    let _guard = SERVER_MUTEX.lock().await;
+    let _guard = acquire_deadline(
+        &SERVER_MUTEX,
+        "SERVER_MUTEX (dsl rest e2e)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let ServerHandle { port, rx, token } = spawn_negotiation_server("/neg/raw", "POST").await;
     let sink = Arc::new(AtomicUsize::new(0));
 

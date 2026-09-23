@@ -84,8 +84,11 @@ literals. Compliance is enforced by `cargo xtask lint-non-exhaustive`.
 
 ## `test-support` feature
 
-The optional `test-support` feature exposes the `test_support` module,
-`NoopRuntimeObservability`, and `PanicRuntimeObservability`. The panic stub is only for downstream
+The optional `test-support` feature exposes the `test_support` module (including its `tls`
+submodule), `NoopRuntimeObservability`, `PanicRuntimeObservability`, `acquire_deadline`, and
+`TEST_LOCK_DEADLINE`. `acquire_deadline` bounds global test-lock acquisition so a stalled holder
+fails one test instead of wedging the binary (bd rc-88old). `TEST_LOCK_DEADLINE` is the 900 s
+default deadline. The panic stub is only for downstream
 tests. Production builds must not enable this feature. The feature also enables optional `rcgen`
 support.
 

@@ -37,6 +37,7 @@ use std::time::Duration;
 
 use camel_component_api::Consumer;
 use camel_component_api::consumer::{ConsumerContext, ExchangeEnvelope};
+use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -335,7 +336,12 @@ async fn conflicting_binds_fail_before_socket() {
 async fn guest_only_non_loopback_bind_gated() {
     let port_a = common::stage_wasm_source_listener("127.0.0.1").await;
     let guest_bind = format!("0.0.0.0:{port_a}");
-    let _ack_guard = ACK_TEST_LOCK.lock().await;
+    let _ack_guard = acquire_deadline(
+        &ACK_TEST_LOCK,
+        "ACK_TEST_LOCK (wasm source bind)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     WasmSourceBindAcks::global().set(HashMap::new());
 
     // No `bind` query param — operator bind absent.
@@ -370,7 +376,12 @@ async fn non_loopback_public_gate_with_and_without_ack() {
     // Phase 1 — no ack: start() fails naming the bind.
     let port_a = common::stage_wasm_source_listener("127.0.0.1").await;
     let bind_a = format!("0.0.0.0:{port_a}");
-    let _ack_guard = ACK_TEST_LOCK.lock().await;
+    let _ack_guard = acquire_deadline(
+        &ACK_TEST_LOCK,
+        "ACK_TEST_LOCK (wasm source bind)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     WasmSourceBindAcks::global().set(HashMap::new());
 
     let uri = format!("wasm:webhook.wasm?bind={bind_a}");
@@ -479,7 +490,12 @@ async fn loopback_public_needs_no_ack() {
 #[tokio::test]
 #[ignore = "requires pre-built guest wasm (see module docs)"]
 async fn refused_route_preserves_staged_slot() {
-    let _ack_guard = ACK_TEST_LOCK.lock().await;
+    let _ack_guard = acquire_deadline(
+        &ACK_TEST_LOCK,
+        "ACK_TEST_LOCK (wasm source bind)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
 
     let port = common::stage_wasm_source_listener("0.0.0.0").await;
     let guest_bind = format!("0.0.0.0:{port}");

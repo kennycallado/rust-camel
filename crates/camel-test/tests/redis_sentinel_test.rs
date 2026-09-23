@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use camel_api::{Body, Exchange, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use camel_component_redis::{RedisComponent, RedisSentinelComponent};
 use camel_test::CamelTestContext;
 use redis::Commands;
@@ -453,7 +454,12 @@ async fn wait_master_switched(previous_port: &str, deadline: Instant) -> u16 {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_recovers_after_sentinel_failover() {
-    let _guard = TOPOLOGY_LOCK.lock().await;
+    let _guard = acquire_deadline(
+        &TOPOLOGY_LOCK,
+        "TOPOLOGY_LOCK (redis sentinel)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let h = sentinel_harness().await;
     let uri = sentinel_uri();
 
@@ -540,7 +546,12 @@ async fn producer_recovers_after_sentinel_failover() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn queue_consumer_recovers_after_sentinel_failover() {
-    let _guard = TOPOLOGY_LOCK.lock().await;
+    let _guard = acquire_deadline(
+        &TOPOLOGY_LOCK,
+        "TOPOLOGY_LOCK (redis sentinel)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let h = sentinel_harness().await;
     let uri = sentinel_uri();
 
@@ -618,7 +629,12 @@ async fn queue_consumer_recovers_after_sentinel_failover() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pubsub_consumer_resubscribes_after_sentinel_failover() {
-    let _guard = TOPOLOGY_LOCK.lock().await;
+    let _guard = acquire_deadline(
+        &TOPOLOGY_LOCK,
+        "TOPOLOGY_LOCK (redis sentinel)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
     let h = sentinel_harness().await;
     let uri = sentinel_uri();
 

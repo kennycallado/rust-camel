@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use camel_component_api::{
     Component, ComponentBundle, Consumer, ConsumerContext, ExchangeEnvelope, NoOpComponentContext,
 };
@@ -104,7 +105,8 @@ fn write_gz_file(dir: &std::path::Path, name: &str, content: &str) -> PathBuf {
 #[tokio::test]
 async fn http_static_shared_port_api_and_static() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "hello.txt", "hello from static");
@@ -186,7 +188,8 @@ async fn http_static_shared_port_api_and_static() {
 #[tokio::test]
 async fn http_static_basic_file_serving() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "index.html", "<h1>Hello</h1>");
@@ -228,7 +231,8 @@ async fn http_static_basic_file_serving() {
 #[tokio::test]
 async fn http_static_precompressed_gzip_content_encoding() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     let js_content = "console.log('hello world');";
@@ -280,7 +284,8 @@ async fn http_static_precompressed_gzip_content_encoding() {
 #[tokio::test]
 async fn http_static_cache_control_from_config() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir1 = tempfile::TempDir::new().expect("tempdir");
     write_file(dir1.path(), "file.txt", "from dir1");
@@ -350,7 +355,8 @@ async fn http_static_cache_control_from_config() {
 #[tokio::test]
 async fn http_static_spa_fallback_serves_index() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "index.html", "<div id=\"app\">SPA</div>");
@@ -389,7 +395,8 @@ async fn http_static_spa_fallback_serves_index() {
 #[tokio::test]
 async fn http_static_spa_wins_over_custom_error_page() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(
@@ -442,7 +449,8 @@ async fn http_static_spa_wins_over_custom_error_page() {
 #[tokio::test]
 async fn http_static_subdirectory_serving() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     std::fs::create_dir_all(dir.path().join("assets/css")).expect("create subdirs");
@@ -477,7 +485,8 @@ async fn http_static_subdirectory_serving() {
 #[tokio::test]
 async fn http_static_404_for_missing_file() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "exists.txt", "I exist");
@@ -509,7 +518,8 @@ async fn http_static_404_for_missing_file() {
 #[tokio::test]
 async fn http_static_mount_path_prefix_serves_files() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "style.css", "body { color: blue; }");
@@ -550,7 +560,8 @@ async fn http_static_mount_path_prefix_serves_files() {
 #[tokio::test]
 async fn http_static_multiple_mounts_same_port() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir_assets = tempfile::TempDir::new().expect("tempdir assets");
     let dir_public = tempfile::TempDir::new().expect("tempdir public");
@@ -612,7 +623,8 @@ async fn http_static_multiple_mounts_same_port() {
 #[tokio::test]
 async fn http_static_duplicate_mount_path_rejected() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir1 = tempfile::TempDir::new().expect("tempdir1");
     let dir2 = tempfile::TempDir::new().expect("tempdir2");
@@ -679,7 +691,8 @@ async fn http_static_duplicate_mount_path_rejected() {
 #[tokio::test]
 async fn http_static_longest_prefix_wins() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir_assets = tempfile::TempDir::new().expect("tempdir assets");
     let dir_assets_sub = tempfile::TempDir::new().expect("tempdir assets/sub");
@@ -734,7 +747,8 @@ async fn http_static_longest_prefix_wins() {
 #[tokio::test]
 async fn http_static_spa_fallback_scoped_to_mount_prefix() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "index.html", "<div id=\"app\">Scoped SPA</div>");
@@ -779,7 +793,8 @@ async fn http_static_spa_fallback_scoped_to_mount_prefix() {
 #[tokio::test]
 async fn http_static_segment_boundary_prefix_match() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "file.txt", "from asset dir");
@@ -820,7 +835,8 @@ async fn http_static_segment_boundary_prefix_match() {
 #[tokio::test]
 async fn http_static_spa_and_non_spa_same_mount_path_rejected() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir1 = tempfile::TempDir::new().expect("tempdir1");
     let dir2 = tempfile::TempDir::new().expect("tempdir2");
@@ -887,7 +903,8 @@ async fn http_static_spa_and_non_spa_same_mount_path_rejected() {
 #[tokio::test]
 async fn http_static_consumer_lifecycle_start_stop() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "test.txt", "lifecycle test");
@@ -1027,7 +1044,8 @@ fn http_static_bundle_from_toml() {
 #[tokio::test]
 async fn http_static_error_page_returns_original_status() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "custom404.html", "<h1>Not Found</h1>");
@@ -1067,7 +1085,8 @@ async fn http_static_error_page_returns_original_status() {
 #[tokio::test]
 async fn http_static_path_traversal_rejected() {
     install_crypto_provider();
-    let _guard = TEST_MUTEX.lock().await;
+    let _guard =
+        acquire_deadline(&TEST_MUTEX, "TEST_MUTEX (http_static)", TEST_LOCK_DEADLINE).await;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     write_file(dir.path(), "safe.txt", "safe content");
