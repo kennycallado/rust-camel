@@ -37,10 +37,15 @@
 //!   step compilers) fire at startup, before the job send loop.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use camel_api::CamelError;
-use camel_component_seda::{SedaComponent, is_no_active_consumers_gate};
+use camel_component_api::{ConsumerContext, ExchangeEnvelope, NoopRuntimeObservability};
+use camel_component_seda::{
+    SedaComponent, is_no_active_consumers_gate, is_seda_terminal_config_error,
+};
 use camel_core::CamelContext;
+use tokio_util::sync::CancellationToken;
 
 use super::document::{JobBody, JobSendAction};
 use super::{SendError, is_retryable_startup_failure, send_with_startup_retry};
@@ -179,6 +184,64 @@ async fn behavioral_fanout_gate_fails_fast_classification() {
         !is_retryable_startup_failure(&e),
         "a genuine SEDA fanout gate must fail fast (non-retryable): {e}"
     );
+}
+
+// ---- non-retryable: genuine SEDA terminal-config conflict (behavioral) ---
+
+#[tokio::test]
+async fn behavioral_multiple_consumers_wait_config_fails_fast() {
+    let ctx = booted_seda_context().await;
+
+    // Start ONE consumer on the fanout endpoint: with an active
+    // subscriber the pre-enqueue gate passes and the producer reaches
+    // the deterministic multipleConsumers+wait configuration conflict.
+    let component = ctx.registry().get("seda").expect("seda component");
+    let endpoint = component
+        .create_endpoint("seda:q?multipleConsumers=true", &ctx)
+        .expect("fanout endpoint creation");
+    let mut consumer = endpoint
+        .create_consumer(Arc::new(NoopRuntimeObservability))
+        .expect("consumer creation");
+    let (tx, _rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let consumer_ctx = ConsumerContext::new(tx, CancellationToken::new(), "q".to_string());
+    consumer.start(consumer_ctx).await.expect("consumer start");
+
+    // The send URI mirrors the job loop's forced Always (the
+    // document::seda_send_uri output shape).
+    let send = tick_send("seda:q?multipleConsumers=true");
+    let started = Instant::now();
+    let e = match send_with_startup_retry(
+        &ctx,
+        &send,
+        "seda:q?multipleConsumers=true&waitForTaskToComplete=Always",
+        &[],
+    )
+    .await
+    {
+        Err(SendError::Pipeline(e)) => e,
+        Err(SendError::Transport(detail)) => {
+            panic!(
+                "expected the terminal-config rejection as a pipeline failure, got transport: {detail}"
+            )
+        }
+        Ok(_) => panic!("expected the terminal-config rejection as a pipeline failure, got Ok"),
+    };
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the terminal-config rejection must return on the first attempt without \
+         burning the 3 s retry window, took {:?}",
+        started.elapsed()
+    );
+    assert!(
+        is_seda_terminal_config_error(&e),
+        "the captured error must carry the seda terminal-config marker: {e}"
+    );
+    assert!(
+        !is_retryable_startup_failure(&e),
+        "a deterministic configuration conflict must fail fast (non-retryable): {e}"
+    );
+
+    consumer.stop().await.expect("consumer stop");
 }
 
 // ---- retryable: the consumer-startup race family -------------------------

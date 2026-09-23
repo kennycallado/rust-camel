@@ -595,6 +595,30 @@ impl NoActiveConsumersGate {
     }
 }
 
+/// Provenance marker for the SEDA producer's terminal configuration
+/// rejection (multipleConsumers + `waitForTaskToComplete` != Never): the
+/// producer embeds this crate-private value in the rejection's source
+/// chain and [`is_seda_terminal_config_error`] classifies by downcasting
+/// along that chain. Its `Display` is deliberately NON-canonical
+/// diagnostic text — it never participates in classification and never
+/// equals a canonical rejection message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TerminalConfigError {
+    MultipleConsumersWaitConflict,
+}
+
+impl std::fmt::Display for TerminalConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MultipleConsumersWaitConflict => f.write_str(
+                "seda terminal-config-error rejection (multipleConsumers wait conflict)",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TerminalConfigError {}
+
 /// Single-mode pre-enqueue gate rejection (`SedaMode::Single` producer
 /// entry).
 fn single_mode_gate_rejection(name: &str) -> CamelError {
@@ -611,6 +635,23 @@ fn fanout_preenqueue_gate_rejection(name: &str) -> CamelError {
 /// dispatch).
 fn fanout_subscriber_list_gate_rejection(name: &str) -> CamelError {
     NoActiveConsumersGate::Fanout.rejection(name)
+}
+
+/// Terminal configuration rejection (`SedaProducer::call`): the
+/// `multipleConsumers=true` + `waitForTaskToComplete` != Never combination
+/// is a deterministic configuration conflict — no consumer state can ever
+/// satisfy it, so a retry can never succeed. The outer detail stays
+/// BYTE-IDENTICAL to the historical wording (folding preserved);
+/// classification rides the typed [`TerminalConfigError`] marker in the
+/// source chain, not the text (rc-3px7o doctrine).
+fn terminal_config_rejection() -> CamelError {
+    CamelError::EndpointCreationFailedWithSource(
+        "multipleConsumers=true with waitForTaskToComplete != Never \
+         is not supported — a single request cannot have N valid \
+         replies without aggregator semantics"
+            .to_string(),
+        OpaqueErrorSource::new(Arc::new(TerminalConfigError::MultipleConsumersWaitConflict)),
+    )
 }
 
 /// Bound on the [`is_no_active_consumers_gate`] provenance walk: the
@@ -635,32 +676,50 @@ fn unwrap_arc_dyn_error<'a>(
     }
 }
 
-/// Extract the crate-private gate marker from a rejection's source chain,
-/// if present.
+/// Shared bounded provenance walk for the crate-private markers: downcast
+/// along an [`CamelError::EndpointCreationFailedWithSource`] source chain,
+/// probing for `T` and returning a clone of the matched marker.
 ///
 /// Classification is by TYPED PROVENANCE: only a
 /// [`CamelError::EndpointCreationFailedWithSource`] whose source chain
-/// carries a [`NoActiveConsumersGate`] within [`MAX_SOURCE_HOPS`] hops
-/// matches. Display text never participates — a foreign error whose
-/// message contains the canonical gate wording is NOT a gate (rc-3px7o;
-/// same doctrine as camel-redis's retryclass/rediserr walks). The walk
-/// starts from the variant's own source pointee — thiserror surfaces the
-/// `#[source] OpaqueErrorSource` field as the wrapper node itself, whose
-/// `source()` is the wrapped chain start (hop 1) — and probes each hop
-/// after unwrapping any std `Arc<dyn Error>` wrapper.
-fn gate_from_error(err: &CamelError) -> Option<NoActiveConsumersGate> {
+/// carries `T` within [`MAX_SOURCE_HOPS`] hops matches. Display text never
+/// participates — a foreign error whose message mimics a canonical wording
+/// is NOT classified (rc-3px7o; same doctrine as camel-redis's
+/// retryclass/rediserr walks). The walk starts from the variant's own
+/// source pointee — thiserror surfaces the `#[source] OpaqueErrorSource`
+/// field as the wrapper node itself, whose `source()` is the wrapped chain
+/// start (hop 1) — and probes each hop after unwrapping any std
+/// `Arc<dyn Error>` wrapper.
+fn marker_in_source_chain<T>(err: &CamelError) -> Option<T>
+where
+    T: std::error::Error + Clone + 'static,
+{
     let CamelError::EndpointCreationFailedWithSource(_, source) = err else {
         return None;
     };
     let mut node: &(dyn std::error::Error + 'static) = std::error::Error::source(source)?;
     for _ in 0..MAX_SOURCE_HOPS {
         let probe = unwrap_arc_dyn_error(node);
-        if let Some(gate) = probe.downcast_ref::<NoActiveConsumersGate>() {
-            return Some(gate.clone());
+        if let Some(marker) = probe.downcast_ref::<T>() {
+            return Some(marker.clone());
         }
         node = probe.source()?;
     }
     None
+}
+
+/// Extract the crate-private gate marker from a rejection's source chain,
+/// if present (thin delegation to the shared [`marker_in_source_chain`]
+/// walk).
+fn gate_from_error(err: &CamelError) -> Option<NoActiveConsumersGate> {
+    marker_in_source_chain::<NoActiveConsumersGate>(err)
+}
+
+/// True when the rejection's source chain carries the crate-private
+/// [`TerminalConfigError`] marker within the bounded walk (thin delegation
+/// to the shared [`marker_in_source_chain`] walk).
+fn terminal_config_from_error(err: &CamelError) -> bool {
+    marker_in_source_chain::<TerminalConfigError>(err).is_some()
 }
 
 /// True for the SEDA producer's startup-race gate rejections: the
@@ -681,26 +740,43 @@ pub fn is_no_active_consumers_gate(err: &CamelError) -> bool {
     gate_from_error(err).is_some()
 }
 
+/// True for the SEDA producer's terminal configuration rejections: the
+/// `multipleConsumers=true` + `waitForTaskToComplete` != Never conflict.
+/// Classification is by TYPED PROVENANCE, not wording: the producer embeds
+/// a crate-private `TerminalConfigError` marker in the rejection's source
+/// chain and this predicate runs a bounded walk (at most
+/// `MAX_SOURCE_HOPS` = 8 source hops) over that chain. Display text never
+/// classifies — a foreign error whose message merely byte-matches the
+/// canonical config wording is NOT a terminal-config error. The conflict
+/// is deterministic configuration state: no consumer timing can ever
+/// satisfy it, so a retry can never succeed and senders use this predicate
+/// to fail fast instead of burning the retry window.
+pub fn is_seda_terminal_config_error(err: &CamelError) -> bool {
+    terminal_config_from_error(err)
+}
+
 /// True for the consumer-startup race a sender may safely retry: an
-/// endpoint-creation failure that is NOT the SEDA no-active-consumers
-/// gate. The direct component reports its startup race ("direct endpoint
-/// '{}' not registered" at poll_ready, "no consumer registered for
-/// direct:{name}" at call) under [`CamelError::EndpointCreationFailed`],
-/// and any other typed endpoint failure
-/// ([`CamelError::EndpointCreationFailedWithSource`]) whose source chain
-/// lacks the gate marker is equally a plain creation race — the structure,
-/// not the Display wording, carries the classification (rc-fr20u
-/// doctrine). The gate shares the failure family but must FAIL FAST: it
-/// rejects pre-enqueue yet INSIDE the caller's pipeline, so a retry
-/// duplicates already-executed side effects (rc-tgaxf) —
-/// [`is_no_active_consumers_gate`] is the exclusion discriminator this
-/// crate owns. Boundary (rc-utx98): a text-carrying `ProcessorError`
-/// ("… not registered") is NOT a startup race — terminal, never retried;
-/// only the variant decides.
+/// endpoint-creation failure that is NEITHER the SEDA no-active-consumers
+/// gate NOR the SEDA terminal-config rejection. The direct component
+/// reports its startup race ("direct endpoint '{}' not registered" at
+/// poll_ready, "no consumer registered for direct:{name}" at call) under
+/// [`CamelError::EndpointCreationFailed`], and any other typed endpoint
+/// failure ([`CamelError::EndpointCreationFailedWithSource`]) whose source
+/// chain lacks both markers is equally a plain creation race — the
+/// structure, not the Display wording, carries the classification
+/// (rc-fr20u doctrine). Two typed failures FAIL FAST: the gate rejects
+/// pre-enqueue yet INSIDE the caller's pipeline, so a retry duplicates
+/// already-executed side effects (rc-tgaxf), and the terminal-config
+/// rejection is a deterministic configuration conflict that no retry can
+/// ever satisfy ([`is_seda_terminal_config_error`]). Boundary (rc-utx98):
+/// a text-carrying `ProcessorError` ("… not registered") is NOT a startup
+/// race — terminal, never retried; only the variant decides.
 pub fn is_direct_startup_race(err: &CamelError) -> bool {
     match err {
         CamelError::EndpointCreationFailed(_) => true,
-        CamelError::EndpointCreationFailedWithSource(..) => !is_no_active_consumers_gate(err),
+        CamelError::EndpointCreationFailedWithSource(..) => {
+            !(is_no_active_consumers_gate(err) || is_seda_terminal_config_error(err))
+        }
         _ => false,
     }
 }
@@ -1256,12 +1332,11 @@ impl Service<Exchange> for SedaProducer {
                 };
 
                 if state.config.multiple_consumers && should_wait {
-                    return Err(CamelError::EndpointCreationFailed(
-                        "multipleConsumers=true with waitForTaskToComplete != Never \
-                         is not supported — a single request cannot have N valid \
-                         replies without aggregator semantics"
-                            .to_string(),
-                    ));
+                    // Deterministic configuration conflict — a retry can
+                    // never succeed. Typed provenance via
+                    // [`terminal_config_rejection`]; the rendered detail
+                    // stays byte-identical to the historical wording.
+                    return Err(terminal_config_rejection());
                 }
 
                 let (reply_tx, reply_rx) = if should_wait {
@@ -3004,6 +3079,165 @@ mod consumer_producer_tests {
                 "sibling wording must stay retryable: {wording}"
             );
         }
+    }
+
+    // --- Typed terminal-config provenance (sedaretry) ---
+
+    static TERMINAL_MARKER: TerminalConfigError =
+        TerminalConfigError::MultipleConsumersWaitConflict;
+
+    /// A LOCAL test-only marker mimicking a FOREIGN crate's terminal-config
+    /// marker: the seda walk probes only for the seda marker type, so this
+    /// imitation must never classify.
+    #[derive(Debug)]
+    struct ForeignTerminalMarker;
+
+    impl std::fmt::Display for ForeignTerminalMarker {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("foreign terminal-config marker")
+        }
+    }
+
+    impl std::error::Error for ForeignTerminalMarker {}
+
+    /// Terminal-config twin of [`ChainHop`]: `TerminalChainHop(n)` links
+    /// through `n` wrappers to the terminal-config marker, so
+    /// `TerminalChainHop(7)` places the marker exactly at the walk limit.
+    /// Nodes are tiny leaked test fixtures.
+    #[derive(Debug)]
+    struct TerminalChainHop(u16);
+
+    impl std::fmt::Display for TerminalChainHop {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "terminal chain hop {}", self.0)
+        }
+    }
+
+    impl std::error::Error for TerminalChainHop {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            if self.0 <= 1 {
+                Some(&TERMINAL_MARKER)
+            } else {
+                Some(Box::leak(Box::new(TerminalChainHop(self.0 - 1))))
+            }
+        }
+    }
+
+    /// The genuine multipleConsumers+wait reject fails fast (sedaretry):
+    /// behavioral capture from a fanout endpoint with a STARTED consumer and
+    /// a producer whose `waitForTaskToComplete` is Always — the gate check
+    /// passes (active consumer) and the config conflict rejects. Both
+    /// predicates are pinned, and the outer detail stays byte-identical to
+    /// the historical wording.
+    #[tokio::test]
+    async fn genuine_config_reject_classifies_terminal() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint("seda:tconf?multipleConsumers=true", &NoOpComponentContext)
+            .unwrap();
+
+        // STARTED consumer so the pre-enqueue gate passes (reuse of the
+        // explicit-startup handshake pieces).
+        let mut consumer = ep.create_consumer(rt()).unwrap();
+        let (ctx, receiver, _route_rx) = started_consumer_ctx();
+        consumer.start(ctx).await.unwrap();
+        receiver
+            .await_ready()
+            .await
+            .expect("readiness must be signalled after activation");
+
+        // Producer-only option on a same-name endpoint (compatible per
+        // `is_compatible_with`, which ignores producer-only options).
+        let producer_ep = comp
+            .create_endpoint(
+                "seda:tconf?multipleConsumers=true&waitForTaskToComplete=Always",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+        let producer = producer_ep
+            .create_producer(rt(), &test_producer_ctx())
+            .unwrap();
+        let err = producer
+            .oneshot(Exchange::new(Message::new("config conflict")))
+            .await
+            .expect_err("multipleConsumers+wait send must be rejected");
+        assert!(is_seda_terminal_config_error(&err));
+        assert!(!is_direct_startup_race(&err));
+        assert_endpoint_failure_payload(
+            err,
+            "multipleConsumers=true with waitForTaskToComplete != Never is not \
+             supported — a single request cannot have N valid replies without \
+             aggregator semantics",
+        );
+
+        consumer.stop().await.unwrap();
+    }
+
+    /// A plain `EndpointCreationFailed` byte-matching the canonical config
+    /// wording carries no typed marker — typed provenance only, so the
+    /// imitation stays a retryable startup race.
+    #[test]
+    fn foreign_config_wording_imitation_stays_retryable() {
+        let e = CamelError::EndpointCreationFailed(
+            "multipleConsumers=true with waitForTaskToComplete != Never is not \
+             supported — a single request cannot have N valid replies without \
+             aggregator semantics"
+                .to_string(),
+        );
+        assert!(!is_seda_terminal_config_error(&e));
+        assert!(is_direct_startup_race(&e));
+    }
+
+    /// A typed endpoint failure whose source chain carries a foreign error
+    /// type instead of the terminal-config marker stays a retryable startup
+    /// race.
+    #[test]
+    fn typed_with_foreign_source_not_terminal_config() {
+        let e = CamelError::EndpointCreationFailedWithSource(
+            "foreign".to_string(),
+            OpaqueErrorSource::new(Arc::new(ForeignSource)),
+        );
+        assert!(!is_seda_terminal_config_error(&e));
+        assert!(is_direct_startup_race(&e));
+    }
+
+    /// An endpoint-creation failure whose source is a local test-only marker
+    /// mimicking a FOREIGN crate's terminal marker never classifies as the
+    /// seda terminal-config error — the walk matches only the seda type —
+    /// so it stays a retryable startup race.
+    #[test]
+    fn foreign_terminal_marker_imitation_stays_retryable() {
+        let e = CamelError::EndpointCreationFailedWithSource(
+            "foreign terminal marker".to_string(),
+            OpaqueErrorSource::new(Arc::new(ForeignTerminalMarker)),
+        );
+        assert!(!is_seda_terminal_config_error(&e));
+        assert!(is_direct_startup_race(&e));
+    }
+
+    /// Seven wrappers place the terminal-config marker at exactly hop depth
+    /// 8 (1 = the variant's own source, 2-8 = the wrapper chain) — the walk
+    /// limit — so the typed failure classifies as terminal.
+    #[test]
+    fn terminal_config_marker_at_hop_limit_classifies() {
+        let e = CamelError::EndpointCreationFailedWithSource(
+            "outer".to_string(),
+            OpaqueErrorSource::new(Arc::new(TerminalChainHop(7))),
+        );
+        assert!(is_seda_terminal_config_error(&e));
+        assert!(!is_direct_startup_race(&e));
+    }
+
+    /// Eight wrappers push the marker to hop depth 9 — beyond the limit —
+    /// so the typed failure stays a retryable startup race.
+    #[test]
+    fn terminal_config_marker_beyond_limit_stays_retryable() {
+        let e = CamelError::EndpointCreationFailedWithSource(
+            "outer".to_string(),
+            OpaqueErrorSource::new(Arc::new(TerminalChainHop(8))),
+        );
+        assert!(!is_seda_terminal_config_error(&e));
+        assert!(is_direct_startup_race(&e));
     }
 
     /// The Single-mode site function produces the byte-exact canonical

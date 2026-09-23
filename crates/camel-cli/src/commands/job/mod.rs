@@ -1953,20 +1953,25 @@ fn load_route_definitions(
 /// CALLER-side Display sniffing; the text match lives in the crate that
 /// owns the message). Delegates to
 /// [`camel_component_seda::is_direct_startup_race`]: an
-/// `EndpointCreationFailed` that is NOT the SEDA no-active-consumers
-/// gate.
+/// endpoint-creation-family failure that is neither the SEDA
+/// no-active-consumers gate nor the SEDA terminal-config error.
 ///
-/// The SEDA gate wordings ("has no active consumers" single mode, "has
-/// no active subscribers" fanout mode) are NON-retryable: the rejection
-/// fires pre-enqueue but inside the caller's pipeline, so a retry
-/// re-executes already-run route steps and duplicates their side
-/// effects (rc-ucemm; fail-fast ruling rc-tgaxf). Every non-gate
-/// `EndpointCreationFailed` stays retryable — the direct component's
-/// "direct endpoint '…' not registered" startup race (camel-direct owns
-/// the wording, the variant carries the classification), plus the
-/// documented residual: SEDA queue-full and bounded enqueue/fanout
-/// timeout errors share the variant and are NOT excluded (bd rc-ucemm
-/// scope).
+/// Two SEDA error classes are NON-retryable. The gate wordings ("has no
+/// active consumers" single mode, "has no active subscribers" fanout
+/// mode) reject pre-enqueue but inside the caller's pipeline, so a
+/// retry re-executes already-run route steps and duplicates their side
+/// effects (rc-ucemm; fail-fast ruling rc-tgaxf). The terminal-config
+/// error (`multipleConsumers=true` with `waitForTaskToComplete` !=
+/// Never) is a deterministic configuration conflict — no consumer
+/// timing can ever satisfy it, so a retry can never succeed; it is
+/// classified by the typed marker walk behind
+/// [`camel_component_seda::is_seda_terminal_config_error`], never by
+/// wording. Every other `EndpointCreationFailed` stays retryable — the
+/// direct component's "direct endpoint '…' not registered" startup race
+/// (camel-direct owns the wording, the variant carries the
+/// classification), plus the documented residual: SEDA queue-full and
+/// bounded enqueue/fanout timeout errors share the variant and are NOT
+/// excluded (bd rc-ucemm scope).
 ///
 /// The former `to_string().contains("not registered")` sniff matched no
 /// reachable error outside `EndpointCreationFailed`: the direct race is
@@ -1982,13 +1987,17 @@ fn is_retryable_startup_failure(e: &CamelError) -> bool {
 /// (the `deliver_input` discipline): non-gate `EndpointCreationFailed`
 /// errors — the direct registration race family and the SEDA queue-full
 /// residual — are retried every [`SEND_RETRY_SLEEP`] up to
-/// [`SEND_RETRY_WINDOW`]. The SEDA no-active-consumers gate is NOT
-/// retried: it rejects pre-enqueue but inside the caller's pipeline, so
-/// a retry would replay already-executed route steps and duplicate their
-/// side effects (rc-ucemm) — a gate error returns
-/// [`SendError::Pipeline`] on the first attempt without sleeping. A
-/// persistent failure maps to [`SendError::Pipeline`] when the pipeline
-/// itself failed, [`SendError::Transport`] otherwise.
+/// [`SEND_RETRY_WINDOW`]. Two SEDA classes are NOT retried: the
+/// no-active-consumers gate (it rejects pre-enqueue but inside the
+/// caller's pipeline, so a retry would replay already-executed route
+/// steps and duplicate their side effects, rc-ucemm) and the
+/// terminal-config error (the deterministic `multipleConsumers=true` +
+/// `waitForTaskToComplete` != Never conflict, typed by
+/// [`camel_component_seda::is_seda_terminal_config_error`] — a retry
+/// can never succeed). Both return [`SendError::Pipeline`] on the first
+/// attempt without sleeping. A persistent failure maps to
+/// [`SendError::Pipeline`] when the pipeline itself failed,
+/// [`SendError::Transport`] otherwise.
 async fn send_with_startup_retry(
     ctx: &camel_core::CamelContext,
     send: &document::JobSendAction,

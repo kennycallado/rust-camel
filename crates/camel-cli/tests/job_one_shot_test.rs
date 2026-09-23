@@ -600,6 +600,67 @@ routeFiles:
     );
 }
 
+/// Terminal-config fail-fast (spec "terminal-config job exits Failed
+/// without retry burn"): a job document sending to
+/// `seda:q?multipleConsumers=true` whose route consumer is started. The
+/// fanout consumer must be active so the pre-enqueue gate passes and the
+/// send's forced `waitForTaskToComplete=Always` reaches the deterministic
+/// multipleConsumers+wait configuration conflict, which the send loop
+/// classifies non-retryable — exit 1, `Failed`, error naming the
+/// conflict, and `duration_ms` (frozen at report construction, before
+/// the 5 s shutdown floor can inflate it) under 1.5 s, half the 3 s
+/// retry window: a retry burn alone would add >= 3000 ms.
+#[test]
+fn seda_terminal_config_job_fails_fast() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-config"
+    from: "seda:q?multipleConsumers=true"
+    steps:
+      - to: "log:done"
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: "seda:q?multipleConsumers=true"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
+    assert_eq!(
+        code, 1,
+        "expected exit 1 (terminal-config failure);\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Failed", "report: {report}");
+    assert!(
+        report["error"].as_str().is_some_and(
+            |e| e.contains("multipleConsumers=true with waitForTaskToComplete != Never")
+        ),
+        "report must name the multipleConsumers+wait conflict; report: {report}"
+    );
+    let duration_ms = report["duration_ms"]
+        .as_u64()
+        .expect("report carries an integer duration_ms");
+    assert!(
+        duration_ms < 1500,
+        "no retry burn: duration_ms must stay under the 1.5 s budget; got {duration_ms}; report: {report}"
+    );
+}
+
 /// The mandatory overall timeout: a slow route plus `timeout: 1s`
 /// reports `Timeout` and exits 2, within a bounded wall clock (boot +
 /// 1 s timeout + the 5 s shutdown floor; generously bounded at 15 s).
