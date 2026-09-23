@@ -37,6 +37,10 @@
 # (read/write/flush awaits) is deferred to a later detector revision;
 # adding it is a deliberate, review-visible ceiling bump.
 #
+# Closure-unroll verdict (2026-09-23, bd rc-q2l8u): 393 -> 393,
+# zero movement — corpus contains no directly-invoked closure
+# shapes; unroll and tail classification are net-new coverage.
+#
 # Unadjudicated inventory at seed (2026-09-21), one entry per site —
 # - crates/camel-cli/src/commands/test/scenario_tests.rs:575
 # - crates/camel-core/src/health_registry.rs:614
