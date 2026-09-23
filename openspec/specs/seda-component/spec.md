@@ -125,18 +125,19 @@ bounded walk depth of 8 source hops, contains the marker type. The marker
 type SHALL NOT be constructible or nameable outside the SEDA crate, and
 the source handle carrying it SHALL NOT be cloneable or extractable
 outside camel-api, so foreign code cannot forge gate provenance. Message
-text SHALL play no part in classification. Every
-`EndpointCreationFailed` that lacks the marker — whatever its text — SHALL
-report `is_no_active_consumers_gate` as false and `is_direct_startup_race`
-as true (retryable). The crate SHALL construct every gate rejection
-through one in-crate constructor, and the rejection's outer detail SHALL
-stay byte-identical to the historical wording
-(`SEDA endpoint '<name>' has no active consumers` single mode,
-`SEDA endpoint '<name>' has no active subscribers` fanout mode); the
-marker's own Display is non-canonical diagnostic text (it never equals a
-gate message and never participates in classification). A marker deeper
-than 8 source hops SHALL NOT classify the error as the gate (bounded
-walk; tested at and beyond the limit).
+text SHALL play no part in classification. Every endpoint-creation
+failure that lacks the gate marker AND the terminal-config marker —
+whatever its text — SHALL report `is_no_active_consumers_gate` as false
+and `is_direct_startup_race` as true (retryable), except the terminal-config
+carrier defined by the typed terminal-config-error classification
+requirement. The crate SHALL construct every gate rejection through one
+in-crate constructor, and the rejection's outer detail SHALL stay
+byte-identical to the historical wording (`SEDA endpoint '<name>' has no
+active consumers` single mode, `SEDA endpoint '<name>' has no active
+subscribers` fanout mode); the marker's own Display is non-canonical
+diagnostic text (it never equals a gate message and never participates
+in classification). A marker deeper than 8 source hops SHALL NOT classify
+the error as the gate (bounded walk; tested at and beyond the limit).
 
 #### Scenario: genuine single-mode gate fails fast
 
@@ -221,7 +222,8 @@ walk; tested at and beyond the limit).
 
 - **GIVEN** an endpoint-creation failure variant carrying a source chain
   that does not contain the gate marker (a foreign or future
-  source-preserving endpoint failure)
+  source-preserving endpoint failure, including one whose source is a
+  terminal-config marker of a FOREIGN crate)
 - **WHEN** the classification runs
 - **THEN** `is_no_active_consumers_gate` reports false and
   `is_direct_startup_race` reports true
@@ -229,11 +231,13 @@ walk; tested at and beyond the limit).
 #### Scenario: other SEDA endpoint-creation failures stay retryable
 
 - **GIVEN** a SEDA endpoint-creation failure with any other wording
-  (queue-full, enqueue or fanout timeout, multipleConsumers configuration
-  rejection, or a passthrough creation failure)
+  (queue-full, enqueue or fanout timeout, or a passthrough creation
+  failure)
 - **WHEN** the classification runs
 - **THEN** `is_no_active_consumers_gate` reports false and
-  `is_direct_startup_race` reports true (documented residual, unchanged)
+  `is_direct_startup_race` reports true (documented residual, unchanged;
+  the multipleConsumers configuration rejection moved to the terminal-config
+  classification — see the typed terminal-config-error requirement)
 
 #### Scenario: canonical wording and aliases are preserved
 
@@ -242,4 +246,68 @@ walk; tested at and beyond the limit).
 - **THEN** the outer detail is byte-identical to the historical wording,
   `variant_name()` reports `EndpointCreationFailed`, and `classify()`
   reports `endpoint`
+
+### Requirement: typed SEDA terminal-config-error classification
+
+The SEDA crate SHALL classify a pipeline error as a terminal
+configuration error only when the error carries the crate's typed
+terminal-config marker — an `EndpointCreationFailedWithSource` whose
+source chain, within the classifier's bounded walk depth of 8 source
+hops, contains the marker type. The marker type SHALL NOT be
+constructible or nameable outside the SEDA crate. Message text SHALL
+play no part in classification. The crate SHALL construct every
+terminal-config rejection through one in-crate constructor, and the
+multipleConsumers+wait rejection's outer detail SHALL stay byte-identical
+to the historical wording (`multipleConsumers=true with
+waitForTaskToComplete != Never is not supported — a single request
+cannot have N valid replies without aggregator semantics`). The marker's
+own Display SHALL be non-canonical diagnostic text that never equals a
+canonical rejection message. `is_direct_startup_race` SHALL report false
+for an error carrying the marker within the walk limit (the combination
+is deterministic — a retry can never succeed), and true when the marker
+sits deeper than 8 source hops (bounded walk; boundary tested at the
+limit and beyond). The plain `EndpointCreationFailed` variant SHALL
+never classify as a terminal-config error.
+
+#### Scenario: genuine multipleConsumers+wait reject fails fast
+
+- **GIVEN** a SEDA fanout endpoint (`multipleConsumers=true`) with an
+  active consumer and a producer whose `waitForTaskToComplete` is not
+  `Never`
+- **WHEN** the producer send rejects through the terminal-config
+  constructor
+- **THEN** `is_seda_terminal_config_error` reports true and
+  `is_direct_startup_race` reports false (terminal, no retry)
+
+#### Scenario: foreign imitation of the config wording stays retryable
+
+- **GIVEN** a plain `EndpointCreationFailed` whose text byte-matches the
+  canonical multipleConsumers+wait wording
+- **WHEN** the classification runs
+- **THEN** `is_seda_terminal_config_error` reports false and
+  `is_direct_startup_race` reports true (typed provenance only)
+
+#### Scenario: typed source without the terminal-config marker stays retryable
+
+- **GIVEN** an `EndpointCreationFailedWithSource` whose source chain
+  carries a foreign error type instead of the marker
+- **WHEN** the classification runs
+- **THEN** `is_seda_terminal_config_error` reports false and
+  `is_direct_startup_race` reports true
+
+#### Scenario: terminal-config marker at exactly the walk limit classifies
+
+- **GIVEN** an endpoint-creation failure whose source chain carries the
+  typed terminal-config marker at exactly 8 source hops
+- **WHEN** the classification runs
+- **THEN** `is_seda_terminal_config_error` reports true and
+  `is_direct_startup_race` reports false (inclusive limit)
+
+#### Scenario: terminal-config marker beyond the walk limit stays retryable
+
+- **GIVEN** an endpoint-creation failure whose source chain carries the
+  typed terminal-config marker deeper than 8 source hops
+- **WHEN** the classification runs
+- **THEN** `is_seda_terminal_config_error` reports false and
+  `is_direct_startup_race` reports true (bounded walk, boundary tested)
 
