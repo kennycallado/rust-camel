@@ -20,6 +20,7 @@ use camel_proto_compiler::ProtoCache;
 use prost::Message as _;
 use prost_reflect::{DynamicMessage, MessageDescriptor};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use tracing::{debug, info};
 
@@ -267,13 +268,16 @@ async fn acquire_permit_cancel_safe(
     }
 }
 
+/// Best-effort UNAVAILABLE status message at shutdown, shared with the
+/// transport's bidi cancel arm (rc-qq8zz).
+pub(crate) const SHUTDOWN_STATUS: &str = "consumer shutting down";
+
 /// Best-effort UNAVAILABLE reply for an envelope dropped at shutdown.
 ///
 /// Unary-style envelopes answer on the oneshot; streaming envelopes get a
 /// non-blocking `try_send`. Both are best-effort: a gone or full receiver
 /// is ignored, never awaited — the shutdown path must not block.
 fn reply_unavailable(envelope: GrpcRequestEnvelope) {
-    const SHUTDOWN_STATUS: &str = "consumer shutting down";
     debug!(path = "grpc consumer", "reply unavailable on shutdown");
     match envelope {
         GrpcRequestEnvelope::Unary { reply_tx, .. }
@@ -322,6 +326,7 @@ struct DispatchRegistrationGuard {
     dispatch: GrpcDispatchTable,
     path: String,
     env_tx: mpsc::Sender<GrpcRequestEnvelope>,
+    cancel: CancellationToken,
     armed: bool,
 }
 
@@ -330,11 +335,13 @@ impl DispatchRegistrationGuard {
         dispatch: GrpcDispatchTable,
         path: String,
         env_tx: mpsc::Sender<GrpcRequestEnvelope>,
+        cancel: CancellationToken,
     ) -> Self {
         Self {
             dispatch,
             path,
             env_tx,
+            cancel,
             armed: true,
         }
     }
@@ -346,11 +353,19 @@ impl DispatchRegistrationGuard {
         // Disarm while still holding the write guard: no `.await` between
         // removal and disarm, so a racing Drop cannot re-run removal.
         self.armed = false;
+        // rc-qq8zz: every teardown path cancels the entry token so the
+        // transport's open streaming calls terminate.
+        self.cancel.cancel();
     }
 }
 
 impl Drop for DispatchRegistrationGuard {
     fn drop(&mut self) {
+        // rc-qq8zz: cancel FIRST — synchronous and runtime-free, before
+        // the armed check and the runtime-conditional removal below — so
+        // the no-runtime teardown branch still terminates open streaming
+        // calls. Double-cancel is idempotent.
+        self.cancel.cancel();
         if !self.armed {
             return;
         }
@@ -393,13 +408,14 @@ fn insert_dispatch_entry(
     env_tx: mpsc::Sender<GrpcRequestEnvelope>,
     mode: GrpcMode,
     kernel: Option<Arc<GrpcKernelAuth>>,
+    cancel: CancellationToken,
 ) -> Result<(), CamelError> {
     if table.get(path).is_some_and(|entry| !entry.0.is_closed()) {
         return Err(CamelError::EndpointCreationFailed(format!(
             "duplicate gRPC consumer path: {path}"
         )));
     }
-    table.insert(path.to_string(), (env_tx, mode, kernel));
+    table.insert(path.to_string(), (env_tx, mode, kernel, cancel));
     Ok(())
 }
 
@@ -681,12 +697,27 @@ impl GrpcConsumer {
         // `same_channel`-comparable clone of the sender that actually
         // lands in the table (bd rc-orr73).
         let env_tx_for_guard = env_tx.clone();
+        // rc-qq8zz: per-registration child token of the consumer's
+        // cancellation token. It rides the dispatch entry so the
+        // transport's open streaming calls observe shutdown and abort.
+        let handler_cancel = ctx.cancel_token().child_token();
         {
             let mut table = dispatch.write().await;
-            insert_dispatch_entry(&mut table, &path, env_tx, mode, kernel.clone())?;
+            insert_dispatch_entry(
+                &mut table,
+                &path,
+                env_tx,
+                mode,
+                kernel.clone(),
+                handler_cancel.clone(),
+            )?;
         }
-        let mut registration =
-            DispatchRegistrationGuard::arm(Arc::clone(&dispatch), path.clone(), env_tx_for_guard);
+        let mut registration = DispatchRegistrationGuard::arm(
+            Arc::clone(&dispatch),
+            path.clone(),
+            env_tx_for_guard,
+            handler_cancel,
+        );
 
         let host = self.host.clone();
         let port = self.port;
@@ -1657,12 +1688,17 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         let path = "/t/S/M".to_string();
         let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
-        table
-            .write()
-            .await
-            .insert(path.clone(), (tx.clone(), GrpcMode::Unary, None));
+        table.write().await.insert(
+            path.clone(),
+            (tx.clone(), GrpcMode::Unary, None, CancellationToken::new()),
+        );
 
-        let guard = DispatchRegistrationGuard::arm(table.clone(), path.clone(), tx);
+        let guard = DispatchRegistrationGuard::arm(
+            table.clone(),
+            path.clone(),
+            tx,
+            CancellationToken::new(),
+        );
         drop(guard);
 
         let removal = tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -1689,11 +1725,16 @@ mod tests {
         let (tx1, _rx1) = mpsc::channel::<GrpcRequestEnvelope>(1);
         let (tx2, _rx2) = mpsc::channel::<GrpcRequestEnvelope>(1);
 
-        let mut guard = DispatchRegistrationGuard::arm(table.clone(), path.clone(), tx1);
-        table
-            .write()
-            .await
-            .insert(path.clone(), (tx2.clone(), GrpcMode::Unary, None));
+        let mut guard = DispatchRegistrationGuard::arm(
+            table.clone(),
+            path.clone(),
+            tx1,
+            CancellationToken::new(),
+        );
+        table.write().await.insert(
+            path.clone(),
+            (tx2.clone(), GrpcMode::Unary, None, CancellationToken::new()),
+        );
 
         guard.cleanup().await;
 
@@ -1732,17 +1773,24 @@ mod tests {
         let (stale_tx, stale_rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
         drop(stale_rx);
         assert!(stale_tx.is_closed());
-        table
-            .write()
-            .await
-            .insert(path.clone(), (stale_tx, GrpcMode::Unary, None));
+        table.write().await.insert(
+            path.clone(),
+            (stale_tx, GrpcMode::Unary, None, CancellationToken::new()),
+        );
 
         // A fresh live sender replaces the closed entry.
         let (fresh_tx, _fresh_rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
         {
             let mut guard = table.write().await;
-            insert_dispatch_entry(&mut guard, &path, fresh_tx.clone(), GrpcMode::Unary, None)
-                .expect("closed stale entry must be replaceable");
+            insert_dispatch_entry(
+                &mut guard,
+                &path,
+                fresh_tx.clone(),
+                GrpcMode::Unary,
+                None,
+                CancellationToken::new(),
+            )
+            .expect("closed stale entry must be replaceable");
         }
         {
             let table = table.read().await;
@@ -1758,14 +1806,89 @@ mod tests {
         // A live entry still fails as a duplicate, entry unchanged.
         let (other_tx, _other_rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
         let mut guard = table.write().await;
-        let err = insert_dispatch_entry(&mut guard, &path, other_tx, GrpcMode::Unary, None)
-            .expect_err("live duplicate registration must be rejected");
+        let err = insert_dispatch_entry(
+            &mut guard,
+            &path,
+            other_tx,
+            GrpcMode::Unary,
+            None,
+            CancellationToken::new(),
+        )
+        .expect_err("live duplicate registration must be rejected");
         assert!(err.to_string().contains("duplicate"), "message was: {err}");
         assert!(
             guard
                 .get(&path)
                 .is_some_and(|entry| entry.0.same_channel(&fresh_tx)),
             "rejected duplicate must leave the live entry unchanged"
+        );
+    }
+
+    /// rc-qq8zz: `cleanup` removes the entry AND cancels its token, so the
+    /// transport's open streaming calls observe a graceful-stop teardown.
+    #[tokio::test]
+    async fn dispatch_guard_cancels_token_on_cleanup() {
+        let table: GrpcDispatchTable =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let path = "/t/S/M".to_string();
+        let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let token = CancellationToken::new();
+        table.write().await.insert(
+            path.clone(),
+            (tx.clone(), GrpcMode::Unary, None, token.clone()),
+        );
+
+        let mut guard =
+            DispatchRegistrationGuard::arm(table.clone(), path.clone(), tx, token.clone());
+        guard.cleanup().await;
+
+        assert!(token.is_cancelled(), "cleanup must cancel the entry token");
+        let removal = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while table.read().await.contains_key(&path) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await; // allow-test-sleep: poll for removal
+            }
+        })
+        .await;
+        assert!(
+            removal.is_ok() && !table.read().await.contains_key(&path),
+            "dispatch entry for {path} must be removed within 1s of cleanup"
+        );
+    }
+
+    /// rc-qq8zz: Drop cancels the token as its FIRST statement — before the
+    /// armed check and the runtime-conditional removal — so the entry token
+    /// is cancelled synchronously even on a no-runtime teardown.
+    #[tokio::test]
+    async fn dispatch_guard_cancels_token_on_drop() {
+        let table: GrpcDispatchTable =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let path = "/t/S/M".to_string();
+        let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let token = CancellationToken::new();
+        table.write().await.insert(
+            path.clone(),
+            (tx.clone(), GrpcMode::Unary, None, token.clone()),
+        );
+
+        let guard = DispatchRegistrationGuard::arm(table.clone(), path.clone(), tx, token.clone());
+
+        drop(guard);
+
+        // No await needed: cancel is the first statement of `drop`.
+        assert!(
+            token.is_cancelled(),
+            "drop must cancel the entry token synchronously"
+        );
+
+        let removal = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while table.read().await.contains_key(&path) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await; // allow-test-sleep: poll for spawned drop-cleanup task
+            }
+        })
+        .await;
+        assert!(
+            removal.is_ok() && !table.read().await.contains_key(&path),
+            "dispatch entry for {path} must be removed within 1s of drop"
         );
     }
 }

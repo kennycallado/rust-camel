@@ -15,6 +15,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio::sync::{OnceCell, RwLock, mpsc};
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 use tonic::body::Body as TonicBody;
 use tonic::codec::Streaming;
 use tonic::{Request, Response, Status};
@@ -34,6 +35,10 @@ pub(crate) type GrpcDispatchEntry = (
     mpsc::Sender<GrpcRequestEnvelope>,
     GrpcMode,
     Option<Arc<GrpcKernelAuth>>,
+    // rc-qq8zz: child token of the consumer's cancellation token; the
+    // registration guard cancels it on every teardown path and the bidi
+    // forward task observes it to terminate open streaming calls.
+    CancellationToken,
 );
 
 pub(crate) type GrpcDispatchTable = Arc<RwLock<HashMap<String, GrpcDispatchEntry>>>;
@@ -554,10 +559,10 @@ async fn handle_grpc_request(
         let table = dispatch.read().await;
         table
             .get(&path)
-            .map(|(tx, mode, kernel)| (tx.clone(), *mode, kernel.clone()))
+            .map(|(tx, mode, kernel, cancel)| (tx.clone(), *mode, kernel.clone(), cancel.clone()))
     };
 
-    let Some((sender, mode, kernel)) = entry else {
+    let Some((sender, mode, kernel, cancel)) = entry else {
         let handler = UnimplementedHandler;
         let mut grpc = tonic::server::Grpc::new(RawBytesCodec);
         let response = grpc.unary(handler, req).await;
@@ -583,7 +588,11 @@ async fn handle_grpc_request(
             Ok(response)
         }
         GrpcMode::Bidi => {
-            let handler = BidiHandler { sender, kernel };
+            let handler = BidiHandler {
+                sender,
+                kernel,
+                cancel,
+            };
             let response = grpc.streaming(handler, req).await;
             Ok(response)
         }
@@ -758,6 +767,7 @@ impl tonic::server::ClientStreamingService<Vec<u8>> for ClientStreamingHandler {
 struct BidiHandler {
     sender: mpsc::Sender<GrpcRequestEnvelope>,
     kernel: Option<Arc<GrpcKernelAuth>>,
+    cancel: CancellationToken,
 }
 
 impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
@@ -768,6 +778,7 @@ impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
 
     fn call(&mut self, req: Request<Streaming<Vec<u8>>>) -> Self::Future {
         let kernel = self.kernel.clone();
+        let cancel = self.cancel.clone();
         let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(64);
         let (reply_tx, reply_rx) = mpsc::channel::<GrpcStreamItem>(64);
         let reply_tx_forward = reply_tx.clone();
@@ -785,17 +796,33 @@ impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
 
             tokio::spawn(async move {
                 let mut stream = req.into_inner();
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok(bytes) => {
-                            if body_tx.send(bytes).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(status) => {
-                            tracing::warn!(error = %status, "bidi streaming decode error");
-                            let _ = reply_tx_forward.send(GrpcStreamItem::Error(status)).await;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            // Shutdown must not block on a full or gone
+                            // reply channel: `try_send`, never
+                            // `send().await` (rc-qq8zz).
+                            let _ = reply_tx_forward.try_send(GrpcStreamItem::Error(
+                                tonic::Status::unavailable(crate::consumer::SHUTDOWN_STATUS),
+                            ));
                             break;
+                        }
+                        result = stream.next() => {
+                            let Some(result) = result else { break };
+                            match result {
+                                Ok(bytes) => {
+                                    if body_tx.send(bytes).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(status) => {
+                                    tracing::warn!(error = %status, "bidi streaming decode error");
+                                    let _ =
+                                        reply_tx_forward.send(GrpcStreamItem::Error(status)).await;
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -816,19 +843,24 @@ impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::io;
     use std::sync::Mutex;
     use std::task::Poll;
     use std::time::Duration;
 
+    use bytes::{Buf, BufMut, Bytes, BytesMut};
     use camel_api::MetricsCollector;
     use camel_api::security_policy::AuthPrincipal;
     use camel_auth::CredentialSource;
     use camel_component_api::HealthCheckRegistry;
     use futures::{Stream, StreamExt};
+    use http_body_util::StreamBody;
+    use hyper::body::Frame as HttpFrame;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
+    use tokio_stream::wrappers::ReceiverStream;
     use tonic::Status;
-    use tonic::server::{ServerStreamingService, UnaryService};
+    use tonic::server::{ServerStreamingService, StreamingService, UnaryService};
     use tower::Service;
 
     use super::*;
@@ -982,7 +1014,7 @@ mod tests {
             let mut table = dispatch.write().await;
             table.insert(
                 "/test.Service/Method".to_string(),
-                (tx, GrpcMode::Unary, None),
+                (tx, GrpcMode::Unary, None, CancellationToken::new()),
             );
         }
         assert!(dispatch.read().await.contains_key("/test.Service/Method"));
@@ -1021,10 +1053,18 @@ mod tests {
         let path = "/pkg.Service/Method".to_string();
         {
             let mut table = dispatch.write().await;
-            table.insert(path.clone(), (tx, GrpcMode::ServerStreaming, None));
+            table.insert(
+                path.clone(),
+                (
+                    tx,
+                    GrpcMode::ServerStreaming,
+                    None,
+                    CancellationToken::new(),
+                ),
+            );
         }
         let table = dispatch.read().await;
-        let (_, mode, _) = table.get(&path).unwrap();
+        let (_, mode, ..) = table.get(&path).unwrap();
         assert_eq!(*mode, GrpcMode::ServerStreaming);
     }
 
@@ -1035,13 +1075,16 @@ mod tests {
         let path = "/pkg.Service/Method".to_string();
         {
             let mut table = dispatch.write().await;
-            table.insert(path.clone(), (tx, GrpcMode::Bidi, None));
+            table.insert(
+                path.clone(),
+                (tx, GrpcMode::Bidi, None, CancellationToken::new()),
+            );
         }
         {
             let mut table = dispatch.write().await;
             let removed = table.remove(&path);
             assert!(removed.is_some());
-            let (_, mode, _) = removed.unwrap();
+            let (_, mode, ..) = removed.unwrap();
             assert_eq!(mode, GrpcMode::Bidi);
         }
         assert!(dispatch.read().await.is_empty());
@@ -1060,13 +1103,16 @@ mod tests {
             let mut table = dispatch.write().await;
             for (i, mode) in modes.iter().enumerate() {
                 let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
-                table.insert(format!("/svc/M{i}"), (tx, *mode, None));
+                table.insert(
+                    format!("/svc/M{i}"),
+                    (tx, *mode, None, CancellationToken::new()),
+                );
             }
         }
         let table = dispatch.read().await;
         assert_eq!(table.len(), 4);
         for (i, expected_mode) in modes.iter().enumerate() {
-            let (_, mode, _) = table.get(&format!("/svc/M{i}")).unwrap();
+            let (_, mode, ..) = table.get(&format!("/svc/M{i}")).unwrap();
             assert_eq!(*mode, *expected_mode);
         }
     }
@@ -1297,7 +1343,10 @@ mod tests {
         let path = "/test.Unregister/Method".to_string();
         {
             let mut table = dispatch.write().await;
-            table.insert(path.clone(), (tx, GrpcMode::Unary, None));
+            table.insert(
+                path.clone(),
+                (tx, GrpcMode::Unary, None, CancellationToken::new()),
+            );
         }
         assert!(dispatch.read().await.contains_key(&path));
 
@@ -1341,6 +1390,7 @@ mod tests {
         let _handler = BidiHandler {
             sender: _tx,
             kernel: None,
+            cancel: CancellationToken::new(),
         };
     }
 
@@ -1404,6 +1454,7 @@ mod tests {
         let handler = BidiHandler {
             sender: tx,
             kernel: None,
+            cancel: CancellationToken::new(),
         };
         assert!(handler.sender.is_closed());
     }
@@ -1569,6 +1620,7 @@ mod tests {
         let handler = BidiHandler {
             sender: tx,
             kernel: None,
+            cancel: CancellationToken::new(),
         };
         let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(4);
         let envelope_for_test = GrpcRequestEnvelope::Bidi {
@@ -1589,6 +1641,229 @@ mod tests {
         body_tx.send(vec![10]).await.unwrap();
         body_tx.send(vec![20]).await.unwrap();
         drop(body_tx);
+    }
+
+    // -----------------------------------------------------------------------
+    // rc-qq8zz: shared bidi-request harness
+    // -----------------------------------------------------------------------
+
+    /// gRPC wire framing for one uncompressed message: 1-byte compression
+    /// flag (0) + 4-byte big-endian length + payload. Tonic's `Streaming`
+    /// strips this header before handing the payload to the decoder.
+    fn grpc_data_frame(msg: &[u8]) -> Bytes {
+        let mut buf = BytesMut::with_capacity(5 + msg.len());
+        buf.put_u8(0);
+        buf.put_u32(msg.len() as u32);
+        buf.put_slice(msg);
+        buf.freeze()
+    }
+
+    /// Passthrough decoder: hands each framed payload through unchanged and
+    /// never errors.
+    struct PassthroughDecoder;
+
+    impl tonic::codec::Decoder for PassthroughDecoder {
+        type Item = Vec<u8>;
+        type Error = Status;
+
+        fn decode(
+            &mut self,
+            buf: &mut tonic::codec::DecodeBuf<'_>,
+        ) -> Result<Option<Self::Item>, Self::Error> {
+            if buf.remaining() == 0 {
+                return Ok(None);
+            }
+            let data = buf.copy_to_bytes(buf.remaining()).to_vec();
+            Ok(Some(data))
+        }
+    }
+
+    /// Open a bidi request whose client request side stays open: the
+    /// channel feeding the request body is NEVER closed by the harness,
+    /// exactly like an idle bidi client that has sent nothing and not
+    /// ended its stream. Returns the request plus the sender for pushing
+    /// raw message payloads (each is wrapped in gRPC wire framing before
+    /// it reaches the request body).
+    fn open_bidi_request() -> (Request<Streaming<Vec<u8>>>, mpsc::Sender<Vec<u8>>) {
+        let (wire_tx, wire_rx) = mpsc::channel::<Result<HttpFrame<Bytes>, io::Error>>(64);
+        let body = StreamBody::new(ReceiverStream::new(wire_rx));
+        let streaming = Streaming::new_request(PassthroughDecoder, body, None, None);
+
+        let (msg_tx, mut msg_rx) = mpsc::channel::<Vec<u8>>(64);
+        tokio::spawn(async move {
+            while let Some(msg) = msg_rx.recv().await {
+                if wire_tx
+                    .send(Ok(HttpFrame::data(grpc_data_frame(&msg))))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        (Request::new(streaming), msg_tx)
+    }
+
+    #[tokio::test]
+    async fn bidi_handler_cancelled_token_closes_stream_without_client_end() {
+        let (env_tx, mut env_rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let token = CancellationToken::new();
+        let mut handler = BidiHandler {
+            sender: env_tx,
+            kernel: None,
+            cancel: token.clone(),
+        };
+
+        // Request stream stays open: no client end, no client chunks.
+        let (request, _chunk_tx) = open_bidi_request();
+        let mut response_stream = handler.call(request).await.expect("call ok").into_inner();
+
+        // The envelope holds the ORIGINAL reply_tx: recv and drop it so
+        // only the forward task's clone pins the reply channel open.
+        let envelope = timeout(Duration::from_millis(500), env_rx.recv())
+            .await
+            .expect("envelope within 500ms")
+            .expect("envelope channel alive");
+        drop(envelope);
+
+        token.cancel();
+
+        let item = timeout(Duration::from_millis(500), response_stream.next())
+            .await
+            .expect("terminal item within 500ms")
+            .expect("stream must yield an item");
+        let status = item.expect_err("stream must yield Err(Unavailable)");
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+
+        let end = timeout(Duration::from_millis(500), response_stream.next())
+            .await
+            .expect("end-of-stream within 500ms");
+        assert!(end.is_none(), "stream must end after Unavailable");
+    }
+
+    #[tokio::test]
+    async fn bidi_handler_uncancelled_token_forwards_and_cancel_closes() {
+        let (env_tx, mut env_rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let token = CancellationToken::new();
+        let mut handler = BidiHandler {
+            sender: env_tx,
+            kernel: None,
+            cancel: token.clone(),
+        };
+
+        let (request, chunk_tx) = open_bidi_request();
+        let mut response_stream = handler.call(request).await.expect("call ok").into_inner();
+
+        let envelope = timeout(Duration::from_millis(500), env_rx.recv())
+            .await
+            .expect("envelope within 500ms")
+            .expect("envelope channel alive");
+        let GrpcRequestEnvelope::Bidi {
+            body_rx, reply_tx, ..
+        } = envelope
+        else {
+            panic!("expected Bidi envelope");
+        };
+        let mut body_rx = body_rx;
+
+        // The uncancelled path must forward client chunks to the
+        // envelope's body_rx — assert HERE, on the forwarding direction
+        // (nothing writes response items in a unit test).
+        chunk_tx.send(vec![10]).await.expect("harness alive");
+        chunk_tx.send(vec![20]).await.expect("harness alive");
+        let first = timeout(Duration::from_millis(500), body_rx.recv())
+            .await
+            .expect("chunk 1 within 500ms");
+        assert_eq!(first, Some(vec![10]));
+        let second = timeout(Duration::from_millis(500), body_rx.recv())
+            .await
+            .expect("chunk 2 within 500ms");
+        assert_eq!(second, Some(vec![20]));
+
+        // Cancel WITHOUT ending the request stream.
+        token.cancel();
+
+        let item = timeout(Duration::from_millis(500), response_stream.next())
+            .await
+            .expect("terminal item within 500ms")
+            .expect("stream must yield an item");
+        let status = item.expect_err("stream must yield Err(Unavailable)");
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+
+        // The envelope's reply_tx must be gone for the stream to end.
+        drop(reply_tx);
+        let end = timeout(Duration::from_millis(500), response_stream.next())
+            .await
+            .expect("end-of-stream within 500ms");
+        assert!(end.is_none(), "stream must end after Unavailable");
+    }
+
+    #[tokio::test]
+    async fn bidi_handler_cancel_with_full_reply_channel_never_blocks_or_injects_error() {
+        let (env_tx, mut env_rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let token = CancellationToken::new();
+        let mut handler = BidiHandler {
+            sender: env_tx,
+            kernel: None,
+            cancel: token.clone(),
+        };
+
+        // Channel-backed request stream that stays open.
+        let (request, _chunk_tx) = open_bidi_request();
+        let mut response_stream = handler.call(request).await.expect("call ok").into_inner();
+
+        let envelope = timeout(Duration::from_millis(500), env_rx.recv())
+            .await
+            .expect("envelope within 500ms")
+            .expect("envelope channel alive");
+        let GrpcRequestEnvelope::Bidi { reply_tx, .. } = envelope else {
+            panic!("expected Bidi envelope");
+        };
+
+        // Fill the reply channel to capacity; the receiver is not polled
+        // yet, so all 64 items sit in the buffer.
+        for _ in 0..64 {
+            reply_tx
+                .try_send(GrpcStreamItem::Message(vec![1u8]))
+                .expect("reply channel must accept 64 buffered items");
+        }
+
+        // Cancel WITHOUT draining. On the current-thread test runtime the
+        // forward task only runs when this task yields: a few `yield_now`s
+        // make it observe the cancel against the STILL-FULL channel, so
+        // its `try_send` fails (as designed) before the drain starts.
+        token.cancel();
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        // Then drop the envelope's reply_tx: only the forward task's clone
+        // remains until cancel fires it.
+        drop(reply_tx);
+
+        // Exactly the 64 buffered Ok items, then None — an Err/UNAVAILABLE
+        // item must NEVER appear. A `send().await` cancel arm would park
+        // until this drain frees capacity and then inject the error as the
+        // 65th item; `try_send` fails silently on the full channel and the
+        // sender drop closes the stream.
+        let forwarded = timeout(Duration::from_secs(2), async {
+            let mut oks = 0usize;
+            while let Some(item) = response_stream.next().await {
+                match item {
+                    Ok(bytes) => {
+                        assert_eq!(bytes, vec![1u8]);
+                        oks += 1;
+                    }
+                    Err(status) => {
+                        panic!("cancel arm must not inject an error item: {status}");
+                    }
+                }
+            }
+            oks
+        })
+        .await
+        .expect("stream must drain the 64 buffered items and end within 2s");
+        assert_eq!(forwarded, 64, "exactly the 64 buffered items, then end");
     }
 
     #[tokio::test]

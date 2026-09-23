@@ -2229,9 +2229,10 @@ async fn grpc_consumer_abort_mid_permit_wait_allows_same_path_restart() {
     consumer_task.abort();
     let _ = timeout(Duration::from_secs(2), consumer_task).await;
 
-    // rc-qq8zz: bidi response streams end only when the client closes its
-    // request side (pre-existing BidiHandler behavior); the consumer-side
-    // hang this test pins is fixed by the permit wait rework.
+    // Close B's client request side; with rc-qq8zz fixed the abort-path
+    // cancel wiring also closes B's response stream, but this permitcancel
+    // test pins only the permit-wait rework — closing the sender is test
+    // cleanup, not a termination prerequisite.
     drop(b_echo_tx);
 
     let b_outcome = timeout(Duration::from_secs(2), b_item_rx.recv())
@@ -2568,4 +2569,175 @@ async fn grpc_consumer_saturated_stop_then_restart_reregisters_same_path() {
     let _ = release2_tx.send(()).await;
     drop(release2_tx);
     let _ = timeout(Duration::from_secs(2), responder2_task).await;
+}
+
+/// rc-qq8zz (task 1.1, RED): an accepted bidi call whose client request side
+/// stays open must have its response stream terminated when the consumer
+/// shuts down: the consumer task joins within 2s, the client observes
+/// `Unavailable` then end-of-stream, and the call-scoped acceptance claim
+/// releases.
+#[tokio::test]
+async fn grpc_consumer_shutdown_closes_open_bidi_response_stream() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/streaming.proto");
+
+    let mut consumer = GrpcConsumer::new(
+        "127.0.0.1".to_string(),
+        port,
+        "/streaming.StreamService/BidiEcho".to_string(),
+        proto_path,
+        "streaming.StreamService".to_string(),
+        "BidiEcho".to_string(),
+        GrpcMode::Bidi,
+        test_rt(),
+        GrpcServerConfig::default(),
+        1,
+    );
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // Kept alive and never read: with zero client chunks nothing is ever
+    // sent on the route channel; A's acceptance claim is held call-scoped
+    // by the parked processor future.
+    let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
+    let cancel_token = CancellationToken::new();
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-bidi-close-route".to_string(),
+    )
+    .with_in_flight_counter(std::sync::Arc::clone(&counter));
+
+    let consumer_task = tokio::spawn(async move {
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("consumer start");
+    });
+
+    // allow-test-sleep: readiness for bidi-close consumer test (rc-qq8zz)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Client A: open the bidi call and send NOTHING; the returned request
+    // sender stays alive for the whole test, so the client request stream
+    // stays open.
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let (item_tx, mut item_rx) = tokio::sync::mpsc::channel(16);
+    let (_call, _echo_tx) = open_bidi_call(StreamServiceClient::new(channel), item_tx).await;
+    assert!(
+        wait_for_total(&counter, 1, Duration::from_secs(5)).await,
+        "A call-scoped acceptance claim held by the processor parked on the request stream"
+    );
+
+    // ACT: cancel the consumer while A's call is open and idle.
+    cancel_token.cancel();
+
+    // ASSERT: the consumer task joins within 2s...
+    timeout(Duration::from_secs(2), consumer_task)
+        .await
+        .expect("consumer must exit within 2s")
+        .expect("clean consumer exit");
+    // ...the open response stream fails with `Unavailable` while the client
+    // request side is STILL open (this is the rc-qq8zz leak pre-fix)...
+    let item = timeout(Duration::from_secs(2), item_rx.recv())
+        .await
+        .expect("open bidi response stream must terminate within 2s of shutdown");
+    assert!(
+        matches!(
+            item,
+            Some(Err(ref status)) if status.code() == tonic::Code::Unavailable
+        ),
+        "open bidi response stream must fail with Unavailable on shutdown"
+    );
+    // ...then reaches end-of-stream...
+    let end = timeout(Duration::from_secs(1), item_rx.recv())
+        .await
+        .expect("response stream must reach end-of-stream within 1s of Unavailable");
+    assert!(end.is_none(), "response stream must end after Unavailable");
+    // ...and the call-scoped acceptance claim releases.
+    assert!(
+        wait_for_total(&counter, 0, Duration::from_secs(2)).await,
+        "call-scoped acceptance claim must release after shutdown"
+    );
+}
+
+/// rc-qq8zz (task 1.1, RED): aborting the consumer must terminate an
+/// accepted bidi call whose client request side stays open: the response
+/// stream reaches a terminal item (any outcome) and the call-scoped
+/// acceptance claim releases.
+#[tokio::test]
+async fn grpc_consumer_abort_closes_open_bidi_response_stream() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/streaming.proto");
+
+    let mut consumer = GrpcConsumer::new(
+        "127.0.0.1".to_string(),
+        port,
+        "/streaming.StreamService/BidiEcho".to_string(),
+        proto_path,
+        "streaming.StreamService".to_string(),
+        "BidiEcho".to_string(),
+        GrpcMode::Bidi,
+        test_rt(),
+        GrpcServerConfig::default(),
+        1,
+    );
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // Kept alive and never read (see the shutdown test for the rationale).
+    let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
+    let cancel_token = CancellationToken::new();
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-bidi-abort-route".to_string(),
+    )
+    .with_in_flight_counter(std::sync::Arc::clone(&counter));
+
+    let consumer_task = tokio::spawn(async move {
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("consumer start");
+    });
+
+    // allow-test-sleep: readiness for bidi-close consumer test (rc-qq8zz)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Client A: open the bidi call and send NOTHING; the returned request
+    // sender stays alive for the whole test, so the client request stream
+    // stays open.
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let (item_tx, mut item_rx) = tokio::sync::mpsc::channel(16);
+    let (_call, _echo_tx) = open_bidi_call(StreamServiceClient::new(channel), item_tx).await;
+    assert!(
+        wait_for_total(&counter, 1, Duration::from_secs(5)).await,
+        "A call-scoped acceptance claim held by the processor parked on the request stream"
+    );
+
+    // ACT: abort the consumer while A's call is open and idle; join is
+    // bounded like the mirrored permitcancel abort test.
+    consumer_task.abort();
+    let _ = timeout(Duration::from_secs(2), consumer_task).await;
+
+    // ASSERT: the open response stream reaches a terminal item (any outcome
+    // — do not pin the code on the abort path; the client request side is
+    // STILL open — this is the rc-qq8zz leak pre-fix)...
+    let item = timeout(Duration::from_secs(2), item_rx.recv())
+        .await
+        .expect("open bidi response stream must terminate within 2s of abort");
+    assert!(
+        matches!(item, Some(Err(_)) | None),
+        "open bidi response stream must reach a terminal item on abort"
+    );
+    // ...and the call-scoped acceptance claim releases.
+    assert!(
+        wait_for_total(&counter, 0, Duration::from_secs(2)).await,
+        "call-scoped acceptance claim must release after abort"
+    );
 }
