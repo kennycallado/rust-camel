@@ -41,7 +41,10 @@ pub(crate) async fn direct_oneshot(
             Ok(reply) => return Ok(reply),
             Err(e) => {
                 // Retry only the direct startup race via the shared
-                // predicate; the seda gate fails fast (rc-tgaxf).
+                // predicate; the seda gate (rc-tgaxf) and the seda
+                // terminal-config rejections — the multipleConsumers+wait
+                // conflict (rc-rif19) and the endpoint config conflict
+                // (rc-zovuy) — all fail fast.
                 let is_startup_race = camel_component_seda::is_direct_startup_race(&e);
                 if is_startup_race && tokio::time::Instant::now() < deadline {
                     tokio::time::sleep(RETRY_SLEEP).await;

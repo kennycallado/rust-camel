@@ -274,7 +274,11 @@ async fn deliver_input(
                 // duplicate their side effects (rc-zjrx). The pre-input
                 // readiness probe makes this error unreachable in practice;
                 // failing fast here is the accurate outcome when it still
-                // fires.
+                // fires. The predicate also excludes the seda
+                // terminal-config rejections — the multipleConsumers+wait
+                // conflict (rc-rif19) and the endpoint config conflict
+                // (rc-zovuy) — which likewise fail fast instead of
+                // retrying.
                 let is_startup_race = camel_component_seda::is_direct_startup_race(&e);
                 if is_startup_race && tokio::time::Instant::now() < deadline {
                     tokio::time::sleep(STARTUP_RETRY_SLEEP).await;

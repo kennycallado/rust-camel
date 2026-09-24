@@ -880,7 +880,10 @@ impl PartnerAdapter for DirectStimulus {
                         // Structural startup-race classification via the
                         // shared seda predicate (rc-utx98):
                         // EndpointCreationFailed minus the no-active-consumers
-                        // gate, which fails fast (rc-tgaxf). The full
+                        // gate (rc-tgaxf) and minus the seda terminal-config
+                        // rejections — the multipleConsumers+wait conflict
+                        // (rc-rif19) and the endpoint config conflict
+                        // (rc-zovuy) — all of which fail fast. The full
                         // rationale lives on the predicate's rustdoc.
                         let is_startup_race = camel_component_seda::is_direct_startup_race(&e);
                         if is_startup_race && tokio::time::Instant::now() < deadline {

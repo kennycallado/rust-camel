@@ -293,9 +293,75 @@ enum SendError {
     /// The route pipeline failed (`PipelineOutcome::Failed` surfaced as
     /// the producer's `Err`) — verdict class, exit 1.
     Pipeline(CamelError),
-    /// Producer/endpoint apparatus failure after the retry budget —
-    /// exit 2.
-    Transport(String),
+    /// Producer/endpoint apparatus failure — deterministic classes
+    /// (unregistered scheme, invalid URI, seda terminal-config) fail
+    /// fast on the first attempt; transient classes return after the
+    /// retry budget — exit 2.
+    Transport(TransportFailure),
+}
+
+/// Typed producer/endpoint apparatus failure (bd rc-zovuy): the outer
+/// `attempt_send` error carries its class structurally — scheme lookup
+/// miss, endpoint creation, producer creation — instead of an erased
+/// `String`, so the send loop can fail fast on deterministic classes
+/// without Display sniffing (rc-3px7o/rc-utx98 doctrine: only the
+/// variant and crate-owned typed markers classify, never wording).
+/// `Display` reproduces the historical transport strings
+/// byte-identically; every consumer stays Display-driven.
+#[derive(Debug)]
+enum TransportFailure {
+    /// No component is registered under the URI's scheme — the
+    /// registry is frozen after boot, so this can never heal.
+    ComponentNotRegistered {
+        /// The full send target URI.
+        uri: String,
+        /// The URI's scheme, missing from the registry.
+        scheme: String,
+    },
+    /// `create_endpoint` rejected the URI or its configuration.
+    EndpointCreation {
+        /// The full send target URI.
+        uri: String,
+        /// The typed component rejection.
+        cause: CamelError,
+    },
+    /// The endpoint refused to build its producer.
+    ProducerCreation {
+        /// The full send target URI.
+        uri: String,
+        /// The typed component rejection.
+        cause: CamelError,
+    },
+}
+
+impl std::fmt::Display for TransportFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ComponentNotRegistered { uri, scheme } => {
+                write!(
+                    f,
+                    "failed to send to {uri}: `{scheme}:` component not registered"
+                )
+            }
+            Self::EndpointCreation { uri, cause } => {
+                write!(f, "failed to create endpoint {uri}: {cause}")
+            }
+            Self::ProducerCreation { uri, cause } => {
+                write!(f, "failed to create producer for {uri}: {cause}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TransportFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ComponentNotRegistered { .. } => None,
+            Self::EndpointCreation { cause, .. } | Self::ProducerCreation { cause, .. } => {
+                Some(cause)
+            }
+        }
+    }
 }
 
 /// Maximum directory depth of the metadata listing walk: the root is
@@ -1961,10 +2027,12 @@ fn load_route_definitions(
 /// mode) reject pre-enqueue but inside the caller's pipeline, so a
 /// retry re-executes already-run route steps and duplicates their side
 /// effects (rc-ucemm; fail-fast ruling rc-tgaxf). The terminal-config
-/// error (`multipleConsumers=true` with `waitForTaskToComplete` !=
-/// Never) is a deterministic configuration conflict — no consumer
-/// timing can ever satisfy it, so a retry can never succeed; it is
-/// classified by the typed marker walk behind
+/// error class — both the producer's `multipleConsumers=true` with
+/// `waitForTaskToComplete` != Never conflict and the same-name endpoint
+/// config conflict raised at endpoint creation — is a deterministic
+/// configuration conflict: no consumer timing can ever satisfy either,
+/// so a retry can never succeed. Both are classified by the typed
+/// marker walk behind
 /// [`camel_component_seda::is_seda_terminal_config_error`], never by
 /// wording. Every other `EndpointCreationFailed` stays retryable — the
 /// direct component's "direct endpoint '…' not registered" startup race
@@ -1983,6 +2051,33 @@ fn is_retryable_startup_failure(e: &CamelError) -> bool {
     camel_component_seda::is_direct_startup_race(e)
 }
 
+/// Deterministic transport-failure classes (bd rc-zovuy): failures
+/// whose cause is a permanent configuration defect, so retrying inside
+/// the send loop can never succeed and only burns the window. A
+/// registry miss is terminal — the component registry is frozen after
+/// boot, so a missing scheme can never appear mid-run. Endpoint or
+/// producer creation is terminal when the typed cause says so:
+/// `CamelError::InvalidUri` (a malformed URI/parameter parse never
+/// becomes valid on a later attempt) or the seda terminal-config
+/// marker class ([`camel_component_seda::is_seda_terminal_config_error`]
+/// — both the `multipleConsumers=true` + `waitForTaskToComplete` !=
+/// Never conflict and the same-name endpoint config conflict, walked
+/// through the crate-private typed marker). Everything else stays
+/// retryable: plain creation apparatus races heal when the consumer
+/// registers, and foreign components' deterministic rejections remain
+/// component-owned (rc-3px7o/rc-utx98 doctrine — classification by
+/// variant and typed markers only, never Display sniffing).
+fn is_deterministic_transport_failure(f: &TransportFailure) -> bool {
+    match f {
+        TransportFailure::ComponentNotRegistered { .. } => true,
+        TransportFailure::EndpointCreation { cause, .. }
+        | TransportFailure::ProducerCreation { cause, .. } => {
+            matches!(cause, CamelError::InvalidUri(_))
+                || camel_component_seda::is_seda_terminal_config_error(cause)
+        }
+    }
+}
+
 /// Send the job's single exchange, retrying the consumer-startup race
 /// (the `deliver_input` discipline): non-gate `EndpointCreationFailed`
 /// errors — the direct registration race family and the SEDA queue-full
@@ -1995,9 +2090,22 @@ fn is_retryable_startup_failure(e: &CamelError) -> bool {
 /// `waitForTaskToComplete` != Never conflict, typed by
 /// [`camel_component_seda::is_seda_terminal_config_error`] — a retry
 /// can never succeed). Both return [`SendError::Pipeline`] on the first
-/// attempt without sleeping. A persistent failure maps to
-/// [`SendError::Pipeline`] when the pipeline itself failed,
-/// [`SendError::Transport`] otherwise.
+/// attempt without sleeping. The OUTER transport arm behaves the same
+/// way (bd rc-zovuy): deterministic [`TransportFailure`] classes — a
+/// registry miss (the registry is frozen after boot), an
+/// `InvalidUri` cause, and the seda terminal-config class (including
+/// the endpoint config conflict) — map to [`SendError::Transport`]
+/// immediately, without burning the window; plain transport apparatus
+/// failures keep the bounded sleep-and-retry window. A persistent
+/// failure maps to [`SendError::Pipeline`] when the pipeline itself
+/// failed, [`SendError::Transport`] otherwise.
+///
+/// The transport failure's `CamelError` cause stays inline (unboxed)
+/// so the classifier can match it directly; the size trips
+/// clippy::result_large_err — allow mirrors the `do_try_segment`
+/// precedent: a lint threshold does not justify rewriting the error
+/// contract.
+#[allow(clippy::result_large_err)]
 async fn send_with_startup_retry(
     ctx: &camel_core::CamelContext,
     send: &document::JobSendAction,
@@ -2041,6 +2149,12 @@ async fn send_with_startup_retry(
                 return Err(SendError::Pipeline(e));
             }
             Err(detail) => {
+                // Deterministic classes (bd rc-zovuy) fail fast: the
+                // retry window can never heal them, so return before
+                // the window check without sleeping.
+                if is_deterministic_transport_failure(&detail) {
+                    return Err(SendError::Transport(detail));
+                }
                 if Instant::now() < retry_until {
                     tokio::time::sleep(SEND_RETRY_SLEEP).await;
                     continue;
@@ -2052,30 +2166,45 @@ async fn send_with_startup_retry(
 }
 
 /// One producer-creation + send attempt. The outer `Err` carries a
-/// transport detail (producer/endpoint apparatus); the inner `Result`
-/// is the producer's reply — `Err` there is the route pipeline failing
-/// (`PipelineOutcome::Failed` per ADR-0024).
+/// typed [`TransportFailure`] (producer/endpoint apparatus); the inner
+/// `Result` is the producer's reply — `Err` there is the route pipeline
+/// failing (`PipelineOutcome::Failed` per ADR-0024). The cause stays
+/// inline (unboxed) so [`is_deterministic_transport_failure`] can match
+/// it directly; the size trips clippy::result_large_err — allow mirrors
+/// the `do_try_segment` precedent: a lint threshold does not justify
+/// rewriting the error contract.
+#[allow(clippy::result_large_err)]
 async fn attempt_send(
     ctx: &camel_core::CamelContext,
     scheme: &str,
     uri: &str,
     exchange: Exchange,
-) -> Result<Result<Exchange, CamelError>, String> {
+) -> Result<Result<Exchange, CamelError>, TransportFailure> {
     let producer = {
         // Producer creation under the registry lock, mirroring the
         // `deliver_input` / `DirectStimulus` discipline; the guard drops
         // before the awaited send.
         let registry = ctx.registry();
-        let component = registry.get(scheme).ok_or_else(|| {
-            format!("failed to send to {uri}: `{scheme}:` component not registered")
+        let component =
+            registry
+                .get(scheme)
+                .ok_or_else(|| TransportFailure::ComponentNotRegistered {
+                    uri: uri.to_string(),
+                    scheme: scheme.to_string(),
+                })?;
+        let endpoint = component.create_endpoint(uri, ctx).map_err(|e| {
+            TransportFailure::EndpointCreation {
+                uri: uri.to_string(),
+                cause: e,
+            }
         })?;
-        let endpoint = component
-            .create_endpoint(uri, ctx)
-            .map_err(|e| format!("failed to create endpoint {uri}: {e}"))?;
         let producer_ctx = ctx.producer_context();
         endpoint
             .create_producer(std::sync::Arc::new(NoOpComponentContext), &producer_ctx)
-            .map_err(|e| format!("failed to create producer for {uri}: {e}"))?
+            .map_err(|e| TransportFailure::ProducerCreation {
+                uri: uri.to_string(),
+                cause: e,
+            })?
     };
     Ok(producer.oneshot(exchange).await)
 }

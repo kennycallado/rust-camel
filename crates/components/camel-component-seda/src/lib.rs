@@ -595,16 +595,18 @@ impl NoActiveConsumersGate {
     }
 }
 
-/// Provenance marker for the SEDA producer's terminal configuration
-/// rejection (multipleConsumers + `waitForTaskToComplete` != Never): the
-/// producer embeds this crate-private value in the rejection's source
-/// chain and [`is_seda_terminal_config_error`] classifies by downcasting
-/// along that chain. Its `Display` is deliberately NON-canonical
-/// diagnostic text — it never participates in classification and never
-/// equals a canonical rejection message.
+/// Provenance marker for the SEDA terminal configuration rejections: the
+/// producer's `multipleConsumers` + `waitForTaskToComplete` != Never
+/// conflict and the same-name endpoint config conflict (detretry,
+/// rc-zovuy). The producer embeds this crate-private value in the
+/// rejection's source chain and [`is_seda_terminal_config_error`]
+/// classifies by downcasting along that chain. Its `Display` is
+/// deliberately NON-canonical diagnostic text — it never participates in
+/// classification and never equals a canonical rejection message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TerminalConfigError {
     MultipleConsumersWaitConflict,
+    EndpointConfigConflict,
 }
 
 impl std::fmt::Display for TerminalConfigError {
@@ -613,6 +615,9 @@ impl std::fmt::Display for TerminalConfigError {
             Self::MultipleConsumersWaitConflict => f.write_str(
                 "seda terminal-config-error rejection (multipleConsumers wait conflict)",
             ),
+            Self::EndpointConfigConflict => {
+                f.write_str("seda terminal-config-error rejection (endpoint config conflict)")
+            }
         }
     }
 }
@@ -651,6 +656,19 @@ fn terminal_config_rejection() -> CamelError {
          replies without aggregator semantics"
             .to_string(),
         OpaqueErrorSource::new(Arc::new(TerminalConfigError::MultipleConsumersWaitConflict)),
+    )
+}
+
+/// Endpoint config-conflict rejection (`get_or_create_state`): a same-name
+/// endpoint already exists with an incompatible config — deterministic
+/// configuration state, so a retry can never succeed. The `detail` is the
+/// historical `is_compatible_with` wording, passed through BYTE-IDENTICAL;
+/// classification rides the typed [`TerminalConfigError`] marker in the
+/// source chain, not the text (rc-3px7o doctrine; detretry rc-zovuy).
+fn endpoint_config_conflict_rejection(detail: String) -> CamelError {
+    CamelError::EndpointCreationFailedWithSource(
+        detail,
+        OpaqueErrorSource::new(Arc::new(TerminalConfigError::EndpointConfigConflict)),
     )
 }
 
@@ -740,17 +758,21 @@ pub fn is_no_active_consumers_gate(err: &CamelError) -> bool {
     gate_from_error(err).is_some()
 }
 
-/// True for the SEDA producer's terminal configuration rejections: the
-/// `multipleConsumers=true` + `waitForTaskToComplete` != Never conflict.
-/// Classification is by TYPED PROVENANCE, not wording: the producer embeds
-/// a crate-private `TerminalConfigError` marker in the rejection's source
-/// chain and this predicate runs a bounded walk (at most
-/// `MAX_SOURCE_HOPS` = 8 source hops) over that chain. Display text never
-/// classifies — a foreign error whose message merely byte-matches the
-/// canonical config wording is NOT a terminal-config error. The conflict
-/// is deterministic configuration state: no consumer timing can ever
-/// satisfy it, so a retry can never succeed and senders use this predicate
-/// to fail fast instead of burning the retry window.
+/// True for the SEDA terminal configuration rejections, both deterministic
+/// configuration conflicts no consumer timing can ever satisfy: the
+/// producer's `multipleConsumers=true` + `waitForTaskToComplete` != Never
+/// conflict, and the same-name endpoint config conflict raised at endpoint
+/// creation when an incompatible config already exists (detretry,
+/// rc-zovuy). Classification is by TYPED PROVENANCE, not wording: the
+/// rejecting site embeds a crate-private `TerminalConfigError` marker in
+/// the rejection's source chain and this predicate runs a bounded walk (at
+/// most `MAX_SOURCE_HOPS` = 8 source hops) over that chain. Display text
+/// never classifies — a foreign error whose message merely byte-matches a
+/// canonical conflict wording is NOT a terminal-config error. Both marker
+/// kinds reject deterministically, so a retry can never succeed and
+/// senders use this predicate to fail fast instead of burning the retry
+/// window; the config conflict fires at endpoint creation, not producer
+/// call.
 pub fn is_seda_terminal_config_error(err: &CamelError) -> bool {
     terminal_config_from_error(err)
 }
@@ -767,10 +789,12 @@ pub fn is_seda_terminal_config_error(err: &CamelError) -> bool {
 /// (rc-fr20u doctrine). Two typed failures FAIL FAST: the gate rejects
 /// pre-enqueue yet INSIDE the caller's pipeline, so a retry duplicates
 /// already-executed side effects (rc-tgaxf), and the terminal-config
-/// rejection is a deterministic configuration conflict that no retry can
-/// ever satisfy ([`is_seda_terminal_config_error`]). Boundary (rc-utx98):
-/// a text-carrying `ProcessorError` ("… not registered") is NOT a startup
-/// race — terminal, never retried; only the variant decides.
+/// marker class covers BOTH deterministic configuration conflicts — the
+/// multipleConsumers+wait conflict at producer call and the endpoint
+/// config conflict at endpoint creation (detretry, rc-zovuy) — that no
+/// retry can ever satisfy ([`is_seda_terminal_config_error`]). Boundary
+/// (rc-utx98): a text-carrying `ProcessorError` ("… not registered") is
+/// NOT a startup race — terminal, never retried; only the variant decides.
 pub fn is_direct_startup_race(err: &CamelError) -> bool {
     match err {
         CamelError::EndpointCreationFailed(_) => true,
@@ -822,7 +846,7 @@ impl SedaComponent {
             existing
                 .config
                 .is_compatible_with(config)
-                .map_err(CamelError::EndpointCreationFailed)?;
+                .map_err(endpoint_config_conflict_rejection)?;
             Ok(Arc::clone(existing))
         } else {
             let state = Arc::new(SedaEndpointState::new(config));
@@ -3235,6 +3259,73 @@ mod consumer_producer_tests {
         let e = CamelError::EndpointCreationFailedWithSource(
             "outer".to_string(),
             OpaqueErrorSource::new(Arc::new(TerminalChainHop(8))),
+        );
+        assert!(!is_seda_terminal_config_error(&e));
+        assert!(is_direct_startup_race(&e));
+    }
+
+    /// The endpoint config-conflict rejection (detretry, rc-zovuy):
+    /// creating a same-name endpoint with incompatible `size` carries the
+    /// typed [`TerminalConfigError`] marker, so the real carrier classifies
+    /// as a terminal-config error.
+    #[test]
+    fn config_conflict_rejection_carries_terminal_marker() {
+        let comp = create_component();
+        let _ep = comp
+            .create_endpoint("seda:conflict?size=10", &NoOpComponentContext)
+            .unwrap();
+        let err = match comp.create_endpoint("seda:conflict?size=5", &NoOpComponentContext) {
+            Err(e) => e,
+            Ok(_) => panic!("incompatible same-name config must be rejected"),
+        };
+        assert!(is_seda_terminal_config_error(&err));
+    }
+
+    /// The endpoint config-conflict rejection is deterministic (rc-zovuy):
+    /// the same carrier must NOT classify as a retryable startup race.
+    #[test]
+    fn config_conflict_rejection_not_startup_race() {
+        let comp = create_component();
+        let _ep = comp
+            .create_endpoint("seda:conflict?size=10", &NoOpComponentContext)
+            .unwrap();
+        let err = match comp.create_endpoint("seda:conflict?size=5", &NoOpComponentContext) {
+            Err(e) => e,
+            Ok(_) => panic!("incompatible same-name config must be rejected"),
+        };
+        assert!(!is_direct_startup_race(&err));
+    }
+
+    /// The endpoint config-conflict detail stays BYTE-IDENTICAL to the
+    /// historical `is_compatible_with` wording (rc-zovuy): exact equality
+    /// on the variant's detail field, not a substring of the rendered
+    /// Display.
+    #[test]
+    fn config_conflict_detail_byte_identical() {
+        let comp = create_component();
+        let _ep = comp
+            .create_endpoint("seda:q?size=10", &NoOpComponentContext)
+            .unwrap();
+        let err = match comp.create_endpoint("seda:q?size=5", &NoOpComponentContext) {
+            Err(e) => e,
+            Ok(_) => panic!("incompatible same-name config must be rejected"),
+        };
+        let CamelError::EndpointCreationFailedWithSource(detail, _) = err else {
+            panic!("config conflict must arrive as EndpointCreationFailedWithSource");
+        };
+        assert_eq!(
+            detail,
+            "endpoint 'q' already exists with different config: size: 10 vs 5"
+        );
+    }
+
+    /// A plain `EndpointCreationFailed` byte-matching the endpoint
+    /// config-conflict wording carries no typed marker — typed provenance
+    /// only, so the imitation stays a retryable startup race (rc-3px7o).
+    #[test]
+    fn foreign_config_conflict_imitation_stays_retryable() {
+        let e = CamelError::EndpointCreationFailed(
+            "endpoint 'q' already exists with different config: size: 10 vs 5".to_string(),
         );
         assert!(!is_seda_terminal_config_error(&e));
         assert!(is_direct_startup_race(&e));

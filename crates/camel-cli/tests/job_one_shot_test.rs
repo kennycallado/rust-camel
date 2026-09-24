@@ -661,6 +661,70 @@ routeFiles:
     );
 }
 
+/// Config-conflict fail-fast (spec "config-conflict job exits fast
+/// with apparatus failure", rc-zovuy): a job document sending to
+/// `seda:q?size=5` whose route already created the endpoint with
+/// `size=10`. Unlike the terminal-config send rejection above, the
+/// endpoint config conflict fires in the send apparatus — endpoint
+/// creation — BEFORE the report writer runs: the process exits 2
+/// with the conflict on stderr and NO JSON report on stdout, and the
+/// wall clock (spawn included) stays under 1.5 s, half the 3 s retry
+/// window: a retry burn alone would add >= 3000 ms.
+#[test]
+fn seda_config_conflict_job_exits_fast_apparatus_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path());
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("routes/job-route.yaml"),
+        r#"routes:
+  - id: "job-config-conflict"
+    from: "seda:q?size=10"
+    steps:
+      - to: "log:done"
+"#,
+    )
+    .expect("write route");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        r#"execute:
+  mode: one-shot
+  timeout: 60s
+  send:
+    to: "seda:q?size=5"
+routeFiles:
+  - routes/job-route.yaml
+"#,
+    )
+    .expect("write job doc");
+
+    let started = std::time::Instant::now();
+    let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        code, 2,
+        "expected exit 2 (send apparatus failure);\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    // The transport arm exits before report writing, so stdout
+    // carries no JSON report (early exit-2 class).
+    assert!(
+        serde_json::from_str::<serde_json::Value>(stdout.trim()).is_err(),
+        "stdout must NOT parse as a JSON report (early exit-2);\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("failed to create endpoint"),
+        "stderr must name the endpoint-creation failure; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("endpoint 'q' already exists with different config: size: 10 vs 5"),
+        "stderr must name the endpoint config conflict; stderr:\n{stderr}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "no retry burn: elapsed must stay under the 1.5 s budget (spawn included); got {elapsed:?}"
+    );
+}
+
 /// The mandatory overall timeout: a slow route plus `timeout: 1s`
 /// reports `Timeout` and exits 2, within a bounded wall clock (boot +
 /// 1 s timeout + the 5 s shutdown floor; generously bounded at 15 s).

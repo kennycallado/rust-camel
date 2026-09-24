@@ -131,7 +131,7 @@ send fields and header injection with one deprecation note on stderr.
 | Pipeline failure | the send's route pipeline failed (`PipelineOutcome::Failed` through the producer reply seam) | 1 |
 | Overall timeout | the mandatory `timeout` expired before send+drain+teardown completed (report outcome `Timeout`) | 2 |
 | Signal interruption | first SIGINT/SIGTERM cancelled the in-flight send or batch drain (report outcome `Interrupted`; teardown runs under the one-shot `MIN_SHUTDOWN_BUDGET` floor or the batch no-floor deadline) | 2 |
-| Send apparatus failure | producer/endpoint creation failed past the 3 s startup-race window (not a pipeline verdict) | 2 |
+| Send apparatus failure | producer/endpoint creation failed — deterministic classes (unregistered scheme, invalid URI, seda terminal-config) on the first attempt, transient classes past the 3 s startup-race window (not a pipeline verdict) | 2 |
 | Shutdown failure | teardown failed or exceeded its budget after a recorded verdict (report `shutdown_error` carries the detail; `error` keeps the verdict) | 2 |
 | Report write failure | `--report` path unwritable, or report serialization failed | 2 |
 
