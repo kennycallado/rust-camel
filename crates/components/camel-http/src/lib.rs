@@ -6395,10 +6395,28 @@ mod tests {
         let handle = tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
             loop {
-                if let Ok((mut stream, _)) = listener.accept().await {
+                // Per-iteration deadline (lintwiden D4.2, idle-relay
+                // re-arm): every caller drops the returned handle, so
+                // this accept loop is a detached server for the test
+                // process's lifetime and quiet gaps between client
+                // requests are normal — a lapsed deadline re-arms (as
+                // does a transient accept error, prior behavior).
+                // Process exit reaps the task.
+                if let Ok(Ok((mut stream, _))) =
+                    tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+                {
                     let captured = Arc::clone(&captured);
                     tokio::spawn(async move {
-                        let Some(req) = capture_request(&mut stream).await else {
+                        // Per-connection deadline (lintwiden D4.2): a client
+                        // that connects but never completes a request must
+                        // not pin the handler task — drop the connection.
+                        let Some(req) = tokio::time::timeout(
+                            Duration::from_secs(10),
+                            capture_request(&mut stream),
+                        )
+                        .await
+                        .ok()
+                        .flatten() else {
                             return;
                         };
                         captured.lock().unwrap().push(req);
@@ -6435,10 +6453,28 @@ mod tests {
         let handle = tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
             loop {
-                if let Ok((mut stream, _)) = listener.accept().await {
+                // Per-iteration deadline (lintwiden D4.2, idle-relay
+                // re-arm): every caller drops the returned handle, so
+                // this accept loop is a detached server for the test
+                // process's lifetime and quiet gaps between client
+                // requests are normal — a lapsed deadline re-arms (as
+                // does a transient accept error, prior behavior).
+                // Process exit reaps the task.
+                if let Ok(Ok((mut stream, _))) =
+                    tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+                {
                     let captured = Arc::clone(&captured);
                     tokio::spawn(async move {
-                        let Some(req) = capture_request(&mut stream).await else {
+                        // Per-connection deadline (lintwiden D4.2): a client
+                        // that connects but never completes a request must
+                        // not pin the handler task — drop the connection.
+                        let Some(req) = tokio::time::timeout(
+                            Duration::from_secs(10),
+                            capture_request(&mut stream),
+                        )
+                        .await
+                        .ok()
+                        .flatten() else {
                             return;
                         };
                         let path = req.path.clone();
@@ -12286,12 +12322,19 @@ mod tests {
         body: String,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            if let Some(envelope) = rx.recv().await {
-                let _ = envelope.reply_tx.send(HttpReply {
-                    status,
-                    headers: vec![],
-                    body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
-                });
+            // Per-iteration deadline (lintwiden D4.2): the recv wait is
+            // bounded; a stall panics the task (surfaced at the join)
+            // instead of parking it. Channel close still ends silently.
+            match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    let _ = envelope.reply_tx.send(HttpReply {
+                        status,
+                        headers: vec![],
+                        body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
+                    });
+                }
+                Ok(None) => {}
+                Err(_) => panic!("spawn_responder: no request arrived within 10s"),
             }
         })
     }
@@ -12347,7 +12390,9 @@ mod tests {
         let body = resp.text().await.unwrap();
         assert_eq!(body, "create");
 
-        let _ = tokio::join!(get_handle, post_handle);
+        let (get_joined, post_joined) = tokio::join!(get_handle, post_handle);
+        get_joined.expect("get responder task must not stall");
+        post_joined.expect("post responder task must not stall");
     }
 
     #[tokio::test]
@@ -12588,7 +12633,9 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 201);
         assert_eq!(resp.text().await.unwrap(), "create");
 
-        let _ = post_handle.await;
+        post_handle
+            .await
+            .expect("post responder task must not stall");
     }
 
     #[tokio::test]
@@ -12650,7 +12697,9 @@ mod tests {
         // Exact-match handler answered — not the templated one.
         assert_eq!(resp.text().await.unwrap(), "exact");
 
-        let _ = exact_handle.await;
+        exact_handle
+            .await
+            .expect("exact responder task must not stall");
     }
 
     #[tokio::test]
@@ -13677,28 +13726,53 @@ mod tests {
         registry.register_api_route(path.to_string(), tx).await;
         let path_owned = path.to_string();
         tokio::spawn(async move {
-            while let Some(envelope) = rx.recv().await {
-                let exchange = envelope_to_exchange(&envelope);
-                let reply_tx = envelope.reply_tx;
-                let result: Result<(), CamelError> = async {
-                    let token = extract_token_from_exchange(&exchange, &sources)
-                        .map(|extracted| extracted.token)
-                        .ok_or_else(|| {
-                            CamelError::Unauthenticated("no credential in any source".into())
-                        })?;
-                    authenticator.authenticate_bearer(&token).await?;
-                    Ok(())
+            loop {
+                // Per-iteration deadline (lintwiden D4.2): each recv
+                // await is bounded; a stall panics the task instead of
+                // parking it. Channel close still ends the loop.
+                match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                    Ok(Some(envelope)) => {
+                        let exchange = envelope_to_exchange(&envelope);
+                        let reply_tx = envelope.reply_tx;
+                        // Per-request deadline (lintwiden D4.2): a wedged
+                        // authenticator must fail the request instead of
+                        // pinning the route task.
+                        let reply = match extract_token_from_exchange(&exchange, &sources)
+                            .map(|extracted| extracted.token)
+                        {
+                            Some(token) => {
+                                match tokio::time::timeout(
+                                    Duration::from_secs(10),
+                                    authenticator.authenticate_bearer(&token),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(_)) => HttpReply {
+                                        status: 200,
+                                        headers: vec![],
+                                        body: HttpReplyBody::Bytes(bytes::Bytes::from("ok")),
+                                    },
+                                    Ok(Err(e)) => pipeline_error_to_reply(e, &path_owned),
+                                    Err(_) => pipeline_error_to_reply(
+                                        CamelError::ProcessorError(
+                                            "authenticator stalled beyond 10s".into(),
+                                        ),
+                                        &path_owned,
+                                    ),
+                                }
+                            }
+                            None => pipeline_error_to_reply(
+                                CamelError::Unauthenticated("no credential in any source".into()),
+                                &path_owned,
+                            ),
+                        };
+                        let _ = reply_tx.send(reply);
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        panic!("spawn_failing_auth_route: no request arrived within 10s")
+                    }
                 }
-                .await;
-                let reply = match result {
-                    Ok(()) => HttpReply {
-                        status: 200,
-                        headers: vec![],
-                        body: HttpReplyBody::Bytes(bytes::Bytes::from("ok")),
-                    },
-                    Err(e) => pipeline_error_to_reply(e, &path_owned),
-                };
-                let _ = reply_tx.send(reply);
             }
         });
     }

@@ -29,11 +29,15 @@ fn install_sqlx_drivers() {
 
 async fn create_pool(conn_str: &str) -> AnyPool {
     install_sqlx_drivers();
-    sqlx::any::AnyPoolOptions::new()
-        .max_connections(5)
-        .connect(conn_str)
-        .await
-        .expect("Failed to connect to database")
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        sqlx::any::AnyPoolOptions::new()
+            .max_connections(5)
+            .connect(conn_str),
+    )
+    .await
+    .expect("sql pool connect timed out after 30s")
+    .expect("Failed to connect to database")
 }
 
 async fn wait_for_mock_exchanges(mock: &MockComponent, endpoint_name: &str, min_count: usize) {

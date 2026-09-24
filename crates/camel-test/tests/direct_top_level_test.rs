@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use camel_api::{Exchange, Message, RouteStatus, RuntimeCommand};
 use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component_api::test_support::acquire_deadline;
 use camel_core::LanguageRegistryError;
 use camel_language_rhai::RhaiLanguage;
 use camel_test::CamelTestContext;
@@ -34,7 +35,12 @@ async fn send_to_direct_ignoring_error(
     exchange: Exchange,
 ) {
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = acquire_deadline(
+            h.ctx(),
+            "camel context (send_to_direct_ignoring_error)",
+            Duration::from_secs(10),
+        )
+        .await;
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry
@@ -59,34 +65,48 @@ async fn send_to_direct_until_delivered(
     exchange: Exchange,
     timeout: Duration,
 ) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let producer = {
-            let ctx = h.ctx().lock().await;
-            let producer_ctx = ctx.producer_context();
-            let registry = ctx.registry();
-            let component = registry
-                .get("direct")
-                .expect("direct component not registered");
-            let endpoint = component
-                .create_endpoint(endpoint_uri, &*ctx)
-                .expect("failed to create direct endpoint");
-            endpoint
-                .create_producer(test_rt(), &producer_ctx)
-                .expect("failed to create direct producer")
-        };
-        match producer.oneshot(exchange.clone()).await {
-            Ok(_) => return,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+    // Anti-wedge backstop (lintwiden D4.1S): the retry loop's own deadline
+    // governs startup-race exhaustion; this outer bound only turns a stalled
+    // ctx-lock or producer await into a loud failure instead of a wedge.
+    tokio::time::timeout(timeout + Duration::from_secs(5), async {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let producer = {
+                let ctx = h.ctx().lock().await;
+                let producer_ctx = ctx.producer_context();
+                let registry = ctx.registry();
+                let component = registry
+                    .get("direct")
+                    .expect("direct component not registered");
+                let endpoint = component
+                    .create_endpoint(endpoint_uri, &*ctx)
+                    .expect("failed to create direct endpoint");
+                endpoint
+                    .create_producer(test_rt(), &producer_ctx)
+                    .expect("failed to create direct producer")
+            };
+            match producer.oneshot(exchange.clone()).await {
+                Ok(_) => return,
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => {
+                    panic!("failed to send exchange to {endpoint_uri} within {timeout:?}: {e}")
+                }
             }
-            Err(e) => panic!("failed to send exchange to {endpoint_uri} within {timeout:?}: {e}"),
         }
-    }
+    })
+    .await
+    .expect("send_to_direct_until_delivered stalled beyond its retry deadline");
 }
 
 async fn route_status(h: &CamelTestContext, route_id: &str) -> Option<RouteStatus> {
-    let ctx = h.ctx().lock().await;
+    let ctx = acquire_deadline(
+        h.ctx(),
+        "camel context (route_status)",
+        Duration::from_secs(10),
+    )
+    .await;
     let s = ctx
         .runtime_route_status(route_id)
         .await
@@ -104,7 +124,12 @@ async fn route_status(h: &CamelTestContext, route_id: &str) -> Option<RouteStatu
 
 async fn stop_route(h: &CamelTestContext, route_id: &str) {
     let runtime = {
-        let ctx = h.ctx().lock().await;
+        let ctx = acquire_deadline(
+            h.ctx(),
+            "camel context (stop_route)",
+            Duration::from_secs(10),
+        )
+        .await;
         ctx.runtime()
     };
     runtime
@@ -119,7 +144,12 @@ async fn stop_route(h: &CamelTestContext, route_id: &str) {
 
 async fn start_route(h: &CamelTestContext, route_id: &str) {
     let runtime = {
-        let ctx = h.ctx().lock().await;
+        let ctx = acquire_deadline(
+            h.ctx(),
+            "camel context (start_route)",
+            Duration::from_secs(10),
+        )
+        .await;
         ctx.runtime()
     };
     runtime

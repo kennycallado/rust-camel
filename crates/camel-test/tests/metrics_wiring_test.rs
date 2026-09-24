@@ -231,7 +231,10 @@ async fn wait_for_started(ctx: &CamelContext, route_ids: &[&str]) {
     loop {
         let mut all_started = true;
         for id in route_ids {
-            if !route_started(ctx, id).await {
+            if !tokio::time::timeout(Duration::from_secs(5), route_started(ctx, id))
+                .await
+                .expect("route status poll stalled in wait_for_started")
+            {
                 all_started = false;
                 break;
             }

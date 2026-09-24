@@ -9,7 +9,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use camel_component_api::test_support::acquire_deadline;
 use camel_integration_test::DocumentOutcome;
 use camel_integration_test::{
     DirectStimulus, LayeredEnv, ScenarioDocument, ScenarioFailure, ScenarioVerdict, ambient_std,
@@ -50,7 +52,9 @@ async fn run_direct(doc: &ScenarioDocument, root: &Path) -> DocumentOutcome {
     // (rc-5yon); the boot-owning run flow forwards it to the outcome
     // slot, like the shutdown slot below.
     outcome.inbound_bound = run.inbound_bound;
-    if let Err(e) = run.boot.shutdown(&mut *ctx.lock().await).await {
+    let mut ctx =
+        acquire_deadline(&ctx, "scenario ctx (run_direct)", Duration::from_secs(10)).await;
+    if let Err(e) = run.boot.shutdown(&mut ctx).await {
         outcome.final_failure = Some(ScenarioFailure::ShutdownFailure {
             message: e.to_string(),
         });

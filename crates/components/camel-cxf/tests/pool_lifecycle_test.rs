@@ -1,5 +1,7 @@
 mod support;
 
+use std::time::Duration;
+
 use camel_component_cxf::config::CxfPoolConfig;
 use camel_component_cxf::proto::{HealthRequest, cxf_bridge_client::CxfBridgeClient};
 use camel_component_cxf::{BridgeSlot, CxfBridgePool};
@@ -10,9 +12,11 @@ use support::mock_bridge::spawn_mock_bridge;
 async fn connect_mock_channel(
     port: u16,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
-    let channel = Endpoint::from_shared(format!("http://127.0.0.1:{port}"))?
-        .connect()
-        .await?;
+    let channel = tokio::time::timeout(
+        Duration::from_secs(5),
+        Endpoint::from_shared(format!("http://127.0.0.1:{port}"))?.connect(),
+    )
+    .await??;
     Ok(channel)
 }
 

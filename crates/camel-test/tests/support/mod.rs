@@ -171,7 +171,10 @@ where
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {
-        match op().await {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), op())
+            .await
+            .expect("direct retry op stalled beyond 5s in retry_direct_not_registered");
+        match outcome {
             Ok(exchange) => return Ok(exchange),
             Err(err)
                 if is_direct_not_registered(&err) && tokio::time::Instant::now() < deadline =>

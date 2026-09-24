@@ -105,7 +105,17 @@ fn make_consumer(guest_config: Vec<(String, String)>) -> WasmSourceConsumer {
 async fn wait_for_bind(port: u16, timeout: Duration) {
     let start = std::time::Instant::now();
     loop {
-        if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        // Per-attempt deadline (lintwiden D4.3): a wedged connect must
+        // fail the attempt (and the retry loop) instead of parking the
+        // helper; refusal — the normal not-yet-listening case — retries.
+        if matches!(
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                TcpStream::connect(("127.0.0.1", port)),
+            )
+            .await,
+            Ok(Ok(_))
+        ) {
             return;
         }
         if start.elapsed() > timeout {
@@ -119,9 +129,15 @@ async fn wait_for_bind(port: u16, timeout: Duration) {
 /// The stream is returned so the caller can keep the connection alive while
 /// the body is being streamed to the guest.
 async fn send_http_post(port: u16, path: &str, body: &[u8]) -> (String, TcpStream) {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("failed to connect to source HTTP listener");
+    // Per-attempt deadline (lintwiden D4.3): a wedged connect must fail
+    // the helper instead of parking it.
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .expect("connect to source HTTP listener timed out after 5s")
+    .expect("failed to connect to source HTTP listener");
 
     let request = format!(
         "POST {path} HTTP/1.1\r\n\

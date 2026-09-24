@@ -77,6 +77,12 @@ toml.workspace = true
 # lowering against the camel-builder `.parameters()` merge. Test-only, so the
 # authoring crates stay decoupled (no camel-builder dep inside camel-dsl).
 camel-builder.workspace = true
+# lintwiden D4.1S: helper fns in tests/ and the cfg(test) http.rs rig bound
+# their state-mutex acquisitions through acquire_deadline. Test-only feature
+# line: never enable test-support on the [dependencies] entry above — the
+# feature's stub panics in production use, and feature unification would
+# propagate it downstream.
+camel-component-api = { workspace = true, features = ["test-support"] }
 
 [features]
 # Shared security composition root (scenario-shared-boot task 3.1):

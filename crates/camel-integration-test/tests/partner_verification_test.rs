@@ -17,6 +17,7 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use camel_integration_test::runner::fill_bind_vars;
 use camel_integration_test::{
@@ -591,9 +592,13 @@ partners:
 async fn raw_post(authority: &str, path: &str) {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
-    let mut stream = tokio::net::TcpStream::connect(authority)
-        .await
-        .expect("the partner's bound address must accept");
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(authority),
+    )
+    .await
+    .expect("connect to partner timed out after 5s")
+    .expect("the partner's bound address must accept");
     let request = format!(
         "POST {path} HTTP/1.1\r\nhost: {authority}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
     );
@@ -614,9 +619,13 @@ async fn raw_post(authority: &str, path: &str) {
 async fn raw_get(authority: &str, path: &str) {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
-    let mut stream = tokio::net::TcpStream::connect(authority)
-        .await
-        .expect("the partner's bound address must accept");
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(authority),
+    )
+    .await
+    .expect("connect to partner timed out after 5s")
+    .expect("the partner's bound address must accept");
     let request = format!("GET {path} HTTP/1.1\r\nhost: {authority}\r\nconnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())

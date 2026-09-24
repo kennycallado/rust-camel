@@ -27,11 +27,15 @@ async fn ready_call(
 
 async fn make_producer() -> (CxfProducer, MockState) {
     let (port, state) = spawn_mock_bridge().await.expect("mock bridge");
-    let channel = Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
-        .expect("endpoint")
-        .connect()
-        .await
-        .expect("connect");
+    let channel = tokio::time::timeout(
+        Duration::from_secs(5),
+        Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+            .expect("endpoint")
+            .connect(),
+    )
+    .await
+    .expect("connect timed out after 5s")
+    .expect("connect");
 
     let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
         std::sync::Arc::new(camel_component_api::NoOpComponentContext);

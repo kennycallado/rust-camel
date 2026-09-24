@@ -26,7 +26,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
+use camel_component_api::test_support::acquire_deadline;
 use camel_integration_test::{
     DirectStimulus, DocumentOutcome, HttpPartner, LayeredEnv, PartnerAdapter, PartnerRouter,
     ScenarioDocument, ScenarioFailure, ScenarioVerdict, ambient_std, boot_scenario,
@@ -168,7 +170,9 @@ async fn run_two_docs(
     // and never masks the recorded verdicts (the `direct_reply_test`
     // pattern).
     let mut second = second;
-    if let Err(e) = run.boot.shutdown(&mut *ctx.lock().await).await {
+    let mut ctx =
+        acquire_deadline(&ctx, "scenario ctx (run_two_docs)", Duration::from_secs(10)).await;
+    if let Err(e) = run.boot.shutdown(&mut ctx).await {
         second.final_failure = Some(ScenarioFailure::ShutdownFailure {
             message: e.to_string(),
         });

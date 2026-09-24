@@ -416,7 +416,13 @@ async fn poll_get(h: &CamelTestContext, expected: &str, timeout: Duration) -> Op
     };
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(ex) = send_to_direct(h, "direct:sentinel-get", Exchange::default()).await {
+        let sent = tokio::time::timeout(
+            Duration::from_secs(5),
+            send_to_direct(h, "direct:sentinel-get", Exchange::default()),
+        )
+        .await
+        .expect("stalled sending sentinel GET probe in poll_get");
+        if let Ok(Ok(ex)) = sent {
             let got = body_string(&ex);
             if got.as_deref() == Some(expected) {
                 return got;

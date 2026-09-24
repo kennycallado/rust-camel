@@ -104,10 +104,17 @@ pub async fn spawn_test_server(
 /// Retry-connect until the axum listener accepts — no fixed sleeps.
 async fn wait_listening(port: u16) {
     for _ in 0..150 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
+        // Per-attempt deadline (lintwiden D4.3): a wedged listener must
+        // fail the attempt (and the retry loop) instead of parking the
+        // helper; refusal — the normal not-yet-listening case — retries.
+        if matches!(
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                tokio::net::TcpStream::connect(("127.0.0.1", port)),
+            )
+            .await,
+            Ok(Ok(_))
+        ) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -135,9 +142,13 @@ impl RawResponse {
 /// server wrote the response but before a clean FIN (possible when the
 /// request body was not fully drained server-side).
 pub async fn http_roundtrip(port: u16, request: String) -> RawResponse {
-    let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("connect to test server");
+    let mut sock = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .expect("connect to test server timed out after 5s")
+    .expect("connect to test server");
     sock.write_all(request.as_bytes())
         .await
         .expect("write request");

@@ -1,5 +1,6 @@
-//! Structural ratchet lint for unbounded waits in test function bodies
-//! (`lint-unbounded-wait`, bd rc-3lx2, ADR-0069 §13.2 R1, epic rc-99d5).
+//! Structural ratchet lint for unbounded waits in test-scoped function
+//! bodies (`lint-unbounded-wait`, bd rc-3lx2, ADR-0069 §13.2 R1, epic
+//! rc-99d5).
 //!
 //! # Why structural, not lexical
 //!
@@ -7,12 +8,20 @@
 //! `tokio::time::timeout`. Adjudication rejected it: it misses JoinHandle
 //! awaits and bare channel receives (no loop at all), and brace counting
 //! over raw text mis-fires on braces in strings and comments. This lint
-//! walks the real `syn` AST of every `#[test]` / `#[tokio::test]`
-//! function body (same scope rule as `lint-test-sleep`, bd rc-c9r6w):
-//! nested `fn` items and associated fns are out of scope. A closure
-//! body whose closure executes in the test body — directly invoked and
-//! awaited, or synchronous and directly invoked — is analyzed as part
-//! of the enclosing body; all other closures stay out of scope.
+//! walks the real `syn` AST. Scan scope: every `#[test]` /
+//! `#[tokio::test]` function body anywhere, plus non-test function
+//! bodies under a `tests/` path component and inside inline
+//! `#[cfg(test)]` module subtrees. Out-of-line `#[cfg(test)] mod X;`
+//! module files are a declared false-negative class: each file parses
+//! standalone, so the cfg attribute on the declaration is not visible
+//! there (same treatment as the rc-eow0s binding-indirection class).
+//! Associated fns (`impl` / trait default methods) stay out of scope at
+//! file level, mirroring the in-body pruning rule. Spawned-closure
+//! pruning is unchanged: a closure whose body runs in its own task
+//! scope stays out of the enclosing scan. A closure body whose closure
+//! executes in the scanned body — directly invoked and awaited, or
+//! synchronous and directly invoked — is analyzed as part of the
+//! enclosing body; all other closures stay out of scope.
 //!
 //! # Detector classes (V1)
 //!
@@ -132,9 +141,12 @@
 //!
 //! Soft count ratchet, mirror of `lint-test-sleep` /
 //! `lint-cancel-tokens`: `scripts/xtask/ratchet-unbounded-wait.max`
-//! holds the maximum allowed count of unadjudicated findings. The number
-//! may only decrease (monotone). Raising it is a review-visible
-//! regression signal.
+//! holds the maximum allowed count of unadjudicated findings. The count
+//! spans the full widened scan scope — test-attributed fns everywhere,
+//! plus non-test fns under `tests/` path components and inside inline
+//! `#[cfg(test)]` module subtrees — so widening the scope is a
+//! review-visible ratchet event. The number may only decrease
+//! (monotone). Raising it is a review-visible regression signal.
 //!
 //! Escape hatch (ADR-0069 R1 normative wording): append
 //! `// allow-test-wait: <reason>` (non-empty reason) to any source line
@@ -189,7 +201,11 @@ pub fn scan_source(source: &str, file: &Path) -> Result<Vec<Finding>, ScanError>
     let mut root_imports = Imports::new();
     collect_imports(&ast.items, &mut root_imports);
     let mut findings = Vec::new();
-    scan_items(&ast.items, &[root_imports], &lines, &mut findings);
+    let ctx = ScanCtx {
+        under_tests_dir: under_tests_dir(file),
+        in_cfg_test: false,
+    };
+    scan_items(&ast.items, &[root_imports], &lines, &mut findings, ctx);
     Ok(findings)
 }
 
@@ -406,6 +422,34 @@ fn is_test_fn(f: &ItemFn) -> bool {
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         matches!(names.as_slice(), ["test"] | ["tokio", "test"])
     })
+}
+
+/// True when the file path has a component named exactly `tests`
+/// (a directory component; a file named `tests.rs` does not match).
+fn under_tests_dir(file: &Path) -> bool {
+    file.components()
+        .any(|c| matches!(c, std::path::Component::Normal(name) if name == OsStr::new("tests")))
+}
+
+/// True when `m` is annotated exactly `#[cfg(test)]` (attribute path
+/// `cfg`, meta list tokens `test`). Other shapes — `cfg(all(test, ..))`,
+/// `cfg_attr` — are deliberately not treated as cfg(test): a miss is a
+/// false negative, never a false positive.
+fn is_cfg_test_mod(m: &syn::ItemMod) -> bool {
+    m.attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string() == "test")
+    })
+}
+
+/// Scan-scope context threaded through [`scan_items`] recursion.
+/// `under_tests_dir` is derived once from the file path; `in_cfg_test`
+/// becomes sticky when descending into an inline `#[cfg(test)]` module
+/// and is never cleared downward.
+#[derive(Clone, Copy)]
+struct ScanCtx {
+    under_tests_dir: bool,
+    in_cfg_test: bool,
 }
 
 /// Walk a use tree, populating an [`Imports`] multimap.
@@ -1292,7 +1336,7 @@ impl Visit<'_> for BodyNestedCollector<'_> {
     }
 }
 
-fn scan_test_fn(f: &ItemFn, chain: &[Imports], lines: &[&str], findings: &mut Vec<Finding>) {
+fn scan_fn_body(f: &ItemFn, chain: &[Imports], lines: &[&str], findings: &mut Vec<Finding>) {
     // Collect body_top from direct statements via collect_item
     let mut body_top = Imports::new();
     for stmt in &f.block.stmts {
@@ -1360,18 +1404,32 @@ fn scan_test_fn(f: &ItemFn, chain: &[Imports], lines: &[&str], findings: &mut Ve
 }
 
 /// Recursively walk items, descending into inline modules with a
-/// per-module import chain (root module first, innermost last).
-fn scan_items(items: &[Item], chain: &[Imports], lines: &[&str], findings: &mut Vec<Finding>) {
+/// per-module import chain (root module first, innermost last). Fns
+/// enter the body scan when test-attributed, when under a `tests/`
+/// path component, or when inside an inline `#[cfg(test)]` subtree.
+fn scan_items(
+    items: &[Item],
+    chain: &[Imports],
+    lines: &[&str],
+    findings: &mut Vec<Finding>,
+    ctx: ScanCtx,
+) {
     for item in items {
         match item {
-            Item::Fn(f) if is_test_fn(f) => scan_test_fn(f, chain, lines, findings),
+            Item::Fn(f) if is_test_fn(f) || ctx.under_tests_dir || ctx.in_cfg_test => {
+                scan_fn_body(f, chain, lines, findings)
+            }
             Item::Mod(m) => {
                 if let Some(content) = &m.content {
                     let mut map = Imports::new();
                     collect_imports(&content.1, &mut map);
                     let mut sub_chain = chain.to_vec();
                     sub_chain.push(map);
-                    scan_items(&content.1, &sub_chain, lines, findings);
+                    let sub_ctx = ScanCtx {
+                        under_tests_dir: ctx.under_tests_dir,
+                        in_cfg_test: ctx.in_cfg_test || is_cfg_test_mod(m),
+                    };
+                    scan_items(&content.1, &sub_chain, lines, findings, sub_ctx);
                 }
             }
             _ => {}
@@ -2375,6 +2433,82 @@ mod tests {
     #[test]
     fn multiline_wait_marker_on_last_line_suppresses() {
         let src = "#[tokio::test]\nasync fn t() {\n    let v = rx\n        .recv()\n        .await; // allow-test-wait: handshake completes or test hangs by design\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    // ---- scan scope widening ----------------------------------------------
+
+    fn findings_under(src: &str, path: &Path) -> Vec<usize> {
+        scan_source(src, path)
+            .expect("parse ok")
+            .into_iter()
+            .map(|f| f.line)
+            .collect()
+    }
+
+    #[test]
+    fn helper_fn_under_tests_dir_reported() {
+        let src = "async fn helper() {\n    let v = rx.recv().await;\n}\n";
+        assert_eq!(findings_under(src, Path::new("tests/fixture.rs")), vec![2]);
+    }
+
+    #[test]
+    fn helper_fn_in_src_not_reported() {
+        let src = "async fn helper() {\n    let v = rx.recv().await;\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn helper_fn_in_cfg_test_module_reported() {
+        let src = "#[cfg(test)] mod t {\n    async fn helper() {\n        let v = rx.recv().await;\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
+    }
+
+    #[test]
+    fn cfg_test_submodule_helper_reported() {
+        let src = "#[cfg(test)] mod outer {\n    mod inner {\n        async fn helper() {\n            let v = rx.recv().await;\n        }\n    }\n}\n";
+        assert_eq!(findings(src), vec![4]);
+    }
+
+    #[test]
+    fn helper_fn_in_plain_module_not_reported() {
+        let src = "mod t {\n    async fn helper() {\n        let v = rx.recv().await;\n    }\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn test_fn_findings_identical_under_both_scopes() {
+        let src = "#[tokio::test]\nasync fn t() {\n    let v = rx.recv().await;\n}\n";
+        assert_eq!(findings_under(src, Path::new("fixture.rs")), vec![3]);
+        assert_eq!(findings_under(src, Path::new("tests/fixture.rs")), vec![3]);
+    }
+
+    #[test]
+    fn spawned_closure_in_helper_fn_not_reported() {
+        // Closure-kind spawn (the shape D3 names): the wait runs in the
+        // spawned task's scope and stays pruned inside the helper scan.
+        // An `async move` block argument is NOT pruned — the existing
+        // prune point is `visit_expr_closure`, and the same shape in a
+        // `#[tokio::test]` body reports today.
+        let src = "async fn helper() {\n    tokio::spawn(|| {\n        let v = rx.recv().await;\n    });\n}\n";
+        assert!(findings_under(src, Path::new("tests/fixture.rs")).is_empty());
+    }
+
+    #[test]
+    fn main_fn_under_tests_dir_reported() {
+        let src = "async fn main() {\n    let v = rx.recv().await;\n}\n";
+        assert_eq!(findings_under(src, Path::new("tests/fixture.rs")), vec![2]);
+    }
+
+    #[test]
+    fn helper_fn_in_tests_rs_file_not_reported() {
+        let src = "async fn helper() {\n    let v = rx.recv().await;\n}\n";
+        assert!(findings_under(src, Path::new("src/tests.rs")).is_empty());
+    }
+
+    #[test]
+    fn helper_fn_in_cfg_all_test_module_not_reported() {
+        let src = "#[cfg(all(test, feature = \"x\"))] mod t {\n    async fn helper() {\n        let v = rx.recv().await;\n    }\n}\n";
         assert!(findings(src).is_empty());
     }
 

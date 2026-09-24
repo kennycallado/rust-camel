@@ -1691,13 +1691,24 @@ mod tests {
 
         let (msg_tx, mut msg_rx) = mpsc::channel::<Vec<u8>>(64);
         tokio::spawn(async move {
-            while let Some(msg) = msg_rx.recv().await {
-                if wire_tx
-                    .send(Ok(HttpFrame::data(grpc_data_frame(&msg))))
-                    .await
-                    .is_err()
-                {
-                    break;
+            // Per-iteration deadline (lintwiden D4.2): each recv await is
+            // bounded. The relay legitimately IDLES for the whole test
+            // when the harness never pushes (the request side must stay
+            // open), so a lapsed deadline re-arms instead of breaking —
+            // only a channel close (harness dropped msg_tx) ends the loop.
+            loop {
+                match timeout(Duration::from_secs(2), msg_rx.recv()).await {
+                    Ok(Some(msg)) => {
+                        if wire_tx
+                            .send(Ok(HttpFrame::data(grpc_data_frame(&msg))))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => continue,
                 }
             }
         });

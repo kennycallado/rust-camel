@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use camel_component_api::NoopRuntimeObservability;
 use camel_component_api::consumer::{Consumer, ConsumerContext};
+use camel_component_api::test_support::acquire_deadline;
 use camel_component_cxf::config::CxfPoolConfig;
 use camel_component_cxf::consumer::CxfConsumer;
 use camel_component_cxf::proto::{
@@ -28,7 +29,11 @@ async fn open_consumer_stream() -> Result<
 > {
     let (port, state) = spawn_mock_bridge().await?;
     let endpoint = format!("http://127.0.0.1:{port}");
-    let channel = Channel::from_shared(endpoint)?.connect().await?;
+    let channel = tokio::time::timeout(
+        Duration::from_secs(5),
+        Channel::from_shared(endpoint)?.connect(),
+    )
+    .await??;
     let mut client = CxfBridgeClient::new(channel);
 
     let (response_tx, response_rx) = mpsc::channel::<ConsumerResponse>(32);
@@ -48,7 +53,17 @@ async fn wait_for_consumer_request_sender(
     Box<dyn std::error::Error + Send + Sync>,
 > {
     for _ in 0..50 {
-        if let Some(tx) = state.consumer_requests_tx.lock().await.clone() {
+        // Per-lock deadline (lintwiden D4.1S): the loop's own 500ms
+        // budget governs readiness; this only keeps a stalled MockState
+        // holder from parking the helper silently.
+        if let Some(tx) = acquire_deadline(
+            &state.consumer_requests_tx,
+            "consumer_requests_tx (wait_for_consumer_request_sender)",
+            Duration::from_secs(5),
+        )
+        .await
+        .clone()
+        {
             return Ok(tx);
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -61,7 +76,15 @@ async fn wait_for_recorded_responses(
     n: usize,
 ) -> Result<Vec<ConsumerResponse>, Box<dyn std::error::Error + Send + Sync>> {
     for _ in 0..50 {
-        let current = state.consumer_responses_received.lock().await.clone();
+        // Per-lock deadline (lintwiden D4.1S): same anti-wedge backstop
+        // as wait_for_consumer_request_sender above.
+        let current = acquire_deadline(
+            &state.consumer_responses_received,
+            "consumer_responses_received (wait_for_recorded_responses)",
+            Duration::from_secs(5),
+        )
+        .await
+        .clone();
         if current.len() >= n {
             return Ok(current);
         }

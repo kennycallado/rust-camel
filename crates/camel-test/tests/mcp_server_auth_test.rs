@@ -119,8 +119,9 @@ async fn raw_json_rpc_post(
     request.push_str("\r\n");
     request.push_str(&payload);
 
-    let mut stream = tokio::net::TcpStream::connect(addr)
+    let mut stream = timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
         .await
+        .expect("tcp connect to MCP listener timed out after 5s")
         .expect("connect to listener");
     stream
         .write_all(request.as_bytes())

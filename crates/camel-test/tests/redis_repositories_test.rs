@@ -1097,18 +1097,25 @@ async fn acl_node_info_replication(port: u16) -> String {
 async fn trigger_acl_failover() {
     let give_up = Instant::now() + Duration::from_secs(30);
     loop {
-        let outcome: Result<(), redis::RedisError> = match try_raw_connection(&format!(
-            "redis://127.0.0.1:{SENT_ACL_SENTINEL_PORT}"
-        ))
+        // Per-op connect/command bounds (lintwiden D4.3): a stall beyond 5s
+        // is a loud failure; the give_up deadline still governs NOGOODSLAVE
+        // retries.
+        let outcome: Result<(), redis::RedisError> = match tokio::time::timeout(
+            Duration::from_secs(5),
+            try_raw_connection(&format!("redis://127.0.0.1:{SENT_ACL_SENTINEL_PORT}")),
+        )
         .await
+        .expect("acl sentinel connection attempt stalled beyond 5s in trigger_acl_failover")
         {
-            Some(mut conn) => {
+            Some(mut conn) => tokio::time::timeout(
+                Duration::from_secs(5),
                 redis::cmd("SENTINEL")
                     .arg("FAILOVER")
                     .arg(SENT_ACL_MASTER_NAME)
-                    .query_async(&mut conn)
-                    .await
-            }
+                    .query_async(&mut conn),
+            )
+            .await
+            .expect("SENTINEL FAILOVER command stalled beyond 5s in trigger_acl_failover"),
             None => panic!("acl sentinel connection failed during failover trigger"),
         };
         match outcome {

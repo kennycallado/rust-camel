@@ -16,7 +16,21 @@ pub const ARTEMIS_PORT: u16 = 61616;
 async fn wait_for_broker_port(port: u16, timeout: Duration) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     loop {
-        match TcpStream::connect(("127.0.0.1", port)).await {
+        // Per-attempt connect bound (lintwiden D4.3): a timed-out attempt is
+        // treated like any failed connect — the loop deadline still governs
+        // the overall wait.
+        let attempt = tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "tcp connect attempt exceeded 5s",
+            ))
+        });
+        match attempt {
             Ok(stream) => {
                 drop(stream);
                 return Ok(());

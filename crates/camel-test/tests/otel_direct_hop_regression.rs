@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use camel_api::{CamelError, Exchange, Message, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component_api::test_support::acquire_deadline;
 use camel_test::CamelTestContext;
 use tower::ServiceExt;
 
@@ -29,7 +30,12 @@ fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
 
 /// True once `route_id` reports the `Started` status.
 async fn route_started(h: &CamelTestContext, route_id: &str) -> bool {
-    let ctx = h.ctx().lock().await;
+    let ctx = acquire_deadline(
+        h.ctx(),
+        "camel context (route_started)",
+        Duration::from_secs(10),
+    )
+    .await;
     matches!(
         ctx.runtime_route_status(route_id).await,
         Ok(Some(status)) if status == "Started"
@@ -43,7 +49,10 @@ async fn wait_for_started(h: &CamelTestContext, route_ids: &[&str]) {
     loop {
         let mut all_started = true;
         for id in route_ids {
-            if !route_started(h, id).await {
+            if !tokio::time::timeout(Duration::from_secs(5), route_started(h, id))
+                .await
+                .expect("route status poll stalled in wait_for_started")
+            {
                 all_started = false;
                 break;
             }
@@ -69,33 +78,40 @@ async fn drive_entry_in_out(
     body: &str,
     retry_window: Duration,
 ) -> Result<Exchange, CamelError> {
-    let deadline = tokio::time::Instant::now() + retry_window;
-    loop {
-        let producer = {
-            let ctx = h.ctx().lock().await;
-            let producer_ctx = ctx.producer_context();
-            let registry = ctx.registry();
-            let component = registry
-                .get("direct")
-                .expect("direct component not registered");
-            let endpoint = component
-                .create_endpoint("direct:entry", &*ctx)
-                .expect("failed to create direct endpoint");
-            endpoint
-                .create_producer(test_rt(), &producer_ctx)
-                .expect("failed to create direct producer")
-        };
-        match producer
-            .oneshot(Exchange::new_in_out(Message::new(body)))
-            .await
-        {
-            Ok(reply) => return Ok(reply),
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+    // Anti-wedge backstop (lintwiden D4.1S): the retry loop's own deadline
+    // governs startup-race exhaustion; this outer bound only turns a stalled
+    // ctx-lock or producer await into a loud failure instead of a wedge.
+    tokio::time::timeout(retry_window + Duration::from_secs(5), async {
+        let deadline = tokio::time::Instant::now() + retry_window;
+        loop {
+            let producer = {
+                let ctx = h.ctx().lock().await;
+                let producer_ctx = ctx.producer_context();
+                let registry = ctx.registry();
+                let component = registry
+                    .get("direct")
+                    .expect("direct component not registered");
+                let endpoint = component
+                    .create_endpoint("direct:entry", &*ctx)
+                    .expect("failed to create direct endpoint");
+                endpoint
+                    .create_producer(test_rt(), &producer_ctx)
+                    .expect("failed to create direct producer")
+            };
+            match producer
+                .oneshot(Exchange::new_in_out(Message::new(body)))
+                .await
+            {
+                Ok(reply) => return Ok(reply),
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
         }
-    }
+    })
+    .await
+    .expect("drive_entry_in_out stalled beyond its retry deadline")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

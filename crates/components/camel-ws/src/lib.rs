@@ -2758,27 +2758,35 @@ mod tests {
         producer: BoxProcessor,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            if let Some(envelope) = route_rx.recv().await {
-                let payload = envelope
-                    .exchange
-                    .input
-                    .body
-                    .as_text()
-                    .unwrap_or_default()
-                    .to_string();
-                let key = envelope
-                    .exchange
-                    .input
-                    .header("CamelWsConnectionKey")
-                    .and_then(|v| v.as_str())
-                    .unwrap()
-                    .to_string();
+            // Per-iteration deadline (lintwiden D4.2): the recv wait is
+            // bounded; a stall panics the task (surfaced at the awaited
+            // JoinHandle) instead of parking it. Channel close still
+            // ends silently.
+            match tokio::time::timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    let payload = envelope
+                        .exchange
+                        .input
+                        .body
+                        .as_text()
+                        .unwrap_or_default()
+                        .to_string();
+                    let key = envelope
+                        .exchange
+                        .input
+                        .header("CamelWsConnectionKey")
+                        .and_then(|v| v.as_str())
+                        .unwrap()
+                        .to_string();
 
-                let mut response = Exchange::new(CamelMessage::new(CamelBody::Text(payload)));
-                response
-                    .input
-                    .set_header("CamelWsConnectionKey", serde_json::Value::String(key));
-                producer.oneshot(response).await.unwrap();
+                    let mut response = Exchange::new(CamelMessage::new(CamelBody::Text(payload)));
+                    response
+                        .input
+                        .set_header("CamelWsConnectionKey", serde_json::Value::String(key));
+                    producer.oneshot(response).await.unwrap();
+                }
+                Ok(None) => {}
+                Err(_) => panic!("spawn_echo_route: no envelope arrived within 2s"),
             }
         })
     }

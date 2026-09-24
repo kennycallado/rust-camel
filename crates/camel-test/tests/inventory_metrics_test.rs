@@ -199,7 +199,9 @@ fn queue_depth_value(body: &str, queue: &str) -> Option<f64> {
 async fn await_queue_depth(port: u16, queue: &str, want_positive: bool) -> f64 {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let body = scrape(port).await;
+        let body = tokio::time::timeout(Duration::from_secs(5), scrape(port))
+            .await
+            .expect("metrics scrape stalled in await_queue_depth");
         if let Some(v) = queue_depth_value(&body, queue) {
             let satisfied = if want_positive { v > 0.0 } else { v == 0.0 };
             if satisfied {
@@ -251,7 +253,10 @@ async fn wait_for_started(ctx: &CamelContext, route_ids: &[&str]) {
     loop {
         let mut all_started = true;
         for id in route_ids {
-            if !route_started(ctx, id).await {
+            if !tokio::time::timeout(Duration::from_secs(5), route_started(ctx, id))
+                .await
+                .expect("route status poll stalled in wait_for_started")
+            {
                 all_started = false;
                 break;
             }

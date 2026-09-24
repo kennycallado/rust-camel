@@ -715,11 +715,17 @@ mod tests {
 
     async fn sqlite_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
-        AnyPoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("sqlite pool")
+        // Per-attempt deadline (lintwiden D4.3): a wedged pool connect
+        // must fail the helper instead of parking it.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            AnyPoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:"),
+        )
+        .await
+        .expect("sqlite pool connect timed out after 10s")
+        .expect("sqlite pool")
     }
 
     async fn seed_consumer_table(pool: &AnyPool) {

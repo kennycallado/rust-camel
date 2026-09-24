@@ -22,8 +22,10 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use camel_api::Value;
+use camel_component_api::test_support::acquire_deadline;
 use camel_integration_test::runner::fill_bind_vars;
 use camel_integration_test::{
     DirectStimulus, DocumentOutcome, HttpPartner, HttpRecorder, LayeredEnv, PartnerAdapter,
@@ -1412,7 +1414,12 @@ async fn run_doc_route_dialed(
     vars.set("MOCK", Value::String(bound));
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
 
-    let mut guard = ctx.lock().await;
+    let mut guard = acquire_deadline(
+        &ctx,
+        "scenario ctx (run_doc_route_dialed)",
+        Duration::from_secs(10),
+    )
+    .await;
     run.boot
         .shutdown(&mut guard)
         .await

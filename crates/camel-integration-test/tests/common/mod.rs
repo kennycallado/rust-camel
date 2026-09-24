@@ -26,7 +26,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
+use camel_component_api::test_support::acquire_deadline;
 use camel_integration_test::runner::fill_bind_vars;
 use camel_integration_test::{
     DirectStimulus, DocumentOutcome, EndpointRef, LayeredEnv, PartnerAdapter, PartnerRouter,
@@ -88,7 +90,12 @@ pub async fn run_logs_document(doc_yaml: &str, fixture: &str) -> DocumentOutcome
     fill_bind_vars(&wired, &router, &mut vars);
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
 
-    let mut guard = ctx.lock().await;
+    let mut guard = acquire_deadline(
+        &ctx,
+        "scenario ctx (run_logs_document)",
+        Duration::from_secs(10),
+    )
+    .await;
     run.boot
         .shutdown(&mut guard)
         .await

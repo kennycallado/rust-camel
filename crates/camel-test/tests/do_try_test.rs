@@ -11,6 +11,7 @@ use std::time::Duration;
 use camel_api::body::Body;
 use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange};
 use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component_api::test_support::acquire_deadline;
 use camel_dsl::parse_yaml;
 use camel_test::CamelTestContext;
 use tower::ServiceExt;
@@ -22,7 +23,12 @@ fn test_rt() -> Arc<dyn camel_component_api::RuntimeObservability> {
 /// Send an exchange to a `direct:` endpoint and expect success.
 async fn send_to_direct(h: &CamelTestContext, endpoint_uri: &str, exchange: Exchange) {
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = acquire_deadline(
+            h.ctx(),
+            "camel context (send_to_direct)",
+            Duration::from_secs(10),
+        )
+        .await;
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry

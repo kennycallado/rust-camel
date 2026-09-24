@@ -45,6 +45,7 @@ mod common;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use bytes::Bytes;
 use camel_api::{Body, CamelError, Exchange, IdentityProcessor, Message, StreamMetadata};
@@ -322,7 +323,13 @@ async fn serve_gate(
     reply: SinkReply,
 ) {
     for _ in 0..expected {
-        let mut envelope = rx.recv().await.expect("envelope must reach the pipeline");
+        // Per-iteration deadline (lintwiden D4.2): a stalled pipeline
+        // must fail loudly instead of parking this spawned helper; the
+        // channel-closed arm keeps the original early-EOF panic.
+        let mut envelope = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("envelope receive stalled beyond 10s in serve_gate")
+            .expect("envelope must reach the pipeline");
         let outcome = gate.clone().oneshot(envelope.exchange).await;
         match outcome {
             Ok(mut passed) => {

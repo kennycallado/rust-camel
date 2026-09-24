@@ -91,7 +91,17 @@ pub async fn start_template_route(
 pub async fn send_title(ctx: &CamelContext, title: &str) -> Exchange {
     let deadline = tokio::time::Instant::now() + RACE_RETRY_TIMEOUT;
     loop {
-        let outcome = send_title_once(ctx, title).await;
+        // Per-attempt deadline (lintwiden D4.2): a wedged `direct:in`
+        // oneshot must fail the attempt instead of parking the retry
+        // loop. A stall is a non-race failure and panics immediately,
+        // per this helper's documented contract.
+        let outcome =
+            match tokio::time::timeout(Duration::from_secs(2), send_title_once(ctx, title)).await {
+                Ok(outcome) => outcome,
+                Err(_) => panic!(
+                    "render request stalled: direct:in oneshot exceeded the 2s per-attempt deadline"
+                ),
+            };
         match outcome {
             Ok(exchange) => return exchange,
             Err(err)

@@ -93,9 +93,15 @@ async fn raw_json_rpc_post_with_host(
     request.push_str("\r\n");
     request.push_str(&payload);
 
-    let mut stream = tokio::net::TcpStream::connect(addr)
-        .await
-        .expect("connect to listener");
+    // Per-attempt deadline (lintwiden D4.3): a wedged connect must fail
+    // the helper instead of parking it.
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .expect("connect to listener timed out after 5s")
+    .expect("connect to listener");
     // Linux picks the loopback prefsrc (127.0.0.1) as source even when
     // dialing 127.0.0.3, so capture the real peer address, not the dialed IP.
     let peer = stream

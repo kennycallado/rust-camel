@@ -25,6 +25,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, watch};
@@ -195,18 +196,35 @@ async fn serve_connection(stream: TcpStream, inner: Arc<StubInner>) {
     // so the client's command await pends until its response deadline
     // fires.
     loop {
-        let Ok(Some(command)) = stub.next_command().await else {
-            break;
-        };
-        if !is_handshake_command(&command) {
-            continue;
-        }
-        if !wait_until_released(&inner, &mut hold_rx).await {
-            // Rejecting stub released under us: close without replying.
-            break;
-        }
-        if stub.write_reply(b"+OK\r\n").await.is_err() {
-            break;
+        // Per-iteration deadline (lintwiden D4.2, idle-relay re-arm):
+        // each frame wait is bounded. This task is spawned detached per
+        // connection and its premise is to serve until the PEER
+        // disconnects; quiet gaps between client frames are normal (the
+        // response-deadline tests park the client up to 10s waiting on
+        // its own deadline), so a lapsed deadline re-arms. Peer
+        // disconnect / stream error — the designed exits — still break.
+        match tokio::time::timeout(Duration::from_secs(10), stub.next_command()).await {
+            Ok(Ok(Some(command))) => {
+                if !is_handshake_command(&command) {
+                    continue;
+                }
+                if !tokio::time::timeout(
+                    Duration::from_secs(30),
+                    wait_until_released(&inner, &mut hold_rx),
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    // Rejecting stub released under us (or the hold wait
+                    // lapsed): close without replying.
+                    break;
+                }
+                if stub.write_reply(b"+OK\r\n").await.is_err() {
+                    break;
+                }
+            }
+            Ok(Ok(None)) | Ok(Err(_)) => break,
+            Err(_) => continue,
         }
     }
 }
@@ -229,7 +247,17 @@ async fn wait_until_released(inner: &StubInner, hold_rx: &mut watch::Receiver<Ho
         if matches!(*hold_rx.borrow_and_update(), HoldState::Free) {
             return !inner.reject.load(Ordering::Acquire);
         }
-        notified.await;
+        // Per-wait deadline (lintwiden D4.2): a hold that outlives the
+        // consuming tests' liveness bound (30 s) must end the
+        // park. Closing the connection (the `false` contract) fails the
+        // parked handshake loudly at the client instead of holding this
+        // detached connection task forever.
+        if tokio::time::timeout(Duration::from_secs(30), notified.as_mut())
+            .await
+            .is_err()
+        {
+            return false;
+        }
     }
 }
 

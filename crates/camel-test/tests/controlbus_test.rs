@@ -8,11 +8,17 @@ use std::time::Duration;
 
 use camel_api::{RouteStatus, RuntimeCommand};
 use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component_api::test_support::acquire_deadline;
 use camel_component_controlbus::ControlBusComponent;
 use camel_test::CamelTestContext;
 
 async fn route_status(h: &CamelTestContext, route_id: &str) -> Option<RouteStatus> {
-    let ctx = h.ctx().lock().await;
+    let ctx = acquire_deadline(
+        h.ctx(),
+        "camel context (route_status)",
+        Duration::from_secs(10),
+    )
+    .await;
     match ctx
         .runtime_route_status(route_id)
         .await
@@ -35,7 +41,12 @@ async fn route_status(h: &CamelTestContext, route_id: &str) -> Option<RouteStatu
 
 async fn start_route(h: &CamelTestContext, route_id: &str) {
     let runtime = {
-        let ctx = h.ctx().lock().await;
+        let ctx = acquire_deadline(
+            h.ctx(),
+            "camel context (start_route)",
+            Duration::from_secs(10),
+        )
+        .await;
         ctx.runtime()
     };
 
@@ -51,7 +62,12 @@ async fn start_route(h: &CamelTestContext, route_id: &str) {
 
 async fn suspend_route(h: &CamelTestContext, route_id: &str) {
     let runtime = {
-        let ctx = h.ctx().lock().await;
+        let ctx = acquire_deadline(
+            h.ctx(),
+            "camel context (suspend_route)",
+            Duration::from_secs(10),
+        )
+        .await;
         ctx.runtime()
     };
 
@@ -67,7 +83,12 @@ async fn suspend_route(h: &CamelTestContext, route_id: &str) {
 
 async fn resume_route(h: &CamelTestContext, route_id: &str) {
     let runtime = {
-        let ctx = h.ctx().lock().await;
+        let ctx = acquire_deadline(
+            h.ctx(),
+            "camel context (resume_route)",
+            Duration::from_secs(10),
+        )
+        .await;
         ctx.runtime()
     };
 

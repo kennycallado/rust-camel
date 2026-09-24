@@ -368,37 +368,44 @@ async fn send_await_reply(
     exchange: Exchange,
     timeout: Duration,
 ) -> Result<Exchange, CamelError> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let producer = {
-            let ctx = h.ctx().lock().await;
-            let producer_ctx = ctx.producer_context();
-            let registry = ctx.registry();
-            let component = registry
-                .get("direct")
-                .expect("direct component not registered");
-            let endpoint = component
-                .create_endpoint(endpoint_uri, &*ctx)
-                .expect("failed to create direct endpoint");
-            endpoint
-                .create_producer(test_rt(), &producer_ctx)
-                .expect("failed to create direct producer")
-        };
-        match producer.oneshot(exchange.clone()).await {
-            Ok(ex) => return Ok(ex),
-            Err(e) => {
-                // Retry only the direct startup race via the shared
-                // structural predicate (rc-utx98); the seda gate fails
-                // fast (rc-tgaxf).
-                let is_startup_race = camel_component_seda::is_direct_startup_race(&e);
-                if is_startup_race && tokio::time::Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    continue;
+    // Anti-wedge backstop (lintwiden D4.1S): the retry loop's own deadline
+    // governs startup-race exhaustion; this outer bound only turns a stalled
+    // ctx-lock or producer await into a loud failure instead of a wedge.
+    tokio::time::timeout(timeout + Duration::from_secs(5), async {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let producer = {
+                let ctx = h.ctx().lock().await;
+                let producer_ctx = ctx.producer_context();
+                let registry = ctx.registry();
+                let component = registry
+                    .get("direct")
+                    .expect("direct component not registered");
+                let endpoint = component
+                    .create_endpoint(endpoint_uri, &*ctx)
+                    .expect("failed to create direct endpoint");
+                endpoint
+                    .create_producer(test_rt(), &producer_ctx)
+                    .expect("failed to create direct producer")
+            };
+            match producer.oneshot(exchange.clone()).await {
+                Ok(ex) => return Ok(ex),
+                Err(e) => {
+                    // Retry only the direct startup race via the shared
+                    // structural predicate (rc-utx98); the seda gate fails
+                    // fast (rc-tgaxf).
+                    let is_startup_race = camel_component_seda::is_direct_startup_race(&e);
+                    if is_startup_race && tokio::time::Instant::now() < deadline {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        continue;
+                    }
+                    return Err(e);
                 }
-                return Err(e);
             }
         }
-    }
+    })
+    .await
+    .expect("send_await_reply stalled beyond its retry deadline")
 }
 
 // ---------------------------------------------------------------------------

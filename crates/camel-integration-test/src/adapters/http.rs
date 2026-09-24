@@ -1325,9 +1325,13 @@ mod tests {
     async fn raw_request(authority: &str, method: &str, target: &str) {
         use tokio::io::AsyncReadExt;
         use tokio::io::AsyncWriteExt;
-        let mut stream = tokio::net::TcpStream::connect(authority)
-            .await
-            .expect("the partner's bound address must accept");
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect(authority),
+        )
+        .await
+        .expect("connect to partner timed out after 5s")
+        .expect("the partner's bound address must accept");
         let request = format!(
             "{method} {target} HTTP/1.1\r\nhost: {authority}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
         );

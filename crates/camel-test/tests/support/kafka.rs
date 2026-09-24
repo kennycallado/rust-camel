@@ -50,8 +50,14 @@ pub async fn shared_kafka() -> &'static (ContainerAsync<apache::Kafka>, String) 
 
 /// Lightweight readiness probe: attempts a TCP connect to the broker port.
 async fn kafka_probe(brokers: &str) -> Result<bool, String> {
-    tokio::net::TcpStream::connect(brokers)
-        .await
-        .map(|_| true)
-        .map_err(|e| format!("tcp connect to {brokers} failed: {e}"))
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(brokers),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(e)) => Err(format!("tcp connect to {brokers} failed: {e}")),
+        Err(_) => Err(format!("tcp connect to {brokers} timed out after 5s")),
+    }
 }
