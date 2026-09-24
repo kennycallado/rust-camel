@@ -126,11 +126,12 @@ the drain verdict after the trigger send.
 - **WHEN** the deadline expires
 - **THEN** it reports `Timeout` and exits 2
 
-#### Scenario: batch works with a dynamic flag
+#### Scenario: batch works with arg injection
 
 - **GIVEN** a batch job declaring `batch_id` whose worker routes
   record the resolved value
-- **WHEN** `camel job` runs the document with `--batch_id 42`
+- **WHEN** `camel job` runs the document with the dynamic flag
+  `--batch_id 42` (the `--arg` form is removed)
 - **THEN** the job drains, exits 0, and the recorded exchanges carry
   the resolved `batch_id` value
 
@@ -157,6 +158,12 @@ validation failures SHALL use exit 2.
 - **GIVEN** a job declaring `tier: {default: gold}`
 - **WHEN** it runs without `--tier`
 - **THEN** `${arg:tier}` resolves to `gold`
+
+#### Scenario: unknown declared argument fails
+
+- **GIVEN** a job declaring only `name`
+- **WHEN** it runs with `--tier gold`
+- **THEN** it exits 2 and names `tier` in the error
 
 ### Requirement: argument interpolation
 
@@ -385,6 +392,24 @@ typed defaults through the same rules at startup.
 - **WHEN** the document loads
 - **THEN** loading exits 2 naming `verbose`, the expected type `bool`, and the raw value
 
+#### Scenario: bool accepts case-insensitive true and false
+
+- **GIVEN** a job declaring `verbose: {type: bool}` with `${arg:verbose}` referenced in its `body`
+- **WHEN** it runs with `--verbose TRUE` and later with `--verbose False`
+- **THEN** the body interpolates the canonical form `true`, respectively `false`, and each run exits 0
+
+#### Scenario: bool rejects numeric and unknown spellings
+
+- **GIVEN** a job declaring `verbose: {type: bool}`
+- **WHEN** it runs with `--verbose 1`, with `--verbose 0`, or with `--verbose yes`
+- **THEN** each run exits 2 before boot and the error names `verbose`, the expected type `bool`, and the raw value
+
+#### Scenario: unknown-name failure precedes coercion
+
+- **GIVEN** a job declaring `count: {type: int}` and nothing else
+- **WHEN** it runs with `--ghost 1 --count abc`
+- **THEN** it exits 2 naming `ghost` as the unknown argument, not a coercion error for `count`
+
 #### Scenario: enum accepts a member and substitutes it verbatim
 
 - **GIVEN** a job declaring `tier: {type: "enum[bronze,gold]"}` with `${arg:tier}` referenced in its `headers`
@@ -397,7 +422,7 @@ typed defaults through the same rules at startup.
 - **WHEN** it runs with `--tier silver`
 - **THEN** it exits 2 before boot and the error names `tier`, `silver`, and lists `bronze` and `gold`
 
-#### Scenario: typed default coerces without a flag
+#### Scenario: typed default coerces without a CLI pair
 
 - **GIVEN** a job declaring `count: {type: int, default: "007"}` with `${arg:count}` referenced in its `to`
 - **WHEN** it runs without `--count`
@@ -450,7 +475,7 @@ no inference, no aliases — with the suggestion hint computed against
 the declared flag set. Invocations without dynamic
 flags SHALL behave identically to before this requirement existed.
 
-#### Scenario: declared string flag resolves through interpolation
+#### Scenario: declared string flag behaves identically to arg
 
 - **GIVEN** a job document declaring `name: {required: true}` with
   `${arg:name}` referenced in its send body

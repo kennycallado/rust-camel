@@ -452,49 +452,13 @@ classes, traits, or registries are PERMANENT NON-GOALS.
 - **THEN** parsing fails with a loud document diagnostic and the process
   exits with code 2 before any boot
 
-### Requirement: arg flag header injection
-
-`camel job` SHALL accept a repeatable `--arg NAME=VALUE` flag. When the job
-document has no top-level `args:` block, each pair SHALL inject one string
-header onto the trigger exchange at send time, applied after document headers;
-repeated names use the last value, values remain raw strings with no
-interpolation, and a CLI value overrides a colliding document header. When
-`args:` is present, each pair SHALL instead satisfy a declared argument and
-SHALL NOT inject an implicit header. Malformed pairs and declared-argument
-validation failures SHALL exit 2 before boot. The flag SHALL work in both
-execution modes on the legacy path.
-
-#### Scenario: declared and legacy paths differ
-
-- **GIVEN** one document without `args:` and one document declaring `name`
-- **WHEN** both run with `--arg name=John`
-- **THEN** the first sends a `name=John` header and the second resolves only its declared interpolation
-
-#### Scenario: arg overrides a colliding document header
-
-- **GIVEN** a no-`args:` document with `send.headers.name: Doc`
-- **WHEN** it runs with repeated `--arg name=First --arg name=Last`
-- **THEN** the trigger exchange carries raw string header `name=Last`
-
-#### Scenario: single and repeated args reach the route
-
-- **GIVEN** a no-`args:` job whose target route records exchange headers
-- **WHEN** it runs with `--arg name=John --arg tier=gold`
-- **THEN** the recorded headers are `name=John` and `tier=gold`, with the last occurrence winning
-
-#### Scenario: malformed arg is a usage error
-
-- **GIVEN** an `--arg` value with no `=` or with an empty name
-- **WHEN** `camel job` parses the flag
-- **THEN** it exits 2 before boot with a usage error
-
 ### Requirement: batch mode drains until empty
 
 A `mode: batch` job SHALL boot the same composition root (including the
 job boot projection), apply the same send-target validation, start all
 document routes, and send one trigger exchange. It SHALL retain the same
-declared-argument validation, defaulting, interpolation, and legacy
-no-`args:` header behavior as one-shot execution.
+declared-argument validation, defaulting, and interpolation as one-shot
+execution.
 For a `seda:` target it SHALL rewrite `waitForTaskToComplete` to `Always` so
 the send is synchronous.
 After the trigger send it SHALL wait until the context-global
@@ -521,7 +485,7 @@ the drain verdict after the trigger send.
 #### Scenario: batch applies declared defaults
 
 - **GIVEN** a batch job declaring `tier: {default: gold}` and using `${arg:tier}`
-- **WHEN** it runs without `--arg tier=...`
+- **WHEN** it runs without `--tier`
 - **THEN** the default is resolved before the trigger send and the batch drains normally
 
 #### Scenario: batch drains a fan-out pipeline then exits 0
@@ -582,11 +546,12 @@ the drain verdict after the trigger send.
 
 #### Scenario: batch works with arg injection
 
-- **GIVEN** a batch job whose worker routes record exchange headers to a
-  `mock:` endpoint
-- **WHEN** `camel job` runs the document with `--arg batch-id=42`
+- **GIVEN** a batch job declaring `batch_id` whose worker routes
+  record the resolved value
+- **WHEN** `camel job` runs the document with the dynamic flag
+  `--batch_id 42` (the `--arg` form is removed)
 - **THEN** the job drains, exits 0, and the recorded exchanges carry
-  header `batch-id=42`
+  the resolved `batch_id` value
 
 ### Requirement: bounded metadata listing
 
@@ -826,32 +791,33 @@ parsing). The document and each declaration SHALL reject unknown fields.
 
 ### Requirement: declared argument validation
 
-When `args:` is present, `--arg NAME=VALUE` SHALL name a declared argument.
-Unknown names SHALL fail with a diagnostic naming the name. A required argument
-without a default SHALL fail when omitted. Optional arguments with defaults
-SHALL receive their default. Explicit values SHALL override defaults. After
-name resolution, required checking, and default application, every typed
-argument's resolved value SHALL be coerced to its declared type per the
+When `args:` is present, argument values SHALL be supplied only
+through each declared argument's dynamic flag. A required argument
+without a default SHALL fail when its dynamic flag is absent.
+Optional arguments with defaults SHALL receive their default.
+Explicit flag values SHALL override defaults. After name resolution,
+required checking, and default application, every typed argument's
+resolved value SHALL be coerced to its declared type per the
 `typed argument coercion` requirement before interpolation. All such
 validation failures SHALL use exit 2.
-
-#### Scenario: unknown declared argument fails
-
-- **GIVEN** a job declaring only `name`
-- **WHEN** it runs with `--arg tier=gold`
-- **THEN** it exits 2 and names `tier` in the error
 
 #### Scenario: required argument is missing
 
 - **GIVEN** a job declaring `name: {required: true}` without a default
-- **WHEN** it runs without `--arg name=...`
+- **WHEN** it runs without `--name`
 - **THEN** it exits 2 and names `name` in the error
 
 #### Scenario: default applies
 
 - **GIVEN** a job declaring `tier: {default: gold}`
-- **WHEN** it runs without `--arg tier=...`
+- **WHEN** it runs without `--tier`
 - **THEN** `${arg:tier}` resolves to `gold`
+
+#### Scenario: unknown declared argument fails
+
+- **GIVEN** a job declaring only `name`
+- **WHEN** it runs with `--tier gold`
+- **THEN** it exits 2 and names `tier` in the error
 
 ### Requirement: argument interpolation
 
@@ -863,9 +829,10 @@ not supported. Resolved arguments SHALL be available in `to`, `body`,
 declaration carries a `type`, the reference SHALL substitute the coerced
 value's canonical string form; without a `type`, the value substitutes
 verbatim (A2 behavior). Normal jobs accept declared values through
-`--arg`; compiled artifacts use embedded defaults — coerced through the
-same rules at startup — and reject required declarations without defaults
-at startup while retaining their existing narrow argument surface.
+dynamic flags; compiled artifacts use embedded defaults — coerced through
+the same rules at startup — and reject required declarations without
+defaults at startup while retaining their existing narrow argument
+surface.
 
 #### Scenario: all job fields interpolate
 
@@ -877,43 +844,17 @@ at startup while retaining their existing narrow argument surface.
 
 - **GIVEN** one job document declaring `value: {default: "hello"}` compiled into an artifact and run normally
 - **WHEN** both runs resolve `${arg:value}`
-- **THEN** both paths produce identical interpolated route and message data, the artifact rejects `--arg value=other`, and a compiled declaration with `required: true` and no default exits 2
-
-### Requirement: legacy argument compatibility
-
-When a document has no `args:` block, undeclared `--arg NAME=VALUE` pairs
-SHALL continue to inject string headers after document headers. The command
-SHALL emit a deprecation note identifying the legacy behavior. This path SHALL
-remain available in both execution modes.
-
-#### Scenario: no declaration preserves header injection
-
-- **GIVEN** a job document with no top-level `args:` block
-- **WHEN** it runs with `--arg name=John`
-- **THEN** `name=John` reaches the trigger exchange header and stderr contains the deprecation note
-
-### Requirement: declared arguments replace legacy header injection
-
-The existing `arg flag header injection` requirement SHALL be modified so
-`--arg` pairs inject headers only when the document has no top-level `args:`
-block. Declared documents SHALL resolve values through their declarations and
-interpolation surface instead of implicitly creating headers.
-
-#### Scenario: declared argument is not an implicit header
-
-- **GIVEN** a document declaring `name` and referencing `${arg:name}` in its body
-- **WHEN** it runs with `--arg name=John`
-- **THEN** the body receives `John` and no automatic `name` header is added
+- **THEN** both paths produce identical interpolated route and message data, the artifact rejects `--arg value=other` as an unknown flag, and a compiled declaration with `required: true` and no default exits 2
 
 ### Requirement: argument validation exit status
 
-Every argument parse, declaration, unknown-name, missing-required,
-coercion, or interpolation validation failure SHALL exit 2. No new exit
-code SHALL be added.
+Every argument parse, declaration, missing-required, coercion, or
+interpolation validation failure SHALL exit 2. No new exit code
+SHALL be added.
 
 #### Scenario: malformed CLI argument exits 2
 
-- **GIVEN** `--arg nameonly`
+- **GIVEN** a dynamic flag invocation missing its value (for example `--name` as the last token)
 - **WHEN** the CLI parses arguments
 - **THEN** it exits 2 before boot
 
@@ -930,8 +871,8 @@ with its comma-separated member list, a `required`/`optional` marker, the
 `default` value when one is declared, and the argument `description` when
 present. When at least one argument is declared, the `Arguments:` table
 SHALL carry exactly one additional note line stating that each argument
-is settable as `--<name> <VALUE>`, bool arguments as bare `--<name>` /
-`--no-<name>`, in addition to `--arg <name>=<value>`; the note's exact
+is settable as `--<name> <VALUE>` and bool arguments as bare `--<name>` /
+`--no-<name>`; the note's exact
 wording SHALL be pinned byte-exact by tests. Documents with no declared
 arguments SHALL keep printing `(no arguments)` with no note. Each
 argument SHALL render on one line: any maximal run of CR and LF
@@ -951,7 +892,7 @@ execution parsing (suffix contract, section exclusivity, strict serde
 shape, route-source conflict, per-argument declaration validation
 including `type` grammar and typed-default coercion, mode spelling,
 `timeout` presence) and SHALL
-NOT resolve `--arg` pairs, apply defaults, interpolate, or validate
+NOT apply defaults, interpolate, or validate
 execution values (timeout duration, send scheme). Resolution, structural,
 and declaration failures SHALL exit 2 with the existing loud diagnostics.
 
@@ -980,8 +921,8 @@ and declaration failures SHALL exit 2 with the existing loud diagnostics.
   argument
 - **WHEN** `camel job <name> --help` runs
 - **THEN** the `Arguments:` table includes the one note line naming
-  the `--<name> <VALUE>`, `--<name>` / `--no-<name>`, and
-  `--arg <name>=<value>` spellings, and the exit code is 0
+  the `--<name> <VALUE>` and `--<name>` / `--no-<name>` spellings,
+  and the exit code is 0
 
 #### Scenario: help renders the enum member list
 
@@ -1010,7 +951,7 @@ and declaration failures SHALL exit 2 with the existing loud diagnostics.
 - **GIVEN** a schema-valid job document declaring a required argument
   without a default, whose `to` and `timeout` reference `${arg:...}`
   tokens
-- **WHEN** `camel job <name> --help` runs without any `--arg`
+- **WHEN** `camel job <name> --help` runs without any dynamic flag
 - **THEN** the interface renders with the `to` token as authored and the
   declared arguments unchanged, and the exit code is 0
 
@@ -1054,7 +995,7 @@ and declaration failures SHALL exit 2 with the existing loud diagnostics.
 ### Requirement: typed argument coercion
 
 When a declaration carries `type:`, the argument's resolved value — the
-last `--arg NAME=VALUE` pair or the applied `default` — SHALL be coerced
+last dynamic-flag value or the applied `default` — SHALL be coerced
 to the declared type at resolution, before interpolation. Coercion SHALL
 produce the value's canonical string form: `int` accepts an optional sign
 followed by decimal digits only (no surrounding whitespace, i64 range) and
@@ -1065,7 +1006,7 @@ validates exact, case-sensitive membership and canonicalizes as the
 matched member verbatim; `string` (and any declaration without `type:`)
 keeps the value verbatim. A coercion failure SHALL exit 2 before boot,
 naming the argument, the expected type, and the raw value; an enum failure
-SHALL list the allowed members. Unknown-name and missing-required
+SHALL list the allowed members. Missing-required
 failures SHALL take precedence over coercion. A typed declaration whose
 `default` fails coercion SHALL fail document load with the same
 declaration-error class in BOTH execution parsing and `--help` parsing.
@@ -1078,49 +1019,67 @@ typed defaults through the same rules at startup.
 #### Scenario: int canonical form substitutes
 
 - **GIVEN** a job declaring `count: {type: int}` with `${arg:count}` referenced in its `to`
-- **WHEN** it runs with `--arg count=007`
+- **WHEN** it runs with `--count 007`
 - **THEN** the send target interpolates `7` and the exit code is 0
 
 #### Scenario: int rejects a non-integer value
 
 - **GIVEN** a job declaring `count: {type: int}`
-- **WHEN** it runs with `--arg count=abc`
+- **WHEN** it runs with `--count abc`
 - **THEN** it exits 2 before boot and the error names `count`, the expected type `int`, and `abc`
 
 #### Scenario: int rejects float and whitespace forms
 
 - **GIVEN** a job declaring `count: {type: int}`
-- **WHEN** it runs with `--arg count=3.5` or `--arg count=" 42"`
+- **WHEN** it runs with `--count 3.5` or `--count " 42"`
 - **THEN** it exits 2 before boot naming `count` and `int`
+
+#### Scenario: bool canonicalizes case-insensitive defaults
+
+- **GIVEN** a job declaring `verbose: {type: bool, default: "TRUE"}` with `${arg:verbose}` referenced in its `body`
+- **WHEN** it runs without a `verbose` flag
+- **THEN** the body interpolates the canonical form `true` and the exit code is 0
+
+#### Scenario: bool rejects numeric and unknown default spellings
+
+- **GIVEN** a job declaring `verbose: {type: bool, default: "yes"}`
+- **WHEN** the document loads
+- **THEN** loading exits 2 naming `verbose`, the expected type `bool`, and the raw value
 
 #### Scenario: bool accepts case-insensitive true and false
 
 - **GIVEN** a job declaring `verbose: {type: bool}` with `${arg:verbose}` referenced in its `body`
-- **WHEN** it runs with `--arg verbose=TRUE` and later with `--arg verbose=False`
+- **WHEN** it runs with `--verbose TRUE` and later with `--verbose False`
 - **THEN** the body interpolates the canonical form `true`, respectively `false`, and each run exits 0
 
 #### Scenario: bool rejects numeric and unknown spellings
 
 - **GIVEN** a job declaring `verbose: {type: bool}`
-- **WHEN** it runs with `--arg verbose=1`, with `--arg verbose=0`, or with `--arg verbose=yes`
+- **WHEN** it runs with `--verbose 1`, with `--verbose 0`, or with `--verbose yes`
 - **THEN** each run exits 2 before boot and the error names `verbose`, the expected type `bool`, and the raw value
+
+#### Scenario: unknown-name failure precedes coercion
+
+- **GIVEN** a job declaring `count: {type: int}` and nothing else
+- **WHEN** it runs with `--ghost 1 --count abc`
+- **THEN** it exits 2 naming `ghost` as the unknown argument, not a coercion error for `count`
 
 #### Scenario: enum accepts a member and substitutes it verbatim
 
 - **GIVEN** a job declaring `tier: {type: "enum[bronze,gold]"}` with `${arg:tier}` referenced in its `headers`
-- **WHEN** it runs with `--arg tier=gold`
+- **WHEN** it runs with `--tier gold`
 - **THEN** the header interpolates `gold` and the exit code is 0
 
 #### Scenario: enum rejects an outsider and lists the members
 
 - **GIVEN** a job declaring `tier: {type: "enum[bronze,gold]"}`
-- **WHEN** it runs with `--arg tier=silver`
+- **WHEN** it runs with `--tier silver`
 - **THEN** it exits 2 before boot and the error names `tier`, `silver`, and lists `bronze` and `gold`
 
 #### Scenario: typed default coerces without a CLI pair
 
 - **GIVEN** a job declaring `count: {type: int, default: "007"}` with `${arg:count}` referenced in its `to`
-- **WHEN** it runs without `--arg count=...`
+- **WHEN** it runs without `--count`
 - **THEN** the send target interpolates `7` and the exit code is 0
 
 #### Scenario: typed default failing coercion fails load and help
@@ -1129,22 +1088,16 @@ typed defaults through the same rules at startup.
 - **WHEN** the job runs, or `camel job <name> --help` runs
 - **THEN** both exit 2 with a declaration error naming `count`, `int`, and `abc`
 
-#### Scenario: unknown-name failure precedes coercion
-
-- **GIVEN** a job declaring `count: {type: int}` and nothing else
-- **WHEN** it runs with `--arg ghost=1 --arg count=abc`
-- **THEN** it exits 2 naming `ghost` as the unknown argument, not a coercion error for `count`
-
 #### Scenario: coerced values reach every interpolation site
 
 - **GIVEN** a job declaring `target: {type: "enum[direct:in,direct:out]"}`, `count: {type: int, default: "7"}`, `verbose: {type: bool}` referenced in `to`, `body`, and `headers`, and `wait: {type: int, default: "30"}` referenced in `timeout: "${arg:wait}s"`
-- **WHEN** it runs with `--arg verbose=false --arg target=direct:out`
+- **WHEN** it runs with `--no-verbose --target direct:out`
 - **THEN** every reference resolves to the canonical form before field validation and the exit code is 0
 
 #### Scenario: missing-required failure precedes coercion
 
 - **GIVEN** a job declaring `name: {type: string, required: true}` without a default and `count: {type: int}`
-- **WHEN** it runs with `--arg count=abc` and no `--arg name=...`
+- **WHEN** it runs with `--count abc` and no `--name`
 - **THEN** it exits 2 naming `name` as the missing required argument, not a coercion error for `count`
 
 #### Scenario: compiled artifact coerces embedded typed defaults
@@ -1336,11 +1289,9 @@ Dynamic flags SHALL be accepted only AFTER the positional document
 reference (explicit path or bare name); a dynamic flag before the
 document reference SHALL fail with the standard unknown-argument
 diagnostic. Repeating the same dynamic flag SHALL keep the last
-occurrence. Dynamic flags SHALL lower into the same NAME=VALUE pair
-channel `--arg` uses, before coercion, defaults, required checks, and
-interpolation, so a run with `--name world` SHALL behave identically
-to `--arg name=world` (same resolved values, same interpolation, same
-report bytes, same exit code). Values of declared `int`, `enum`, and
+occurrence. Dynamic flags SHALL lower into NAME=VALUE pairs before
+coercion, defaults, required checks, and interpolation.
+Values of declared `int`, `enum`, and
 untyped arguments SHALL flow through the existing typed coercion
 unchanged. An undeclared flag, a dash-alias spelling of a declared
 underscore name (`--user-name` for `user_name`), a partial prefix of
@@ -1354,10 +1305,8 @@ flags SHALL behave identically to before this requirement existed.
 
 - **GIVEN** a job document declaring `name: {required: true}` with
   `${arg:name}` referenced in its send body
-- **WHEN** it runs once with `camel job <doc> --name world` and once
-  with `camel job <doc> --arg name=world`
-- **THEN** both runs exit 0, interpolate `world` identically, and
-  produce the same report
+- **WHEN** it runs with `camel job <doc> --name world`
+- **THEN** the run exits 0 and interpolates `world` into the body
 
 #### Scenario: both value forms accepted
 
@@ -1369,8 +1318,7 @@ flags SHALL behave identically to before this requirement existed.
 
 - **GIVEN** a job document declaring `name`
 - **WHEN** it runs with `--name first --name second`
-- **THEN** the resolved value is `second`, matching the `--arg`
-  repeat rule
+- **THEN** the resolved value is `second`
 
 #### Scenario: typed coercion applies to flag values
 
@@ -1410,12 +1358,12 @@ flags SHALL behave identically to before this requirement existed.
 
 #### Scenario: static flags keep their meaning after the document
 
-- **GIVEN** invocations placing `--arg`, `--help`/`-h`, `--report`,
+- **GIVEN** invocations placing `--help`/`-h`, `--report`,
   or `--config` after the document reference — before or after a
   dynamic flag
 - **WHEN** the run is parsed
-- **THEN** each flag keeps its pre-existing meaning (`--arg` pairs,
-  manual job help, report path, config load): flags clap consumes
+- **THEN** each flag keeps its pre-existing meaning (manual job help,
+  report path, config load): flags clap consumes
   statically apply directly; flags captured into the dynamic tail
   (which begins at the first unknown token) are recovered by the
   tail re-parse, and a tail `--config` is honored before job-root
@@ -1438,8 +1386,8 @@ true) and as bare `--no-flag` (value false); when neither appears the
 document `default` SHALL apply, or the argument stays unset when no
 default exists. The value-taking forms `--flag=false` and
 `--no-flag=false` SHALL be hard errors (exit 2) whose diagnostic names
-the accepted spellings `--flag`, `--no-flag`, and the pair form
-`--arg flag=false`. A stray token after a bool flag (`--flag false`)
+the accepted spellings `--flag` and `--no-flag`. A stray token after a
+bool flag (`--flag false`)
 SHALL fail (exit 2) rather than be consumed as the flag's value.
 Supplying both `--flag` and `--no-flag` in one invocation SHALL fail
 (exit 2) naming the argument; it SHALL NOT resolve by last-wins.
@@ -1475,7 +1423,7 @@ bool coercion unchanged.
 - **GIVEN** a job document declaring `verbose: {type: bool}`
 - **WHEN** it runs with `--verbose=false` or with `--no-verbose=false`
 - **THEN** it exits 2 before boot and the diagnostic names
-  `--verbose`, `--no-verbose`, and `--arg verbose=false`
+  `--verbose` and `--no-verbose`
 
 #### Scenario: stray token after a bool flag fails
 
@@ -1497,43 +1445,24 @@ bool coercion unchanged.
 - **THEN** it exits 2 with the unknown-argument diagnostic for
   `--no-count`
 
-### Requirement: cross-form argument conflicts
-
-The same argument key supplied through BOTH a dynamic flag and an
-`--arg NAME=VALUE` pair in one invocation SHALL fail (exit 2) naming
-the key and both forms. It SHALL NOT resolve by last-wins across
-forms. Within a single form the existing last-wins rules SHALL apply.
-
-#### Scenario: same key through both forms fails
-
-- **GIVEN** a job document declaring `name`
-- **WHEN** it runs with `--name a --arg name=b`, or with the forms in
-  the opposite order (`--arg name=b --name a`)
-- **THEN** it exits 2 before boot and the diagnostic names `name`,
-  the `--name` form, and the `--arg` form, regardless of order
-
 ### Requirement: dynamic flags require an args block
 
 A dynamic flag passed to a job document WITHOUT a top-level `args:`
 block SHALL fail (exit 2) with a diagnostic naming the flag and
-pointing at the two remedies: declaring an `args:` block or using
-`--arg`. The dynamic flag SHALL NOT fall back to legacy header
-injection and SHALL NOT trigger the legacy `--arg` deprecation note;
-the deprecation note SHALL keep applying to `--arg` pairs on
-undeclared documents exactly as before.
+pointing at the remedy: declaring an `args:` block. The dynamic flag
+SHALL NOT fall back to header injection.
 
 #### Scenario: dynamic flag on an undeclared document fails
 
 - **GIVEN** a job document with no `args:` block
 - **WHEN** it runs with `--name x`
-- **THEN** it exits 2 before boot; the diagnostic names `--name`,
-  mentions the `args:` block and `--arg`, and no header injection or
-  deprecation note occurs
+- **THEN** it exits 2 before boot; the diagnostic names the flag `name` and
+  mentions the `args:` block, and no header injection occurs
 
 ### Requirement: reserved argument names
 
 A job document declaring a top-level argument named `help`, `config`,
-`report`, or `arg` SHALL fail document load (exit 2) with a
+or `report` SHALL fail document load (exit 2) with a
 reserved-name diagnostic naming the argument and the static flag it
 collides with. The rejection SHALL occur in BOTH execution parsing
 and `camel job <name> --help` parsing, and in `camel compile`'s
@@ -1543,7 +1472,7 @@ arguments.
 #### Scenario: every reserved name fails execution
 
 - **GIVEN** job documents each declaring one argument named `help`,
-  `config`, `report`, or `arg`
+  `config`, or `report`
 - **WHEN** each job runs
 - **THEN** each run exits 2 at load with a diagnostic naming the
   argument as a reserved argument name

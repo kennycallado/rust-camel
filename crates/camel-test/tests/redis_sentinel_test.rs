@@ -422,7 +422,7 @@ async fn poll_get(h: &CamelTestContext, expected: &str, timeout: Duration) -> Op
         )
         .await
         .expect("stalled sending sentinel GET probe in poll_get");
-        if let Ok(Ok(ex)) = sent {
+        if let Ok(ex) = sent {
             let got = body_string(&ex);
             if got.as_deref() == Some(expected) {
                 return got;
