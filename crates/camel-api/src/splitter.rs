@@ -462,6 +462,31 @@ mod tests {
     }
 
     #[test]
+    fn split_body_json_array_string_elements_stay_json() {
+        // Pins CURRENT behavior: string elements are emitted as
+        // Body::Json(Value::String), not coerced to Body::Text.
+        // A separate bd issue tracks changing this; keep both green.
+        let ex = Exchange::new(Message::new(serde_json::json!(["a", "b"])));
+
+        let fragments = split_body_json_array()(&ex).unwrap();
+        assert_eq!(fragments.len(), 2);
+        for frag in &fragments {
+            assert!(
+                matches!(&frag.input.body, Body::Json(serde_json::Value::String(_))),
+                "expected Body::Json(Value::String), got {:?}",
+                frag.input.body
+            );
+            assert!(
+                !matches!(&frag.input.body, Body::Text(_)),
+                "fragment body must not be Body::Text, got {:?}",
+                frag.input.body
+            );
+        }
+        assert!(matches!(&fragments[0].input.body, Body::Json(v) if *v == serde_json::json!("a")));
+        assert!(matches!(&fragments[1].input.body, Body::Json(v) if *v == serde_json::json!("b")));
+    }
+
+    #[test]
     fn test_split_body_json_array_not_array() {
         let obj = serde_json::json!({"not": "array"});
         let ex = Exchange::new(Message::new(obj));

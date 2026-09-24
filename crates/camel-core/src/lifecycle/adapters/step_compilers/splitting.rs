@@ -149,7 +149,10 @@ impl StepCompiler for SplittingCompiler {
                                 .into_iter()
                                 .map(|v| {
                                     let mut fragment = exchange.clone();
-                                    fragment.input.body = Body::from(v);
+                                    fragment.input.body = match v {
+                                        Value::String(s) => Body::Text(s),
+                                        other => Body::Json(other),
+                                    };
                                     fragment
                                 })
                                 .collect()),
