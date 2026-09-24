@@ -217,11 +217,22 @@ async fn settle_stability_deadline_fires_while_emitting() {
     let pinger_mock = mock.clone();
     let pinger = tokio::spawn(async move {
         loop {
-            deliver_to_mock(&pinger_mock, "result").await;
+            // allow-test-wait: spawned pinger choreography loop; abort-bounded by the settle outcome (ADR-0069 §13.2 R1)
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                deliver_to_mock(&pinger_mock, "result"),
+            )
+            .await
+            .expect("mock delivery must not block the pinger cadence");
             wait_bounded(Duration::from_millis(50)).await;
         }
     });
-    let outcome = settle_stability(&mock, &names, quiet, route_started_at).await;
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        settle_stability(&mock, &names, quiet, route_started_at),
+    )
+    .await
+    .expect("settle must decide within its own 5s instability budget");
     pinger.abort();
 
     let error = outcome.expect_err("emitting traffic must hit the deadline"); // allow-unwrap
@@ -304,7 +315,10 @@ async fn settle_stability_window_resets_on_arrival() {
         deliver_to_mock(&delivery_mock, "result").await;
     });
     let outcome = settle_stability(&mock, &names, quiet, route_started_at).await;
-    delivery.await.expect("delivery task join must not fail"); // allow-unwrap
+    tokio::time::timeout(Duration::from_secs(5), delivery)
+        .await
+        .expect("delivery task must finish within 5s")
+        .expect("delivery task join must not fail"); // allow-unwrap
 
     assert!(
         outcome.is_ok(),
