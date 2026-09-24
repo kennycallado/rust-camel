@@ -2,7 +2,7 @@
 description: fast - fast and cheap implementation worker for simple tasks.
 mode: subagent
 temperature: 0.1
-model: opencode-go/deepseek-v4-flash
+model: opencode-go/deepseek-v4.1-flash
 variant: high
 tools:
   write: true
