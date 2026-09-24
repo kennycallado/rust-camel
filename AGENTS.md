@@ -46,6 +46,8 @@
       -- -D warnings
     cargo clippy -p camel-component-kafka --all-targets -- -D warnings
     cargo clippy -p camel-cli -- -D warnings
+    cargo clippy -p camel-cli --no-default-features \
+      --features flavor-regular,exec --all-targets -- -D warnings
 - name: lint-unwrap
   run: cargo xtask lint-unwrap
 - name: lint-secrets
