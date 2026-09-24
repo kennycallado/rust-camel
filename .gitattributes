@@ -1,0 +1,3 @@
+
+# protobuf descriptor-set fixtures are binary; prevent CRLF rewrite
+crates/services/camel-proto-compiler/tests/*.desc binary

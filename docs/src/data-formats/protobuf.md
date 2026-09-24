@@ -1,6 +1,6 @@
 # Protobuf
 
-The protobuf data format converts between JSON and binary protobuf wire format. It uses `prost-reflect` for dynamic message descriptors that the format compiles at runtime. The format requires no compile-time code generation. It ships as a separate crate, `camel-dataformat-protobuf`.
+The protobuf data format converts between JSON and binary protobuf wire format. It uses `prost-reflect` for dynamic message descriptors that the format compiles at runtime, so it requires no compile-time code generation. A `protoc` binary must exist at runtime. It ships as a separate crate, `camel-dataformat-protobuf`.
 
 Marshal converts `Body::Json` to `Body::Bytes`. Unmarshal reverses the conversion and returns `Body::Json`. The round trip preserves field values through the JSON bridge.
 
@@ -19,6 +19,20 @@ let df = ProtobufDataFormat::new("protos/helloworld.proto", "helloworld.HelloReq
 ```
 
 The constructor compiles the proto file at runtime through `camel-proto-compiler`. Pass a shared `ProtoCache` to `new_with_cache` to reuse the compiled descriptor pool across formats.
+
+## Protoc resolution
+
+`camel-proto-compiler` resolves the `protoc` binary in a fixed order:
+
+1. The `PROTOC` environment variable. The value is honored verbatim and never re-resolved. A broken value surfaces the ordinary execution error from running it.
+2. The vendored `protoc` embedded in standard builds.
+3. When neither yields a binary, compilation fails with a typed error whose display starts with `protoc unavailable:` and ends with the `Set PROTOC` remedy.
+
+Set the override when the embedded binary is missing or unsuitable:
+
+```console
+export PROTOC=/path/to/protoc
+```
 
 ## Route usage
 

@@ -9,12 +9,14 @@
 ## Features
 
 - Compile `.proto` files to `DescriptorPool` at runtime
-- Vendored `protoc` (zero-install) with `PROTOC` env var fallback
+- Protoc resolution in a fixed order: `PROTOC` environment override first (honored verbatim, never re-resolved), vendored `protoc` fallback second, typed `ProtocUnavailable` failure when neither exists
 - Thread-safe cache keyed by `(proto path, SHA-256 content hash, ordered include-path hash)`. The include-path hash uses canonical paths when available and supplied paths otherwise.
 - FIFO cache eviction at the configurable `max_entries` ceiling (default 1000)
 - Returns `prost-reflect` `DescriptorPool` directly (no round-trip)
 
 ## Known limitation
+
+When the `PROTOC` override is unset and the vendored `protoc` is absent, `compile_proto` fails with `ProtoCompileError::ProtocUnavailable`. The display starts with `protoc unavailable:` and ends with the `Set PROTOC` remedy. Export `PROTOC=/path/to/protoc` to point at any protoc binary.
 
 `compile_proto` writes descriptor sets to `std::env::temp_dir()` with names from a process-local counter. Calls in one process use distinct names. Concurrent processes that share a temporary directory can select the same name and return the wrong descriptor pool or a decode error. Track the fix in `rc-gr8k`.
 
