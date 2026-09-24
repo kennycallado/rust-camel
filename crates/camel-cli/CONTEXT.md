@@ -333,7 +333,7 @@ yet; the human-dispatched musl-jemalloc-verify workflow owns that check
 | Doc parse error | unreadable file, invalid YAML, `TestDocError` from `parse_test_document`, or `DocError` from `parse_scenario_document` (doc-validation class) | 2 |
 | Boot failure | unit-tier `CamelContext` boot, route load, route start, or input delivery fails; full-boot scenario partner bind (`partner-bind-failure`), sealed config load, or composition-root boot (`full-boot-failure`) | 2 |
 | Expansion error | zero-document directory argument or unreadable directory during walk | 2 |
-| Settle timeout | traffic does not quiesce within the quiet window plus the 5s instability budget | 1 |
+| Settle timeout | completion mode: quiescence notification not received within the settle timeout; stability mode: traffic does not quiesce within the quiet window plus the 5s instability budget | 1 |
 | Assertion failure | expectation mismatch reported by `MockEndpointInner::try_assert_satisfied` | 1 |
 | Reply assertion failure | `expectReply` mismatch on a captured reply (FAIL reply line) | 1 |
 | Scenario verdict failure | `receive-timeout`, `validation-mismatch` (FAIL action line) | 1 |

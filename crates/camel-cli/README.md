@@ -223,7 +223,7 @@ expects:                           # mandatory, ≥ 1 endpoint
     minCount: 1                    # or minimum count (mutually exclusive with count)
     bodies: ["hello"]              # ordered expected bodies
     headers: {kind: greeting}      # expected headers
-settle: "500ms"                    # optional quiet window (0 < settle <= 5s)
+settle: "500ms"                    # settle timeout / quiet-window override (0 < settle <= 5s)
 ```
 
 - **Route source**: exactly one of `routeFiles` (paths resolved relative to the
@@ -235,7 +235,8 @@ settle: "500ms"                    # optional quiet window (0 < settle <= 5s)
 - **Expects**: keys are `mock:`-prefixed endpoint URIs (`mock:result`); the
   runner normalizes to the bare name (`result`). `count` and `minCount` are
   mutually exclusive per endpoint. `settle` is a humantime string
-  (`"500ms"`, `"2s"`) within `0 < settle <= 5s`.
+  (`"500ms"`, `"2s"`) within `0 < settle <= 5s`: the settle timeout in
+  completion mode, the quiet-window override in stability mode.
 - Unknown fields are rejected.
 
 ### Exit codes
