@@ -173,8 +173,7 @@ async fn parse_error_doc_named_in_summary() {
     assert!(err.contains("bad.test.yaml"), "err: {err}");
     let last = err
         .lines()
-        .filter(|l| !l.trim().is_empty())
-        .next_back()
+        .rfind(|l| !l.trim().is_empty())
         .unwrap_or_default();
     assert!(
         last.contains("1 parse-error doc (skipped): "),
@@ -235,8 +234,7 @@ async fn two_parse_error_docs_plural_and_order() {
     let err = String::from_utf8(err).unwrap();
     let last = err
         .lines()
-        .filter(|l| !l.trim().is_empty())
-        .next_back()
+        .rfind(|l| !l.trim().is_empty())
         .unwrap_or_default();
     let i1 = last.find("b1.test.yaml").expect("b1 named"); // allow-unwrap
     let i2 = last.find("b2.test.yaml").expect("b2 named"); // allow-unwrap
