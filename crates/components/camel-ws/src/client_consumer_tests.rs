@@ -1202,8 +1202,6 @@ async fn wss_client_consumer_frames_flow() {
 /// sleeps — the recv is the barrier.
 #[tokio::test]
 async fn frame_dispatch_carries_in_flight_claim() {
-    use std::sync::atomic::AtomicU64;
-
     let frames = vec![Message::text("claim-me")];
     let (addr, server) = spawn_frame_push_server("127.0.0.1:0", frames, Duration::ZERO).await;
 
@@ -1214,7 +1212,7 @@ async fn frame_dispatch_carries_in_flight_claim() {
         state_tx,
     );
 
-    let counter = Arc::new(AtomicU64::new(0));
+    let counter = Arc::new(camel_api::InFlightGauge::new());
     let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(16);
     let (signal, _startup_rx) = StartupSignal::pair();
     let ctx = ConsumerContext::new(tx, CancellationToken::new(), "claim-route".into())
@@ -1232,14 +1230,14 @@ async fn frame_dispatch_carries_in_flight_claim() {
         .take()
         .expect("frame dispatch must carry an acceptance-minted claim");
     assert_eq!(
-        counter.load(std::sync::atomic::Ordering::Acquire),
+        counter.total(),
         1,
         "exact total: the acceptance mint is the only live claim"
     );
     drop(claim);
     drop(env);
     assert_eq!(
-        counter.load(std::sync::atomic::Ordering::Acquire),
+        counter.total(),
         0,
         "release exactly once when the holder drops"
     );

@@ -50,10 +50,10 @@ struct DispatcherState {
     /// Fairness yield counter, cumulative across ALL dispatches through this
     /// dispatcher.
     hop_budget: AtomicU32,
-    /// Context-global accepted-not-completed counter (drainclaim): each
+    /// Context-global accepted-not-completed gauge (drainclaim): each
     /// dispatch mints one claim held across the pipeline call. `None` on
-    /// test harnesses built without a controller counter.
-    in_flight: Option<Arc<AtomicU64>>,
+    /// test harnesses built without a controller gauge.
+    in_flight: Option<Arc<camel_api::InFlightGauge>>,
     /// Test-only count of times the `yield_now` fairness site fired.
     #[cfg(test)]
     yields: AtomicU32,
@@ -85,7 +85,7 @@ impl RouteInlineDispatcher {
         cancel: CancellationToken,
         drain_in_flight: Arc<AtomicU64>,
         cohort: Arc<CohortActivationGate>,
-        in_flight: Option<Arc<AtomicU64>>,
+        in_flight: Option<Arc<camel_api::InFlightGauge>>,
     ) -> Self {
         Self {
             state: Arc::new(DispatcherState {

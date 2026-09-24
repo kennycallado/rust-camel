@@ -211,6 +211,14 @@ pub struct MockComponent {
     /// endpoint's `received` lock so per-endpoint index order matches push
     /// order by construction. Never reset — not even by endpoint `reset()`.
     arrival_counter: Arc<AtomicU64>,
+    /// Clone-shared arrival-notification slots keyed by endpoint name.
+    /// `Arc`-wrapped because `MockComponent` is `#[derive(Clone)]`: the
+    /// settle runner registers interest via one clone while the registered
+    /// component records via another. Slots exist from first
+    /// [`MockComponent::ensure_arrival_notify`] request — before the
+    /// endpoint is created — so registration never depends on endpoint
+    /// existence.
+    arrival_slots: Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>,
 }
 
 impl MockComponent {
@@ -224,6 +232,7 @@ impl MockComponent {
             registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
             config,
             arrival_counter: Arc::new(AtomicU64::new(0)),
+            arrival_slots: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -236,6 +245,26 @@ impl MockComponent {
             .lock()
             .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
         registry.get(name).cloned()
+    }
+
+    /// Return the arrival-notification slot for `name`, inserting a fresh
+    /// one if absent.
+    ///
+    /// The slot exists from this first request — independent of endpoint
+    /// creation (the slot is keyed separately from the endpoint registry),
+    /// so settle registration must not depend on endpoint existence. The
+    /// record path pings the slot on every receive for `name`, auto-creating
+    /// it when no registration preceded the receive. The registry is shared
+    /// across `MockComponent` clones.
+    pub fn ensure_arrival_notify(&self, name: &str) -> Arc<Notify> {
+        let mut slots = self
+            .arrival_slots
+            .lock()
+            .expect("arrival slots mutex poisoned"); // allow-unwrap
+        slots
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone()
     }
 }
 
@@ -353,6 +382,7 @@ impl Component for MockComponent {
                     expectations: Arc::new(std::sync::Mutex::new(MockExpectations::new())),
                     arrival_counter: Arc::clone(&self.arrival_counter),
                     arrival_indices: Arc::new(Mutex::new(Vec::new())),
+                    arrival_slots: Arc::clone(&self.arrival_slots),
                 }));
                 (Arc::clone(created), true)
             }

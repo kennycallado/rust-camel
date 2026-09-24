@@ -1,7 +1,6 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
@@ -10,9 +9,9 @@ use camel_api::StepLifecycle;
 use camel_api::component_metadata::ComponentMetadata;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    CamelError, FunctionInvoker, HealthReport, Lifecycle, MetricsCollector, MetricsHandle,
-    PlatformIdentity, PlatformService, ReadinessGate, RouteTemplateSpec, RuntimeCommandBus,
-    RuntimeQueryBus, TemplateInstanceRecord,
+    CamelError, FunctionInvoker, HealthReport, InFlightGauge, Lifecycle, MetricsCollector,
+    MetricsHandle, PlatformIdentity, PlatformService, ReadinessGate, RouteTemplateSpec,
+    RuntimeCommandBus, RuntimeQueryBus, TemplateInstanceRecord,
 };
 use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
 use camel_language_api::Language;
@@ -81,11 +80,12 @@ pub struct CamelContext {
     build_git_sha: &'static str,
     /// Anchor for `camel_uptime_seconds` (context build time).
     build_started_at: std::time::Instant,
-    /// Context-global accepted-not-completed counter (drainclaim): every
-    /// live `InFlightClaim` on this context increments it. The SAME `Arc`
+    /// Context-global accepted-not-completed gauge (drainclaim): every
+    /// live `InFlightClaim` on this context increments it, and the last
+    /// release fires the gauge's idle notification. The SAME `Arc`
     /// is installed into the route controller, so consumers, producers,
-    /// and the inline dispatcher all mint claims against one counter.
-    in_flight_total: Arc<AtomicU64>,
+    /// and the inline dispatcher all mint claims against one gauge.
+    in_flight_total: Arc<InFlightGauge>,
 }
 
 /// Parts bag used by [`CamelContextBuilder::build`] to construct a [`CamelContext`]
@@ -113,7 +113,7 @@ pub(crate) struct FromParts {
     pub(crate) build_version: &'static str,
     pub(crate) build_git_sha: &'static str,
     pub(crate) build_started_at: std::time::Instant,
-    pub(crate) in_flight_total: Arc<AtomicU64>,
+    pub(crate) in_flight_total: Arc<InFlightGauge>,
 }
 
 impl CamelContext {
@@ -685,7 +685,14 @@ impl CamelContext {
     /// awaiting completion. Distinct from the per-route `drain_in_flight`
     /// stop-bookkeeping (ADR-0043), which is untouched.
     pub fn total_in_flight(&self) -> u64 {
-        self.in_flight_total.load(Ordering::Acquire)
+        self.in_flight_total.total()
+    }
+
+    /// Clone of the shared in-flight gauge (drainclaim): the runner seam
+    /// for notification-based settle — await `idle()` for the zero
+    /// transition instead of polling [`Self::total_in_flight`].
+    pub fn in_flight_gauge(&self) -> Arc<InFlightGauge> {
+        Arc::clone(&self.in_flight_total)
     }
 
     /// Get the platform service.
@@ -1041,10 +1048,10 @@ impl ComponentContext for CamelContext {
         self.health_registry.unregister_for_route(route_id);
     }
 
-    /// The context-global accepted-not-completed counter (drainclaim):
+    /// The context-global accepted-not-completed gauge (drainclaim):
     /// producers created through this context capture it once at
     /// `create_producer` and mint `InFlightClaim`s against it.
-    fn in_flight_counter(&self) -> Option<Arc<AtomicU64>> {
+    fn in_flight_counter(&self) -> Option<Arc<InFlightGauge>> {
         Some(Arc::clone(&self.in_flight_total))
     }
 }

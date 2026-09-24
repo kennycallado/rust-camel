@@ -1118,9 +1118,7 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_stash_keeps_carried_claim_until_completion() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(camel_api::InFlightGauge::new());
         let svc = new_test_svc(config_size(2));
 
         // First exchange: pending stash — the carried claim moves into
@@ -1138,11 +1136,7 @@ mod tests {
             pending.in_flight_claim.is_none(),
             "the pending marker carries no claim (it completes immediately)"
         );
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "stashed exchange must stay counted"
-        );
+        assert_eq!(counter.total(), 1, "stashed exchange must stay counted");
 
         // Second exchange completes the bucket: the aggregated output
         // carries ONE claim for its downstream continuation; the other
@@ -1159,13 +1153,13 @@ mod tests {
             "aggregated output carries one claim downstream"
         );
         assert_eq!(
-            counter.load(Ordering::SeqCst),
+            counter.total(),
             1,
             "consumed input's claim released; the output's stays held"
         );
         drop(aggregated);
         assert_eq!(
-            counter.load(Ordering::SeqCst),
+            counter.total(),
             0,
             "dropping the completed output releases the last claim"
         );
@@ -1173,9 +1167,7 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_rejection_releases_carried_claim() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(camel_api::InFlightGauge::new());
         let svc = new_test_svc(config_size(2));
 
         // Missing correlation header: the submission is rejected and the
@@ -1184,11 +1176,7 @@ mod tests {
         bad.in_flight_claim = Some(InFlightClaim::attach(&counter));
         let result = svc.clone().oneshot(bad).await;
         assert!(result.is_err(), "missing correlation key must reject");
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            0,
-            "rejected submission releases its claim"
-        );
+        assert_eq!(counter.total(), 0, "rejected submission releases its claim");
     }
 
     #[tokio::test]

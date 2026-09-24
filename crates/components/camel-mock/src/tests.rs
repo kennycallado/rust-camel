@@ -3165,3 +3165,87 @@ async fn exists_header_absent_key() {
         "message should name the absent key, got: {msg}"
     );
 }
+
+// -----------------------------------------------------------------------
+// settlefix 2.1: component-level arrival notification slots
+// -----------------------------------------------------------------------
+
+#[test]
+fn arrival_slot_available_before_endpoint() {
+    let component = MockComponent::new();
+    let _slot = component.ensure_arrival_notify("result");
+    // The slot exists independent of endpoint creation: get_endpoint still
+    // returns None until the first receive creates the endpoint.
+    assert!(component.get_endpoint("result").is_none());
+}
+
+#[test]
+fn arrival_slots_shared_across_clones() {
+    let a = MockComponent::new();
+    let b = a.clone();
+    let slot_a = a.ensure_arrival_notify("result");
+    let slot_b = b.ensure_arrival_notify("result");
+    assert!(
+        Arc::ptr_eq(&slot_a, &slot_b),
+        "clones must observe the same arrival slot registry"
+    );
+}
+
+#[tokio::test]
+async fn receive_pings_arrival_slot() {
+    let ctx = test_producer_ctx();
+    let component = MockComponent::new();
+    let slot = component.ensure_arrival_notify("result");
+
+    // Register-before-check: pin the notified() future and enable it before
+    // delivering the exchange, so the ping cannot slip past registration.
+    let mut notified = std::pin::pin!(slot.notified());
+    notified.as_mut().enable();
+
+    // Deliver one exchange through the component's receive path (endpoint +
+    // producer, the same way every existing test drives mock receive).
+    let endpoint = component
+        .create_endpoint("mock:result", &NoOpComponentContext)
+        .unwrap();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    producer
+        .call(Exchange::new(Message::new("pinged")))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_millis(500), notified.as_mut())
+        .await
+        .expect("arrival slot must be pinged when the exchange is recorded");
+}
+
+#[tokio::test]
+async fn receive_without_prior_ensure_creates_slot_for_late_registration() {
+    let ctx = test_producer_ctx();
+    let component = MockComponent::new();
+
+    // Deliver one exchange WITHOUT a prior ensure_arrival_notify: the
+    // record path auto-creates the slot.
+    let endpoint = component
+        .create_endpoint("mock:result", &NoOpComponentContext)
+        .unwrap();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    producer
+        .call(Exchange::new(Message::new("first")))
+        .await
+        .unwrap();
+
+    // Late registration succeeds on the auto-created slot...
+    let slot = component.ensure_arrival_notify("result");
+
+    // ...and the next receive resolves a waiter registered on it.
+    let mut notified = std::pin::pin!(slot.notified());
+    notified.as_mut().enable();
+    producer
+        .call(Exchange::new(Message::new("second")))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_millis(500), notified.as_mut())
+        .await
+        .expect("late-registered slot must be pinged by the next receive");
+}

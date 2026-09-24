@@ -1686,7 +1686,7 @@ async fn grpc_consumer_unary_dispatch_carries_in_flight_claim() {
         64,
     );
 
-    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = std::sync::Arc::new(camel_api::InFlightGauge::new());
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
     let ctx = ConsumerContext::new(
@@ -1745,13 +1745,13 @@ async fn grpc_consumer_unary_dispatch_carries_in_flight_claim() {
         .expect("pipeline join")
         .expect("unary dispatch must carry an acceptance-minted claim");
     assert_eq!(
-        counter.load(std::sync::atomic::Ordering::Acquire),
+        counter.total(),
         1,
         "exact total: the acceptance mint is the only live claim"
     );
     drop(claim);
     assert_eq!(
-        counter.load(std::sync::atomic::Ordering::Acquire),
+        counter.total(),
         0,
         "release exactly once when the holder drops"
     );
@@ -1785,7 +1785,7 @@ async fn grpc_consumer_client_streaming_holds_claim_across_idle_gap() {
         64,
     );
 
-    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = std::sync::Arc::new(camel_api::InFlightGauge::new());
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
     let ctx = ConsumerContext::new(
@@ -1863,7 +1863,7 @@ async fn grpc_consumer_client_streaming_holds_claim_across_idle_gap() {
         .expect("chunk exchange must arrive within 5s")
         .expect("route channel open");
     assert_eq!(
-        counter.load(std::sync::atomic::Ordering::Acquire),
+        counter.total(),
         2,
         "call-scoped claim + chunk envelope claim, both held"
     );
@@ -1886,7 +1886,7 @@ async fn grpc_consumer_client_streaming_holds_claim_across_idle_gap() {
         .expect("completion exchange must arrive within 5s")
         .expect("route channel open");
     assert_eq!(
-        counter.load(std::sync::atomic::Ordering::Acquire),
+        counter.total(),
         2,
         "call-scoped claim + completion envelope claim, both held"
     );
@@ -1917,17 +1917,17 @@ async fn grpc_consumer_client_streaming_holds_claim_across_idle_gap() {
 
 /// Poll-free-friendly wait: yields between reads; bounded by `bound`.
 async fn wait_for_total(
-    counter: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    counter: &std::sync::Arc<camel_api::InFlightGauge>,
     target: u64,
     bound: std::time::Duration,
 ) -> bool {
     let _ = tokio::time::timeout(bound, async {
-        while counter.load(std::sync::atomic::Ordering::Acquire) != target {
+        while counter.total() != target {
             tokio::task::yield_now().await;
         }
     })
     .await;
-    counter.load(std::sync::atomic::Ordering::Acquire) == target
+    counter.total() == target
 }
 
 /// rc-orr73 (task 1.4): open a bidi call and forward every response item —
@@ -1980,7 +1980,7 @@ async fn grpc_consumer_shutdown_during_saturated_permit_wait_exits_cleanly() {
         1,
     );
 
-    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = std::sync::Arc::new(camel_api::InFlightGauge::new());
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
     let ctx = ConsumerContext::new(
@@ -2140,7 +2140,7 @@ async fn grpc_consumer_abort_mid_permit_wait_allows_same_path_restart() {
         1,
     );
 
-    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = std::sync::Arc::new(camel_api::InFlightGauge::new());
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
     let ctx = ConsumerContext::new(
@@ -2372,7 +2372,7 @@ async fn grpc_consumer_saturated_stop_then_restart_reregisters_same_path() {
         1,
     );
 
-    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = std::sync::Arc::new(camel_api::InFlightGauge::new());
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
     let ctx = ConsumerContext::new(
@@ -2601,7 +2601,7 @@ async fn grpc_consumer_shutdown_closes_open_bidi_response_stream() {
         1,
     );
 
-    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = std::sync::Arc::new(camel_api::InFlightGauge::new());
     // Kept alive and never read: with zero client chunks nothing is ever
     // sent on the route channel; A's acceptance claim is held call-scoped
     // by the parked processor future.
@@ -2692,7 +2692,7 @@ async fn grpc_consumer_abort_closes_open_bidi_response_stream() {
         1,
     );
 
-    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = std::sync::Arc::new(camel_api::InFlightGauge::new());
     // Kept alive and never read (see the shutdown test for the rationale).
     let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();

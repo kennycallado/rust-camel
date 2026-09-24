@@ -41,7 +41,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
-use camel_api::{BoxProcessorExt, OpaqueErrorSource};
+use camel_api::{BoxProcessorExt, InFlightGauge, OpaqueErrorSource};
 use camel_component_api::UriConfig;
 use camel_component_api::parse_uri;
 use camel_component_api::{
@@ -1279,11 +1279,11 @@ struct SedaProducer {
     /// Observability handle: `component_metrics()` powers the uniform
     /// `seda:produce` emission (dashboard-observability Task 4.2).
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
-    /// Context-global accepted-not-completed counter (drainclaim),
+    /// Context-global accepted-not-completed gauge (drainclaim),
     /// captured once at `create_producer` from
     /// [`camel_component_api::RuntimeObservability::in_flight_counter`].
     /// `None` keeps this producer's enqueues uncounted (test runtimes).
-    in_flight: Option<Arc<AtomicU64>>,
+    in_flight: Option<Arc<InFlightGauge>>,
 }
 
 /// Mint the fanout claim set: ONE minted claim plus one `split()` sibling
@@ -1293,7 +1293,7 @@ struct SedaProducer {
 /// claim per copy in send order; an empty iterator when the runtime installs
 /// no counter (uncounted enqueues, e.g. test runtimes).
 fn fanout_claims(
-    counter: Option<&Arc<AtomicU64>>,
+    counter: Option<&Arc<InFlightGauge>>,
     copies: usize,
 ) -> std::vec::IntoIter<InFlightClaim> {
     let mut claims = Vec::with_capacity(copies);
@@ -3972,17 +3972,18 @@ mod queue_depth_tests {
 #[cfg(test)]
 mod in_flight_tests {
     use super::*;
+    use camel_api::InFlightGauge;
     use camel_api::MetricsCollector;
     use camel_component_api::{
         HealthCheckRegistry, Message, NoOpComponentContext, RuntimeObservability,
     };
     use tower::ServiceExt;
 
-    /// Test runtime reporting a shared in-flight counter through
+    /// Test runtime reporting a shared in-flight gauge through
     /// `RuntimeObservability::in_flight_counter` (drainclaim): producers
     /// created with it mint real enqueue claims against `counter`.
     struct CountingRuntime {
-        in_flight: Arc<AtomicU64>,
+        in_flight: Arc<InFlightGauge>,
     }
 
     impl RuntimeObservability for CountingRuntime {
@@ -3992,25 +3993,25 @@ mod in_flight_tests {
         fn health(&self) -> Arc<dyn HealthCheckRegistry> {
             Arc::new(NoopRuntimeObservability)
         }
-        fn in_flight_counter(&self) -> Option<Arc<AtomicU64>> {
+        fn in_flight_counter(&self) -> Option<Arc<InFlightGauge>> {
             Some(Arc::clone(&self.in_flight))
         }
     }
 
-    fn counting_rt(counter: &Arc<AtomicU64>) -> Arc<dyn RuntimeObservability> {
+    fn counting_rt(counter: &Arc<InFlightGauge>) -> Arc<dyn RuntimeObservability> {
         Arc::new(CountingRuntime {
             in_flight: Arc::clone(counter),
         })
     }
 
-    /// Deadline-bounded poll for the in-flight counter to reach exactly
+    /// Deadline-bounded poll for the in-flight gauge to reach exactly
     /// `expected` (helper-fn poll pattern — no bare test-fn sleeps). Sound
     /// only for states that are STABLE once reached (settled claims,
     /// parked forwarders); never a sampler of transient windows.
-    async fn await_in_flight(counter: &AtomicU64, expected: u64) {
+    async fn await_in_flight(counter: &InFlightGauge, expected: u64) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
-            let seen = counter.load(Ordering::Acquire);
+            let seen = counter.total();
             if seen == expected {
                 return;
             }
@@ -4029,7 +4030,7 @@ mod in_flight_tests {
     /// while the pipeline parks and returns to baseline on completion.
     #[tokio::test]
     async fn enqueue_residency_counted() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let runtime = counting_rt(&counter);
 
         let comp = SedaComponent::new();
@@ -4086,7 +4087,7 @@ mod in_flight_tests {
     /// subscribers releases them one by one.
     #[tokio::test]
     async fn fanout_splits_claim_per_copy() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let runtime = counting_rt(&counter);
 
         let comp = SedaComponent::new();
@@ -4170,7 +4171,7 @@ mod in_flight_tests {
     /// = 4 — both handoff claims live at once, observed, not sampled.
     #[tokio::test]
     async fn handoff_overlap_observed_at_boundary() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let runtime = counting_rt(&counter);
 
         let comp = SedaComponent::new();
@@ -4254,7 +4255,7 @@ mod in_flight_tests {
     /// claim is minted — the counter stays at baseline.
     #[tokio::test]
     async fn no_consumer_rejection_leaves_counter_zero() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let runtime = counting_rt(&counter);
 
         let comp = SedaComponent::new();
@@ -4272,7 +4273,7 @@ mod in_flight_tests {
             .unwrap_err();
         assert_endpoint_failure_payload(err, "SEDA endpoint 'noc' has no active consumers");
         assert_eq!(
-            counter.load(Ordering::Acquire),
+            counter.total(),
             0,
             "rejection must not leave a claim behind"
         );

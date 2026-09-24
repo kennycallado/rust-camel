@@ -1328,14 +1328,14 @@ async fn published_dispatcher_implies_non_identity_pipeline() {
 // in-flight counter
 // ------------------------------------------------------------------
 
-/// Poll until the controller's global counter reaches `want` (bounded).
-async fn await_global_total(counter: &std::sync::atomic::AtomicU64, want: u64) {
+/// Poll until the controller's global gauge reaches `want` (bounded).
+async fn await_global_total(counter: &camel_api::InFlightGauge, want: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while counter.load(std::sync::atomic::Ordering::SeqCst) != want {
+    while counter.total() != want {
         assert!(
             tokio::time::Instant::now() < deadline,
             "global in-flight counter did not reach {want} within 2s (now {})",
-            counter.load(std::sync::atomic::Ordering::SeqCst)
+            counter.total()
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -1359,10 +1359,7 @@ async fn inline_dispatch_counted() {
     let first = tokio::spawn(dispatcher.dispatch(test_exchange("1")));
     assert_eq!(harness.await_entry().await, "1");
     assert!(
-        controller
-            .in_flight_total
-            .load(std::sync::atomic::Ordering::SeqCst)
-            >= 1,
+        controller.in_flight_total.total() >= 1,
         "parked inline dispatch must be counted"
     );
 
@@ -1376,10 +1373,7 @@ async fn inline_dispatch_counted() {
     let second = tokio::spawn(dispatcher.dispatch(test_exchange("2")));
     assert_eq!(harness.await_entry().await, "2");
     assert!(
-        controller
-            .in_flight_total
-            .load(std::sync::atomic::Ordering::SeqCst)
-            >= 1,
+        controller.in_flight_total.total() >= 1,
         "second parked dispatch must be counted"
     );
     harness.release(2);

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -175,15 +175,15 @@ async fn await_capture(captured: &CapturedCtxs) -> ConsumerContext {
     panic!("consumer context was not captured within 2s");
 }
 
-/// Poll until the controller's global in-flight counter reaches
+/// Poll until the controller's global in-flight gauge reaches
 /// `want` (bounded; panics past the deadline).
-async fn await_total(counter: &AtomicU64, want: u64) {
+async fn await_total(counter: &camel_api::InFlightGauge, want: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while counter.load(Ordering::SeqCst) != want {
+    while counter.total() != want {
         assert!(
             tokio::time::Instant::now() < deadline,
             "global in-flight counter did not reach {want} within 2s (now {})",
-            counter.load(Ordering::SeqCst)
+            counter.total()
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -268,7 +268,7 @@ async fn pipeline_residency_counted_until_completion() {
         .expect("pipeline entry within 2s")
         .expect("entry channel alive");
     assert!(
-        controller.in_flight_total.load(Ordering::SeqCst) >= 1,
+        controller.in_flight_total.total() >= 1,
         "exchange parked in the pipeline must be counted"
     );
 
@@ -406,7 +406,7 @@ async fn pending_bucket_keeps_claim() {
         "first exchange must be stashed, not completed"
     );
     assert_eq!(
-        controller.in_flight_total.load(Ordering::SeqCst),
+        controller.in_flight_total.total(),
         1,
         "stashed exchange must stay counted"
     );
@@ -615,7 +615,7 @@ async fn force_complete_releases_claims() {
         .expect("pending ack reply");
     assert!(first.property("CamelAggregatorPending").is_some());
     assert_eq!(
-        controller.in_flight_total.load(Ordering::SeqCst),
+        controller.in_flight_total.total(),
         1,
         "stashed exchange must stay counted"
     );

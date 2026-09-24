@@ -10,7 +10,7 @@ use bytes::BytesMut;
 use camel_api::redact::redact_host;
 use camel_api::security_policy::AuthPrincipal;
 use camel_api::store_principal_properties;
-use camel_api::{Body, CamelError, Exchange, Message, Value};
+use camel_api::{Body, CamelError, Exchange, InFlightGauge, Message, Value};
 use camel_auth::{AuthenticatedPrincipal, CredentialSource, enforce_dispatch, install_carrier};
 use camel_component_api::{
     ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, ExchangeEnvelope,
@@ -1127,7 +1127,7 @@ async fn process_client_streaming_request(
     sender: mpsc::Sender<ExchangeEnvelope>,
     reply_tx: tokio::sync::oneshot::Sender<GrpcReply>,
     kernel_auth: Option<KernelRequestAuth>,
-    in_flight: &Option<Arc<AtomicU64>>,
+    in_flight: &Option<Arc<InFlightGauge>>,
 ) {
     while let Some(body) = body_rx.recv().await {
         let req_dyn = match DynamicMessage::decode(req_desc.clone(), body.as_slice()) {
@@ -1266,7 +1266,7 @@ async fn process_bidi_request(
     sender: mpsc::Sender<ExchangeEnvelope>,
     reply_tx: mpsc::Sender<GrpcStreamItem>,
     kernel_auth: Option<KernelRequestAuth>,
-    in_flight: &Option<Arc<AtomicU64>>,
+    in_flight: &Option<Arc<InFlightGauge>>,
 ) {
     let observer = GrpcStreamObserver::new(reply_tx.clone(), resp_desc);
     let observer_id = next_observer_id();

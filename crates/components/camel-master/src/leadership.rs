@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use camel_api::{CamelError, MetricsCollector, PlatformService};
+use camel_api::{CamelError, InFlightGauge, MetricsCollector, PlatformService};
 use camel_component_api::{
     Component, ConsumerContext, ExchangeEnvelope, InFlightClaim, NetworkRetryPolicy,
     is_retryable_camel_error,
@@ -38,7 +38,7 @@ pub(crate) fn spawn_epoch_bridge(
     real_sender: tokio::sync::mpsc::Sender<ExchangeEnvelope>,
     my_epoch: u64,
     parent_cancel: CancellationToken,
-    in_flight: Option<Arc<AtomicU64>>,
+    in_flight: Option<Arc<InFlightGauge>>,
 ) -> (
     tokio::sync::mpsc::Sender<ExchangeEnvelope>,
     tokio::task::JoinHandle<()>,
@@ -86,7 +86,7 @@ pub(crate) fn spawn_epoch_bridge(
 /// raw-sender components minting at their own acceptance) pass through
 /// untouched — never a double count. A failed forward drops the envelope
 /// and rolls the claim back (RAII).
-fn bridge_mint_claim(env: &mut ExchangeEnvelope, in_flight: &Option<Arc<AtomicU64>>) {
+fn bridge_mint_claim(env: &mut ExchangeEnvelope, in_flight: &Option<Arc<InFlightGauge>>) {
     if env.in_flight_claim.is_none()
         && let Some(counter) = in_flight
     {
@@ -234,11 +234,11 @@ pub(crate) struct ReconcileContext<'a> {
     /// Reconnect policy consulted before every delegate create attempt.
     pub(crate) reconnect: NetworkRetryPolicy,
     /// rc-nftni (drainclaim): the route's context-global accepted-not-
-    /// completed counter. Installed on the delegate's synthetic
+    /// completed gauge. Installed on the delegate's synthetic
     /// `ConsumerContext` (so `send()`/`send_and_wait()` delegates mint at
     /// `stamp_tx` entry) and consulted by the epoch bridge as a mint-if-none
     /// safety net for delegates that push raw envelopes.
-    pub(crate) in_flight: Option<Arc<AtomicU64>>,
+    pub(crate) in_flight: Option<Arc<InFlightGauge>>,
 }
 
 pub(crate) async fn reconcile_event(
@@ -426,7 +426,7 @@ pub(crate) async fn reconcile_event(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::AtomicU64;
     use std::time::Duration;
 
     use camel_api::{Body, CamelError, Exchange, Message, NoOpMetrics};
@@ -755,7 +755,7 @@ mod tests {
     /// with exact totals.
     #[tokio::test]
     async fn bridge_mints_claim_for_uncounted_envelopes() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(camel_api::InFlightGauge::new());
         let (pipeline_tx, mut pipeline_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(10);
         let cancel = CancellationToken::new();
 
@@ -778,11 +778,11 @@ mod tests {
             .take()
             .expect("bridge must have minted a claim for the uncounted envelope");
         // Exact total: the minted claim is the only live claim.
-        assert_eq!(counter.load(Ordering::Acquire), 1);
+        assert_eq!(counter.total(), 1);
         drop(claim);
         drop(received);
         assert_eq!(
-            counter.load(Ordering::Acquire),
+            counter.total(),
             0,
             "dropping the envelope must release exactly once"
         );
@@ -793,7 +793,7 @@ mod tests {
     /// through the bridge untouched — never a double count.
     #[tokio::test]
     async fn bridge_preserves_existing_claim_without_double_counting() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(camel_api::InFlightGauge::new());
         let (pipeline_tx, mut pipeline_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(10);
         let cancel = CancellationToken::new();
 
@@ -804,7 +804,7 @@ mod tests {
         // would attach it on the synthetic context.
         let mut pre_claimed = make_envelope("already-counted");
         pre_claimed.in_flight_claim = Some(camel_component_api::InFlightClaim::attach(&counter));
-        assert_eq!(counter.load(Ordering::Acquire), 1);
+        assert_eq!(counter.total(), 1);
 
         stamp_tx.send(pre_claimed).await.unwrap();
         drop(stamp_tx);
@@ -822,12 +822,12 @@ mod tests {
             .take()
             .expect("pre-existing claim must survive the bridge");
         assert_eq!(
-            counter.load(Ordering::Acquire),
+            counter.total(),
             1,
             "bridge must not mint a sibling for an already-counted envelope"
         );
         drop(claim);
         drop(received);
-        assert_eq!(counter.load(Ordering::Acquire), 0);
+        assert_eq!(counter.total(), 0);
     }
 }

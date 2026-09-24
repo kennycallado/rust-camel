@@ -28,6 +28,7 @@ use axum::extract::{FromRequest, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::{Router, serve};
+use camel_api::InFlightGauge;
 use camel_api::security_policy::{AccessMode, AuthPrincipal, RouteSecurityPlan};
 use camel_auth::{AuthenticatedPrincipal, ProviderRegistry};
 use camel_component_api::tls_source::ServerTlsSource;
@@ -724,10 +725,10 @@ pub struct WsAppState {
     /// rc-nftni (drainclaim): the context-global accepted-not-completed
     /// counter, set once by the first route whose consumer registered on
     /// this shared server (`finish_start`). Set-once, keep-first — routes
-    /// sharing a server share a CamelContext, so the counter is the same
+    /// sharing a server share a CamelContext, so the gauge is the same
     /// Arc in practice. The per-connection handler mints one claim per
     /// inbound frame envelope (acceptance dequeue).
-    pub in_flight: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>>,
+    pub in_flight: Arc<std::sync::OnceLock<Arc<InFlightGauge>>>,
 }
 
 pub struct WsConnectionRegistry {
@@ -2688,8 +2689,6 @@ mod tests {
     /// barrier.
     #[tokio::test]
     async fn server_frame_dispatch_carries_in_flight_claim() {
-        use std::sync::atomic::AtomicU64;
-
         let _guard = acquire_deadline(
             &REGISTRY_TEST_LOCK,
             "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
@@ -2709,7 +2708,7 @@ mod tests {
             rt(),
         );
 
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(
             route_tx,
@@ -2736,14 +2735,14 @@ mod tests {
             .take()
             .expect("server frame dispatch must carry an acceptance-minted claim");
         assert_eq!(
-            counter.load(std::sync::atomic::Ordering::Acquire),
+            counter.total(),
             1,
             "exact total: the acceptance mint is the only live claim"
         );
         drop(claim);
         drop(envelope);
         assert_eq!(
-            counter.load(std::sync::atomic::Ordering::Acquire),
+            counter.total(),
             0,
             "release exactly once when the holder drops"
         );

@@ -742,15 +742,15 @@ mod tests {
         ResequencerService::new(policy, post, 1024, vec![])
     }
 
-    /// Poll until the counter reaches `want` (bounded, panics past the
+    /// Poll until the gauge reaches `want` (bounded, panics past the
     /// deadline) — same discipline as the drainclaim route tests.
-    async fn await_in_flight(counter: &Arc<AtomicU64>, want: u64) {
+    async fn await_in_flight(counter: &Arc<camel_api::InFlightGauge>, want: u64) {
         let deadline = Instant::now() + Duration::from_secs(2);
-        while counter.load(Ordering::SeqCst) != want {
+        while counter.total() != want {
             assert!(
                 Instant::now() < deadline,
                 "in-flight counter did not reach {want} within 2s (now {})",
-                counter.load(Ordering::SeqCst)
+                counter.total()
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -758,7 +758,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_held_while_buffered_released_on_completion() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(camel_api::InFlightGauge::new());
         let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<Exchange>();
         let service = stream_service(capture_tx);
 
@@ -774,7 +774,7 @@ mod tests {
             Some(true)
         );
         assert_eq!(
-            counter.load(Ordering::SeqCst),
+            counter.total(),
             1,
             "buffered exchange must stay counted after the ack resolves"
         );
@@ -802,7 +802,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_released_on_shutdown_flush() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(camel_api::InFlightGauge::new());
         let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<Exchange>();
         let service = stream_service(capture_tx);
 
@@ -811,7 +811,7 @@ mod tests {
         let mut buffered = seq_exchange(2);
         buffered.in_flight_claim = Some(camel_api::InFlightClaim::attach(&counter));
         let _ = service.clone().oneshot(buffered).await.unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(counter.total(), 1);
 
         service
             .shutdown(StepShutdownReason::RouteStop)
@@ -826,7 +826,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_released_when_input_dropped_after_shutdown() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(camel_api::InFlightGauge::new());
         let (capture_tx, _capture_rx) = mpsc::unbounded_channel::<Exchange>();
         let service = stream_service(capture_tx);
         service
@@ -845,7 +845,7 @@ mod tests {
             "shutdown-intake exchange must not be accepted"
         );
         assert_eq!(
-            counter.load(Ordering::SeqCst),
+            counter.total(),
             0,
             "dropped input releases its claim immediately"
         );
@@ -853,7 +853,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_released_when_capacity_policy_drops_exchange() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(camel_api::InFlightGauge::new());
         let (capture_tx, _capture_rx) = mpsc::unbounded_channel::<Exchange>();
         // Capacity 1: seq 2 occupies the queue (gap at 1); seq 3 hits
         // the cap and CapacityPolicy::LogAndDrop drops it — the dropped
@@ -872,7 +872,7 @@ mod tests {
         let mut held = seq_exchange(2);
         held.in_flight_claim = Some(camel_api::InFlightClaim::attach(&counter));
         let _ = service.clone().oneshot(held).await.unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(counter.total(), 1);
 
         let mut overflow = seq_exchange(3);
         overflow.in_flight_claim = Some(camel_api::InFlightClaim::attach(&counter));

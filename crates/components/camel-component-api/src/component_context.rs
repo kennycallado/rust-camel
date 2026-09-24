@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use camel_api::{AsyncHealthCheck, MetricsCollector, PlatformService};
+use camel_api::{AsyncHealthCheck, InFlightGauge, MetricsCollector, PlatformService};
 use camel_language_api::Language;
 
 use crate::Component;
@@ -16,12 +16,12 @@ pub trait ComponentContext: Send + Sync {
     /// Access the active metrics collector.
     fn metrics(&self) -> Arc<dyn MetricsCollector>;
 
-    /// Context-global counter of accepted-not-completed exchanges
-    /// (drainclaim). Production contexts return the counter installed on
+    /// Context-global gauge of accepted-not-completed exchanges
+    /// (drainclaim). Production contexts return the gauge installed on
     /// every `ConsumerContext` at consumer start and read by
     /// `CamelContext::total_in_flight()` for the drain verdict. Default
     /// `None` keeps test contexts uncounted.
-    fn in_flight_counter(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+    fn in_flight_counter(&self) -> Option<Arc<InFlightGauge>> {
         None
     }
 

@@ -5,7 +5,7 @@
 //! synchronous [`ExchangeAssert`] handle. These types are re-exported from the
 //! crate root; the public API is unchanged.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -62,6 +62,12 @@ pub struct MockEndpointInner {
     /// the `received` lock — keep this nesting order:
     /// `arrival_indices` is never locked before `received`.
     pub(crate) arrival_indices: Arc<Mutex<Vec<u64>>>,
+    /// Clone-shared component-level arrival-notification slots keyed by
+    /// endpoint name, owned by the `MockComponent` that created this
+    /// inner. Handed to the [`MockProducer`] so the record path can ping
+    /// (and auto-create) the slot for its endpoint name after recording an
+    /// exchange.
+    pub(crate) arrival_slots: Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>,
 }
 
 impl MockEndpointInner {
@@ -417,6 +423,7 @@ impl Endpoint for MockEndpoint {
             fail_fast_error: Arc::clone(&self.0.fail_fast_error),
             arrival_counter: Arc::clone(&self.0.arrival_counter),
             arrival_indices: Arc::clone(&self.0.arrival_indices),
+            arrival_slots: Arc::clone(&self.0.arrival_slots),
         }))
     }
 }
@@ -424,6 +431,25 @@ impl Endpoint for MockEndpoint {
 // ---------------------------------------------------------------------------
 // MockProducer
 // ---------------------------------------------------------------------------
+
+/// Ping the component-level arrival slot for `name`, creating the slot when
+/// no `ensure_arrival_notify` registration preceded the receive.
+///
+/// Free function over the shared slot registry: the record site owns a
+/// `MockProducer`, not a `MockComponent` handle. Called after the exchange
+/// is recorded so a waiter that registered before checking counts (the
+/// settle register-before-check pattern) always observes a state change on
+/// wake.
+fn ping(slots: &Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>, name: &str) {
+    let slot = {
+        let mut guard = slots.lock().expect("arrival slots mutex poisoned"); // allow-unwrap
+        guard
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone()
+    };
+    slot.notify_waiters();
+}
 
 /// A producer that simply records each exchange it processes.
 #[derive(Clone)]
@@ -437,6 +463,7 @@ struct MockProducer {
     fail_fast_error: Arc<std::sync::Mutex<Option<CamelError>>>,
     arrival_counter: Arc<AtomicU64>,
     arrival_indices: Arc<Mutex<Vec<u64>>>,
+    arrival_slots: Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>,
 }
 
 impl Service<Exchange> for MockProducer {
@@ -467,6 +494,7 @@ impl Service<Exchange> for MockProducer {
         let fail_fast_error = Arc::clone(&self.fail_fast_error);
         let arrival_counter = Arc::clone(&self.arrival_counter);
         let arrival_indices = Arc::clone(&self.arrival_indices);
+        let arrival_slots = Arc::clone(&self.arrival_slots);
         Box::pin(async move {
             // In fail-fast mode, check if a previous error was recorded
             if fail_fast
@@ -526,6 +554,7 @@ impl Service<Exchange> for MockProducer {
                 "exchange recorded on mock"
             );
             notify.notify_waiters();
+            ping(&arrival_slots, &name);
 
             Ok(exchange)
         })

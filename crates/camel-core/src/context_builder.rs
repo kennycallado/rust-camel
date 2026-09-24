@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use tokio_util::sync::CancellationToken;
 
 use camel_api::{
-    CamelError, FunctionInvoker, Lifecycle, MetricsCollector, MetricsHandle, NoopPlatformService,
-    PlatformService, SupervisionConfig,
+    CamelError, FunctionInvoker, InFlightGauge, Lifecycle, MetricsCollector, MetricsHandle,
+    NoopPlatformService, PlatformService, SupervisionConfig,
 };
 use camel_language_api::Language;
 
@@ -310,12 +309,12 @@ impl CamelContextBuilder {
             reg
         };
 
-        // Context-global accepted-not-completed counter (drainclaim):
+        // Context-global accepted-not-completed gauge (drainclaim):
         // created ONCE here. The SAME Arc seeds the route controller
         // (consumer contexts, producer-creation contexts, the inline
         // dispatcher) and the CamelContext slot exposed through
         // `total_in_flight()` — one counter, one linearizable verdict.
-        let in_flight_total = Arc::new(AtomicU64::new(0));
+        let in_flight_total = Arc::new(InFlightGauge::new());
 
         let (controller, actor_join, supervision_join) =
             if let Some(config) = self.supervision_config {

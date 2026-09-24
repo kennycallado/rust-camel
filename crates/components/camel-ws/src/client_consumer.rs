@@ -2,10 +2,10 @@
 //! server and consumes frames as an inbound route source (`consumeAsClient`).
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use camel_api::InFlightGauge;
 use camel_component_api::{
     Body as CamelBody, CamelError, ConcurrencyModel, Consumer, ConsumerContext,
     ConsumerStartupMode, Exchange, ExchangeEnvelope, InFlightClaim, Message as CamelMessage,
@@ -62,10 +62,10 @@ struct FrameLoopDeps {
     max_message_size: u32,
     plan: ReconnectPlan,
     conn_state_tx: watch::Sender<ClientConnState>,
-    /// rc-nftni (drainclaim): context-global counter captured at start;
+    /// rc-nftni (drainclaim): context-global gauge captured at start;
     /// every frame envelope mints its claim at acceptance in
     /// [`receive_until_disconnect`].
-    in_flight: Option<Arc<AtomicU64>>,
+    in_flight: Option<Arc<InFlightGauge>>,
 }
 
 /// Private lifecycle gate: rejects double `start` and makes `stop` idempotent.
@@ -411,7 +411,7 @@ async fn receive_until_disconnect(
     route_id: &str,
     runtime: &dyn RuntimeObservability,
     max_message_size: u32,
-    in_flight: Option<&Arc<AtomicU64>>,
+    in_flight: Option<&Arc<InFlightGauge>>,
     cancel: &CancellationToken,
 ) -> Result<(), CamelError> {
     let mut pending: Option<ExchangeEnvelope> = None;

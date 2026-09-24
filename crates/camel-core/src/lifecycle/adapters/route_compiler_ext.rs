@@ -7,7 +7,6 @@
 //! duplicating the implementations.
 
 use camel_api::SpanKindHint;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Weak};
 
 use camel_api::circuit_breaker::CircuitBreakerConfig;
@@ -15,8 +14,8 @@ use camel_api::error_handler::{ErrorHandlerConfig, ExceptionDisposition, Excepti
 use camel_api::metrics::MetricsCollector;
 use camel_api::security_policy::{SecurityPolicyConfig, TransportId};
 use camel_api::{
-    BoxProcessor, CamelError, FunctionInvoker, IdentityProcessor, NoOpMetrics, PlatformService,
-    ProducerContext, RuntimeHandle, StepLifecycle, UnitOfWorkConfig,
+    BoxProcessor, CamelError, FunctionInvoker, IdentityProcessor, InFlightGauge, NoOpMetrics,
+    PlatformService, ProducerContext, RuntimeHandle, StepLifecycle, UnitOfWorkConfig,
 };
 use camel_bean::BeanRegistry;
 use camel_component_api::{ComponentContext, RuntimeObservability};
@@ -111,15 +110,15 @@ pub(super) fn resolve_error_handler(
     )
 }
 
-/// Resolve a `UnitOfWorkConfig` into an `(ExchangeUoWLayer, Arc<AtomicU64>)`.
+/// Resolve a `UnitOfWorkConfig` into an `(ExchangeUoWLayer, Arc<InFlightGauge>)`.
 /// Returns `Err` if any hook URI cannot be resolved.
 pub(super) fn resolve_uow_layer(
     config: &UnitOfWorkConfig,
     producer_ctx: &ProducerContext,
     rt: Arc<dyn camel_component_api::RuntimeObservability>,
     component_ctx: &dyn ComponentContext,
-    counter: Option<Arc<AtomicU64>>,
-) -> Result<(ExchangeUoWLayer, Arc<AtomicU64>), CamelError> {
+    counter: Option<Arc<InFlightGauge>>,
+) -> Result<(ExchangeUoWLayer, Arc<InFlightGauge>), CamelError> {
     let resolve_uri = |uri: &str| -> Result<BoxProcessor, CamelError> {
         let parsed = camel_endpoint::parse_uri(uri)?;
         let component = component_ctx
@@ -139,7 +138,7 @@ pub(super) fn resolve_uow_layer(
     let on_complete = config.on_complete.as_deref().map(resolve_uri).transpose()?;
     let on_failure = config.on_failure.as_deref().map(resolve_uri).transpose()?;
 
-    let counter = counter.unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
+    let counter = counter.unwrap_or_else(|| Arc::new(InFlightGauge::new()));
     let layer = ExchangeUoWLayer::new(Arc::clone(&counter), on_complete, on_failure);
     Ok((layer, counter))
 }
@@ -190,7 +189,7 @@ pub(crate) fn build_eh_config_pipeline(
     security_policy: Option<SecurityPolicyConfig>,
     transport: TransportId,
     circuit_breaker: Option<CircuitBreakerConfig>,
-    in_flight_total: Arc<AtomicU64>,
+    in_flight_total: Arc<InFlightGauge>,
 ) -> Result<BoxProcessor, CamelError> {
     Ok(if let Some(config) = eh_config {
         // ── New path: RouteChannelService with explicit gates ──
@@ -315,11 +314,11 @@ pub(crate) struct RouteCompilerExt<'a> {
     pub(crate) cache_repositories: crate::SharedCacheRegistry,
     /// Route send-point interception rules captured at compile time.
     pub(crate) intercept: &'a InterceptRules,
-    /// Context-global accepted-not-completed counter (drainclaim): the
+    /// Context-global accepted-not-completed gauge (drainclaim): the
     /// controller's `in_flight_total` — every `ControllerComponentContext`
     /// this extension builds (step resolution, error handler, UoW hooks)
     /// exposes it to `create_producer`.
-    pub(crate) in_flight_total: Arc<AtomicU64>,
+    pub(crate) in_flight_total: Arc<InFlightGauge>,
 }
 
 impl RouteCompilerExt<'_> {

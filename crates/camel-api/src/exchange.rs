@@ -77,8 +77,9 @@ pub struct Exchange {
     /// Carries the active span context between processing steps.
     /// Defaults to an empty context (noop span) if OTel is not active.
     pub otel_context: Context,
-    /// RAII claim on the context-global accepted-not-completed counter
-    /// (drainclaim, claimfamily). Pipeline drain sites split a sibling
+    /// RAII claim on the context-global in-flight gauge — the
+    /// accepted-not-completed counter (drainclaim, claimfamily). Pipeline
+    /// drain sites split a sibling
     /// of the envelope's claim onto the exchange so residency inside
     /// pipeline-embedded stash sites (resequencer buffers, aggregator
     /// buckets — raw-`Exchange` territory with no envelope) stays

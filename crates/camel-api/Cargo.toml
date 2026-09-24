@@ -37,7 +37,7 @@ schema = []
 
 [dev-dependencies]
 criterion.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
 
 [[bench]]
 name = "exchange"

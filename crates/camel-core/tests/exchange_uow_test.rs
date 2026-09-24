@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message};
+use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange, InFlightGauge, Message};
 use camel_core::ExchangeUoWLayer;
 use tower::Layer;
 
@@ -29,19 +29,19 @@ fn counter_hook(counter: Arc<AtomicU64>) -> BoxProcessor {
 
 #[tokio::test]
 async fn counter_is_zero_before_and_after_exchange() {
-    let c = Arc::new(AtomicU64::new(0));
+    let c = Arc::new(InFlightGauge::new());
     let layer = ExchangeUoWLayer::new(Arc::clone(&c), None, None);
-    assert_eq!(c.load(Ordering::Relaxed), 0);
+    assert_eq!(c.total(), 0);
     let _ = tower::ServiceExt::oneshot(layer.layer(identity()), Exchange::new(Message::new("x")))
         .await
         .unwrap();
-    assert_eq!(c.load(Ordering::Relaxed), 0);
+    assert_eq!(c.total(), 0);
 }
 
 #[tokio::test]
 async fn on_complete_fires_exactly_once_on_success() {
     let fired = Arc::new(AtomicU64::new(0));
-    let c = Arc::new(AtomicU64::new(0));
+    let c = Arc::new(InFlightGauge::new());
     let layer = ExchangeUoWLayer::new(Arc::clone(&c), Some(counter_hook(Arc::clone(&fired))), None);
     tower::ServiceExt::oneshot(layer.layer(identity()), Exchange::new(Message::new("ok")))
         .await
@@ -52,7 +52,7 @@ async fn on_complete_fires_exactly_once_on_success() {
 #[tokio::test]
 async fn on_failure_fires_when_exchange_has_error() {
     let fired = Arc::new(AtomicU64::new(0));
-    let c = Arc::new(AtomicU64::new(0));
+    let c = Arc::new(InFlightGauge::new());
     let layer = ExchangeUoWLayer::new(Arc::clone(&c), None, Some(counter_hook(Arc::clone(&fired))));
     tower::ServiceExt::oneshot(
         layer.layer(set_error_processor()),
@@ -66,7 +66,7 @@ async fn on_failure_fires_when_exchange_has_error() {
 #[tokio::test]
 async fn on_complete_does_not_fire_when_exchange_has_error() {
     let fired = Arc::new(AtomicU64::new(0));
-    let c = Arc::new(AtomicU64::new(0));
+    let c = Arc::new(InFlightGauge::new());
     let layer = ExchangeUoWLayer::new(Arc::clone(&c), Some(counter_hook(Arc::clone(&fired))), None);
     tower::ServiceExt::oneshot(
         layer.layer(set_error_processor()),
@@ -82,7 +82,7 @@ async fn hook_failure_does_not_fail_exchange() {
     let bad_hook = BoxProcessor::from_fn(|_| {
         Box::pin(async { Err(CamelError::ProcessorError("bad hook".into())) })
     });
-    let c = Arc::new(AtomicU64::new(0));
+    let c = Arc::new(InFlightGauge::new());
     let layer = ExchangeUoWLayer::new(Arc::clone(&c), Some(bad_hook), None);
     let result =
         tower::ServiceExt::oneshot(layer.layer(identity()), Exchange::new(Message::new("ok")))
@@ -92,7 +92,7 @@ async fn hook_failure_does_not_fail_exchange() {
 
 #[tokio::test]
 async fn multiple_sequential_exchanges_counter_returns_to_zero() {
-    let c = Arc::new(AtomicU64::new(0));
+    let c = Arc::new(InFlightGauge::new());
     let complete_count = Arc::new(AtomicU64::new(0));
     let layer = ExchangeUoWLayer::new(
         Arc::clone(&c),
@@ -107,6 +107,6 @@ async fn multiple_sequential_exchanges_counter_returns_to_zero() {
         .await
         .unwrap();
     }
-    assert_eq!(c.load(Ordering::Relaxed), 0);
+    assert_eq!(c.total(), 0);
     assert_eq!(complete_count.load(Ordering::Relaxed), 5);
 }

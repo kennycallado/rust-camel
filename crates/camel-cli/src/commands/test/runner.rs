@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use camel_api::{Body, Exchange, Message};
+use camel_api::{Body, Exchange, InFlightGauge, Message};
 use camel_component_api::NoOpComponentContext;
 use camel_component_direct::DirectComponent;
 use camel_component_log::LogComponent;
@@ -30,11 +30,11 @@ use super::document::{
     ExpectReply, ExpectSet, InputBody, RepositoriesDoc, TestDocError, TestDocument, TestInput,
 };
 
-/// Instability budget: traffic must quiesce within this window after the
-/// quiet window elapses, anchored at route-execution begin.
+/// Instability budget: stability-mode traffic must quiesce within this
+/// window after the quiet window elapses, anchored at route-execution
+/// begin. Also the completion-mode default timeout when the document
+/// declares no `settle`.
 pub(crate) const SETTLE_DEADLINE: Duration = Duration::from_secs(5);
-/// Sampling cadence for `received_count` across all expected endpoints.
-const SAMPLE_INTERVAL: Duration = Duration::from_millis(50);
 /// Default quiet window when the document declares no `settle`.
 const DEFAULT_QUIET: Duration = Duration::from_millis(250);
 /// Startup-race retry sleep for `direct:` producer delivery.
@@ -290,6 +290,17 @@ async fn deliver_input(
     }
 }
 
+/// True when any route consumes from a self-firing source. In the lean
+/// registry only `timer:` fires on its own; direct, log, mock, and seda
+/// are demand-driven. Timer documents settle by stability (count
+/// quiescence over expected endpoints); everything else settles by
+/// completion (the in-flight gauge reaching zero). Derived from the same
+/// from-URI scan class that collects seda consumer names (settlefix
+/// design D3).
+fn has_self_firing_consumer(defs: &[camel_core::RouteDefinition]) -> bool {
+    defs.iter().any(|def| def.from_uri().starts_with("timer:"))
+}
+
 /// Sample every expected endpoint's `received_count` simultaneously. Endpoints
 /// absent from the registry at sample time count as 0 (routes may create them
 /// late).
@@ -305,37 +316,150 @@ async fn sample_counts(mock: &MockComponent, names: &[String]) -> Vec<usize> {
     counts
 }
 
-/// Settle traffic: wait until all expected endpoints' counts are stable for
-/// the quiet window, or fail on the deadline (quiet + instability budget,
-/// anchored at route-execution begin).
-async fn settle(
+/// Completion-mode settle (settlefix design D3/D4): wait until the
+/// context-global in-flight gauge reads zero, notified by the last claim
+/// release. Register-before-check: pin+enable the idle future, then read
+/// the count, so a release landing between the two is never missed. The
+/// deadline is anchored at settle entry — after input delivery, so
+/// delivery time never consumes the settle budget — and takes precedence
+/// over idle acceptance: it is checked FIRST at entry and on every wake,
+/// so a release racing the deadline resolves too late. Never hangs: every
+/// wait is bounded by `sleep_until(deadline)`.
+async fn settle_completion(
+    gauge: &Arc<InFlightGauge>,
+    timeout: Duration,
+    settle_entry: Instant,
+) -> Result<(), String> {
+    let deadline = settle_entry + timeout;
+    let deadline_t = tokio::time::Instant::from_std(deadline);
+    loop {
+        // Deadline precedence FIRST — before any idle acceptance, on the
+        // first iteration and on every notification wake alike.
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "settle timeout: no completion notification within {timeout:?}"
+            ));
+        }
+        // Register-before-check: enable the idle future, THEN read the
+        // count. `notify_waiters` only wakes waiters registered before the
+        // release, so registration must precede the read.
+        let mut idle = std::pin::pin!(gauge.idle().notified());
+        idle.as_mut().enable();
+        if gauge.total() == 0 {
+            return Ok(());
+        }
+        tokio::select! {
+            _ = &mut idle => {
+                // Last release observed; loop re-checks the deadline,
+                // re-enables, and accepts the zero.
+            }
+            _ = tokio::time::sleep_until(deadline_t) => {
+                // Loop re-checks the deadline and errors.
+            }
+        }
+    }
+}
+
+/// Stability-mode settle (timer documents; legacy semantics, event-driven
+/// — settlefix design D3/D4): wait until every expected endpoint's
+/// received-count vector has been unchanged for the quiet window, or fail
+/// on the deadline (route start + quiet + instability budget — unchanged
+/// formula). Every expected endpoint gets an arrival-notification slot
+/// (existing before endpoint creation, so registration never depends on
+/// endpoint existence); a sampled change restarts the window, and window
+/// expiry re-samples as a backstop so a change no notification observed
+/// can only delay the restart, never settle prematurely. Never hangs:
+/// every wait is bounded by `sleep_until(min(last_change + quiet,
+/// deadline))`.
+async fn settle_stability(
     mock: &MockComponent,
     names: &[String],
     quiet: Duration,
     route_started_at: Instant,
 ) -> Result<(), String> {
     let deadline = route_started_at + quiet + SETTLE_DEADLINE;
-    let mut last_change = Instant::now();
+    // Clone-shared slots: exist from first request, independent of
+    // endpoint creation — including not-yet-created endpoints.
+    let slots: Vec<Arc<tokio::sync::Notify>> = names
+        .iter()
+        .map(|name| mock.ensure_arrival_notify(name))
+        .collect();
     let mut last_counts = sample_counts(mock, names).await;
-
+    let mut last_change = Instant::now();
     loop {
-        tokio::time::sleep(SAMPLE_INTERVAL).await;
-        let now = Instant::now();
-        if now >= deadline {
+        // Deadline precedence FIRST — mirrored from `settle_completion`, on
+        // the first iteration and on every wake alike, so a deadline crossed
+        // between arrival wakes still errors without another wait.
+        if Instant::now() >= deadline {
             return Err(
                 "settle timeout: traffic did not quiesce within the 5s instability budget"
                     .to_string(),
             );
         }
+        // Register-before-check: enable EVERY expected endpoint's notified
+        // future, THEN sample counts. A fresh future per pass — a
+        // completed `Notified` never re-fires.
+        let mut waiters = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            let mut notified = Box::pin(slot.notified());
+            notified.as_mut().enable();
+            waiters.push(notified);
+        }
         let counts = sample_counts(mock, names).await;
         if counts != last_counts {
             last_counts = counts;
-            last_change = now;
-            continue;
+            last_change = Instant::now();
         }
-        if now.duration_since(last_change) >= quiet {
-            return Ok(());
+        let window_end = std::cmp::min(last_change + quiet, deadline);
+        let any_arrival = std::future::poll_fn(|cx| {
+            for waiter in waiters.iter_mut() {
+                if waiter.as_mut().poll(cx).is_ready() {
+                    return std::task::Poll::Ready(());
+                }
+            }
+            std::task::Poll::Pending
+        });
+        tokio::select! {
+            _ = any_arrival => {
+                // An expected endpoint recorded an arrival; the next pass
+                // re-enables and re-samples (the changed sample restarts
+                // the window).
+            }
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(window_end)) => {
+                // Window expiry with no observed arrival. Deadline first,
+                // then the backstop re-sample: a change no notification
+                // observed restarts the window; an unchanged vector past
+                // the quiet window settles.
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(
+                        "settle timeout: traffic did not quiesce within the 5s instability budget"
+                            .to_string(),
+                    );
+                }
+                let counts = sample_counts(mock, names).await;
+                if counts != last_counts {
+                    last_counts = counts;
+                    last_change = now;
+                } else if now.duration_since(last_change) >= quiet {
+                    return Ok(());
+                }
+            }
         }
+    }
+}
+
+/// Map a settle failure to the document result shape: a single
+/// `<settle>` endpoint-result row — a verdict-class failure the driver
+/// counts toward exit 1 — with no document-level error (a settle timeout
+/// is a traffic verdict, not a harness fault).
+fn settle_failure_result(error: String) -> TestDocResult {
+    TestDocResult {
+        endpoint_results: vec![EndpointResult {
+            endpoint: "<settle>".to_string(),
+            outcome: Err(error),
+        }],
+        doc_error: None,
     }
 }
 
@@ -599,6 +723,11 @@ async fn run_phases(
         })
         .collect();
 
+    // Settle mode classification by the same from-URI scan class (design
+    // D3): a self-firing consumer (`timer:`) settles by stability;
+    // demand-driven documents settle by completion.
+    let stability_mode = has_self_firing_consumer(&defs);
+
     // (c) Register and start routes; anchor the settle deadline at
     // route-execution begin.
     let route_started_at = {
@@ -651,15 +780,26 @@ async fn run_phases(
             }
         }
     }
-    let quiet = doc.settle_duration().unwrap_or(DEFAULT_QUIET);
-    if let Err(e) = settle(mock, &names, quiet, route_started_at).await {
-        return TestDocResult {
-            endpoint_results: vec![EndpointResult {
-                endpoint: "<settle>".to_string(),
-                outcome: Err(e),
-            }],
-            doc_error: None,
+    // Settle entry anchors the completion-mode deadline AFTER input
+    // delivery, so delivery time never consumes the settle budget.
+    let settle_entry = Instant::now();
+    let settle_outcome = if stability_mode {
+        let quiet = doc.settle_duration().unwrap_or(DEFAULT_QUIET);
+        settle_stability(mock, &names, quiet, route_started_at).await
+    } else {
+        let gauge = {
+            let guard = ctx.lock().await;
+            guard.in_flight_gauge()
         };
+        settle_completion(
+            &gauge,
+            doc.settle_duration().unwrap_or(SETTLE_DEADLINE),
+            settle_entry,
+        )
+        .await
+    };
+    if let Err(e) = settle_outcome {
+        return settle_failure_result(e);
     }
 
     // (f) Evaluate expectations, then reply assertions in input order.
@@ -769,65 +909,5 @@ pub(super) async fn run_test_doc_with_defs(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn find_camel_toml_root_strict_walk() {
-        let root = tempfile::tempdir().expect("tempdir"); // allow-unwrap
-        std::fs::write(root.path().join("Camel.toml"), "").expect("write Camel.toml"); // allow-unwrap
-        let nested = root.path().join("a").join("b");
-        std::fs::create_dir_all(&nested).expect("create nested dir"); // allow-unwrap
-        assert_eq!(
-            find_camel_toml_root(&nested),
-            Some(root.path().to_path_buf())
-        );
-    }
-
-    #[test]
-    fn find_camel_toml_root_no_marker_is_none() {
-        let root = tempfile::tempdir().expect("tempdir"); // allow-unwrap
-        // A workspace Cargo.toml is NOT an accepted marker for this walk.
-        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").expect("write Cargo.toml"); // allow-unwrap
-        let nested = root.path().join("nested");
-        std::fs::create_dir_all(&nested).expect("create nested dir"); // allow-unwrap
-        assert_eq!(find_camel_toml_root(&nested), None);
-    }
-
-    /// Output-message precedence at the reply-evaluation boundary: with a
-    /// hand-built exchange carrying input body `A` and output body `B`, an
-    /// expectation of `B` passes and one of `A` fails — the output message
-    /// is preferred when present, regardless of DSL reachability (no
-    /// lean-set step sets `exchange.output`).
-    #[test]
-    fn reply_output_message_precedence() {
-        let mut exchange = Exchange::new(Message::new(Body::Text("A".to_string())));
-        exchange.output = Some(Message::new(Body::Text("B".to_string())));
-
-        let expect_b = ExpectReply {
-            body: Some(camel_component_mock::BodyMatcher::Equals(Body::Text(
-                "B".to_string(),
-            ))),
-            headers: None,
-        };
-        let row = evaluate_reply_expectation(&expect_b, &exchange, "reply[0] direct:in");
-        assert_eq!(row.endpoint, "reply[0] direct:in");
-        assert!(
-            row.outcome.is_ok(),
-            "expected B must match output body B: {:?}",
-            row.outcome
-        );
-
-        let expect_a = ExpectReply {
-            body: Some(camel_component_mock::BodyMatcher::Equals(Body::Text(
-                "A".to_string(),
-            ))),
-            headers: None,
-        };
-        let row = evaluate_reply_expectation(&expect_a, &exchange, "reply[0] direct:in");
-        assert!(
-            row.outcome.is_err(),
-            "expected A must NOT match output body B (output takes precedence)"
-        );
-    }
-}
+#[path = "runner_tests.rs"]
+mod runner_tests;

@@ -3,10 +3,9 @@
 //! for endpoint resolution and observability during route compilation and startup.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use camel_api::metrics::MetricsCollector;
-use camel_api::{AsyncHealthCheck, PlatformService};
+use camel_api::{AsyncHealthCheck, InFlightGauge, PlatformService};
 use camel_component_api::ComponentContext;
 use camel_processor::aggregator::SharedLanguageRegistry;
 
@@ -25,11 +24,11 @@ pub(crate) struct ControllerComponentContext {
     /// assembly — the production seam for
     /// [`RuntimeObservability::component_metrics`] (lever-gated family).
     component_metrics_enabled: bool,
-    /// Context-global accepted-not-completed counter (drainclaim):
+    /// Context-global accepted-not-completed gauge (drainclaim):
     /// `Some` on production paths whose `Arc<dyn RuntimeObservability>`
     /// reaches `create_producer`, so producers can mint `InFlightClaim`s.
     /// Default `None` keeps test-only contexts uncounted.
-    in_flight: Option<Arc<AtomicU64>>,
+    in_flight: Option<Arc<InFlightGauge>>,
 }
 
 impl ControllerComponentContext {
@@ -54,11 +53,11 @@ impl ControllerComponentContext {
         }
     }
 
-    /// Install the context-global accepted-not-completed counter
+    /// Install the context-global accepted-not-completed gauge
     /// (drainclaim). Production construction sites chain this with the
-    /// SAME `Arc<AtomicU64>` the `CamelContext` exposes through
+    /// SAME `Arc<InFlightGauge>` the `CamelContext` exposes through
     /// `total_in_flight()`.
-    pub(crate) fn with_in_flight(self, counter: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_in_flight(self, counter: Arc<InFlightGauge>) -> Self {
         let mut this = self;
         this.in_flight = Some(counter);
         this
@@ -98,7 +97,7 @@ impl ComponentContext for ControllerComponentContext {
         self.component_metrics_enabled
     }
 
-    fn in_flight_counter(&self) -> Option<Arc<AtomicU64>> {
+    fn in_flight_counter(&self) -> Option<Arc<InFlightGauge>> {
         self.in_flight.clone()
     }
 }

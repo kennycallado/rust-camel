@@ -5,9 +5,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use camel_api::BoxProcessor;
+use camel_api::{BoxProcessor, InFlightGauge};
 
 use super::consumer_management;
 use super::route_helpers::{ManagedRoute, handle_is_running, inferred_lifecycle_label};
@@ -112,15 +111,13 @@ impl RouteRegistry {
 
     /// Returns the in-flight exchange count for a route, if the route has UoW tracking.
     pub(super) fn in_flight_count(&self, route_id: &str) -> Option<u64> {
-        self.routes.get(route_id).map(|r| {
-            r.in_flight
-                .as_ref()
-                .map_or(0, |c| c.load(Ordering::Relaxed))
-        })
+        self.routes
+            .get(route_id)
+            .map(|r| r.in_flight.as_ref().map_or(0, |c| c.total()))
     }
 
-    /// Returns a clone of the in-flight counter for a route (for use in hot-reload).
-    pub(super) fn in_flight_counter(&self, route_id: &str) -> Option<Arc<AtomicU64>> {
+    /// Returns a clone of the in-flight gauge for a route (for use in hot-reload).
+    pub(super) fn in_flight_counter(&self, route_id: &str) -> Option<Arc<InFlightGauge>> {
         self.routes
             .get(route_id)
             .and_then(|r| r.in_flight.as_ref().map(Arc::clone))

@@ -2,6 +2,7 @@ use super::*;
 use crate::commands::run::tests::EnvVarGuard;
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// Create a unique temp directory for one test.
 fn temp_dir(tag: &str) -> PathBuf {
@@ -103,6 +104,9 @@ impl Drop for CleanupPaths {
         for path in &self.0 {
             let _ = fs::remove_file(path);
             let _ = fs::remove_dir(path);
+            // Fallback for test temp dirs whose document files live inside:
+            // `remove_dir` fails ENOTEMPTY, so recurse to clean the tree.
+            let _ = fs::remove_dir_all(path);
         }
     }
 }
@@ -328,19 +332,28 @@ async fn multi_doc_second_failing_both_evaluated() {
     assert!(out.contains("1 passed, 1 failed"), "out: {out}");
 }
 
+/// Spec scenario "sequential execution unchanged" (settlefix), extended
+/// from the former two-document pin: three lean documents with distinct
+/// endpoint names, passed in a known argument order, must print their
+/// per-document result lines to stdout in that same order.
 #[tokio::test(flavor = "multi_thread")]
 async fn multi_doc_arg_order() {
     let dir = temp_dir("arg-order");
-    let a = write_passing(&dir, "a.test.yaml");
-    let b = write_passing(&dir, "b.test.yaml");
+    let a = write_passing(&dir, "a.test.yaml"); // mock:out
+    let b = write_orders(&dir, "b.test.yaml"); // mock:orders
+    let c = write_lean_result_doc(&dir, "c.test.yaml", None); // mock:result
+    let _guard = CleanupPaths(vec![a.clone(), b.clone(), c.clone(), dir.clone()]);
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let summary = run_tests(&[a, b], &mut out, &mut err).await;
+    let summary = run_tests(&[a, b, c], &mut out, &mut err).await;
     assert_eq!(summary.exit_code, 0);
+    assert_eq!(summary.passed, 3, "one endpoint per document");
     let out = String::from_utf8(out).unwrap();
     let ia = out.find("a.test.yaml#out").expect("a PASS line"); // allow-unwrap
-    let ib = out.find("b.test.yaml#out").expect("b PASS line"); // allow-unwrap
+    let ib = out.find("b.test.yaml#orders").expect("b PASS line"); // allow-unwrap
+    let ic = out.find("c.test.yaml#result").expect("c PASS line"); // allow-unwrap
     assert!(ia < ib, "a must precede b in out: {out}");
+    assert!(ib < ic, "b must precede c in out: {out}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1067,9 +1080,15 @@ expects:
 /// Write a document whose route sends to `mock:out` only when the filter
 /// predicate passes (`sends`); the endpoint is created at route-add either
 /// way, and `maxCount: 0` is an absence claim over the settled window.
-fn write_absence_doc(dir: &Path, name: &str, sends: bool) -> PathBuf {
+/// `settle` pins an explicit quiet window; `None` leaves the document on
+/// the default settling path.
+fn write_absence_doc(dir: &Path, name: &str, sends: bool, settle: Option<&str>) -> PathBuf {
     let path = dir.join(name);
     let needle = if sends { "x" } else { "never-sent" };
+    let settle_line = match settle {
+        Some(raw) => format!("\nsettle: {raw}"),
+        None => String::new(),
+    };
     fs::write(
         &path,
         format!(
@@ -1087,8 +1106,7 @@ inputs:
     body: "x"
 expects:
   mock:out:
-    maxCount: 0
-settle: 200ms
+    maxCount: 0{settle_line}
 "#
         ),
     )
@@ -1351,9 +1369,17 @@ expects:
 
 #[tokio::test(flavor = "multi_thread")]
 async fn max_count_zero_asserts_absence() {
+    let pass_dir = temp_dir("max-zero-pass");
+    let default_dir = temp_dir("max-zero-pass-default");
+    let fail_dir = temp_dir("max-zero-fail");
+    let _guard = CleanupPaths(vec![
+        pass_dir.clone(),
+        default_dir.clone(),
+        fail_dir.clone(),
+    ]);
+
     // No arrival inside the window: the absence claim holds.
-    let dir = temp_dir("max-zero-pass");
-    let path = write_absence_doc(&dir, "pass.test.yaml", false);
+    let path = write_absence_doc(&pass_dir, "pass.test.yaml", false, Some("200ms"));
     let mut out = Vec::new();
     let mut err = Vec::new();
     let summary = run_tests(&[path], &mut out, &mut err).await;
@@ -1365,9 +1391,24 @@ async fn max_count_zero_asserts_absence() {
     assert!(out.contains("PASS"), "out: {out}");
     assert!(out.contains("pass.test.yaml#out"), "out: {out}");
 
+    // Revised spec scenario (settlefix) "maxCount zero asserts absence
+    // after settling", notification arm: no explicit `settle:` — the run
+    // settles on the in-flight-zero completion notification with no
+    // fixed window floor, and the absence claim still holds.
+    let path = write_absence_doc(&default_dir, "pass.test.yaml", false, None);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(
+        summary.exit_code, 0,
+        "maxCount 0 must pass after default notification settling"
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("PASS"), "out: {out}");
+    assert!(out.contains("pass.test.yaml#out"), "out: {out}");
+
     // Same-window arrival: the absence claim fails with the at-most text.
-    let dir = temp_dir("max-zero-fail");
-    let path = write_absence_doc(&dir, "fail.test.yaml", true);
+    let path = write_absence_doc(&fail_dir, "fail.test.yaml", true, Some("200ms"));
     let mut out = Vec::new();
     let mut err = Vec::new();
     let summary = run_tests(&[path], &mut out, &mut err).await;
@@ -1376,6 +1417,258 @@ async fn max_count_zero_asserts_absence() {
     assert!(
         out.contains("MockEndpoint 'out': expected at most 0 exchanges, got 1"),
         "an arrival must break the maxCount 0 claim: {out}"
+    );
+}
+
+/// Write a lean document forwarding one input from `direct:in` to
+/// `mock:result` (count 1), with an optional explicit `settle:` window.
+fn write_lean_result_doc(dir: &Path, name: &str, settle: Option<&str>) -> PathBuf {
+    let path = dir.join(name);
+    let settle_line = match settle {
+        Some(raw) => format!("settle: {raw}\n"),
+        None => String::new(),
+    };
+    fs::write(
+        &path,
+        format!(
+            r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - to: "mock:result"
+inputs:
+  - to: "direct:in"
+    body: "x"
+expects:
+  mock:result:
+    count: 1
+{settle_line}"#
+        ),
+    )
+    .expect("write lean result doc"); // allow-unwrap
+    path
+}
+
+/// Write a self-firing timer document: route `timer:{timer_query}` →
+/// `mock:result`, no inputs (the route self-starts), `expects count`
+/// on `mock:result`.
+fn write_timer_result_doc(dir: &Path, name: &str, timer_query: &str, count: usize) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"
+routes:
+  - id: r1
+    from: "timer:{timer_query}"
+    steps:
+      - to: "mock:result"
+expects:
+  mock:result:
+    count: {count}
+"#
+        ),
+    )
+    .expect("write timer result doc"); // allow-unwrap
+    path
+}
+
+/// Write the late-arrival absence document: route
+/// `timer:late?period=1000&delay=100&repeatCount=1` → `mock:silent`
+/// (exactly one tick, ~100 ms into the run) with `maxCount: 0` on
+/// `mock:silent`.
+fn write_late_arrival_absence_doc(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        r#"
+routes:
+  - id: r1
+    from: "timer:late?period=1000&delay=100&repeatCount=1"
+    steps:
+      - to: "mock:silent"
+expects:
+  mock:silent:
+    maxCount: 0
+"#,
+    )
+    .expect("write late-arrival absence doc"); // allow-unwrap
+    path
+}
+
+/// Spec scenario "lean document settles on the completion notification",
+/// driver level: five lean documents in one run must each settle on the
+/// in-flight-zero notification with no quiet-window floor — the old
+/// sampler's settle windows alone (5 × 250 ms) would exceed the 1250 ms
+/// bound, so the bound pins the notification fast path.
+#[tokio::test(flavor = "multi_thread")]
+async fn lean_batch_settles_without_window_floor() {
+    let dir = temp_dir("lean-batch-fast");
+    let paths: Vec<PathBuf> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|tag| write_lean_result_doc(&dir, &format!("{tag}.test.yaml"), None))
+        .collect();
+    let mut cleanup = paths.clone();
+    cleanup.push(dir.clone());
+    let _guard = CleanupPaths(cleanup);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let config = TestRunConfig {
+        files: paths,
+        ..Default::default()
+    };
+    let started = Instant::now();
+    let summary = run_tests_full(&config, &mut out, &mut err).await;
+    let elapsed = started.elapsed();
+    assert_eq!(summary.exit_code, 0);
+    assert_eq!(summary.passed, 5, "every lean document must pass");
+    assert_eq!(summary.failed, 0);
+    assert!(
+        elapsed < Duration::from_millis(1250),
+        "five lean documents must settle on notifications, not 5×250ms windows: {elapsed:?}"
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("5 passed, 0 failed"), "out: {out}");
+}
+
+/// Spec scenario "existing `settle:` config keeps working as a pure
+/// deadline": a lean document declaring `settle: 50ms` still passes —
+/// the explicit window caps the completion notification instead of
+/// imposing a fixed sleep.
+#[tokio::test(flavor = "multi_thread")]
+async fn settle_50ms_keeps_working_as_deadline() {
+    let dir = temp_dir("settle-50ms-deadline");
+    let path = write_lean_result_doc(&dir, "a.test.yaml", Some("50ms"));
+    let _guard = CleanupPaths(vec![path.clone(), dir.clone()]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let config = TestRunConfig {
+        files: vec![path],
+        ..Default::default()
+    };
+    let started = Instant::now();
+    let summary = run_tests_full(&config, &mut out, &mut err).await;
+    let elapsed = started.elapsed();
+    assert_eq!(summary.exit_code, 0);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "a 50ms settle deadline must not degrade into a fixed sleep: {elapsed:?}"
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("a.test.yaml#result"), "out: {out}");
+}
+
+/// Spec scenario "timer route settles before assertion": three ticks at
+/// 20 ms must all arrive inside the stability window, and the count
+/// assertion evaluated after settling must see all three.
+#[tokio::test(flavor = "multi_thread")]
+async fn timer_route_settles_before_assertion() {
+    let dir = temp_dir("timer-settle-assert");
+    let path = write_timer_result_doc(&dir, "a.test.yaml", "tick?period=20&repeatCount=3", 3);
+    let _guard = CleanupPaths(vec![path.clone(), dir.clone()]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let config = TestRunConfig {
+        files: vec![path],
+        ..Default::default()
+    };
+    let summary = run_tests_full(&config, &mut out, &mut err).await;
+    let out = String::from_utf8(out).unwrap();
+    let err = String::from_utf8(err).unwrap();
+    assert_eq!(
+        summary.exit_code, 0,
+        "all three ticks must arrive before the assertion — out: {out} | err: {err}"
+    );
+    assert!(out.contains("a.test.yaml#result"), "out: {out}");
+    assert!(out.contains("1 passed, 0 failed"), "out: {out}");
+}
+
+/// Spec scenario "count change resets the quiet window": with a 150 ms
+/// period the second tick restarts the 250 ms quiet window, so the run
+/// cannot settle before the second fire plus the full quiet window
+/// (~400 ms after route start; boot time only adds). The lower bound
+/// pins the reset semantics — a sampler anchored at the first arrival
+/// would settle earlier.
+#[tokio::test(flavor = "multi_thread")]
+async fn timer_count_change_resets_window() {
+    let dir = temp_dir("timer-reset-window");
+    let path = write_timer_result_doc(&dir, "a.test.yaml", "tick?period=150&repeatCount=2", 2);
+    let _guard = CleanupPaths(vec![path.clone(), dir.clone()]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let config = TestRunConfig {
+        files: vec![path],
+        ..Default::default()
+    };
+    let started = Instant::now();
+    let summary = run_tests_full(&config, &mut out, &mut err).await;
+    let elapsed = started.elapsed();
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(summary.exit_code, 0, "both ticks must arrive: {out}");
+    assert!(
+        elapsed >= Duration::from_millis(400),
+        "the second arrival (~150ms) must restart the 250ms quiet window before settle: {elapsed:?}"
+    );
+    assert!(out.contains("a.test.yaml#result"), "out: {out}");
+}
+
+/// Revised spec scenario "maxCount zero asserts absence after settling",
+/// late-arrival arm: the single tick fires ~100 ms into the run — inside
+/// the settle window — restarting the quiet window; after it quiets, the
+/// absence claim must fail with the at-most text at exit 1.
+#[tokio::test(flavor = "multi_thread")]
+async fn maxcount_zero_late_arrival_fails() {
+    let dir = temp_dir("max-zero-late");
+    let path = write_late_arrival_absence_doc(&dir, "a.test.yaml");
+    let _guard = CleanupPaths(vec![path.clone(), dir.clone()]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let config = TestRunConfig {
+        files: vec![path],
+        ..Default::default()
+    };
+    let summary = run_tests_full(&config, &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 1);
+    assert_eq!(summary.failed, 1);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("MockEndpoint 'silent': expected at most 0 exchanges, got 1"),
+        "the late tick must break the maxCount 0 claim: {out}"
+    );
+}
+
+/// Spec scenario "unstable traffic times out at the instability budget",
+/// driver level: a 5 ms infinite timer keeps resetting the quiet window
+/// until the deadline (route start + quiet + budget ≈ 5.25 s — the fixed
+/// SETTLE_DEADLINE makes this an intentionally ~5 s test). The settle
+/// verdict must fail the run at exit 1, and the driver prints the
+/// `<settle>` FAIL line to STDOUT (verdict-class row, not stderr).
+#[tokio::test(flavor = "multi_thread")]
+async fn timer_unstable_traffic_times_out_exit_1() {
+    // Runs ~5.25s by design: the fixed SETTLE_DEADLINE (5s) budget plus
+    // the 250ms default quiet window must elapse before the settle gives
+    // up on continuously-arriving traffic.
+    let dir = temp_dir("timer-flood-timeout");
+    let path = write_timer_result_doc(&dir, "a.test.yaml", "flood?period=5", 1);
+    let _guard = CleanupPaths(vec![path.clone(), dir.clone()]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let config = TestRunConfig {
+        files: vec![path],
+        ..Default::default()
+    };
+    let summary = run_tests_full(&config, &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 1);
+    assert_eq!(
+        summary.failed, 1,
+        "the <settle> verdict counts as the one failure"
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("#<settle>"), "out: {out}");
+    assert!(
+        out.contains("settle timeout: traffic did not quiesce within the 5s instability budget"),
+        "out: {out}"
     );
 }
 

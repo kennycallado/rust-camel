@@ -124,8 +124,8 @@ pub(super) struct ManagedRoute {
     /// Channel sender for sending exchanges to the pipeline.
     /// Stored to allow resuming a suspended route without recreating the channel.
     pub(super) channel_sender: Option<mpsc::Sender<ExchangeEnvelope>>,
-    /// In-flight exchange counter. `None` when UoW is not configured for this route.
-    pub(super) in_flight: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// In-flight exchange gauge. `None` when UoW is not configured for this route.
+    pub(super) in_flight: Option<Arc<camel_api::InFlightGauge>>,
     /// Always-populated counter for shutdown drain coordination (ADR-0043 amend).
     /// Incremented when the pipeline task dequeues an exchange, decremented on
     /// completion. `stop_route_internal` waits for this to reach zero before

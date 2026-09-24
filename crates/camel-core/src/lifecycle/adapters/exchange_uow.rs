@@ -4,42 +4,25 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tower::{Layer, Service, ServiceExt};
 
-use camel_api::{BoxProcessor, CamelError, Exchange};
-
-// ─── RAII Guard ──────────────────────────────────────────────────────────────
-
-/// RAII guard that decrements the in-flight counter when dropped.
-///
-/// Uses `Ordering::Relaxed` intentionally: the counter is a best-effort
-/// observability metric, not a synchronization primitive. Approximate
-/// counts under concurrent load are acceptable — no happens-before
-/// relationship with other memory is required.
-pub struct InFlightGuard(Arc<AtomicU64>);
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
-    }
-}
+use camel_api::{BoxProcessor, CamelError, Exchange, InFlightClaim, InFlightGauge};
 
 // ─── Layer ───────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct ExchangeUoWLayer {
-    counter: Arc<AtomicU64>,
+    counter: Arc<InFlightGauge>,
     on_complete_producer: Option<BoxProcessor>,
     on_failure_producer: Option<BoxProcessor>,
 }
 
 impl ExchangeUoWLayer {
     pub fn new(
-        counter: Arc<AtomicU64>,
+        counter: Arc<InFlightGauge>,
         on_complete_producer: Option<BoxProcessor>,
         on_failure_producer: Option<BoxProcessor>,
     ) -> Self {
@@ -73,7 +56,7 @@ where
 #[derive(Clone)]
 pub struct ExchangeUoW<S> {
     inner: S,
-    counter: Arc<AtomicU64>,
+    counter: Arc<InFlightGauge>,
     on_complete_producer: Option<BoxProcessor>,
     on_failure_producer: Option<BoxProcessor>,
 }
@@ -98,9 +81,10 @@ where
         let on_failure = self.on_failure_producer.clone();
 
         Box::pin(async move {
-            // Relaxed: this counter is observability-only; no synchronization needed.
-            counter.fetch_add(1, Ordering::Relaxed);
-            let _guard = InFlightGuard(Arc::clone(&counter));
+            // The claim increments at attach and decrements exactly once
+            // when the future completes (RAII) — same lifetime as the
+            // former fetch_add/guard pair.
+            let _claim = InFlightClaim::attach(&counter);
             let original = exchange.clone();
 
             let result = match inner.ready().await {
@@ -158,7 +142,7 @@ async fn fire_hook(producer: Option<BoxProcessor>, exchange: Option<Exchange>) {
 mod tests {
     use super::*;
     use camel_api::{BoxProcessorExt, Message};
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn make_exchange() -> Exchange {
         Exchange::new(Message::new("test"))
@@ -185,24 +169,24 @@ mod tests {
 
     #[tokio::test]
     async fn counter_increments_then_decrements_on_success() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let layer = ExchangeUoWLayer::new(Arc::clone(&counter), None, None);
         let svc = layer.layer(identity());
-        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        assert_eq!(counter.total(), 0);
         let _ = tower::ServiceExt::oneshot(svc, make_exchange())
             .await
             .unwrap();
-        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        assert_eq!(counter.total(), 0);
     }
 
     #[tokio::test]
     async fn counter_decrements_on_inner_error() {
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let layer = ExchangeUoWLayer::new(Arc::clone(&counter), None, None);
         let svc = layer.layer(failing());
         let result = tower::ServiceExt::oneshot(svc, make_exchange()).await;
         assert!(result.is_err());
-        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        assert_eq!(counter.total(), 0);
     }
 
     #[tokio::test]
@@ -213,7 +197,7 @@ mod tests {
             fired_clone.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move { Ok(ex) })
         });
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let layer = ExchangeUoWLayer::new(Arc::clone(&counter), Some(hook), None);
         let _ = tower::ServiceExt::oneshot(layer.layer(identity()), make_exchange())
             .await
@@ -229,7 +213,7 @@ mod tests {
             fired_clone.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move { Ok(ex) })
         });
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let layer = ExchangeUoWLayer::new(Arc::clone(&counter), None, Some(hook));
         let _ = tower::ServiceExt::oneshot(layer.layer(failing()), make_exchange()).await;
         assert_eq!(fired.load(Ordering::Relaxed), 1);
@@ -243,7 +227,7 @@ mod tests {
             fired_clone.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move { Ok(ex) })
         });
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let layer = ExchangeUoWLayer::new(Arc::clone(&counter), None, Some(hook));
         let _ = tower::ServiceExt::oneshot(layer.layer(error_exchange_proc()), make_exchange())
             .await
@@ -287,7 +271,7 @@ mod tests {
             fired_clone.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move { Ok(ex) })
         });
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let layer = ExchangeUoWLayer::new(Arc::clone(&counter), None, Some(hook));
         let svc = layer.layer(FailReadySvc {
             polls: Arc::new(AtomicU64::new(0)),
@@ -299,7 +283,7 @@ mod tests {
             1,
             "on_failure must fire when poll_ready fails"
         );
-        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        assert_eq!(counter.total(), 0);
     }
 
     #[tokio::test]
@@ -310,7 +294,7 @@ mod tests {
             fired_clone.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move { Ok(ex) })
         });
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let layer = ExchangeUoWLayer::new(Arc::clone(&counter), Some(hook), None);
         let _ = tower::ServiceExt::oneshot(layer.layer(error_exchange_proc()), make_exchange())
             .await
@@ -323,7 +307,7 @@ mod tests {
         let bad_hook = BoxProcessor::from_fn(|_| {
             Box::pin(async { Err(CamelError::ProcessorError("hook failed".into())) })
         });
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let layer = ExchangeUoWLayer::new(Arc::clone(&counter), Some(bad_hook), None);
         let result = tower::ServiceExt::oneshot(layer.layer(identity()), make_exchange()).await;
         assert!(
@@ -348,7 +332,7 @@ mod tests {
             fired_clone.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move { Ok(ex) })
         });
-        let counter = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(InFlightGauge::new());
         let layer = ExchangeUoWLayer::new(Arc::clone(&counter), Some(hook), None);
 
         // Top-level pipeline with Stop — maps Stop to Ok(ex).
@@ -368,15 +352,5 @@ mod tests {
             1,
             "on_complete MUST fire for Stop (same as Completed)"
         );
-    }
-
-    #[test]
-    fn in_flight_guard_decrements_on_drop() {
-        let counter = Arc::new(AtomicU64::new(1));
-        {
-            let _guard = InFlightGuard(Arc::clone(&counter));
-            assert_eq!(counter.load(Ordering::Relaxed), 1);
-        }
-        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 }

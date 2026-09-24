@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -7,29 +6,29 @@ use tokio::time::timeout;
 
 #[test]
 fn claim_attach_increments_and_drop_decrements() {
-    let counter = Arc::new(AtomicU64::new(0));
+    let counter = Arc::new(InFlightGauge::new());
     let claim = InFlightClaim::attach(&counter);
-    assert_eq!(counter.load(Ordering::Acquire), 1);
+    assert_eq!(counter.total(), 1);
     drop(claim);
-    assert_eq!(counter.load(Ordering::Acquire), 0);
+    assert_eq!(counter.total(), 0);
 }
 
 #[test]
 fn claim_split_adds_one_sibling() {
-    let counter = Arc::new(AtomicU64::new(0));
+    let counter = Arc::new(InFlightGauge::new());
     let original = InFlightClaim::attach(&counter);
-    assert_eq!(counter.load(Ordering::Acquire), 1);
+    assert_eq!(counter.total(), 1);
     let sibling = original.split();
-    assert_eq!(counter.load(Ordering::Acquire), 2);
+    assert_eq!(counter.total(), 2);
     drop(sibling);
-    assert_eq!(counter.load(Ordering::Acquire), 1);
+    assert_eq!(counter.total(), 1);
     drop(original);
-    assert_eq!(counter.load(Ordering::Acquire), 0);
+    assert_eq!(counter.total(), 0);
 }
 
 #[tokio::test]
 async fn send_attaches_claim_when_counter_installed() {
-    let counter = Arc::new(AtomicU64::new(0));
+    let counter = Arc::new(InFlightGauge::new());
     let (tx, mut rx) = mpsc::channel(1);
     let ctx = ConsumerContext::new(tx, CancellationToken::new(), "route".to_string())
         .with_in_flight_counter(Arc::clone(&counter));
@@ -41,9 +40,9 @@ async fn send_attaches_claim_when_counter_installed() {
         .expect("envelope must arrive within 2s")
         .expect("envelope channel alive");
     assert!(envelope.in_flight_claim.is_some());
-    assert_eq!(counter.load(Ordering::Acquire), 1);
+    assert_eq!(counter.total(), 1);
     drop(envelope);
-    assert_eq!(counter.load(Ordering::Acquire), 0);
+    assert_eq!(counter.total(), 0);
 }
 
 #[tokio::test]
@@ -62,12 +61,12 @@ async fn send_without_counter_carries_none() {
 
 #[tokio::test]
 async fn push_failure_rolls_claim_back() {
-    let counter = Arc::new(AtomicU64::new(0));
+    let counter = Arc::new(InFlightGauge::new());
     // Pre-seed the counter with one live claim (baseline 1): a failed send
     // that never attached would leave the counter at 1, so only a real
     // rollback returns it to the prior value.
     let _baseline = InFlightClaim::attach(&counter);
-    assert_eq!(counter.load(Ordering::Acquire), 1);
+    assert_eq!(counter.total(), 1);
     let (tx, rx) = mpsc::channel(1);
     drop(rx); // receiver gone — the push must fail
     let ctx = ConsumerContext::new(tx, CancellationToken::new(), "route".to_string())
@@ -79,12 +78,12 @@ async fn push_failure_rolls_claim_back() {
     assert!(matches!(err, CamelError::ChannelClosed));
     // The rejected envelope dropped its claim — counter rolled back to the
     // pre-existing baseline (1), not to 0.
-    assert_eq!(counter.load(Ordering::Acquire), 1);
+    assert_eq!(counter.total(), 1);
 }
 
 #[tokio::test]
 async fn raw_sender_path_stays_uncounted() {
-    let counter = Arc::new(AtomicU64::new(0));
+    let counter = Arc::new(InFlightGauge::new());
     let (tx, mut rx) = mpsc::channel(1);
     let ctx = ConsumerContext::new(tx, CancellationToken::new(), "route".to_string())
         .with_in_flight_counter(Arc::clone(&counter));
@@ -102,7 +101,7 @@ async fn raw_sender_path_stays_uncounted() {
         .expect("envelope must arrive within 2s")
         .expect("envelope channel alive");
     assert!(envelope.in_flight_claim.is_none());
-    assert_eq!(counter.load(Ordering::Acquire), 0);
+    assert_eq!(counter.total(), 0);
 }
 
 // rc-nftni: raw-sender components capture the counter through the getter and
@@ -110,7 +109,7 @@ async fn raw_sender_path_stays_uncounted() {
 // the context mints with, not a copy of the current value.
 #[test]
 fn in_flight_counter_getter_returns_the_installed_arc() {
-    let counter = Arc::new(AtomicU64::new(0));
+    let counter = Arc::new(InFlightGauge::new());
     let (tx, _rx) = mpsc::channel(1);
     let ctx = ConsumerContext::new(tx, CancellationToken::new(), "route".to_string());
     assert!(
@@ -124,7 +123,7 @@ fn in_flight_counter_getter_returns_the_installed_arc() {
     // Attach through the RETURNED handle: only the same Arc moves the
     // original counter.
     let claim = InFlightClaim::attach(&returned);
-    assert_eq!(counter.load(Ordering::Acquire), 1);
+    assert_eq!(counter.total(), 1);
     drop(claim);
-    assert_eq!(counter.load(Ordering::Acquire), 0);
+    assert_eq!(counter.total(), 0);
 }

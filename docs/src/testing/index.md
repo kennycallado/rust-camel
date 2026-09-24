@@ -139,7 +139,7 @@ The stub beans mirror the `bean:` step. The step looks up a bean by name and cal
 
 ### Endpoint expectations
 
-`expects` maps a `mock:` endpoint name to an expectation object. The object may hold `count`, `minCount`, `maxCount`, a `bodies` list, and a `headers` map. `count` is mutually exclusive with `minCount` and with `maxCount`. `minCount` together with `maxCount` means the inclusive range `[minCount, maxCount]`; `minCount` above `maxCount` is a document error. An explicit `maxCount: 0` asserts absence: the endpoint must receive no exchanges during the settle window. Example: `expects: {mock: out: {minCount: 1, maxCount: 2}}` passes with 1 or 2 exchanges and fails with 3.
+`expects` maps a `mock:` endpoint name to an expectation object. The object may hold `count`, `minCount`, `maxCount`, a `bodies` list, and a `headers` map. `count` is mutually exclusive with `minCount` and with `maxCount`. `minCount` together with `maxCount` means the inclusive range `[minCount, maxCount]`; `minCount` above `maxCount` is a document error. An explicit `maxCount: 0` asserts absence: the endpoint must receive no exchanges while the document settles. Example: `expects: {mock: out: {minCount: 1, maxCount: 2}}` passes with 1 or 2 exchanges and fails with 3.
 
 `bodies` uses strict grammar. Each entry is a bare string or a single-key matcher map. A bare string is exact equality (`equals`). A map with one recognized body-matcher key selects that matcher. Any other form is a document error. `camel test` exits with code 2 and names the field and the key.
 
@@ -256,6 +256,20 @@ Both sides name `faststub`; the stub registers and the route loads. Without the 
 Every `env:` value must be a string. An integer, boolean, or null value is a document error. Values are data, never re-interpolated: the value text is substituted verbatim, so a value that itself looks like a placeholder stays literal. Typing follows the route-side contract: a substituted leaf keeps string typing, so an integer- or boolean-typed field carrying a placeholder fails the document exactly as `camel run` rejects it, even when the `env:` map supplies the value. Numeric-typed knobs are tracked separately.
 
 Identifier interpolation has a fixed grammar and scope. The doc-side identifier fields resolve `${env:NAME:-default}` through the same scanner as the route sources. A stub key and its route reference thus always name the same value. Interpolation runs after deserialization and before the other document checks. The scheme, blank-name, and built-in `memory` guards see the resolved value. A placeholder without a default and without an `env:` entry fails document validation at exit 2. The message names the variable and the field position. Assertion data and path fields stay literal. Input `body` and `headers` values, `expectReply` blocks, matcher contents, bean `methods` and `config` values, repository stub targets, `settle`, and the `routeFiles` and `routeFilesFromRoot` paths are never interpolated. The scope follows the mock-testkit spec requirement "Doc-side identifiers interpolate through the document env layer for name-match parity with route sources" (`openspec/specs/mock-testkit/spec.md` in the repository, outside the rendered book). The regression that motivated the requirement is tracked as bd rc-4hexo.
+
+### Settling before assertions
+
+`camel test` settles traffic before it evaluates expectations. The settle mode is structural: it is derived from the routes, not declared in the document. A document whose routes consume from no self-firing source runs in **completion mode**. A document with at least one such consumer runs in **stability mode**. In the lean registry the only self-firing source is `timer:`; `direct`, `log`, `mock`, and `seda` are demand-driven.
+
+Completion mode settles on the in-flight quiescence notification: the context-global accepted-not-completed counter releases its last claim. No quiet window applies. `settle:` is the settle timeout, a humantime string within `0 < settle <= 5s`; the default is 5s. The timeout is anchored after input delivery, so delivery time never consumes the settle budget. An expired deadline fails before any idle acceptance; an idle counter with an unexpired deadline completes at once.
+
+Stability mode cannot use counter quiescence: a self-firing source keeps producing traffic that no input claims. The quiet window (default 250ms, overridden by `settle:`) must elapse with no change in the expected endpoints' `received_count`. Every arrival that changes a sampled count restarts the window. The document-wide deadline starts when route execution begins and equals one full quiet window plus a 5s instability budget, so any valid `settle:` value can satisfy its own window.
+
+In both modes a count above its expectation does not end settling — only the mode's completion condition does. A run that reaches its deadline without settling fails the document with a settle-timeout message and exit code 1. It never hangs.
+
+Historical note: an interim mitigation set `settle: 50ms` to shorten lean runs (4.9x on lean batches; 258ms down to 52.7ms per document). Completion mode supersedes that mitigation: lean documents now settle in microseconds without tuning. Existing `settle: 50ms` configurations keep working — the value now acts as the completion-mode deadline.
+
+The contract lives in the mock-testkit spec (`openspec/specs/mock-testkit/spec.md` in the repository — outside the rendered book), requirement "Settling before assertion".
 
 ### CI output and filters
 

@@ -4,7 +4,6 @@
 //! including starting, stopping, suspending, and resuming routes.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -21,8 +20,8 @@ use camel_api::metrics::MetricsCollector;
 #[allow(unused_imports)]
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FunctionInvoker, IdentityProcessor, InFlightClaim,
-    NoOpMetrics, NoopPlatformService, PlatformService, ProducerContext, RouteController,
-    RuntimeHandle, StepLifecycle,
+    InFlightGauge, NoOpMetrics, NoopPlatformService, PlatformService, ProducerContext,
+    RouteController, RuntimeHandle, StepLifecycle,
 };
 use camel_component_api::{Consumer, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_processor::aggregator::AggregatorService;
@@ -111,12 +110,12 @@ pub struct DefaultRouteController {
     /// `RouteControllerHandle` at spawn; reset/activate act on this shared
     /// gate directly, never through the actor.
     pub(super) cohort: Arc<CohortActivationGate>,
-    /// Context-global accepted-not-completed counter (drainclaim): the
+    /// Context-global accepted-not-completed gauge (drainclaim): the
     /// SAME `Arc` the owning `CamelContext` exposes through
     /// `total_in_flight()` (installed by the builder). Standalone
-    /// controllers keep an isolated zero counter — claims flow, but only
+    /// controllers keep an isolated zero gauge — claims flow, but only
     /// the constructing scope can read them.
-    pub(super) in_flight_total: Arc<AtomicU64>,
+    pub(super) in_flight_total: Arc<InFlightGauge>,
 }
 
 impl DefaultRouteController {
@@ -191,7 +190,7 @@ impl DefaultRouteController {
             intercept: InterceptRules::default(),
             frozen: false,
             cohort: Arc::new(CohortActivationGate::new_closed()),
-            in_flight_total: Arc::new(AtomicU64::new(0)),
+            in_flight_total: Arc::new(InFlightGauge::new()),
         }
     }
 
@@ -224,7 +223,7 @@ impl DefaultRouteController {
             intercept: InterceptRules::default(),
             frozen: false,
             cohort: Arc::new(CohortActivationGate::new_closed()),
-            in_flight_total: Arc::new(AtomicU64::new(0)),
+            in_flight_total: Arc::new(InFlightGauge::new()),
         }
     }
 
@@ -257,7 +256,7 @@ impl DefaultRouteController {
             intercept: InterceptRules::default(),
             frozen: false,
             cohort: Arc::new(CohortActivationGate::new_closed()),
-            in_flight_total: Arc::new(AtomicU64::new(0)),
+            in_flight_total: Arc::new(InFlightGauge::new()),
         }
     }
 
@@ -441,13 +440,13 @@ impl DefaultRouteController {
         self.tracer_metrics = Some(metrics);
     }
 
-    /// Install the context-global accepted-not-completed counter
-    /// (drainclaim) — the SAME `Arc<AtomicU64>` the owning
+    /// Install the context-global accepted-not-completed gauge
+    /// (drainclaim) — the SAME `Arc<InFlightGauge>` the owning
     /// `CamelContext` reads through `total_in_flight()`. Called once by
     /// `CamelContextBuilder::build()`; contexts built without a builder
-    /// (or standalone controllers) keep the isolated zero counter from
+    /// (or standalone controllers) keep the isolated zero gauge from
     /// construction.
-    pub fn set_in_flight_total(&mut self, counter: Arc<AtomicU64>) {
+    pub fn set_in_flight_total(&mut self, counter: Arc<InFlightGauge>) {
         self.in_flight_total = counter;
     }
 

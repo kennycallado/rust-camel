@@ -1,4 +1,3 @@
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -7,7 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use camel_api::security_policy::SecurityPolicy;
-use camel_api::{CamelError, Exchange};
+use camel_api::{CamelError, Exchange, InFlightGauge};
 use camel_auth::CredentialSource;
 
 use crate::dispatch::InlineRouteDispatcher;
@@ -197,10 +196,10 @@ pub struct ConsumerContext {
     /// context (`Arc<OnceLock<_>>`). Set once by the camel-core runtime
     /// before the consumer starts; every clone observes the same value.
     inline_dispatcher: Arc<OnceLock<Arc<dyn InlineRouteDispatcher>>>,
-    /// Context-global accepted-not-completed counter, installed by the
+    /// Context-global accepted-not-completed gauge, installed by the
     /// camel-core runtime at consumer start (drainclaim). `None` keeps
     /// the context's sends uncounted (tests, raw fast paths).
-    in_flight: Option<Arc<AtomicU64>>,
+    in_flight: Option<Arc<InFlightGauge>>,
 }
 
 impl ConsumerContext {
@@ -241,23 +240,23 @@ impl ConsumerContext {
         self
     }
 
-    /// Install the context-global accepted-not-completed counter on this
+    /// Install the context-global accepted-not-completed gauge on this
     /// context (drainclaim). The camel-core runtime calls this at consumer
     /// start; afterwards every envelope sent via [`Self::send`] or
     /// [`Self::send_and_wait`] carries an [`InFlightClaim`]. Contexts
-    /// without a counter (tests, raw fast paths) send uncounted envelopes.
-    pub fn with_in_flight_counter(mut self, counter: Arc<AtomicU64>) -> Self {
+    /// without a gauge (tests, raw fast paths) send uncounted envelopes.
+    pub fn with_in_flight_counter(mut self, counter: Arc<InFlightGauge>) -> Self {
         self.in_flight = Some(counter);
         self
     }
 
-    /// Returns the installed accepted-not-completed counter, if any
+    /// Returns the installed accepted-not-completed gauge, if any
     /// (drainclaim). Components whose consumers dispatch through the raw
     /// [`Self::sender`] fast path capture this once at consumer start and
     /// mint an [`InFlightClaim`] at their acceptance-dequeue points, so raw
     /// dispatches count exactly like [`Self::send`] (rc-nftni). Returns
-    /// `None` for contexts without a counter (tests) — callers mint none.
-    pub fn in_flight_counter(&self) -> Option<Arc<AtomicU64>> {
+    /// `None` for contexts without a gauge (tests) — callers mint none.
+    pub fn in_flight_counter(&self) -> Option<Arc<InFlightGauge>> {
         self.in_flight.clone()
     }
 

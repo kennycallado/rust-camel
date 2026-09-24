@@ -8433,8 +8433,6 @@ mod tests {
     /// readiness is the startup signal, the recv IS the barrier.
     #[tokio::test]
     async fn http_consumer_raw_dispatch_carries_in_flight_claim() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
         use camel_component_api::ConsumerContext;
         use camel_component_api::StartupSignal;
 
@@ -8455,7 +8453,7 @@ mod tests {
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
-        let counter = std::sync::Arc::new(AtomicU64::new(0));
+        let counter = std::sync::Arc::new(camel_api::InFlightGauge::new());
         let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
         let (signal, startup_rx) = StartupSignal::pair();
@@ -8487,7 +8485,7 @@ mod tests {
                     .take()
                     .expect("raw dispatch must carry an acceptance-minted claim");
                 assert_eq!(
-                    counter.load(Ordering::Acquire),
+                    counter.total(),
                     1,
                     "exact total: the acceptance mint is the only live claim"
                 );
@@ -8510,7 +8508,7 @@ mod tests {
 
         drop(claim);
         assert_eq!(
-            counter.load(Ordering::Acquire),
+            counter.total(),
             0,
             "release exactly once when the holder drops"
         );
