@@ -107,6 +107,11 @@ http = [
 # harness is a bundles consumer, so the shadow feature must forward it
 # (lint-gate-forwarding Rule 1).
 sql = ["dep:sqlx", "camel-bundles/sql"]
+# Demand-gated WASM activation: forwards camel-bundles' wasm gate so
+# the scenario boot registers the wasm bundle (base-dir fix rc-l3zrr).
+# The harness is a bundles consumer, so the shadow feature must
+# forward it (lint-gate-forwarding Rule 1).
+wasm = ["camel-bundles/wasm"]
 
 [lints]
 workspace = true

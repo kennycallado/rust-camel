@@ -13,7 +13,8 @@
 //! row per action. Documents execute in CLI
 //! argument order, sequentially; a document-level error is reported and
 //! execution continues with the next document. Every executed document
-//! carries a `[lean]`/`[full]` tier annotation line. Exit codes: 0 all
+//! carries a `[lean]`/`[full]` tier annotation line (`full*` for unit
+//! documents that derive FULL but execute on the lean boot). Exit codes: 0 all
 //! pass; 1 any verdict-class failure (expectation, settle timeout,
 //! scenario `receive-timeout` / `validation-mismatch`); 2 misuse,
 //! unreadable file, parse error, and apparatus-class failures
@@ -308,10 +309,15 @@ fn unit_tier(doc: &document::TestDocument, defs: &[camel_core::RouteDefinition])
     derive_tier(defs, &inputs)
 }
 
-/// The tier annotation label (`lean` / `full`).
-fn tier_label(tier: Tier) -> &'static str {
-    match tier {
-        Tier::Lean => "lean",
+/// The tier annotation label: `lean` for lean-derived documents, `full`
+/// for scenario documents, and `full*` for unit documents that derive
+/// FULL but execute on the lean registry — honest advertisement, since
+/// the lean set is pinned by ADR-0064 and is not grown for unit
+/// documents.
+fn tier_label(unit: bool, tier: Tier) -> &'static str {
+    match (unit, tier) {
+        (true, Tier::Lean) => "lean",
+        (true, Tier::Full) => "full*",
         _ => "full",
     }
 }
@@ -481,7 +487,12 @@ pub async fn run_tests_full(
                 continue;
             }
         };
-        let label = tier_label(tier);
+        let unit = matches!(&loaded, LoadedDoc::Unit(..));
+        let label = tier_label(unit, tier);
+        // The honesty predicate, computed once: FULL-derived unit
+        // documents execute on the lean registry (ADR-0064) and get the
+        // `full*` label, the advisory, and the failure hint.
+        let full_star = unit && matches!(tier, Tier::Full);
         // Tier filter: a nonmatching explicitly named document collides
         // (exit 2); a nonmatching expanded document is excluded silently
         // (no stdout, no counts, no junit rows).
@@ -537,6 +548,15 @@ pub async fn run_tests_full(
         }
         // Tier annotation: one line per executed document.
         let _ = writeln!(out, "{} [{label}]", path.display());
+        // Honest advertisement (ADR-0064): a unit document that derives
+        // FULL still executes on the lean registry; name the gap before
+        // the run.
+        if full_star {
+            let _ = writeln!(
+                err,
+                "R-UNIT-FULL: derived full, executed on the lean registry (direct, log, mock, seda, timer — ADR-0064); components outside the lean set need a scenario document"
+            );
+        }
         match loaded {
             LoadedDoc::Scenario(scenario, root) => {
                 let result = scenario::run_scenario_doc(&scenario, &root).await;
@@ -582,6 +602,17 @@ pub async fn run_tests_full(
                 let result = run_test_doc_with_defs(&unit_doc, defs).await.0;
                 if let Some(doc_error) = result.doc_error {
                     parse_error_names.push(path.display().to_string());
+                    // Actionable lean miss (ADR-0064): a FULL-derived unit
+                    // document's doc-level failure carries the registry
+                    // truth and the scenario alternative — tier-derived
+                    // only, no error-text matching.
+                    let doc_error = if full_star {
+                        format!(
+                            "{doc_error} — unit documents execute on the lean registry (direct, log, mock, seda, timer); use a scenario document for wasm and other full-boot components"
+                        )
+                    } else {
+                        doc_error
+                    };
                     let _ = writeln!(err, "{}: {doc_error}", path.display());
                     doc_reports.push(junit::DocReport {
                         path: path.clone(),

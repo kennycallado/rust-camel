@@ -93,6 +93,16 @@ pub async fn boot_scenario(
     root: &Path,
     env: &LayeredEnv,
 ) -> Result<ScenarioRun, CamelError> {
+    // An empty root (a document named as a bare relative filename)
+    // resolves its joins against the process CWD — fine for config load
+    // and route files, fatal for the wasm base dir, whose empty
+    // canonicalize() fails. Normalize to "." — the same empty-parent rule
+    // `camel run` applies (try_canonical_project_root).
+    let root: &Path = if root.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        root
+    };
     let doc_dir = doc
         .source_path
         .parent()

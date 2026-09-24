@@ -21,8 +21,9 @@ pub(crate) struct DocReport {
     pub rows: Vec<EndpointResult>,
     /// Document-level error; `None` when the document ran to evaluation.
     pub doc_error: Option<String>,
-    /// Derived tier annotation (`lean` / `full`); `None` when the tier
-    /// could not be derived (read or parse failure).
+    /// Derived tier annotation (`lean` / `full` / `full*` for
+    /// FULL-derived unit documents); `None` when the tier could not be
+    /// derived (read or parse failure).
     pub tier: Option<&'static str>,
 }
 

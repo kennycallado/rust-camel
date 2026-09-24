@@ -2097,3 +2097,127 @@ repositories:
         "err must name the unresolved variable: {err}"
     );
 }
+
+/// Write a route file whose single route steps through `wasm:` — a
+/// component outside the lean registry (ADR-0064) — then `mock:result`.
+/// No wasm guest file is needed: the lean registry misses before any
+/// file resolution.
+fn write_wasm_route_file(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - to: "wasm:echo.wasm"
+      - to: "mock:result"
+"#,
+    )
+    .expect("write wasm route file"); // allow-unwrap
+    path
+}
+
+/// Write a unit document referencing the `wasm:` route file via
+/// `routeFiles`, with one `direct:start` input and `mock:result` count 1.
+fn write_wasm_doc(dir: &Path, name: &str, route_file: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"
+routeFiles:
+  - {route_file}
+inputs:
+  - to: "direct:start"
+    body: "hi"
+expects:
+  mock:result:
+    count: 1
+"#
+        ),
+    )
+    .expect("write wasm unit doc"); // allow-unwrap
+    path
+}
+
+/// Spec scenario "full-derived unit document annotates full* with
+/// advisory": the annotation tells the truth (`full*` — derived FULL,
+/// executed on the lean boot) and one stderr advisory names the lean
+/// registry before the run.
+#[tokio::test(flavor = "multi_thread")]
+async fn unit_wasm_doc_annotates_full_star_with_advisory() {
+    let dir = temp_dir("unit-wasm-star");
+    let route = write_wasm_route_file(&dir, "route.yaml");
+    let doc_path = write_wasm_doc(&dir, "doc.test.yaml", "route.yaml");
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    let config = TestRunConfig {
+        files: vec![doc_path],
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests_full(&config, &mut out, &mut err).await;
+    let out = String::from_utf8(out).unwrap();
+    let err = String::from_utf8(err).unwrap();
+    assert!(out.contains("doc.test.yaml [full*]\n"), "out: {out}");
+    assert!(err.contains("R-UNIT-FULL:"), "err: {err}");
+    assert!(
+        err.contains("direct, log, mock, seda, timer"),
+        "advisory must name the lean registry: {err}"
+    );
+    assert_eq!(
+        summary.exit_code, 2,
+        "the lean-registry miss is a document-level failure: out: {out} err: {err}"
+    );
+}
+
+/// Spec scenario "lean registry miss is actionable": the reported
+/// doc-error names the missing component AND the lean registry AND the
+/// scenario alternative in one string — never a bare
+/// `Component not found: wasm`.
+#[tokio::test(flavor = "multi_thread")]
+async fn unit_wasm_failure_names_lean_registry_and_alternative() {
+    let dir = temp_dir("unit-wasm-hint");
+    let route = write_wasm_route_file(&dir, "route.yaml");
+    let doc_path = write_wasm_doc(&dir, "doc.test.yaml", "route.yaml");
+    let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
+    let config = TestRunConfig {
+        files: vec![doc_path],
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let _summary = run_tests_full(&config, &mut out, &mut err).await;
+    let err = String::from_utf8(err).unwrap();
+    let line = err
+        .lines()
+        .find(|line| line.contains("Component not found: wasm"))
+        .expect("doc-error line naming the missing component"); // allow-unwrap
+    assert!(
+        line.contains("lean registry") && line.contains("scenario document"),
+        "doc-error must carry the appended hint in one string: {line}"
+    );
+}
+
+/// Regression guard: a lean-derived document keeps the `[lean]`
+/// annotation exactly and writes no `R-UNIT-FULL` advisory.
+#[tokio::test(flavor = "multi_thread")]
+async fn lean_doc_annotation_stays_lean() {
+    let dir = temp_dir("lean-star-regression");
+    let doc_path = write_passing(&dir, "doc.test.yaml");
+    let _guard = CleanupPaths(vec![doc_path.clone(), dir.clone()]);
+    let config = TestRunConfig {
+        files: vec![doc_path],
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests_full(&config, &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 0);
+    let out = String::from_utf8(out).unwrap();
+    let err = String::from_utf8(err).unwrap();
+    assert!(out.contains("doc.test.yaml [lean]\n"), "out: {out}");
+    assert!(!err.contains("R-UNIT-FULL"), "err: {err}");
+}
