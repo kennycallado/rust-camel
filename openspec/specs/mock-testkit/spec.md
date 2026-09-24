@@ -450,6 +450,18 @@ annotation (`lean` or `full`) per document, and a final `N passed, M failed`
 summary. A `shutdown-failure` after a recorded verdict SHALL NOT mask the
 verdict.
 
+When one or more entries fail with a parse-class error (expansion errors,
+unreadable files, document/route parse errors, boot failures, tier-filter
+collisions on explicitly named documents, and input delivery failures), the
+summary line SHALL carry the passed and failed counts plus an additive
+segment `, N parse-error docs (skipped)` (`doc` singular when N is 1).
+Parse-class failures SHALL NOT count toward the passed or failed counts, and
+the exit-code rules above SHALL apply unchanged. stderr SHALL name every
+parse-error entry on one line, in occurrence order, immediately before the
+summary line; the per-failure stderr diagnostics SHALL stay as before. When
+no parse-class failure occurred, the summary SHALL read exactly
+`N passed, M failed` and stderr SHALL carry no naming line.
+
 #### Scenario: all pass
 - **Given** a document whose expectations all hold
 - **When** `camel test <doc>` runs
@@ -492,6 +504,24 @@ verdict.
 - **Given** a first document with a failing expectation and a second document failing with `partner-bind-failure`
 - **When** `camel test a.test.yaml b.test.yaml` runs
 - **Then** both failures are reported and the exit code is 2
+
+#### Scenario: parse-error doc shows in the summary
+
+- **Given** one document whose expectations pass and one document that fails parsing
+- **When** `camel test a.test.yaml bad.test.yaml` runs
+- **Then** stdout ends with a summary `1 passed, 0 failed, 1 parse-error doc (skipped)`, stderr names `bad.test.yaml` on the line immediately before the summary, and the exit code is 2
+
+#### Scenario: parse-error doc only
+
+- **Given** a run whose only document fails parsing
+- **When** `camel test bad.test.yaml` runs
+- **Then** stdout ends with `0 passed, 0 failed, 1 parse-error doc (skipped)` and the exit code is 2
+
+#### Scenario: clean run carries no parse-error segment
+
+- **Given** a run where every document parses and every expectation passes
+- **When** `camel test a.test.yaml b.test.yaml` runs
+- **Then** the summary reads `N passed, 0 failed` with no parse-error segment, and stderr carries no naming line
 
 ### Requirement: camel run non-interference
 
