@@ -248,7 +248,12 @@ settle: "500ms"                    # optional quiet window (0 < settle <= 5s)
 
 When classes coexist, precedence is `2 > 1 > 0` (a broken suite outranks an
 assertion failure). stdout carries one `PASS`/`FAIL` line per endpoint per
-document plus a final `N passed, M failed` summary.
+document plus a final `N passed, M failed` summary. When documents (or
+directory-expansion entries) were skipped by a parse-class error, the
+summary gains an additive segment — `N passed, M failed, K parse-error
+docs (skipped)` — and stderr names each skipped entry on the line
+immediately before the summary. Parse-error docs never count toward
+`passed` or `failed`.
 
 ### Non-interference with `camel run`
 

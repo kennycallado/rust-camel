@@ -135,6 +135,10 @@ pub struct TestRunSummary {
     pub passed: usize,
     /// Number of endpoints that failed.
     pub failed: usize,
+    /// Number of parse-class entries (documents and expansion entries)
+    /// skipped before producing rows; never counted in `passed` or
+    /// `failed`.
+    pub parse_errors: usize,
 }
 
 /// Directory names skipped during expansion, at any depth.
@@ -346,7 +350,7 @@ pub async fn run_tests_full(
 ) -> TestRunSummary {
     let mut passed = 0usize;
     let mut failed = 0usize;
-    let mut had_parse_error = false;
+    let mut parse_error_names: Vec<String> = Vec::new();
     let mut had_apparatus = false;
     let mut had_misuse = false;
     let mut any_survivor = false;
@@ -356,7 +360,7 @@ pub async fn run_tests_full(
     // path, error = bare message) consumed by the JUnit writer after the loop.
     let mut expansion_reports: Vec<junit::ExpansionReport> = Vec::new();
     for (path, message) in &expansion_errors {
-        had_parse_error = true;
+        parse_error_names.push(path.display().to_string());
         let _ = writeln!(err, "{}: {message}", path.display());
         expansion_reports.push(junit::ExpansionReport {
             name: path.display().to_string(),
@@ -399,7 +403,7 @@ pub async fn run_tests_full(
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) => {
-                had_parse_error = true;
+                parse_error_names.push(path.display().to_string());
                 any_survivor = true;
                 let _ = writeln!(err, "{}: {e}", path.display());
                 doc_reports.push(junit::DocReport {
@@ -414,7 +418,7 @@ pub async fn run_tests_full(
         let doc = match parse_document(path, &text) {
             Ok(doc) => doc,
             Err(e) => {
-                had_parse_error = true;
+                parse_error_names.push(path.display().to_string());
                 any_survivor = true;
                 let _ = writeln!(err, "{}: {e}", path.display());
                 doc_reports.push(junit::DocReport {
@@ -441,7 +445,7 @@ pub async fn run_tests_full(
                 match runner::find_camel_toml_root(&parent_dir) {
                     Some(root) => Ok((Tier::Full, LoadedDoc::Scenario(scenario, root))),
                     None => {
-                        had_parse_error = true;
+                        parse_error_names.push(path.display().to_string());
                         any_survivor = true;
                         let message = format!(
                             "no Camel.toml ancestor for scenario document {}",
@@ -465,7 +469,7 @@ pub async fn run_tests_full(
         let (tier, loaded) = match loaded_tier {
             Ok(pair) => pair,
             Err(e) => {
-                had_parse_error = true;
+                parse_error_names.push(path.display().to_string());
                 any_survivor = true;
                 let _ = writeln!(err, "{}: {e}", path.display());
                 doc_reports.push(junit::DocReport {
@@ -485,7 +489,7 @@ pub async fn run_tests_full(
             && !filter.selects(tier)
         {
             if explicit.contains(&explicit_key(path)) {
-                had_parse_error = true;
+                parse_error_names.push(path.display().to_string());
                 any_survivor = true;
                 let message = filters::collision_message(filter, label);
                 let _ = writeln!(err, "{}: {message}", path.display());
@@ -577,7 +581,7 @@ pub async fn run_tests_full(
             LoadedDoc::Unit(unit_doc, defs) => {
                 let result = run_test_doc_with_defs(&unit_doc, defs).await.0;
                 if let Some(doc_error) = result.doc_error {
-                    had_parse_error = true;
+                    parse_error_names.push(path.display().to_string());
                     let _ = writeln!(err, "{}: {doc_error}", path.display());
                     doc_reports.push(junit::DocReport {
                         path: path.clone(),
@@ -617,6 +621,8 @@ pub async fn run_tests_full(
         let _ = writeln!(err, "{}", filter_misuse_message(config));
     }
 
+    // Derived: every parse-class site records its name; see parse_error_names.
+    let had_parse_error = !parse_error_names.is_empty();
     let mut exit_code = if had_parse_error || had_misuse || had_apparatus {
         2
     } else if failed > 0 {
@@ -624,7 +630,21 @@ pub async fn run_tests_full(
     } else {
         0
     };
-    let _ = writeln!(out, "{passed} passed, {failed} failed");
+    if parse_error_names.is_empty() {
+        let _ = writeln!(out, "{passed} passed, {failed} failed");
+    } else {
+        let n = parse_error_names.len();
+        let noun = if n == 1 { "doc" } else { "docs" };
+        let _ = writeln!(
+            err,
+            "{n} parse-error {noun} (skipped): {}",
+            parse_error_names.join(", ")
+        );
+        let _ = writeln!(
+            out,
+            "{passed} passed, {failed} failed, {n} parse-error {noun} (skipped)"
+        );
+    }
     // JUnit report: written on exit-0/1/2 runs alike, after the human
     // summary line. A write failure is stderr + exit 2 (raise only).
     if let Some(path) = &config.junit
@@ -639,6 +659,7 @@ pub async fn run_tests_full(
         exit_code,
         passed,
         failed,
+        parse_errors: parse_error_names.len(),
     }
 }
 

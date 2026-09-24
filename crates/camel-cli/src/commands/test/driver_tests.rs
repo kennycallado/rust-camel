@@ -154,6 +154,155 @@ async fn parse_error_continues_and_exits_two() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn parse_error_doc_named_in_summary() {
+    let dir = temp_dir("parse-named");
+    let a = write_passing(&dir, "a.test.yaml");
+    let bad = write_bad(&dir, "bad.test.yaml");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[a, bad], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 2);
+    assert_eq!(summary.parse_errors, 1);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("1 passed, 0 failed, 1 parse-error doc (skipped)"),
+        "out: {out}"
+    );
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.contains("1 parse-error doc (skipped): "), "err: {err}");
+    assert!(err.contains("bad.test.yaml"), "err: {err}");
+    let last = err
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .next_back()
+        .unwrap_or_default();
+    assert!(
+        last.contains("1 parse-error doc (skipped): "),
+        "last non-empty stderr line must be the naming line: {err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clean_run_has_no_parse_error_segment() {
+    let dir = temp_dir("clean-run");
+    let a = write_passing(&dir, "a.test.yaml");
+    let b = write_passing(&dir, "b.test.yaml");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[a, b], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 0);
+    assert_eq!(summary.parse_errors, 0);
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("2 passed, 0 failed"), "out: {out}");
+    assert!(!out.contains("parse-error"), "out: {out}");
+    let err = String::from_utf8(err).unwrap();
+    assert!(!err.contains("parse-error"), "err: {err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parse_error_only_zero_ran() {
+    let dir = temp_dir("parse-only");
+    let bad = write_bad(&dir, "bad.test.yaml");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[bad], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 2);
+    assert_eq!(summary.passed, 0);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.parse_errors, 1);
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(out, "0 passed, 0 failed, 1 parse-error doc (skipped)\n");
+}
+
+/// Two parse-error documents: the plural noun and the CLI-order naming
+/// line (`b1` before `b2`).
+#[tokio::test(flavor = "multi_thread")]
+async fn two_parse_error_docs_plural_and_order() {
+    let dir = temp_dir("parse-plural-order");
+    let a = write_passing(&dir, "a.test.yaml");
+    let b1 = write_bad(&dir, "b1.test.yaml");
+    let b2 = write_bad(&dir, "b2.test.yaml");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[a, b1, b2], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 2);
+    assert_eq!(summary.parse_errors, 2);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("1 passed, 0 failed, 2 parse-error docs (skipped)"),
+        "out: {out}"
+    );
+    let err = String::from_utf8(err).unwrap();
+    let last = err
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .next_back()
+        .unwrap_or_default();
+    let i1 = last.find("b1.test.yaml").expect("b1 named"); // allow-unwrap
+    let i2 = last.find("b2.test.yaml").expect("b2 named"); // allow-unwrap
+    assert!(i1 < i2, "b1 must precede b2 in the naming line: {err}");
+}
+
+/// A verdict failure mixed with a parse error: the summary counts both
+/// classes and the parse-error segment carries the singular noun.
+#[tokio::test(flavor = "multi_thread")]
+async fn parse_error_with_failures_mixes_counts() {
+    let dir = temp_dir("parse-fail-mix");
+    let f = write_failing(&dir, "f.test.yaml");
+    let b = write_bad(&dir, "b.test.yaml");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[f, b], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 2);
+    assert_eq!(summary.passed, 0);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.parse_errors, 1);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("0 passed, 1 failed, 1 parse-error doc (skipped)"),
+        "out: {out}"
+    );
+}
+
+/// An empty directory argument is an expansion (parse-class) error: it
+/// counts in `parse_errors`, the naming line names the directory, and
+/// stdout is exactly the zero-ran summary with the skipped segment.
+#[tokio::test(flavor = "multi_thread")]
+async fn expansion_error_counts_in_summary() {
+    let empty = tempfile::tempdir().expect("create empty dir"); // allow-unwrap
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[empty.path().to_path_buf()], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 2);
+    assert_eq!(summary.parse_errors, 1);
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(out, "0 passed, 0 failed, 1 parse-error doc (skipped)\n");
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.contains("1 parse-error doc (skipped): "), "err: {err}");
+    let name = empty.path().display().to_string();
+    assert!(err.contains(name.as_str()), "err must name the dir: {err}");
+}
+
+/// An expansion error alongside a passing document: the doc still runs
+/// and the summary carries the skipped segment; exit stays 2.
+#[tokio::test(flavor = "multi_thread")]
+async fn expansion_error_alongside_passing_doc() {
+    let file_dir = tempfile::tempdir().expect("create file dir"); // allow-unwrap
+    let file = write_passing(file_dir.path(), "a.test.yaml");
+    let empty = tempfile::tempdir().expect("create empty dir"); // allow-unwrap
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[file, empty.path().to_path_buf()], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 2);
+    assert_eq!(summary.parse_errors, 1);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("1 passed, 0 failed, 1 parse-error doc (skipped)"),
+        "out: {out}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn precedence_parse_beats_assertion() {
     let dir = temp_dir("precedence");
     let a = write_failing(&dir, "a.test.yaml");
@@ -336,15 +485,15 @@ async fn no_flags_output_is_byte_identical() {
     let out = String::from_utf8(out).unwrap();
     let err = String::from_utf8(err).unwrap();
     let expected_out = format!(
-        "{a} [lean]\nPASS {a}#out\n{b} [lean]\nFAIL {b}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed\n",
+        "{a} [lean]\nPASS {a}#out\n{b} [lean]\nFAIL {b}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed, 1 parse-error doc (skipped)\n",
         a = a.display(),
         b = b.display()
     );
     assert_eq!(out, expected_out, "stdout must be byte-identical");
     let expected_err = format!(
         // noyalib 0.0.29 emits a libyaml-style parse message for flow mappings.
-        "{}: invalid test document: expected ',' or '}}' in flow mapping at line 2 column 1\n",
-        bad.display()
+        "{bad}: invalid test document: expected ',' or '}}' in flow mapping at line 2 column 1\n1 parse-error doc (skipped): {bad}\n",
+        bad = bad.display()
     );
     assert_eq!(err, expected_err, "stderr must be byte-identical");
 }
@@ -741,14 +890,14 @@ async fn junit_absent_writes_nothing() {
     assert!(!would_be.exists(), "junit None must not write a report");
 
     let expected_out = format!(
-        "{a} [lean]\nPASS {a}#out\n{b} [lean]\nFAIL {b}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed\n",
+        "{a} [lean]\nPASS {a}#out\n{b} [lean]\nFAIL {b}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed, 1 parse-error doc (skipped)\n",
         a = a.display(),
         b = b.display()
     );
     let expected_err = format!(
         // noyalib 0.0.29 emits a libyaml-style parse message for flow mappings.
-        "{}: invalid test document: expected ',' or '}}' in flow mapping at line 2 column 1\n",
-        bad.display()
+        "{bad}: invalid test document: expected ',' or '}}' in flow mapping at line 2 column 1\n1 parse-error doc (skipped): {bad}\n",
+        bad = bad.display()
     );
     assert_eq!(
         String::from_utf8(out1).unwrap(),

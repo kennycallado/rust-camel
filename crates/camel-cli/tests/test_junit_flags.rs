@@ -120,15 +120,15 @@ fn no_flag_dispatch_byte_identical_e2e() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     let expected_out = format!(
-        "{a} [lean]\nPASS {a}#out\n{b} [lean]\nFAIL {b}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed\n",
+        "{a} [lean]\nPASS {a}#out\n{b} [lean]\nFAIL {b}#out — MockEndpoint 'out': expected 2 exchanges, got 1\n1 passed, 1 failed, 1 parse-error doc (skipped)\n",
         a = a.display(),
         b = b.display()
     );
     assert_eq!(stdout, expected_out, "stdout must be byte-identical");
     let expected_err = format!(
         // noyalib 0.0.29 emits a libyaml-style parse message for flow mappings.
-        "{}: invalid test document: expected ',' or '}}' in flow mapping at line 2 column 1\n",
-        bad.display()
+        "{bad}: invalid test document: expected ',' or '}}' in flow mapping at line 2 column 1\n1 parse-error doc (skipped): {bad}\n",
+        bad = bad.display()
     );
     assert_eq!(stderr, expected_err, "stderr must be byte-identical");
     assert_eq!(
