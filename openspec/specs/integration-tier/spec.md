@@ -856,7 +856,7 @@ The strict wire-bytes lane key SHALL keep its fidelity contract. The client-role
 
 ### Requirement: Scenario boot shares the camel run composition root
 
-The scenario tier SHALL boot through the same composition root as `camel run`: sealed config load and root-anchored route resolution follow the boot root, which is the nearest ancestor directory (including the document's own) containing a `Camel.toml`. Relative `routeFiles` entries SHALL resolve against the scenario document's own directory. A document with no `Camel.toml` ancestor SHALL fail named with exit 2 before boot.
+The scenario tier SHALL boot through the same composition root as `camel run`: sealed config load and root-anchored route resolution follow the boot root, which is the nearest ancestor directory (including the document's own) containing a `Camel.toml`. Relative `routeFiles` entries SHALL resolve against the scenario document's own directory. A document with no `Camel.toml` ancestor SHALL fail named with exit 2 before boot. The resolved boot root SHALL be a usable, non-empty directory: an empty resolved root — a document named as a bare relative filename from its project directory — SHALL normalize to the working directory (`.`), the same empty-parent rule `camel run` applies to its project root, so every root-derived consumer (sealed config load, root-anchored route resolution, and the wasm bundle base dir) receives semantics identical to `camel run` booting the same project.
 
 #### Scenario: boot root is the nearest Camel.toml ancestor
 
@@ -881,6 +881,13 @@ The scenario tier SHALL boot through the same composition root as `camel run`: s
 - **GIVEN** a nested scenario document declaring `routeFilesFromRoot: [routes/x.yaml]` present under the ancestor root's route space
 - **WHEN** the tier boots from the ancestor root
 - **THEN** the root-anchored paths resolve against the resolved boot root, not the document directory
+
+#### Scenario: wasm route boots with the boot root as base dir
+
+- **GIVEN** a scenario project whose route file declares a `wasm:` step and whose guest module sits under the project root
+- **WHEN** the tier boots the document named as a bare relative filename from the project root directory
+- **THEN** the wasm base dir resolves to the normalized boot root (never the empty path), the guest loads, and the boot succeeds — identical to `camel run` on the same project
+
 #### Scenario: security_policy route boots in the tier
 
 - **GIVEN** a scenario project whose Camel.toml declares native security
