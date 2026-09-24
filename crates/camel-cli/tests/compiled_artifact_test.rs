@@ -217,7 +217,7 @@ routes:
 ";
 
 /// A one-shot job document declaring a REQUIRED argument without a
-/// default: an embedded run has no `--arg` surface to fill it, so the
+/// default: an embedded run has no CLI flags to fill it, so the
 /// artifact must reject it at startup (exit 2, naming the argument).
 const REQUIRED_ARG_DOC: &str = "\
 args:
@@ -1060,9 +1060,10 @@ fn compiled_artifact_resolves_deploy_environment() {
 // ---------------------------------------------------------------------------
 // jobargs Task 3.2: embedded declared arguments. The artifact payload is
 // pre-interpolation authoring text; declared `args:` resolve at artifact
-// startup through the same parse path normal jobs use, with EMPTY CLI
-// pairs — embedded defaults only. `--arg` stays outside the artifact
-// surface (`--report`, `--help`, `--version`, `--manifest`).
+// startup through the same parse path normal jobs use, with NO dynamic
+// flags — embedded defaults only. Unknown flags (`--arg` included) are
+// rejected outside the static artifact surface (`--report`, `--help`,
+// `--version`, `--manifest`).
 // ---------------------------------------------------------------------------
 
 /// A compiled job applies its embedded declaration defaults exactly like
@@ -1100,7 +1101,7 @@ fn compiled_job_uses_declared_default() {
     );
 
     // Parity: the same document through the normal `camel job` path (no
-    // `--arg` there either) resolves the same default.
+    // dynamic flags there either) resolves the same default.
     std::fs::write(deploy.path().join("args.job.yaml"), ARG_DOC).expect("write source doc");
     let (code, stdout, stderr) = common::run_binary(
         deploy.path(),
@@ -1124,7 +1125,7 @@ fn compiled_job_uses_declared_default() {
 }
 
 /// A compiled job with a required declaration and no default has no
-/// `--arg` surface to fill it: artifact startup rejects it with exit 2,
+/// CLI flag to fill it: artifact startup rejects it with exit 2,
 /// naming the argument, before any boot and without a report.
 #[test]
 fn compiled_job_rejects_required_without_default() {
@@ -1161,8 +1162,9 @@ fn compiled_job_rejects_required_without_default() {
     );
 }
 
-/// `--arg` stays outside the artifact surface: the existing
-/// unknown-argument rejection applies (exit 2, argument named, no boot).
+/// An unknown flag (`--arg` spelling) stays rejected on the artifact
+/// surface: the unknown-argument rejection applies (exit 2, argument
+/// named, no boot).
 #[test]
 fn compiled_job_rejects_arg_flag() {
     child_guard();
@@ -1232,7 +1234,7 @@ fn compiled_job_coerces_typed_default() {
     );
 
     // Parity: the same document through the normal `camel job` path
-    // (no `--arg` there either) coerces to the identical send target.
+    // (no dynamic flags there either) coerces to the identical send target.
     std::fs::write(deploy.path().join("typed.job.yaml"), TYPED_DEFAULT_ARG_DOC)
         .expect("write source doc");
     let (code, stdout, stderr) = common::run_binary(

@@ -53,7 +53,7 @@ Mode:      one-shot
 Sends to:  direct:ingest
 
 Arguments:
-  (settable as --<name> <VALUE>; bool as --<name> / --no-<name>; or --arg <name>=<value>)
+  (settable as --<name> <VALUE>; bool as --<name> / --no-<name>)
   feed    string  required  Feed identifier
   region  string  optional  default=eu-west-1";
     assert_eq!(rendered, expected);
@@ -307,7 +307,7 @@ Mode:      one-shot
 Sends to:  direct:ingest
 
 Arguments:
-  (settable as --<name> <VALUE>; bool as --<name> / --no-<name>; or --arg <name>=<value>)
+  (settable as --<name> <VALUE>; bool as --<name> / --no-<name>)
   feed    string  required  Feed identifier
   region  string  optional  default=eu-west-1";
     assert_eq!(rendered, expected);

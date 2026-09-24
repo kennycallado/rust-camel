@@ -121,17 +121,6 @@ pub struct JobArgs {
         env = "CAMEL_CONFIG_FILE"
     )]
     pub config: String,
-    /// Repeatable NAME=VALUE pair. On documents WITHOUT `args:` the
-    /// pair is injected as a message header at send time (applied after
-    /// document headers; last occurrence wins; deprecation note on
-    /// stderr). On declared documents the pair must name a declared
-    /// argument and resolves through `${arg:}` interpolation instead.
-    #[arg(
-        long = "arg",
-        value_name = "NAME=VALUE",
-        value_parser = parse_arg_pair
-    )]
-    pub args: Vec<(String, String)>,
     /// Raw trailing tokens after the document reference (phase-1 capture
     /// for document-derived dynamic flags; empty for invocations without
     /// them). Pinned clap 4.x semantics: static flags after the document
@@ -140,7 +129,7 @@ pub struct JobArgs {
     /// recovered by the tail re-parse; a flag before the document is a
     /// phase-1 unknown-argument error. A bare `--` after the `job`
     /// token ends flag parsing: the post-`--` tail is literal and is
-    /// never re-parsed (see [`tail_terminator_boundary`]).
+    /// never re-parsed (see `tail_terminator_boundary`).
     #[arg(
         trailing_var_arg = true,
         allow_hyphen_values = true,
@@ -148,17 +137,6 @@ pub struct JobArgs {
         value_name = "DYNAMIC"
     )]
     pub dynamic: Vec<std::ffi::OsString>,
-}
-
-/// Parse one `--arg` value as a NAME=VALUE pair: split at the FIRST `=`
-/// (the value may contain further `=`); an empty name is a usage error,
-/// an empty value is allowed.
-fn parse_arg_pair(raw: &str) -> Result<(String, String), String> {
-    match raw.split_once('=') {
-        None => Err(format!("invalid --arg value `{raw}`: expected NAME=VALUE")),
-        Some(("", _)) => Err(format!("invalid --arg value `{raw}`: name is empty")),
-        Some((name, value)) => Ok((name.to_string(), value.to_string())),
-    }
 }
 
 /// The effective `--config` path carried by the raw tail, if any:
@@ -239,14 +217,6 @@ fn tail_terminator_boundary(
         Some(dd - tail_start)
     }
 }
-
-/// The deprecation note for the legacy implicit-header path: emitted
-/// exactly once per run when a document without `args:` receives
-/// `--arg` pairs. The wording is a stable output contract (the delta
-/// spec requires a note "identifying the legacy behavior"; unit tests
-/// pin it verbatim).
-const LEGACY_ARG_DEPRECATION: &str = "camel job: --arg header injection on documents \
- without an `args:` block is deprecated; declare arguments in a top-level `args:` block instead";
 
 /// The JSON report of one job run.
 #[derive(Serialize)]
@@ -720,11 +690,10 @@ fn list_jobs(roots: &[(String, PathBuf)]) -> i32 {
 }
 
 /// The result of lowering the raw dynamic-flag tail against the job
-/// document's declared arguments: merged NAME=VALUE pairs (phase-1
-/// `--arg` pairs, then tail `--arg` pairs, then dynamic-flag pairs;
-/// last-wins per key at resolution time), the tail's recovered
-/// `--help`/`-h` request, and the tail's recovered `--report` value
-/// (last-wins against the phase-1 value is the caller's call).
+/// document's declared arguments: merged NAME=VALUE pairs (dynamic-flag
+/// pairs only; last-wins per key at resolution time), the tail's
+/// recovered `--help`/`-h` request, and the tail's recovered `--report`
+/// value (last-wins against the phase-1 value is the caller's call).
 #[derive(Debug)]
 struct LoweredDynamic {
     pairs: Vec<(String, String)>,
@@ -741,14 +710,11 @@ enum DynamicFlagError {
     BoolFlagValue { name: String },
     /// A bool argument given both spellings in one invocation.
     ContradictoryBool { name: String },
-    /// A key given through BOTH a dynamic flag and an `--arg` pair.
-    CrossFormConflict { name: String },
     /// A dynamic flag on a document that declares no `args:` block.
     UndeclaredDocument { flag: String },
     /// A stray positional token in the tail (the `--flag false` shape).
     UnexpectedPositional { value: String },
-    /// clap's own rendered diagnostic (unknown flag, malformed `--arg`,
-    /// ...).
+    /// clap's own rendered diagnostic (unknown flag, ...).
     Clap(String),
 }
 
@@ -757,21 +723,17 @@ impl std::fmt::Display for DynamicFlagError {
         match self {
             Self::BoolFlagValue { name } => write!(
                 f,
-                "boolean flag '--{name}' takes no value; use '--{name}' for true, \
-                 '--no-{name}' for false, or '--arg {name}=false'"
+                "boolean flag '--{name}' takes no value; use '--{name}' for true \
+                 or '--no-{name}' for false"
             ),
             Self::ContradictoryBool { name } => write!(
                 f,
                 "argument '{name}' given as both '--{name}' and '--no-{name}'"
             ),
-            Self::CrossFormConflict { name } => write!(
-                f,
-                "argument '{name}' given through both '--{name}' and '--arg {name}=VALUE'"
-            ),
             Self::UndeclaredDocument { flag } => write!(
                 f,
                 "dynamic flag '{flag}' requires the document to declare an 'args:' block; \
-                 declare the argument or use '--arg {flag}=VALUE'"
+                 declare the argument"
             ),
             Self::UnexpectedPositional { value } => {
                 write!(f, "unexpected positional '{value}' after the job document")
@@ -788,8 +750,8 @@ impl std::fmt::Display for DynamicFlagError {
 /// ID) and re-parsing the tail tokens against it.
 ///
 /// Precedence: empty tail is the identity; a tail help token short-
-/// circuits (no further validation, matching the `--arg` behavior on
-/// the help branch); declared bools reject `=value` spellings up front
+/// circuits (no further validation); declared bools reject `=value`
+/// spellings up front
 /// with a targeted diagnostic (clap would render its own, less
 /// actionable one). On a legacy document (no `args:` block) the
 /// phase-2 command carries no dynamic args, so an unknown long flag
@@ -811,7 +773,6 @@ impl std::fmt::Display for DynamicFlagError {
 fn lower_dynamic_flags(
     declarations: Option<&document::JobArgumentDeclarations>,
     dynamic: &[std::ffi::OsString],
-    arg_pairs: &[(String, String)],
 ) -> Result<LoweredDynamic, DynamicFlagError> {
     use clap::parser::ValueSource;
     use clap::{Arg, ArgAction};
@@ -819,7 +780,7 @@ fn lower_dynamic_flags(
     // Empty tail: identity — nothing to recover.
     if dynamic.is_empty() {
         return Ok(LoweredDynamic {
-            pairs: arg_pairs.to_vec(),
+            pairs: Vec::new(),
             help: false,
             report: None,
         });
@@ -830,7 +791,7 @@ fn lower_dynamic_flags(
     // branch renders the declared interface, it does not gate on it.
     if tail_has_help(dynamic) {
         return Ok(LoweredDynamic {
-            pairs: arg_pairs.to_vec(),
+            pairs: Vec::new(),
             help: true,
             report: None,
         });
@@ -908,8 +869,7 @@ fn lower_dynamic_flags(
             // on a document that declares none. The offending token comes
             // from clap's error context (`InvalidArg`), not the rendered
             // string; the flag name loses its `--` prefix and any `=value`
-            // suffix. Malformed `--arg` values and non-`--` tokens keep
-            // clap's own diagnostic.
+            // suffix. Non-`--` tokens keep clap's own diagnostic.
             if declarations.is_none()
                 && err.kind() == clap::error::ErrorKind::UnknownArgument
                 && let Some(clap::error::ContextValue::String(token)) =
@@ -966,30 +926,15 @@ fn lower_dynamic_flags(
     }
 
     // Tail statics: recovered `--help` (the pre-scan above normally
-    // claims it; kept for completeness), `--report`, and tail `--arg`
-    // pairs. `--config` was honored before config load — not here.
+    // claims it; kept for completeness) and `--report`. `--config` was
+    // honored before config load — not here.
     let help = matches.value_source("help") == Some(ValueSource::CommandLine);
     let report = (matches.value_source("report") == Some(ValueSource::CommandLine))
         .then(|| matches.get_one::<PathBuf>("report").cloned())
         .flatten();
-    let tail_arg_pairs: Vec<(String, String)> = matches
-        .get_many::<(String, String)>("args")
-        .map(|values| values.cloned().collect())
-        .unwrap_or_default();
 
-    // Cross-form conflict: one key through BOTH a dynamic flag and an
-    // `--arg` pair (phase-1 + tail combined) is ambiguous input.
-    let mut pairs = arg_pairs.to_vec();
-    pairs.extend(tail_arg_pairs);
-    for (name, _) in &dynamic_pairs {
-        if pairs.iter().any(|(key, _)| key == name) {
-            return Err(DynamicFlagError::CrossFormConflict { name: name.clone() });
-        }
-    }
-
-    pairs.extend(dynamic_pairs);
     Ok(LoweredDynamic {
-        pairs,
+        pairs: dynamic_pairs,
         help,
         report,
     })
@@ -1142,12 +1087,12 @@ pub async fn run_job(args: &JobArgs) -> i32 {
     };
     // Lower the raw tail against the declared interface BEFORE the
     // help/execution split: a recovered `--help` re-routes to the help
-    // branch, recovered `--report`/`--arg` tail statics join the run,
-    // and a lowering failure is a usage error (exit 2) that never
-    // boots. `Clap` prints clap's own diagnostic verbatim (its render
+    // branch and a recovered `--report` tail static joins the run, and
+    // a lowering failure is a usage error (exit 2) that never boots.
+    // `Clap` prints clap's own diagnostic verbatim (its render
     // carries the trailing newline); the targeted variants get the
     // `camel job:` prefix.
-    let lowered = match lower_dynamic_flags(info.args.as_ref(), tail_flags, &args.args) {
+    let lowered = match lower_dynamic_flags(info.args.as_ref(), tail_flags) {
         Ok(lowered) => lowered,
         Err(DynamicFlagError::Clap(rendered)) => {
             eprint!("{rendered}");
@@ -1180,15 +1125,6 @@ pub async fn run_job(args: &JobArgs) -> i32 {
             return 2;
         }
     };
-    // Legacy implicit-header path: pairs stay raw send-time headers, and
-    // the command emits exactly ONE deprecation note identifying the
-    // legacy behavior (only when the behavior is actually exercised).
-    // Declared documents resolved the pairs through their declarations
-    // during the parse above and inject no headers.
-    let legacy_header_args = doc.legacy_arg_headers();
-    if legacy_header_args && !lowered.pairs.is_empty() {
-        eprintln!("{LEGACY_ARG_DEPRECATION}");
-    }
     let doc_dir = document_path
         .parent()
         .map(Path::to_path_buf)
@@ -1210,15 +1146,6 @@ pub async fn run_job(args: &JobArgs) -> i32 {
         // Argv last-wins: a tail `--report` comes after any pre-path
         // one.
         report_path: lowered.report.clone().or(args.report.clone()),
-        // Raw header pairs are a LEGACY-path construct: declared
-        // documents resolve `--arg` through declarations + interpolation
-        // at parse time and must not get implicit headers; embedded
-        // runs never carry pairs.
-        cli_args: if legacy_header_args {
-            lowered.pairs.clone()
-        } else {
-            Vec::new()
-        },
     };
     execute_job(doc, run, camel_config, signals).await
 }
@@ -1259,11 +1186,6 @@ struct JobRun {
     project_root: PathBuf,
     /// `--report` path; `None` writes the report to stdout.
     report_path: Option<PathBuf>,
-    /// Raw CLI `--arg NAME=VALUE` header pairs — legacy documents only
-    /// (declared documents resolve pairs through declarations +
-    /// interpolation at parse time and pass none; embedded runs pass
-    /// none).
-    cli_args: Vec<(String, String)>,
 }
 
 /// Run one embedded job document (compiled artifact; openspec change
@@ -1277,11 +1199,11 @@ struct JobRun {
 /// `camel job` taxonomy.
 ///
 /// Declared `args:` documents (jobargs Task 3.2) resolve through the same
-/// parse path as normal jobs with EMPTY `--arg` pairs: the embedded
+/// parse path as normal jobs with NO dynamic flags: the embedded
 /// declaration defaults fill `to`, `body`, `headers`, and `timeout` via
 /// the shared namespace-specific interpolation stage, and a required
 /// declaration without a default fails HERE — exit 2, before boot —
-/// because an artifact has no `--arg` surface to fill it.
+/// because an artifact has no CLI flag surface to fill it.
 pub(crate) async fn run_embedded_job(
     source_name: &str,
     text: &str,
@@ -1300,8 +1222,8 @@ pub(crate) async fn run_embedded_job(
         Err(document::JobDocError::MissingRequiredArgument { name }) => {
             eprintln!(
                 "compiled://{source_name}: missing required argument `{name}`: compiled \
-                 artifacts cannot accept --arg; declare a `default` for the argument in \
-                 the document instead"
+                 artifacts accept no argument flags; declare a `default` for the argument \
+                 in the document instead"
             );
             return 2;
         }
@@ -1337,7 +1259,6 @@ pub(crate) async fn run_embedded_job(
         route_load,
         project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         report_path: report,
-        cli_args: Vec::new(),
     };
     execute_job(doc, run, camel_config, None).await
 }
@@ -1437,8 +1358,9 @@ pub(crate) async fn run_embedded_job_store(
         Ok(doc) => doc,
         Err(document::JobDocError::MissingRequiredArgument { name }) => {
             eprintln!(
-                "{identity}: missing required argument `{name}`: compiled artifacts cannot accept \
-                 --arg; declare a `default` for the argument in the document instead"
+                "{identity}: missing required argument `{name}`: compiled artifacts accept \
+                 no argument flags; declare a `default` for the argument in the document \
+                 instead"
             );
             return 2;
         }
@@ -1475,7 +1397,6 @@ pub(crate) async fn run_embedded_job_store(
         route_load,
         project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         report_path: report,
-        cli_args: Vec::new(),
     };
     execute_job(doc, run, camel_config, None).await
 }
@@ -1530,7 +1451,6 @@ async fn execute_job(
         route_load,
         project_root,
         report_path,
-        cli_args,
     } = run;
 
     // Job boot projection (jobcoexist): every downstream consumer — the
@@ -1668,7 +1588,7 @@ async fn execute_job(
     } else {
         doc.execute.send.to.clone()
     };
-    let send = send_with_startup_retry(&ctx, &doc.execute.send, &send_to, &cli_args);
+    let send = send_with_startup_retry(&ctx, &doc.execute.send, &send_to);
     // Shared shape for every overall-deadline expiry: the send-timeout
     // arm and the batch drain-timeout path report identically.
     let timeout_report = || JobReport {
@@ -2110,7 +2030,6 @@ async fn send_with_startup_retry(
     ctx: &camel_core::CamelContext,
     send: &document::JobSendAction,
     send_to: &str,
-    cli_args: &[(String, String)],
 ) -> Result<Exchange, SendError> {
     let body = match &send.body {
         Some(JobBody::Text(s)) => Body::Text(s.clone()),
@@ -2122,14 +2041,6 @@ async fn send_with_startup_retry(
         for (k, v) in headers {
             message.set_header(k.clone(), v.clone());
         }
-    }
-    // CLI values are applied LAST: they override colliding document
-    // headers, and a repeated name resolves to the last occurrence.
-    // Legacy path only — declared documents pass an empty pair list
-    // (`JobRun::cli_args`), their values having already been resolved
-    // through `${arg:}` interpolation.
-    for (k, v) in cli_args {
-        message.set_header(k.clone(), serde_json::Value::String(v.clone()));
     }
     let exchange = Exchange::new(message);
     let scheme = document::scheme_of_uri(send_to)

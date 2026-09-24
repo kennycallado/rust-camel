@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::commands::test::document::TestDocError;
 
-use super::document::{self, JobDocError};
+use super::document::{self, JobBody, JobDocError};
 
 /// A `.job.yaml` path inside a tempdir-free constant (the parser only
 /// inspects the suffix).
@@ -554,10 +554,10 @@ routes:
 }
 
 #[test]
-fn reserved_argument_name_rejected_all_four() {
+fn reserved_argument_name_rejected_all_three() {
     // Arrange: a declaration keyed by each static job-subcommand flag,
     // one at a time.
-    for name in ["help", "config", "report", "arg"] {
+    for name in ["help", "config", "report"] {
         let text = format!(
             r#"
 args:
@@ -657,6 +657,32 @@ args:
         JobDocError::ReservedArgumentName { name } => assert_eq!(name, "config"),
         other => panic!("expected ReservedArgumentName, got {other:?}"),
     }
+}
+
+#[test]
+fn argument_named_arg_is_accepted() {
+    // Arrange: a declaration keyed `arg` — no longer a reserved name.
+    let text = r#"
+args:
+  arg:
+    default: "x"
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act
+    let doc = document::parse_job_document_with_args(&doc_path(), text, &[]).expect("parses");
+    // Assert: the declaration is kept.
+    let args = doc.args.as_ref().expect("declared mode selected");
+    assert_eq!(
+        args.entries.get("arg").expect("arg declaration").default,
+        Some("x".to_string())
+    );
 }
 
 #[test]
@@ -771,8 +797,8 @@ routes:
 
 #[test]
 fn empty_args_select_declared_mode() {
-    // Arrange: `args: {}` — the operator would pass a CLI pair (e.g.
-    // `--arg name=John`); the parser only records the declared mode.
+    // Arrange: `args: {}` — the operator would pass a dynamic flag
+    // (e.g. `--name John`); the parser only records the declared mode.
     let text = r#"
 args: {}
 execute:
@@ -786,21 +812,19 @@ routes:
 "#;
     // Act
     let doc = document::parse_job_document(&doc_path(), text).expect("empty args parse");
-    // Assert: declarations are present and legacy-header mode is false.
+    // Assert: declarations are present (declared mode selected).
     let args = doc.args.as_ref().expect("declared mode selected");
     assert!(args.entries.is_empty());
-    assert!(!doc.legacy_arg_headers());
 }
 
 #[test]
-fn absent_args_select_legacy_mode() {
+fn absent_args_select_raw_fields_mode() {
     // Arrange: a document without any top-level `args:` block.
     // Act
-    let doc =
-        document::parse_job_document(&doc_path(), VALID_ONE_SHOT).expect("legacy document parses");
-    // Assert: no declarations and legacy-header mode stays on.
+    let doc = document::parse_job_document(&doc_path(), VALID_ONE_SHOT)
+        .expect("raw-fields document parses");
+    // Assert: no declarations (raw-fields mode selected).
     assert!(doc.args.is_none());
-    assert!(doc.legacy_arg_headers());
 }
 
 #[test]
@@ -834,8 +858,8 @@ routeFiles:
 #[test]
 fn help_parse_accepts_unsatisfiable_required_argument() {
     // Arrange: a `required: true` argument with no default and no
-    // `--arg` pairs available; help renders the interface, so nothing
-    // may demand a value.
+    // dynamic-flag pairs available; help renders the interface, so
+    // nothing may demand a value.
     let text = r#"
 args:
   name:
@@ -1444,7 +1468,7 @@ fn resolve_enum_member_verbatim_and_outsider_lists_members() {
 
 #[test]
 fn resolve_typed_default_canonicalizes_without_pair() {
-    // Arrange: a typed default and NO `--arg` pairs at all.
+    // Arrange: a typed default and NO pairs at all.
     let decls = parse_declarations("  count:\n    type: int\n    default: \"007\"");
     let pairs: Vec<(String, String)> = Vec::new();
     // Act
@@ -1454,20 +1478,30 @@ fn resolve_typed_default_canonicalizes_without_pair() {
 }
 
 #[test]
-fn resolve_unknown_name_precedes_coercion() {
-    // Arrange: one typed declaration; the pairs carry an unknown name
-    // AND an uncoercible value.
-    let decls = parse_declarations("  count:\n    type: int");
-    let pairs = vec![
-        ("ghost".to_string(), "1".to_string()),
-        ("count".to_string(), "abc".to_string()),
-    ];
-    // Act
-    let err = document::resolve_job_args(Some(&decls), &pairs).unwrap_err();
-    // Assert: unknown-name wins over coercion.
-    match &err {
-        JobDocError::UnknownArgumentName { name } => assert_eq!(name, "ghost"),
-        other => panic!("expected UnknownArgumentName, got {other:?}"),
+fn bool_typed_default_canonicalizes_case() {
+    // Arrange: a `bool` declaration whose default is spelled in
+    // uppercase; `${arg:verbose}` referenced in the send body.
+    let text = r#"
+args:
+  verbose:
+    type: bool
+    default: "TRUE"
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:transform
+    body: "${arg:verbose}"
+routes:
+  - id: r
+    from: direct:transform
+"#;
+    // Act: parse + resolve with NO dynamic flag — the default applies.
+    let doc = document::parse_job_document_with_args(&doc_path(), text, &[]).expect("parses");
+    // Assert: the body interpolates the canonical lowercase form.
+    match &doc.execute.send.body {
+        Some(JobBody::Text(text)) => assert_eq!(text, "true"),
+        other => panic!("expected interpolated Text body \"true\", got {other:?}"),
     }
 }
 

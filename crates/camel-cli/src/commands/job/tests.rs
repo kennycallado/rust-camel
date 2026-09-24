@@ -6,11 +6,11 @@ use super::{JobArgs, run_job};
 
 // ---- jobargs Task 3.1 harness -------------------------------------------
 //
-// The declared-argument and legacy-header tests act through the real
+// The declared-argument tests act through the real
 // `camel job` execution (boot, send, report) because the contract under
 // test spans argv parsing, pre-boot validation, and the send path. The
 // subprocess boundary is also the only way to observe stderr (the
-// deprecation note and pre-boot diagnostics).
+// pre-boot diagnostics).
 
 /// Locate the built `camel` binary. `CARGO_BIN_EXE_camel` is NOT set
 /// for unit tests (Cargo only sets it for integration-test targets),
@@ -86,11 +86,11 @@ fn read_report(path: &std::path::Path) -> serde_json::Value {
     serde_json::from_str(text.trim()).expect("report is JSON")
 }
 
-/// Unknown `--arg` names and omitted required arguments fail at the
+/// Undeclared flags and omitted required arguments fail at the
 /// load-time validation stage with exit 2 and a diagnostic naming the
 /// argument — BEFORE boot. The fixture's route file is missing, so a
 /// post-boot run would fail with the route-discovery error instead:
-/// the arg diagnostic winning proves validation precedes boot (the
+/// the flag diagnostic winning proves validation precedes boot (the
 /// control case with valid args still shows the route error).
 #[test]
 fn declared_args_validate_before_boot() {
@@ -115,16 +115,17 @@ routeFiles:
     )
     .expect("write job doc");
 
-    // Unknown name: exit 2, named diagnostic, no boot failure text.
-    let (code, _stdout, stderr) = run_camel_job(dir.path(), &["job.job.yaml", "--arg", "other=x"]);
-    assert_eq!(code, 2, "unknown --arg must exit 2; stderr:\n{stderr}");
+    // Undeclared flag: exit 2, clap's unknown-argument diagnostic
+    // naming the token, no boot failure text.
+    let (code, _stdout, stderr) = run_camel_job(dir.path(), &["job.job.yaml", "--other", "x"]);
+    assert_eq!(code, 2, "undeclared flag must exit 2; stderr:\n{stderr}");
     assert!(
-        stderr.contains("unknown argument"),
-        "diagnostic must name the class; stderr:\n{stderr}"
+        stderr.contains("unexpected argument"),
+        "diagnostic must be clap's unknown-argument class; stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("other"),
-        "diagnostic must name the offending argument; stderr:\n{stderr}"
+        stderr.contains("--other"),
+        "diagnostic must name the offending flag; stderr:\n{stderr}"
     );
     assert!(
         !stderr.contains("camel-cli job failed"),
@@ -145,20 +146,24 @@ routeFiles:
         stderr.contains("`name`"),
         "diagnostic must name the missing argument; stderr:\n{stderr}"
     );
+    assert!(
+        stderr.contains("pass --name <value>"),
+        "diagnostic must carry the dynamic-flag remedy; stderr:\n{stderr}"
+    );
 
     // Control: valid args pass validation and the run proceeds to the
     // (post-boot) route-discovery failure — proving the two failures
     // come from different stages.
-    let (code, _stdout, stderr) = run_camel_job(dir.path(), &["job.job.yaml", "--arg", "name=x"]);
+    let (code, _stdout, stderr) = run_camel_job(dir.path(), &["job.job.yaml", "--name", "x"]);
     assert_eq!(code, 2, "missing route file exits 2; stderr:\n{stderr}");
     assert!(
-        !stderr.contains("unknown argument") && !stderr.contains("missing required argument"),
+        !stderr.contains("unexpected argument") && !stderr.contains("missing required argument"),
         "valid args must pass validation; stderr:\n{stderr}"
     );
 }
 
 /// Declaration defaults apply when the CLI omits the argument, and an
-/// explicit `--arg` value wins over the default — resolved through
+/// explicit dynamic-flag value wins over the default — resolved through
 /// `${arg:}` interpolation in the send body.
 #[test]
 fn declared_defaults_and_explicit_values() {
@@ -201,69 +206,14 @@ routeFiles:
             "job.job.yaml",
             "--report",
             report.to_str().expect("utf8"),
-            "--arg",
-            "tier=silver",
+            "--tier",
+            "silver",
         ],
     );
     assert_eq!(code, 0, "explicit run must complete; stderr:\n{stderr}");
     let json = read_report(&report);
     assert_eq!(json["outcome"], "Completed", "report: {json}");
     assert_eq!(json["reply"]["body"], "value=silver", "report: {json}");
-}
-
-/// On documents without `args:`, repeated `--arg` pairs stay raw
-/// string headers applied after document headers — last occurrence
-/// wins and overrides the colliding document header — and stderr
-/// carries the deprecation note identifying the legacy behavior.
-#[test]
-fn legacy_args_remain_headers_with_deprecation() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_job_fixture_config(dir.path());
-    write_tap_route(dir.path());
-    std::fs::write(
-        dir.path().join("job.job.yaml"),
-        r#"execute:
-  mode: one-shot
-  timeout: 60s
-  capture-reply: true
-  send:
-    to: direct:tap
-    body: "ping"
-    headers:
-      name: Doc
-routeFiles:
-  - routes/job-route.yaml
-"#,
-    )
-    .expect("write job doc");
-    let report = dir.path().join("report.json");
-
-    let (code, _stdout, stderr) = run_camel_job(
-        dir.path(),
-        &[
-            "job.job.yaml",
-            "--report",
-            report.to_str().expect("utf8"),
-            "--arg",
-            "name=First",
-            "--arg",
-            "name=Last",
-        ],
-    );
-    assert_eq!(code, 0, "legacy run must complete; stderr:\n{stderr}");
-    let json = read_report(&report);
-    assert_eq!(json["outcome"], "Completed", "report: {json}");
-    // Last occurrence wins and overrides the document header; the
-    // value stays the raw string (no interpolation, no typing).
-    assert_eq!(json["reply"]["headers"]["name"], "Last", "report: {json}");
-    assert!(
-        stderr.contains("--arg header injection"),
-        "stderr must carry the deprecation note; stderr:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("deprecated"),
-        "stderr must mark the legacy behavior deprecated; stderr:\n{stderr}"
-    );
 }
 
 /// A declared argument resolves through `${arg:}` interpolation and is
@@ -302,8 +252,8 @@ routeFiles:
             "job.job.yaml",
             "--report",
             report.to_str().expect("utf8"),
-            "--arg",
-            "name=John",
+            "--name",
+            "John",
         ],
     );
     assert_eq!(code, 0, "declared run must complete; stderr:\n{stderr}");
@@ -425,7 +375,7 @@ routeFiles:
 /// Typed canonical forms substitute at EVERY interpolation site: the
 /// enum member reaches `to` (the run selects the `direct:out` consumer,
 /// proven by the route's body stamp) and `headers` (`tier=direct:out`),
-/// the CLI pair `count=007` canonicalizes to `7` in the body next to
+/// the dynamic flag `--count 007` canonicalizes to `7` in the body next to
 /// the canonicalized bool (`v=false`), and the typed default
 /// `wait: "30"` canonicalizes into the accepted `30s` timeout (the run
 /// completing with exit 0 proves the duration parsed).
@@ -442,12 +392,11 @@ fn typed_args_interpolate_canonical_forms_all_fields() {
             "job.job.yaml",
             "--report",
             report.to_str().expect("utf8"),
-            "--arg",
-            "verbose=false",
-            "--arg",
-            "target=direct:out",
-            "--arg",
-            "count=007",
+            "--no-verbose",
+            "--target",
+            "direct:out",
+            "--count",
+            "007",
         ],
     );
     assert_eq!(
@@ -483,8 +432,8 @@ fn typed_coercion_failure_exits_2_before_boot() {
             "job.job.yaml",
             "--report",
             report.to_str().expect("utf8"),
-            "--arg",
-            "count=abc",
+            "--count",
+            "abc",
         ],
     );
     assert_eq!(code, 2, "coercion failure must exit 2; stderr:\n{stderr}");
@@ -506,7 +455,7 @@ fn typed_coercion_failure_exits_2_before_boot() {
     );
 }
 
-/// An UNtyped declaration keeps the A2 verbatim behavior: a `--arg`
+/// An UNtyped declaration keeps the A2 verbatim behavior: a dynamic-flag
 /// override whose text has leading zeros (`007`) substitutes exactly
 /// that text — no int canonicalization, body reads `value=007`, not
 /// `value=7`.
@@ -540,8 +489,8 @@ routeFiles:
             "job.job.yaml",
             "--report",
             report.to_str().expect("utf8"),
-            "--arg",
-            "tier=007",
+            "--tier",
+            "007",
         ],
     );
     assert_eq!(code, 0, "untyped run must complete; stderr:\n{stderr}");
@@ -618,8 +567,7 @@ routeFiles:
     )
     .expect("write job doc");
 
-    let (code, stdout, stderr) =
-        run_camel_job(dir.path(), &["job.job.yaml", "--arg", "batch_id=007"]);
+    let (code, stdout, stderr) = run_camel_job(dir.path(), &["job.job.yaml", "--batch_id", "007"]);
     assert_eq!(
         code, 0,
         "batch run must complete and drain;\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -687,7 +635,7 @@ fn tail(tokens: &[&str]) -> Vec<std::ffi::OsString> {
 }
 
 /// Static flags after the document reference parse STATICALLY (native
-/// back-compat): `--arg`, `--config`, `--report`, and `--help` keep
+/// back-compat): `--config`, `--report`, and `--help` keep
 /// their meaning and the raw tail stays empty.
 #[test]
 fn phase1_static_flags_after_path_parse_statically() {
@@ -695,8 +643,6 @@ fn phase1_static_flags_after_path_parse_statically() {
         "camel",
         "job",
         "doc.job.yaml",
-        "--arg",
-        "name=x",
         "--config",
         "c.toml",
         "--report",
@@ -705,7 +651,6 @@ fn phase1_static_flags_after_path_parse_statically() {
     ])
     .expect("expected parse success");
     let args = job_of(cli);
-    assert_eq!(args.args, [("name".to_string(), "x".to_string())]);
     assert_eq!(args.config, "c.toml");
     assert_eq!(args.report.as_deref(), Some(std::path::Path::new("r.json")));
     assert!(args.help);
@@ -743,31 +688,29 @@ fn phase1_flags_after_path_land_in_dynamic_tail() {
     assert_eq!(dynamic, ["--name", "world", "--name=flat"]);
 }
 
-/// The tail starts at the FIRST unknown token: `--arg` before it still
-/// parses statically, while the later static `--report` is already
-/// part of the raw tail.
+/// The tail starts at the FIRST unknown token: static flags before it
+/// still parse statically, while the first unknown token and everything
+/// after it is part of the raw tail.
 #[test]
 fn phase1_tail_starts_at_first_unknown_token() {
     let cli = TestCli::try_parse_from([
         "camel",
         "job",
         "doc.job.yaml",
-        "--arg",
-        "a=1",
-        "--name",
-        "w",
         "--report",
         "r.json",
+        "--name",
+        "w",
     ])
     .expect("expected parse success");
     let args = job_of(cli);
-    assert_eq!(args.args, [("a".to_string(), "1".to_string())]);
+    assert_eq!(args.report.as_deref(), Some(std::path::Path::new("r.json")));
     let dynamic: Vec<String> = args
         .dynamic
         .iter()
         .map(|token| token.to_string_lossy().into_owned())
         .collect();
-    assert_eq!(dynamic, ["--name", "w", "--report", "r.json"]);
+    assert_eq!(dynamic, ["--name", "w"]);
 }
 
 /// A flag BEFORE the document reference is a phase-1
@@ -947,8 +890,8 @@ fn help_with_name_renders_declared_interface() {
 }
 
 /// The help render shows the RAW `${arg:}` send target without pair
-/// validation: a required argument missing its `--arg` value, which
-/// the execution path rejects pre-boot, never blocks `--help`.
+/// validation: a required argument missing its dynamic-flag value,
+/// which the execution path rejects pre-boot, never blocks `--help`.
 #[test]
 fn help_with_name_reports_required_args_without_pairs() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -963,8 +906,8 @@ fn help_with_name_reports_required_args_without_pairs() {
     );
     write_jobs_root_document(dir.path(), "daily-sync", &document);
 
-    // No --arg: the execution path would fail pair validation; help
-    // must still render.
+    // No dynamic flag: the execution path would fail required-argument
+    // validation; help must still render.
     let (code, stdout, stderr) = run_camel_job(dir.path(), &["daily-sync", "--help"]);
     assert_eq!(
         code, 0,
@@ -1212,50 +1155,6 @@ routeFiles:
     .expect("write job doc");
 }
 
-/// A dynamic flag and the equivalent `--arg` pair are interchangeable:
-/// both spellings exit 0 and the report shows the same interpolated
-/// body.
-#[test]
-fn binary_dynamic_flag_runs_identical_to_arg() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_job_fixture_config(dir.path());
-    write_tap_route(dir.path());
-    write_declared_name_job(dir.path());
-    let report = dir.path().join("report.json");
-
-    // Dynamic flag form.
-    let (code, _stdout, stderr) = run_camel_job(
-        dir.path(),
-        &[
-            "job.job.yaml",
-            "--name",
-            "world",
-            "--report",
-            report.to_str().expect("utf8"),
-        ],
-    );
-    assert_eq!(code, 0, "dynamic-flag run must complete; stderr:\n{stderr}");
-    let json = read_report(&report);
-    assert_eq!(json["outcome"], "Completed", "report: {json}");
-    assert_eq!(json["reply"]["body"], "hello world", "report: {json}");
-
-    // `--arg` form: identical outcome.
-    let (code, _stdout, stderr) = run_camel_job(
-        dir.path(),
-        &[
-            "job.job.yaml",
-            "--arg",
-            "name=world",
-            "--report",
-            report.to_str().expect("utf8"),
-        ],
-    );
-    assert_eq!(code, 0, "--arg run must complete; stderr:\n{stderr}");
-    let json = read_report(&report);
-    assert_eq!(json["outcome"], "Completed", "report: {json}");
-    assert_eq!(json["reply"]["body"], "hello world", "report: {json}");
-}
-
 /// A dynamic flag works through bare-name resolution: `hello` probes
 /// `jobs/hello.job.yaml` in the default root and `--name` fills the
 /// declared argument.
@@ -1356,7 +1255,7 @@ fn binary_bool_spellings_end_to_end() {
 }
 
 /// A declared bool given in value form (`--verbose=false`) is a usage
-/// error (exit 2) whose targeted diagnostic names all three valid
+/// error (exit 2) whose targeted diagnostic names both valid
 /// spellings — not clap's own render.
 #[test]
 fn binary_bool_value_form_rejected() {
@@ -1375,47 +1274,12 @@ fn binary_bool_value_form_rejected() {
         stderr.contains("--no-verbose"),
         "diagnostic must name the negated spelling; stderr:\n{stderr}"
     );
-    assert!(
-        stderr.contains("--arg verbose=false"),
-        "diagnostic must name the pair spelling; stderr:\n{stderr}"
-    );
-}
-
-/// One argument given through BOTH forms (dynamic flag + `--arg`
-/// pair) is ambiguous input: a usage error naming the argument and
-/// both forms.
-#[test]
-fn binary_cross_form_conflict() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_job_fixture_config(dir.path());
-    write_tap_route(dir.path());
-    write_declared_name_job(dir.path());
-
-    let (code, _stdout, stderr) = run_camel_job(
-        dir.path(),
-        &["job.job.yaml", "--name", "a", "--arg", "name=b"],
-    );
-    assert_eq!(
-        code, 2,
-        "cross-form conflict must exit 2; stderr:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("'name'"),
-        "diagnostic must name the argument; stderr:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("--name"),
-        "diagnostic must name the flag form; stderr:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("--arg name=VALUE"),
-        "diagnostic must name the pair form; stderr:\n{stderr}"
-    );
 }
 
 /// A dynamic flag on a legacy (no-`args:`) document is a usage error
-/// that steers toward `args:` and `--arg` — and is NOT misread as the
-/// legacy `--arg`-header behavior (no deprecation note).
+/// that steers toward declaring an `args:` block — and is NOT misread
+/// as an implicit-header path (no header injection, no deprecation
+/// note).
 #[test]
 fn binary_dynamic_on_legacy_document_errors() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1445,84 +1309,8 @@ routes:
         "diagnostic must point at the args block; stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("--arg"),
-        "diagnostic must offer the --arg fallback; stderr:\n{stderr}"
-    );
-    assert!(
         !stderr.contains("deprecated"),
-        "a dynamic flag is not the legacy --arg path; stderr:\n{stderr}"
-    );
-}
-
-/// `--arg` back-compat in both positions on a legacy document: after
-/// the path (phase-1 static) and before the path, both deliver the raw
-/// header (overriding the document header, last-wins) and the
-/// deprecation note — unchanged by the tail work.
-#[test]
-fn binary_arg_backcompat_positions() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_job_fixture_config(dir.path());
-    write_tap_route(dir.path());
-    std::fs::write(
-        dir.path().join("job.job.yaml"),
-        r#"execute:
-  mode: one-shot
-  timeout: 60s
-  capture-reply: true
-  send:
-    to: direct:tap
-    body: "ping"
-    headers:
-      name: Doc
-routeFiles:
-  - routes/job-route.yaml
-"#,
-    )
-    .expect("write job doc");
-    let report = dir.path().join("report.json");
-
-    // After the path.
-    let (code, _stdout, stderr) = run_camel_job(
-        dir.path(),
-        &[
-            "job.job.yaml",
-            "--arg",
-            "name=x",
-            "--report",
-            report.to_str().expect("utf8"),
-        ],
-    );
-    assert_eq!(
-        code, 0,
-        "post-path --arg run must complete; stderr:\n{stderr}"
-    );
-    let json = read_report(&report);
-    assert_eq!(json["reply"]["headers"]["name"], "x", "report: {json}");
-    assert!(
-        stderr.contains("deprecated"),
-        "deprecation note must carry; stderr:\n{stderr}"
-    );
-
-    // Before the path.
-    let (code, _stdout, stderr) = run_camel_job(
-        dir.path(),
-        &[
-            "--arg",
-            "name=x",
-            "job.job.yaml",
-            "--report",
-            report.to_str().expect("utf8"),
-        ],
-    );
-    assert_eq!(
-        code, 0,
-        "pre-path --arg run must complete; stderr:\n{stderr}"
-    );
-    let json = read_report(&report);
-    assert_eq!(json["reply"]["headers"]["name"], "x", "report: {json}");
-    assert!(
-        stderr.contains("deprecated"),
-        "deprecation note must carry; stderr:\n{stderr}"
+        "a dynamic flag is not a legacy path; stderr:\n{stderr}"
     );
 }
 
@@ -1686,13 +1474,13 @@ routes:
 }
 
 /// The help path shares the load-time reserved-name guard with
-/// execution: a document declaring one of the four static
+/// execution: a document declaring one of the three static
 /// job-subcommand flag names fails the `--help` render pre-boot with
 /// exit 2 and the reserved-name diagnostic naming the argument —
-/// identically for all four names.
+/// identically for all three names.
 #[test]
 fn binary_reserved_name_help_rejected() {
-    for name in ["help", "config", "report", "arg"] {
+    for name in ["help", "config", "report"] {
         let dir = tempfile::tempdir().expect("tempdir");
         write_job_fixture_config(dir.path());
         let document = format!(

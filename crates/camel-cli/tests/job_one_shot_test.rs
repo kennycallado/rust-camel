@@ -436,11 +436,12 @@ routeFiles:
     );
 }
 
-/// Batch mode + `--arg` injection: the CLI arg reaches the seda worker
-/// as a header, the worker interpolates it before the file write —
-/// exit 0, `Completed`, and the tagged file carries the injected value.
+/// Batch mode + dynamic flag: the declared `batch_id` argument is
+/// interpolated into a send header (`${arg:batch_id}`), the seda worker
+/// interpolates the header before the file write — exit 0, `Completed`,
+/// and the tagged file carries the resolved value.
 #[test]
-fn batch_works_with_arg_injection() {
+fn batch_works_with_dynamic_flag() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_config(dir.path());
     std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
@@ -461,20 +462,23 @@ fn batch_works_with_arg_injection() {
     std::fs::write(dir.path().join("routes/job-route.yaml"), routes).expect("write route");
     std::fs::write(
         dir.path().join("job.job.yaml"),
-        r#"execute:
+        r#"args:
+  batch_id: {}
+execute:
   mode: batch
   timeout: 60s
   send:
     to: direct:fan
     body: "m"
+    headers:
+      batch-id: "${arg:batch_id}"
 routeFiles:
   - routes/job-route.yaml
 "#,
     )
     .expect("write job doc");
 
-    let (code, stdout, stderr) =
-        run_job_args(dir.path(), &["job.job.yaml", "--arg", "batch-id=42"]);
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--batch_id", "42"]);
     assert_eq!(
         code, 0,
         "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -485,7 +489,7 @@ routeFiles:
     let text = read_eventually(dir.path(), "tagged.txt");
     assert!(
         text.contains("id-42"),
-        "tagged.txt must carry the injected arg; got: {text}"
+        "tagged.txt must carry the resolved arg; got: {text}"
     );
 }
 
@@ -1113,42 +1117,27 @@ routeFiles:
     .expect("write job doc");
 }
 
-/// A declared argument set through the dynamic-flag form and through
-/// the legacy `--arg` form records the same run: both exit 0 and the
-/// two JSON reports match on the evidence fields exactly (`duration_ms`
-/// is timing noise and excluded).
+/// A declared argument supplied through its dynamic flag runs the
+/// declared path end to end: exit 0 and a `Completed` one-shot report
+/// whose reply body carries the interpolated `${arg:name}` value.
 #[test]
-fn dynamic_flag_one_shot_matches_arg_form() {
+fn dynamic_flag_one_shot_end_to_end() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_declared_name_fixture(dir.path());
 
-    let (flag_code, flag_stdout, flag_stderr) =
-        run_job_args(dir.path(), &["job.job.yaml", "--name", "world"]);
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--name", "world"]);
     assert_eq!(
-        flag_code, 0,
-        "dynamic-flag run must complete;\nstdout:\n{flag_stdout}\nstderr:\n{flag_stderr}"
-    );
-    let (arg_code, arg_stdout, arg_stderr) =
-        run_job_args(dir.path(), &["job.job.yaml", "--arg", "name=world"]);
-    assert_eq!(
-        arg_code, 0,
-        "--arg run must complete;\nstdout:\n{arg_stdout}\nstderr:\n{arg_stderr}"
+        code, 0,
+        "dynamic-flag run must complete;\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
-    let flag_report: serde_json::Value = serde_json::from_str(flag_stdout.trim())
-        .expect("stdout is the JSON report; got:\n{flag_stdout}");
-    let arg_report: serde_json::Value = serde_json::from_str(arg_stdout.trim())
-        .expect("stdout is the JSON report; got:\n{arg_stdout}");
-    for field in ["outcome", "mode", "terminated_early", "reply"] {
-        assert_eq!(
-            flag_report[field], arg_report[field],
-            "reports must match on `{field}`;\nflag form:\n{flag_report}\narg form:\n{arg_report}"
-        );
-    }
-    assert_eq!(flag_report["outcome"], "Completed", "report: {flag_report}");
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(report["mode"], "one-shot", "report: {report}");
     assert_eq!(
-        flag_report["reply"]["body"], "hello world",
-        "the interpolated ${{arg:name}} body must carry; report: {flag_report}"
+        report["reply"]["body"], "hello world",
+        "the interpolated ${{arg:name}} body must carry; report: {report}"
     );
 }
 
@@ -2458,122 +2447,6 @@ fn job_listing_does_not_boot_route_pipeline() {
     );
 }
 
-// ── --arg header injection (add-job-args-batch) ────────────────────────
-
-/// `--arg NAME=VALUE` pairs reach the route as message headers: the flag
-/// is repeatable, and two distinct names both interpolate in a single
-/// simple expression.
-#[test]
-fn arg_single_and_repeated_reach_route_as_headers() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_config(dir.path());
-    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
-    std::fs::write(
-        dir.path().join("routes/job-route.yaml"),
-        r#"routes:
-  - id: "job-arg-headers"
-    from: "direct:transform"
-    steps:
-      - transform: {simple: "${header.name}-${header.tier}"}
-"#,
-    )
-    .expect("write route");
-    std::fs::write(
-        dir.path().join("job.job.yaml"),
-        r#"execute:
-  mode: one-shot
-  timeout: 60s
-  capture-reply: true
-  send:
-    to: direct:transform
-    body: "x"
-routeFiles:
-  - routes/job-route.yaml
-"#,
-    )
-    .expect("write job doc");
-
-    let (code, stdout, stderr) = run_job_args(
-        dir.path(),
-        &["job.job.yaml", "--arg", "name=John", "--arg", "tier=gold"],
-    );
-    assert_eq!(
-        code, 0,
-        "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    let report: serde_json::Value =
-        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
-    assert_eq!(report["outcome"], "Completed", "report: {report}");
-    assert_eq!(report["reply"]["body"], "John-gold", "report: {report}");
-}
-
-/// A CLI `--arg` overrides a colliding document `send.headers` entry:
-/// CLI values are applied after document headers, so the last write
-/// wins.
-#[test]
-fn arg_overrides_document_header() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_config(dir.path());
-    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
-    std::fs::write(
-        dir.path().join("routes/job-route.yaml"),
-        r#"routes:
-  - id: "job-arg-override"
-    from: "direct:transform"
-    steps:
-      - transform: {simple: "${header.name}"}
-"#,
-    )
-    .expect("write route");
-    std::fs::write(
-        dir.path().join("job.job.yaml"),
-        r#"execute:
-  mode: one-shot
-  timeout: 60s
-  capture-reply: true
-  send:
-    to: direct:transform
-    body: "x"
-    headers:
-      name: Doc
-routeFiles:
-  - routes/job-route.yaml
-"#,
-    )
-    .expect("write job doc");
-
-    let (code, stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--arg", "name=Cli"]);
-    assert_eq!(
-        code, 0,
-        "expected exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    let report: serde_json::Value =
-        serde_json::from_str(stdout.trim()).expect("stdout is the JSON report; got:\n{stdout}");
-    assert_eq!(report["reply"]["body"], "Cli", "report: {report}");
-}
-
-/// A malformed `--arg` value (no `=`, or an empty name) is a clap usage
-/// error: exit 2 with the value-parser message on stderr.
-#[test]
-fn malformed_arg_is_usage_error() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_bare_name_fixture(dir.path());
-
-    let (code, _stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--arg", "noequals"]);
-    assert_eq!(code, 2, "missing = is a usage error; stderr:\n{stderr}");
-    assert!(
-        stderr.contains("expected NAME=VALUE"),
-        "stderr must carry the usage error; got:\n{stderr}"
-    );
-
-    let (code, _stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--arg", "=value"]);
-    assert_eq!(code, 2, "empty name is a usage error; stderr:\n{stderr}");
-    assert!(
-        stderr.contains("name is empty"),
-        "stderr must carry the usage error; got:\n{stderr}"
-    );
-}
-
 // ── Declared `args:` end to end (jobargs Task 4.1) ─────────────────────
 
 /// The field-matrix fixture: four declared arguments (`target`, `text`,
@@ -2619,12 +2492,12 @@ routeFiles:
 
 /// The four-field interpolation matrix in BOTH execution modes: one-shot
 /// resolves embedded defaults for `to`, `body`, `headers`, and `timeout`;
-/// batch resolves explicit `--arg` pairs over the same defaults. Exit 0
+/// batch resolves explicit dynamic flags over the same defaults. Exit 0
 /// and a `Completed` report whose reply body carries the interpolated
 /// header and body (`${header.X-Env}:${body}`).
 #[test]
 fn job_args_end_to_end_field_matrix() {
-    // One-shot: defaults only, no `--arg` pairs.
+    // One-shot: defaults only, no dynamic flags.
     let dir = tempfile::tempdir().expect("tempdir");
     write_args_matrix_fixture(dir.path(), "one-shot");
     let (code, stdout, stderr) = run_job(dir.path(), "job.job.yaml");
@@ -2641,7 +2514,7 @@ fn job_args_end_to_end_field_matrix() {
         "declared defaults must resolve in headers and body; report: {report}"
     );
 
-    // Batch: explicit pairs win over the same defaults; the direct
+    // Batch: explicit flags win over the same defaults; the direct
     // target keeps the drain empty-queue immediate.
     let dir = tempfile::tempdir().expect("tempdir");
     write_args_matrix_fixture(dir.path(), "batch");
@@ -2649,12 +2522,12 @@ fn job_args_end_to_end_field_matrix() {
         dir.path(),
         &[
             "job.job.yaml",
-            "--arg",
-            "text=hi",
-            "--arg",
-            "header=silver",
-            "--arg",
-            "wait=45s",
+            "--text",
+            "hi",
+            "--header",
+            "silver",
+            "--wait",
+            "45s",
         ],
     );
     assert_eq!(
@@ -2667,14 +2540,14 @@ fn job_args_end_to_end_field_matrix() {
     assert_eq!(report["mode"], "batch", "report: {report}");
     assert_eq!(
         report["reply"]["body"], "silver:hi",
-        "explicit pairs must win over defaults in batch mode; report: {report}"
+        "explicit flags must win over defaults in batch mode; report: {report}"
     );
 }
 
 /// Declared-argument validation happens before boot and exits 2 naming
-/// the offending argument: an `--arg` naming an undeclared argument, and
-/// an omitted required argument with no default. Early exit-2 classes
-/// are stderr-only — no JSON report reaches stdout.
+/// the offending argument: an undeclared dynamic flag, and an omitted
+/// required argument with no default. Early exit-2 classes are
+/// stderr-only — no JSON report reaches stdout.
 #[test]
 fn job_args_validation_exit_two() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2706,15 +2579,15 @@ routeFiles:
     )
     .expect("write job doc");
 
-    // Unknown name: exit 2 before boot, stderr names `tier`.
-    let (code, stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--arg", "tier=gold"]);
+    // Unknown name: exit 2 before boot, clap names `--tier`.
+    let (code, stdout, stderr) = run_job_args(dir.path(), &["job.job.yaml", "--tier", "gold"]);
     assert_eq!(
         code, 2,
-        "unknown declared argument is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "undeclared dynamic flag is exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("unknown argument `tier`"),
-        "stderr must name the undeclared argument; got:\n{stderr}"
+        stderr.contains("unexpected argument '--tier' found"),
+        "stderr must name the undeclared flag; got:\n{stderr}"
     );
     assert!(
         stdout.trim().is_empty(),

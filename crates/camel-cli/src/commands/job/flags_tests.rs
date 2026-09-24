@@ -112,14 +112,14 @@ routeFiles:
 #[test]
 fn lower_string_flag_to_pair() {
     let decls = declarations_for(NAME_DOC);
-    let lowered = lower_dynamic_flags(decls.as_ref(), &tail(&["--name", "world"]), &[])
+    let lowered = lower_dynamic_flags(decls.as_ref(), &tail(&["--name", "world"]))
         .expect("space form lowers");
     assert_eq!(
         lowered.pairs.last(),
         Some(&("name".to_string(), "world".to_string()))
     );
-    let equals = lower_dynamic_flags(decls.as_ref(), &tail(&["--name=world"]), &[])
-        .expect("equals form lowers");
+    let equals =
+        lower_dynamic_flags(decls.as_ref(), &tail(&["--name=world"])).expect("equals form lowers");
     assert_eq!(equals.pairs, lowered.pairs, "both forms are byte-identical");
 }
 
@@ -129,7 +129,6 @@ fn lower_last_wins_within_form() {
     let lowered = lower_dynamic_flags(
         decls.as_ref(),
         &tail(&["--name", "first", "--name", "second"]),
-        &[],
     )
     .expect("repeated flag lowers");
     assert_eq!(
@@ -142,7 +141,7 @@ fn lower_last_wins_within_form() {
 #[test]
 fn lower_int_flag_flows_to_coercion() {
     let decls = declarations_for(COUNT_INT_DOC);
-    let lowered = lower_dynamic_flags(decls.as_ref(), &tail(&["--count", "notanint"]), &[])
+    let lowered = lower_dynamic_flags(decls.as_ref(), &tail(&["--count", "notanint"]))
         .expect("flag lowers; coercion is downstream");
     let err = document::parse_job_document_with_args(&doc_path(), COUNT_INT_DOC, &lowered.pairs)
         .unwrap_err();
@@ -169,18 +168,18 @@ fn lower_int_flag_flows_to_coercion() {
 fn lower_bool_bare_and_negated() {
     let decls = declarations_for(VERBOSE_BOOL_DEFAULT_DOC);
     let bare =
-        lower_dynamic_flags(decls.as_ref(), &tail(&["--verbose"]), &[]).expect("bare bool lowers");
+        lower_dynamic_flags(decls.as_ref(), &tail(&["--verbose"])).expect("bare bool lowers");
     assert_eq!(
         bare.pairs,
         vec![("verbose".to_string(), "true".to_string())]
     );
-    let negated = lower_dynamic_flags(decls.as_ref(), &tail(&["--no-verbose"]), &[])
-        .expect("negated bool lowers");
+    let negated =
+        lower_dynamic_flags(decls.as_ref(), &tail(&["--no-verbose"])).expect("negated bool lowers");
     assert_eq!(
         negated.pairs,
         vec![("verbose".to_string(), "false".to_string())]
     );
-    let empty = lower_dynamic_flags(decls.as_ref(), &tail(&[]), &[]).expect("empty tail");
+    let empty = lower_dynamic_flags(decls.as_ref(), &tail(&[])).expect("empty tail");
     assert!(
         empty.pairs.is_empty(),
         "no verbose pair: the declared default applies downstream"
@@ -191,17 +190,15 @@ fn lower_bool_bare_and_negated() {
 fn lower_bool_value_form_rejected_naming_spellings() {
     let decls = declarations_for(VERBOSE_BOOL_DOC);
     for spelling in ["--verbose=false", "--no-verbose=false"] {
-        let err = lower_dynamic_flags(decls.as_ref(), &tail(&[spelling]), &[]).unwrap_err();
+        let err = lower_dynamic_flags(decls.as_ref(), &tail(&[spelling])).unwrap_err();
         match &err {
             DynamicFlagError::BoolFlagValue { name } => assert_eq!(name, "verbose"),
             other => panic!("expected BoolFlagValue for {spelling}, got {other:?}"),
         }
         let msg = err.to_string();
         assert!(
-            msg.contains("--verbose")
-                && msg.contains("--no-verbose")
-                && msg.contains("--arg verbose=false"),
-            "diagnostic names every usable spelling: {msg}"
+            msg.contains("--verbose") && msg.contains("--no-verbose") && !msg.contains("--arg"),
+            "diagnostic names the usable spellings without --arg: {msg}"
         );
     }
 }
@@ -209,7 +206,7 @@ fn lower_bool_value_form_rejected_naming_spellings() {
 #[test]
 fn lower_stray_positional_after_bool_rejected() {
     let decls = declarations_for(VERBOSE_BOOL_DOC);
-    let err = lower_dynamic_flags(decls.as_ref(), &tail(&["--verbose", "false"]), &[]).unwrap_err();
+    let err = lower_dynamic_flags(decls.as_ref(), &tail(&["--verbose", "false"])).unwrap_err();
     match &err {
         DynamicFlagError::UnexpectedPositional { value } => assert_eq!(value, "false"),
         other => panic!("expected UnexpectedPositional, got {other:?}"),
@@ -219,8 +216,8 @@ fn lower_stray_positional_after_bool_rejected() {
 #[test]
 fn lower_contradictory_bool_rejected() {
     let decls = declarations_for(VERBOSE_BOOL_DOC);
-    let err = lower_dynamic_flags(decls.as_ref(), &tail(&["--verbose", "--no-verbose"]), &[])
-        .unwrap_err();
+    let err =
+        lower_dynamic_flags(decls.as_ref(), &tail(&["--verbose", "--no-verbose"])).unwrap_err();
     match &err {
         DynamicFlagError::ContradictoryBool { name } => assert_eq!(name, "verbose"),
         other => panic!("expected ContradictoryBool, got {other:?}"),
@@ -230,7 +227,7 @@ fn lower_contradictory_bool_rejected() {
 #[test]
 fn lower_negation_of_non_bool_is_unknown() {
     let decls = declarations_for(COUNT_INT_DOC);
-    let err = lower_dynamic_flags(decls.as_ref(), &tail(&["--no-count"]), &[]).unwrap_err();
+    let err = lower_dynamic_flags(decls.as_ref(), &tail(&["--no-count"])).unwrap_err();
     let DynamicFlagError::Clap(rendered) = &err else {
         panic!("expected Clap, got {err:?}")
     };
@@ -244,7 +241,7 @@ fn lower_negation_of_non_bool_is_unknown() {
 fn lower_alias_spellings_rejected() {
     let decls = declarations_for(USER_NAME_DOC);
     for spelling in ["--user-name", "--user", "-u"] {
-        let err = lower_dynamic_flags(decls.as_ref(), &tail(&[spelling, "x"]), &[]).unwrap_err();
+        let err = lower_dynamic_flags(decls.as_ref(), &tail(&[spelling, "x"])).unwrap_err();
         let DynamicFlagError::Clap(rendered) = &err else {
             panic!("expected Clap for {spelling}, got {err:?}")
         };
@@ -258,7 +255,7 @@ fn lower_alias_spellings_rejected() {
 #[test]
 fn lower_undeclared_flag_renders_clap_error_with_hint() {
     let decls = declarations_for(NAME_DOC);
-    let err = lower_dynamic_flags(decls.as_ref(), &tail(&["--nmae", "x"]), &[]).unwrap_err();
+    let err = lower_dynamic_flags(decls.as_ref(), &tail(&["--nmae", "x"])).unwrap_err();
     let DynamicFlagError::Clap(rendered) = &err else {
         panic!("expected Clap, got {err:?}")
     };
@@ -277,13 +274,8 @@ fn lower_undeclared_flag_renders_clap_error_with_hint() {
 #[test]
 fn lower_empty_tail_is_identity() {
     let decls = declarations_for(NAME_DOC);
-    let arg_pairs = vec![
-        ("a".to_string(), "1".to_string()),
-        ("b".to_string(), "2".to_string()),
-    ];
-    let lowered = lower_dynamic_flags(decls.as_ref(), &tail(&[]), &arg_pairs)
-        .expect("empty tail is identity");
-    assert_eq!(lowered.pairs, arg_pairs);
+    let lowered = lower_dynamic_flags(decls.as_ref(), &tail(&[])).expect("empty tail is identity");
+    assert!(lowered.pairs.is_empty());
     assert!(!lowered.help);
     assert_eq!(lowered.report, None);
 }
@@ -293,19 +285,13 @@ fn lower_tail_statics_recovered() {
     let decls = declarations_for(NAME_DOC);
     let lowered = lower_dynamic_flags(
         decls.as_ref(),
-        &tail(&["--name", "w", "--report", "r.json", "--arg", "a=1"]),
-        &[],
+        &tail(&["--name", "w", "--report", "r.json"]),
     )
     .expect("statics recover alongside a dynamic flag");
     assert_eq!(
         lowered.report.as_deref(),
         Some(Path::new("r.json")),
         "tail --report recovers"
-    );
-    assert!(
-        lowered.pairs.contains(&("a".to_string(), "1".to_string())),
-        "tail --arg pair recovers: {:?}",
-        lowered.pairs
     );
     assert!(
         lowered
@@ -315,68 +301,59 @@ fn lower_tail_statics_recovered() {
         lowered.pairs
     );
     assert!(!lowered.help);
+
+    // A tail legacy pair token is NOT a recoverable static: the pair
+    // flag is gone, so the token fails lowering as an unknown argument.
+    let err = lower_dynamic_flags(decls.as_ref(), &tail(&["--arg", "x=1"])).unwrap_err();
+    assert!(
+        matches!(err, DynamicFlagError::Clap(_)),
+        "tail legacy pair token fails lowering: {err:?}"
+    );
 }
 
 #[test]
 fn lower_help_precedence_short_circuits() {
     let decls = declarations_for(NAME_DOC);
-    let lowered = lower_dynamic_flags(decls.as_ref(), &tail(&["--nmae", "x", "--help"]), &[])
+    let lowered = lower_dynamic_flags(decls.as_ref(), &tail(&["--nmae", "x", "--help"]))
         .expect("help wins over flag errors");
     assert!(lowered.help, "--help short-circuits before validation");
     assert!(lowered.pairs.is_empty());
     assert_eq!(lowered.report, None);
 }
 
+/// A value flag with no value (`--name` as the last token) fails with
+/// clap's own missing-value diagnostic (`DynamicFlagError::Clap`).
 #[test]
-fn lower_cross_form_conflict_both_orders() {
+fn lower_value_flag_missing_value_is_clap_error() {
     let decls = declarations_for(NAME_DOC);
-    let flag_first = lower_dynamic_flags(
-        decls.as_ref(),
-        &tail(&["--name", "a"]),
-        &[("name".to_string(), "b".to_string())],
-    )
-    .unwrap_err();
-    let arg_first = lower_dynamic_flags(
-        decls.as_ref(),
-        &tail(&["--arg", "name=b", "--name", "a"]),
-        &[],
-    )
-    .unwrap_err();
-    for err in [&flag_first, &arg_first] {
-        match err {
-            DynamicFlagError::CrossFormConflict { name } => assert_eq!(name, "name"),
-            other => panic!("expected CrossFormConflict, got {other:?}"),
-        }
-        let msg = err.to_string();
-        assert!(
-            msg.contains("'name'") && msg.contains("--name") && msg.contains("--arg name=VALUE"),
-            "diagnostic names both forms: {msg}"
-        );
-    }
+    let err = lower_dynamic_flags(decls.as_ref(), &tail(&["--name"])).unwrap_err();
+    assert!(
+        matches!(err, DynamicFlagError::Clap(_)),
+        "expected Clap for the missing value, got {err:?}"
+    );
 }
 
 #[test]
 fn lower_dynamic_on_undeclared_document_errors() {
-    let err = lower_dynamic_flags(None, &tail(&["--name", "x"]), &[]).unwrap_err();
+    let err = lower_dynamic_flags(None, &tail(&["--name", "x"])).unwrap_err();
     match &err {
         DynamicFlagError::UndeclaredDocument { flag } => assert_eq!(flag, "name"),
         other => panic!("expected UndeclaredDocument, got {other:?}"),
     }
     let msg = err.to_string();
     assert!(
-        msg.contains("args:") && msg.contains("--arg"),
-        "diagnostic points at the args: block and --arg: {msg}"
+        msg.contains("args:") && msg.contains("declare the argument") && !msg.contains("--arg"),
+        "diagnostic points at the args: block remedy, not --arg: {msg}"
     );
 
-    let statics_only = lower_dynamic_flags(None, &tail(&["--arg", "a=1"]), &[])
-        .expect("statics-only tail on a legacy document is not an error");
-    assert!(
-        statics_only
-            .pairs
-            .contains(&("a".to_string(), "1".to_string())),
-        "statics-only tail recovers: {:?}",
-        statics_only.pairs
-    );
+    // The formerly statics-only pair token is an unknown long flag on
+    // an undeclared document: it fails as UndeclaredDocument naming
+    // the flag.
+    let err = lower_dynamic_flags(None, &tail(&["--arg", "a=1"])).unwrap_err();
+    match &err {
+        DynamicFlagError::UndeclaredDocument { flag } => assert_eq!(flag, "arg"),
+        other => panic!("expected UndeclaredDocument for the pair token, got {other:?}"),
+    }
 }
 
 #[test]
@@ -385,7 +362,6 @@ fn lower_ids_do_not_collide_with_declared_names() {
     let lowered = lower_dynamic_flags(
         decls.as_ref(),
         &tail(&["--document", "x", "--verbose", "--no_verbose", "y"]),
-        &[],
     )
     .expect("colon-namespaced IDs keep declared names distinct");
     assert!(

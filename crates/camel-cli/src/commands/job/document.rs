@@ -46,8 +46,18 @@ const JOB_SEND_SCHEMES: [&str; 2] = ["direct", "seda"];
 pub(crate) struct JobDocument {
     /// The `execute:` section.
     pub(crate) execute: ExecuteSection,
-    /// Declared top-level `args:` map; `None` selects the legacy
-    /// implicit-header path for `--arg` pairs.
+    /// Declared top-level `args:` map; `None` is the undeclared mode
+    /// (fields stay raw, no argument interpolation). The record of the
+    /// parser's declared/raw-fields mode split: consumers read the
+    /// declarations through [`JobHelpInfo::args`] or
+    /// [`resolve_job_args`], not this field.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "mode-split record; the parser split must stay observable"
+        )
+    )]
     pub(crate) args: Option<JobArgumentDeclarations>,
     /// Route files relative to the document's directory.
     pub(crate) route_files: Option<Vec<String>>,
@@ -55,17 +65,6 @@ pub(crate) struct JobDocument {
     pub(crate) route_files_from_root: Option<Vec<String>>,
     /// Inline route definitions (same schema as route files).
     pub(crate) routes: Option<serde_yaml::Value>,
-}
-
-impl JobDocument {
-    /// Whether `--arg` pairs take the legacy implicit-header path: true
-    /// when the document declares no top-level `args:` block. Declared
-    /// documents resolve pairs against [`JobDocument::args`] instead
-    /// (pair resolution and defaults run inside
-    /// [`parse_job_document_with_args`], before any field validation).
-    pub(crate) fn legacy_arg_headers(&self) -> bool {
-        self.args.is_none()
-    }
 }
 
 /// The execution mode of a job document's `execute:` section.
@@ -214,7 +213,7 @@ pub(crate) enum JobDocError {
     /// allowed `required`/`default`/`description`/`type` set.
     UnknownArgumentField { argument: String, field: String },
     /// A top-level `args:` name collides with a static job-subcommand
-    /// flag (`help`, `config`, `report`, `arg`).
+    /// flag (`help`, `config`, `report`).
     ReservedArgumentName { name: String },
     /// A top-level `args:` declaration carries a `type:` value that is
     /// neither `string`, `int`, `bool`, nor a well-formed `enum[...]`.
@@ -229,12 +228,8 @@ pub(crate) enum JobDocError {
     /// A top-level `args:` declaration is not a mapping, or one of its
     /// fields has the wrong type (values remain string-only).
     InvalidArgumentDeclaration { argument: String, detail: String },
-    /// A `--arg` pair names an argument the document does not declare
-    /// (declared mode only; legacy documents accept any name as a
-    /// header).
-    UnknownArgumentName { name: String },
     /// A declared `required: true` argument without a `default` got no
-    /// `--arg` value.
+    /// dynamic-flag value.
     MissingRequiredArgument { name: String },
     /// A `${arg:NAME}` token in a declared document's fields resolved
     /// to nothing: `NAME` was neither declared (no default, no CLI
@@ -315,13 +310,9 @@ impl std::fmt::Display for JobDocError {
             Self::InvalidArgumentDeclaration { argument, detail } => {
                 write!(f, "invalid declaration for argument `{argument}`: {detail}")
             }
-            Self::UnknownArgumentName { name } => write!(
-                f,
-                "unknown argument `{name}` in `--arg`: not declared in the document's `args:` block"
-            ),
             Self::MissingRequiredArgument { name } => write!(
                 f,
-                "missing required argument `{name}`: pass --arg {name}=<value>"
+                "missing required argument `{name}`: pass --{name} <value>"
             ),
             Self::UnresolvedArgument { name } => write!(
                 f,
@@ -420,47 +411,46 @@ const TEST_VOCABULARY_KEYS: [&str; 8] = [
 /// Parse one job document: suffix contract, section exclusivity, serde
 /// shape, and v1 grammar rules (`mode: one-shot`/`batch`, mandatory
 /// `timeout`, one `direct:`/`seda:` send, exactly one route source).
-/// Pure document grammar: no CLI `--arg` machinery — declared
+/// Pure document grammar: no CLI machinery — declared
 /// arguments are normalized into the model but never resolved or
 /// interpolated (fields stay raw). See
 /// [`parse_job_document_with_args`].
 ///
 /// The grammar test suite (`document_tests`) is the only consumer since
 /// the embedded-artifact path moved to [`parse_job_document_with_args`]
-/// with EMPTY pairs (jobargs Task 3.2); the pair-free bare parse is
+/// with no pairs (jobargs Task 3.2); the pair-free bare parse is
 /// deliberately preserved as the pure-grammar seam.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_job_document(path: &Path, text: &str) -> Result<JobDocument, JobDocError> {
     parse_job_document_impl(path, text, None)
 }
 
-/// [`parse_job_document`] with the CLI's repeatable `--arg NAME=VALUE`
-/// pairs. For a declared document (`args:` present) the pairs are
-/// resolved against the declarations FIRST — unknown names and missing
-/// required values fail before any field validation and before boot —
-/// then defaults fill the omissions, and the resolved values (plus the
-/// ambient environment, the same namespace-specific shared stage the
-/// route sources use) are interpolated into `to`, `body`, `headers`,
-/// and `timeout` BEFORE those fields are validated. Legacy documents
-/// (no `args:`) never see pair validation or field interpolation:
-/// their pairs stay raw send-time headers.
+/// [`parse_job_document`] with the dynamic-flag NAME=VALUE pairs. For
+/// a declared document (`args:` present) the pairs are resolved against
+/// the declarations FIRST — missing required values fail before any
+/// field validation and before boot — then defaults fill the omissions,
+/// and the resolved values (plus the ambient environment, the same
+/// namespace-specific shared stage the route sources use) are
+/// interpolated into `to`, `body`, `headers`, and `timeout` BEFORE those
+/// fields are validated. Undeclared documents (no `args:`) never see
+/// pair validation or field interpolation.
 pub(crate) fn parse_job_document_with_args(
     path: &Path,
     text: &str,
-    cli_args: &[(String, String)],
+    pairs: &[(String, String)],
 ) -> Result<JobDocument, JobDocError> {
-    parse_job_document_impl(path, text, Some(cli_args))
+    parse_job_document_impl(path, text, Some(pairs))
 }
 
-/// Shared document parser. `cli_args` is `Some` on the CLI execution
-/// path (the raw pairs) and on the embedded-artifact path (EMPTY pairs —
-/// embedded defaults only, jobargs Task 3.2): pair resolution,
-/// defaulting, and field interpolation are execution concerns, while the
-/// bare parse (model inspection) stays pair-free.
+/// Shared document parser. `pairs` is `Some` on the CLI execution
+/// path (the lowered dynamic-flag pairs) and on the embedded-artifact
+/// path (empty pairs — embedded defaults only, jobargs Task 3.2):
+/// pair resolution, defaulting, and field interpolation are execution
+/// concerns, while the bare parse (model inspection) stays pair-free.
 fn parse_job_document_impl(
     path: &Path,
     text: &str,
-    cli_args: Option<&[(String, String)]>,
+    pairs: Option<&[(String, String)]>,
 ) -> Result<JobDocument, JobDocError> {
     if !camel_dsl::discovery::is_job_document(path) {
         return Err(JobDocError::NotJobSuffix {
@@ -509,13 +499,13 @@ fn parse_job_document_impl(
     // argument-specific diagnostics.
     let args = normalize_job_args(raw.args.take())?;
 
-    // Declared mode with CLI pairs: resolve the pairs against the
-    // declarations (unknown/missing-required fail HERE, before field
+    // Declared mode with pairs: resolve the pairs against the
+    // declarations (missing-required fails HERE, before field
     // validation and before boot), apply defaults, then interpolate
     // the resolved values into the four field surfaces so validation
-    // sees final text. Legacy pairs are untouched (raw send-time
-    // headers) and the bare parse (cli_args = None) keeps raw fields.
-    let resolved = match cli_args {
+    // sees final text. Undeclared documents are untouched (fields stay
+    // raw) and the bare parse (pairs = None) keeps raw fields.
+    let resolved = match pairs {
         Some(pairs) => resolve_job_args(args.as_ref(), pairs)?,
         None => None,
     };
@@ -675,8 +665,8 @@ fn is_argument_identifier(name: &str) -> bool {
 }
 
 /// Static job-subcommand flag names a top-level `args:` name must not
-/// collide with (`camel job --help/--config/--report/--arg`).
-const RESERVED_ARGUMENT_NAMES: [&str; 4] = ["help", "config", "report", "arg"];
+/// collide with (`camel job --help/--config/--report`).
+const RESERVED_ARGUMENT_NAMES: [&str; 3] = ["help", "config", "report"];
 
 /// Normalize the raw top-level `args:` map: each name must match the
 /// identifier grammar and each declaration the strict
@@ -871,27 +861,27 @@ fn coerce_argument(value: &str, arg_type: &JobArgType) -> Option<String> {
     }
 }
 
-/// Resolve the CLI `--arg NAME=VALUE` pairs against the declared
-/// arguments (pure; declared mode only — `None` declarations are the
-/// legacy path and yield `Ok(None)` without validating the pairs, which
-/// stay raw send-time headers). Semantics, in order:
+/// Resolve the dynamic-flag NAME=VALUE pairs against the declared
+/// arguments (pure; declared mode only — `None` declarations yield
+/// `Ok(None)` without validating the pairs). Every pair name is
+/// declared by construction: the tail lowering only produces pairs
+/// from declared dynamic flags, and an undeclared flag fails there as
+/// clap's unknown-argument diagnostic. Semantics, in order:
 ///
-/// 1. Every pair must name a declared argument — the first unknown name
-///    fails with [`JobDocError::UnknownArgumentName`].
-/// 2. Repeated names take the LAST value (sequential overwrite;
+/// 1. Repeated names take the LAST value (sequential overwrite;
 ///    deterministic).
-/// 3. Every `required: true` declaration without a `default` must have
+/// 2. Every `required: true` declaration without a `default` must have
 ///    received a pair — the first (lexical) omission fails with
 ///    [`JobDocError::MissingRequiredArgument`].
-/// 4. Declarations with a `default` fill omissions; an explicit pair
+/// 3. Declarations with a `default` fill omissions; an explicit pair
 ///    always wins over the default.
-/// 5. Every resolved value under a non-`string` declaration is coerced
+/// 4. Every resolved value under a non-`string` declaration is coerced
 ///    to its canonical form (via [`coerce_argument`]) and the canonical
 ///    text OVERWRITES the map entry — pairs and defaults alike — so
 ///    interpolation only ever sees canonical text; a coercion failure
 ///    is [`JobDocError::ArgumentCoercion`].
 ///
-/// Precedence is therefore unknown-name > missing-required > coercion:
+/// Precedence is therefore missing-required > coercion:
 /// the checks run in that order and the first failure wins.
 ///
 /// The returned map is the complete `${arg:NAME}` lookup for
@@ -906,9 +896,6 @@ pub(crate) fn resolve_job_args(
     };
     let mut resolved = BTreeMap::new();
     for (name, value) in pairs {
-        if !declarations.entries.contains_key(name) {
-            return Err(JobDocError::UnknownArgumentName { name: name.clone() });
-        }
         resolved.insert(name.clone(), value.clone());
     }
     for (name, declaration) in &declarations.entries {

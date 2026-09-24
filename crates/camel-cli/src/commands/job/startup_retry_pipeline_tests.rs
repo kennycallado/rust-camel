@@ -118,7 +118,7 @@ async fn gate_fails_fast_with_exactly_one_side_effect() {
     let send = tick_send();
 
     let started = Instant::now();
-    let result = send_with_startup_retry(&ctx, &send, "direct:jobs", &[]).await;
+    let result = send_with_startup_retry(&ctx, &send, "direct:jobs").await;
     let elapsed = started.elapsed();
 
     assert_gate_failure(result, elapsed);
@@ -134,7 +134,7 @@ async fn fanout_gate_fails_fast_with_exactly_one_side_effect() {
     let send = tick_send();
 
     let started = Instant::now();
-    let result = send_with_startup_retry(&ctx, &send, "direct:jobs", &[]).await;
+    let result = send_with_startup_retry(&ctx, &send, "direct:jobs").await;
     let elapsed = started.elapsed();
 
     let e = assert_gate_failure(result, elapsed);
@@ -156,7 +156,7 @@ async fn discard_if_no_consumers_proceeds_without_gate_error() {
     let (ctx, mock) = booted_gate_pipeline("seda:worker?discardIfNoConsumers=true").await;
     let send = tick_send();
 
-    let result = send_with_startup_retry(&ctx, &send, "direct:jobs", &[]).await;
+    let result = send_with_startup_retry(&ctx, &send, "direct:jobs").await;
     match result {
         Ok(_) => {}
         Err(SendError::Pipeline(e)) => {
@@ -221,7 +221,7 @@ routes:
 
     let send = tick_send();
     let started = Instant::now();
-    let result = send_with_startup_retry(&ctx, &send, "direct:jobs", &[]).await;
+    let result = send_with_startup_retry(&ctx, &send, "direct:jobs").await;
     let elapsed = started.elapsed();
 
     tokio::time::timeout(Duration::from_secs(2), racer)

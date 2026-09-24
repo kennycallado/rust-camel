@@ -112,20 +112,21 @@ Documents MAY declare job arguments in a top-level `args:` block beside
 carry `type` (`string` default, `int`, `bool`, or `enum[...]` as one string
 scalar with trimmed, non-empty, unique members); unknown fields fail. Typed
 values coerce at resolution, coercion and typed-default failures exit 2, and
-`${arg:NAME}` substitutes the canonical string form. Every
-`--arg NAME=VALUE` pair on a declared document must name a declaration;
-unknown and missing-required names exit 2, defaults fill omissions, and
-explicit pairs win. Resolved values interpolate through `${arg:NAME}` in
+`${arg:NAME}` substitutes the canonical string form. A declared argument
+is supplied through its `--<name>` flag; an undeclared flag fails as an
+unknown argument, missing-required declarations exit 2, defaults fill
+omissions, and an explicit flag wins. Resolved values interpolate through
+`${arg:NAME}` in
 `to`, `body`, `headers`, and `timeout` before field validation, at the same
 scanner stage as `${env:NAME}`. The `arg:` namespace never falls through to
 the environment, `:-fallback` is rejected, and unresolved names exit 2.
-Declared documents inject no implicit headers; legacy documents keep raw
-send fields and header injection with one deprecation note on stderr.
+There is no CLI header injection: documents without an `args:` block keep
+raw send fields, and declared documents never inject implicit headers.
 
 | Failure mode | Trigger | Exit code |
 |--------------|---------|-----------|
 | Doc load error | unreadable file, non-`*.job.yaml` suffix (a `*.test.yaml` declaring `execute:` gets rename guidance), missing `execute:`, mixed `scenario:`/unit-tier sections, serde/grammar errors, unsupported `mode` (accepted: `one-shot`, `batch`), missing/invalid `timeout`, non-`direct:`/`seda:` send target, route-source conflict, no `Camel.toml` ancestor for `routeFilesFromRoot`, bare-name miss across configured `[jobs].dirs` roots | 2 |
-| Argument validation | invalid `args:` declaration or `type` grammar, typed-default or resolved-value coercion failure, undeclared or missing-required `--arg`, unresolved `${arg:}`/`${env:}` in a declared document | 2 |
+| Argument validation | invalid `args:` declaration or `type` grammar, typed-default or resolved-value coercion failure, missing-required dynamic flag, unresolved `${arg:}`/`${env:}` in a declared document | 2 |
 | Job-safety rejection | a discovered route consumes from a scheme outside the `{direct, seda, log, mock}` allowlist; or the send target has no matching consumer route, or its base is ambiguous across several; or the route source resolves zero routes | 2 |
 | Boot failure | config load, context configure, security compile context, `camel_bundles::boot`, route discovery/parse, route registration, `ctx.start()` | 2 |
 | Pipeline failure | the send's route pipeline failed (`PipelineOutcome::Failed` through the producer reply seam) | 1 |

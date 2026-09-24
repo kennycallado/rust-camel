@@ -160,7 +160,7 @@ async fn booted_seda_context() -> CamelContext {
 async fn behavioral_single_gate_fails_fast_classification() {
     let ctx = booted_seda_context().await;
     let send = tick_send("seda:worker");
-    let e = match send_with_startup_retry(&ctx, &send, "seda:worker", &[]).await {
+    let e = match send_with_startup_retry(&ctx, &send, "seda:worker").await {
         Err(SendError::Pipeline(e)) => e,
         Err(SendError::Transport(detail)) => {
             panic!("expected the SEDA gate as a pipeline failure, got transport: {detail}")
@@ -181,9 +181,7 @@ async fn behavioral_single_gate_fails_fast_classification() {
 async fn behavioral_fanout_gate_fails_fast_classification() {
     let ctx = booted_seda_context().await;
     let send = tick_send("seda:worker?multipleConsumers=true");
-    let e = match send_with_startup_retry(&ctx, &send, "seda:worker?multipleConsumers=true", &[])
-        .await
-    {
+    let e = match send_with_startup_retry(&ctx, &send, "seda:worker?multipleConsumers=true").await {
         Err(SendError::Pipeline(e)) => e,
         Err(SendError::Transport(detail)) => {
             panic!("expected the SEDA gate as a pipeline failure, got transport: {detail}")
@@ -228,7 +226,6 @@ async fn behavioral_multiple_consumers_wait_config_fails_fast() {
         &ctx,
         &send,
         "seda:q?multipleConsumers=true&waitForTaskToComplete=Always",
-        &[],
     )
     .await
     {
@@ -544,20 +541,16 @@ async fn seda_config_conflict_transport_fails_fast() {
     // document::seda_send_uri output shape) on the same queue name.
     let send = tick_send("seda:q");
     let started = Instant::now();
-    let detail = match send_with_startup_retry(
-        &ctx,
-        &send,
-        "seda:q?size=5&waitForTaskToComplete=Always",
-        &[],
-    )
-    .await
-    {
-        Err(SendError::Transport(detail)) => detail,
-        Err(SendError::Pipeline(e)) => {
-            panic!("expected the config conflict as a transport failure, got pipeline: {e}")
-        }
-        Ok(_) => panic!("expected the config conflict as a transport failure, got Ok"),
-    };
+    let detail =
+        match send_with_startup_retry(&ctx, &send, "seda:q?size=5&waitForTaskToComplete=Always")
+            .await
+        {
+            Err(SendError::Transport(detail)) => detail,
+            Err(SendError::Pipeline(e)) => {
+                panic!("expected the config conflict as a transport failure, got pipeline: {e}")
+            }
+            Ok(_) => panic!("expected the config conflict as a transport failure, got Ok"),
+        };
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "the endpoint config conflict must return on the first attempt without \
@@ -581,7 +574,7 @@ async fn invalid_uri_transport_fails_fast() {
     let send = tick_send("seda:q");
 
     let started = Instant::now();
-    let detail = match send_with_startup_retry(&ctx, &send, "seda:q?size=abc", &[]).await {
+    let detail = match send_with_startup_retry(&ctx, &send, "seda:q?size=abc").await {
         Err(SendError::Transport(detail)) => detail,
         Err(SendError::Pipeline(e)) => {
             panic!("expected the InvalidUri rejection as a transport failure, got pipeline: {e}")
@@ -626,7 +619,7 @@ async fn transient_transport_failure_keeps_retry_loop() {
     ctx.start().await.expect("context start");
 
     let send = tick_send("flaky-once:thing");
-    match send_with_startup_retry(&ctx, &send, "flaky-once:thing", &[]).await {
+    match send_with_startup_retry(&ctx, &send, "flaky-once:thing").await {
         Ok(_) => {}
         Err(SendError::Pipeline(e)) => {
             panic!(

@@ -52,7 +52,6 @@ routeFiles:
         help: false,
         report: Some(report_path.clone()),
         config: dir.path().join("Camel.toml").display().to_string(),
-        args: Vec::new(),
         dynamic: Vec::new(),
     };
 
@@ -139,7 +138,7 @@ routeFiles:
 
 /// A batch job's declared defaults resolve before the trigger send:
 /// `tier: {default: gold}` substitutes into the send body with no
-/// `--arg tier` pair, the worker records `tier-gold` to its sink, and
+/// `--tier` dynamic flag, the worker records `tier-gold` to its sink, and
 /// the batch drains normally (the `batch_typed_arg` fixture shape).
 #[test]
 fn batch_applies_declared_defaults() {
@@ -177,7 +176,7 @@ routeFiles:
     )
     .expect("write job doc");
 
-    // No `--arg tier`: the declared default must fill the send body.
+    // No `--tier`: the declared default must fill the send body.
     let (code, stdout, stderr) = run_camel_job(dir.path(), &["job.job.yaml"]);
     assert_eq!(
         code, 0,

@@ -8,9 +8,9 @@ use super::document::{JobArgType, JobArgumentDeclaration, JobHelpInfo};
 
 /// The flag-spelling note under `Arguments:`: every declared argument
 /// is settable through its dynamic flag (bools through the
-/// presence/negation twin) or the legacy `--arg` pair.
+/// presence/negation twin).
 pub(crate) const FLAG_SPELLING_NOTE: &str =
-    "  (settable as --<name> <VALUE>; bool as --<name> / --no-<name>; or --arg <name>=<value>)";
+    "  (settable as --<name> <VALUE>; bool as --<name> / --no-<name>)";
 
 /// Render the declared interface of one job document as its
 /// `camel job <name> --help` text. Pure: no I/O, no process state; the
