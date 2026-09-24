@@ -367,8 +367,8 @@ the received body or header values.
 #### Scenario: maxCount zero asserts absence after settling
 
 - **Given** `expects: {mock:silent: {maxCount: 0}}` on an endpoint that received no exchanges, and a route wired so one exchange WOULD arrive late without settling
-- **When** evaluation runs after the settle window
-- **Then** the endpoint reports PASS when nothing arrived during the window; a same-window arrival makes it FAIL with the at-most error text
+- **When** evaluation runs after settling completes
+- **Then** the endpoint reports PASS when nothing arrived before settling completes; an arrival before settling completes makes it FAIL with the at-most error text
 
 #### Scenario: unknown mock endpoint fails the document
 
@@ -402,30 +402,66 @@ the received body or header values.
 
 ### Requirement: Settling before assertion
 
-The runner SHALL settle traffic before evaluating: a document-wide settle
-deadline starts when route execution begins and equals one full quiet window
-plus a 5-second instability budget (so any valid `settle` value can always
-satisfy its own window); all expected endpoints' `received_count` SHALL be
-sampled simultaneously every 50ms; the quiet window (default 250ms, `settle:`
-override) must elapse with no sampled change (any change resets the window).
-Count values above expectations do NOT end settling — only quiescence does.
-Hitting the deadline without stability SHALL fail the document with a
-settle-timeout message (exit 1), never hang.
+The runner SHALL settle traffic before evaluating, driven by completion
+notifications — not periodic sampling. The document's mode is structural:
+completion mode when no route consumes from a self-firing source, stability
+mode when some route does. In the lean registry the only self-firing source
+is `timer:` (direct, log, mock, seda are demand-driven).
+
+Completion mode: settle SHALL complete when the harness receives the
+in-flight quiescence notification — the context-global accepted-not-completed
+counter releasing its last claim. No quiet window SHALL be imposed. The
+settle timeout starts when settling begins (after input delivery, so
+delivery time never consumes the settle budget) and equals the declared
+`settle:` value (default 5 seconds). Deadline precedence: at entry and on
+every wake, an expired deadline yields the timeout failure before any idle
+acceptance; an idle counter with an unexpired deadline completes
+immediately.
+
+Stability mode: future emissions from a self-firing source are unclaimed,
+so quiescence of the counter is not completion. The quiet window (default
+250ms, `settle:` override) must elapse with no change in the expected
+endpoints' `received_count` — every arrival notification that changes a
+sampled count resets the window. The document-wide settle deadline starts
+when route execution begins and equals one full quiet window plus a
+5-second instability budget (so any valid `settle` value can always satisfy
+its own window).
+
+Both modes: count values above expectations do NOT end settling — only the
+mode's completion condition does. Hitting the deadline without settling
+SHALL fail the document with a settle-timeout message (exit 1), never hang.
+Documents SHALL continue to execute sequentially in CLI argument order with
+settle confined to one document at a time.
+
+#### Scenario: lean document settles on the completion notification
+
+- **Given** a document whose routes consume from no self-firing source, whose input-triggered traffic completes
+- **When** the in-flight counter releases its last claim
+- **Then** evaluation proceeds promptly — no quiet window and no sampling floor delays it
 
 #### Scenario: timer route settles before assertion
+
 - **Given** a timer-driven route emitting 3 exchanges and `expects: {mock:result: {count: 3}}`
 - **When** the counts are stable for the quiet window within the deadline
 - **Then** evaluation proceeds and passes
 
+#### Scenario: count change resets the quiet window
+
+- **Given** a stability-mode endpoint whose `received_count` changes 100ms into a 250ms quiet window
+- **When** the arrival notification is received and the sample differs
+- **Then** the quiet window restarts from that change and evaluation waits for a full stable window or the deadline
+
 #### Scenario: unstable traffic hits the deadline
+
 - **Given** a route still emitting when the settle deadline (quiet window + 5-second budget) is reached
 - **When** the deadline hits
 - **Then** the document fails with a settle-timeout message and exit code 1
 
-#### Scenario: count change resets the quiet window
-- **Given** an endpoint whose `received_count` changes 100ms into a 250ms quiet window
-- **When** the next sample is taken
-- **Then** the quiet window restarts from that sample and evaluation waits for a full stable window or the deadline
+#### Scenario: settle timeout fires when no completion arrives
+
+- **Given** a completion-mode document whose in-flight work never completes (a stuck claim) and `settle: 50ms`
+- **When** the settle timeout elapses
+- **Then** the document fails with a settle-timeout message and exit code 1 — the runner never hangs
 
 ### Requirement: Exit codes, reporting, and multi-document execution
 
