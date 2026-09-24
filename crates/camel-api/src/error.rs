@@ -39,6 +39,9 @@ pub enum ConfigValidationError {
     #[error("loop step must specify either 'count' or 'while', not both")]
     LoopConflictingCountAndWhile,
 
+    #[error("on_exceptions clause cannot set both steps and handled_by (delegation is exclusive)")]
+    OnExceptionStepsHandledByConflict,
+
     #[error("loop step must specify either 'count' or 'while'")]
     LoopMissingCountOrWhile,
 
@@ -709,6 +712,15 @@ mod tests {
         let not_acceptable_msg = not_acceptable.to_string();
         assert!(not_acceptable_msg.contains("application/xml"));
         assert!(not_acceptable_msg.contains("application/json"));
+    }
+
+    #[test]
+    fn config_validation_error_on_exception_conflict_display() {
+        let err = ConfigValidationError::OnExceptionStepsHandledByConflict;
+        let msg = format!("{err}");
+        assert!(msg.contains("steps"));
+        assert!(msg.contains("handled_by"));
+        assert!(msg.contains("exclusive"));
     }
 
     #[test]

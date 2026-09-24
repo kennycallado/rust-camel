@@ -238,8 +238,9 @@ _Avoid_: dead letter queue, DLQ (unless the external system is specifically a qu
 
 **RedeliveryPolicy**:
 Retry configuration inside an ErrorHandler or OnException: maximum attempts, delay, backoff
-multiplier, max delay, jitter, and optional `handled_by` URI (route to this URI after exhausting
-retries instead of propagating the error).
+multiplier, max delay, and jitter. Delegation is NOT part of the retry config — use the
+clause-level `handled_by` field (see OnException), which composes with retry: retry first,
+then delegate once retries exhaust.
 _Avoid_: retry settings, backoff config, DeclarativeRedeliveryPolicy
 
 **CircuitBreaker**:

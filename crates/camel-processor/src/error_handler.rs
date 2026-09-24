@@ -43,8 +43,8 @@ async fn execute_on_steps(
             // log-policy: handler-owned
             tracing::warn!(error = %original_err, "on_steps pipeline failed, falling back to handler/DLC");
             let mut ex = snapshot;
-            ex.set_error(original_err);
-            send_to_handler(ex, handler).await
+            ex.set_error(original_err.clone());
+            forward_or_propagate(ex, handler, original_err).await
         }
     }
 }
@@ -341,8 +341,10 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
                 // Propagate and any future variant forward the error.
                 _ => Ok(StepDisposition::Propagate(error)),
             },
-            // Dead code by construction: send_to_handler always returns Ok.
-            Err(_) => Ok(StepDisposition::Propagate(error)),
+            // Delegate failure (rc-ntpof): the ORIGINAL step error
+            // propagates — a failed delegate must never surface as a
+            // successful Handled/Continued disposition.
+            Err(_delegate) => Ok(StepDisposition::Propagate(error)),
         }
     }
 
@@ -428,8 +430,10 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
                     Ok(ex)
                 }
             },
-            // Dead code by construction: send_to_handler always returns Ok.
-            Err(e) => Err(e),
+            // Delegate failure (rc-ntpof): the ORIGINAL boundary error
+            // propagates — the delegate error is only logged and recorded
+            // on the span, never replaces the original.
+            Err(_delegate) => Err(error),
         }
     }
 }
@@ -479,8 +483,11 @@ where
 
 /// Tower Service that absorbs pipeline errors by retrying and/or forwarding to a DLC.
 ///
-/// `call` always returns `Ok` — errors are absorbed. The returned exchange will have
-/// `has_error() == true` if the pipeline ultimately failed.
+/// Pipeline errors are absorbed: the returned `Ok` exchange will have
+/// `has_error() == true` if the pipeline ultimately failed. A DELEGATE
+/// failure (DLC/handler readiness or call error) is the one exception: it
+/// surfaces as `Err(original_error)` so a broken delegate can never mask
+/// the original failure as success (rc-ntpof).
 pub struct ErrorHandlerService<S> {
     inner: S,
     dlc_producer: Option<BoxProcessor>,
@@ -616,9 +623,10 @@ where
                                         )
                                         .await;
                                     }
-                                    original.set_error(retry_err);
+                                    original.set_error(retry_err.clone());
                                     let handler = policy_producer.or(dlc);
-                                    return send_to_handler(original, handler).await;
+                                    return forward_or_propagate(original, handler, retry_err)
+                                        .await;
                                 }
                             }
                         }
@@ -631,16 +639,44 @@ where
                         .await;
                 }
                 let mut ex = original.clone();
-                ex.set_error(err);
+                ex.set_error(err.clone());
                 let handler = policy_producer.or(dlc);
-                send_to_handler(ex, handler).await
+                forward_or_propagate(ex, handler, err).await
             } else {
                 // No matching policy — forward directly to DLC.
                 let mut ex = original;
-                ex.set_error(err);
-                send_to_handler(ex, dlc).await
+                ex.set_error(err.clone());
+                forward_or_propagate(ex, dlc, err).await
             }
         })
+    }
+}
+
+/// Record the delegate error on the current span, if one is active and
+/// declares an `error` field. The span carries the DELEGATE error while the
+/// system-broken log structures BOTH errors (rc-ntpof).
+fn record_span_error(delegate_err: &CamelError) {
+    let span = tracing::Span::current();
+    if !span.is_none() {
+        span.record("error", tracing::field::display(delegate_err));
+    }
+}
+
+/// Forward a failed exchange to the DLC/handler delegate, mapping the
+/// result so the ORIGINAL error always wins (rc-ntpof).
+///
+/// A DELEGATE failure (readiness or call error) is logged and recorded on
+/// the span inside `send_to_handler`; here it is discarded and
+/// `original_error` propagated instead — a failed delegate must never
+/// surface as a successful exchange nor replace the original error.
+async fn forward_or_propagate(
+    exchange: Exchange,
+    producer: Option<BoxProcessor>,
+    original_error: CamelError,
+) -> Result<Exchange, CamelError> {
+    match send_to_handler(exchange, producer).await {
+        Ok(ex) => Ok(ex),
+        Err(_delegate) => Err(original_error),
     }
 }
 
@@ -659,17 +695,34 @@ async fn send_to_handler(
         }
         Some(mut prod) => match prod.ready().await {
             Err(e) => {
+                // BOTH the original exchange error and the delegate
+                // failure are structured; the span records the DELEGATE
+                // error (rc-ntpof).
                 // log-policy: system-broken
-                tracing::error!("DLC/handler not ready: {e}");
-                Ok(exchange)
+                tracing::error!(
+                    original_error = ?exchange.error,
+                    delegate_error = %e,
+                    "DLC/handler not ready"
+                );
+                record_span_error(&e);
+                Err(e)
             }
             Ok(svc) => match svc.call(exchange.clone()).await {
                 Ok(ex) => Ok(ex),
                 Err(e) => {
+                    // BOTH the original exchange error and the delegate
+                    // failure are structured; the span records the
+                    // DELEGATE error (rc-ntpof).
                     // log-policy: system-broken
-                    tracing::error!("DLC/handler call failed: {e}");
-                    // Return the original exchange with original error intact.
-                    Ok(exchange)
+                    tracing::error!(
+                        original_error = ?exchange.error,
+                        delegate_error = %e,
+                        "DLC/handler call failed"
+                    );
+                    record_span_error(&e);
+                    // The delegate error is returned to the caller so no
+                    // path can mistake a failed delegate for success.
+                    Err(e)
                 }
             },
         },
@@ -1933,6 +1986,298 @@ mod tests {
         );
     }
 
+    // ── Delegate-failure contract tests (rc-ntpof) ──
+    //
+    // A failing delegate (DLC/handler producer) must NEVER surface as a
+    // successful exchange or disposition: the ORIGINAL error always
+    // propagates, every path.
+
+    /// Delegate producer whose `call` always fails with a distinct error.
+    fn failing_delegate() -> BoxProcessor {
+        BoxProcessor::from_fn(|_| {
+            Box::pin(async { Err(CamelError::ProcessorError("delegate-broken".into())) })
+        })
+    }
+
+    /// Handler with one match-any policy (Handled disposition) and the
+    /// given `handled_by` producer.
+    fn handled_policy_with(producer: Option<BoxProcessor>) -> DefaultRouteErrorHandler {
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: None,
+            disposition: ExceptionDisposition::Handled,
+        };
+        DefaultRouteErrorHandler::new(None, vec![(policy, producer)])
+    }
+
+    fn assert_propagates_original(result: &Result<StepDisposition, CamelError>) {
+        assert!(
+            matches!(
+                result,
+                Ok(StepDisposition::Propagate(CamelError::ProcessorError(m)))
+                    if m == "original-err"
+            ),
+            "delegate failure must propagate the ORIGINAL error, got: {:?}",
+            result
+                .as_ref()
+                .map(|d| d_variant_name(d))
+                .unwrap_or_default()
+        );
+    }
+
+    /// Test-only: short label of a StepDisposition for panic messages.
+    fn d_variant_name(d: &StepDisposition) -> &'static str {
+        match d {
+            StepDisposition::Propagate(_) => "Propagate",
+            StepDisposition::Handled(_) => "Handled",
+            StepDisposition::Continued(_) => "Continued",
+            _ => "other",
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_call_failure_with_handled_propagates_original() {
+        // Prevent callsite-interest poisoning of the system-broken error!
+        // callsites before this test executes them (see ensure_global_registry).
+        ensure_global_registry();
+        let handler = handled_policy_with(Some(failing_delegate()));
+        let result = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                make_exchange(),
+                CamelError::ProcessorError("original-err".into()),
+            )
+            .await;
+        assert_propagates_original(&result);
+    }
+
+    #[test]
+    fn delegate_failure_emits_system_broken_log_and_span_error() {
+        let handler = handled_policy_with(Some(failing_delegate()));
+        let mut ex = make_exchange();
+        ex.set_error(CamelError::ProcessorError("original-err".into()));
+        let (result, captured, span_records) = capture_debugs_with_span_records(|| {
+            // Declared `error` field so send_to_handler's span record lands.
+            let span = tracing::info_span!("delegate_failure_test", error = tracing::field::Empty);
+            let _guard = span.enter();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(handler.handle_step(
+                    Some(PolicyId(0)),
+                    ex,
+                    CamelError::ProcessorError("original-err".into()),
+                ))
+        });
+        assert!(
+            matches!(result, Ok(StepDisposition::Propagate(_))),
+            "delegate failure must propagate, got: {}",
+            result
+                .as_ref()
+                .map(|d| d_variant_name(d))
+                .unwrap_or("Err(..)")
+        );
+        // (i) system-broken record structuring BOTH errors.
+        assert!(
+            captured.iter().any(|line| {
+                line.contains("DLC/handler call failed")
+                    && line.contains("original-err")
+                    && line.contains("delegate-broken")
+            }),
+            "expected system-broken log structuring BOTH errors, captured: {captured:?}"
+        );
+        // (ii) the span recorded the `error` field with the DELEGATE error.
+        assert!(
+            span_records.iter().any(|line| {
+                line.contains("error=")
+                    && line.contains("delegate-broken")
+                    && !line.contains("original-err")
+            }),
+            "expected span error record carrying the DELEGATE error, span records: {span_records:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_exhausted_then_delegate_failure_propagates_original() {
+        // Prevent callsite-interest poisoning of the system-broken error!
+        // callsites before this test executes them (see ensure_global_registry).
+        ensure_global_registry();
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: Some(RedeliveryPolicy {
+                max_attempts: 1,
+                initial_delay: Duration::from_millis(1),
+                multiplier: 1.0,
+                max_delay: Duration::from_millis(10),
+                jitter_factor: 0.0,
+            }),
+            handled_by: None,
+            on_steps: None,
+            disposition: ExceptionDisposition::Handled,
+        };
+        let svc = ErrorHandlerService::new(
+            failing_processor(),
+            Some(failing_delegate()),
+            vec![(policy, None)],
+        );
+        let result = svc.oneshot(make_exchange()).await;
+        assert!(
+            matches!(&result, Err(CamelError::ProcessorError(m)) if m == "boom"),
+            "retry-exhausted ORIGINAL error must surface as Err, got: {:?}",
+            result.map(|ex| ex.has_error())
+        );
+    }
+
+    #[tokio::test]
+    async fn on_steps_fallback_delegate_failure_propagates_original() {
+        // Prevent callsite-interest poisoning of the system-broken error!
+        // callsites before this test executes them (see ensure_global_registry).
+        ensure_global_registry();
+        // on_steps pipeline itself fails → handle_step's on_steps Err arm
+        // falls through to the send_to_handler forward → delegate also
+        // fails → the ORIGINAL step error must propagate.
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: Some(SyncBoxProcessor::new(failing_processor())),
+            disposition: ExceptionDisposition::Handled,
+        };
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, Some(failing_delegate()))]);
+        let result = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                make_exchange(),
+                CamelError::ProcessorError("original-err".into()),
+            )
+            .await;
+        assert_propagates_original(&result);
+    }
+
+    #[tokio::test]
+    async fn no_match_dlc_delegate_failure_propagates_original() {
+        // Prevent callsite-interest poisoning of the system-broken error!
+        // callsites before this test executes them (see ensure_global_registry).
+        ensure_global_registry();
+        // No policy matches → the no-match DLC forward fires → DLC fails →
+        // the ORIGINAL error surfaces as Err (never an Ok exchange masking
+        // the failure).
+        let policy = ExceptionPolicy::new(|e| matches!(e, CamelError::Io(_)));
+        let svc = ErrorHandlerService::new(
+            failing_processor(),
+            Some(failing_delegate()),
+            vec![(policy, None)],
+        );
+        let result = svc.oneshot(make_exchange()).await;
+        assert!(
+            matches!(&result, Err(CamelError::ProcessorError(m)) if m == "boom"),
+            "no-match DLC delegate failure must surface the ORIGINAL error as Err, got: {:?}",
+            result.map(|ex| ex.has_error())
+        );
+    }
+
+    #[tokio::test]
+    async fn delegate_ready_failure_propagates_original() {
+        // Prevent callsite-interest poisoning of the system-broken error!
+        // callsites before this test executes them (see ensure_global_registry).
+        ensure_global_registry();
+        let not_ready: BoxProcessor = BoxProcessor::new(ReadinessFailService::new(
+            CamelError::ProcessorError("delegate-not-ready".into()),
+        ));
+        let handler = handled_policy_with(Some(not_ready));
+        let result = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                make_exchange(),
+                CamelError::ProcessorError("original-err".into()),
+            )
+            .await;
+        assert_propagates_original(&result);
+    }
+
+    #[tokio::test]
+    async fn delegate_failure_with_continued_propagates_original() {
+        // Prevent callsite-interest poisoning of the system-broken error!
+        // callsites before this test executes them (see ensure_global_registry).
+        ensure_global_registry();
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: None,
+            disposition: ExceptionDisposition::Continued,
+        };
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, Some(failing_delegate()))]);
+        let result = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                make_exchange(),
+                CamelError::ProcessorError("original-err".into()),
+            )
+            .await;
+        assert_propagates_original(&result);
+    }
+
+    #[tokio::test]
+    async fn boundary_delegate_failure_returns_original_err() {
+        // Prevent callsite-interest poisoning of the system-broken error!
+        // callsites before this test executes them (see ensure_global_registry).
+        ensure_global_registry();
+        let handler = DefaultRouteErrorHandler::new(Some(failing_delegate()), vec![]);
+        let result = handler
+            .handle_boundary(
+                BoundaryKind::Security,
+                make_exchange(),
+                CamelError::Unauthorized("denied".into()),
+            )
+            .await;
+        assert!(
+            matches!(&result, Err(CamelError::Unauthorized(m)) if m == "denied"),
+            "boundary delegate failure must return the ORIGINAL boundary error, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn tap_policy_without_handled_propagates() {
+        // Tap semantics: delegate + default disposition (Propagate) — the
+        // delegate fires for side-effects, and the ORIGINAL error still
+        // propagates.
+        let delegate_hits = Arc::new(AtomicU32::new(0));
+        let hits = Arc::clone(&delegate_hits);
+        let tap_delegate = BoxProcessor::from_fn(move |ex: Exchange| {
+            let h = Arc::clone(&hits);
+            Box::pin(async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                Ok(ex)
+            })
+        });
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: None,
+            disposition: ExceptionDisposition::Propagate,
+        };
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, Some(tap_delegate))]);
+        let result = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                make_exchange(),
+                CamelError::ProcessorError("original-err".into()),
+            )
+            .await;
+        assert_propagates_original(&result);
+        assert_eq!(
+            delegate_hits.load(Ordering::SeqCst),
+            1,
+            "delegate must have received the exchange exactly once"
+        );
+    }
+
     #[test]
     fn test_handle_step_no_match_emits_silent_propagate_diagnostic() {
         // rc-xtiem sweep item [1]: parity with the handle_boundary
@@ -1999,24 +2344,27 @@ mod tests {
         );
     }
 
-    /// Test-only log capture: installs a minimal subscriber via
-    /// `tracing::subscriber::with_default` for the duration of one closure and
-    /// records DEBUG-level (and above) event fields. No global state — safe
-    /// under parallel test threads. (Mirror of camel-config's `log_capture`.)
+    /// Test-only log capture: installs capturing layers over
+    /// `tracing_subscriber::registry()` via `tracing::subscriber::with_default`
+    /// for the duration of one closure, recording DEBUG-or-more-severe event
+    /// fields AND per-span `record` calls. No global state — safe under
+    /// parallel test threads. (Mirror of camel-config's `log_capture`.)
+    ///
+    /// The registry base is required: a minimal hand-rolled `Subscriber`
+    /// cannot implement `current_span`, so `Span::current().record(..)`
+    /// (used by `send_to_handler`) would silently no-op.
     mod log_capture {
         use std::fmt;
         use std::sync::{Arc, Mutex};
         use tracing::field::{Field, Visit};
-        use tracing::span::{Attributes, Record};
-        use tracing::{Event, Id, Level, Metadata, Subscriber};
+        use tracing::span::Record;
+        use tracing::{Event, Id, Level, Subscriber};
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
 
         type Sink = Arc<Mutex<Vec<String>>>;
 
-        struct Recorder {
-            events: Sink,
-            next_span_id: std::sync::atomic::AtomicU64,
-        }
-
+        /// Renders `field="value"` pairs joined by spaces.
         struct FieldVisitor(String);
 
         impl Visit for FieldVisitor {
@@ -2028,24 +2376,21 @@ mod tests {
             }
         }
 
-        impl Subscriber for Recorder {
-            fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
-                true
-            }
+        /// Layer capturing events (`error!`/`warn!`/`debug!`/...) into a sink.
+        struct EventCaptureLayer {
+            events: Sink,
+        }
 
-            fn new_span(&self, _attrs: &Attributes<'_>) -> Id {
-                let id = self
-                    .next_span_id
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    + 1;
-                Id::from_u64(id)
-            }
-
-            fn record(&self, _span: &Id, _values: &Record<'_>) {}
-            fn record_follows_from(&self, _span: &Id, _follows_from: &Id) {}
-
-            fn event(&self, event: &Event<'_>) {
-                if *event.metadata().level() >= Level::DEBUG {
+        impl<S> Layer<S> for EventCaptureLayer
+        where
+            S: Subscriber,
+        {
+            fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+                // tracing-core orders Levels so that more-severe levels
+                // compare SMALLER (Error=4 .. Trace=0 with a reversed Ord):
+                // "DEBUG and more severe" is `<= Level::DEBUG`. A `>=`
+                // comparison here silently drops ERROR/WARN/INFO events.
+                if *event.metadata().level() <= Level::DEBUG {
                     let mut visitor = FieldVisitor(String::new());
                     event.record(&mut visitor);
                     if let Ok(mut slot) = self.events.lock() {
@@ -2053,39 +2398,81 @@ mod tests {
                     }
                 }
             }
-
-            fn enter(&self, _span: &Id) {}
-            fn exit(&self, _span: &Id) {}
         }
 
-        /// Runs `f` with a capturing subscriber installed and returns
-        /// `(f's result, captured event field strings)` in emission order.
-        /// Rendered as `field="value"` pairs joined by spaces, with the
-        /// human-readable text under the standard `message` field.
-        pub(super) fn capture_debugs<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
-            // OnceLock-gated global registry: heals/prevents callsite-
-            // interest poisoning of the shared error-handler `debug!`
-            // callsites (`error_handler.rs:280/370`), which subscriber-less
-            // sibling error-handler tests in this binary hit first (fix
-            // pattern: c3853198; bd rc-img5).
+        /// Layer capturing per-span `record` calls (e.g. a field recorded on
+        /// an entered span via `Span::current().record(..)`).
+        struct SpanRecordLayer {
+            records: Sink,
+        }
+
+        impl<S> Layer<S> for SpanRecordLayer
+        where
+            S: Subscriber,
+        {
+            fn on_record(&self, _id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
+                let mut visitor = FieldVisitor(String::new());
+                values.record(&mut visitor);
+                if let Ok(mut slot) = self.records.lock() {
+                    slot.push(visitor.0);
+                }
+            }
+        }
+
+        /// OnceLock-gated global registry install: heals/prevents callsite-
+        /// interest poisoning of the shared error-handler `debug!`/`error!`
+        /// callsites (`error_handler.rs:280/370` and the system-broken
+        /// `error!` sites in `send_to_handler`), which subscriber-less
+        /// sibling error-handler tests in this binary can hit first (fix
+        /// pattern: c3853198; bd rc-img5). Every test that triggers those
+        /// callsites must call this BEFORE the first evaluation, otherwise
+        /// the callsite interest is cached as `never` process-wide.
+        pub(super) fn ensure_global_registry() {
             static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             if INIT.set(()).is_ok() {
                 let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
             }
-            let sink: Sink = Default::default();
-            let recorder = Recorder {
-                events: Arc::clone(&sink),
-                next_span_id: Default::default(),
-            };
-            let out = tracing::subscriber::with_default(recorder, f);
-            let collected = sink
+        }
+
+        /// Runs `f` with capturing layers installed and returns `(f's result,
+        /// captured event field strings, captured span record strings)`.
+        /// Events and span records are kept in separate vectors, each in
+        /// emission order. Rendered as `field="value"` pairs joined by
+        /// spaces, with the human-readable text under the standard
+        /// `message` field.
+        pub(super) fn capture_debugs_with_span_records<T>(
+            f: impl FnOnce() -> T,
+        ) -> (T, Vec<String>, Vec<String>) {
+            ensure_global_registry();
+            let events: Sink = Default::default();
+            let span_records: Sink = Default::default();
+            let subscriber = tracing_subscriber::registry()
+                .with(EventCaptureLayer {
+                    events: Arc::clone(&events),
+                })
+                .with(SpanRecordLayer {
+                    records: Arc::clone(&span_records),
+                });
+            let out = tracing::subscriber::with_default(subscriber, f);
+            let collected = events
                 .lock()
                 .ok()
                 .map(|slot| slot.clone())
                 .unwrap_or_default();
-            (out, collected)
+            let spans = span_records
+                .lock()
+                .ok()
+                .map(|slot| slot.clone())
+                .unwrap_or_default();
+            (out, collected, spans)
+        }
+
+        /// Event-only capture: discards span records (existing contract).
+        pub(super) fn capture_debugs<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+            let (out, events, _span_records) = capture_debugs_with_span_records(f);
+            (out, events)
         }
     }
 
-    use log_capture::capture_debugs;
+    use log_capture::{capture_debugs, capture_debugs_with_span_records, ensure_global_registry};
 }

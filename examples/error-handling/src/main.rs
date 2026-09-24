@@ -125,6 +125,10 @@ async fn main() -> Result<(), CamelError> {
     //
     // Processor errors are routed to a specific handler ("log:processor-errors")
     // instead of the default DLC. Other error types would still go to the DLC.
+    // `handled_by` is a clause-level field and composes with retry: the step
+    // is retried once, and the delegate runs after retries are exhausted.
+    // The clause sets no `handled`/`continued`, so it is a tap: the delegate
+    // receives the failed exchange, and the original error propagates.
     // -----------------------------------------------------------------------
     let route3 = RouteBuilder::from("timer:route3?period=2000&repeatCount=1")
         .route_id("on-exception-handled-by")

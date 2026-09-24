@@ -15,9 +15,9 @@ use camel_api::splitter::{
 };
 use camel_api::{
     BoxProcessor, CamelError, CanonicalConcurrencySpec, CanonicalFieldLoss, CanonicalLossReport,
-    CanonicalRouteSpec, CircuitBreakerConfig, DEFAULT_MAX_DELAY_MS, DelayConfig, IdentityProcessor,
-    LoadBalanceStrategy, LoadBalancerConfig, ThrottleStrategy, ThrottlerConfig,
-    canonical_contract_rejection_reason,
+    CanonicalRouteSpec, CircuitBreakerConfig, ConfigValidationError, DEFAULT_MAX_DELAY_MS,
+    DelayConfig, IdentityProcessor, LoadBalanceStrategy, LoadBalancerConfig, ThrottleStrategy,
+    ThrottlerConfig, canonical_contract_rejection_reason,
     loop_eip::MAX_LOOP_ITERATIONS,
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
@@ -802,9 +802,10 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
                 if retry.jitter_factor > 0.0 {
                     builder = builder.with_jitter(retry.jitter_factor);
                 }
-                if let Some(uri) = retry.handled_by {
-                    builder = builder.handled_by(uri);
-                }
+            }
+
+            if let Some(uri) = clause.handled_by {
+                builder = builder.handled_by(uri);
             }
 
             let has_steps = !clause.steps.is_empty();
@@ -875,9 +876,6 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
         );
         if retry.jitter_factor > 0.0 {
             builder = builder.with_jitter(retry.jitter_factor);
-        }
-        if let Some(uri) = retry.handled_by {
-            builder = builder.handled_by(uri);
         }
         config = builder.build();
     }
@@ -2238,6 +2236,11 @@ fn validate_error_handler(eh: &DeclarativeErrorHandler) -> Result<(), CamelError
     }
     if let Some(ref exceptions) = eh.on_exceptions {
         for clause in exceptions {
+            if !clause.steps.is_empty() && clause.handled_by.is_some() {
+                return Err(CamelError::ConfigValidation(
+                    ConfigValidationError::OnExceptionStepsHandledByConflict,
+                ));
+            }
             if let Some(ref retry) = clause.retry {
                 validate_redelivery_policy(retry)?;
             }
@@ -2357,11 +2360,11 @@ mod tests {
                         multiplier: 2.0,
                         max_delay_ms: 100,
                         jitter_factor: 0.0,
-                        handled_by: Some("log:io".into()),
                     }),
                     steps: vec![],
                     handled: None,
                     continued: None,
+                    handled_by: Some("log:io".into()),
                 },
                 DeclarativeOnException {
                     kind: Some("ProcessorError".into()),
@@ -2372,11 +2375,11 @@ mod tests {
                         multiplier: 2.0,
                         max_delay_ms: 50,
                         jitter_factor: 0.0,
-                        handled_by: None,
                     }),
                     steps: vec![],
                     handled: None,
                     continued: None,
+                    handled_by: None,
                 },
             ]),
             use_original_message: false,
@@ -2406,6 +2409,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -2427,6 +2431,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -2446,7 +2451,6 @@ mod tests {
                 multiplier: 2.0,
                 max_delay_ms: 1000,
                 jitter_factor: 0.0,
-                handled_by: None,
             }),
             on_exceptions: None,
             use_original_message: false,
@@ -2636,6 +2640,7 @@ mod tests {
                     steps: vec![],
                     handled: None,
                     continued: None,
+                    handled_by: None,
                 }]),
                 use_original_message: false,
             })
@@ -2675,6 +2680,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -2706,6 +2712,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -2734,6 +2741,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -2772,6 +2780,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -2811,6 +2820,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -2850,6 +2860,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -2891,6 +2902,7 @@ mod tests {
                     steps: vec![],
                     handled: None,
                     continued: None,
+                    handled_by: None,
                 }]),
                 use_original_message: false,
             });
@@ -2928,6 +2940,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         });
@@ -2963,11 +2976,11 @@ mod tests {
                         multiplier: 2.0,
                         max_delay_ms: 100,
                         jitter_factor: 0.0,
-                        handled_by: Some("log:validation".into()),
                     }),
                     steps: vec![],
                     handled: None,
                     continued: None,
+                    handled_by: Some("log:validation".into()),
                 },
                 DeclarativeOnException {
                     kind: Some("Io".into()),
@@ -2978,11 +2991,11 @@ mod tests {
                         multiplier: 2.0,
                         max_delay_ms: 100,
                         jitter_factor: 0.0,
-                        handled_by: Some("log:io".into()),
                     }),
                     steps: vec![],
                     handled: None,
                     continued: None,
+                    handled_by: Some("log:io".into()),
                 },
             ]),
             use_original_message: false,
@@ -3004,6 +3017,97 @@ mod tests {
     }
 
     #[test]
+    fn compile_clause_level_handled_by_without_retry() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: Some("log:dlc".into()),
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("Io".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: Some(true),
+                continued: None,
+                handled_by: Some("log:io".into()),
+            }]),
+            use_original_message: false,
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(config.policies.len(), 1);
+        assert_eq!(config.policies[0].handled_by.as_deref(), Some("log:io"));
+        assert!(config.policies[0].retry.is_none());
+    }
+
+    #[test]
+    fn compile_retry_composes_with_handled_by() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: Some("log:dlc".into()),
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("Io".into()),
+                message_contains: None,
+                retry: Some(DeclarativeRedeliveryPolicy {
+                    max_attempts: 2,
+                    initial_delay_ms: 10,
+                    multiplier: 2.0,
+                    max_delay_ms: 100,
+                    jitter_factor: 0.0,
+                }),
+                steps: vec![],
+                handled: None,
+                continued: None,
+                handled_by: Some("log:io".into()),
+            }]),
+            use_original_message: false,
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(config.policies.len(), 1);
+        assert!(
+            config.policies[0].retry.is_some(),
+            "retry must compose with clause-level handled_by"
+        );
+        assert_eq!(
+            config.policies[0].retry.as_ref().map(|p| p.max_attempts),
+            Some(2)
+        );
+        assert_eq!(config.policies[0].handled_by.as_deref(), Some("log:io"));
+    }
+
+    #[test]
+    fn compile_steps_plus_handled_by_is_typed_rejection() {
+        let mut route = make_basic_route("direct:start", vec![]);
+        route.error_handler = Some(DeclarativeErrorHandler {
+            dead_letter_channel: Some("log:dlc".into()),
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("Io".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![DeclarativeStep::To(ToStepDef::new("log:out"))],
+                handled: None,
+                continued: None,
+                handled_by: Some("log:io".into()),
+            }]),
+            use_original_message: false,
+        });
+
+        let err = compile_declarative_route(route)
+            .err()
+            .expect("steps + handled_by must be rejected");
+
+        match err {
+            CamelError::ConfigValidation(
+                ConfigValidationError::OnExceptionStepsHandledByConflict,
+            ) => {}
+            other => panic!(
+                "expected typed ConfigValidation(OnExceptionStepsHandledByConflict), got: {other:?}"
+            ),
+        }
+    }
+
+    #[test]
     fn test_compile_error_handler_message_contains_only_clause() {
         let config = compile_error_handler(DeclarativeErrorHandler {
             dead_letter_channel: None,
@@ -3015,6 +3119,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -3041,6 +3146,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -3066,6 +3172,7 @@ mod tests {
                 })],
                 handled: Some(true),
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         };
@@ -3090,6 +3197,7 @@ mod tests {
                 steps: vec![],
                 handled: Some(true),
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         };
@@ -3112,6 +3220,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: Some(true),
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -3134,6 +3243,7 @@ mod tests {
                 steps: vec![],
                 handled: Some(true),
                 continued: Some(true),
+                handled_by: None,
             }]),
             use_original_message: false,
         });
@@ -3152,6 +3262,7 @@ mod tests {
                 steps: vec![],
                 handled: Some(true),
                 continued: Some(false),
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -3174,6 +3285,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         })
@@ -3795,6 +3907,7 @@ mod tests {
                     steps: vec![],
                     handled: None,
                     continued: None,
+                    handled_by: None,
                 },
                 DeclarativeOnException {
                     kind: Some("*".into()),
@@ -3803,6 +3916,7 @@ mod tests {
                     steps: vec![],
                     handled: None,
                     continued: None,
+                    handled_by: None,
                 },
             ]),
             use_original_message: false,
@@ -3833,6 +3947,7 @@ mod tests {
                 steps: vec![],
                 handled: None,
                 continued: None,
+                handled_by: None,
             }]),
             use_original_message: false,
         };
@@ -5257,7 +5372,6 @@ mod tests {
                 multiplier: 2.0,
                 max_delay_ms: 1000,
                 jitter_factor: 0.0,
-                handled_by: None,
             }),
             on_exceptions: None,
             use_original_message: false,

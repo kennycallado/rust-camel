@@ -1,8 +1,8 @@
 //! End-to-end tests for the `on_exceptions` wildcard clause (`kind: "*"`).
 //!
 //! OpenSpec change `on-exceptions-wildcard`, Task oe-wc-2. Proves at HTTP
-//! level that one wildcard clause with `handled: true` + `retry.handled_by`
-//! gives the handler route full ownership of the HTTP response (status,
+//! level that one wildcard clause with `handled: true` + clause-level
+//! `handled_by` gives the handler route full ownership of the HTTP response (status,
 //! body, headers) for every error kind, and that a specific clause placed
 //! before the wildcard wins (first-match-wins).
 //!
@@ -210,10 +210,7 @@ fn wildcard_compiles_from_json() {
                         {
                             "kind": "*",
                             "handled": true,
-                            "retry": {
-                                "handled_by": "direct:shaper",
-                                "max_attempts": 1
-                            }
+                            "handled_by": "direct:shaper"
                         }
                     ]
                 },
@@ -245,6 +242,6 @@ fn wildcard_compiles_from_json() {
     assert_eq!(
         policy.handled_by.as_deref(),
         Some("direct:shaper"),
-        "retry.handled_by must surface on the compiled policy"
+        "clause-level handled_by must surface on the compiled policy"
     );
 }

@@ -819,7 +819,9 @@ where each one goes.
 | `multiplier` | float | no | `2.0` | Backoff multiplier |
 | `max_delay_ms` | integer | no | `10000` | Max delay in ms |
 | `jitter_factor` | float | no | `0.0` | Jitter factor (0.0-1.0) |
-| `handled_by` | string | no | — | Route here after retries are exhausted |
+
+The retry block carries redelivery parameters only. It rejects unknown
+fields. `handled_by` is not a retry field; it lives on the clause.
 
 ### OnException clause
 
@@ -831,6 +833,21 @@ where each one goes.
 | `steps` | list | no | Handler steps |
 | `handled` | bool | no | Absorb the error |
 | `continued` | bool | no | Clear error and continue the pipeline |
+| `handled_by` | string | no | Delegate endpoint URI. Runs after retries are exhausted |
+
+`retry` and `handled_by` compose: the failing step is retried first, and
+the delegate runs once retries are exhausted. With no `retry` block, the
+step runs once and then delegates; no `CamelRedelivered` header is set.
+`handled_by` without `handled` or `continued` is a tap: the delegate
+receives the failed exchange, and the original error propagates.
+
+Two clause shapes are load errors:
+
+- `handled_by` inside the `retry` block. Unknown fields are rejected, so
+  the legacy `retry: {handled_by: ...}` layout fails to load. Use
+  `dead_letter_channel` for a route-level catch-all delegate.
+- `steps` and `handled_by` on one clause. Loading fails with the typed
+  `ConfigValidationError::OnExceptionStepsHandledByConflict`.
 
 ### Circuit breaker config
 

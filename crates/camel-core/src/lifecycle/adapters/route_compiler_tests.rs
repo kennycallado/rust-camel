@@ -1,6 +1,8 @@
 use super::*;
 use camel_api::SpanKindHint;
-use camel_api::error_handler::{BoundaryKind, PolicyId, RetryOutcome, StepDisposition};
+use camel_api::error_handler::{
+    BoundaryKind, ExceptionDisposition, ExceptionPolicy, PolicyId, RetryOutcome, StepDisposition,
+};
 use camel_api::{Body, BoxProcessorExt, CircuitBreakerConfig, Message, Value};
 use camel_processor::RouteErrorHandler;
 use camel_processor::error_handler::DefaultRouteErrorHandler;
@@ -447,6 +449,57 @@ async fn test_run_steps_continued_skips_failed_step() {
         step3_hit.load(Ordering::SeqCst),
         "step 3 should have executed after continued"
     );
+}
+
+/// rc-ntpof pinning test: when the policy delegate (handled_by producer)
+/// fails, `handle_step` returns `Propagate(original)` — run_steps MUST map
+/// that to `PipelineOutcome::Failed` carrying the ORIGINAL error, never
+/// `Completed`.
+#[tokio::test]
+async fn propagate_disposition_maps_to_failed_outcome() {
+    let policy = ExceptionPolicy {
+        matches: Arc::new(|_| true),
+        retry: None,
+        handled_by: None,
+        on_steps: None,
+        disposition: ExceptionDisposition::Handled,
+    };
+    let failing_delegate = BoxProcessor::from_fn(|_| {
+        Box::pin(async { Err(CamelError::ProcessorError("delegate-broken".into())) })
+    });
+    let handler: Arc<dyn RouteErrorHandler> = Arc::new(DefaultRouteErrorHandler::new(
+        None,
+        vec![(policy, Some(failing_delegate))],
+    ));
+    let steps = vec![CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
+        processor: BoxProcessor::from_fn(|_ex| {
+            Box::pin(async { Err(CamelError::ProcessorError("original-err".into())) })
+        }),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+        to_uri: None,
+    }];
+    let outcome = run_steps(
+        SharedSnapshot(Arc::from(steps)),
+        make_test_exchange(),
+        Some(handler),
+        false,
+        "",
+        &PipelineRuntimeCtx::compile_time(),
+    )
+    .await;
+    match outcome {
+        PipelineOutcome::Failed(err) => assert!(
+            matches!(&err, CamelError::ProcessorError(m) if m == "original-err"),
+            "pipeline must fail with the ORIGINAL error, got: {err:?}"
+        ),
+        other => panic!(
+            "expected PipelineOutcome::Failed, got: {:?}",
+            other.is_success()
+        ),
+    }
 }
 
 #[tokio::test]

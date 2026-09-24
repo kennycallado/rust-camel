@@ -1764,6 +1764,13 @@
             "null"
           ]
         },
+        "handled_by": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "kind": {
           "default": null,
           "type": [
@@ -1968,13 +1975,6 @@
     "RouteDslRedeliveryPolicy": {
       "additionalProperties": false,
       "properties": {
-        "handled_by": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "initial_delay_ms": {
           "default": 100,
           "format": "uint64",

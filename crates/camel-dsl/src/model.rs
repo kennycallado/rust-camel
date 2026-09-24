@@ -213,7 +213,6 @@ pub struct DeclarativeRedeliveryPolicy {
     pub multiplier: f64,
     pub max_delay_ms: u64,
     pub jitter_factor: f64,
-    pub handled_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -224,6 +223,9 @@ pub struct DeclarativeOnException {
     pub steps: Vec<DeclarativeStep>,
     pub handled: Option<bool>,
     pub continued: Option<bool>,
+    /// Handler endpoint URI for this clause (delegation; mutually exclusive
+    /// with inline `steps` — see `ConfigValidationError::OnExceptionStepsHandledByConflict`).
+    pub handled_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

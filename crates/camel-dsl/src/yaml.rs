@@ -473,11 +473,11 @@ pub(crate) fn route_dsl_to_declarative_route(
                                     multiplier: retry.multiplier,
                                     max_delay_ms: retry.max_delay_ms,
                                     jitter_factor: retry.jitter_factor,
-                                    handled_by: retry.handled_by,
                                 }),
                                 steps,
                                 handled: clause.handled,
                                 continued: clause.continued,
+                                handled_by: clause.handled_by,
                             })
                         })
                         .collect::<Result<Vec<_>, _>>()
@@ -491,7 +491,6 @@ pub(crate) fn route_dsl_to_declarative_route(
                     multiplier: retry.multiplier,
                     max_delay_ms: retry.max_delay_ms,
                     jitter_factor: retry.jitter_factor,
-                    handled_by: retry.handled_by,
                 }),
                 on_exceptions,
                 use_original_message: eh.use_original_message,
@@ -2493,9 +2492,9 @@ routes:
       dead_letter_channel: "log:dlc"
       on_exceptions:
         - kind: "Io"
+          handled_by: "log:io"
           retry:
             max_attempts: 3
-            handled_by: "log:io"
 "#;
 
         let routes = parse_yaml_to_declarative(yaml).unwrap();
@@ -2512,7 +2511,7 @@ routes:
         assert!(clauses[0].message_contains.is_none());
         let retry = clauses[0].retry.as_ref().expect("retry should be present");
         assert_eq!(retry.max_attempts, 3);
-        assert_eq!(retry.handled_by.as_deref(), Some("log:io"));
+        assert_eq!(clauses[0].handled_by.as_deref(), Some("log:io"));
     }
 
     #[test]
@@ -3361,7 +3360,6 @@ routes:
       dead_letter_channel: "log:dlc"
       retry:
         max_attempts: 2
-        handled_by: "log:handled"
     circuit_breaker:
       failure_threshold: 3
       open_duration_ms: 500
@@ -6461,6 +6459,88 @@ routes:
         assert!(
             result.is_err(),
             "expected error for whitespace-only remove_header key"
+        );
+    }
+
+    /// Legacy layout (`handled_by` nested inside `retry`) is a hard parse
+    /// error: the field moved to the clause level and `deny_unknown_fields`
+    /// rejects it at parse time.
+    #[test]
+    fn test_yaml_legacy_retry_handled_by_is_hard_error() {
+        let yaml = r#"
+routes:
+  - id: "legacy-handled-by"
+    from: "direct:start"
+    error_handler:
+      on_exceptions:
+        - kind: "Io"
+          retry:
+            max_attempts: 1
+            handled_by: "log:io"
+"#;
+        let err = parse_yaml_to_declarative(yaml)
+            .expect_err("legacy retry.handled_by must be a hard parse error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("handled_by"),
+            "expected 'handled_by' in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("unknown field"),
+            "expected 'unknown field' in error, got: {msg}"
+        );
+    }
+
+    /// New layout: `handled_by` at clause level parses, alongside optional
+    /// `retry` as sibling keys.
+    #[test]
+    fn test_yaml_clause_level_handled_by_parses() {
+        let yaml = r#"
+routes:
+  - id: "clause-handled-by"
+    from: "direct:start"
+    error_handler:
+      on_exceptions:
+        - kind: "Io"
+          handled_by: "log:io"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let eh = routes[0]
+            .error_handler
+            .as_ref()
+            .expect("error handler should be present");
+        let clauses = eh
+            .on_exceptions
+            .as_ref()
+            .expect("on_exceptions should be present");
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].handled_by.as_deref(), Some("log:io"));
+        assert!(clauses[0].retry.is_none());
+    }
+
+    /// Route-level `error_handler.retry` is equally strict: legacy
+    /// `handled_by` inside it is rejected as an unknown field.
+    #[test]
+    fn test_yaml_top_level_retry_handled_by_rejected() {
+        let yaml = r#"
+routes:
+  - id: "route-level-retry"
+    from: "direct:start"
+    error_handler:
+      retry:
+        max_attempts: 1
+        handled_by: "log:x"
+"#;
+        let err = parse_yaml_to_declarative(yaml)
+            .expect_err("route-level retry.handled_by must be a hard parse error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("handled_by"),
+            "expected 'handled_by' in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("unknown field"),
+            "expected 'unknown field' in error, got: {msg}"
         );
     }
 }

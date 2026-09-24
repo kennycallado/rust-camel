@@ -95,3 +95,65 @@ Rejected. Routes with no `errorHandler` config still use the Tower layer path fo
 - `ErrorHandlerLayer` / `ErrorHandlerService` are deprecated. New routes should use the `RouteChannelService` path (automatic when `errorHandler` is configured). The old Tower layer path is used only when no `errorHandler` is present.
 - `RouteChannelService` is `pub` but gated behind the `internal-adapters` feature flag; it is not part of the stable public API.
 - `send_to_handler` always returns `Ok(exchange)` — the `Err` branches in `handle_step` / `handle_boundary` are dead code by construction (documented with comments).
+
+## Amendment (2026-09-24): delegate failure and clause-level handled_by
+
+This amendment records the `handled_by` layout and the delegate-failure
+contract as landed (ruling bd rc-ntpof, 2026-09-24). Two statements in the
+Consequences list above are superseded: `send_to_handler` no longer returns
+`Ok(exchange)` on every path, and the `Err` branches in `handle_step` /
+`handle_boundary` are live. Everything else in this ADR is unchanged.
+
+### Clause-level `handled_by`, retry composes
+
+`handled_by` is a clause-level field on each `onException` clause, beside
+`kind`, `message_contains`, `handled`, `continued`, `retry`, and `steps`.
+The `retry` block carries only redelivery parameters. Delegation is a
+disposition, not a retry policy. `retry` and `handled_by` compose: the
+failing step is retried first, and the delegate runs once retries are
+exhausted. This is Apache Camel `onException` redelivery-plus-handled
+parity. With no `retry` block, the step runs once and then delegates; no
+redelivery happens and no `CamelRedelivered` header is set.
+
+The legacy layout put `handled_by` inside the `retry` block. That layout
+is the rejected form:
+
+```yaml
+on_exceptions:
+  - kind: "*"
+    handled: true
+    retry:
+      max_attempts: 1
+      handled_by: "direct:shaper"   # REJECTED: unknown field in retry
+```
+
+The redelivery model uses `deny_unknown_fields`, so this layout is a hard
+load error in both the YAML and the JSON route formats. The route-level
+`error_handler.retry` block has no `handled_by` field;
+`dead_letter_channel` is the catch-all delegate. A clause that sets both
+`steps` and `handled_by` is rejected at load time with the typed
+`ConfigValidationError::OnExceptionStepsHandledByConflict`.
+
+`handled_by` without `handled` or `continued` is a tap: the delegate
+receives the failed exchange as a side effect, and the original error
+propagates (disposition `Propagate`).
+
+### Delegate failure propagates the original error
+
+When the delegate itself fails (`ready()` or `call()` returns an error),
+the original error wins in every disposition. A `handled` or `continued`
+clause with a failed delegate maps to `Propagate(original error)`. The
+pipeline outcome is `Failed` with the original error kind; it is never
+`Completed` when a delegate has failed. `handle_boundary` returns
+`Err(original error)` on its delegate-failure arm. The original error
+stays the main error, so kind matching and HTTP status mapping stay
+business-tied. The delegate error is surfaced through the log policy as
+`system-broken` with both errors structured (original and delegate), and
+recorded on the span as an error. No new `CamelError` variant is
+introduced for this path.
+
+### `do_try` divergence, recorded
+
+A failing `do_try` catch block propagates the CATCH error and loses the
+original. A failed `handled_by` delegate propagates the ORIGINAL error.
+The divergence is intentional and unchanged (tracked bd rc-zgbqq).

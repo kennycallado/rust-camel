@@ -156,7 +156,9 @@ The `RedeliveryPolicy` drives the retry loop:
 Defaults are a 100 ms initial delay, a 2x multiplier, a 10 s cap, and no
 jitter. See `crates/camel-api/src/error_handler.rs`. A retry that recovers the
 exchange clears the error and the pipeline advances. A retry that exhausts
-falls through to the DLC and then to the disposition.
+falls through to the DLC and then to the disposition. When the matched
+clause sets `handled_by`, the exchange goes to that delegate endpoint
+after retries exhaust instead of the DLC.
 
 ### OnException clauses
 
@@ -165,6 +167,25 @@ clause wins. Each clause can carry its own retry, its own `handled_by`
 endpoint, and its own disposition. Put broad clauses before specific clauses.
 A broad clause first shadows the rest.
 
+`handled_by` is a clause-level field, beside `kind`, `message_contains`,
+`handled`, `continued`, `retry`, and `steps`. It delegates the failed
+exchange to another endpoint. Retry and delegation compose: the failing
+step is retried first, and the delegate runs once retries are exhausted.
+With no `retry` block, the step runs once and then delegates; no
+`CamelRedelivered` header is set.
+
+`handled_by` without `handled` or `continued` is a tap. The delegate
+receives the failed exchange as a side effect, and the original error
+propagates.
+
+Two layouts are load errors:
+
+- `handled_by` inside the `retry` block. The retry model rejects unknown
+  fields, so the legacy `retry: {handled_by: ...}` layout fails to load.
+  `dead_letter_channel` is the catch-all delegate at the route level.
+- `steps` and `handled_by` on one clause. Loading fails with the typed
+  `ConfigValidationError::OnExceptionStepsHandledByConflict`.
+
 ### Catch-all clause (kind: "*")
 
 The `kind: "*"` clause matches every error kind. Declare it last because
@@ -172,10 +193,10 @@ evaluation is first-match-wins. A specific clause declared before it keeps
 precedence. Combining `kind: "*"` with `message_contains` narrows the clause
 by message. Both conditions must hold.
 
-The pattern `kind: "*"` with `handled: true` and `retry.handled_by` gives the
-handler route full ownership of the HTTP response. The handler sets the status
-through the `CamelHttpResponseCode` header, the body, and custom headers.
-Custom headers must be string-valued.
+The pattern `kind: "*"` with `handled: true` and a clause-level
+`handled_by` gives the handler route full ownership of the HTTP response.
+The handler sets the status through the `CamelHttpResponseCode` header, the
+body, and custom headers. Custom headers must be string-valued.
 
 ```yaml
 routes:
@@ -185,9 +206,9 @@ routes:
       on_exceptions:
         - kind: "*"
           handled: true
+          handled_by: "direct:shaper"
           retry:
             max_attempts: 1
-            handled_by: "direct:shaper"
     steps:
       - bean:
           name: "validate"

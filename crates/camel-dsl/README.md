@@ -580,20 +580,20 @@ routes:
         max_attempts: 3
         initial_delay_ms: 100
 
-      # New ordered exception clauses (first-match-wins)
+      # Ordered exception clauses (first-match-wins)
       on_exceptions:
         - kind: "Io"
+          handled_by: "log:io-errors"  # clause-level delegate; runs after retries exhaust
           retry:
             max_attempts: 3
             initial_delay_ms: 100
-            handled_by: "log:io-errors"
         - kind: "ProcessorError"
           message_contains: "validation"
           retry:
             max_attempts: 1
         - kind: "ProcessorError"
           message_contains: "recoverable"
-          continued: true   # ← NEW: clear error, pipeline continues to next step
+          continued: true   # clear error, pipeline continues to next step
     circuit_breaker:           # Optional circuit breaker
       failure_threshold: 5
       open_duration_ms: 30000

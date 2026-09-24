@@ -211,9 +211,9 @@ mod tests {
                         "on_exceptions": [
                             {
                                 "kind": "Io",
+                                "handled_by": "log:io",
                                 "retry": {
-                                    "max_attempts": 3,
-                                    "handled_by": "log:io"
+                                    "max_attempts": 3
                                 }
                             }
                         ]
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(clauses[0].kind.as_deref(), Some("Io"));
         let retry = clauses[0].retry.as_ref().expect("retry should be present");
         assert_eq!(retry.max_attempts, 3);
-        assert_eq!(retry.handled_by.as_deref(), Some("log:io"));
+        assert_eq!(clauses[0].handled_by.as_deref(), Some("log:io"));
     }
 
     /// Empty route id must be rejected.
@@ -693,6 +693,45 @@ mod tests {
         assert!(
             err.to_string().contains("exceeds max"),
             "expected size cap error, got: {err}"
+        );
+    }
+
+    /// Legacy layout (`handled_by` nested inside `retry`) is a hard parse
+    /// error: the field moved to the clause level and `deny_unknown_fields`
+    /// rejects it at parse time. JSON shares the converter with YAML, so the
+    /// error surfaces identically.
+    #[test]
+    fn test_json_legacy_retry_handled_by_is_hard_error() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "legacy-handled-by",
+                    "from": "direct:start",
+                    "error_handler": {
+                        "on_exceptions": [
+                            {
+                                "kind": "Io",
+                                "retry": {
+                                    "max_attempts": 1,
+                                    "handled_by": "log:io"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }"#;
+        let err = parse_json_to_declarative(json)
+            .expect_err("legacy retry.handled_by must be a hard parse error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("handled_by"),
+            "expected 'handled_by' in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("unknown field"),
+            "expected 'unknown field' in error, got: {msg}"
         );
     }
 }

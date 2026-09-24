@@ -413,6 +413,8 @@ pub struct RouteDslOnException {
     pub handled: Option<bool>,
     #[serde(default)]
     pub continued: Option<bool>,
+    #[serde(default)]
+    pub handled_by: Option<String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -428,8 +430,6 @@ pub struct RouteDslRedeliveryPolicy {
     pub max_delay_ms: u64,
     #[serde(default = "default_jitter_factor")]
     pub jitter_factor: f64,
-    #[serde(default)]
-    pub handled_by: Option<String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
