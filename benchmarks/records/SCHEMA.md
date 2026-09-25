@@ -133,7 +133,20 @@ Array of contender comparison ratios. Each ratio:
 | `point` | number | Point estimate. |
 | `ci_lo` | number | Lower confidence bound. |
 | `ci_hi` | number | Upper confidence bound. |
+| `degenerate` | boolean | True when ci_lo or ci_hi equals point exactly (zero-width side). |
 | `method` | string | Method used to compute the ratio and CI. |
+
+A `degenerate` row's interval collapsed onto its point estimate: the
+paired percentile bootstrap resamples small-n round medians with one
+index vector per resample, and when the round supplying both cells'
+medians is also the max-ratio round, at least 2.5% of resamples land
+exactly on the point, so a percentile bound can equal it bit-for-bit
+(all-constant cells collapse both sides). A flagged interval MUST NOT
+be read as a confident one-sided bound: treat the point as the
+estimate and the OTHER side (when it is not itself collapsed) as its
+bound. The flag is unrelated to the DEGENERATE-PAIR RULE below (a
+pairing-membership rule, not a CI property). The field is additive —
+no `schema_version` bump, per Forward compatibility below.
 
 Pairing rule (pinned): within a scenario, the numerator contender is
 `rust-camel-lib` whenever that contender was measured; otherwise it is

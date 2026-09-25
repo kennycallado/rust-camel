@@ -49,6 +49,23 @@
 //!
 //! Determinism: a single `bca::SplitMix64` stream seeded by `--seed`
 //! (default 0); identical inputs + seed ⇒ identical output line.
+//!
+//! ## Degenerate intervals
+//!
+//! In paired mode ONE index vector is drawn per resample and applied to
+//! both cells, so each resample's ratio is median-of-n vs median-of-n
+//! over the SAME rounds. When the round supplying both cells' medians is
+//! also the max-ratio round, the top of the resampled-ratio support IS
+//! the point estimate, and >= 2.5% of resamples land exactly on it — the
+//! 97.5th percentile then collapses onto the point, bit-identically
+//! (all-constant cells collapse both sides the same way). A report in
+//! which a published bound equals the point by exact f64 equality
+//! (`ci_lo == point || ci_hi == point`) is flagged `degenerate`: that
+//! side asserts zero uncertainty, which small-n discrete medians cannot
+//! honestly claim. The flag surfaces the collapse instead of hiding it —
+//! consumers must read the point as the estimate and the OTHER side
+//! (when non-degenerate) as its bound, never as a confident one-sided
+//! confidence claim.
 
 use std::path::{Path, PathBuf};
 
@@ -100,6 +117,11 @@ pub struct RatioReport {
     pub ci_lo: f64,
     /// Upper 95% percentile-bootstrap confidence bound.
     pub ci_hi: f64,
+    /// True when a published bound equals the point exactly
+    /// (`ci_lo == point || ci_hi == point`, exact f64 equality): the
+    /// interval asserts zero uncertainty on that side. See
+    /// "Degenerate intervals" in the module docs.
+    pub degenerate: bool,
     /// `bootstrap-paired` or `bootstrap-independent`, matching the
     /// human line's ` UNPAIRED` suffix.
     pub method: String,
@@ -148,6 +170,9 @@ pub fn compute_ratio_report(
         point: outcome.point,
         ci_lo: outcome.lo,
         ci_hi: outcome.hi,
+        // Exact f64 equality on the PUBLISHED values (the locals
+        // above), not on recomputed medians.
+        degenerate: outcome.hi == outcome.point || outcome.lo == outcome.point,
         method: if independent {
             "bootstrap-independent".to_string()
         } else {
@@ -166,6 +191,7 @@ pub fn compute_ratio_report(
 struct RatioJsonLine<'a> {
     ci_hi: f64,
     ci_lo: f64,
+    degenerate: bool,
     denominator: &'a str,
     method: &'a str,
     metric: &'a str,
@@ -179,6 +205,7 @@ pub fn ratio_json_line(report: &RatioReport) -> String {
     let line = RatioJsonLine {
         ci_hi: report.ci_hi,
         ci_lo: report.ci_lo,
+        degenerate: report.degenerate,
         denominator: &report.denominator,
         method: &report.method,
         metric: &report.metric,
@@ -197,7 +224,8 @@ pub fn ratio_json_line(report: &RatioReport) -> String {
 ///
 /// Returns `(line, outcome)`; the line is
 /// `RATIO <A-cell-dir>/<B-cell-dir> point=… lo=… hi=…` plus ` UNPAIRED`
-/// when `independent`.
+/// when `independent`, and ` DEGENERATE` when a published bound equals
+/// the point exactly (see "Degenerate intervals" in the module docs).
 pub fn compute_ratio(
     a_path: &Path,
     b_path: &Path,
@@ -212,6 +240,9 @@ pub fn compute_ratio(
     );
     if independent {
         line.push_str(" UNPAIRED");
+    }
+    if report.degenerate {
+        line.push_str(" DEGENERATE");
     }
     Ok((
         line,
@@ -583,9 +614,10 @@ mod tests {
         assert!(line_out.hi == indep.ci_hi);
     }
 
-    /// `--json` stdout contract: ONE line, exactly the seven schema
-    /// `ratios` fields, keys sorted (ci_hi < ci_lo < denominator <
-    /// method < numerator < point). Pinned as a golden string.
+    /// `--json` stdout contract: ONE line, exactly the eight schema
+    /// `ratios` fields, keys sorted (ci_hi < ci_lo < degenerate <
+    /// denominator < method < numerator < point). Pinned as a golden
+    /// string.
     #[test]
     fn ratio_json_line_sorted_keys_golden() {
         let report = RatioReport {
@@ -595,11 +627,13 @@ mod tests {
             point: 1.5,
             ci_lo: 1.4,
             ci_hi: 1.6,
+            degenerate: false,
             method: "bootstrap-paired".to_string(),
         };
         let line = ratio_json_line(&report);
         let expected = concat!(
             "{\"ci_hi\":1.6,\"ci_lo\":1.4,",
+            "\"degenerate\":false,",
             "\"denominator\":\"camel-standalone-dsl\",",
             "\"method\":\"bootstrap-paired\",",
             "\"metric\":\"m3\",",
@@ -615,6 +649,106 @@ mod tests {
         assert_eq!(parsed["point"], 1.5);
         assert_eq!(parsed["ci_lo"], 1.4);
         assert_eq!(parsed["ci_hi"], 1.6);
+        assert_eq!(parsed["degenerate"], false);
+    }
+
+    /// Run-2 (20260915T093128Z) regression pin: with the record's exact
+    /// m3 per-round means, the paired percentile bootstrap collapses the
+    /// TOP of the interval onto the point — the median round (round 2)
+    /// is also the max-ratio round, so >= 2.5% of resamples land exactly
+    /// on the point and the 97.5th percentile equals it bit-identically.
+    /// Seed 0 / 2000 resamples MUST reproduce point == ci_hi ==
+    /// 4.401240447859682 exactly and flag the row `degenerate` (see
+    /// SCHEMA.md, "degenerate").
+    #[test]
+    fn ratio_degenerate_run2_regression() {
+        let root = TempRoot::new("run2-degenerate");
+        let pa = write_summary(
+            root.path(),
+            "rust-camel-lib",
+            "http-server/rust-camel-lib",
+            "[65984.66, 66446.82, 66165.08, 66262.92, 65573.94]",
+            5,
+        );
+        let pb = write_summary(
+            root.path(),
+            "node-fastify",
+            "http-server/node-fastify",
+            "[14994.66, 15147.02, 15033.28, 15095.8, 15001.06]",
+            5,
+        );
+        write_uniform_order(
+            root.path(),
+            &["http-server/rust-camel-lib", "http-server/node-fastify"],
+            5,
+        );
+
+        let report = compute_ratio_report(&pa, &pb, false, 0, 2000).unwrap();
+        assert_eq!(report.point, 4.401240447859682);
+        assert_eq!(report.ci_hi, report.point);
+        assert!(report.degenerate, "report {report:?}");
+
+        let (line, _) = compute_ratio(&pa, &pb, false, 0, 2000).unwrap();
+        assert!(line.ends_with(" DEGENERATE"), "line {line}");
+        let json = ratio_json_line(&report);
+        assert!(json.contains("\"degenerate\":true"), "json {json}");
+    }
+
+    /// Zero information is degenerate too: all-constant cells put every
+    /// resample on the point, collapsing BOTH sides onto it.
+    #[test]
+    fn ratio_constant_cells_flagged_degenerate() {
+        let root = TempRoot::new("constant-degenerate");
+        let pa = write_summary(
+            root.path(),
+            "cell-a",
+            "t/cell-a",
+            "[200.0, 200.0, 200.0, 200.0, 200.0]",
+            5,
+        );
+        let pb = write_summary(
+            root.path(),
+            "cell-b",
+            "t/cell-b",
+            "[100.0, 100.0, 100.0, 100.0, 100.0]",
+            5,
+        );
+        write_uniform_order(root.path(), &["t/cell-a", "t/cell-b"], 5);
+
+        let report = compute_ratio_report(&pa, &pb, false, 0, 2000).unwrap();
+        assert_eq!(report.point, 2.0);
+        assert_eq!(report.ci_lo, 2.0);
+        assert_eq!(report.ci_hi, 2.0);
+        assert!(report.degenerate, "report {report:?}");
+    }
+
+    /// Varying cells with real interval width stay non-degenerate —
+    /// narrow-but-nonzero intervals must NOT flag.
+    #[test]
+    fn ratio_varying_cells_not_degenerate() {
+        let root = TempRoot::new("varying");
+        let pa = write_summary(
+            root.path(),
+            "cell-a",
+            "t/cell-a",
+            "[190.0, 200.0, 210.0, 205.0, 195.0]",
+            5,
+        );
+        let pb = write_summary(
+            root.path(),
+            "cell-b",
+            "t/cell-b",
+            "[95.0, 105.0, 100.0, 102.0, 98.0]",
+            5,
+        );
+        write_uniform_order(root.path(), &["t/cell-a", "t/cell-b"], 5);
+
+        let report = compute_ratio_report(&pa, &pb, false, 0, 2000).unwrap();
+        assert_ne!(report.ci_lo, report.point);
+        assert_ne!(report.ci_hi, report.point);
+        assert!(!report.degenerate, "report {report:?}");
+        let json = ratio_json_line(&report);
+        assert!(json.contains("\"degenerate\":false"), "json {json}");
     }
 
     #[test]
@@ -644,7 +778,13 @@ mod tests {
         assert!(err.contains("provenance"), "err {err}");
 
         let indep = compute_ratio(&pa, &pb, true, 0, 2000).unwrap();
-        assert!(indep.0.ends_with(" UNPAIRED"), "line {}", indep.0);
+        // All-constant cells collapse both bounds onto the point, so
+        // the DEGENERATE suffix follows UNPAIRED (order pinned here).
+        assert!(
+            indep.0.ends_with(" UNPAIRED DEGENERATE"),
+            "line {}",
+            indep.0
+        );
     }
 
     #[test]

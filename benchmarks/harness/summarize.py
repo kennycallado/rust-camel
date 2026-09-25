@@ -1052,6 +1052,13 @@ def _ratio_row(row, scenario, numerator, denominator):
     inversion. Values are guaranteed positive: the binary rejects
     non-positive per-round means before any math runs. All other
     fields (e.g. `method`) pass through verbatim.
+
+    `degenerate` is RECOMPUTED from the FINAL (post-mirror) values
+    rather than trusted from the binary: inversion preserves exact
+    equality (both sides of the collapse go through the same 1/x), so
+    the flag survives mirroring by construction and always matches
+    what the published values show — including legacy rows that lack
+    the field entirely.
     """
     num_dir = f"{scenario}_{numerator}"
     den_dir = f"{scenario}_{denominator}"
@@ -1068,6 +1075,9 @@ def _ratio_row(row, scenario, numerator, denominator):
         )
     out["numerator"] = numerator
     out["denominator"] = denominator
+    out["degenerate"] = (
+        out["ci_lo"] == out["point"] or out["ci_hi"] == out["point"]
+    )
     return out
 
 
@@ -1243,19 +1253,23 @@ def emit_summary(record, out_dir):
         lines.append("")
         lines.append(
             "| numerator | denominator | metric | point | ci_lo | ci_hi"
-            " | method |"
+            " | degenerate | method |"
         )
-        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
         for r in record["ratios"]:
             lines.append(
                 "| {numerator} | {denominator} | {metric} | {point}"
-                " | {ci_lo} | {ci_hi} | {method} |".format(
+                " | {ci_lo} | {ci_hi} | {degenerate} | {method} |".format(
                     numerator=r["numerator"],
                     denominator=r["denominator"],
                     metric=r["metric"],
                     point=_fmt(r["point"]),
                     ci_lo=_fmt(r["ci_lo"]),
                     ci_hi=_fmt(r["ci_hi"]),
+                    # Legacy rows (pre-field records) carry no key:
+                    # render `-` rather than crash. degenerate is the
+                    # only column allowed to be absent.
+                    degenerate="true" if r.get("degenerate") else "-",
                     method=r["method"],
                 )
             )

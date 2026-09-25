@@ -1916,7 +1916,8 @@ class SummarizeTest(unittest.TestCase):
                 record, run_dir=self.run_dir
             )
         # Pinned pairing rule + name normalization: numerator is the
-        # bare contender name.
+        # bare contender name. The stub emits no `degenerate` key;
+        # _ratio_row recomputes it from the final values (False here).
         self.assertEqual(
             record["ratios"],
             [{
@@ -1926,6 +1927,7 @@ class SummarizeTest(unittest.TestCase):
                 "point": 1.5,
                 "ci_lo": 1.4,
                 "ci_hi": 1.6,
+                "degenerate": False,
                 "method": "bootstrap-paired",
             }],
         )
@@ -1955,6 +1957,98 @@ class SummarizeTest(unittest.TestCase):
         self.assertAlmostEqual(row["ci_lo"], 1.0 / 3.0)
         self.assertAlmostEqual(row["ci_hi"], 1.0 / 1.5)
         self.assertEqual(row["method"], "bootstrap-paired")
+
+    def test_ratio_table_marks_degenerate(self):
+        # A ratio whose published ci_hi equals its point exactly is
+        # degenerate (zero-width side, run-2 m3 mechanism): the Ratios
+        # table shows `true` in the dedicated column. Non-degenerate
+        # rows AND legacy rows lacking the key show `-` (no crash).
+        record = self._record()
+        record["ratios"] = [
+            {
+                "numerator": "rust-camel-lib",
+                "denominator": "node-fastify",
+                "metric": "m3",
+                "point": 4.401240447859682,
+                "ci_lo": 4.371287095711903,
+                "ci_hi": 4.401240447859682,
+                "method": "bootstrap-paired",
+                "degenerate": True,
+            },
+            {
+                "numerator": "rust-camel-lib",
+                "denominator": "node-native",
+                "metric": "m3",
+                "point": 2.0,
+                "ci_lo": 1.9,
+                "ci_hi": 2.1,
+                "method": "bootstrap-paired",
+                "degenerate": False,
+            },
+            {
+                # Legacy row (pre-field record): the renderer just
+                # shows `-`; recomputation lives in _ratio_row.
+                "numerator": "rust-camel-lib",
+                "denominator": "camel-standalone-dsl",
+                "metric": "m3",
+                "point": 1.5,
+                "ci_lo": 1.4,
+                "ci_hi": 1.6,
+                "method": "bootstrap-paired",
+            },
+        ]
+        out = self.root / "out-ratio-table"
+        summarize.emit_summary(record, out)
+        summary = (out / "summary.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "| numerator | denominator | metric | point | ci_lo | ci_hi"
+            " | degenerate | method |",
+            summary,
+        )
+        self.assertIn(
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            summary,
+        )
+        self.assertIn(
+            "| rust-camel-lib | node-fastify | m3 | 4.401240447859682"
+            " | 4.371287095711903 | 4.401240447859682 | true"
+            " | bootstrap-paired |",
+            summary,
+        )
+        self.assertIn(
+            "| rust-camel-lib | node-native | m3 | 2.0 | 1.9 | 2.1"
+            " | - | bootstrap-paired |",
+            summary,
+        )
+        self.assertIn(
+            "| rust-camel-lib | camel-standalone-dsl | m3 | 1.5 | 1.4"
+            " | 1.6 | - | bootstrap-paired |",
+            summary,
+        )
+
+    def test_ratio_row_mirror_preserves_degenerate(self):
+        # The binary reported the pair INVERTED with a collapsed lower
+        # bound (ci_lo == point pre-mirror). Mirroring inverts both
+        # with the SAME 1/x, so the collapse moves to ci_hi: recomputed
+        # from the FINAL (post-mirror) values, the flag must be True —
+        # inversion preserves exact equality by construction.
+        collapsed = 1.0 / 4.401240447859682
+        raw = {
+            "numerator": "http-server_node-fastify",
+            "denominator": "http-server_rust-camel-lib",
+            "metric": "m3",
+            "point": collapsed,
+            "ci_lo": collapsed,
+            "ci_hi": 1.0 / 4.371287095711903,
+            "method": "bootstrap-paired",
+        }
+        out = summarize._ratio_row(
+            raw, "http-server", "rust-camel-lib", "node-fastify"
+        )
+        self.assertEqual(out["numerator"], "rust-camel-lib")
+        self.assertEqual(out["denominator"], "node-fastify")
+        self.assertEqual(out["ci_hi"], out["point"])
+        self.assertIs(out["degenerate"], True)
 
     def test_known_ci_bounds_flow_to_run_json_and_summary(self):
         # Design exit "one ratio with known CI bounds flowing --json ->
@@ -2009,9 +2103,11 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(row["ci_lo"], 1.0)
         self.assertEqual(row["ci_hi"], 1.0)
         summary = (out / "summary.md").read_text(encoding="utf-8")
+        # point == ci_lo == ci_hi == 1.0: the collapsed interval is
+        # degenerate, so the table marks the row `true`.
         self.assertIn(
             "| rust-camel-lib | camel-standalone-dsl | m3"
-            " | 1.0 | 1.0 | 1.0 | bootstrap-paired |",
+            " | 1.0 | 1.0 | 1.0 | true | bootstrap-paired |",
             summary,
         )
 

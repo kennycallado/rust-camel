@@ -406,7 +406,7 @@ pub fn aggregate_bridge_tax_main(args: &[String]) -> ExitCode {
 /// [--bci-resamples=N] [--independent] [--json]`. Validation failures
 /// print `ERROR: <reason>` to stderr and exit 2. Default output is one
 /// human `RATIO …` line; `--json` instead prints a single sorted-key
-/// JSON object (`RatioReport`, the schema v1 `ratios` shape) consumed
+/// JSON object (`RatioReport`, the schema v2 `ratios` shape) consumed
 /// by `benchmarks/harness/summarize.py`. See [`crate::ratios`] for the
 /// validation taxonomy and CI method.
 pub fn aggregate_ratios_main(args: &[String]) -> ExitCode {
