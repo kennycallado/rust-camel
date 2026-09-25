@@ -340,6 +340,40 @@ message B { int32 id = 1; }
     }
 
     #[test]
+    fn vendored_panic_does_not_invoke_panic_hook() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static HOOK_FIRED: AtomicBool = AtomicBool::new(false);
+
+        let _lock = PROTOC_COMPILE_LOCK.lock().unwrap();
+        let _env = ProtocEnvGuard::new();
+        // SAFETY: PROTOC_COMPILE_LOCK (held above) serializes all PROTOC access.
+        unsafe { std::env::remove_var("PROTOC") };
+
+        // The recording hook is process-global for this window: every panic-capable
+        // test in this crate holds PROTOC_COMPILE_LOCK, so no parallel test panic can
+        // set HOOK_FIRED spuriously.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| HOOK_FIRED.store(true, Ordering::SeqCst)));
+
+        let result =
+            resolve_protoc_with(|| panic!("internal: protoc not found /baked/registry/bin/protoc"));
+
+        std::panic::set_hook(previous);
+
+        let err = result.expect_err("panic must be contained");
+        assert!(
+            matches!(&err, ProtoCompileError::ProtocUnavailable { detail }
+                if detail.contains("internal: protoc not found")),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            !HOOK_FIRED.load(Ordering::SeqCst),
+            "scoped silencer must prevent the panic hook from firing"
+        );
+    }
+
+    #[test]
     fn vendored_err_passes_through_seam_verbatim() {
         let _lock = PROTOC_COMPILE_LOCK.lock().unwrap();
         let _env = ProtocEnvGuard::new();
