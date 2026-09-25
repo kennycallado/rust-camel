@@ -56,6 +56,17 @@ SPLIT_AGGREGATE_GOLDEN = (
 # shared branch from the numeric branch of the stub.
 STUB_NUMERIC_DIGEST_HEX = "cd" * 32
 
+# Real era-2 record round_values pinned as regression fixtures
+# (bd rc-o9rwn): run-1 t2-realistic-eip m2 node-native is bimodal
+# with the published median 9337 in the gap between the ~6.8us and
+# ~16.5us modes; run-2 is tight at the high mode; the run-1 cli
+# vector's median sits AT the low mode (one-sided gap); the run-1
+# fastify vector is a gradual spread.
+RUN1_NODE_NATIVE_M2 = [6673, 6883, 9337, 16501, 16581]
+RUN2_NODE_NATIVE_M2 = [16521, 16721, 16701, 16701, 16260]
+RUN1_CLI_M2 = [91792, 92152, 99626, 311553, 327792]
+RUN1_FASTIFY_M2 = [7094, 9818, 10870, 11261, 16852]
+
 
 # Real era-1 run dir (git-tracked regression fixture): flat
 # `<scenario>_<contender>/` cell dirs holding m3+m4 summaries with
@@ -729,6 +740,182 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(cell["median"], 200.0)
         self.assertEqual(cell["unit"], "ns")
         self.assertEqual(record["m2_attempted_cells"], [])
+
+    def test_median_isolated_run1_regression(self):
+        # Run-1 node-native m2 (bd rc-o9rwn): the published median
+        # 9337 falls between the ~6.8us and ~16.5us modes — left gap
+        # 2454/9337 = 26.3%, right gap 7164/9337 = 76.7%, both over
+        # the 20% threshold.
+        self.assertTrue(summarize._median_isolated(RUN1_NODE_NATIVE_M2))
+
+    def test_median_not_isolated_run2_tight(self):
+        # Run-2 node-native m2: tight at the high mode — max
+        # within-sample neighbor gap ~1.1% and the median's right
+        # neighbor equal (16701). No flag.
+        self.assertFalse(
+            summarize._median_isolated(RUN2_NODE_NATIVE_M2)
+        )
+
+    def test_median_not_isolated_one_sided_gap(self):
+        # Run-1 cli m2: median 99626 sits AT the low mode — only the
+        # right gap is large (left gap 7.5%); one-sided, not between
+        # modes, so no flag.
+        self.assertFalse(summarize._median_isolated(RUN1_CLI_M2))
+
+    def test_median_not_isolated_gradual_spread(self):
+        # Run-1 fastify m2: gradual spread — the median's nearest
+        # gaps are 9.7% / 3.6%, both under the threshold.
+        self.assertFalse(summarize._median_isolated(RUN1_FASTIFY_M2))
+
+    def test_median_isolated_edge_guards(self):
+        # n < 3: no neighbors to compare. All-equal: zero gaps — a
+        # median shared by another sample never flags. Even-n
+        # straddle: the middle pair is the neighbor pair — median
+        # 11650, both gaps > 41% — flags. Zero-floor vector: the
+        # median > 0 guard short-circuits (relative gaps would
+        # divide by 0). All-negative: median < 0 — same guard.
+        self.assertFalse(summarize._median_isolated([100, 100000]))
+        self.assertFalse(summarize._median_isolated([5.0] * 5))
+        self.assertTrue(
+            summarize._median_isolated([6700, 6900, 16400, 16600])
+        )
+        self.assertFalse(summarize._median_isolated([0, 0, 0, 10, 10]))
+        self.assertFalse(summarize._median_isolated([-3.0, -2.0, -1.0]))
+
+    def test_median_isolated_threshold_pinned(self):
+        # e_glm pre-park nit B: the record vectors alone only
+        # constrain the threshold to (9.7%, 26.3%) — pin the value
+        # and a straddling pair so a silent drift (e.g. 0.20 → 0.15)
+        # fails here instead of silently contradicting SCHEMA.md's
+        # ">20%".
+        self.assertEqual(summarize._ISOLATED_MEDIAN_REL_GAP, 0.20)
+        self.assertTrue(summarize._median_isolated([79, 100, 121]))
+        self.assertFalse(summarize._median_isolated([81, 100, 119]))
+
+    def test_m4_distribution_cells_never_flag(self):
+        # r_glm round-1 finding (bd rc-o9rwn): the raw helper DOES
+        # flag the sealed m4 vector [0, 0, 4, 8, 332] (median 4,
+        # 100% relative gaps) — but those gaps are quantization
+        # noise around a distribution-series floor, not a round
+        # gap: the median sits inside the dominant low cluster
+        # {0, 0, 4, 8}. The gate at `_summary_cell` therefore
+        # hard-falses m4 cells (`delta_distribution` is a
+        # distribution series, not rounds) while the same vector on
+        # the per-round m3 site still flags — the restriction is
+        # metric-gated, not value-gated.
+        self.assertTrue(summarize._median_isolated([0, 0, 4, 8, 332]))
+        run = self.root / "20260907T000000Z"
+        m4_dir = run / "http-server_node-fastify"
+        m4_dir.mkdir(parents=True)
+        (m4_dir / "m4-summary.json").write_text(
+            json.dumps({
+                "cell": "http-server/node-fastify",
+                "status": "ok",
+                "delta_distribution": [0, 0, 4, 8, 332],
+            }),
+            encoding="utf-8",
+        )
+        m3_dir = run / "t2-json_rust-camel-lib"
+        m3_dir.mkdir(parents=True)
+        (m3_dir / "m3-summary.json").write_text(
+            json.dumps({
+                "cell": "t2-json/rust-camel-lib",
+                "status": "ok",
+                "per_round_means": [0, 0, 4, 8, 332],
+            }),
+            encoding="utf-8",
+        )
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(
+                run, dict(META, scenarios="http-server,t2-json",
+                          run_id="20260907T000000Z")
+            )
+        m4 = next(c for c in record["cells"] if c["metric"] == "m4")
+        self.assertEqual(m4["median"], 4.0)
+        self.assertFalse(m4["median_isolated"])
+        m3 = next(c for c in record["cells"] if c["metric"] == "m3")
+        self.assertEqual(m3["median"], 4.0)
+        self.assertTrue(m3["median_isolated"])
+
+    def test_cell_dicts_carry_median_isolated(self):
+        # m2 merged site: run-1's round p99s (one per round dir)
+        # merge into a cell whose dict flags the gap median.
+        run = self.root / "20260905T220000Z"
+        for rnd, p99 in enumerate(RUN1_NODE_NATIVE_M2):
+            d = run / f"m2-round-{rnd}" / "t2-realistic-eip"
+            d = d / "node-native"
+            d.mkdir(parents=True)
+            (d / "m2-summary.json").write_text(
+                json.dumps({
+                    "median_p99_ns": p99,
+                    "round_p99s_ns": [p99],
+                    "total_samples": 700,
+                    "malformed_records": 0,
+                    "is_invalidated": False,
+                }),
+                encoding="utf-8",
+            )
+        env = {"BENCH_PAYLOAD_DIGEST_BIN": str(self.stub_digest)}
+        with mock.patch.dict(os.environ, env):
+            record = summarize.build_record(
+                run, dict(META, scenarios="t2-realistic-eip",
+                          run_id="20260905T220000Z")
+            )
+        cell = next(c for c in record["cells"] if c["metric"] == "m2")
+        self.assertEqual(cell["median"], 9337.0)
+        self.assertTrue(cell["median_isolated"])
+        # m1 + generic m3/m4 sites: every measured cell carries the
+        # key (False here — the fixture's samples/rounds are n=2).
+        for c in self._record()["cells"]:
+            self.assertIn("median_isolated", c)
+            self.assertFalse(c["median_isolated"])
+
+    def test_measured_table_isolated_column(self):
+        # The Measured table mirrors Ratios `degenerate`: a flagged
+        # cell renders `true`, unflagged and legacy (keyless) shapes
+        # render `-`, and the footnote appears exactly once iff the
+        # table has a flagged cell.
+        record = self._record()
+        m3 = sorted(
+            (c for c in record["cells"] if c["metric"] == "m3"),
+            key=lambda c: (c["scenario"], c["contender"]),
+        )
+        m3[0]["median_isolated"] = True
+        out = self.root / "out-isolated-table"
+        summarize.emit_summary(record, out)
+        summary = (out / "summary.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "| scenario | contender | median | median_isolated |",
+            summary,
+        )
+        self.assertIn(
+            f"| {m3[0]['scenario']} | {m3[0]['contender']}"
+            f" | {summarize._fmt(m3[0]['median'])} | true |",
+            summary,
+        )
+        self.assertIn(
+            f"| {m3[1]['scenario']} | {m3[1]['contender']}"
+            f" | {summarize._fmt(m3[1]['median'])} | - |",
+            summary,
+        )
+        self.assertEqual(summary.count("sparse gap"), 1)
+        # No flagged cells: no footnote anywhere (the m1 table in
+        # the fixture above already renders without one). A legacy
+        # measured cell without the key still renders `-`.
+        legacy = {
+            "scenario": "legacy", "contender": "shape",
+            "variant": "default", "payload_class": "shared",
+            "metric": "m3", "round_values": [1.0], "median": 1.0,
+            "unit": "ns",
+        }
+        record2 = self._record()
+        record2["cells"].append(legacy)
+        out2 = self.root / "out-isolated-plain"
+        summarize.emit_summary(record2, out2)
+        summary2 = (out2 / "summary.md").read_text(encoding="utf-8")
+        self.assertNotIn("sparse gap", summary2)
+        self.assertIn("| legacy | shape | 1.0 | - |", summary2)
 
     def test_m2_insufficient_samples_counts_as_attempted(self):
         # bd rc-tpig: run.sh writes m2-summary.txt (NOT .json) with

@@ -98,6 +98,7 @@ Array of per-cell measurements. Each cell:
 | `metric` | string | Metric name. Opaque string; vocabulary owned by the harness and `CONTEXT.md` (no enum in this schema). |
 | `round_values` | array | Array of numbers: per-round values in measurement order where the metric is per-round; otherwise the metric's native aggregation series (e.g. m4 `delta_distribution`). |
 | `median` | number | `statistics.median` of `round_values`. |
+| `median_isolated` | boolean | True when the median's adjacent sorted neighbors on both sides are each >20% of the median away (`n` >= 3; a median shared by another sample never flags — ties at the median give a zero gap). Per-round metrics only — m4 `delta_distribution` is a distribution series; the field is always false there. See below. |
 | `unit` | string | Unit of the metric. Opaque string; vocabulary owned by the harness and `CONTEXT.md` (no enum in this schema). |
 | `input_sha256` | string or null | Canonical input digest via the loadgen payload contract (`sha256:` + lowercase hex). `null` when the scenario has no canonical payload contract — its measurement input is not a canonical body. |
 
@@ -120,6 +121,22 @@ gate enforces this closure: an unknown `status`, an empty/missing
 latency fields is invalid and counts as MISSING (`bench publish` fails
 closed on it). Extra non-latency fields on a hand-built cell are not
 rejected by the gate (the summarizer never emits them).
+
+A small-n round sample can be bimodal — two tight tick-rate clusters —
+and the order-statistics median can land in the empty gap between
+them: run-1 `t2-realistic-eip` m2 `node-native` measured
+`[6673, 6883, 9337, 16501, 16581]`, median 9337 between the ~6.8us
+and ~16.5us modes, representing neither. `median_isolated` flags
+exactly this (bd rc-o9rwn): a flagged median is a gap artifact, not a
+center — cite the per-round `round_values` or re-run (run-2's tight
+`[16521..16721]` values are the citable ones there). A median AT a
+mode (a one-sided gap: run-1 `rust-camel-cli` m2, left gap 7.5%) is
+representative of that mode and does not flag, and neither does a
+gradual spread. The threshold margin: the largest both-sided
+neighbor gap among non-flagged era-2 cells is 9.5%, the weakest
+flagging gap is 26.3% — 20% sits in the empty gulf between. The
+field is additive — no `schema_version` bump, per Forward
+compatibility below.
 
 ### `ratios`
 

@@ -263,6 +263,46 @@ def round_values(values, where):
     return out
 
 
+# Margin evidence (bd rc-o9rwn): the largest both-sided neighbor
+# gap among non-flagged era-2 cells is 9.5% of the median (run-1
+# http-server m2 node-fastify, n=4); the weakest between-modes flag
+# gap is 26.3% (run-1 t2-realistic-eip m2 node-native). The
+# threshold sits in the empty gulf between the two populations.
+_ISOLATED_MEDIAN_REL_GAP = 0.20
+
+
+def _median_isolated(values):
+    """True when the median falls in a sparse gap of its own sample.
+
+    A small-n round sample can be bimodal (two tight tick-rate
+    clusters); the order-statistics median then lands in the empty
+    gap between the modes and represents neither. True iff n >= 3,
+    median > 0, and the median's nearest sorted neighbors on BOTH
+    sides are more than _ISOLATED_MEDIAN_REL_GAP of the median away
+    (for even n the neighbors are the middle pair — the median is
+    their mean; a median shared by another sample never flags —
+    ties at the median give a zero gap). A true marker, not a mode
+    detector: one-sided gaps (median AT a mode) and gradual spreads
+    never flag.
+    """
+    if len(values) < 3:
+        return False
+    ordered = sorted(values)
+    median = statistics.median(ordered)
+    if median <= 0:
+        return False
+    mid = len(ordered) // 2
+    lo, hi = (
+        (ordered[mid - 1], ordered[mid + 1])
+        if len(ordered) % 2
+        else (ordered[mid - 1], ordered[mid])
+    )
+    return (
+        (median - lo) / median > _ISOLATED_MEDIAN_REL_GAP
+        and (hi - median) / median > _ISOLATED_MEDIAN_REL_GAP
+    )
+
+
 def input_sha256(scenario, payload_class):
     """Canonical input digest via `bench-loadgen payload-digest`.
 
@@ -481,6 +521,12 @@ def _summary_cell(entry, metric, data, scenarios, digest_cache):
         "metric": metric,
         "round_values": values,
         "median": float(statistics.median(values)),
+        # m4 `delta_distribution` is a distribution series, not
+        # rounds; near-zero medians make the relative gaps
+        # quantization noise (r_glm finding 1, bd rc-o9rwn).
+        "median_isolated": (
+            False if metric == "m4" else _median_isolated(values)
+        ),
         "unit": unit,
         "input_sha256": _cached_input_sha256(digest_cache, scenario, "shared"),
     }
@@ -508,6 +554,7 @@ def _m1_cell(entry, scenarios, digest_cache):
         "metric": "m1",
         "round_values": values,
         "median": float(statistics.median(values)),
+        "median_isolated": _median_isolated(values),
         "unit": "ms",
         "input_sha256": _cached_input_sha256(digest_cache, scenario, "shared"),
     }
@@ -838,6 +885,7 @@ def _load_m2_round_cells(run_dir, digest_cache, scenarios):
             "metric": "m2",
             "round_values": vals,
             "median": float(statistics.median(vals)),
+            "median_isolated": _median_isolated(vals),
             "unit": "ns",
             "input_sha256": _cached_input_sha256(
                 digest_cache, scenario, "shared"
@@ -1192,14 +1240,28 @@ def emit_summary(record, out_dir):
                 f"## Metric {metric} ({measured[0].get('unit', '')})"
             )
             lines.append("")
-            lines.append("| scenario | contender | median |")
-            lines.append("| --- | --- | --- |")
+            lines.append(
+                "| scenario | contender | median | median_isolated |"
+            )
+            lines.append("| --- | --- | --- | --- |")
             for c in measured:
                 lines.append(
                     f"| {c['scenario']} | {c['contender']}"
-                    f" | {_fmt(c['median'])} |"
+                    f" | {_fmt(c['median'])}"
+                    # Legacy/pre-field shapes carry no key: render `-`
+                    # rather than crash (mirrors Ratios `degenerate`).
+                    f" | {'true' if c.get('median_isolated') else '-'} |"
                 )
             lines.append("")
+            if any(c.get("median_isolated") for c in measured):
+                lines += [
+                    "- `median_isolated: true` median falls in a sparse"
+                    " gap of its own round sample (small-n multimodal"
+                    " rounds) — it represents no cluster; consult"
+                    " `round_values` or re-run; see SCHEMA.md"
+                    ' "`median_isolated`".',
+                    "",
+                ]
         if attempted:
             # ATTEMPTED cells (schema_version 2): no numeric columns —
             # identity, derived status and the exact sentinel reason
