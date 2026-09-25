@@ -23,6 +23,21 @@ handshake (`WsKernelAuth`) when the route carries a compiled security plan and p
 plan it passes through as Public with no credential extraction. Authorization runs in the pipeline
 security layer against the kernel carrier.
 
+## Test seam
+
+`ServerRegistry::new()` builds an isolated pair: a private port map and a private
+`TlsReloadRegistry`. It shares no state with the process global.
+`WsConsumer::with_server_registry(cfg, rt, reg)` injects that instance;
+`WsConsumer::new()` passes `ServerRegistry::global_arc()`. Every method is
+instance-scoped, so `reset()`, `ref_count_for_test()`, and `bound_addr_for_test()`
+act on the injected instance. `tls_registry()` returns the instance's TLS registry,
+so a handler registered by an isolated server is not visible to the global.
+Production paths still resolve to the process-global instance — the consumer default
+uses `ServerRegistry::global_arc()` (same allocation as `global()`), and the runtime
+reload bus reads `TlsReloadRegistry::global()`.
+`GLOBAL_CONNECTION_REGISTRIES` is a separate global and keeps its path-only matching
+(bd rc-qynxs); this seam does not change it.
+
 ## Client-consumer role
 
 **`WsClientConsumer`**:

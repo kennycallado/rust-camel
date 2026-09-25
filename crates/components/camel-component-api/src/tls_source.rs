@@ -139,9 +139,15 @@ pub trait TlsReloadHandler: Send + Sync {
 
 /// Process-global singleton registry of TLS reload handlers.
 ///
-/// Provides a singleton via [`TlsReloadRegistry::global()`]. Each TLS-terminating
-/// component registers its handler when it first spawns, and unregisters on
-/// release/eviction.
+/// The global is reachable through two handles that wrap the same
+/// allocation: [`TlsReloadRegistry::global()`] returns a `&'static`
+/// reference and [`TlsReloadRegistry::global_arc()`] returns an
+/// [`Arc`] clone — a registration made through either handle is
+/// observable through the other. Isolated instances for tests come
+/// from [`Default`], which never touches the process global.
+///
+/// Each TLS-terminating component registers its handler when it first
+/// spawns, and unregisters on release/eviction.
 #[derive(Default)]
 pub struct TlsReloadRegistry {
     handlers: Mutex<Vec<Arc<dyn TlsReloadHandler>>>,
@@ -150,8 +156,23 @@ pub struct TlsReloadRegistry {
 impl TlsReloadRegistry {
     /// Returns a reference to the process-global singleton.
     pub fn global() -> &'static TlsReloadRegistry {
-        static INSTANCE: std::sync::OnceLock<TlsReloadRegistry> = std::sync::OnceLock::new();
-        INSTANCE.get_or_init(TlsReloadRegistry::default)
+        Self::backing().as_ref()
+    }
+
+    /// Returns an [`Arc`] handle to the process-global singleton.
+    ///
+    /// The `Arc` wraps the same allocation as [`global`](Self::global).
+    pub fn global_arc() -> Arc<TlsReloadRegistry> {
+        Self::backing().clone()
+    }
+
+    /// Single backing allocation behind both [`global`](Self::global)
+    /// and [`global_arc`](Self::global_arc). The `&'static Arc` derefs
+    /// to a `&'static TlsReloadRegistry`, so `global()`'s signature
+    /// and instance identity are unchanged for all callers.
+    fn backing() -> &'static Arc<TlsReloadRegistry> {
+        static BACKING: std::sync::OnceLock<Arc<TlsReloadRegistry>> = std::sync::OnceLock::new();
+        BACKING.get_or_init(|| Arc::new(TlsReloadRegistry::default()))
     }
 
     /// Register a handler so it can be found later via [`find`](Self::find).
@@ -337,5 +358,56 @@ mod registry_tests {
         assert!(reg.find("grpcs", "0.0.0.0", 9090).is_some());
         reg.unregister("grpcs", "0.0.0.0", 9090);
         assert!(reg.find("grpcs", "0.0.0.0", 9090).is_none());
+    }
+
+    #[test]
+    fn global_and_global_arc_share_instance() {
+        const SCHEME: &str = "tlsseam-shared";
+        const HOST: &str = "shared.invalid";
+        const PORT: u16 = 64401;
+
+        let arc = TlsReloadRegistry::global_arc();
+        assert!(std::ptr::eq(TlsReloadRegistry::global(), arc.as_ref()));
+
+        arc.register(Arc::new(FakeHandler {
+            scheme: SCHEME.into(),
+            host: HOST.into(),
+            port: PORT,
+        }));
+        assert!(
+            TlsReloadRegistry::global()
+                .find(SCHEME, HOST, PORT)
+                .is_some(),
+            "registration via global_arc must be visible through global()"
+        );
+        TlsReloadRegistry::global().unregister(SCHEME, HOST, PORT);
+        assert!(
+            TlsReloadRegistry::global()
+                .find(SCHEME, HOST, PORT)
+                .is_none(),
+            "cleanup must leave no residue for sibling tests"
+        );
+    }
+
+    #[test]
+    fn default_instance_is_isolated_from_global() {
+        const SCHEME: &str = "tlsseam-isolated";
+        const HOST: &str = "isolated.invalid";
+        const PORT: u16 = 64402;
+
+        let global = TlsReloadRegistry::global();
+        global.register(Arc::new(FakeHandler {
+            scheme: SCHEME.into(),
+            host: HOST.into(),
+            port: PORT,
+        }));
+        let fresh = TlsReloadRegistry::default();
+        assert!(
+            fresh.find(SCHEME, HOST, PORT).is_none(),
+            "Default instance must not see global registrations"
+        );
+        // Cleanup so sibling tests see no residue.
+        global.unregister(SCHEME, HOST, PORT);
+        assert!(global.find(SCHEME, HOST, PORT).is_none());
     }
 }

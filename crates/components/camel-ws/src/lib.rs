@@ -144,15 +144,48 @@ pub struct ServerRegistry {
     /// Pre-bound listeners staged for consumption by the next vacant-entry
     /// `get_or_spawn` on the same `(host, port)` key.
     staged: Mutex<HashMap<(String, u16), tokio::net::TcpListener>>,
+    /// TLS reload handlers owned by this registry instance. The process
+    /// global shares the global `TlsReloadRegistry`; isolated instances
+    /// ([`new`](Self::new)) hold a private one.
+    tls: Arc<camel_component_api::tls_source::TlsReloadRegistry>,
 }
 
 impl ServerRegistry {
     pub fn global() -> &'static Self {
-        static REG: OnceLock<ServerRegistry> = OnceLock::new();
-        REG.get_or_init(|| Self {
+        Self::backing().as_ref()
+    }
+
+    /// Returns an [`Arc`] handle to the process-global singleton.
+    ///
+    /// The `Arc` wraps the same allocation as [`global`](Self::global).
+    pub fn global_arc() -> Arc<Self> {
+        Self::backing().clone()
+    }
+
+    /// Single backing allocation behind both [`global`](Self::global)
+    /// and [`global_arc`](Self::global_arc). The `&'static Arc` derefs
+    /// to a `&'static ServerRegistry`, so `global()`'s signature and
+    /// instance identity are unchanged for all callers.
+    fn backing() -> &'static Arc<Self> {
+        static BACKING: OnceLock<Arc<ServerRegistry>> = OnceLock::new();
+        BACKING.get_or_init(|| {
+            Arc::new(Self {
+                inner: Mutex::new(HashMap::new()),
+                staged: Mutex::new(HashMap::new()),
+                tls: camel_component_api::tls_source::TlsReloadRegistry::global_arc(),
+            })
+        })
+    }
+
+    /// Construct an isolated registry: empty port map, empty staged map,
+    /// and a private `TlsReloadRegistry`. No process-global state —
+    /// server or TLS — is shared or mutated. Intended for tests.
+    pub fn new() -> Self {
+        Self {
             inner: Mutex::new(HashMap::new()),
             staged: Mutex::new(HashMap::new()),
-        })
+            tls: Arc::new(camel_component_api::tls_source::TlsReloadRegistry::default()),
+        }
     }
 
     /// Stage a pre-bound listener so the next `get_or_spawn` for its exact
@@ -165,7 +198,7 @@ impl ServerRegistry {
     /// (itest-bound-ports). A listener staged but never claimed is dropped
     /// at process exit: a test bug, not a runtime hazard.
     pub async fn stage_listener(
-        &'static self,
+        &self,
         listener: tokio::net::TcpListener,
     ) -> Result<(), CamelError> {
         let addr = listener
@@ -189,7 +222,7 @@ impl ServerRegistry {
     }
 
     pub async fn get_or_spawn(
-        &'static self,
+        &self,
         host: &str,
         port: u16,
         tls_config: Option<WsTlsConfig>,
@@ -224,6 +257,11 @@ impl ServerRegistry {
             (entry.cell.clone(), entry.ref_count == 1)
         };
 
+        // Registration follows the owning registry: the global instance
+        // shares the process-global TLS registry, isolated instances hold
+        // a private one. Cloned before the init closure so the future is
+        // not tied to `&self`.
+        let tls_registry = self.tls.clone();
         let handle = cell
             .get_or_try_init(|| async {
                 // Resolve the listener source inside the init body so
@@ -283,7 +321,7 @@ impl ServerRegistry {
                         source.clone(),
                         port,
                     ));
-                    camel_component_api::tls_source::TlsReloadRegistry::global().register(handler);
+                    tls_registry.register(handler);
                 }
                 Ok::<ServerHandle, CamelError>(handle)
             })
@@ -339,7 +377,7 @@ impl ServerRegistry {
     /// serves that port, the redundant listener is dropped and the
     /// existing server is reused. Returns the actual bound address.
     pub async fn get_or_spawn_with_listener(
-        &'static self,
+        &self,
         listener: tokio::net::TcpListener,
         tls_config: Option<WsTlsConfig>,
         runtime: Arc<dyn RuntimeObservability>,
@@ -380,6 +418,8 @@ impl ServerRegistry {
 
         // When an existing entry wins, the init closure never runs and the
         // injected listener is dropped here — exactly-once spawn holds.
+        // TLS registration follows the owning registry (see `get_or_spawn`).
+        let tls_registry = self.tls.clone();
         let handle = cell
             .get_or_try_init(|| async {
                 let handle =
@@ -393,7 +433,7 @@ impl ServerRegistry {
                         source.clone(),
                         port,
                     ));
-                    camel_component_api::tls_source::TlsReloadRegistry::global().register(handler);
+                    tls_registry.register(handler);
                 }
                 Ok::<ServerHandle, CamelError>(handle)
             })
@@ -432,11 +472,13 @@ impl ServerRegistry {
         tracing::debug!(port, "WebSocket consumer released (server kept alive)");
     }
 
-    /// Reset the global registry — **test-only**.
+    /// Reset this registry — **test-only**. Aborts every server task the
+    /// instance hosts and clears staged listeners. TLS reload handlers are
+    /// NOT unregistered.
     #[cfg(test)]
-    pub fn reset() {
+    pub fn reset(&self) {
         {
-            let mut guard = Self::global().inner.lock().expect("ServerRegistry lock");
+            let mut guard = self.inner.lock().expect("ServerRegistry lock");
             for entry in guard.values() {
                 if let Some(handle) = entry.cell.get() {
                     // Monitor first: an aborted monitor cannot observe the
@@ -449,28 +491,39 @@ impl ServerRegistry {
         }
         // Drop any listeners staged but never claimed so a failed test does
         // not leak staged slots into the next test.
-        Self::global()
-            .staged
+        self.staged
             .lock()
             .expect("ServerRegistry staged lock")
             .clear();
     }
 
+    /// TLS reload registry owned by this instance: the process global for
+    /// the global registry, a private one for isolated instances.
+    pub fn tls_registry(&self) -> &camel_component_api::tls_source::TlsReloadRegistry {
+        self.tls.as_ref()
+    }
+
     /// Current ref count for the entry on `port` — **test-only**.
     #[cfg(test)]
-    pub fn ref_count_for_test(&'static self, port: u16) -> usize {
-        let guard = Self::global().inner.lock().expect("ServerRegistry lock");
+    pub fn ref_count_for_test(&self, port: u16) -> usize {
+        let guard = self.inner.lock().expect("ServerRegistry lock");
         guard.get(&port).map(|entry| entry.ref_count).unwrap_or(0)
     }
 
     /// Bound address of the live server entry on `port` — **test-only**.
     #[cfg(test)]
-    pub fn bound_addr_for_test(&'static self, port: u16) -> Option<std::net::SocketAddr> {
-        let guard = Self::global().inner.lock().expect("ServerRegistry lock");
+    pub fn bound_addr_for_test(&self, port: u16) -> Option<std::net::SocketAddr> {
+        let guard = self.inner.lock().expect("ServerRegistry lock");
         guard
             .get(&port)
             .and_then(|entry| entry.cell.get())
             .map(|handle| handle.bound_addr)
+    }
+}
+
+impl Default for ServerRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1510,12 +1563,27 @@ pub struct WsConsumer {
     security_ctx: Option<camel_component_api::SecurityContext>,
     /// Runtime observability handle for ADR-0012 metrics and health calls.
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+    /// Registry owning the consumer's server entries: the process global
+    /// by default, an isolated instance under constructor injection.
+    server_registry: Arc<ServerRegistry>,
 }
 
 impl WsConsumer {
     pub fn new(
         cfg: WsServerConfig,
         runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Self {
+        Self::with_server_registry(cfg, runtime, ServerRegistry::global_arc())
+    }
+
+    /// Construct a consumer operating on an explicitly provided server
+    /// registry. Tests inject an isolated [`ServerRegistry::new`]
+    /// instance to keep their servers out of process-global state;
+    /// production uses [`WsConsumer::new`], which passes the global.
+    pub fn with_server_registry(
+        cfg: WsServerConfig,
+        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+        server_registry: Arc<ServerRegistry>,
     ) -> Self {
         Self {
             cfg,
@@ -1525,6 +1593,7 @@ impl WsConsumer {
             forward_task: None,
             security_ctx: None,
             runtime,
+            server_registry,
         }
     }
 
@@ -1556,7 +1625,8 @@ impl WsConsumer {
 
         let tls_config = self.tls_config()?;
 
-        let (state, bound_addr, listening_handle, server_exited) = ServerRegistry::global()
+        let (state, bound_addr, listening_handle, server_exited) = self
+            .server_registry
             .get_or_spawn_with_listener(
                 listener,
                 tls_config,
@@ -1768,7 +1838,8 @@ impl Consumer for WsConsumer {
 
         let tls_config = self.tls_config()?;
 
-        let (state, listening_handle, server_exited) = ServerRegistry::global()
+        let (state, listening_handle, server_exited) = self
+            .server_registry
             .get_or_spawn(
                 &self.cfg.inner.host,
                 self.cfg.inner.port,
@@ -1817,7 +1888,7 @@ impl Consumer for WsConsumer {
 
         if let Some(key) = self.registry_key.take() {
             global_registries().remove(&key);
-            ServerRegistry::global().release(key.1);
+            self.server_registry.release(key.1);
         }
 
         if let Some(task) = self.forward_task.take() {
@@ -2391,13 +2462,11 @@ mod tests {
         std::sync::Arc::new(PanicRuntimeObservability)
     }
 
-    /// Serialize tests that touch the global `ServerRegistry::global()`.
-    ///
-    /// `ServerRegistry::reset()` aborts ALL server tasks globally, so any
-    /// test with a running server must hold this lock for its duration to
-    /// prevent a concurrent `reset()` from killing its server. Tests that
-    /// call `reset()` must also hold it.
-    static REGISTRY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// Serialize the two tests that deliberately exercise the process-global
+    /// server registry by design: `consumer_default_keeps_global_registry`
+    /// and `global_spawn_registers_tls_in_global_registry`. Every other test
+    /// runs against an isolated `ServerRegistry::new()` instance.
+    static GLOBAL_DEFAULT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     use super::*;
     use camel_component_api::NoOpComponentContext;
@@ -2592,24 +2661,21 @@ mod tests {
 
     #[tokio::test]
     async fn echo_flow_round_trips_message_through_consumer_and_producer() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
-        let uri = format!("ws://127.0.0.1:{port}/echo");
+        // Unique path: ws_handler cross-registers connections by path only (rc-qynxs).
+        let uri = format!("ws://127.0.0.1:{port}/echo-roundtrip");
         let component_ctx = NoOpComponentContext;
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let producer = endpoint
             .create_producer(rt(), &ProducerContext::default())
@@ -2654,7 +2720,7 @@ mod tests {
             }
         });
 
-        let url = format!("ws://127.0.0.1:{port}/echo");
+        let url = format!("ws://127.0.0.1:{port}/echo-roundtrip");
         let mut client = connect_until_ready(&url).await;
 
         client
@@ -2689,12 +2755,7 @@ mod tests {
     /// barrier.
     #[tokio::test]
     async fn server_frame_dispatch_carries_in_flight_claim() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let uri = format!("ws://127.0.0.1:{port}/claim");
@@ -2703,9 +2764,10 @@ mod tests {
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
 
         let counter = Arc::new(InFlightGauge::new());
@@ -2814,15 +2876,11 @@ mod tests {
 
     #[tokio::test]
     async fn start_with_listener_round_trips_without_port_guess() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let uri = format!("ws://127.0.0.1:{}/echo", addr.port());
+        // Unique path: ws_handler cross-registers connections by path only (rc-qynxs).
+        let uri = format!("ws://127.0.0.1:{}/echo-port0", addr.port());
         let component_ctx = NoOpComponentContext;
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
@@ -2830,9 +2888,10 @@ mod tests {
 
         // The port-0 listener is the source of truth and is handed to
         // the consumer as-is.
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let producer = endpoint
             .create_producer(rt(), &ProducerContext::default())
@@ -2848,7 +2907,7 @@ mod tests {
 
         let route_task = spawn_echo_route(route_rx, producer);
 
-        let url = format!("ws://127.0.0.1:{}/echo", addr.port());
+        let url = format!("ws://127.0.0.1:{}/echo-port0", addr.port());
         let mut client = connect_until_ready(&url).await;
 
         client
@@ -2865,25 +2924,27 @@ mod tests {
 
     #[tokio::test]
     async fn injected_entry_survives_consumer_stop() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
-        let uri = format!("ws://127.0.0.1:{port}/echo");
+        // Unique path: ws_handler inserts connections into the process-wide
+        // GLOBAL_CONNECTION_REGISTRIES by PATH ONLY (host+port ignored), so
+        // two concurrent servers serving "/echo" would cross-close each
+        // other's clients on consumer.stop() (rc-qynxs). This test runs
+        // lock-free, so its served path must not collide with the "/echo"
+        // global-semantics test (`GLOBAL_DEFAULT_TEST_LOCK`).
+        let uri = format!("ws://127.0.0.1:{port}/echo-shared");
         let component_ctx = NoOpComponentContext;
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        // Consumer A: injected listener entry.
-        let mut consumer_a = WsConsumer::new(
+        // Consumer A: injected listener entry on the shared isolated registry.
+        let mut consumer_a = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            Arc::clone(&reg),
         );
         let (route_tx_a, route_rx_a) = mpsc::channel(16);
         let ctx_a = ConsumerContext::new(
@@ -2901,7 +2962,7 @@ mod tests {
             .unwrap();
         let route_task_a = spawn_echo_route(route_rx_a, producer_a);
 
-        let url = format!("ws://127.0.0.1:{port}/echo");
+        let url = format!("ws://127.0.0.1:{port}/echo-shared");
         let mut client_a = connect_until_ready(&url).await;
         client_a
             .send(ClientMessage::Text("msg-a".into()))
@@ -2915,9 +2976,10 @@ mod tests {
         // Consumer B: plain `start` entry on the same port. The injected
         // server entry must still be alive, so this joins it instead of
         // rebinding (a rebind would collide with the live server).
-        let mut consumer_b = WsConsumer::new(
+        let mut consumer_b = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            Arc::clone(&reg),
         );
         let (route_tx_b, route_rx_b) = mpsc::channel(16);
         let ctx_b = ConsumerContext::new(
@@ -2926,6 +2988,11 @@ mod tests {
             "ws-test-route".to_string(),
         );
         consumer_b.start(ctx_b).await.unwrap();
+        assert_eq!(
+            reg.ref_count_for_test(port),
+            2,
+            "consumer_b must join the shared entry: two live consumers, one server"
+        );
 
         let producer_b = endpoint
             .create_producer(rt(), &ProducerContext::default())
@@ -2941,23 +3008,117 @@ mod tests {
 
         consumer_b.stop().await.unwrap();
         route_task_b.await.unwrap();
+
+        // Isolation proof: nothing leaked into the process global.
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            0,
+            "shared-server test must leave the process global untouched"
+        );
     }
 
     #[tokio::test]
-    async fn consumer_stop_sends_close_1001() {
+    async fn consumer_injection_uses_provided_registry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+        // Unique path: ws_handler inserts connections into the process-wide
+        // GLOBAL_CONNECTION_REGISTRIES by PATH ONLY (host+port ignored), so
+        // two concurrent servers serving "/echo" would cross-close each
+        // other's clients on consumer.stop() (rc-qynxs). This test runs
+        // lock-free, so its served path must not collide with the "/echo"
+        // global-semantics test (`GLOBAL_DEFAULT_TEST_LOCK`).
+        let uri = format!("ws://127.0.0.1:{port}/echo-seam-inject");
+        let reg = Arc::new(ServerRegistry::new());
+        let mut consumer = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            test_rt(),
+            reg.clone(),
+        );
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
+        consumer.start_with_listener(ctx, listener).await.unwrap();
+
+        assert_eq!(
+            reg.ref_count_for_test(port),
+            1,
+            "spawn must ref-count the injected registry"
+        );
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            0,
+            "injected registry must bypass the process global"
+        );
+
+        consumer.stop().await.unwrap();
+        // release() keeps the process-lifetime entry in the injected
+        // registry, mirroring the cleanup-contract test.
+        assert!(
+            reg.bound_addr_for_test(port).is_some(),
+            "release must keep the server entry alive in the injected registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn consumer_default_keeps_global_registry() {
         let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
+            &GLOBAL_DEFAULT_TEST_LOCK,
+            "GLOBAL_DEFAULT_TEST_LOCK (camel-ws global ServerRegistry)",
             TEST_LOCK_DEADLINE,
         )
         .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
+        let uri = format!("ws://127.0.0.1:{port}/echo");
+        // Endpoint-path start: park the pre-bound listener in the process
+        // global, then let the endpoint-created consumer claim it. This
+        // keeps a live server start crossing the endpoint boundary while
+        // the default constructor resolves to the same global instance.
+        ServerRegistry::global()
+            .stage_listener(listener)
+            .await
+            .unwrap();
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
+        let mut consumer = endpoint.create_consumer(test_rt()).unwrap();
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
+        consumer.start(ctx).await.unwrap();
+
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(port),
+            1,
+            "default constructor must keep the process-global identity"
+        );
+
+        consumer.stop().await.unwrap();
+        // Cleanup under the guard: release() is a no-op (process-lifetime
+        // entry), so reset() drops the server task before the lock frees.
+        ServerRegistry::global().reset();
+    }
+
+    #[tokio::test]
+    async fn consumer_stop_sends_close_1001() {
+        let reg = Arc::new(ServerRegistry::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/shutdown");
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
@@ -3026,19 +3187,15 @@ mod tests {
 
     #[tokio::test]
     async fn wss_consumer_start_fails_without_tls_cert() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
         let uri = format!("wss://127.0.0.1:{port}/secure");
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let (tx, _rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "ws-test-route".to_string());
@@ -3053,14 +3210,9 @@ mod tests {
 
     #[tokio::test]
     async fn wss_consumer_start_fails_with_nonexistent_cert() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        // Ensure clean global state (process-lifetime servers may leak across tests).
-        ServerRegistry::reset();
+        let reg = Arc::new(ServerRegistry::new());
+        // Ensure clean instance state before the (failing) start.
+        reg.reset();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3068,9 +3220,10 @@ mod tests {
         let uri = format!(
             "wss://127.0.0.1:{port}/secure?tlsCert=/nonexistent/cert.pem&tlsKey=/nonexistent/key.pem"
         );
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let (tx, _rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "ws-test-route".to_string());
@@ -3085,23 +3238,18 @@ mod tests {
 
     #[tokio::test]
     async fn server_registry_returns_same_state_for_same_port() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = ServerRegistry::new();
         // One socket, two handles: clone at the std level BEFORE the tokio
         // conversion so both injected listeners report the same local port.
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let std_clone = std_listener.try_clone().unwrap();
         let listener1 = tokio_listener_from_std(std_listener);
         let listener2 = tokio_listener_from_std(std_clone);
-        let (state1, _addr1, _, _) = ServerRegistry::global()
+        let (state1, _addr1, _, _) = reg
             .get_or_spawn_with_listener(listener1, None, test_rt(), "test-route".into())
             .await
             .unwrap();
-        let (state2, _addr2, _, _) = ServerRegistry::global()
+        let (state2, _addr2, _, _) = reg
             .get_or_spawn_with_listener(listener2, None, test_rt(), "test-route".into())
             .await
             .unwrap();
@@ -3109,6 +3257,161 @@ mod tests {
             Arc::ptr_eq(&state1.dispatch, &state2.dispatch),
             "expected same dispatch table for same port"
         );
+    }
+
+    // ── Dual-handle global + isolated instances (tlsseam) ─────────────────
+
+    #[test]
+    fn server_registry_handles_share_instance() {
+        assert!(
+            std::ptr::eq(
+                ServerRegistry::global(),
+                ServerRegistry::global_arc().as_ref()
+            ),
+            "global() and global_arc() must wrap the same allocation"
+        );
+    }
+
+    #[test]
+    fn isolated_server_registry_is_fresh() {
+        let reg = ServerRegistry::new();
+        assert_eq!(
+            reg.ref_count_for_test(1),
+            0,
+            "isolated registry starts empty"
+        );
+        assert!(
+            reg.bound_addr_for_test(1).is_none(),
+            "isolated registry has no server entries"
+        );
+        assert!(
+            reg.tls_registry().find("wss", "127.0.0.1", 1).is_none(),
+            "isolated registry has a private, empty TLS reload registry"
+        );
+        assert_eq!(
+            ServerRegistry::global().ref_count_for_test(1),
+            0,
+            "constructing an isolated registry must not touch the global one"
+        );
+    }
+
+    #[tokio::test]
+    async fn isolated_reset_scopes_to_own_instance() {
+        let reg_a = ServerRegistry::new();
+        let reg_b = ServerRegistry::new();
+
+        // Bind two listeners on distinct ephemeral ports and stage them so
+        // each registry's `get_or_spawn` serves its own socket.
+        let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_a = listener_a.local_addr().unwrap().port();
+        let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_b = listener_b.local_addr().unwrap().port();
+        reg_a.stage_listener(listener_a).await.expect("stage a");
+        reg_b.stage_listener(listener_b).await.expect("stage b");
+
+        let (_state_a, _, _) = reg_a
+            .get_or_spawn(
+                "127.0.0.1",
+                port_a,
+                None,
+                test_rt(),
+                "ws-iso-reset-a".into(),
+            )
+            .await
+            .expect("reg_a server should spawn");
+        let (_state_b, _, _) = reg_b
+            .get_or_spawn(
+                "127.0.0.1",
+                port_b,
+                None,
+                test_rt(),
+                "ws-iso-reset-b".into(),
+            )
+            .await
+            .expect("reg_b server should spawn");
+
+        assert!(reg_a.bound_addr_for_test(port_a).is_some());
+        assert!(reg_b.bound_addr_for_test(port_b).is_some());
+
+        reg_a.reset();
+
+        assert!(
+            reg_a.bound_addr_for_test(port_a).is_none(),
+            "reset must clear the owning instance's entry"
+        );
+        assert!(
+            reg_b.bound_addr_for_test(port_b).is_some(),
+            "reg_b's server must survive reg_a's reset"
+        );
+
+        reg_b.reset();
+    }
+
+    #[tokio::test]
+    async fn global_spawn_registers_tls_in_global_registry() {
+        use camel_component_api::test_support::tls;
+        use camel_component_api::tls_source::TlsReloadRegistry;
+
+        // Mutates process globals by design; serialized via
+        // GLOBAL_DEFAULT_TEST_LOCK.
+        let _guard = acquire_deadline(
+            &GLOBAL_DEFAULT_TEST_LOCK,
+            "GLOBAL_DEFAULT_TEST_LOCK (camel-ws global ServerRegistry)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let (cert_pem, key_pem) = {
+            let (_ca, c, k) = tls::gen_server_cert();
+            (c, k)
+        };
+        let cert_path = tls::write_pem_tmp("ws-global-tls-cert.pem", &cert_pem);
+        let key_path = tls::write_pem_tmp("ws-global-tls-key.pem", &key_pem);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let tls_cfg = WsTlsConfig {
+            cert_path: cert_path.to_str().expect("cert path").to_string(),
+            key_path: key_path.to_str().expect("key path").to_string(),
+        };
+
+        // Spawn a single WSS server through the global handle.
+        let (_state, _addr, _, _) = ServerRegistry::global()
+            .get_or_spawn_with_listener(
+                listener,
+                Some(tls_cfg),
+                test_rt(),
+                "ws-global-tls-reg".into(),
+            )
+            .await
+            .expect("WSS server should spawn");
+
+        // Assert through the production-bus read path: the runtime reload bus
+        // reads TlsReloadRegistry::global(), NOT ServerRegistry::tls_registry().
+        // Reading via the production global proves wiring, not the accessor.
+        let handler =
+            camel_component_api::tls_source::TlsReloadRegistry::global().find("wss", "", port);
+        assert!(
+            handler.is_some(),
+            "global WSS spawn must register a reload handler for wss://*:{port}"
+        );
+
+        // Pin the wiring identity directly: the ServerRegistry backing must be
+        // the very same TlsReloadRegistry the production bus reads.
+        assert!(
+            std::ptr::eq(
+                ServerRegistry::global().tls_registry(),
+                camel_component_api::tls_source::TlsReloadRegistry::global()
+            ),
+            "ServerRegistry TLS backing must be TlsReloadRegistry::global()"
+        );
+
+        // Cleanup under the guard: release() is a no-op (process-lifetime
+        // server) and reset() aborts servers but does NOT unregister TLS
+        // handlers — clear both so nothing leaks to sibling tests.
+        ServerRegistry::global().reset();
+        TlsReloadRegistry::global().unregister("wss", "", port);
     }
 
     // ── Listener injection: get_or_spawn_with_listener ────────────────────
@@ -3134,19 +3437,14 @@ mod tests {
 
     #[tokio::test]
     async fn with_listener_port_zero_returns_real_bound_addr() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let expected_port = listener.local_addr().unwrap().port();
         assert_ne!(expected_port, 0, "probe port must be real");
 
-        let (_state, bound_addr, listening, _) = ServerRegistry::global()
+        let (_state, bound_addr, listening, _) = reg
             .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-p0".into())
             .await
             .expect("injected listener spawn must succeed");
@@ -3163,13 +3461,8 @@ mod tests {
 
     #[tokio::test]
     async fn with_listener_same_port_reuses_entry() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
 
         // One socket, two handles: clone at the std level BEFORE the tokio
         // conversion so both injected listeners report the same local port.
@@ -3178,13 +3471,13 @@ mod tests {
         let listener1 = tokio_listener_from_std(std_listener);
         let port = listener1.local_addr().unwrap().port();
 
-        let (_s1, addr1, _, _) = ServerRegistry::global()
+        let (_s1, addr1, _, _) = reg
             .get_or_spawn_with_listener(listener1, None, test_rt(), "ws-injected-r1".into())
             .await
             .expect("first injected spawn must succeed");
 
         let listener2 = tokio_listener_from_std(std_clone);
-        let (_s2, addr2, _, _) = ServerRegistry::global()
+        let (_s2, addr2, _, _) = reg
             .get_or_spawn_with_listener(listener2, None, test_rt(), "ws-injected-r2".into())
             .await
             .expect("second injected call must reuse the entry, not rebind");
@@ -3195,7 +3488,7 @@ mod tests {
             "both callers must observe the same bound address"
         );
         assert_eq!(
-            ServerRegistry::global().ref_count_for_test(port),
+            reg.ref_count_for_test(port),
             2,
             "two injected callers must hold two references on the same entry"
         );
@@ -3205,28 +3498,23 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_get_or_spawn_after_injected_reuses_entry() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (_s1, addr, _, _) = ServerRegistry::global()
+        let (_s1, addr, _, _) = reg
             .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-mix".into())
             .await
             .expect("injected spawn must succeed");
 
-        let (_s2, _, _) = ServerRegistry::global()
+        let (_s2, _, _) = reg
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("legacy call on injected entry must reuse it, not rebind");
 
         assert_eq!(
-            ServerRegistry::global().ref_count_for_test(port),
+            reg.ref_count_for_test(port),
             2,
             "injected + legacy callers must hold two references on the same entry"
         );
@@ -3237,13 +3525,8 @@ mod tests {
     async fn legacy_get_or_spawn_unchanged_after_refactor() {
         use camel_component_api::test_support::tls;
 
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         // Test-infra port pick: bind-0, read, drop the probe listener.
@@ -3253,7 +3536,7 @@ mod tests {
 
         // Plain legacy spawn: pre-refactor return shape `(WsAppState, Option<Handle>)`,
         // binds so a TCP connect succeeds, ref count 1.
-        let (_state, listening, _) = ServerRegistry::global()
+        let (_state, listening, _) = reg
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("plain legacy spawn must succeed");
@@ -3262,7 +3545,7 @@ mod tests {
             "plain legacy path must keep returning no listening handle"
         );
         assert_eq!(
-            ServerRegistry::global().ref_count_for_test(port),
+            reg.ref_count_for_test(port),
             1,
             "a single legacy caller holds one reference"
         );
@@ -3279,7 +3562,7 @@ mod tests {
             cert_path: cert_path.to_str().expect("cert path").to_string(),
             key_path: key_path.to_str().expect("key path").to_string(),
         };
-        let result = ServerRegistry::global()
+        let result = reg
             .get_or_spawn(
                 "127.0.0.1",
                 port,
@@ -3297,7 +3580,7 @@ mod tests {
             "expected TLS-mode mismatch error, got: {err}"
         );
         assert_eq!(
-            ServerRegistry::global().ref_count_for_test(port),
+            reg.ref_count_for_test(port),
             1,
             "the rejected caller must not hold a reference"
         );
@@ -3307,13 +3590,8 @@ mod tests {
     async fn with_listener_tls_mismatch_errors() {
         use camel_component_api::test_support::tls;
 
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         // One socket, two handles (same trick as the reuse test): the second
@@ -3323,7 +3601,7 @@ mod tests {
         let listener = tokio_listener_from_std(std_listener);
         let port = listener.local_addr().unwrap().port();
 
-        let (_state, addr, _, _) = ServerRegistry::global()
+        let (_state, addr, _, _) = reg
             .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-plain".into())
             .await
             .expect("plain injected spawn must succeed");
@@ -3340,7 +3618,7 @@ mod tests {
         };
 
         let tls_listener = tokio_listener_from_std(std_clone);
-        let result = ServerRegistry::global()
+        let result = reg
             .get_or_spawn_with_listener(
                 tls_listener,
                 Some(tls_cfg),
@@ -3357,7 +3635,7 @@ mod tests {
             "expected TLS-mode mismatch error, got: {err}"
         );
         assert_eq!(
-            ServerRegistry::global().ref_count_for_test(port),
+            reg.ref_count_for_test(port),
             1,
             "the rejected caller must not hold a reference"
         );
@@ -3366,27 +3644,22 @@ mod tests {
 
     #[tokio::test]
     async fn reset_clears_injected_entry_allowing_rebind() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (_state, _addr, _, _) = ServerRegistry::global()
+        let (_state, _addr, _, _) = reg
             .get_or_spawn_with_listener(listener, None, test_rt(), "ws-injected-reset".into())
             .await
             .expect("injected spawn must succeed");
-        assert_eq!(ServerRegistry::global().ref_count_for_test(port), 1);
+        assert_eq!(reg.ref_count_for_test(port), 1);
 
         // reset() must abort the injected entry's server task and clear the
         // map entry like any other.
-        ServerRegistry::reset();
+        reg.reset();
         assert_eq!(
-            ServerRegistry::global().ref_count_for_test(port),
+            reg.ref_count_for_test(port),
             0,
             "reset must clear the injected entry"
         );
@@ -3405,11 +3678,15 @@ mod tests {
         }
         let fresh = fresh.expect("port must be rebindable after reset (no listener leak)");
 
-        let (_state2, addr2, _, _) = ServerRegistry::global()
+        let (_state2, addr2, _, _) = reg
             .get_or_spawn_with_listener(fresh, None, test_rt(), "ws-injected-rebind".into())
             .await
             .expect("re-spawn on the fresh listener must succeed");
         assert_eq!(addr2.port(), port);
+        assert!(
+            reg.bound_addr_for_test(port).is_some(),
+            "rebound entry must exist in the isolated registry"
+        );
         assert_tcp_connectable(addr2).await;
     }
 
@@ -3422,34 +3699,28 @@ mod tests {
 
     #[tokio::test]
     async fn ws_staged_listener_consumed_on_vacant_entry() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
 
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let staged_addr = std_listener.local_addr().unwrap();
         let port = staged_addr.port();
-        ServerRegistry::global()
-            .stage_listener(tokio_listener_from_std(std_listener))
+        reg.stage_listener(tokio_listener_from_std(std_listener))
             .await
             .expect("staging a fresh (host, port) key must succeed");
 
-        let (_state, _, _) = ServerRegistry::global()
+        let (_state, _, _) = reg
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("vacant-entry spawn must consume the staged listener");
 
         assert_eq!(
-            ServerRegistry::global().ref_count_for_test(port),
+            reg.ref_count_for_test(port),
             1,
             "a single caller holds one reference on the consumed entry"
         );
         assert_eq!(
-            ServerRegistry::global().bound_addr_for_test(port),
+            reg.bound_addr_for_test(port),
             Some(staged_addr),
             "the served socket must BE the staged listener (one-shot vacant-path consumption)"
         );
@@ -3458,13 +3729,8 @@ mod tests {
 
     #[tokio::test]
     async fn ws_staged_not_consumed_when_entry_exists() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
 
         // One socket, three handles: the entry is created from the original,
         // the two probes stage the same port without a second bind.
@@ -3475,7 +3741,7 @@ mod tests {
 
         // Create the entry via the injected-listener path (a second bind on
         // this port is impossible).
-        let (_s, addr, _, _) = ServerRegistry::global()
+        let (_s, addr, _, _) = reg
             .get_or_spawn_with_listener(
                 tokio_listener_from_std(std_listener),
                 None,
@@ -3487,18 +3753,17 @@ mod tests {
 
         // Stage while the entry already exists: the staged slot is empty, so
         // staging succeeds even though no vacant-entry spawn will claim it.
-        ServerRegistry::global()
-            .stage_listener(tokio_listener_from_std(probe1))
+        reg.stage_listener(tokio_listener_from_std(probe1))
             .await
             .expect("staging on an existing entry must succeed (slot empty)");
 
-        let (_s2, _, _) = ServerRegistry::global()
+        let (_s2, _, _) = reg
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("existing entry must be reused, not rebind");
 
         assert_eq!(
-            ServerRegistry::global().ref_count_for_test(port),
+            reg.ref_count_for_test(port),
             2,
             "entry reused: two callers hold two references"
         );
@@ -3506,7 +3771,7 @@ mod tests {
 
         // The reuse path must NOT touch the staged map: the staged listener
         // is still parked, so a duplicate stage on the key is rejected.
-        let err = ServerRegistry::global()
+        let err = reg
             .stage_listener(tokio_listener_from_std(probe2))
             .await
             .expect_err("duplicate stage must be rejected");
@@ -3518,23 +3783,17 @@ mod tests {
 
     #[tokio::test]
     async fn ws_wrong_host_staged_port_fails() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
 
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let staged_addr = std_listener.local_addr().unwrap();
         let port = staged_addr.port();
-        ServerRegistry::global()
-            .stage_listener(tokio_listener_from_std(std_listener))
+        reg.stage_listener(tokio_listener_from_std(std_listener))
             .await
             .expect("staging must succeed");
 
-        let result = ServerRegistry::global()
+        let result = reg
             .get_or_spawn("localhost", port, None, test_rt(), "test-route".into())
             .await;
         let err = match result {
@@ -3548,12 +3807,12 @@ mod tests {
 
         // The conflicting call left the staged slot untouched: the exact-key
         // call consumes it and serves the staged socket.
-        let (_state, _, _) = ServerRegistry::global()
+        let (_state, _, _) = reg
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("exact-key spawn must serve the staged listener");
         assert_eq!(
-            ServerRegistry::global().bound_addr_for_test(port),
+            reg.bound_addr_for_test(port),
             Some(staged_addr),
             "staged slot untouched: served socket must be the staged listener"
         );
@@ -3561,24 +3820,18 @@ mod tests {
 
     #[tokio::test]
     async fn ws_duplicate_stage_rejected() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
 
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let probe = std_listener.try_clone().unwrap();
         let staged_addr = std_listener.local_addr().unwrap();
         let port = staged_addr.port();
-        ServerRegistry::global()
-            .stage_listener(tokio_listener_from_std(std_listener))
+        reg.stage_listener(tokio_listener_from_std(std_listener))
             .await
             .expect("first stage must succeed");
 
-        let err = ServerRegistry::global()
+        let err = reg
             .stage_listener(tokio_listener_from_std(probe))
             .await
             .expect_err("duplicate stage on the same key must be rejected");
@@ -3589,12 +3842,12 @@ mod tests {
 
         // The first staged listener is retained: get_or_spawn serves its
         // socket, not a fresh bind.
-        let (_state, _, _) = ServerRegistry::global()
+        let (_state, _, _) = reg
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .expect("spawn must consume the first staged listener");
         assert_eq!(
-            ServerRegistry::global().bound_addr_for_test(port),
+            reg.bound_addr_for_test(port),
             Some(staged_addr),
             "served socket must be the first staged listener"
         );
@@ -3602,13 +3855,8 @@ mod tests {
 
     #[tokio::test]
     async fn ws_distinct_keys_stage_independently() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
 
         let std1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let std2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3619,16 +3867,14 @@ mod tests {
             addr2.port(),
             "precondition: distinct ports for distinct staged keys"
         );
-        ServerRegistry::global()
-            .stage_listener(tokio_listener_from_std(std1))
+        reg.stage_listener(tokio_listener_from_std(std1))
             .await
             .expect("stage P1");
-        ServerRegistry::global()
-            .stage_listener(tokio_listener_from_std(std2))
+        reg.stage_listener(tokio_listener_from_std(std2))
             .await
             .expect("stage P2");
 
-        let (_s1, _, _) = ServerRegistry::global()
+        let (_s1, _, _) = reg
             .get_or_spawn(
                 "127.0.0.1",
                 addr1.port(),
@@ -3638,7 +3884,7 @@ mod tests {
             )
             .await
             .expect("P1 spawn must consume staged P1");
-        let (_s2, _, _) = ServerRegistry::global()
+        let (_s2, _, _) = reg
             .get_or_spawn(
                 "127.0.0.1",
                 addr2.port(),
@@ -3654,12 +3900,12 @@ mod tests {
         assert_tcp_connectable(addr1).await;
         assert_tcp_connectable(addr2).await;
         assert_eq!(
-            ServerRegistry::global().ref_count_for_test(addr1.port()),
+            reg.ref_count_for_test(addr1.port()),
             1,
             "P1 entry holds exactly one reference"
         );
         assert_eq!(
-            ServerRegistry::global().ref_count_for_test(addr2.port()),
+            reg.ref_count_for_test(addr2.port()),
             1,
             "P2 entry holds exactly one reference"
         );
@@ -3667,14 +3913,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_handler_returns_404_for_unregistered_path() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = ServerRegistry::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let (state, _addr, _, _) = ServerRegistry::global()
+        let (state, _addr, _, _) = reg
             .get_or_spawn_with_listener(listener, None, test_rt(), "test-route".into())
             .await
             .unwrap();
@@ -3741,19 +3982,15 @@ mod tests {
 
     #[tokio::test]
     async fn max_connections_rejects_with_close_1013() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/limited?maxConnections=1");
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
@@ -3796,19 +4033,15 @@ mod tests {
 
     #[tokio::test]
     async fn max_message_size_rejects_with_close_1009() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/sizelimit?maxMessageSize=10");
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
@@ -3852,19 +4085,15 @@ mod tests {
 
     #[tokio::test]
     async fn max_message_size_rejects_binary_with_close_1009() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/sizelimit-bin?maxMessageSize=10");
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
@@ -3908,19 +4137,15 @@ mod tests {
 
     #[tokio::test]
     async fn origin_rejection_returns_403() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/origintest?allowOrigin=https://allowed.com");
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            Arc::clone(&reg),
         );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
@@ -3930,7 +4155,7 @@ mod tests {
         );
         consumer.start_with_listener(ctx, listener).await.unwrap();
 
-        let (state, _, _) = ServerRegistry::global()
+        let (state, _, _) = reg
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .unwrap();
@@ -3966,12 +4191,7 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_sends_to_all_connected_clients() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -3980,9 +4200,10 @@ mod tests {
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let producer = endpoint
             .create_producer(rt(), &ProducerContext::default())
@@ -4043,12 +4264,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_get_or_spawn_returns_same_state() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         // One socket, four handles: clone at the std level BEFORE the tokio
         // conversion so all injected listeners report the same local port.
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4065,8 +4281,9 @@ mod tests {
         let mut handles = Vec::new();
         for listener in [listener0, listener1, listener2, listener3] {
             let results = results.clone();
+            let reg = Arc::clone(&reg);
             handles.push(tokio::spawn(async move {
-                let (state, _addr, _, _) = ServerRegistry::global()
+                let (state, _addr, _, _) = reg
                     .get_or_spawn_with_listener(listener, None, test_rt(), "test-route".into())
                     .await
                     .unwrap();
@@ -4237,19 +4454,15 @@ mod tests {
     // WS-006: Double-start must be rejected
     #[tokio::test]
     async fn consumer_double_start_returns_error() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/doublestart");
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
@@ -4282,19 +4495,15 @@ mod tests {
     // WS-005: Registry cleanup on stop + port reuse
     #[tokio::test]
     async fn registry_cleanup_on_consumer_stop() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/cleanup");
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            Arc::clone(&reg),
         );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
@@ -4322,9 +4531,9 @@ mod tests {
         );
 
         // Server is process-lifetime: release() is a no-op, so the
-        // ServerRegistry entry stays. The port cannot be re-bound until
-        // ServerRegistry::reset() is called.
-        let server_reg = ServerRegistry::global();
+        // entry stays in this isolated registry. The port cannot be
+        // re-bound until that instance's reset() is called.
+        let server_reg = reg;
         let guard = server_reg.inner.lock().unwrap();
         assert!(
             guard.contains_key(&port),
@@ -4335,12 +4544,7 @@ mod tests {
     // WS-003 + WS-004: poll_ready backpressure and server-send error handling
     #[tokio::test]
     async fn producer_server_send_returns_error_when_all_dropped() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
@@ -4350,9 +4554,10 @@ mod tests {
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let producer = endpoint
             .create_producer(rt(), &ProducerContext::default())
@@ -4402,19 +4607,15 @@ mod tests {
     // WS-012: Ping/pong round-trip in server mode
     #[tokio::test]
     async fn server_responds_to_client_ping_with_pong() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
         let uri = format!("ws://127.0.0.1:{port}/pingpong");
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             rt(),
+            reg,
         );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
@@ -4489,12 +4690,7 @@ mod tests {
     // WS-001: Server bind error is visible (fake server-start error test)
     #[tokio::test]
     async fn server_bind_error_is_reported() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         // Bind a port manually to cause a conflict
         let _listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = _listener.local_addr().unwrap().port();
@@ -4502,12 +4698,12 @@ mod tests {
         // Try to start a consumer on the same port — should succeed since axum binds lazily
         // The actual bind error happens when the server task runs
         let uri = format!("ws://127.0.0.1:{port}/binderror");
-        let component_ctx = NoOpComponentContext;
-        let endpoint = WsComponent::new()
-            .create_endpoint(&uri, &component_ctx)
-            .unwrap();
 
-        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let mut consumer = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+            reg,
+        );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
             route_tx,
@@ -4559,17 +4755,12 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_stop_returns_error_when_server_had_errors() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
         let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/errorflag")).unwrap();
-        let mut consumer = WsConsumer::new(cfg.server_config(), test_rt());
+        let mut consumer = WsConsumer::with_server_registry(cfg.server_config(), test_rt(), reg);
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
             route_tx,
@@ -4597,17 +4788,12 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_stop_succeeds_when_server_healthy() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
         let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/healthy")).unwrap();
-        let mut consumer = WsConsumer::new(cfg.server_config(), test_rt());
+        let mut consumer = WsConsumer::with_server_registry(cfg.server_config(), test_rt(), reg);
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
             route_tx,
@@ -4648,13 +4834,8 @@ mod tests {
     /// down.
     #[tokio::test]
     async fn shared_server_death_fails_every_hosted_consumer() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = Arc::new(ServerRegistry::new());
+        reg.reset();
 
         // One socket, two handles: both consumers host on the same port.
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4670,7 +4851,11 @@ mod tests {
         let start_hosted = |path: &str, route_id: &str, listener: tokio::net::TcpListener| {
             let uri = format!("ws://127.0.0.1:{port}/{path}");
             let cfg = WsEndpointConfig::from_uri(&uri).unwrap();
-            let mut consumer = WsConsumer::new(cfg.server_config(), Arc::clone(&rt));
+            let mut consumer = WsConsumer::with_server_registry(
+                cfg.server_config(),
+                Arc::clone(&rt),
+                Arc::clone(&reg),
+            );
             let (tx, rx) = mpsc::channel(16);
             let ctx = ConsumerContext::new(tx, CancellationToken::new(), route_id.to_string());
             async move {
@@ -4697,10 +4882,7 @@ mod tests {
         // Kill the shared server task: abort → JoinError → the monitor's
         // unexpected-exit branch. This is the real crash path (no mock).
         {
-            let guard = ServerRegistry::global()
-                .inner
-                .lock()
-                .expect("ServerRegistry lock");
+            let guard = reg.inner.lock().expect("ServerRegistry lock");
             let handle = guard
                 .get(&port)
                 .and_then(|entry| entry.cell.get())
@@ -4840,13 +5022,8 @@ mod tests {
     /// actually rebind (parity with camel-http's eviction).
     #[tokio::test]
     async fn dead_shared_server_is_evicted_and_rebinds() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
 
         // Two handles on one socket: first spawns, second is kept for the
         // post-death rebind (same port by construction, no rebind race).
@@ -4858,7 +5035,7 @@ mod tests {
 
         let evict_rt: Arc<dyn camel_component_api::RuntimeObservability> =
             Arc::new(RecordingRuntime::new(Arc::new(Mutex::new(Vec::new()))));
-        let (state1, _addr1, _listen1, token1) = ServerRegistry::global()
+        let (state1, _addr1, _listen1, token1) = reg
             .get_or_spawn_with_listener(
                 listener1,
                 None,
@@ -4871,10 +5048,7 @@ mod tests {
         // Kill the shared server task and wait until the monitor has
         // cancelled the death token (bounded, no sleeps).
         {
-            let guard = ServerRegistry::global()
-                .inner
-                .lock()
-                .expect("ServerRegistry lock");
+            let guard = reg.inner.lock().expect("ServerRegistry lock");
             let handle = guard
                 .get(&port)
                 .and_then(|entry| entry.cell.get())
@@ -4892,7 +5066,7 @@ mod tests {
 
         // The next spawn on the same port must rebind: fresh state, fresh
         // (uncancelled) death token.
-        let (state2, _addr2, _listen2, token2) = ServerRegistry::global()
+        let (state2, _addr2, _listen2, token2) = reg
             .get_or_spawn_with_listener(listener2, None, evict_rt, "evict-route-2".into())
             .await
             .unwrap();
@@ -4908,19 +5082,22 @@ mod tests {
         assert!(token1.is_cancelled());
     }
 
-    /// Leave a listened-then-dead entry in the global registry (rc-onm5b
-    /// harness): spawn a server on a dedicated current-thread runtime, let
-    /// the runtime poll the serve task into its accept park (LISTENED,
-    /// proven by a live TCP connect), then drop the runtime so the parked
-    /// serve task dies mid-park. Returns the corpse entry's dispatch-table
-    /// address and its port.
+    /// Leave a listened-then-dead entry in the given registry instance
+    /// (rc-onm5b harness): spawn a server on a dedicated current-thread
+    /// runtime, let the runtime poll the serve task into its accept park
+    /// (LISTENED, proven by a live TCP connect), then drop the runtime so
+    /// the parked serve task dies mid-park. Returns the corpse entry's
+    /// dispatch-table address and its port.
     ///
     /// This is the death mode `#[tokio::test]` runtimes inflict at test
     /// end: the task is dropped, not run to completion, and its
     /// `JoinHandle` may never report completion — while the
     /// process-lifetime registry keeps the initialized entry for the next
     /// test to join via ephemeral port reuse.
-    fn leave_listened_then_dead_entry(route_id: &str) -> (DispatchTable, String, u16) {
+    fn leave_listened_then_dead_entry(
+        reg: Arc<ServerRegistry>,
+        route_id: &str,
+    ) -> (DispatchTable, String, u16) {
         let route = route_id.to_string();
         std::thread::spawn(move || {
             let owner_rt = tokio::runtime::Builder::new_current_thread()
@@ -4932,7 +5109,7 @@ mod tests {
                     .await
                     .expect("owner bind");
                 let port = listener.local_addr().unwrap().port();
-                let (state, _addr, _listen, _token) = ServerRegistry::global()
+                let (state, _addr, _listen, _token) = reg
                     .get_or_spawn_with_listener(listener, None, test_rt(), route.clone())
                     .await
                     .expect("owner server entry should spawn");
@@ -4965,15 +5142,11 @@ mod tests {
     /// the reused port.
     #[tokio::test]
     async fn listened_then_dead_entry_is_not_joined_on_port_reuse() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = Arc::new(ServerRegistry::new());
+        reg.reset();
 
-        let (corpse_dispatch, corpse_route, port) = leave_listened_then_dead_entry("wsevict-owner");
+        let (corpse_dispatch, corpse_route, port) =
+            leave_listened_then_dead_entry(Arc::clone(&reg), "wsevict-owner");
 
         // Port reuse: the corpse's socket closed at runtime drop, so the
         // kernel reissues the port to this joiner, which joins through the
@@ -4981,7 +5154,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .expect("port reissued for the joiner");
-        let (state, _addr, _listen, _token) = ServerRegistry::global()
+        let (state, _addr, _listen, _token) = reg
             .get_or_spawn_with_listener(listener, None, test_rt(), "wsevict-joiner".into())
             .await
             .expect("joiner spawn");
@@ -5010,7 +5183,7 @@ mod tests {
         .expect("fresh server must accept on the reused port within 2s")
         .expect("connect");
 
-        ServerRegistry::reset();
+        reg.reset();
     }
 
     /// rc-onm5b coverage: eviction must not over-fire. A LIVE entry is
@@ -5018,24 +5191,19 @@ mod tests {
     /// accepting traffic after the join.
     #[tokio::test]
     async fn live_shared_server_is_not_evicted_on_join() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = ServerRegistry::new();
+        reg.reset();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let port = listener.local_addr().unwrap().port();
-        let (state1, _addr, _listen, _token) = ServerRegistry::global()
+        let (state1, _addr, _listen, _token) = reg
             .get_or_spawn_with_listener(listener, None, test_rt(), "wsevict-live-1".into())
             .await
             .expect("first spawn");
 
-        let (state2, _listen2, _token2) = ServerRegistry::global()
+        let (state2, _listen2, _token2) = reg
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "wsevict-live-2".into())
             .await
             .expect("second join");
@@ -5045,7 +5213,7 @@ mod tests {
             "a live entry must be joined, not evicted"
         );
         assert_eq!(
-            ServerRegistry::global().ref_count_for_test(port),
+            reg.ref_count_for_test(port),
             2,
             "join must take a second reference on the live entry"
         );
@@ -5057,7 +5225,7 @@ mod tests {
         .expect("live server must keep accepting after the join")
         .expect("connect");
 
-        ServerRegistry::reset();
+        reg.reset();
     }
 
     /// rc-onm5b coverage: the itest join path stages a pre-bound listener
@@ -5067,25 +5235,17 @@ mod tests {
     /// the staged listener.
     #[tokio::test]
     async fn port_reuse_after_eviction_serves_staged_listener() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = Arc::new(ServerRegistry::new());
+        reg.reset();
 
         let (corpse_dispatch, corpse_route, port) =
-            leave_listened_then_dead_entry("wsevict-staged-owner");
+            leave_listened_then_dead_entry(Arc::clone(&reg), "wsevict-staged-owner");
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .expect("port reissued for the staged joiner");
-        ServerRegistry::global()
-            .stage_listener(listener)
-            .await
-            .expect("stage listener");
-        let (state, _listen, _token) = ServerRegistry::global()
+        reg.stage_listener(listener).await.expect("stage listener");
+        let (state, _listen, _token) = reg
             .get_or_spawn(
                 "127.0.0.1",
                 port,
@@ -5116,7 +5276,7 @@ mod tests {
         .expect("fresh server must serve on the staged listener within 2s")
         .expect("connect");
 
-        ServerRegistry::reset();
+        reg.reset();
     }
 
     // === H-10 Finding Tests ===
@@ -5398,25 +5558,25 @@ mod tests {
         );
     }
 
-    // ── TLS cert hot-reload: release/unregister integration tests ─────────
+    // ── TLS cert hot-reload: release/retention integration tests ─────────
     //
     // These verify the WSS path: `get_or_spawn` registers a `WsReloadHandler`
-    // in `TlsReloadRegistry::global()`; `release` unregisters it when the
-    // last reference drops. The host-agnostic `matches` impl keys on
-    // (scheme="wss", port) — see `WsReloadHandler::matches`.
+    // in the `TlsReloadRegistry` owned by the spawning `ServerRegistry`
+    // instance (isolated registries here, so the process global stays
+    // untouched); `release` is a deliberate no-op for the process-lifetime
+    // server, so the handler stays registered with the owning registry. These
+    // tests verify retention plus global isolation. The host-agnostic
+    // `matches` impl keys on (scheme="wss", port) — see
+    // `WsReloadHandler::matches`.
 
     #[tokio::test]
-    async fn wss_release_unregisters_tls_reload_handler() {
+    async fn wss_release_keeps_tls_reload_handler_registered() {
         use camel_component_api::test_support::tls;
         use camel_component_api::tls_source::TlsReloadRegistry;
+        use std::sync::Arc;
 
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
         let _ = rustls::crypto::ring::default_provider().install_default();
+        let reg = Arc::new(ServerRegistry::new());
 
         let (cert_pem, key_pem) = {
             let (_ca, c, k) = tls::gen_server_cert();
@@ -5433,7 +5593,7 @@ mod tests {
         };
 
         // Spawn a single WSS server.
-        let (_state, _addr, _, _) = ServerRegistry::global()
+        let (_state, _addr, _, _) = reg
             .get_or_spawn_with_listener(
                 listener,
                 Some(tls_cfg),
@@ -5444,7 +5604,7 @@ mod tests {
             .expect("WSS server should spawn");
 
         // Handler is registered (host-agnostic — match passes empty host).
-        let handler = TlsReloadRegistry::global().find("wss", "", port);
+        let handler = reg.tls_registry().find("wss", "", port);
         assert!(
             handler.is_some(),
             "WSS server must register a reload handler for wss://*:{port}"
@@ -5458,11 +5618,16 @@ mod tests {
 
         // Release the (only) reference. release() is a no-op
         // (process-lifetime server), so the handler STAYS registered.
-        ServerRegistry::global().release(port);
+        reg.release(port);
 
         assert!(
-            TlsReloadRegistry::global().find("wss", "", port).is_some(),
+            reg.tls_registry().find("wss", "", port).is_some(),
             "WSS server release is a no-op; reload handler must remain registered"
+        );
+        // Isolated visibility: the handler never reaches the process global.
+        assert!(
+            TlsReloadRegistry::global().find("wss", "", port).is_none(),
+            "isolated-registry handler must not leak into TlsReloadRegistry::global()"
         );
     }
 
@@ -5470,14 +5635,10 @@ mod tests {
     async fn wss_multiple_refs_release_does_not_unregister() {
         use camel_component_api::test_support::tls;
         use camel_component_api::tls_source::TlsReloadRegistry;
+        use std::sync::Arc;
 
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
         let _ = rustls::crypto::ring::default_provider().install_default();
+        let reg = Arc::new(ServerRegistry::new());
 
         let (cert_pem, key_pem) = {
             let (_ca, c, k) = tls::gen_server_cert();
@@ -5499,7 +5660,7 @@ mod tests {
         };
 
         // Acquire TWO references to the same port.
-        let (_s1, _addr1, _, _) = ServerRegistry::global()
+        let (_s1, _addr1, _, _) = reg
             .get_or_spawn_with_listener(
                 listener1,
                 Some(tls_cfg.clone()),
@@ -5508,7 +5669,7 @@ mod tests {
             )
             .await
             .expect("WSS server should spawn (ref 1)");
-        let (_s2, _addr2, _, _) = ServerRegistry::global()
+        let (_s2, _addr2, _, _) = reg
             .get_or_spawn_with_listener(
                 listener2,
                 Some(tls_cfg),
@@ -5520,42 +5681,41 @@ mod tests {
 
         // Handler is registered.
         assert!(
-            TlsReloadRegistry::global().find("wss", "", port).is_some(),
+            reg.tls_registry().find("wss", "", port).is_some(),
             "WSS server with refs must have a registered reload handler"
         );
 
         // Release the FIRST reference — ref count is still 1, handler must remain.
-        ServerRegistry::global().release(port);
+        reg.release(port);
         assert!(
-            TlsReloadRegistry::global().find("wss", "", port).is_some(),
+            reg.tls_registry().find("wss", "", port).is_some(),
             "handler must remain registered while ref count > 0"
         );
 
         // Release the LAST reference. release() is a no-op regardless of
         // ref count, so the handler STAYS registered.
-        ServerRegistry::global().release(port);
+        reg.release(port);
         assert!(
-            TlsReloadRegistry::global().find("wss", "", port).is_some(),
+            reg.tls_registry().find("wss", "", port).is_some(),
             "handler must remain registered — release() is a no-op (process-lifetime server)"
+        );
+        // Isolated visibility: the handler never reaches the process global.
+        assert!(
+            TlsReloadRegistry::global().find("wss", "", port).is_none(),
+            "isolated-registry handler must not leak into TlsReloadRegistry::global()"
         );
     }
 
     #[tokio::test]
     async fn ws_plaintext_does_not_register_tls_reload_handler() {
         use camel_component_api::tls_source::TlsReloadRegistry;
+        use std::sync::Arc;
 
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        // Ensure clean global state (process-lifetime servers may leak across tests).
-        ServerRegistry::reset();
+        let reg = Arc::new(ServerRegistry::new());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (_state, _addr, _, _) = ServerRegistry::global()
+        let (_state, _addr, _, _) = reg
             .get_or_spawn_with_listener(
                 listener,
                 None,
@@ -5567,12 +5727,18 @@ mod tests {
 
         // No handler for either wss or ws — plaintext has nothing to reload.
         assert!(
-            TlsReloadRegistry::global().find("wss", "", port).is_none(),
+            reg.tls_registry().find("wss", "", port).is_none(),
             "plaintext WS server must not register a wss handler"
         );
 
         // Cleanup.
-        ServerRegistry::global().release(port);
+        reg.release(port);
+
+        // Isolated visibility: nothing reached the process global either.
+        assert!(
+            TlsReloadRegistry::global().find("wss", "", port).is_none(),
+            "plaintext WS server must not register a wss handler in the global registry"
+        );
     }
 
     // WSS readiness: a failed TLS listener bind must NOT signal readiness.
@@ -5581,15 +5747,10 @@ mod tests {
         use camel_component_api::StartupSignal;
         use camel_component_api::test_support::{NoopRuntimeObservability, tls};
 
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let _ = rustls::crypto::ring::default_provider().install_default();
-        // Clean global state (process-lifetime servers may leak across tests).
-        ServerRegistry::reset();
+        // Clean instance state before the (failing) start.
+        reg.reset();
 
         // Generate valid TLS material so we get past cert loading and reach
         // the actual listener bind.
@@ -5607,15 +5768,15 @@ mod tests {
         let port = blocker.local_addr().unwrap().port();
 
         let uri = format!("wss://127.0.0.1:{port}/secure?tlsCert={cert_str}&tlsKey={key_str}");
-        let component_ctx = NoOpComponentContext;
-        let endpoint = WssComponent::new()
-            .create_endpoint(&uri, &component_ctx)
-            .unwrap();
         // NoopRuntimeObservability: the bind-failure path calls
         // `health().force_unhealthy_for_route`, which must not panic.
         let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
             std::sync::Arc::new(NoopRuntimeObservability);
-        let mut consumer = endpoint.create_consumer(rt).unwrap();
+        let mut consumer = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt,
+            reg,
+        );
 
         // Install our own startup pair so we can observe whether mark_ready
         // was called.
@@ -5658,8 +5819,8 @@ mod tests {
     // `axum_server::Handle` never stores its listening address and never
     // notifies waiters — while the process-lifetime `ServerRegistry` keeps
     // the entry. A later consumer that joins that entry (ephemeral port
-    // reuse under workspace load) awaits `listening()` forever, holding
-    // REGISTRY_TEST_LOCK and wedging every queued test (the rc-oo0c hang).
+    // reuse under workspace load) awaits `listening()` forever, wedging
+    // the serialized registry test queue (the rc-oo0c hang).
     //
     // Phase 1 reproduces the leftover entry deterministically on an owned
     // runtime; phase 2 joins it through the production `start()` path.
@@ -5670,13 +5831,8 @@ mod tests {
     async fn wss_start_does_not_park_on_dead_registry_handle() {
         use camel_component_api::test_support::{NoopRuntimeObservability, tls};
 
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
-        ServerRegistry::reset();
+        let reg = Arc::new(ServerRegistry::new());
+        reg.reset();
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         // Phase 1 — spawn a TLS server entry whose serve task is never
@@ -5696,6 +5852,7 @@ mod tests {
         };
         // A dedicated thread owns the runtime so this test's runtime can
         // stay active while the owner's tasks die (block_on cannot nest).
+        let owner_reg = Arc::clone(&reg);
         let port = std::thread::spawn(move || {
             let owner_rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -5706,7 +5863,7 @@ mod tests {
                     .await
                     .expect("owner bind");
                 let port = listener.local_addr().unwrap().port();
-                let (_state, _addr, _handle, _) = ServerRegistry::global()
+                let (_state, _addr, _handle, _) = owner_reg
                     .get_or_spawn_with_listener(
                         listener,
                         Some(owner_tls_cfg),
@@ -5742,13 +5899,13 @@ mod tests {
         // by the timeout below. A stalled-but-alive serve task (monitor
         // unfinished) still takes gate_ready's bounded timeout path.
         let uri = format!("wss://127.0.0.1:{port}/secure?tlsCert={cert_str}&tlsKey={key_str}");
-        let component_ctx = NoOpComponentContext;
-        let endpoint = WssComponent::new()
-            .create_endpoint(&uri, &component_ctx)
-            .expect("endpoint");
         let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
             std::sync::Arc::new(NoopRuntimeObservability);
-        let mut consumer = endpoint.create_consumer(rt).expect("consumer");
+        let mut consumer = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt,
+            Arc::clone(&reg),
+        );
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(
             route_tx,
@@ -5768,7 +5925,7 @@ mod tests {
             result.err()
         );
 
-        ServerRegistry::reset();
+        reg.reset();
     }
 
     #[test]
@@ -5822,12 +5979,7 @@ mod tests {
 
     #[tokio::test]
     async fn ws_message_dispatch_failure_counts_b_prime() {
-        let _guard = acquire_deadline(
-            &REGISTRY_TEST_LOCK,
-            "REGISTRY_TEST_LOCK (camel-ws ServerRegistry)",
-            TEST_LOCK_DEADLINE,
-        )
-        .await;
+        let reg = Arc::new(ServerRegistry::new());
         let errors: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -5836,9 +5988,10 @@ mod tests {
 
         // Recording runtime through the same seam the other tests fill with
         // the Panic helper (`test_rt()`).
-        let mut consumer = WsConsumer::new(
+        let mut consumer = WsConsumer::with_server_registry(
             WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
             Arc::new(RecordingRuntime::new(Arc::clone(&errors))),
+            reg,
         );
 
         // Pipeline receiver dropped up front: every forward-task dispatch

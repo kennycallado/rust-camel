@@ -200,8 +200,10 @@ the decision or crate that defines it.
   idempotent and skips the journal. [Hot reload](../configuration/hot-reload.md),
   [ADR-0004](../adr/0004-hot-reload-atomic-pipeline-swap.md).
 - **TlsReloadHandler** — trait that each TLS-terminating component implements
-  (`matches(scheme, host, port)` plus `async reload()`). Components register
-  it lazily in `TlsReloadRegistry::global()`. [Hot reload](../configuration/hot-reload.md).
+  (`matches(scheme, host, port)` plus `async reload()`). Handlers register into
+  the `TlsReloadRegistry` instance their server owns. The process global
+  (`global()` / `global_arc()`) stays the production instance; tests may inject
+  an isolated `Default` pair. [Hot reload](../configuration/hot-reload.md).
 - **Vertical slice** — unit of decomposition for camel-core. Each bounded
   context is a self-contained slice with its own
   `domain`/`application`/`ports`/`adapters` layout, not a shared technical

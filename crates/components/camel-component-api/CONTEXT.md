@@ -82,6 +82,18 @@ Both enums carry `#[non_exhaustive]` (landed in rc-3pw3). New contract enums in 
 `#[non_exhaustive]` from birth. ADR-0049 Rule 3 governs public structs and external struct
 literals. Compliance is enforced by `cargo xtask lint-non-exhaustive`.
 
+## TLS reload registry
+
+`TlsReloadRegistry` holds the TLS reload handlers of the process. Two handles wrap
+the same allocation: `global()` returns `&'static TlsReloadRegistry`, and
+`global_arc()` returns an `Arc` clone of the same instance. A registration through
+either handle is visible through the other, so production reload identity is
+preserved.
+
+`TlsReloadRegistry::default()` builds an isolated instance. An isolated instance
+never reads or writes the process global. Tests use it as a seam to keep handler
+state local, so reload lookups do not cross test boundaries.
+
 ## `test-support` feature
 
 The optional `test-support` feature exposes the `test_support` module (including its `tls`
