@@ -81,10 +81,12 @@ A split type error SHALL name the expression kind, the received body variant, th
 
 ### Requirement: Fragment body typing is element-driven
 
-The declarative split SHALL type each fragment body from the array element it
-derives from: string elements produce `Body::Text`; number, boolean, object,
-nested-array, and null elements produce `Body::Json`. Fragment typing SHALL
-NOT depend on how many nodes the split expression matched.
+A split that derives fragments from JSON array elements SHALL type each
+fragment body from the array element it derives from: string elements produce
+`Body::Text`; number, boolean, object, nested-array, and null elements produce
+`Body::Json`. Fragment typing SHALL NOT depend on how many nodes the split
+expression matched. The rule holds for the declarative split and for the
+programmatic `split_body_json_array` expression alike.
 
 #### Scenario: N-match string nodeset yields raw-text fragments
 
@@ -120,5 +122,6 @@ NOT depend on how many nodes the split expression matched.
 
 - **GIVEN** the programmatic `split_body_json_array` expression over a JSON array of strings
 - **WHEN** the splitter runs
-- **THEN** fragment bodies remain `Body::Json` — that splitter's typing is out of scope here and tracked by its own bd
+- **THEN** each fragment body is `Body::Text` with the raw string (name kept for
+  archive stability; behavior updated by delta 2026-09-25-splitjson)
 
