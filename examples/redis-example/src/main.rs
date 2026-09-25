@@ -5,6 +5,7 @@
 //!   - Route 2 (Queue Consumer): from(redis://...?command=BRPOP) → log
 //!   - Route 3 (Pub/Sub Consumer): from(redis://...?command=SUBSCRIBE) → log
 //!   - Route 4 (Pub/Sub Producer): timer → PUBLISH → log
+//!   - Route 5 (Geo Producer): timer → GEOADD → GEOSEARCH → log
 //!
 //! A Redis instance is started automatically via testcontainers (requires Docker).
 //! No external infrastructure needed — just run:
@@ -99,10 +100,26 @@ async fn main() -> Result<(), CamelError> {
         .to("log:info?showHeaders=true")
         .build()?;
 
+    // Route 5: Timer → GEOADD then GEOSEARCH WITHDIST (every 3s, 2 times)
+    let geo_producer = RouteBuilder::from("timer:geo?period=3000&repeatCount=2")
+        .route_id("redis-geo-producer")
+        .set_header("CamelRedis.Key", Value::String("sicily".into()))
+        .set_header("CamelRedis.Longitude", Value::from(13.361389_f64))
+        .set_header("CamelRedis.Latitude", Value::from(38.115556_f64))
+        .set_header("CamelRedis.Member", Value::String("Palermo".into()))
+        .set_header("CamelRedis.Radius", Value::from(200.0_f64))
+        .set_header("CamelRedis.Unit", Value::String("km".into()))
+        .set_header("CamelRedis.WithDist", Value::Bool(true))
+        .to(format!("redis://{conn_str}?command=GEOADD"))
+        .to(format!("redis://{conn_str}?command=GEOSEARCH"))
+        .to("log:info?showHeaders=true")
+        .build()?;
+
     ctx.add_route_definition(string_producer).await?;
     ctx.add_route_definition(queue_consumer).await?;
     ctx.add_route_definition(pubsub_consumer).await?;
     ctx.add_route_definition(pubsub_producer).await?;
+    ctx.add_route_definition(geo_producer).await?;
 
     println!("Starting Redis example... Press Ctrl+C to stop.\n");
 

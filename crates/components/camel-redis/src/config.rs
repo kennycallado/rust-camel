@@ -105,6 +105,13 @@ pub enum RedisCommand {
     Zunionstore,
     Zinterstore,
 
+    // Geo operations
+    Geoadd,
+    Geopos,
+    Geodist,
+    Geosearch,
+    Geohash,
+
     // Pub/Sub operations
     Publish,
     Subscribe,
@@ -216,6 +223,13 @@ impl FromStr for RedisCommand {
             "ZREMRANGEBYSCORE" => Ok(RedisCommand::Zremrangebyscore),
             "ZUNIONSTORE" => Ok(RedisCommand::Zunionstore),
             "ZINTERSTORE" => Ok(RedisCommand::Zinterstore),
+
+            // Geo operations
+            "GEOADD" => Ok(RedisCommand::Geoadd),
+            "GEOPOS" => Ok(RedisCommand::Geopos),
+            "GEODIST" => Ok(RedisCommand::Geodist),
+            "GEOSEARCH" => Ok(RedisCommand::Geosearch),
+            "GEOHASH" => Ok(RedisCommand::Geohash),
 
             // Pub/Sub operations
             "PUBLISH" => Ok(RedisCommand::Publish),
@@ -1159,6 +1173,10 @@ pub fn is_idempotent_command(cmd: &RedisCommand) -> bool {
             | RedisCommand::Zcount
             | RedisCommand::Zrangebyscore
             | RedisCommand::Zrevrangebyscore
+            | RedisCommand::Geopos
+            | RedisCommand::Geodist
+            | RedisCommand::Geosearch
+            | RedisCommand::Geohash
             | RedisCommand::Hget
             | RedisCommand::Hmget
             | RedisCommand::Hexists
@@ -1583,6 +1601,42 @@ mod tests {
         assert!(RedisCommand::from_str("get").is_ok());
         assert_eq!(RedisCommand::from_str("get").unwrap(), RedisCommand::Get);
         assert!(RedisCommand::from_str("UNKNOWN").is_err());
+    }
+
+    #[test]
+    fn test_geo_command_from_str() {
+        // Parsing is case-insensitive via to_uppercase()
+        assert_eq!(
+            RedisCommand::from_str("GEOADD").unwrap(),
+            RedisCommand::Geoadd
+        );
+        assert_eq!(
+            RedisCommand::from_str("geosearch").unwrap(),
+            RedisCommand::Geosearch
+        );
+        assert_eq!(
+            RedisCommand::from_str("GeoDist").unwrap(),
+            RedisCommand::Geodist
+        );
+        assert_eq!(
+            RedisCommand::from_str("GEOPOS").unwrap(),
+            RedisCommand::Geopos
+        );
+        assert_eq!(
+            RedisCommand::from_str("GEOHASH").unwrap(),
+            RedisCommand::Geohash
+        );
+    }
+
+    #[test]
+    fn test_geo_idempotency_classification() {
+        // Read-only GEO commands are idempotent
+        assert!(is_idempotent_command(&RedisCommand::Geopos));
+        assert!(is_idempotent_command(&RedisCommand::Geodist));
+        assert!(is_idempotent_command(&RedisCommand::Geosearch));
+        assert!(is_idempotent_command(&RedisCommand::Geohash));
+        // GEOADD is a write: not idempotent
+        assert!(!is_idempotent_command(&RedisCommand::Geoadd));
     }
 
     // --- RedisConfig tests ---

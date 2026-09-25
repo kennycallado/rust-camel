@@ -20,6 +20,7 @@ pub mod keyspace;
 pub(crate) mod test_metrics;
 
 pub use cache_repo::RedisCacheRepository;
+pub use cache_repo::{GeoSearchRow, GeoUnit};
 // Re-export for internal use only: the executor and idempotent repository
 // consume it via `crate::is_transient_redis_error`; it is not part of the
 // crate's public surface.

@@ -12,15 +12,17 @@ mod support;
 use support::install_crypto_provider;
 use support::redis::shared_redis;
 
-use camel_api::Value;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::{Body, Exchange, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::NetworkRetryPolicy;
 use camel_component_redis::{RedisComponent, RedisConfig};
 use camel_test::CamelTestContext;
 use futures::{FutureExt, StreamExt};
 use redis::AsyncCommands;
+use serde_json::json;
 use std::panic::AssertUnwindSafe;
+use support::send_to_direct;
 use support::wait::wait_until;
 
 // ===========================================================================
@@ -254,6 +256,448 @@ async fn redis_set_commands() {
     }
 
     endpoint.assert_exchange_count(1).await;
+}
+
+// ===========================================================================
+// Geo commands tests
+// ===========================================================================
+
+/// Sends one exchange with `headers` through the direct route bound to a GEO
+/// command and returns the JSON body the redis producer set as the reply.
+async fn geo_exchange(
+    h: &CamelTestContext,
+    direct_uri: &str,
+    headers: &[(&str, Value)],
+) -> serde_json::Value {
+    let mut ex = Exchange::default();
+    for (name, value) in headers {
+        ex.input.set_header(*name, value.clone());
+    }
+    let reply = send_to_direct(h, direct_uri, ex)
+        .await
+        .expect("GEO command must succeed");
+    match reply.input.body {
+        Body::Json(v) => v,
+        other => panic!("GEO reply body must be JSON, got {other:?}"),
+    }
+}
+
+/// Asserts a GEOPOS entry is a `[lon, lat]` pair within `1e-4` of the target.
+fn assert_position(entry: &serde_json::Value, lon: f64, lat: f64, label: &str) {
+    let pair = entry
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: position must be a [lon, lat] pair, got {entry}"));
+    let got_lon = pair[0]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{label}: longitude must be numeric, got {entry}"));
+    let got_lat = pair[1]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{label}: latitude must be numeric, got {entry}"));
+    assert!(
+        (got_lon - lon).abs() < 1e-4 && (got_lat - lat).abs() < 1e-4,
+        "{label}: position ({got_lon}, {got_lat}) must be within 1e-4 of ({lon}, {lat})"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_geo_commands() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_component(RedisComponent::new())
+        .build()
+        .await;
+
+    // One direct route per GEO command: every option (members, unit, radius
+    // or box, WithDist/WithCoord) rides on the exchange as CamelRedis.*
+    // headers, so the routes only pin the redis command.
+    for (id, command) in [
+        ("geo-add", "GEOADD"),
+        ("geo-pos", "GEOPOS"),
+        ("geo-dist", "GEODIST"),
+        ("geo-hash", "GEOHASH"),
+        ("geo-search", "GEOSEARCH"),
+    ] {
+        let route = RouteBuilder::from(&format!("direct:{id}"))
+            .to(format!("redis://{conn_str}?command={command}"))
+            .route_id(&format!("redis-{id}"))
+            .build()
+            .unwrap();
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    // ── GEOADD ──
+    let added = geo_exchange(
+        &h,
+        "direct:geo-add",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Longitude", json!(13.361389)),
+            ("CamelRedis.Latitude", json!(38.115556)),
+            ("CamelRedis.Member", json!("Palermo")),
+        ],
+    )
+    .await;
+    assert_eq!(added, json!(1), "adding Palermo must report one new member");
+
+    let added = geo_exchange(
+        &h,
+        "direct:geo-add",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Longitude", json!(15.087269)),
+            ("CamelRedis.Latitude", json!(37.502669)),
+            ("CamelRedis.Member", json!("Catania")),
+        ],
+    )
+    .await;
+    assert_eq!(added, json!(1), "adding Catania must report one new member");
+
+    let added = geo_exchange(
+        &h,
+        "direct:geo-add",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            // Update: a barely moved coordinate keeps the 1e-4 assertions
+            // below valid for both the original and the stored position.
+            ("CamelRedis.Longitude", json!(13.361390)),
+            ("CamelRedis.Latitude", json!(38.115557)),
+            ("CamelRedis.Member", json!("Palermo")),
+        ],
+    )
+    .await;
+    assert_eq!(
+        added,
+        json!(0),
+        "updating Palermo must report no new member"
+    );
+
+    let added = geo_exchange(
+        &h,
+        "direct:geo-add",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Longitude", json!(0.0)),
+            ("CamelRedis.Latitude", json!(0.0)),
+            ("CamelRedis.Member", json!("Farpoint")),
+        ],
+    )
+    .await;
+    assert_eq!(
+        added,
+        json!(1),
+        "adding Farpoint must report one new member"
+    );
+
+    // ── GEOPOS ──
+    let positions = geo_exchange(
+        &h,
+        "direct:geo-pos",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Members", json!(["Palermo", "Catania"])),
+        ],
+    )
+    .await;
+    let positions = positions
+        .as_array()
+        .expect("GEOPOS body must be an array of positions");
+    assert_eq!(positions.len(), 2, "one position per requested member");
+    assert_position(&positions[0], 13.361389, 38.115556, "Palermo");
+    assert_position(&positions[1], 15.087269, 37.502669, "Catania");
+
+    let positions = geo_exchange(
+        &h,
+        "direct:geo-pos",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Members", json!(["Palermo", "Atlantis"])),
+        ],
+    )
+    .await;
+    assert_eq!(
+        positions[1],
+        json!(null),
+        "an absent member must map to a null position"
+    );
+    assert_position(&positions[0], 13.361389, 38.115556, "Palermo");
+
+    let positions = geo_exchange(
+        &h,
+        "direct:geo-pos",
+        &[
+            ("CamelRedis.Key", json!("geo:absent")),
+            ("CamelRedis.Members", json!(["Palermo", "Catania"])),
+        ],
+    )
+    .await;
+    assert_eq!(
+        positions,
+        json!([null, null]),
+        "GEOPOS on an absent key must return null entries"
+    );
+
+    // ── GEODIST ──
+    let distance = geo_exchange(
+        &h,
+        "direct:geo-dist",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Member", json!("Palermo")),
+            ("CamelRedis.Member2", json!("Catania")),
+            ("CamelRedis.Unit", json!("km")),
+        ],
+    )
+    .await;
+    let distance = distance
+        .as_f64()
+        .expect("GEODIST body must be numeric or null");
+    assert!(
+        distance > 100.0,
+        "Palermo-Catania is ~166 km, got {distance}"
+    );
+
+    let distance = geo_exchange(
+        &h,
+        "direct:geo-dist",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Member", json!("Palermo")),
+            ("CamelRedis.Member2", json!("Atlantis")),
+            ("CamelRedis.Unit", json!("km")),
+        ],
+    )
+    .await;
+    assert!(
+        distance.is_null(),
+        "GEODIST with an absent member must be null, got {distance}"
+    );
+
+    let distance = geo_exchange(
+        &h,
+        "direct:geo-dist",
+        &[
+            ("CamelRedis.Key", json!("geo:absent")),
+            ("CamelRedis.Member", json!("Palermo")),
+            ("CamelRedis.Member2", json!("Catania")),
+            ("CamelRedis.Unit", json!("km")),
+        ],
+    )
+    .await;
+    assert!(
+        distance.is_null(),
+        "GEODIST on an absent key must be null, got {distance}"
+    );
+
+    let distance = geo_exchange(
+        &h,
+        "direct:geo-dist",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Member", json!("Palermo")),
+            ("CamelRedis.Member2", json!("Catania")),
+        ],
+    )
+    .await;
+    let distance = distance
+        .as_f64()
+        .expect("GEODIST body must be numeric or null");
+    assert!(
+        distance > 100000.0,
+        "GEODIST without a unit defaults to meters, got {distance}"
+    );
+
+    // ── GEOHASH ──
+    let hashes = geo_exchange(
+        &h,
+        "direct:geo-hash",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            (
+                "CamelRedis.Members",
+                json!(["Palermo", "Catania", "Atlantis"]),
+            ),
+        ],
+    )
+    .await;
+    let hashes = hashes
+        .as_array()
+        .expect("GEOHASH body must be an array of geohashes");
+    assert_eq!(hashes.len(), 3, "one geohash per requested member");
+    assert!(
+        hashes[0].as_str().is_some_and(|h| !h.is_empty()),
+        "Palermo geohash must be a non-empty string, got {}",
+        hashes[0]
+    );
+    assert!(
+        hashes[1].as_str().is_some_and(|h| !h.is_empty()),
+        "Catania geohash must be a non-empty string, got {}",
+        hashes[1]
+    );
+    assert!(
+        hashes[2].is_null(),
+        "an absent member must map to a null geohash"
+    );
+
+    // ── GEOSEARCH ──
+    let members = geo_exchange(
+        &h,
+        "direct:geo-search",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Longitude", json!(15.0)),
+            ("CamelRedis.Latitude", json!(37.0)),
+            ("CamelRedis.Radius", json!(200)),
+            ("CamelRedis.Unit", json!("km")),
+        ],
+    )
+    .await;
+    let members = members
+        .as_array()
+        .expect("plain GEOSEARCH body must be an array");
+    assert!(
+        members.iter().all(|m| m.is_string()),
+        "plain GEOSEARCH rows must be plain strings, got {members:?}"
+    );
+    assert!(members.contains(&json!("Palermo")), "got {members:?}");
+    assert!(members.contains(&json!("Catania")), "got {members:?}");
+
+    let rows = geo_exchange(
+        &h,
+        "direct:geo-search",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Longitude", json!(15.0)),
+            ("CamelRedis.Latitude", json!(37.0)),
+            ("CamelRedis.Radius", json!(200)),
+            ("CamelRedis.Unit", json!("km")),
+            ("CamelRedis.WithDist", json!(true)),
+        ],
+    )
+    .await;
+    let rows = rows
+        .as_array()
+        .expect("GEOSEARCH WithDist body must be an array");
+    assert!(!rows.is_empty(), "the 200 km radius cannot be empty");
+    for row in rows {
+        let obj = row
+            .as_object()
+            .expect("GEOSEARCH WithDist rows must be objects");
+        let member = obj
+            .get("member")
+            .and_then(|v| v.as_str())
+            .expect("row member must be a string");
+        let distance = obj
+            .get("distance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or_else(|| panic!("{member}: row distance must be numeric, got {row}"));
+        assert!(
+            distance > 0.0 && distance < 200.0,
+            "{member}: distance must be a km figure inside the radius, got {distance}"
+        );
+    }
+
+    let rows = geo_exchange(
+        &h,
+        "direct:geo-search",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Longitude", json!(15.0)),
+            ("CamelRedis.Latitude", json!(37.0)),
+            ("CamelRedis.Radius", json!(200)),
+            ("CamelRedis.Unit", json!("km")),
+            ("CamelRedis.WithCoord", json!(true)),
+        ],
+    )
+    .await;
+    let rows = rows
+        .as_array()
+        .expect("GEOSEARCH WithCoord body must be an array");
+    // GEOSEARCH row order is unspecified, so the coordinate check is keyed
+    // by member instead of relying on the reply's ordering.
+    let mut coords: std::collections::HashMap<&str, (f64, f64)> = std::collections::HashMap::new();
+    for row in rows {
+        let obj = row
+            .as_object()
+            .expect("GEOSEARCH WithCoord rows must be objects");
+        assert!(
+            !obj.contains_key("distance"),
+            "WithCoord rows must not carry distances, got {row}"
+        );
+        let member = obj
+            .get("member")
+            .and_then(|v| v.as_str())
+            .expect("row member must be a string");
+        let lon = obj
+            .get("longitude")
+            .and_then(|v| v.as_f64())
+            .expect("row longitude must be numeric");
+        let lat = obj
+            .get("latitude")
+            .and_then(|v| v.as_f64())
+            .expect("row latitude must be numeric");
+        coords.insert(member, (lon, lat));
+    }
+    for (member, lon, lat) in [
+        ("Palermo", 13.361389, 38.115556),
+        ("Catania", 15.087269, 37.502669),
+    ] {
+        let &(got_lon, got_lat) = coords
+            .get(member)
+            .unwrap_or_else(|| panic!("GEOSEARCH WithCoord must return {member}, got {coords:?}"));
+        assert!(
+            (got_lon - lon).abs() < 1e-4 && (got_lat - lat).abs() < 1e-4,
+            "{member}: coordinates ({got_lon}, {got_lat}) must be within 1e-4 of ({lon}, {lat})"
+        );
+    }
+
+    let members = geo_exchange(
+        &h,
+        "direct:geo-search",
+        &[
+            ("CamelRedis.Key", json!("geo:points")),
+            ("CamelRedis.Longitude", json!(15.0)),
+            ("CamelRedis.Latitude", json!(37.0)),
+            ("CamelRedis.Width", json!(400)),
+            ("CamelRedis.Height", json!(400)),
+            ("CamelRedis.Unit", json!("km")),
+        ],
+    )
+    .await;
+    let members = members
+        .as_array()
+        .expect("GEOSEARCH BYBOX body must be an array");
+    assert!(
+        members.contains(&json!("Palermo")) && members.contains(&json!("Catania")),
+        "the 400 km box must contain Palermo and Catania, got {members:?}"
+    );
+    assert!(
+        !members.contains(&json!("Farpoint")),
+        "the 400 km box must not reach Farpoint, got {members:?}"
+    );
+
+    let members = geo_exchange(
+        &h,
+        "direct:geo-search",
+        &[
+            ("CamelRedis.Key", json!("geo:absent")),
+            ("CamelRedis.Longitude", json!(15.0)),
+            ("CamelRedis.Latitude", json!(37.0)),
+            ("CamelRedis.Radius", json!(200)),
+            ("CamelRedis.Unit", json!("km")),
+        ],
+    )
+    .await;
+    assert_eq!(
+        members,
+        json!([]),
+        "GEOSEARCH on an absent key must return an empty array"
+    );
+
+    h.stop().await;
 }
 
 // ===========================================================================

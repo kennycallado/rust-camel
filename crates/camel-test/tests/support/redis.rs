@@ -19,7 +19,10 @@ pub async fn shared_redis() -> &'static str {
             super::init_tracing();
             super::install_crypto_provider();
 
+            // The module's default tag (5.0) predates GEOSEARCH (Redis 6.2),
+            // which the geo commands tests exercise; pin a current tag.
             let container = Redis::default()
+                .with_tag("7-alpine")
                 .start()
                 .await
                 .expect("Redis container failed to start");

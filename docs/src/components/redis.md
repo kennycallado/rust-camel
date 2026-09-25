@@ -98,7 +98,7 @@ The `command` parameter picks the Redis command at Endpoint creation. Exchange d
 
 ## Commands
 
-The component exposes 80+ commands across eight groups. The enum is exhaustive: an unknown command fails URI parsing with `CamelError::InvalidUri`. The component does not expose `EVAL`, `EVALSHA`, or script-loading commands. Script injection through the public surface is not possible.
+The component exposes 80+ commands across nine groups. The enum is exhaustive: an unknown command fails URI parsing with `CamelError::InvalidUri`. The component does not expose `EVAL`, `EVALSHA`, or script-loading commands. Script injection through the public surface is not possible.
 
 | Group | Commands |
 | --- | --- |
@@ -109,7 +109,37 @@ The component exposes 80+ commands across eight groups. The enum is exhaustive: 
 | Set | `SADD`, `SREM`, `SMEMBERS`, `SCARD`, `SISMEMBER`, `SPOP`, `SMOVE`, `SINTER`, `SUNION`, `SDIFF`, `SINTERSTORE`, `SUNIONSTORE`, `SDIFFSTORE`, `SRANDMEMBER` |
 | Sorted set | `ZADD`, `ZREM`, `ZRANGE`, `ZREVRANGE`, `ZRANK`, `ZREVRANK`, `ZSCORE`, `ZCARD`, `ZINCRBY`, `ZCOUNT`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZUNIONSTORE`, `ZINTERSTORE` |
 | Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `PSUBSCRIBE` |
+| Geospatial | `GEOADD`, `GEOPOS`, `GEODIST`, `GEOSEARCH`, `GEOHASH` |
 | Other | `PING`, `ECHO` |
+
+### Geospatial
+
+`GEOADD` stores one member with its coordinates. `GEOPOS` reads the stored positions of one or more members. `GEODIST` measures the distance between two members. `GEOSEARCH` queries members near a center point by radius or by bounding box. `GEOHASH` returns the standard base-32 geohash of one or more members. Every argument comes from headers; the Producer overwrites the Exchange body with the JSON result.
+
+| Operation | Required headers | Optional headers |
+| --- | --- | --- |
+| `GEOADD` | `CamelRedis.Key`, `CamelRedis.Longitude`, `CamelRedis.Latitude`, `CamelRedis.Member` | — |
+| `GEOPOS` | `CamelRedis.Key`, `CamelRedis.Members` | — |
+| `GEODIST` | `CamelRedis.Key`, `CamelRedis.Member`, `CamelRedis.Member2` | `CamelRedis.Unit` |
+| `GEOSEARCH` | `CamelRedis.Key`, `CamelRedis.Longitude`, `CamelRedis.Latitude`, and one shape | `CamelRedis.Unit`, `CamelRedis.WithDist`, `CamelRedis.WithCoord`, `CamelRedis.Count` |
+| `GEOHASH` | `CamelRedis.Key`, `CamelRedis.Members` | — |
+
+`CamelRedis.Members` is a JSON array of member strings. `CamelRedis.Longitude` must be in `[-180.0, 180.0]`. `CamelRedis.Latitude` must be in `[-90.0, 90.0]`. `CamelRedis.Unit` accepts `m`, `km`, `mi`, or `ft` and defaults to `m`. `CamelRedis.WithDist` and `CamelRedis.WithCoord` are booleans that default to `false`. `CamelRedis.Count` is a positive integer. A non-positive `Count` is ignored.
+
+`GEOSEARCH` needs exactly one shape. `CamelRedis.Radius` selects `BYRADIUS`. `CamelRedis.Width` with `CamelRedis.Height` selects `BYBOX`. The radius and the box are mutually exclusive. A missing shape or a non-positive value fails before any command reaches Redis.
+
+Result shapes follow the splitbody rule: plain string elements stay strings, and only structured rows become JSON objects.
+
+| Operation | Body |
+| --- | --- |
+| `GEOADD` | Integer count of newly added members |
+| `GEOPOS` | Array parallel to the requested members; each entry is `[longitude, latitude]` or `null` |
+| `GEODIST` | Number in the requested unit, or `null` when a member is absent |
+| `GEOSEARCH` without `WithDist`/`WithCoord` | Array of plain member strings |
+| `GEOSEARCH` with `WithDist`/`WithCoord` | Array of objects `{member, distance?, longitude?, latitude?}` |
+| `GEOHASH` | Array of geohash strings parallel to the requested members; `null` for an absent member |
+
+The `member` field is a plain string. `distance` is a number in the requested unit. `longitude` and `latitude` are numbers rounded to six decimals. A structured row is a proper JSON object, never a quoted JSON string.
 
 ## Producer
 

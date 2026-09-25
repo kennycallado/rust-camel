@@ -224,6 +224,13 @@ pub async fn dispatch_command(
         | RedisCommand::Zunionstore
         | RedisCommand::Zinterstore => commands::zset::dispatch(cmd, conn, exchange).await,
 
+        // Geo commands
+        RedisCommand::Geoadd
+        | RedisCommand::Geopos
+        | RedisCommand::Geodist
+        | RedisCommand::Geosearch
+        | RedisCommand::Geohash => commands::geo::dispatch(cmd, conn, exchange).await,
+
         // Pub/Sub commands
         RedisCommand::Publish | RedisCommand::Subscribe | RedisCommand::Psubscribe => {
             commands::pubsub::dispatch(cmd, conn, exchange).await

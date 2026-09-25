@@ -20,6 +20,7 @@ use camel_api::cache::CacheStats;
 use camel_component_redis::RedisEndpointConfig;
 use redis::SetExpiry;
 use redis::SetOptions;
+use redis::from_redis_value;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +30,76 @@ pub type ClockFn = Arc<dyn Fn() -> std::time::SystemTime + Send + Sync>;
 /// The default production clock: [`std::time::SystemTime::now`].
 pub fn default_clock() -> ClockFn {
     Arc::new(std::time::SystemTime::now)
+}
+
+/// Distance unit for the repository's geo surface.
+///
+/// Passed to Redis verbatim (see [`GeoUnit::as_str`]); no client-side
+/// conversion happens — Redis computes distances in this unit and they
+/// come back in the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeoUnit {
+    /// Meters (`m`), Redis's GEO default.
+    Meters,
+    /// Kilometers (`km`).
+    Kilometers,
+    /// Miles (`mi`).
+    Miles,
+    /// Feet (`ft`).
+    Feet,
+}
+
+impl GeoUnit {
+    /// The Redis unit token (`m`, `km`, `mi`, `ft`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GeoUnit::Meters => "m",
+            GeoUnit::Kilometers => "km",
+            GeoUnit::Miles => "mi",
+            GeoUnit::Feet => "ft",
+        }
+    }
+}
+
+/// One GEOSEARCH result row: the member and its distance from the search
+/// origin, in the unit the search was issued with (WITHDIST is always
+/// requested by the repository's geo-search methods).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeoSearchRow {
+    /// The sorted-set member.
+    pub member: String,
+    /// Distance from the search origin, in the search's [`GeoUnit`].
+    pub distance: f64,
+}
+
+/// Fail-early geo-point validation: finite longitude in [-180, 180] and
+/// finite latitude in [-90, 90], checked BEFORE any command is built so a
+/// rejected point never reaches the transport. The message names the
+/// offending argument.
+fn validate_geo_point(longitude: f64, latitude: f64) -> Result<(), CamelError> {
+    if !longitude.is_finite() || !(-180.0..=180.0).contains(&longitude) {
+        return Err(CamelError::ProcessorError(format!(
+            "Invalid longitude: {longitude} must be a finite number in [-180.0, 180.0]"
+        )));
+    }
+    if !latitude.is_finite() || !(-90.0..=90.0).contains(&latitude) {
+        return Err(CamelError::ProcessorError(format!(
+            "Invalid latitude: {latitude} must be a finite number in [-90.0, 90.0]"
+        )));
+    }
+    Ok(())
+}
+
+/// Fail-early geo-extent validation (radius or box side): finite and
+/// strictly positive, checked BEFORE any command is built. The message
+/// names the argument via `name` (`radius`, `width`, `height`).
+fn validate_geo_extent(v: f64, name: &str) -> Result<(), CamelError> {
+    if !v.is_finite() || v <= 0.0 {
+        return Err(CamelError::ProcessorError(format!(
+            "Invalid {name}: {v} must be a finite number greater than 0"
+        )));
+    }
+    Ok(())
 }
 
 /// Redis-backed cache repository (see module docs).
@@ -234,6 +305,109 @@ impl RedisCacheRepository {
             ..CacheStats::default()
         }
     }
+
+    /// Add one member at (`longitude`, `latitude`) to the geo sorted set
+    /// at `key`, returning the number of members added (0 or 1).
+    ///
+    /// Fail-early: the point is validated before any command is built, so
+    /// a rejected coordinate never reaches the transport. One GEOADD
+    /// command against the namespaced key.
+    pub async fn geo_add(
+        &self,
+        key: &str,
+        longitude: f64,
+        latitude: f64,
+        member: &str,
+    ) -> Result<i64, CamelError> {
+        validate_geo_point(longitude, latitude)?;
+        let mut cmd = redis::Cmd::new();
+        cmd.arg("GEOADD")
+            .arg(namespaced(&self.key_prefix, &self.name, key))
+            .arg(longitude)
+            .arg(latitude)
+            .arg(member);
+        let reply = execute_retry_safe(&self.executor, cmd, &self.metrics, "geo_add").await?;
+        from_redis_value(reply).map_err(|e| CamelError::Io(format!("GEOADD reply parse: {e}")))
+    }
+
+    /// Search the geo sorted set at `key` for members within `radius`
+    /// `unit`s of the point (`longitude`, `latitude`), each row carrying
+    /// its distance in `unit`.
+    ///
+    /// Fail-early: the point and the radius are validated before any
+    /// command is built. One GEOSEARCH command with WITHDIST.
+    pub async fn geo_search_radius(
+        &self,
+        key: &str,
+        longitude: f64,
+        latitude: f64,
+        radius: f64,
+        unit: GeoUnit,
+    ) -> Result<Vec<GeoSearchRow>, CamelError> {
+        validate_geo_point(longitude, latitude)?;
+        validate_geo_extent(radius, "radius")?;
+        let mut cmd = redis::Cmd::new();
+        cmd.arg("GEOSEARCH")
+            .arg(namespaced(&self.key_prefix, &self.name, key))
+            .arg("FROMLONLAT")
+            .arg(longitude)
+            .arg(latitude)
+            .arg("BYRADIUS")
+            .arg(radius)
+            .arg(unit.as_str())
+            .arg("WITHDIST");
+        self.execute_geo_search(cmd, "geo_search_radius").await
+    }
+
+    /// Search the geo sorted set at `key` for members inside the box of
+    /// `width` x `height` `unit`s centered on the point (`longitude`,
+    /// `latitude`), each row carrying its distance in `unit`.
+    ///
+    /// Fail-early: the point and both box sides are validated before any
+    /// command is built. One GEOSEARCH command with WITHDIST.
+    pub async fn geo_search_box(
+        &self,
+        key: &str,
+        longitude: f64,
+        latitude: f64,
+        width: f64,
+        height: f64,
+        unit: GeoUnit,
+    ) -> Result<Vec<GeoSearchRow>, CamelError> {
+        validate_geo_point(longitude, latitude)?;
+        validate_geo_extent(width, "width")?;
+        validate_geo_extent(height, "height")?;
+        let mut cmd = redis::Cmd::new();
+        cmd.arg("GEOSEARCH")
+            .arg(namespaced(&self.key_prefix, &self.name, key))
+            .arg("FROMLONLAT")
+            .arg(longitude)
+            .arg(latitude)
+            .arg("BYBOX")
+            .arg(width)
+            .arg(height)
+            .arg(unit.as_str())
+            .arg("WITHDIST");
+        self.execute_geo_search(cmd, "geo_search_box").await
+    }
+
+    /// Shared GEOSEARCH execution: one retry-safe command under the
+    /// caller's `operation` label (radius vs box stay observable as
+    /// distinct component operations), the reply parsed as
+    /// `[member, distance]` rows.
+    async fn execute_geo_search(
+        &self,
+        cmd: redis::Cmd,
+        operation: &'static str,
+    ) -> Result<Vec<GeoSearchRow>, CamelError> {
+        let reply = execute_retry_safe(&self.executor, cmd, &self.metrics, operation).await?;
+        let rows: Vec<(String, f64)> = from_redis_value(reply)
+            .map_err(|e| CamelError::Io(format!("GEOSEARCH reply parse: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|(member, distance)| GeoSearchRow { member, distance })
+            .collect())
+    }
 }
 
 #[async_trait::async_trait]
@@ -311,6 +485,8 @@ impl std::fmt::Debug for RedisCacheRepository {
 #[cfg(test)]
 mod tests {
     use super::ClockFn;
+    use super::GeoSearchRow;
+    use super::GeoUnit;
     use super::RedisCacheRepository;
     use super::default_clock;
     use crate::executor::FakeRepoExecutor;
@@ -821,6 +997,142 @@ mod tests {
             recorder.errors(),
             vec![("redis".to_string(), "e:redis:get".to_string())],
             "error-family forwarding is never lever-gated"
+        );
+    }
+
+    #[test]
+    fn test_geo_unit_as_str() {
+        assert_eq!(GeoUnit::Meters.as_str(), "m");
+        assert_eq!(GeoUnit::Kilometers.as_str(), "km");
+        assert_eq!(GeoUnit::Miles.as_str(), "mi");
+        assert_eq!(GeoUnit::Feet.as_str(), "ft");
+    }
+
+    #[tokio::test]
+    async fn test_geo_add_rejects_bad_latitude() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let repo = repo(default_clock(), fake.clone());
+
+        let err = repo
+            .geo_add("sicily", 13.0, 95.0, "Palermo")
+            .await
+            .expect_err("latitude 95.0 must be rejected before any command");
+
+        match &err {
+            CamelError::ProcessorError(message) => assert!(
+                message.contains("latitude"),
+                "error must name the argument, got: {message}"
+            ),
+            other => panic!("expected CamelError::ProcessorError, got: {other}"),
+        }
+        assert_eq!(fake.execute_count(), 0, "validation runs first, no I/O");
+    }
+
+    #[tokio::test]
+    async fn test_geo_search_radius_rejects_bad_radius() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let repo = repo(default_clock(), fake.clone());
+
+        let err = repo
+            .geo_search_radius("sicily", 13.0, 38.0, 0.0, GeoUnit::Kilometers)
+            .await
+            .expect_err("radius 0.0 must be rejected before any command");
+
+        match &err {
+            CamelError::ProcessorError(message) => assert!(
+                message.contains("radius"),
+                "error must name the argument, got: {message}"
+            ),
+            other => panic!("expected CamelError::ProcessorError, got: {other}"),
+        }
+        assert_eq!(fake.execute_count(), 0, "validation runs first, no I/O");
+    }
+
+    #[tokio::test]
+    async fn test_geo_search_box_rejects_bad_width() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let repo = repo(default_clock(), fake.clone());
+
+        let err = repo
+            .geo_search_box("sicily", 13.0, 38.0, -5.0, 400.0, GeoUnit::Kilometers)
+            .await
+            .expect_err("width -5.0 must be rejected before any command");
+
+        match &err {
+            CamelError::ProcessorError(message) => assert!(
+                message.contains("width"),
+                "error must name the argument, got: {message}"
+            ),
+            other => panic!("expected CamelError::ProcessorError, got: {other}"),
+        }
+        assert_eq!(fake.execute_count(), 0, "validation runs first, no I/O");
+    }
+
+    #[tokio::test]
+    async fn test_geo_add_targets_namespaced_key() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let repo = repo(default_clock(), fake.clone());
+        fake.push_result(Ok(redis::Value::Int(1)));
+
+        let added = repo
+            .geo_add("sicily", 13.361389, 38.115556, "Palermo")
+            .await
+            .expect("geo_add must succeed");
+
+        assert_eq!(added, 1, "added count comes from the GEOADD reply");
+        let commands = fake.commands();
+        assert_eq!(commands.len(), 1, "geo_add is ONE command");
+        assert_eq!(
+            cmd_args(&commands[0]),
+            vec![
+                b"GEOADD".to_vec(),
+                b"camel:cache:default:sicily".to_vec(),
+                b"13.361389".to_vec(),
+                b"38.115556".to_vec(),
+                b"Palermo".to_vec(),
+            ],
+            "must GEOADD lon lat member against the namespaced key"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_geo_search_radius_builds_geosearch_withdist() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let repo = repo(default_clock(), fake.clone());
+        fake.push_result(Ok(redis::Value::Array(vec![redis::Value::Array(vec![
+            redis::Value::BulkString(b"Palermo".to_vec()),
+            redis::Value::BulkString(b"190.4424".to_vec()),
+        ])])));
+
+        let rows = repo
+            .geo_search_radius("sicily", 15.0, 37.0, 200.0, GeoUnit::Kilometers)
+            .await
+            .expect("geo_search_radius must succeed");
+
+        let commands = fake.commands();
+        assert_eq!(commands.len(), 1, "geo_search_radius is ONE command");
+        assert_eq!(
+            cmd_args(&commands[0]),
+            vec![
+                b"GEOSEARCH".to_vec(),
+                b"camel:cache:default:sicily".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15.0".to_vec(),
+                b"37.0".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200.0".to_vec(),
+                b"km".to_vec(),
+                b"WITHDIST".to_vec(),
+            ],
+            "GEOSEARCH FROMLONLAT BYRADIUS WITHDIST in order, namespaced key"
+        );
+        assert_eq!(
+            rows,
+            vec![GeoSearchRow {
+                member: "Palermo".to_string(),
+                distance: 190.4424,
+            }],
+            "rows parsed from the fake's reply"
         );
     }
 }

@@ -39,10 +39,14 @@
 mod support;
 use support::install_crypto_provider;
 
+use camel_api::ComponentMetrics;
 use camel_api::cache::{CacheEntry, ContentType};
+use camel_api::metrics::MetricsHandle;
 use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use camel_config::CamelConfig;
+use camel_redis_repo::{GeoUnit, RedisCacheRepository, RedisEndpointConfig};
 use redis::AsyncCommands;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use testcontainers::ContainerAsync;
 use testcontainers::GenericImage;
@@ -448,6 +452,124 @@ async fn idempotent_registration_via_config_live() {
     assert!(
         ctx.idempotent_repository("memory").is_some(),
         "memory backend must remain the default alongside redis"
+    );
+}
+
+// ===========================================================================
+// Geo: geo_add / geo_search_radius / geo_search_box on the concrete repo
+// ===========================================================================
+
+/// Direct `redis://` endpoint config for `url`, bypassing Camel.toml.
+fn redis_endpoint(url: &str) -> RedisEndpointConfig {
+    RedisEndpointConfig::from_uri(url).expect("redis:// endpoint parses")
+}
+
+/// Builds a cache repository named `name` against `url` with the default
+/// `camel:cache` key prefix, mirroring the config-path defaults. The geo
+/// surface lives on the concrete `RedisCacheRepository`, so these tests
+/// connect it directly instead of resolving it through the context.
+async fn direct_redis_cache_repo(name: &str, url: &str) -> RedisCacheRepository {
+    install_crypto_provider();
+    RedisCacheRepository::connect(
+        name,
+        &redis_endpoint(url),
+        "camel:cache",
+        Duration::from_secs(30),
+        // Live suite: lever-off metrics facade, compile-only wiring.
+        ComponentMetrics::new(Arc::new(MetricsHandle::new()), false),
+    )
+    .await
+    .expect("redis cache repository connects directly")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geo_repo_roundtrip() {
+    let (_container, url) = own_redis().await;
+    let repo = direct_redis_cache_repo("geo", &url).await;
+
+    assert_eq!(
+        repo.geo_add("sicily", 13.361389, 38.115556, "Palermo")
+            .await
+            .expect("geo_add Palermo succeeds"),
+        1,
+        "first geo_add must report one newly added member"
+    );
+    assert_eq!(
+        repo.geo_add("sicily", 15.087269, 37.502669, "Catania")
+            .await
+            .expect("geo_add Catania succeeds"),
+        1,
+        "second geo_add must report one newly added member"
+    );
+
+    let radius = repo
+        .geo_search_radius("sicily", 15.0, 37.0, 400.0, GeoUnit::Kilometers)
+        .await
+        .expect("geo_search_radius succeeds");
+    let radius_members: Vec<&str> = radius.iter().map(|r| r.member.as_str()).collect();
+    assert_eq!(
+        radius_members.len(),
+        2,
+        "both Sicilian cities must be within 400 km, got {radius_members:?}"
+    );
+    assert!(
+        radius_members.contains(&"Palermo"),
+        "Palermo missing from radius search: {radius_members:?}"
+    );
+    assert!(
+        radius_members.contains(&"Catania"),
+        "Catania missing from radius search: {radius_members:?}"
+    );
+    for row in &radius {
+        assert!(
+            row.distance > 0.0 && row.distance <= 400.0,
+            "distance must be positive and within the requested 400 km radius, got {row:?}"
+        );
+    }
+
+    let boxed = repo
+        .geo_search_box("sicily", 15.0, 37.0, 400.0, 400.0, GeoUnit::Kilometers)
+        .await
+        .expect("geo_search_box succeeds");
+    let box_members: Vec<&str> = boxed.iter().map(|r| r.member.as_str()).collect();
+    assert!(
+        box_members.contains(&"Palermo") && box_members.contains(&"Catania"),
+        "both Sicilian cities must be inside the 400x400 km box, got {box_members:?}"
+    );
+    for row in &boxed {
+        assert!(
+            row.distance > 0.0,
+            "box search must return WITHDIST distances, positive for every row, got {row:?}"
+        );
+    }
+
+    let nowhere = repo
+        .geo_search_radius("nowhere", 15.0, 37.0, 400.0, GeoUnit::Kilometers)
+        .await
+        .expect("geo_search_radius on an absent key succeeds");
+    assert!(
+        nowhere.is_empty(),
+        "searching an absent key must return empty, got {nowhere:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geo_repo_namespace_isolation() {
+    let (_container, url) = own_redis().await;
+    let west = direct_redis_cache_repo("geo-west", &url).await;
+    let east = direct_redis_cache_repo("geo-east", &url).await;
+
+    west.geo_add("sicily", 13.361389, 38.115556, "Palermo")
+        .await
+        .expect("geo_add into the west namespace succeeds");
+
+    let foreign = east
+        .geo_search_radius("sicily", 15.0, 37.0, 400.0, GeoUnit::Kilometers)
+        .await
+        .expect("geo_search_radius on the foreign namespace succeeds");
+    assert!(
+        foreign.is_empty(),
+        "the east repository must not see the west repository's geo set, got {foreign:?}"
     );
 }
 
