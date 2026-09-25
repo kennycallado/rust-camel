@@ -122,6 +122,12 @@ The compiler SHALL embed the R2 asset matrix — certificates, private keys, and
 - **WHEN** the operator invokes compilation
 - **THEN** the route sources and configuration are embedded in the virtual store and the job does not require external source files at runtime
 
+#### Scenario: Job configuration is self-contained
+
+- **GIVEN** a job document that depends on external config, profiles, includes, or a route source outside the document
+- **WHEN** the operator invokes compilation
+- **THEN** compilation exits 2 before output creation and names the dependency
+
 #### Scenario: TLS assets compile into the store
 
 - **GIVEN** a route declaring certificate, private-key, and client-CA files under a `tls` block, with the files present under the selected root
@@ -162,7 +168,7 @@ The compiler SHALL normalize source names to UTF-8 relative paths using `/`, anc
 - **WHEN** compilation runs
 - **THEN** it exits 2 naming the symlink path and does not silently skip or follow it
 
-#### Scenario: Overlapping route sources fail closed
+#### Scenario: Overlapping sources fail closed
 
 - **GIVEN** two route-file patterns that resolve the same canonical source or two names that normalize to the same logical path
 - **WHEN** compilation runs
@@ -214,7 +220,7 @@ The artifact SHALL feed the indexed documents through the existing parse, runtim
 - **WHEN** the artifact starts
 - **THEN** it exits 2 before configuration or route boot
 
-#### Scenario: Memory-served artifact writes nothing on a read-only filesystem
+#### Scenario: Read-only deployment
 
 - **GIVEN** a valid artifact whose assets are all static files (memory-served), running with a read-only root filesystem and no writable `TMPDIR`
 - **WHEN** it boots and receives deployment environment values
@@ -305,6 +311,12 @@ The artifact SHALL preserve the sealed deployment-unit wall: no watch or hot rel
 - **GIVEN** an operator or roadmap proposal requests watch/hot-reload, runtime file discovery/globbing, ambient `Camel.toml`, a command argument beyond `--report`/`--help`/`--version`/`--manifest` other than the sanctioned R4 signature-verification surface, or a compile-time `CAMEL_*` configuration override
 - **WHEN** the proposal is evaluated against the compiled-artifact contract
 - **THEN** the capability is rejected as a permanent non-goal rather than added to the artifact surface
+
+#### Scenario: MUST-NOT capabilities remain rejected
+
+- **GIVEN** a proposal to add ambient configuration, runtime discovery, compile-time overrides, watch, a wider artifact argument surface, or asset embedding to R1
+- **WHEN** the proposal is evaluated against the sealed-artifact contract
+- **THEN** it is rejected as outside this change and recorded for its roadmap owner rather than added to the virtual-store implementation
 
 #### Scenario: Roadmap milestones are not permanent non-goals
 
