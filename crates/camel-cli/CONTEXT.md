@@ -167,7 +167,19 @@ components, non-UTF-8 names, symlink escapes, duplicate canonical targets,
 duplicate logical paths, and out-of-root references fail with exit 2
 before any output is created. Declared pattern order is preserved and each
 pattern's matches sort by normalized logical path, so identical inputs
-produce identical artifact bytes. The aggregate bound (normalized
+produce identical artifact bytes.
+
+For a job entry document, the source plan holds exactly the job document
+and its own file-form route expansions. Configuration `routes` patterns
+do not seed the job plan; this mirrors the `camel job` exactly-one-source
+rule, so an overlapping configuration pattern is not a duplicate-source
+rejection for a job compile. A file-form job route source that
+resolves zero route files fails compilation with a diagnostic naming the
+document and the rule `job route source resolved zero route definitions`.
+A structurally invalid route entry still compiles; the artifact fails at
+boot with the entry named.
+
+The aggregate bound (normalized
 document bytes plus verbatim asset bytes) defaults to 16 MiB and moves
 with `--max-payload-bytes`; the reader stays cap-free. The store packs
 typed entries (`route`, `job`, `config`, `include`, `profile`, `asset`)

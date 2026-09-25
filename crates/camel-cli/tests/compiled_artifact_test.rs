@@ -5,7 +5,7 @@
 //! every artifact, so per-test compiles would write gigabytes under
 //! parallel execution and exhaust the disk (ENOSPC). The fixture and the
 //! per-test deploy directories live on a space-probed [`fixture_root`]:
-//! the OS temp directory when it holds the ~3.5 GiB the suite writes,
+//! the OS temp directory when it holds the ~3.7 GiB the suite writes,
 //! otherwise the workspace target directory (bd rc-fdkta). Every test
 //! then deploys the fixture artifact into its own source-free directory
 //! and runs it through `run_embedded_document` — the same entry the
@@ -196,6 +196,100 @@ routes:
           value: ${env:DEPLOY_GREETING}
 ";
 
+/// The multi-entry chain job document (r3jobs Task 2.1): `routeFiles`
+/// names all four route files of the B → B.C1 → B.C1.C2 → B.C1.C2.A
+/// direct-endpoint chain explicitly, and the one-shot send fires the
+/// first link with `capture-reply` so the reply proves every entry ran.
+const MULTI_N_JOB_DOC: &str = "\
+routeFiles:
+  - routes/b.yaml
+  - routes/c1.yaml
+  - routes/c2.yaml
+  - routes/a.yaml
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: ping
+";
+
+/// Chain link 1: consumes the job's send endpoint and forwards on.
+const MULTI_N_ROUTE_B: &str = "\
+routes:
+  - id: chain-b
+    from: direct:transform
+    steps:
+      - set_body:
+          value: B
+      - to: direct:step-c1
+";
+
+/// Chain link 2.
+const MULTI_N_ROUTE_C1: &str = "\
+routes:
+  - id: chain-c1
+    from: direct:step-c1
+    steps:
+      - set_body:
+          value: B.C1
+      - to: direct:step-c2
+";
+
+/// Chain link 3.
+const MULTI_N_ROUTE_C2: &str = "\
+routes:
+  - id: chain-c2
+    from: direct:step-c2
+    steps:
+      - set_body:
+          value: B.C1.C2
+      - to: direct:final
+";
+
+/// Chain link 4: terminal consumer; its body IS the reply.
+const MULTI_N_ROUTE_A: &str = "\
+routes:
+  - id: chain-a
+    from: direct:final
+    steps:
+      - set_body:
+          value: B.C1.C2.A
+";
+
+/// r3jobs Task 2.2: a multi-entry job document in the same shape as
+/// `MULTI_N_JOB_DOC`, but naming THREE route files: two valid chain
+/// links plus `routes/bad.yaml`, which is well-declared (a `direct:`
+/// consumer with a `steps:` list) yet structurally invalid (its only
+/// step key, `totally_not_a_step:`, matches no `RouteDslStep` variant).
+/// Compilation must accept it — declaration checks only; boot must
+/// reject it, naming the entry.
+const MULTI_BAD_JOB_DOC: &str = "\
+routeFiles:
+  - routes/b.yaml
+  - routes/bad.yaml
+  - routes/c1.yaml
+execute:
+  mode: one-shot
+  timeout: 60s
+  capture-reply: true
+  send:
+    to: direct:transform
+    body: ping
+";
+
+/// The structurally invalid chain link: an unknown step key under a
+/// well-formed `direct:` consumer.
+const MULTI_BAD_ROUTE: &str = "\
+routes:
+  - id: chain-bad
+    from: direct:step-c2
+    steps:
+      - totally_not_a_step:
+          value: nope
+";
+
 /// A one-shot job document with a DECLARED argument whose default
 /// (`hello`) the artifact must apply at startup (jobargs Task 3.2): the
 /// send body carries `${arg:value}` and the step-free route echoes the
@@ -359,14 +453,14 @@ fn compile_full(
 ///
 /// The artifacts live in a single cache directory keyed by this test
 /// process (`camel-compiled-fixture-<pid>` under the space-probed
-/// [`fixture_root`], the repo's `camel-test-*` convention): twelve
-/// artifacts at the current binary size total ~3.5 GiB, so the root
+/// [`fixture_root`], the repo's `camel-test-*` convention): thirteen
+/// artifacts at the current binary size total ~3.7 GiB, so the root
 /// needs [`REQUIRED_ROOT_FREE`] free before the suite starts — the OS
 /// temp directory when it has room (CI, unchanged), the workspace
 /// target directory as fallback on small-`/tmp` dev machines. A
 /// detached reaper child removes that directory once this process dies
 /// — normal exit or crash — and the next run sweeps any leftover, so
-/// repeated runs never accumulate the ~3.5 GiB of compiled artifacts.
+/// repeated runs never accumulate the ~3.7 GiB of compiled artifacts.
 struct Fixture {
     /// `ROUTE_DOC` artifact (timer→log route).
     route: PathBuf,
@@ -389,6 +483,13 @@ struct Fixture {
     /// Multi-document job artifact whose indexed route resolves
     /// `${env:DEPLOY_GREETING}`, compiled with a compile-time value.
     multi_env: PathBuf,
+    /// Multi-entry chain job artifact (config, job document naming four
+    /// route files, the four chained route sources).
+    multi_job_n: PathBuf,
+    /// Multi-entry job artifact whose route set contains a structurally
+    /// invalid entry (`routes/bad.yaml`): compiles clean, boots with
+    /// exit 2 naming the entry.
+    multi_job_bad: PathBuf,
     /// `TYPED_DEFAULT_ARG_DOC` artifact (typed default coerces at
     /// startup, jobtyped Task 5).
     typed_arg: PathBuf,
@@ -397,13 +498,14 @@ struct Fixture {
 static FIXTURE: OnceLock<Fixture> = OnceLock::new();
 
 /// Free space the fixture root must have before the suite starts
-/// compiling: twelve artifacts at the current ~287 MB binary (~3.4 GiB)
-/// plus the transient whole-artifact copies (the three mutation tests
-/// hold up to one copy each in parallel, and the accepted loose compile
-/// writes one more). Bump this when the suite gains artifacts or the
-/// binary grows past what the headroom covers.
+/// compiling: thirteen artifact writes at the current ~287 MB binary
+/// (~3.7 GiB — the twelve fixture compiles plus the accepted loose
+/// compile) plus the transient whole-artifact copies (the three
+/// mutation tests hold up to one copy each in parallel). Bump this
+/// when the suite gains artifacts or the binary grows past what the
+/// headroom covers.
 #[cfg_attr(not(unix), allow(dead_code))]
-const REQUIRED_ROOT_FREE: u64 = 5 << 30;
+const REQUIRED_ROOT_FREE: u64 = 6 << 30;
 
 /// The cargo target directory of this workspace: the fallback fixture
 /// root when the OS temp directory does not have [`REQUIRED_ROOT_FREE`]
@@ -510,7 +612,7 @@ fn fixture_root_picking_prefers_roomy_candidates() {
 /// same filesystem so deploys can hardlink the immutable fixture
 /// artifacts). Prefers the OS temp directory when it has room — the
 /// CI behavior is unchanged — and falls back to the workspace target
-/// directory on machines whose `/tmp` is too small for the ~3.5 GiB
+/// directory on machines whose `/tmp` is too small for the ~3.7 GiB
 /// suite footprint (bd rc-fdkta: the fixture alone exhausted a 4 GiB
 /// `/tmp`, ENOSPC-ing the artifact-mutation tests).
 fn fixture_root() -> PathBuf {
@@ -641,8 +743,7 @@ fn fixture() -> &'static Fixture {
                              config: &str,
                              entry: &str,
                              entry_doc: &str,
-                             route_path: &str,
-                             route_doc: &str,
+                             routes: &[(&str, &str)],
                              artifact: &str,
                              envs: &[(&str, &str)]|
          -> PathBuf {
@@ -652,7 +753,9 @@ fn fixture() -> &'static Fixture {
             std::fs::write(root.join("Camel.toml"), config).expect("write config");
             std::fs::write(root.join("conf").join("base.toml"), MULTI_INCLUDE)
                 .expect("write include");
-            std::fs::write(root.join(route_path), route_doc).expect("write indexed route");
+            for (route_path, route_doc) in routes {
+                std::fs::write(root.join(route_path), route_doc).expect("write indexed route");
+            }
             std::fs::write(root.join(entry), entry_doc).expect("write entry document");
             // `-o` is relative to the compile working directory (the
             // subtree root), so the artifact lands beside its sources.
@@ -670,8 +773,7 @@ fn fixture() -> &'static Fixture {
             MULTI_CONFIG,
             "multi-app.yaml",
             MULTI_ENTRY_ROUTE,
-            "routes/beta.yaml",
-            MULTI_INDEXED_ROUTE,
+            &[("routes/beta.yaml", MULTI_INDEXED_ROUTE)],
             "multi-route.bin",
             &[],
         );
@@ -680,8 +782,7 @@ fn fixture() -> &'static Fixture {
             MULTI_JOB_CONFIG,
             "ingest-m.job.yaml",
             MULTI_JOB_DOC,
-            "routes/transform.yaml",
-            MULTI_JOB_ROUTE,
+            &[("routes/transform.yaml", MULTI_JOB_ROUTE)],
             "multi-job.bin",
             &[],
         );
@@ -690,10 +791,41 @@ fn fixture() -> &'static Fixture {
             MULTI_JOB_CONFIG,
             "greet-m.job.yaml",
             MULTI_ENV_JOB_DOC,
-            "routes/greet.yaml",
-            MULTI_ENV_ROUTE,
+            &[("routes/greet.yaml", MULTI_ENV_ROUTE)],
             "multi-env.bin",
             &[("DEPLOY_GREETING", "compile-secret-value")],
+        );
+        // Multi-entry chain job: the job document names FOUR route
+        // files, so the helper writes a whole (path, document) list of
+        // route sources.
+        let multi_job_n = compile_multi(
+            "multi-job-n",
+            MULTI_JOB_CONFIG,
+            "ingest-n.job.yaml",
+            MULTI_N_JOB_DOC,
+            &[
+                ("routes/b.yaml", MULTI_N_ROUTE_B),
+                ("routes/c1.yaml", MULTI_N_ROUTE_C1),
+                ("routes/c2.yaml", MULTI_N_ROUTE_C2),
+                ("routes/a.yaml", MULTI_N_ROUTE_A),
+            ],
+            "multi-job-n.bin",
+            &[],
+        );
+        // Failing-entry variant: same shape, but one route file is
+        // structurally invalid — compile must still accept it.
+        let multi_job_bad = compile_multi(
+            "multi-job-bad",
+            MULTI_JOB_CONFIG,
+            "ingest-bad.job.yaml",
+            MULTI_BAD_JOB_DOC,
+            &[
+                ("routes/b.yaml", MULTI_N_ROUTE_B),
+                ("routes/bad.yaml", MULTI_BAD_ROUTE),
+                ("routes/c1.yaml", MULTI_N_ROUTE_C1),
+            ],
+            "multi-job-bad.bin",
+            &[],
         );
         let typed_arg = compile_one("typed.job.yaml", TYPED_DEFAULT_ARG_DOC, "typed.bin", &[]);
         Fixture {
@@ -706,6 +838,8 @@ fn fixture() -> &'static Fixture {
             multi_route,
             multi_job,
             multi_env,
+            multi_job_n,
+            multi_job_bad,
             typed_arg,
         }
     })
@@ -2201,6 +2335,198 @@ fn compiled_job_uses_embedded_route_plan_and_report() {
         report["reply"]["body"], "multi-job-done",
         "indexed route file must drive the pipeline: {report}"
     );
+}
+
+/// r3jobs Task 2.1: a multi-entry chain job — `routeFiles` naming four
+/// route files whose direct endpoints chain B → B.C1 → B.C1.C2 →
+/// B.C1.C2.A — boots EVERY embedded entry, not just the first. The
+/// pinned parity: `camel job` on the same document set and the compiled
+/// artifact agree on outcome `Completed` and reply `B.C1.C2.A`, so the
+/// reply value alone proves all four files' routes were present and ran.
+#[test]
+fn compiled_job_multi_entry_boots_every_entry() {
+    child_guard();
+    let source_dir = fixture()
+        .multi_job_n
+        .parent()
+        .expect("chain artifact has its source subtree")
+        .to_path_buf();
+
+    // Leg 1 — CLI parity: the same source set through `camel job`.
+    let (code, stdout, stderr) = common::run_binary(
+        &source_dir,
+        Path::new(env!("CARGO_BIN_EXE_camel")),
+        &[
+            "job",
+            "ingest-n.job.yaml",
+            "--config",
+            "Camel.toml",
+            "--report",
+            "cli-report.json",
+        ],
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "CLI job must complete;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let cli_report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(source_dir.join("cli-report.json")).expect("CLI report written"),
+    )
+    .expect("CLI report is JSON");
+    assert_eq!(cli_report["outcome"], "Completed", "report: {cli_report}");
+    assert_eq!(
+        cli_report["reply"]["body"], "B.C1.C2.A",
+        "chain must traverse all four files' routes: {cli_report}"
+    );
+
+    // Leg 2 — artifact: deployed WITHOUT the source tree, config, or
+    // routes; the embedded plan alone must boot the whole chain.
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_job_n);
+    for absent in ["ingest-n.job.yaml", "Camel.toml", "routes", "conf"] {
+        assert!(
+            !deploy.path().join(absent).exists(),
+            "no source/config tree: {absent} must not exist"
+        );
+    }
+    let (code, stdout, stderr) = spawn_child_output(
+        "compiled_job_multi_entry_boots_every_entry",
+        deploy.path(),
+        &artifact,
+        &["--report", "report.json"],
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "multi-entry artifact must complete;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(deploy.path().join("report.json"))
+            .expect("artifact report written"),
+    )
+    .expect("artifact report is JSON");
+    assert_eq!(
+        report["outcome"], "Completed",
+        "job-level parity with the CLI run: {report}"
+    );
+    assert_eq!(
+        report["reply"]["body"], "B.C1.C2.A",
+        "compiled chain must traverse all four entries: {report}"
+    );
+    assert_eq!(
+        report["document"], "compiled://ingest-n.job.yaml",
+        "virtual entry-point identity: {report}"
+    );
+}
+
+/// r3jobs Task 2.2: a multi-entry job whose route file set holds a
+/// STRUCTURALLY INVALID entry (`routes/bad.yaml`, unknown step key
+/// under a `direct:` consumer) still compiles — declaration checks
+/// only — but boot must reject it with exit 2, naming the offending
+/// entry, before any boot and without an outcome report.
+#[test]
+fn compiled_job_multi_entry_failure_names_entry() {
+    child_guard();
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_job_bad);
+    for absent in ["ingest-bad.job.yaml", "Camel.toml", "routes", "conf"] {
+        assert!(
+            !deploy.path().join(absent).exists(),
+            "no source/config tree: {absent} must not exist"
+        );
+    }
+    let (code, stdout, stderr) = spawn_child_output(
+        "compiled_job_multi_entry_failure_names_entry",
+        deploy.path(),
+        &artifact,
+        &["--report", "bad-report.json"],
+        &[],
+    );
+    assert_eq!(
+        code, 2,
+        "structure-invalid entry must fail the boot;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("compiled://routes/bad.yaml"),
+        "diagnostic must name the failing entry;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !deploy.path().join("bad-report.json").exists(),
+        "a boot-class failure writes no outcome report"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(!combined.contains("context started"), "no boot: {combined}");
+}
+
+/// r3jobs Task 2.3: `--manifest` on the multi-entry chain job artifact
+/// lists the job entry, every chained route entry, and the
+/// config/include entries — each document entry with its byte length
+/// and content digest — and exits 0 without booting any route.
+#[test]
+fn artifact_manifest_lists_multi_entry_job_without_boot() {
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_job_n);
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &["--manifest"], &[]);
+    assert_eq!(
+        code, 0,
+        "--manifest exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is manifest JSON");
+    assert_eq!(manifest["kind"], "job", "manifest: {manifest}");
+    assert_eq!(manifest["artifact_kind"], "job", "manifest: {manifest}");
+    let files = manifest["embedded_files"]
+        .as_array()
+        .expect("embedded_files array");
+
+    // The canonical entry order: configuration chain first, then the
+    // job entry point, then the four chained route entries. The exact
+    // list pins the full entry set, not just membership.
+    let expected = [
+        ("Camel.toml", "config"),
+        ("conf/base.toml", "include"),
+        ("ingest-n.job.yaml", "job"),
+        ("routes/a.yaml", "route"),
+        ("routes/b.yaml", "route"),
+        ("routes/c1.yaml", "route"),
+        ("routes/c2.yaml", "route"),
+    ];
+    let listed: Vec<(String, String)> = files
+        .iter()
+        .map(|f| {
+            (
+                f["path"].as_str().expect("path").to_string(),
+                f["kind"].as_str().expect("kind").to_string(),
+            )
+        })
+        .collect();
+    let want: Vec<(String, String)> = expected
+        .iter()
+        .map(|(p, k)| (p.to_string(), k.to_string()))
+        .collect();
+    assert_eq!(
+        listed, want,
+        "every embedded logical path is listed in canonical order: {manifest}"
+    );
+
+    // Each document entry carries its kind plus a non-null byte length
+    // and a content digest.
+    for (entry, (path, kind)) in files.iter().zip(expected) {
+        assert_eq!(
+            entry["kind"].as_str(),
+            Some(kind),
+            "kind for {path}: {manifest}"
+        );
+        assert!(
+            entry["length"].as_u64().is_some(),
+            "byte length listed for {path}: {manifest}"
+        );
+        assert!(
+            entry["digest"].as_str().is_some_and(|d| !d.is_empty()),
+            "content digest listed for {path}: {manifest}"
+        );
+    }
+
+    let all = format!("{stdout}{stderr}");
+    assert!(!all.contains("context started"), "no job boot: {all}");
 }
 
 /// `${env:NAME}` inside a multi-document artifact survives compilation

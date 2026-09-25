@@ -143,6 +143,16 @@ pub enum SourceError {
     /// (reserved document suffix, unsupported extension, malformed
     /// glob).
     UnsupportedRouteSource(String),
+    /// A job-kind entry document declared a file-form route source
+    /// (`routeFiles`/`routeFilesFromRoot`) whose patterns resolved zero
+    /// route files. `camel job` rejects the same declaration set with
+    /// its job-safety rule, so compiling would embed a dead artifact.
+    JobRouteSourceEmpty {
+        /// Logical path of the job document.
+        document: String,
+        /// The declared route-file patterns.
+        patterns: Vec<String>,
+    },
     /// A collected asset reference names a file that does not exist
     /// under the selected root (reject-missing at compile time).
     AssetMissing {
@@ -279,6 +289,12 @@ impl fmt::Display for SourceError {
             Self::InvalidConfig(reason) => write!(f, "invalid configuration: {reason}"),
             Self::InvalidDocument(reason) => write!(f, "invalid document: {reason}"),
             Self::UnsupportedRouteSource(reason) => write!(f, "unsupported route source: {reason}"),
+            Self::JobRouteSourceEmpty { document, patterns } => write!(
+                f,
+                "job route source resolved zero route definitions: document '{document}' \
+                 declares route-file patterns [{}] that matched no route files",
+                patterns.join(", ")
+            ),
             Self::AssetMissing {
                 field,
                 class,
@@ -669,6 +685,15 @@ pub fn resolve(
     // will store.
     let entry_text = trailer::normalize_document(&raws[0].bytes).map_err(SourceError::Normalize)?;
     let entry_fields = route_source_fields(&entry_text)?;
+    // r3jobs Task 1.2: remember a file-form declaration (with its
+    // declared patterns) for the zero-entry job check after plan
+    // construction — `camel job` rejects a job whose route source
+    // resolves zero route definitions, and so must compile.
+    let job_file_patterns = match &entry_fields {
+        RouteSourceFields::RouteFiles(patterns)
+        | RouteSourceFields::RouteFilesFromRoot(patterns) => Some(patterns.clone()),
+        RouteSourceFields::None => None,
+    };
     match entry_fields {
         RouteSourceFields::RouteFiles(patterns) => {
             for declared in patterns {
@@ -856,8 +881,17 @@ pub fn resolve(
             });
         }
 
-        // Config route patterns, declared order, matches sorted.
-        if let Some(patterns) = route_patterns {
+        // Config route patterns, declared order, matches sorted. Route
+        // kind only: a job's route set comes exclusively from its own
+        // `routeFiles`/`routeFilesFromRoot` declarations — `camel job`
+        // never consults configuration `routes` patterns, so seeding
+        // the plan from them here would reject document sets the CLI
+        // accepts (`duplicate source` when a pattern overlaps a
+        // declared file). Parity: every document set `camel job`
+        // accepts must compile.
+        if kind == TrailerKind::Route
+            && let Some(patterns) = route_patterns
+        {
             for declared in patterns {
                 for (canonical, logical) in resolver.expand_pattern(&declared, &root)? {
                     raws.push(RawSource {
@@ -869,6 +903,28 @@ pub fn resolve(
                 }
             }
         }
+    }
+
+    // r3jobs Task 1.2: a job whose declared file-form route source
+    // resolved zero route files is a named rejection, mirroring the
+    // `camel job` job-safety rule ("job route source resolved zero
+    // route definitions") — compiling would embed a dead artifact.
+    // Count-of-entries check only: route document contents are never
+    // parsed here. Config `routes` patterns never seed a job plan (see
+    // above), so the plan is final. Inline-`routes:` job documents
+    // (no file form) keep compiling.
+    if kind == TrailerKind::Job
+        && let Some(patterns) = job_file_patterns
+        && raws
+            .iter()
+            .filter(|raw| raw.kind == StoreEntryKind::Route)
+            .count()
+            == 0
+    {
+        return Err(SourceError::JobRouteSourceEmpty {
+            document: doc_logical.clone(),
+            patterns,
+        });
     }
 
     // Normalize the whole set under the configured aggregate cap. The

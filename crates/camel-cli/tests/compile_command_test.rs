@@ -380,6 +380,503 @@ execute:
     );
 }
 
+/// r3jobs Task 1.1: for a job-kind entry document, configuration `routes`
+/// patterns add no plan entries. `camel job` never consults them (the
+/// job's route set comes only from its own `routeFiles` /
+/// `routeFilesFromRoot` declarations), so a document set the CLI accepts
+/// must compile: here the config pattern `routes/*.yaml` matches the
+/// explicitly declared `routes/b.yaml` and would collide with it
+/// (`duplicate source`, exit 2) if the patterns seeded the plan.
+#[test]
+fn compile_job_ignores_config_route_patterns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("conf")).expect("mkdir conf");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("Camel.toml"),
+        "\
+include = [\"conf/base.toml\"]
+routes = [\"routes/*.yaml\"]
+[default]
+log_level = \"info\"
+",
+    )
+    .expect("write config");
+    std::fs::write(
+        dir.path().join("conf").join("base.toml"),
+        "[default]\ndrain_timeout_ms = 5000\n",
+    )
+    .expect("write include fragment");
+    std::fs::write(
+        dir.path().join("routes").join("a.yaml"),
+        "routes:\n  - id: unused\n    from: direct:unused\n    steps:\n      - to: log:unused\n",
+    )
+    .expect("write pattern-matched route source");
+    std::fs::write(
+        dir.path().join("routes").join("b.yaml"),
+        "routes:\n  - id: job-consumer\n    from: direct:start\n    steps:\n      - to: log:job-consumer\n",
+    )
+    .expect("write declared route source");
+    std::fs::write(
+        dir.path().join("ingest.job.yaml"),
+        "\
+routeFiles:
+  - routes/b.yaml
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:start
+",
+    )
+    .expect("write document");
+
+    // GIVEN: `camel job` accepts this document set — it ignores the
+    // configuration `routes` pattern and runs with the declared
+    // `routes/b.yaml` only.
+    let mut job = Command::new(env!("CARGO_BIN_EXE_camel"));
+    job.env_clear().current_dir(dir.path());
+    job.arg("job")
+        .arg("ingest.job.yaml")
+        .arg("--config")
+        .arg("Camel.toml")
+        .arg("--report")
+        .arg("cli-report.json");
+    let job_output = job.output().expect("spawn `camel job`");
+    assert_eq!(
+        job_output.status.code(),
+        Some(0),
+        "`camel job` must accept the document set: {}",
+        stderr_of(&job_output)
+    );
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("cli-report.json")).expect("report written"),
+    )
+    .expect("report is JSON");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+
+    // WHEN: the same document set is compiled with the same config.
+    let output = compile_full(
+        dir.path(),
+        "ingest.job.yaml",
+        "out.bin",
+        None,
+        Some("Camel.toml"),
+        &[],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a document set `camel job` accepts must compile: {}",
+        stderr_of(&output)
+    );
+    let (_, store, _) = decode_v2(&std::fs::read(dir.path().join("out.bin")).expect("artifact"));
+
+    // THEN: the plan holds only the entry and its declared route
+    // source; the pattern-matched `routes/a.yaml` appears in no store
+    // entry, while the config and include fragments still embed.
+    assert_eq!(store.index.entry_point, "ingest.job.yaml");
+    assert_eq!(
+        store.index.source_plan.references,
+        vec!["ingest.job.yaml", "routes/b.yaml"]
+    );
+    assert_eq!(
+        entry_paths(&store),
+        vec![
+            "Camel.toml",
+            "conf/base.toml",
+            "ingest.job.yaml",
+            "routes/b.yaml"
+        ]
+    );
+}
+
+/// r3jobs Task 1.2: a job document whose file-form route source
+/// (`routeFiles`) resolves zero route files must fail compilation.
+/// `camel job` rejects the same declaration set with its job-safety rule
+/// ("job route source resolved zero route definitions"), so compile must
+/// not exit 0 and embed a dead artifact. A wildcard pattern matching
+/// nothing is not itself a resolution error — the zero-entry outcome is.
+#[test]
+fn compile_job_rejects_zero_route_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("conf")).expect("mkdir conf");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    // The config's `routes` pattern WOULD mask the zero-entry count
+    // pre-guard (r3jobs Task 1.1): the job plan must ignore it, so the
+    // rejection below still fires with the pattern present.
+    std::fs::write(
+        dir.path().join("Camel.toml"),
+        "\
+include = [\"conf/base.toml\"]
+routes = [\"routes/*.yaml\"]
+[default]
+log_level = \"info\"
+",
+    )
+    .expect("write config");
+    std::fs::write(
+        dir.path().join("conf").join("base.toml"),
+        "[default]\ndrain_timeout_ms = 5000\n",
+    )
+    .expect("write include fragment");
+    std::fs::write(
+        dir.path().join("routes").join("b.yaml"),
+        "routes:\n  - id: job-consumer\n    from: direct:start\n    steps:\n      - to: log:job-consumer\n",
+    )
+    .expect("write unrelated route source");
+    std::fs::write(
+        dir.path().join("ingest.job.yaml"),
+        "\
+routeFiles:
+  - routes/none/*.yaml
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:start
+",
+    )
+    .expect("write document");
+
+    let output = compile_full(
+        dir.path(),
+        "ingest.job.yaml",
+        "out.bin",
+        None,
+        Some("Camel.toml"),
+        &[],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "zero resolved route files must fail compilation: {}",
+        stderr_of(&output)
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("job route source resolved zero route definitions"),
+        "rejection must use the `camel job` rule wording: {stderr}"
+    );
+    assert!(
+        stderr.contains("ingest.job.yaml"),
+        "rejection must name the job document: {stderr}"
+    );
+    assert!(!dir.path().join("out.bin").exists(), "no output artifact");
+}
+
+/// r3jobs Task 1.2: same zero-entry rejection for the root-anchored
+/// form — `routeFilesFromRoot` resolving zero route files under the
+/// selected `--config` root fails compilation with the `camel job`
+/// rule wording.
+#[test]
+fn compile_job_rejects_zero_route_files_from_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("conf")).expect("mkdir conf");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("Camel.toml"),
+        "\
+include = [\"conf/base.toml\"]
+[default]
+log_level = \"info\"
+",
+    )
+    .expect("write config");
+    std::fs::write(
+        dir.path().join("conf").join("base.toml"),
+        "[default]\ndrain_timeout_ms = 5000\n",
+    )
+    .expect("write include fragment");
+    std::fs::write(
+        dir.path().join("routes").join("b.yaml"),
+        "routes:\n  - id: job-consumer\n    from: direct:start\n    steps:\n      - to: log:job-consumer\n",
+    )
+    .expect("write unrelated route source");
+    std::fs::write(
+        dir.path().join("ingest.job.yaml"),
+        "\
+routeFilesFromRoot:
+  - routes/missing/*.yaml
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:start
+",
+    )
+    .expect("write document");
+
+    let output = compile_full(
+        dir.path(),
+        "ingest.job.yaml",
+        "out.bin",
+        None,
+        Some("Camel.toml"),
+        &[],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "zero resolved route files must fail compilation: {}",
+        stderr_of(&output)
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("job route source resolved zero route definitions"),
+        "rejection must use the `camel job` rule wording: {stderr}"
+    );
+    assert!(
+        stderr.contains("ingest.job.yaml"),
+        "rejection must name the job document: {stderr}"
+    );
+    assert!(!dir.path().join("out.bin").exists(), "no output artifact");
+}
+
+/// Pin the duplicate rule to the job document's OWN declared route-file
+/// family (blessed spec `r3jobs/specs/cli-compile`, MODIFIED requirement
+/// "Resolve and confine compile-time sources": "the duplicate rule
+/// applies within the job document's own declared route-file family").
+/// The configuration here declares NO `routes` patterns, so the only
+/// possible duplicate source is inside the job document itself: the
+/// literal `routes/b.yaml` and the glob `routes/*.yaml` both resolve the
+/// same canonical file (the second route file keeps the glob
+/// meaningful). That within-family overlap must still fail closed with
+/// the route-source duplicate wording, exactly as two route-file
+/// patterns in one family always have.
+#[test]
+fn compile_job_rejects_duplicate_declared_route_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("conf")).expect("mkdir conf");
+    std::fs::create_dir_all(dir.path().join("routes")).expect("mkdir routes");
+    // Plain configuration: include + [default], NO `routes` patterns —
+    // the config cannot be the duplicate's origin.
+    std::fs::write(
+        dir.path().join("Camel.toml"),
+        "\
+include = [\"conf/base.toml\"]
+[default]
+log_level = \"info\"
+",
+    )
+    .expect("write config");
+    std::fs::write(
+        dir.path().join("conf").join("base.toml"),
+        "[default]\ndrain_timeout_ms = 5000\n",
+    )
+    .expect("write include fragment");
+    // Two route files: the glob must be meaningful (more than one hit).
+    std::fs::write(
+        dir.path().join("routes").join("a.yaml"),
+        "routes:\n  - id: job-consumer\n    from: direct:start\n    steps:\n      - to: log:job-consumer\n",
+    )
+    .expect("write first route source");
+    std::fs::write(
+        dir.path().join("routes").join("b.yaml"),
+        "routes:\n  - id: job-consumer\n    from: direct:start\n    steps:\n      - to: log:job-consumer\n",
+    )
+    .expect("write second route source");
+    std::fs::write(
+        dir.path().join("ingest.job.yaml"),
+        "\
+routeFiles:
+  - routes/b.yaml
+  - routes/*.yaml
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:start
+",
+    )
+    .expect("write document");
+
+    let output = compile_full(
+        dir.path(),
+        "ingest.job.yaml",
+        "out.bin",
+        None,
+        Some("Camel.toml"),
+        &[],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "overlapping declared route files must fail compilation: {}",
+        stderr_of(&output)
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("duplicate source"),
+        "rejection must use the duplicate-source wording: {stderr}"
+    );
+    assert!(
+        stderr.contains("routes/b.yaml"),
+        "rejection must name the duplicated source: {stderr}"
+    );
+    assert!(!dir.path().join("out.bin").exists(), "no output artifact");
+    assert!(
+        !dir.path().join("out.bin.tmp").exists(),
+        "no partial artifact"
+    );
+}
+
+// --- r3jobs Task 1.3: multi-entry job plan order and determinism ---
+
+/// r3jobs Task 1.3 fixtures: a job document declaring three route
+/// sources in a deliberate non-alphabetical order (literal, glob,
+/// literal) whose flat resolution yields four route files, plus the
+/// selected configuration with one include fragment.
+const MULTI_ENTRY_JOB_DOC: &str = "\
+routeFiles:
+  - routes/b.yaml
+  - routes/c*.yaml
+  - routes/a.yaml
+execute:
+  mode: one-shot
+  timeout: 30s
+  send:
+    to: direct:start
+";
+
+const MULTI_ENTRY_ROUTE_B: &str =
+    "routes:\n  - id: b\n    from: direct:start\n    steps:\n      - to: log:b\n";
+const MULTI_ENTRY_ROUTE_A: &str =
+    "routes:\n  - id: a\n    from: direct:aux\n    steps:\n      - to: log:a\n";
+const MULTI_ENTRY_ROUTE_C1: &str =
+    "routes:\n  - id: c1\n    from: direct:c1\n    steps:\n      - to: log:c1\n";
+const MULTI_ENTRY_ROUTE_C2: &str =
+    "routes:\n  - id: c2\n    from: direct:c2\n    steps:\n      - to: log:c2\n";
+
+const MULTI_ENTRY_CONFIG: &str =
+    "include = [\"conf/base.toml\"]\n[default]\nlog_level = \"info\"\n";
+const MULTI_ENTRY_BASE_TOML: &str = "[default]\ndrain_timeout_ms = 5000\n";
+
+/// Write the multi-entry job fixture tree. Route files are created in a
+/// scrambled order (b, a, c2, c1) so a passing plan cannot be explained
+/// by directory-creation order; only declared-pattern order with
+/// sorted glob matches produces the expected plan.
+fn write_multi_entry_fixture(dir: &Path) {
+    std::fs::write(dir.join("Camel.toml"), MULTI_ENTRY_CONFIG).expect("write config");
+    std::fs::create_dir_all(dir.join("conf")).expect("mkdir conf");
+    std::fs::create_dir_all(dir.join("routes")).expect("mkdir routes");
+    std::fs::write(dir.join("conf").join("base.toml"), MULTI_ENTRY_BASE_TOML)
+        .expect("write include fragment");
+    std::fs::write(dir.join("routes").join("b.yaml"), MULTI_ENTRY_ROUTE_B).expect("write route b");
+    std::fs::write(dir.join("routes").join("a.yaml"), MULTI_ENTRY_ROUTE_A).expect("write route a");
+    std::fs::write(dir.join("routes").join("c2.yaml"), MULTI_ENTRY_ROUTE_C2)
+        .expect("write route c2");
+    std::fs::write(dir.join("routes").join("c1.yaml"), MULTI_ENTRY_ROUTE_C1)
+        .expect("write route c1");
+    std::fs::write(dir.join("ingest.job.yaml"), MULTI_ENTRY_JOB_DOC).expect("write job document");
+}
+
+/// A job document declaring multiple route sources compiles with the
+/// source plan in declared pattern order — each literal in its
+/// declaration position, each glob's matches sorted — and the store
+/// embeds all four route files as kind `route`.
+#[test]
+fn compile_job_multi_entry_plan_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_multi_entry_fixture(dir.path());
+
+    let output = compile_full(
+        dir.path(),
+        "ingest.job.yaml",
+        "out.bin",
+        None,
+        Some("Camel.toml"),
+        &[],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "multi-entry job must compile: {}",
+        stderr_of(&output)
+    );
+
+    let bytes = std::fs::read(dir.path().join("out.bin")).expect("artifact exists");
+    let (_, store, _) = decode_v2(&bytes);
+
+    // Declared pattern order: the entry document first, then `b`
+    // (literal), then the glob's matches sorted (`c1`, `c2`), then `a`
+    // (literal) — not alphabetical plan order.
+    assert_eq!(store.index.entry_point, "ingest.job.yaml");
+    assert_eq!(
+        store.index.source_plan.references,
+        vec![
+            "ingest.job.yaml",
+            "routes/b.yaml",
+            "routes/c1.yaml",
+            "routes/c2.yaml",
+            "routes/a.yaml",
+        ]
+    );
+
+    // All four route files embed as kind `route` (canonical store order).
+    let route_entries: Vec<&str> = store
+        .index
+        .entries
+        .iter()
+        .filter(|e| e.kind.as_str() == "route")
+        .map(|e| e.path.as_str())
+        .collect();
+    assert_eq!(
+        route_entries,
+        vec![
+            "routes/a.yaml",
+            "routes/b.yaml",
+            "routes/c1.yaml",
+            "routes/c2.yaml",
+        ],
+        "store must embed all four route entries with kind `route`"
+    );
+}
+
+/// Compiling the same multi-entry job document set twice produces
+/// byte-identical artifacts.
+#[test]
+fn compile_job_multi_entry_deterministic_bytes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_multi_entry_fixture(dir.path());
+
+    let first = compile_full(
+        dir.path(),
+        "ingest.job.yaml",
+        "out1.bin",
+        None,
+        Some("Camel.toml"),
+        &[],
+    );
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "first compile must succeed: {}",
+        stderr_of(&first)
+    );
+    let second = compile_full(
+        dir.path(),
+        "ingest.job.yaml",
+        "out2.bin",
+        None,
+        Some("Camel.toml"),
+        &[],
+    );
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "second compile must succeed: {}",
+        stderr_of(&second)
+    );
+
+    let bytes1 = std::fs::read(dir.path().join("out1.bin")).expect("first artifact exists");
+    let bytes2 = std::fs::read(dir.path().join("out2.bin")).expect("second artifact exists");
+    assert_eq!(
+        bytes1, bytes2,
+        "two compiles of the identical input set must emit identical bytes"
+    );
+}
+
 // --- Focused regressions (review findings, Task 1.2) ---
 
 /// Regression: the forbidden `key` field is scoped to TLS/listener
