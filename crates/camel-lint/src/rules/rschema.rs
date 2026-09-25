@@ -35,7 +35,8 @@
 //!   de-collapses into ONE targeted diagnostic per field, anchored on
 //!   the value-spec mapping (see the `AnyOf` arm in [`RSchemaRule`]).
 //! - A collapsed anyOf burying pattern violations (the MCP TLS path
-//!   fields) de-collapses into one diagnostic per pattern leaf, and a
+//!   fields and the MCP name/bind fields) de-collapses into one
+//!   diagnostic per pattern leaf, and a
 //!   non-pattern defect co-located in the SAME failed anyOf also
 //!   surfaces as its own sibling leaf diagnostic (the null-branch
 //!   whole-node type mismatch is excluded as branch noise); with no
@@ -233,7 +234,8 @@ impl Rule for RSchemaRule {
                 //
                 // 2. PATTERN de-collapse — the schema's only pattern
                 //    keywords are the two MCP TLS path fields (rc-n3t73)
-                //    — reporting each nested, strictly-deeper pattern
+                //    and the four MCP name/bind fields (rc-sghtz) —
+                //    reporting each nested, strictly-deeper pattern
                 //    error on its own leaf.
                 //
                 // When a pattern violation co-occurs with a

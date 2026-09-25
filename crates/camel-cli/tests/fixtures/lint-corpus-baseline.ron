@@ -203,6 +203,17 @@
         [("R-SCHEMA", "error")],
     ),
 
+    // Blank server name (whitespace-only) + bind (empty string) are real
+    // defects: the runtime rejects both (lowering charset check on
+    // `name`, consumer-config `SocketAddr` parse on `bind`), so the
+    // lint-side R-SCHEMA Errors are honest semantics (rc-sghtz). Both
+    // diagnostics share one (code, severity) pair — the baseline is a
+    // set per file.
+    (
+        "crates/camel-cli/tests/fixtures/lint-corpus/mcp-blank-bind-name.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+
     // Co-occurrence witness (rc-lys6a): blank cert_path + unknown
     // rogue_key in the same tls map — the sibling additionalProperties
     // defect must surface alongside the pattern leaf. Both are real

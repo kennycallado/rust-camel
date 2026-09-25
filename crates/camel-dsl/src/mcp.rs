@@ -51,6 +51,37 @@ where
     non_empty_path(deserializer, "key_path")
 }
 
+/// Reject blank-after-trim values but return the RAW string — unlike
+/// `non_empty_path` (which trims), the runtime consumers of `bind`/`name`
+/// (`SocketAddr` parse, `validate_mcp_name` charset) use the verbatim value,
+/// so trimming here would silently accept padded values the runtime rejects.
+fn non_blank_verbatim<'de, D>(deserializer: D, field: &'static str) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom(format!(
+            "{field} must not be empty"
+        )));
+    }
+    Ok(value)
+}
+
+fn deserialize_mcp_name<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    non_blank_verbatim(deserializer, "name")
+}
+
+fn deserialize_mcp_bind<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    non_blank_verbatim(deserializer, "bind")
+}
+
 /// TLS certificate and private-key paths declared by an MCP DSL server.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
@@ -104,8 +135,12 @@ pub struct RouteDslMcp {
 #[serde(deny_unknown_fields)]
 pub struct RouteDslMcpServer {
     /// Name of the server (referenced by lowered `mcp:<name>/...` routes).
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"\S")))]
+    #[serde(deserialize_with = "deserialize_mcp_name")]
     pub name: String,
     /// Streamable-HTTP listen address (IP:port literal).
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"\S")))]
+    #[serde(deserialize_with = "deserialize_mcp_bind")]
     pub bind: String,
     /// Optional TLS configuration.
     #[serde(default)]
@@ -134,6 +169,8 @@ pub struct RouteDslMcpServer {
 #[serde(deny_unknown_fields)]
 pub struct RouteDslMcpTool {
     /// Tool name (referenced by the lowered `mcp:<server>/tool/<name>` route).
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"\S")))]
+    #[serde(deserialize_with = "deserialize_mcp_name")]
     pub name: String,
     /// Input JSON Schema for the tool's arguments.
     pub input_schema: serde_json::Value,
@@ -145,6 +182,8 @@ pub struct RouteDslMcpTool {
 #[serde(deny_unknown_fields)]
 pub struct RouteDslMcpResource {
     /// Resource name (referenced by the lowered `mcp:<server>/resource/<name>` route).
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"\S")))]
+    #[serde(deserialize_with = "deserialize_mcp_name")]
     pub name: String,
     /// The MCP resource URI (operator config, e.g. `crm://customers`).
     pub uri: String,
@@ -760,6 +799,106 @@ mcp:
                 .iter()
                 .any(|r| r.from.starts_with("mcp:crm/resource/customers?")),
             "the resource route must be present"
+        );
+    }
+
+    // ── Blank bind/name rejection at load (bd rc-sghtz) ──
+
+    #[test]
+    fn blank_server_name_rejected_at_load() {
+        let yaml = r#"
+mcp:
+  - server:
+      name: ""
+      bind: 127.0.0.1:9100
+"#;
+        let err = serde_yml::from_str::<RouteDslRoutes>(yaml)
+            .err()
+            .expect("blank server name must be rejected at load");
+        assert!(
+            err.to_string().contains("name must not be empty"),
+            "error must name the blank field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn blank_server_bind_whitespace_rejected_at_load() {
+        let yaml = r#"
+mcp:
+  - server:
+      name: crm
+      bind: "   "
+"#;
+        let err = serde_yml::from_str::<RouteDslRoutes>(yaml)
+            .err()
+            .expect("whitespace-only server bind must be rejected at load");
+        assert!(
+            err.to_string().contains("bind must not be empty"),
+            "error must name the blank field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn blank_tool_and_resource_names_rejected_at_load() {
+        let yaml = r#"
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+    tools:
+      - name: ""
+        input_schema:
+          type: object
+    resources:
+      - name: "  "
+        uri: crm://customers
+"#;
+        let err = serde_yml::from_str::<RouteDslRoutes>(yaml)
+            .err()
+            .expect("blank tool/resource names must be rejected at load");
+        assert!(
+            err.to_string().contains("name must not be empty"),
+            "error must name the blank field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn non_blank_padded_values_load_verbatim() {
+        // Padded non-blank values must parse AND keep their raw bytes: the
+        // runtime (`SocketAddr` parse, `validate_mcp_name` charset) consumes
+        // the verbatim string, so trimming at deserialize would silently
+        // accept values the runtime rejects today.
+        let yaml = r#"
+mcp:
+  - server:
+      name: " crm "
+      bind: " 127.0.0.1:9100 "
+"#;
+        let parsed: RouteDslRoutes =
+            serde_yml::from_str(yaml).expect("padded non-blank values must still parse");
+        let mcp = &parsed.mcp[0];
+        assert_eq!(mcp.server.name, " crm ");
+        assert_eq!(mcp.server.bind, " 127.0.0.1:9100 ");
+    }
+
+    #[test]
+    fn blank_name_still_rejected_at_lowering() {
+        // Lowering is untouched by the load-time fix: a blank name injected
+        // past serde (struct built directly) must still fail the charset
+        // validation, naming the offending key.
+        let mut block = make_block();
+        block.server.name = String::new();
+        block.tools = vec![RouteDslMcpTool {
+            name: "lookup".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }];
+        let err = lower_all_mcp_to_routes(&[block])
+            .err()
+            .expect("blank server name must still be rejected at lowering");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("name") && msg.contains("invalid"),
+            "lowering error must name the invalid value, got: {msg}"
         );
     }
 }

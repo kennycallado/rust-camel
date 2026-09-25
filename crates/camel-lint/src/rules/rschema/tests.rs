@@ -709,6 +709,239 @@ mcp:
 }
 
 #[test]
+fn rschema_mcp_blank_bind_empty_rejected() {
+    // rc-sghtz: ROUTE_SCHEMA carries `\S` patterns on the MCP server
+    // `name`/`bind` fields, so a blank `bind` (empty string) is a pattern
+    // violation. With `name` valid, the only possible error site is bind:
+    // exactly one Error anchored on the raw quoted token (`""`), and the
+    // valid `name` value must stay diagnostic-free.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: \"\"
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the blank bind; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert_eq!(d.severity, Severity::Error, "blank bind must be an Error");
+    let raw = slice(source, &d.span);
+    assert_eq!(raw, "\"\"", "span must anchor on the raw quoted token");
+    assert!(
+        raw.trim_matches('"').trim().is_empty(),
+        "the anchored value must be blank; sliced: {raw:?}"
+    );
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+    assert!(
+        !diags.iter().any(|d| slice(source, &d.span).contains("crm")),
+        "the valid `name` value must stay diagnostic-free; got: {:?}",
+        diags
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_blank_name_whitespace_rejected() {
+    // rc-sghtz: same defect shape for `name`, blanked with three spaces
+    // inside quotes: the raw slice is `"   "` and must be blank after
+    // quote/whitespace trimming. With `bind` valid, `name` is the only
+    // possible error site and `bind` stays diagnostic-free.
+    let source = "\
+mcp:
+  - server:
+      name: \"   \"
+      bind: 127.0.0.1:9100
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the whitespace name; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert_eq!(d.severity, Severity::Error, "blank name must be an Error");
+    let raw = slice(source, &d.span);
+    assert_eq!(raw, "\"   \"", "span must anchor on the raw quoted token");
+    assert!(
+        raw.trim_matches('"').trim().is_empty(),
+        "the anchored value must be blank; sliced: {raw:?}"
+    );
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| slice(source, &d.span).contains("127.0.0.1:9100")),
+        "the valid `bind` value must stay diagnostic-free; got: {:?}",
+        diags
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_blank_tool_name_rejected() {
+    // rc-sghtz sweep: `RouteDslMcpTool.name` carries the same `\S`
+    // pattern, so a blank tool `name` (`""`) is a pattern violation even
+    // with a fully valid server. The single diagnostic anchors on the
+    // raw quoted tool-name token.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+    tools:
+      - name: \"\"
+        input_schema:
+          type: object
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the blank tool name; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert_eq!(
+        d.severity,
+        Severity::Error,
+        "blank tool name must be an Error"
+    );
+    let raw = slice(source, &d.span);
+    assert_eq!(raw, "\"\"", "span must anchor on the raw quoted token");
+    assert!(
+        raw.trim_matches('"').trim().is_empty(),
+        "the anchored value must be blank; sliced: {raw:?}"
+    );
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+}
+
+#[test]
+fn rschema_mcp_blank_resource_name_rejected() {
+    // rc-sghtz sweep: the MCP resource `name` carries the same `\S`
+    // pattern, so a blank resource `name` (`""`) is a pattern violation
+    // even with a fully valid server and tool. The single diagnostic
+    // anchors on the raw quoted resource-name token.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+    tools:
+      - name: lookup
+        input_schema:
+          type: object
+    resources:
+      - name: \"\"
+        uri: crm://customers
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the blank resource name; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert_eq!(
+        d.severity,
+        Severity::Error,
+        "blank resource name must be an Error"
+    );
+    let raw = slice(source, &d.span);
+    assert_eq!(raw, "\"\"", "span must anchor on the raw quoted token");
+    assert!(
+        raw.trim_matches('"').trim().is_empty(),
+        "the anchored value must be blank; sliced: {raw:?}"
+    );
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+    assert!(
+        !rschema
+            .iter()
+            .any(|d| slice(source, &d.span).contains("crm")
+                || slice(source, &d.span).contains("127.0.0.1:9100")),
+        "the server fields must stay diagnostic-free; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_blank_values_keep_nonblank_clean() {
+    // Non-blank values stay out of the blank class: a fully valid mcp
+    // document (server name+bind, one tool, one resource) yields ZERO
+    // R-SCHEMA diagnostics. Deeper bind/charset validation
+    // (SocketAddr parse, validate_mcp_name) is runtime-owned and must
+    // not leak into the lint-side blank rejection.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+    tools:
+      - name: lookup
+        input_schema:
+          type: object
+    resources:
+      - name: customers
+        uri: crm://customers
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "a non-blank mcp document must lint clean; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn rschema_mcp_tls_blank_cert_path_unknown_key_sibling_both_reported() {
     // A blank `cert_path` (pattern violation) co-occurring with an
     // unknown `rogue_key` in the SAME failed anyOf reports BOTH: the

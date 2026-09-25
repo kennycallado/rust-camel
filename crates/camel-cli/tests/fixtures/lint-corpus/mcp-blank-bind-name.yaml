@@ -1,0 +1,13 @@
+# Corpus fixture (rc-sghtz): negative witness — blank server name+bind
+# must FAIL R-SCHEMA. Blank sibling of mixed-routes-rest-mcp.yaml
+# (rc-ysvjl): that file proves the mcp form lints CLEAN, this one proves
+# blank `name`/`bind` are rejected by the route schema (both blank
+# classes in one file: whitespace-only name, empty-string bind). The
+# runtime rejects both (lowering charset check on `name`, consumer-config
+# `SocketAddr` parse on `bind`), so the lint-side Errors are agreed real
+# defects, hence baselined. R-URI walk skips the mcp subtree; no other
+# rule fires on an mcp-only document.
+mcp:
+  - server:
+      name: "   "
+      bind: ""
