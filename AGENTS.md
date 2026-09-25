@@ -208,6 +208,7 @@ bd ready --json
 ```bash
 bd create "Issue title" --description="Detailed context" -t bug|feature|task -p 0-4 --json
 bd create "Issue title" --description="What this issue is about" -p 1 --deps discovered-from:bd-123 --json
+scripts/bd-create-idempotent.sh "Issue title" ...  # retry-safe create: reuses an identical open bd <10min old
 ```
 
 **Claim and update:**
