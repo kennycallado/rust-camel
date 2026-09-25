@@ -655,7 +655,10 @@ where
 /// Record the delegate error on the current span, if one is active and
 /// declares an `error` field. The span carries the DELEGATE error while the
 /// system-broken log structures BOTH errors (rc-ntpof).
-fn record_span_error(delegate_err: &CamelError) {
+///
+/// Shared with the `do_try` arms (bd rc-zgbqq): the catch-failure envelope
+/// records the catch error on the active span the same way.
+pub(crate) fn record_span_error(delegate_err: &CamelError) {
     let span = tracing::Span::current();
     if !span.is_none() {
         span.record("error", tracing::field::display(delegate_err));
@@ -2344,135 +2347,14 @@ mod tests {
         );
     }
 
-    /// Test-only log capture: installs capturing layers over
-    /// `tracing_subscriber::registry()` via `tracing::subscriber::with_default`
-    /// for the duration of one closure, recording DEBUG-or-more-severe event
-    /// fields AND per-span `record` calls. No global state — safe under
-    /// parallel test threads. (Mirror of camel-config's `log_capture`.)
-    ///
-    /// The registry base is required: a minimal hand-rolled `Subscriber`
-    /// cannot implement `current_span`, so `Span::current().record(..)`
-    /// (used by `send_to_handler`) would silently no-op.
-    mod log_capture {
-        use std::fmt;
-        use std::sync::{Arc, Mutex};
-        use tracing::field::{Field, Visit};
-        use tracing::span::Record;
-        use tracing::{Event, Id, Level, Subscriber};
-        use tracing_subscriber::Layer;
-        use tracing_subscriber::layer::{Context, SubscriberExt};
+    // Log-capture helpers moved to the shared `crate::test_log_capture`
+    // module (bd rc-zgbqq) so the do_try tests reuse the exact same
+    // capture behavior. `capture_debugs` stays local as a thin wrapper.
+    use crate::test_log_capture::{capture_debugs_with_span_records, ensure_global_registry};
 
-        type Sink = Arc<Mutex<Vec<String>>>;
-
-        /// Renders `field="value"` pairs joined by spaces.
-        struct FieldVisitor(String);
-
-        impl Visit for FieldVisitor {
-            fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-                if !self.0.is_empty() {
-                    self.0.push(' ');
-                }
-                let _ = fmt::write(&mut self.0, format_args!("{}={:?}", field.name(), value));
-            }
-        }
-
-        /// Layer capturing events (`error!`/`warn!`/`debug!`/...) into a sink.
-        struct EventCaptureLayer {
-            events: Sink,
-        }
-
-        impl<S> Layer<S> for EventCaptureLayer
-        where
-            S: Subscriber,
-        {
-            fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-                // tracing-core orders Levels so that more-severe levels
-                // compare SMALLER (Error=4 .. Trace=0 with a reversed Ord):
-                // "DEBUG and more severe" is `<= Level::DEBUG`. A `>=`
-                // comparison here silently drops ERROR/WARN/INFO events.
-                if *event.metadata().level() <= Level::DEBUG {
-                    let mut visitor = FieldVisitor(String::new());
-                    event.record(&mut visitor);
-                    if let Ok(mut slot) = self.events.lock() {
-                        slot.push(visitor.0);
-                    }
-                }
-            }
-        }
-
-        /// Layer capturing per-span `record` calls (e.g. a field recorded on
-        /// an entered span via `Span::current().record(..)`).
-        struct SpanRecordLayer {
-            records: Sink,
-        }
-
-        impl<S> Layer<S> for SpanRecordLayer
-        where
-            S: Subscriber,
-        {
-            fn on_record(&self, _id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
-                let mut visitor = FieldVisitor(String::new());
-                values.record(&mut visitor);
-                if let Ok(mut slot) = self.records.lock() {
-                    slot.push(visitor.0);
-                }
-            }
-        }
-
-        /// OnceLock-gated global registry install: heals/prevents callsite-
-        /// interest poisoning of the shared error-handler `debug!`/`error!`
-        /// callsites (`error_handler.rs:280/370` and the system-broken
-        /// `error!` sites in `send_to_handler`), which subscriber-less
-        /// sibling error-handler tests in this binary can hit first (fix
-        /// pattern: c3853198; bd rc-img5). Every test that triggers those
-        /// callsites must call this BEFORE the first evaluation, otherwise
-        /// the callsite interest is cached as `never` process-wide.
-        pub(super) fn ensure_global_registry() {
-            static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-            if INIT.set(()).is_ok() {
-                let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
-            }
-        }
-
-        /// Runs `f` with capturing layers installed and returns `(f's result,
-        /// captured event field strings, captured span record strings)`.
-        /// Events and span records are kept in separate vectors, each in
-        /// emission order. Rendered as `field="value"` pairs joined by
-        /// spaces, with the human-readable text under the standard
-        /// `message` field.
-        pub(super) fn capture_debugs_with_span_records<T>(
-            f: impl FnOnce() -> T,
-        ) -> (T, Vec<String>, Vec<String>) {
-            ensure_global_registry();
-            let events: Sink = Default::default();
-            let span_records: Sink = Default::default();
-            let subscriber = tracing_subscriber::registry()
-                .with(EventCaptureLayer {
-                    events: Arc::clone(&events),
-                })
-                .with(SpanRecordLayer {
-                    records: Arc::clone(&span_records),
-                });
-            let out = tracing::subscriber::with_default(subscriber, f);
-            let collected = events
-                .lock()
-                .ok()
-                .map(|slot| slot.clone())
-                .unwrap_or_default();
-            let spans = span_records
-                .lock()
-                .ok()
-                .map(|slot| slot.clone())
-                .unwrap_or_default();
-            (out, collected, spans)
-        }
-
-        /// Event-only capture: discards span records (existing contract).
-        pub(super) fn capture_debugs<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
-            let (out, events, _span_records) = capture_debugs_with_span_records(f);
-            (out, events)
-        }
+    /// Event-only capture: discards span records (existing contract).
+    fn capture_debugs<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+        let (out, events, _span_records) = capture_debugs_with_span_records(f);
+        (out, events)
     }
-
-    use log_capture::{capture_debugs, capture_debugs_with_span_records, ensure_global_registry};
 }

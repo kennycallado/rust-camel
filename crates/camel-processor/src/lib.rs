@@ -46,6 +46,8 @@ pub mod stream_codec;
 pub mod streaming_split_segment;
 pub mod streaming_splitter;
 pub mod tar_splitter;
+#[cfg(test)]
+mod test_log_capture;
 pub mod throttler;
 pub mod validate;
 pub mod wire_tap;

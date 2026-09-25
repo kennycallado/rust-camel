@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use camel_api::security_policy::{CredentialSource, Principal, SecurityPolicyConfig};
-use camel_api::{Exchange, Message, Value};
+use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, Message, Value};
 use camel_auth::native_auth::NativeCredentialStore;
 use camel_auth::{
     NativeCredential, NativeCredentialSecret, RolePolicy, StaticTokenAuthenticator,
@@ -394,6 +394,71 @@ async fn http_pipeline_error_returns_500() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 500);
+}
+
+// ---------------------------------------------------------------------------
+// Test 11b (dotryorig task 1.3): doTry catch failure maps the HTTP status
+// from the CATCH error kind
+// ---------------------------------------------------------------------------
+
+/// Integration test: when a doTry catch clause body itself fails, the mapped
+/// HTTP status derives from the CATCH error kind, not the original try error.
+///
+/// Pipeline (no route-level handler):
+///   http://…/translate → doTry(process fails Unauthenticated("orig-auth"))
+///     → doCatch(["Unauthenticated"], handled, process fails
+///       ValidationError("translated-validation"))
+///
+/// Expected: response status 400 with a json body naming "validation_error"
+/// — the CATCH kind's mapping through `pipeline_error_to_reply` — and NOT
+/// 401, which is what the original Unauthenticated kind alone would map to.
+#[tokio::test(flavor = "multi_thread")]
+async fn do_try_catch_failure_maps_http_status_from_catch_kind() {
+    install_crypto_provider();
+    let port = stage_http_listener("127.0.0.1").await;
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .build()
+        .await;
+
+    let route = RouteBuilder::from(&format!("http://127.0.0.1:{port}/translate"))
+        .route_id("http-do-try-catch-translation")
+        .do_try()
+        .process(BoxProcessor::from_fn(|_ex: Exchange| {
+            Box::pin(async { Err(CamelError::Unauthenticated("orig-auth".into())) })
+        }))
+        .do_catch_exception(&["Unauthenticated"])
+        .handled()
+        .process(BoxProcessor::from_fn(|_ex: Exchange| {
+            Box::pin(async { Err(CamelError::ValidationError("translated-validation".into())) })
+        }))
+        .end_do_catch()
+        .end_do_try()
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/translate"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "status must derive from the CATCH ValidationError kind (the original \
+         Unauthenticated kind alone would map to 401)"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("validation_error"),
+        "body must carry the catch kind's validation_error code, got: {body}"
+    );
+
+    h.stop().await;
 }
 
 // ---------------------------------------------------------------------------

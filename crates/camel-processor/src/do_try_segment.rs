@@ -4,6 +4,7 @@
 //! with the exchange state intact. See ADR-0025 §3.
 
 use crate::do_try::CatchMatcher;
+use crate::error_handler::record_span_error;
 use camel_api::error_handler::ExceptionDisposition;
 use camel_api::outcome_pipeline::OutcomePipeline;
 use camel_api::pipeline_outcome::PipelineOutcome;
@@ -160,6 +161,18 @@ impl OutcomePipeline for DoTrySegment {
                                 // the catch chain (no recursive catch-of-catch in
                                 // Camel). Skip remaining catches and finally.
                                 PipelineOutcome::Failed(catch_err) => {
+                                    // Sealed failure envelope: the catch error
+                                    // stays the main error (returned below);
+                                    // the original try error is surfaced
+                                    // through the unconditional warn record
+                                    // and, when a span is active, the span
+                                    // error record. No new span is created.
+                                    tracing::warn!(
+                                        original_error = %err,
+                                        catch_error = %catch_err,
+                                        "do_try catch block failed; catch error supersedes original"
+                                    );
+                                    record_span_error(&catch_err);
                                     return PipelineOutcome::Failed(catch_err);
                                 }
                             }
@@ -189,6 +202,7 @@ impl OutcomePipeline for DoTrySegment {
 mod tests {
     use super::*;
     use crate::do_try::CatchMatcher;
+    use crate::test_log_capture::{capture_debugs_with_span_records, captured_field, record_field};
     use camel_api::pipeline_outcome::PipelineOutcome;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -469,6 +483,85 @@ mod tests {
             finally_call.load(Ordering::SeqCst),
             0,
             "finally must NOT run when on_when=false"
+        );
+    }
+
+    // ── Catch-body failure envelope (compiled-segment path) ──
+
+    fn catch_fails_segment() -> DoTrySegment {
+        DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("orig".into())),
+            catches: vec![CatchClauseSegment {
+                matcher: CatchMatcher::ByVariant(vec!["ProcessorError".into()]),
+                on_when: None,
+                body: seg_fail(CamelError::Io("catch-fail".into())),
+                disposition: ExceptionDisposition::Handled,
+            }],
+            finally: None,
+        }
+    }
+
+    #[test]
+    fn catch_body_failure_returns_catch_err_and_marks_span() {
+        let mut seg = catch_fails_segment();
+        let (result, _captured, span_records) = capture_debugs_with_span_records(|| {
+            // Declared `error` field so record_span_error's record lands.
+            let span = tracing::info_span!("dotry_seg_test", error = tracing::field::Empty);
+            let _guard = span.enter();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(async { seg.run(Exchange::default()).await })
+        });
+
+        assert!(
+            matches!(result, PipelineOutcome::Failed(CamelError::Io(_))),
+            "catch failure must surface the catch error as Failed(Io), got: {result:?}"
+        );
+        // The span recorded the `error` field with the CATCH error.
+        // Structured field lookup: substring `error=` would also match
+        // `original_error=` suffixes.
+        assert!(
+            span_records.iter().any(|line| {
+                captured_field(line, "error").is_some_and(|v| v.contains("catch-fail"))
+            }),
+            "expected span error record carrying the catch error, span records: {span_records:?}"
+        );
+    }
+
+    #[test]
+    fn catch_body_failure_emits_envelope_log() {
+        let mut seg = catch_fails_segment();
+        let (result, captured, _span_records) = capture_debugs_with_span_records(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(async { seg.run(Exchange::default()).await })
+        });
+
+        assert!(
+            matches!(result, PipelineOutcome::Failed(CamelError::Io(_))),
+            "catch failure must surface the catch error as Failed(Io), got: {result:?}"
+        );
+        // Structured field lookup on the envelope record, not message
+        // formatting.
+        let original = record_field(&captured, "do_try catch block failed", "original_error")
+            .unwrap_or_else(|| {
+                panic!("envelope record missing original_error field, captured: {captured:?}")
+            });
+        let catch = record_field(&captured, "do_try catch block failed", "catch_error")
+            .unwrap_or_else(|| {
+                panic!("envelope record missing catch_error field, captured: {captured:?}")
+            });
+        assert!(
+            original.contains("orig"),
+            "original_error must carry the original error, got: {original}"
+        );
+        assert!(
+            catch.contains("catch-fail"),
+            "catch_error must carry the catch error, got: {catch}"
         );
     }
 }

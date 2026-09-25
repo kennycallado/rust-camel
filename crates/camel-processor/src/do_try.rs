@@ -1,12 +1,17 @@
 //! ## Stop semantics (ADR-0025)
 //!
 //! This segment implements `OutcomePipeline` and propagates `PipelineOutcome::Stopped(ex)` with the exchange state intact (including mutations made inside the segment body before Stop fired). See ADR-0025 §3 (stopped-exchange-state-preservation invariant).
+//!
+//! Catch-block failure envelope (bd rc-zgbqq): if a catch body fails, the catch error stays the main error in every disposition; the original error lives in the `warn` record ("do_try catch block failed; catch error supersedes original", fields `original_error` and `catch_error`) and, when a span is active, in the span event.
+//! See the error-handler spec, requirement "delegate failure propagates the original error" (that rule covers `handled_by` delegates, not catch bodies).
 
 use camel_api::error_handler::ExceptionDisposition;
 use camel_api::exchange::PROPERTY_EXCEPTION_HANDLED;
 use camel_api::{BoxProcessor, CamelError, Exchange, FilterPredicate};
 use tower::Service;
 use tower::ServiceExt;
+
+use crate::error_handler::record_span_error;
 
 /// Matcher for a `doCatch` clause.
 #[derive(Clone)]
@@ -110,43 +115,59 @@ async fn run_pipeline(
 }
 
 /// Run the finally block. Camel parity for finally-throws:
-/// - If finally succeeds: return its exchange.
-/// - If finally throws AND there was a previous error: restore previous (log finally_err).
-/// - If finally throws AND no previous error: propagate finally_err.
+/// - If finally succeeds (or is skipped): `Completed` with its exchange.
+/// - If finally throws AND there was a previous error: `Restore` (caller
+///   logs and restores the previous error).
+/// - If finally throws AND no previous error: `NoPreviousFail` (caller logs
+///   and propagates finally_err).
+///
+/// Logging lives at the CALLERS so the restore record's field names can
+/// match the calling flow (`previous_error` vs `catch_error`, bd rc-zgbqq).
 async fn run_finally(
     finally_steps: Vec<BoxProcessor>,
     finally_on_when: Option<FilterPredicate>,
     ex: Exchange,
     previous_err: Option<CamelError>,
-) -> Result<Exchange, CamelError> {
+) -> FinallyOutcome {
     if finally_steps.is_empty() {
-        return Ok(ex);
+        return FinallyOutcome::Completed(ex);
     }
     if let Some(on_when) = &finally_on_when
         && !on_when(&ex)
     {
-        return Ok(ex);
+        return FinallyOutcome::Completed(ex);
     }
     match run_pipeline(finally_steps, ex).await {
-        Ok(ex) => Ok(ex),
+        Ok(ex) => FinallyOutcome::Completed(ex),
         Err(failed) => {
             let (_, finally_err) = *failed;
             match previous_err {
-                Some(prev) => {
-                    tracing::warn!(
-                        finally_error = %finally_err,
-                        previous_error = %prev,
-                        "doFinally threw; restoring previous exception (Camel parity)"
-                    );
-                    Err(prev)
-                }
-                None => {
-                    tracing::warn!(error = %finally_err, "doFinally threw");
-                    Err(finally_err)
-                }
+                Some(prev) => FinallyOutcome::Restore {
+                    previous: prev,
+                    finally_err,
+                },
+                None => FinallyOutcome::NoPreviousFail(finally_err),
             }
         }
     }
+}
+
+/// Result of `run_finally`. Tower-local to this module — unrelated to the
+/// identically-named enum in `do_try_segment.rs`.
+// The variant shape is fixed by the sealed do_try ruling (bd rc-zgbqq);
+// Exchange simply dwarfs the error payloads, so allow the lint instead of
+// boxing and drifting from the specified envelope.
+#[allow(clippy::large_enum_variant)]
+enum FinallyOutcome {
+    /// Finally ran (or was skipped) successfully; carries its exchange.
+    Completed(Exchange),
+    /// Finally threw with no previous error; the finally error wins.
+    NoPreviousFail(CamelError),
+    /// Finally threw with a previous error; the previous error is restored.
+    Restore {
+        previous: CamelError,
+        finally_err: CamelError,
+    },
 }
 
 impl tower::Service<Exchange> for DoTryService {
@@ -176,7 +197,15 @@ impl tower::Service<Exchange> for DoTryService {
         Box::pin(async move {
             let try_result = run_pipeline(try_steps, exchange).await;
             match try_result {
-                Ok(ex) => run_finally(finally_steps, finally_on_when, ex, None).await,
+                Ok(ex) => match run_finally(finally_steps, finally_on_when, ex, None).await {
+                    FinallyOutcome::Completed(ex) => Ok(ex),
+                    FinallyOutcome::NoPreviousFail(fin) => {
+                        tracing::warn!(error = %fin, "doFinally threw");
+                        Err(fin)
+                    }
+                    // Unreachable: the try-Ok flow passes no previous error.
+                    FinallyOutcome::Restore { previous, .. } => Err(previous),
+                },
                 Err(failed) => {
                     let (failed_ex, original_err) = *failed;
                     let mut ex = failed_ex;
@@ -225,13 +254,31 @@ impl tower::Service<Exchange> for DoTryService {
                                     // Propagate and any future variant thread the original error.
                                     _ => Some(original_err.clone()),
                                 };
-                                let mut ex = run_finally(
+                                let mut ex = match run_finally(
                                     finally_steps.clone(),
                                     finally_on_when.clone(),
                                     ok_ex,
                                     prev,
                                 )
-                                .await?;
+                                .await
+                                {
+                                    FinallyOutcome::Completed(ex) => ex,
+                                    FinallyOutcome::NoPreviousFail(fin) => {
+                                        tracing::warn!(error = %fin, "doFinally threw");
+                                        return Err(fin);
+                                    }
+                                    FinallyOutcome::Restore {
+                                        previous,
+                                        finally_err,
+                                    } => {
+                                        tracing::warn!(
+                                            finally_error = %finally_err,
+                                            previous_error = %previous,
+                                            "doFinally threw; restoring previous exception (Camel parity)"
+                                        );
+                                        return Err(previous);
+                                    }
+                                };
                                 // AFTER finally has run (and had access to exception props),
                                 // apply handle_error() for Handled disposition to clear the
                                 // error state and set CamelExceptionHandled=true marker.
@@ -244,29 +291,67 @@ impl tower::Service<Exchange> for DoTryService {
                                 }
                             }
                             Err(failed) => {
-                                // Catch threw. Run finally with previous=catch_err.
-                                // Per Camel parity, if finally itself throws, catch_err is restored.
+                                // Catch threw. Sealed failure envelope (bd rc-zgbqq):
+                                // the catch error stays the main error (returned
+                                // below and threaded into finally); the original is
+                                // surfaced through the unconditional warn record
+                                // and, best-effort, the active span. The event
+                                // lands on the current span when one is entered —
+                                // no new span, no second event.
                                 let (catch_ex, catch_err) = *failed;
-                                let _ex = run_finally(
+                                tracing::warn!(
+                                    original_error = %original_err,
+                                    catch_error = %catch_err,
+                                    "do_try catch block failed; catch error supersedes original"
+                                );
+                                record_span_error(&catch_err);
+                                // Run finally with previous=catch_err. Per Camel
+                                // parity, if finally itself throws, catch_err is
+                                // restored.
+                                let outcome = run_finally(
                                     finally_steps.clone(),
                                     finally_on_when.clone(),
                                     catch_ex,
                                     Some(catch_err.clone()),
                                 )
-                                .await?;
+                                .await;
+                                if let FinallyOutcome::Restore {
+                                    previous,
+                                    finally_err,
+                                } = outcome
+                                {
+                                    tracing::warn!(
+                                        catch_error = %previous,
+                                        finally_error = %finally_err,
+                                        "doFinally threw after failed catch; restoring catch error"
+                                    );
+                                    return Err(previous);
+                                }
                                 Err(catch_err)
                             }
                         };
                     }
 
                     // No catch matched. Run finally with previous=original. Propagate original.
-                    let _ex = run_finally(
+                    let outcome = run_finally(
                         finally_steps,
                         finally_on_when,
                         ex,
                         Some(original_err.clone()),
                     )
-                    .await?;
+                    .await;
+                    if let FinallyOutcome::Restore {
+                        previous,
+                        finally_err,
+                    } = outcome
+                    {
+                        tracing::warn!(
+                            finally_error = %finally_err,
+                            previous_error = %previous,
+                            "doFinally threw; restoring previous exception (Camel parity)"
+                        );
+                        return Err(previous);
+                    }
                     Err(original_err)
                 }
             }
@@ -282,6 +367,7 @@ impl tower::Service<Exchange> for DoTryService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_log_capture::{capture_debugs_with_span_records, captured_field, record_field};
     use camel_api::{BoxProcessor, BoxProcessorExt};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -676,6 +762,174 @@ mod tests {
             finally_flag.load(Ordering::SeqCst),
             0,
             "doFinally must NOT run when on_when returns false"
+        );
+    }
+
+    fn catch_fails_service() -> BoxProcessor {
+        let try_step = always_fail(CamelError::ProcessorError("orig-lost".into()));
+        let catch_step = always_fail(CamelError::Io("catch-fail".into()));
+        let mut svc = DoTryService::new(vec![try_step]);
+        svc.catch_clauses.push(CatchClause {
+            matcher: CatchMatcher::ByVariant(vec!["ProcessorError".into()]),
+            on_when: None,
+            steps: vec![catch_step],
+            disposition: ExceptionDisposition::Handled,
+        });
+        BoxProcessor::new(svc)
+    }
+
+    #[tokio::test]
+    async fn catch_throws_under_propagate_disposition_returns_catch_err() {
+        let try_step = always_fail(CamelError::ProcessorError("orig".into()));
+        let catch_step = always_fail(CamelError::Io("catch-fail".into()));
+        let mut svc = DoTryService::new(vec![try_step]);
+        svc.catch_clauses.push(CatchClause {
+            matcher: CatchMatcher::ByVariant(vec!["ProcessorError".into()]),
+            on_when: None,
+            steps: vec![catch_step],
+            disposition: ExceptionDisposition::Propagate,
+        });
+
+        let mut boxed = BoxProcessor::new(svc);
+        let result = boxed.ready().await.unwrap().call(Exchange::default()).await;
+        assert!(
+            matches!(result, Err(CamelError::Io(_))),
+            "Propagate-disposition catch failure must return the catch error, \
+             same envelope as Handled, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn catch_throws_logs_original_and_catch_error() {
+        let mut boxed = catch_fails_service();
+        let (result, captured, _span_records) = capture_debugs_with_span_records(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(async { boxed.ready().await.unwrap().call(Exchange::default()).await })
+        });
+
+        assert!(
+            matches!(result, Err(CamelError::Io(_))),
+            "catch failure must return Err(Io), got: {result:?}"
+        );
+        // Structured field lookup on the envelope record, not message
+        // formatting.
+        let original = record_field(&captured, "do_try catch block failed", "original_error")
+            .unwrap_or_else(|| {
+                panic!("envelope record missing original_error field, captured: {captured:?}")
+            });
+        let catch = record_field(&captured, "do_try catch block failed", "catch_error")
+            .unwrap_or_else(|| {
+                panic!("envelope record missing catch_error field, captured: {captured:?}")
+            });
+        assert!(
+            original.contains("orig-lost"),
+            "original_error must carry the original error, got: {original}"
+        );
+        assert!(
+            catch.contains("catch-fail"),
+            "catch_error must carry the catch error, got: {catch}"
+        );
+    }
+
+    #[test]
+    fn catch_throws_marks_span_error_and_event() {
+        let mut boxed = catch_fails_service();
+        let (result, captured, span_records) = capture_debugs_with_span_records(|| {
+            // Declared `error` field so record_span_error's record lands.
+            let span = tracing::info_span!("dotry_test", error = tracing::field::Empty);
+            let _guard = span.enter();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(async { boxed.ready().await.unwrap().call(Exchange::default()).await })
+        });
+
+        assert!(
+            matches!(result, Err(CamelError::Io(_))),
+            "catch failure must return Err(Io), got: {result:?}"
+        );
+        // The span recorded the `error` field with the CATCH error.
+        // Structured field lookup: substring `error=` would also match
+        // `original_error=` suffixes.
+        assert!(
+            span_records.iter().any(|line| {
+                captured_field(line, "error").is_some_and(|v| v.contains("catch-fail"))
+            }),
+            "expected span error record carrying the catch error, span records: {span_records:?}"
+        );
+        // The WARN event still carries original_error while a span is active.
+        let original = record_field(
+            &captured,
+            "do_try catch block failed",
+            "original_error",
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "envelope record missing original_error field under active span, captured: {captured:?}"
+            )
+        });
+        assert!(
+            original.contains("orig-lost"),
+            "original_error must carry the original error under an active span, got: {original}"
+        );
+    }
+
+    #[test]
+    fn catch_and_finally_throw_logs_finally_error() {
+        let try_step = always_fail(CamelError::ProcessorError("orig".into()));
+        let catch_step = always_fail(CamelError::Io("catch-fail".into()));
+        let finally_step = always_fail(CamelError::Config("fin-fail".into()));
+        let mut svc = DoTryService::new(vec![try_step]);
+        svc.catch_clauses.push(CatchClause {
+            matcher: CatchMatcher::ByVariant(vec!["ProcessorError".into()]),
+            on_when: None,
+            steps: vec![catch_step],
+            disposition: ExceptionDisposition::Handled,
+        });
+        svc.finally_steps = vec![finally_step];
+
+        let mut boxed = BoxProcessor::new(svc);
+        let (result, captured, _span_records) = capture_debugs_with_span_records(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(async { boxed.ready().await.unwrap().call(Exchange::default()).await })
+        });
+
+        assert!(
+            matches!(result, Err(CamelError::Io(_))),
+            "catch error must be restored over finally error, got: {result:?}"
+        );
+        let catch = record_field(
+            &captured,
+            "doFinally threw after failed catch; restoring catch error",
+            "catch_error",
+        )
+        .unwrap_or_else(|| {
+            panic!("catch-failed restore record missing catch_error field, captured: {captured:?}")
+        });
+        let finally = record_field(
+            &captured,
+            "doFinally threw after failed catch; restoring catch error",
+            "finally_error",
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "catch-failed restore record missing finally_error field, captured: {captured:?}"
+            )
+        });
+        assert!(
+            catch.contains("catch-fail"),
+            "catch_error must carry the catch error, got: {catch}"
+        );
+        assert!(
+            finally.contains("fin-fail"),
+            "finally_error must carry the finally error, got: {finally}"
         );
     }
 }

@@ -291,6 +291,16 @@ block with catch clauses and an optional finally clause. A handled catch does
 not trigger the route-level error handler. The block stays a local island.
 Unhandled errors bubble up to the route.
 
+A catch body can fail too. When it fails, the catch error is the main error in
+every disposition. Route-level kind matching and HTTP status mapping use the
+catch error, so exception translation works. The original error is not lost
+from logs and traces.
+The `warn` record ("do_try catch block failed; catch error supersedes
+original") carries `original_error` and `catch_error`, and an active span
+records both errors. A failing `handled_by` delegate is different: it
+propagates the original error as the main error, because the delegate is
+infrastructure, not route code.
+
 ```rust,ignore
 {{#include ../../../examples/do-try/src/main.rs:do-try-route}}
 ```
