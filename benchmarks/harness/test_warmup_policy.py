@@ -16,8 +16,12 @@ CONTEXT_MD = HARNESS_DIR / "CONTEXT.md"
 RUN_SH = HARNESS_DIR / "run.sh"
 SEALED_DIR = REPO_ROOT / "benchmarks" / "records" / "20260903T084658Z"
 
-# Pinned SHA-256 of the sealed era-2 record (2026-09-03). Any change to
-# these files is a republish and must fail this test.
+# Pinned SHA-256 of the sealed era-2 record (2026-09-03). run.json and
+# CAVEATS.md are evidence: any change is a republish and must fail this
+# test. summary.md is a derived view (e_opus ruling 2026-09-25): the pin
+# tracks the current renderer's output and is updated when the renderer
+# legitimately changes — regeneration must always go through
+# `summarize.py --check` green first.
 SEALED_SHA256 = {
     "CAVEATS.md": (
         "b4cb35aab10f5b23bc7720062ced5e98b0029cb80e25a9bf173ecb5941e08044"
@@ -26,7 +30,7 @@ SEALED_SHA256 = {
         "fe14eca6e69c55a5d5bd725772731e0b92f8e3bbcddd8924d1b8bd1b08342b84"
     ),
     "summary.md": (
-        "b824f0f184010b0e7c7e3d68d832574fb6d4cad872845316289bfdc9ea77b71e"
+        "ab1f7c5d4d51228432a54ff1ea5c027398037bfdf86b7a65a1d44102dca2682f"
     ),
 }
 
@@ -37,7 +41,7 @@ REQUIRED_PHRASES = (
     "wall-clock",                      # Protocol A collects until the deadline
     "MessageBoundUnconverged",         # retained only for compatibility
     "Protocol B",                      # unchanged
-    "never modified or republished",   # sealed-record boundary
+    "never modified; `summary.md` is a derived view",  # sealing boundary (e_opus 2026-09-25)
     "20260903T084658Z",                # the sealed record, by name
     "docs-investigation-strategy.md",  # live-defect link (§8)
 )

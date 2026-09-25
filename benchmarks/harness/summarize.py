@@ -271,6 +271,26 @@ def round_values(values, where):
 _ISOLATED_MEDIAN_REL_GAP = 0.20
 
 
+def _resolved_median_isolated(cell):
+    """Stored flag wins; pre-field records compute it from their own
+    round_values (m4 stays metric-gated False, mirroring
+    _summary_cell). Missing must never render as not-flagged (e_opus
+    ruling 2026-09-25: unknown is not false)."""
+    if "median_isolated" in cell:
+        return cell["median_isolated"]
+    if cell.get("metric") == "m4" or "round_values" not in cell:
+        return False
+    return _median_isolated(cell["round_values"])
+
+
+def _resolved_degenerate(ratio):
+    """Stored flag wins; pre-field records recompute from their own
+    bounds (exact f64 equality, mirroring the publish-time check)."""
+    if "degenerate" in ratio:
+        return ratio["degenerate"]
+    return ratio["ci_lo"] == ratio["point"] or ratio["ci_hi"] == ratio["point"]
+
+
 def _median_isolated(values):
     """True when the median falls in a sparse gap of its own sample.
 
@@ -1248,12 +1268,12 @@ def emit_summary(record, out_dir):
                 lines.append(
                     f"| {c['scenario']} | {c['contender']}"
                     f" | {_fmt(c['median'])}"
-                    # Legacy/pre-field shapes carry no key: render `-`
-                    # rather than crash (mirrors Ratios `degenerate`).
-                    f" | {'true' if c.get('median_isolated') else '-'} |"
+                    # Pre-field shapes: compute from the cell's own
+                    # round_values (never '-' for computable unknowns).
+                    f" | {'true' if _resolved_median_isolated(c) else '-'} |"
                 )
             lines.append("")
-            if any(c.get("median_isolated") for c in measured):
+            if any(_resolved_median_isolated(c) for c in measured):
                 lines += [
                     "- `median_isolated: true` median falls in a sparse"
                     " gap of its own round sample (small-n multimodal"
@@ -1328,10 +1348,9 @@ def emit_summary(record, out_dir):
                     point=_fmt(r["point"]),
                     ci_lo=_fmt(r["ci_lo"]),
                     ci_hi=_fmt(r["ci_hi"]),
-                    # Legacy rows (pre-field records) carry no key:
-                    # render `-` rather than crash. degenerate is the
-                    # only column allowed to be absent.
-                    degenerate="true" if r.get("degenerate") else "-",
+                    # Pre-field rows: recompute from the row's own
+                    # bounds (never '-' for computable unknowns).
+                    degenerate="true" if _resolved_degenerate(r) else "-",
                     method=r["method"],
                 )
             )

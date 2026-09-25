@@ -2658,3 +2658,75 @@ class DigestGuardCheckTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreFieldShapeRenderingTest(unittest.TestCase):
+    """e_opus ruling 2026-09-25: sealed pre-field records must render
+    COMPUTED flags, never '-' for a computable unknown (unknown is not
+    false). Canonical examples: run-1 20260903T084658Z bimodal node-native
+    rounds and run-2 20260915T093128Z collapsed ci_hi == point ratio."""
+
+    def _old_shape_cell(self):
+        # No median_isolated key — exactly the sealed run-1 shape.
+        return {
+            "scenario": "t2-realistic-eip",
+            "contender": "node-native",
+            "metric": "m2",
+            "unit": "us",
+            "round_values": [6673, 6883, 9337, 16501, 16581],
+            "median": 9337.0,
+        }
+
+    def _old_shape_ratio(self):
+        # No degenerate key — exactly the sealed run-2 m3 shape.
+        return {
+            "numerator": "rust-camel-lib",
+            "denominator": "node-fastify",
+            "metric": "m3",
+            "point": 4.401240447859682,
+            "ci_lo": 4.371287,
+            "ci_hi": 4.401240447859682,
+            "method": "bootstrap-paired",
+        }
+
+    def test_resolver_computes_isolated_median_for_old_shape(self):
+        self.assertTrue(
+            summarize._resolved_median_isolated(self._old_shape_cell())
+        )
+
+    def test_resolver_stored_flag_wins_over_computation(self):
+        cell = self._old_shape_cell()
+        cell["median_isolated"] = False
+        self.assertFalse(summarize._resolved_median_isolated(cell))
+
+    def test_resolver_m4_old_shape_stays_false(self):
+        cell = self._old_shape_cell()
+        cell["metric"] = "m4"
+        self.assertFalse(summarize._resolved_median_isolated(cell))
+
+    def test_resolver_computes_degenerate_for_old_shape(self):
+        self.assertTrue(
+            summarize._resolved_degenerate(self._old_shape_ratio())
+        )
+
+    def test_resolver_stored_degenerate_wins(self):
+        ratio = self._old_shape_ratio()
+        ratio["degenerate"] = False
+        self.assertFalse(summarize._resolved_degenerate(ratio))
+
+    def test_emit_summary_renders_true_for_old_shapes(self):
+        record = {
+            "run_id": "t-oldshape",
+            "date": "2026-09-03",
+            "era": "2",
+            "git_commit": "0" * 40,
+            "cells": [self._old_shape_cell()],
+            "ratios": [self._old_shape_ratio()],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            summarize.emit_summary(record, out)
+            text = (out / "summary.md").read_text(encoding="utf-8")
+        self.assertIn("| true |", text)  # median_isolated computed
+        self.assertIn("true", text.split("## Ratios")[1])  # degenerate
+        self.assertIn("`median_isolated: true`", text)  # footnote fired
