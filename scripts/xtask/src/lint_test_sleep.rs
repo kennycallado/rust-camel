@@ -311,6 +311,11 @@ impl Visit<'_> for ShadowCollector<'_> {
         self.names.insert(f.sig.ident.to_string());
         visit::visit_item_fn(self, f);
     }
+
+    fn visit_item_mod(&mut self, m: &syn::ItemMod) {
+        self.names.insert(m.ident.to_string());
+        visit::visit_item_mod(self, m);
+    }
 }
 
 struct SleepFinder<'a> {
@@ -322,8 +327,11 @@ struct SleepFinder<'a> {
 
 impl SleepFinder<'_> {
     /// True when the callee path is a fully-qualified sleep call (leading
-    /// `::` tolerated) or a single segment resolving through the enclosing
-    /// module chain to a sleep target, unless a local binding shadows it.
+    /// `::` tolerated), a single segment resolving through the enclosing
+    /// module chain to a sleep target, or a multi-segment path whose first
+    /// segment resolves through that chain to a sleep module (the rest
+    /// matched literally); a local binding shadowing the first segment
+    /// suppresses the expansion.
     fn is_sleep_call(&self, path: &syn::Path) -> bool {
         let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         // A leading `::` lives in `path.leading_colon`, not in the segments,
@@ -335,8 +343,19 @@ impl SleepFinder<'_> {
                 && self
                     .resolve(name)
                     .is_some_and(|target| is_sleep_target(target))
+        } else if is_sleep_target(&qualified) {
+            true
         } else {
-            is_sleep_target(&qualified)
+            // Trivial first-segment expansion: `use tokio::time as clock;`
+            // plus `clock::sleep(..)` resolves through the enclosing module
+            // chain exactly like the single-segment branch. Absolute paths
+            // (`::a::b::f`) bypass alias expansion — the literal check
+            // above already covers them.
+            path.leading_colon.is_none()
+                && !self.shadow.contains(segments[0].as_str())
+                && self.resolve(segments[0].as_str()).is_some_and(|target| {
+                    is_sleep_target(&format!("{target}::{}", segments[1..].join("::")))
+                })
         }
     }
 
@@ -486,8 +505,64 @@ mod tests {
     }
 
     #[test]
+    fn module_alias_qualified_sleep_reported() {
+        let src = "use tokio::time as clock;\n\n#[tokio::test]\nasync fn t() {\n    let d = std::time::Duration::from_millis(1);\n    clock::sleep(d).await;\n}\n";
+        let findings = scan_source(src, Path::new("fixture.rs")).expect("parse ok");
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn plain_module_import_qualified_sleep_reported() {
+        let src = "use tokio::time;\n\n#[tokio::test]\nasync fn t() {\n    let d = std::time::Duration::from_millis(1);\n    time::sleep(d).await;\n}\n";
+        let findings = scan_source(src, Path::new("fixture.rs")).expect("parse ok");
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn plain_module_import_qualified_thread_sleep_reported() {
+        let src = "use std::thread;\n\n#[test]\nfn t() {\n    thread::sleep(1);\n}\n";
+        let findings = scan_source(src, Path::new("fixture.rs")).expect("parse ok");
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn module_alias_qualified_thread_sleep_reported() {
+        let src = "use std::thread as th;\n\n#[test]\nfn t() {\n    th::sleep(1);\n}\n";
+        let findings = scan_source(src, Path::new("fixture.rs")).expect("parse ok");
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn non_sleep_module_alias_qualified_not_reported() {
+        let src = "use std::fmt as fmt;\n\n#[test]\nfn t() {\n    fmt::sleep(1);\n}\n";
+        let findings = scan_source(src, Path::new("fixture.rs")).expect("parse ok");
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn absolute_qualified_sleep_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    let d = std::time::Duration::from_millis(1);\n    ::tokio::time::sleep(d).await;\n}\n";
+        let findings = scan_source(src, Path::new("fixture.rs")).expect("parse ok");
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn grouped_import_alias_qualified_sleep_reported() {
+        let src = "use tokio::{time as clock, sync};\n\n#[tokio::test]\nasync fn t() {\n    let d = std::time::Duration::from_millis(1);\n    clock::sleep(d).await;\n}\n";
+        let findings = scan_source(src, Path::new("fixture.rs")).expect("parse ok");
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
     fn shadowed_local_symbol_not_reported() {
         let src = "use tokio::time::sleep;\n\n#[tokio::test]\nasync fn t() {\n    fn sleep(_: std::time::Duration) {}\n    let d = std::time::Duration::from_millis(1);\n    sleep(d);\n}\n";
+        let findings = scan_source(src, Path::new("fixture.rs")).expect("parse ok");
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn shadowed_module_alias_qualified_not_expanded() {
+        let src = "use tokio::time as clock;\n\n#[test]\nfn t() {\n    mod clock {\n        pub fn sleep(ms: u64) {}\n    }\n    clock::sleep(1);\n}\n";
         let findings = scan_source(src, Path::new("fixture.rs")).expect("parse ok");
         assert!(findings.is_empty());
     }

@@ -488,4 +488,22 @@
 # - benchmarks/contenders/axum-bare/tests/integration.rs:215
 # - benchmarks/contenders/rust-camel-lib/src/scenarios/split-aggregate.rs:520
 # - benchmarks/harness/loadgen/tests/cli_integration.rs:198
-470
+#
+# Raise 470 -> 471 (2026-09-25, aliaswait qualified-sleep alias
+# resolution): lint-test-sleep compared multi-segment callee paths
+# literally, so a test-body `thread::sleep(..)` behind a plain module
+# import (`use std::thread;`) or an aliased module import (`use
+# tokio::time as clock;`) was missed. The multi-segment branch now
+# expands the first segment through the existing module-import chain
+# (same rule as the single-segment branch; absolute paths and locally
+# shadowed names bypass expansion). 7 new TRUE findings, all
+# `thread::sleep` behind `use std::thread;` in camel-cli tests,
+# inventoried below; every other base finding is preserved.
+# - crates/camel-cli/tests/compiled_artifact_test.rs:2354
+# - crates/camel-cli/tests/new_test.rs:443
+# - crates/camel-cli/tests/run_watch_test_doc_test.rs:136
+# - crates/camel-cli/tests/stream_run_pipe.rs:103
+# - crates/camel-cli/tests/stream_run_pipe.rs:140
+# - crates/camel-cli/tests/test_beans.rs:591
+# - crates/camel-cli/tests/test_intercepts.rs:315
+471
