@@ -6,7 +6,8 @@
 //! `expectReply` block that asserts against the producer's reply
 //! exchange), non-empty `expects` keyed by `mock:` URIs (relaxed to
 //! optional when at least one input declares `expectReply`), an optional
-//! `settle` quiet window (`0 < settle <= 5s`), an optional `intercepts`
+//! `settle` (`0 < settle <= 5s`; settle timeout in completion mode,
+//! quiet-window override in stability mode), an optional `intercepts`
 //! block (real endpoint URIs mapped to mock endpoints), and an optional
 //! `beans` block (declarative stub beans). Unknown fields are
 //! rejected (`deny_unknown_fields`); input bodies are restricted to string,
@@ -40,7 +41,7 @@ const BODY_SCALAR_SENTINEL: &str = "unsupported body scalar: ";
 /// after it is the rendered [`TestDocError::InvalidMatcher`] message (any
 /// trailing serde location suffix is stripped during classification).
 const MATCHER_SENTINEL: &str = "invalid matcher: ";
-/// Upper bound for the `settle` quiet window.
+/// Upper bound for `settle` (timeout in completion mode, quiet-window override in stability mode).
 const SETTLE_MAX: Duration = Duration::from_secs(5);
 /// Registry kinds `repositories:` accepts; displayed order in error messages.
 pub(crate) const SUPPORTED_REGISTRY_KINDS: [&str; 3] = ["cache", "idempotent", "claimCheck"];
