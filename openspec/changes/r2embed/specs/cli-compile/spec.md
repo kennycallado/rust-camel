@@ -52,7 +52,7 @@ The CLI SHALL provide `camel compile <document> -o <artifact>` that resolves one
 - **WHEN** a version-2-capable executable starts it
 - **THEN** the reader exposes it as a one-entry virtual store and preserves existing runtime behavior
 
-#### Scenario: Cross-target compilation remains rejected
+#### Scenario: Reject unsupported target compilation
 
 - **GIVEN** a requested target different from the native Linux target
 - **WHEN** the operator invokes compilation
