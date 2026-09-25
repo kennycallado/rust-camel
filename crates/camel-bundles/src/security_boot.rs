@@ -714,6 +714,7 @@ mod security_tests {
         .expect("config parses");
 
         let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
+        let _registry_anchor = Arc::clone(&registry);
         let ctx = super::build_security_compile_context_from_config(&cfg, registry)
             .await
             .expect("security context builds");
@@ -752,6 +753,7 @@ routes:
         .expect("config parses");
 
         let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
+        let _registry_anchor = Arc::clone(&registry);
         let err = match super::build_security_compile_context_from_config(&cfg, registry).await {
             Ok(_) => panic!("policies without the wasm feature must be rejected"),
             Err(err) => err,
@@ -794,6 +796,7 @@ routes:
         .expect("config parses");
 
         let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
+        let _registry_anchor = Arc::clone(&registry);
         let ctx = super::build_security_compile_context_from_config(&cfg, registry)
             .await
             .expect("security context builds");
@@ -813,6 +816,7 @@ routes:
         .expect("config parses");
 
         let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
+        let _registry_anchor = Arc::clone(&registry);
         let err = match super::build_security_compile_context_from_config(&cfg, registry).await {
             Ok(_) => {
                 panic!("wasm permission provider without path must fail during registry build")
@@ -1373,6 +1377,7 @@ routes:
             .expect("config parses");
 
             let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
+            let _registry_anchor = Arc::clone(&registry);
             let ctx = super::super::build_security_compile_context_from_config(&cfg, registry)
                 .await
                 .expect("security context builds");
@@ -1413,6 +1418,7 @@ routes:
             .expect("config parses");
 
             let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
+            let _registry_anchor = Arc::clone(&registry);
             let ctx = super::super::build_security_compile_context_from_config(&cfg, registry)
                 .await
                 .expect("security context builds");

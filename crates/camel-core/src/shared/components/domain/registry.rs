@@ -98,8 +98,16 @@ impl Default for Registry {
 /// (e.g. compile-time security scan, standalone examples without a
 /// live context), construction resolves
 /// [`camel_api::NoOpMetrics`].
+///
+/// The registry reference is non-owning: the context holds only a
+/// [`std::sync::Weak`] to the registry, so it never keeps the registry
+/// (and, transitively, the `CamelContext` that owns it) alive.
+/// Component resolution works only while a strong registry reference
+/// exists elsewhere — the owning `CamelContext`, or an anchor the
+/// embedder retains. Once the last strong reference drops, resolution
+/// returns `None`.
 pub struct RegistryComponentContext {
-    registry: Arc<std::sync::Mutex<Registry>>,
+    registry: std::sync::Weak<std::sync::Mutex<Registry>>,
     metrics: Arc<dyn camel_api::MetricsCollector>,
     components_enabled: bool,
 }
@@ -113,7 +121,7 @@ impl RegistryComponentContext {
         components_enabled: bool,
     ) -> Self {
         Self {
-            registry,
+            registry: Arc::downgrade(&registry),
             metrics: metrics.unwrap_or_else(|| Arc::new(camel_api::NoOpMetrics)),
             components_enabled,
         }
@@ -122,7 +130,12 @@ impl RegistryComponentContext {
 
 impl camel_component_api::ComponentContext for RegistryComponentContext {
     fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn camel_component_api::Component>> {
-        self.registry.lock().ok()?.get(scheme)
+        let registry = self.registry.upgrade()?;
+        let component = registry.lock().ok()?.get(scheme);
+        // Release the lock guard (statement end) and the upgraded anchor
+        // so the caller's return path retains neither.
+        drop(registry);
+        component
     }
 
     fn resolve_language(&self, _name: &str) -> Option<Arc<dyn camel_language_api::Language>> {
@@ -430,8 +443,38 @@ mod tests {
         let mut registry = Registry::new();
         registry.register(Arc::new(TimerComponent::new()));
         let registry = Arc::new(std::sync::Mutex::new(registry));
+        // Anchor: the context holds the registry weakly, so a strong
+        // reference must stay alive across the assertion.
+        let _registry_anchor = Arc::clone(&registry);
         let ctx = RegistryComponentContext::new(registry, None, false);
 
         assert!(ctx.resolve_component("timer").is_some());
+    }
+
+    #[test]
+    fn resolve_component_returns_component_while_anchored() {
+        let mut registry = Registry::new();
+        registry.register(Arc::new(TimerComponent::new()));
+        // The local binding is the strong anchor keeping the weak
+        // reference inside the context live.
+        let registry = Arc::new(std::sync::Mutex::new(registry));
+        let ctx = RegistryComponentContext::new(Arc::clone(&registry), None, false);
+
+        let Some(component) = ctx.resolve_component("timer") else {
+            panic!("anchored resolution must return the component");
+        };
+        assert_eq!(component.scheme(), "timer");
+    }
+
+    #[test]
+    fn resolve_component_returns_none_after_last_strong_ref_drops() {
+        let mut registry = Registry::new();
+        registry.register(Arc::new(TimerComponent::new()));
+        let registry = Arc::new(std::sync::Mutex::new(registry));
+        let ctx = RegistryComponentContext::new(Arc::clone(&registry), None, false);
+        // This binding held the only strong reference.
+        drop(registry);
+
+        assert!(ctx.resolve_component("timer").is_none());
     }
 }

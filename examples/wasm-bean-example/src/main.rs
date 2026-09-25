@@ -18,6 +18,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let wasm_path = fixtures_dir.join("text_utils.wasm");
     let registry_arc = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
+    // RegistryComponentContext holds the registry only weakly; this
+    // strong anchor keeps weak resolution live for the whole run.
+    let registry_anchor = Arc::clone(&registry_arc);
     let bean_config: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     // Build the WASM runtime config from WasmLimitsConfig. This is the same
     // path `camel-cli` uses when loading beans from Camel.toml. Here we use
@@ -84,6 +87,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ctx.add_route_definition(route_transform).await?;
     ctx.add_route_definition(route_last).await?;
+
+    // Hold the registry anchor until the run completes.
+    let _registry_anchor = registry_anchor;
+
     ctx.start().await?;
 
     println!("\n=== WASM Bean Example ===");

@@ -111,6 +111,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fixtures_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
     let wasm_path = fixtures_dir.join("role-check.wasm");
     let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
+    // RegistryComponentContext holds the registry only weakly; this
+    // strong anchor keeps weak resolution live for the whole run.
+    let registry_anchor = Arc::clone(&registry);
 
     // This example uses the programmatic WasmSecurityPolicy::new() API.
     // For production routes, prefer Camel.toml registration via
@@ -146,6 +149,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .security_policy(SecurityPolicyConfig::new(policy))
         .to("log:info?showHeaders=true")
         .build()?;
+
+    // Hold the registry anchor until the run completes.
+    let _registry_anchor = registry_anchor;
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

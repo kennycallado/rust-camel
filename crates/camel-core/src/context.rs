@@ -993,6 +993,29 @@ impl CamelContext {
     }
 }
 
+/// Dropping the context is a NON-graceful termination of the controller
+/// actor and supervision tasks: both background tasks are aborted, so an
+/// outstanding controller command is interrupted at its await point (the
+/// same cancellation class as [`abort()`](Self::abort); ADR-0018
+/// sequencing is not extended to the drop path). Route and service
+/// teardown remains the caller's [`stop()`](Self::stop) responsibility.
+/// [`stop()`](Self::stop) → [`start()`](Self::start) restart semantics are
+/// unchanged, because Drop fires only when the context value itself is
+/// discarded — a stopped-but-alive context keeps its actor for restart.
+/// If a join handle was already taken (e.g. via the test-only
+/// `take_actor_join`), the corresponding
+/// `Option` is `None` and Drop skips it.
+impl Drop for CamelContext {
+    fn drop(&mut self) {
+        if let Some(handle) = self.actor_join.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.supervision_join.take() {
+            handle.abort();
+        }
+    }
+}
+
 impl ComponentRegistrar for CamelContext {
     fn register_component_dyn(&mut self, component: Arc<dyn Component>) {
         let scheme = component.scheme().to_string();

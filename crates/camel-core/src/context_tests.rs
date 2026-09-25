@@ -870,7 +870,7 @@ async fn context_start_stop_drives_runtime_lifecycle_via_command_bus() {
 
 use camel_api::Lifecycle;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 struct MockService {
     start_count: Arc<AtomicUsize>,
@@ -1443,4 +1443,94 @@ async fn component_context_exposes_counter() {
         rt.in_flight_counter().is_some(),
         "CamelContext coerced to RuntimeObservability must expose the counter"
     );
+}
+
+// ── rssbase-2: context drop terminates controller tasks ──
+
+/// Test-local probe that records its own drop. Registered into the
+/// context's component registry; the flag flips when the last strong
+/// reference to the component is released — at camel-core level the
+/// surviving holder is the registry `Arc` pinned by the controller
+/// actor task, so the flag can only turn after the actor is gone.
+struct ProbeComponent {
+    dropped: Arc<AtomicBool>,
+}
+
+impl Drop for ProbeComponent {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Component for ProbeComponent {
+    fn scheme(&self) -> &str {
+        "rssbase-probe"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        ComponentMetadata::minimal(self.scheme())
+    }
+
+    fn create_endpoint(
+        &self,
+        _uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        Err(CamelError::ComponentNotFound("rssbase-probe".into()))
+    }
+}
+
+// Dropping the context after a clean stop must abort the controller
+// actor, releasing the registry `Arc` it pins, so the registered probe
+// component is dropped. Multi-thread runtime with 2 workers so the
+// aborted actor's drop schedules while the test task polls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_runs_exclusive_component_drop_after_stop() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let mut ctx = CamelContext::builder()
+        .build()
+        .await
+        .expect("build context");
+    ctx.register_component(ProbeComponent {
+        dropped: Arc::clone(&dropped),
+    });
+    ctx.start().await.expect("start context");
+    ctx.stop().await.expect("stop context");
+
+    drop(ctx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("probe component must be dropped after context drop");
+}
+
+// Restart through the living actor must keep working (stop→start twice),
+// and the later context drop must still terminate the actor so the
+// probe component is dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_start_restart_then_drop_runs_component_drop() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let mut ctx = CamelContext::builder()
+        .build()
+        .await
+        .expect("build context");
+    ctx.register_component(ProbeComponent {
+        dropped: Arc::clone(&dropped),
+    });
+    ctx.start().await.expect("first start");
+    ctx.stop().await.expect("first stop");
+    ctx.start().await.expect("restart start");
+    ctx.stop().await.expect("restart stop");
+
+    drop(ctx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("probe component must be dropped after restart then drop");
 }

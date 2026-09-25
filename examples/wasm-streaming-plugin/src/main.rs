@@ -40,6 +40,9 @@ async fn main() -> Result<(), CamelError> {
     let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
 
     let registry = Arc::new(Mutex::new(Registry::new()));
+    // RegistryComponentContext holds the registry only weakly; this
+    // strong anchor keeps weak resolution live for the whole run.
+    let registry_anchor = Arc::clone(&registry);
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     // base_dir = fixtures/ → "streaming-plugin.wasm" resolves to fixtures/streaming-plugin.wasm
@@ -79,6 +82,9 @@ async fn main() -> Result<(), CamelError> {
         .to("wasm:streaming-plugin.wasm?timeout=5&max-memory=10485760")
         .to("log:info")
         .build()?;
+
+    // Hold the registry anchor until the run completes.
+    let _registry_anchor = registry_anchor;
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;
