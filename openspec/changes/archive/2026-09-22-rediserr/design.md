@@ -67,7 +67,8 @@ One source of truth for the boundary + classification:
 | retry.rs budget | `connection lost while {stage} (retry budget exhausted…)` | YES (`connection`) | `TransientRetryBudgetExhausted { stage, attempts }` (text unchanged) |
 | topology.rs connection info | `failed to build Redis connection info: {e}` | YES (`connection`) | `TransientByProse { site: "topology connection info" }` |
 | topology.rs open client (×2 production + ×1 test (FakeTopology)) | `failed to open Redis client: {e}` | no | preserve `RedisError` source |
-| topology.rs sentinel client (×1) | `failed to build sentinel client: {e}` | no | preserve `RedisError` source |
+| topology.rs sentinel client, non-TLS SentinelClient::build (×1) | `failed to build sentinel client: {e}` | no | preserve `RedisError` source (`ProcessorErrorWithSource`, rules 4/5) |
+| topology.rs sentinel client, TLS SentinelClientBuilder (×2 production) | `failed to build sentinel client: {e}` | no | `CamelError::Config` (rule 1 = false) |
 | topology.rs sentinel resolve (auth-enriched) | `sentinel resolve: {e}` | no | preserve `RedisError` source |
 | topology.rs sentinel resolve join | `sentinel resolve join: {e}` | no | preserve `RedisError` source |
 | topology.rs sentinel mutex poisoned | `sentinel mutex poisoned` | no | plain `ProcessorError` (rule 6 = legacy false) |

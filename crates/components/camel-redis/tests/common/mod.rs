@@ -196,6 +196,11 @@ async fn serve_connection(stream: TcpStream, inner: Arc<StubInner>) {
     // so the client's command await pends until its response deadline
     // fires.
     loop {
+        // allow-test-wait: wait sites bounded — frames by the 10 s
+        // per-iteration timeout below, release by wait_until_released's
+        // internal 30 s per-wait deadline (invisible to this lexical
+        // lint); designed exits: peer disconnect / stream error
+        // (ADR-0069 §13.2 R1).
         // Per-iteration deadline (lintwiden D4.2, idle-relay re-arm):
         // each frame wait is bounded. This task is spawned detached per
         // connection and its premise is to serve until the PEER
@@ -208,13 +213,7 @@ async fn serve_connection(stream: TcpStream, inner: Arc<StubInner>) {
                 if !is_handshake_command(&command) {
                     continue;
                 }
-                if !tokio::time::timeout(
-                    Duration::from_secs(30),
-                    wait_until_released(&inner, &mut hold_rx),
-                )
-                .await
-                .unwrap_or(false)
-                {
+                if !wait_until_released(&inner, &mut hold_rx).await {
                     // Rejecting stub released under us (or the hold wait
                     // lapsed): close without replying.
                     break;
