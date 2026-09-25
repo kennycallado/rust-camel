@@ -10,8 +10,10 @@ Dependencies: `camel-api`, `noyalib`, `jsonschema`, `ariadne`, `serde`, `thiserr
 ## Architecture
 
 **LintEngine** is stateless — a `Vec<Box<dyn Rule>>` plus an `Arc<dyn ComponentMetadataCatalog>`.
-`lint(source: &str) -> Vec<Diagnostic>` parses the source, runs every rule, and returns
-diagnostics sorted by span position.
+`lint(source: &str) -> Vec<Diagnostic>` parses the source and runs every rule, concatenating each
+rule's output in rule-list (registration) order — no span sort. R-SCHEMA leaf order follows
+jsonschema `iter_errors` traversal, deterministic per serde_json map configuration (dual-config
+hazard documented in rschema.rs).
 
 **Editor support**: the same engine powers `complete_at` / `hover_at` for camel-lsp and the
 lint CLI. Completion covers scheme position, query-string option keys, and `parameters:`
@@ -75,6 +77,15 @@ targeted Error per value spec — message matches the runtime error wording
 (`yaml_source_to_value_source`) — via a recursive walk of collapsed
 Option-wrapper `anyOf` error contexts; non-permission oneOf failures keep
 their generic collapsed diagnostics.
+
+**R-SCHEMA pattern de-collapse (rc-n3t73)**: the MCP TLS `cert_path`/`key_path` fields carry a
+`pattern \S` regex (blank and whitespace-only values are rejected at lint time, mirroring the
+runtime trim-and-reject). A collapsed `anyOf` burying pattern violations de-collapses into one
+diagnostic per strictly-deeper pattern leaf, replacing the collapsed diagnostic when a leaf
+surfaces; duplicates dedup by `(path, pattern)`. A non-pattern defect co-located in the same failed
+`anyOf` also surfaces as its own sibling leaf (the null-branch whole-node type mismatch is excluded
+as branch noise); unit pin: `rschema_mcp_tls_blank_both_paths_two_leaves_rejected` (both TLS paths
+blank -> two leaf errors).
 
 Per-token semantics: a whole-document error fallback is forbidden. The
 interpolator lives in `src/env_interpolation.rs` — a SYNC mirror of the

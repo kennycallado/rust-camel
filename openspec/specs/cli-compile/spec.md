@@ -393,7 +393,7 @@ The artifact SHALL carry deploy-time assets as typed `asset` store entries under
 
 #### Scenario: Legacy consumer materialization is confined
 
-- **GIVEN** a compiled artifact whose TLS listener references embedded certificate, key, and client-CA entries
+- **GIVEN** a compiled artifact whose TLS listener references embedded certificate and key entries
 - **WHEN** the artifact boots and the listener spawns
 - **THEN** the referenced assets exist only inside the confined per-boot directory under the system temp directory, the substituted paths resolve inside it, files are mode 0600 and the directory mode 0700, no asset is written outside it, and shutdown removes the directory
 

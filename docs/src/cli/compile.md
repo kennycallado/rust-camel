@@ -1,6 +1,6 @@
 # camel compile
 
-`camel compile` packs one route or job document into a self-contained executable artifact. The artifact is a copy of the current Camel executable with an appended trailer that carries the documents. It runs on a target host without a source tree, route files, or a toolchain, and it performs no extraction.
+`camel compile` packs one route or job document into a self-contained executable artifact. The artifact is a copy of the current Camel executable with an appended trailer that carries the documents. It runs on a target host without a source tree, route files, or a toolchain, and it performs no extraction; the TLS, xslt, xsd, and sql classes materialize into a confined per-boot directory under the system temp directory.
 
 The format is a native Linux preview: the only accepted target is the native Linux triple of the compiling executable.
 
@@ -76,6 +76,10 @@ The artifact argument surface is deliberately narrow:
 A v2 run uses the merged embedded configuration and the ordered source-plan routes. `${env:}` tokens resolve against the deployment environment. The artifact reads no ambient `Camel.toml` and honors no `CAMEL_*` overrides. Watch mode is always off.
 
 Exit codes for an artifact run: 0 for graceful completion (or a completed job); 1 for a failed job pipeline (job artifacts); 2 for argument misuse, validation, discovery, configuration, boot, or report-write failure.
+
+## TLS in compiled artifacts
+
+The bootable TLS shape is the `https://` URI parameters `tlsCert` and `tlsKey`: the listener parses the materialized PEMs at boot. Route-level `tls:` blocks (document fields) compile, embed, and materialize — the compile-side promise holds — but a route-level `tls:` key is an unknown DSL field at discovery, so an artifact whose route carries one fails at discovery and never boots. A bootable client-CA site does not exist yet, because the `https` listener has no URI-parameter site for one; a listener TLS authoring shape is future work ([ADR-0075](../adr/0075-self-contained-executable-artifact-format.md) R2 amendment, bd `rc-7mzdu`).
 
 ## See also
 
