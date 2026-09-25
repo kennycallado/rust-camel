@@ -38,8 +38,12 @@ pub(crate) fn in_memory_default_config()
 }
 
 /// Load the Camel.toml at `config_path`, falling back to serde defaults
-/// ONLY when the main file does not exist. Shared with `camel job`
-/// (same real-boot config seam).
+/// ONLY when the main file does not exist. An explicitly empty
+/// `config_path` (the `--config=`, tail-override, or
+/// `CAMEL_CONFIG_FILE=""` spellings) is rejected outright with a
+/// `CamelError::Config` naming `--config` — only a non-empty missing
+/// path falls back to defaults. Shared with `camel job` (same real-boot
+/// config seam).
 ///
 /// The not-found decision is made on the main path alone, before loading:
 /// a missing INCLUDE also surfaces as file-not-found inside `ConfigError`
@@ -51,6 +55,12 @@ pub(crate) fn in_memory_default_config()
 pub(crate) fn load_config_or_default(
     config_path: &str,
 ) -> Result<camel_config::config::CamelConfig, camel_api::CamelError> {
+    if config_path.is_empty() {
+        return Err(camel_api::CamelError::Config(
+            "--config requires a non-empty path; pass a Camel.toml path or omit the flag"
+                .to_string(),
+        ));
+    }
     match std::path::Path::new(config_path).try_exists() {
         Ok(false) => in_memory_default_config(),
         Err(e) => Err(camel_api::CamelError::Config(format!(

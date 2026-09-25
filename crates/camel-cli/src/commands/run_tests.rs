@@ -115,6 +115,29 @@ fn missing_config_file_yields_defaults() {
     assert_eq!(config.timeout_ms, 5000);
 }
 
+/// cfgempty Task 1: an explicitly empty `--config` value (flag, `camel
+/// job` tail override, and `CAMEL_CONFIG_FILE=""` all feed this seam)
+/// must be rejected with a `CamelError::Config` naming the flag, before
+/// the absent-file fallback can silently boot on defaults.
+#[test]
+fn load_config_or_default_empty_path_errors_naming_config_flag() {
+    let err =
+        load_config_or_default("").expect_err("empty config path must be rejected, not defaulted"); // allow-unwrap
+    match err {
+        camel_api::CamelError::Config(msg) => {
+            assert!(
+                msg.contains("--config"),
+                "error must name the --config flag: {msg}"
+            );
+            assert!(
+                msg.contains("non-empty"),
+                "error must require a non-empty path: {msg}"
+            );
+        }
+        other => panic!("expected CamelError::Config, got {other:?}"),
+    }
+}
+
 #[test]
 fn malformed_config_aborts_instead_of_defaults() {
     let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap

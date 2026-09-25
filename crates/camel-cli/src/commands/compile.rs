@@ -161,6 +161,17 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
         return EXIT_REJECTION;
     }
 
+    // An explicitly passed empty --config value (a programmatic caller
+    // constructing `CompileArgs` with `Some(PathBuf::from(""))`; the CLI
+    // parser already rejects empty values) must fail with a diagnostic
+    // naming the flag instead of the opaque empty-string source error.
+    if args.config.as_deref() == Some(Path::new("")) {
+        eprintln!(
+            "camel compile: --config requires a non-empty path; pass a Camel.toml path or omit the flag"
+        );
+        return EXIT_REJECTION;
+    }
+
     // Resolve and confine the explicit multi-document source set. This
     // is the single read of the entry document; the normalized text the
     // resolver captured is what every later gate sees.
@@ -316,4 +327,35 @@ fn write_artifact(output: &Path, trailer_bytes: &[u8]) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod empty_config_tests {
+    use super::{CompileArgs, run_compile};
+    use std::path::PathBuf;
+
+    /// cfgempty: an explicitly empty `--config` value must be a named
+    /// rejection (exit 2), not an opaque empty-source diagnostic. The
+    /// CLI parser already rejects empty values for `Option<PathBuf>`
+    /// args (clap `PathBufValueParser`), so this seam is only reachable
+    /// by programmatic `CompileArgs` construction — which is exactly
+    /// what this test pins. The stderr text is asserted at the clap
+    /// boundary by `compile_command_test`; `run_compile` prints via
+    /// `eprintln!` with no capture seam, so the in-process assertion is
+    /// the exit code alone.
+    #[test]
+    fn compile_config_empty_value_is_named_rejection_exit_2() {
+        let args = CompileArgs {
+            document: PathBuf::from("routes.yaml"),
+            output: PathBuf::from("artifact-out"),
+            target: None,
+            config: Some(PathBuf::from("")),
+            profile: Vec::new(),
+        };
+        assert_eq!(
+            run_compile(&args),
+            2,
+            "empty --config must be the named rejection, not a source-resolution path"
+        );
+    }
 }
