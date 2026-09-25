@@ -994,8 +994,11 @@ mod tests {
         assert!(matches!(result, Err(WasmError::GuestPanic(_))));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn drain_watchdog_passes_when_chunks_flow() {
+        // start_paused determinism: the 10 ms pings and the 50 ms drain
+        // timeout are ordering inputs on the virtual clock, so the pass
+        // does not depend on scheduler margins.
         let progress = Arc::new(Notify::new());
         let drain_started = Arc::new(Notify::new());
         let p = progress.clone();
@@ -1114,7 +1117,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn invoke_stall_progress_resets_timer() {
         // Some(timeout): periodic progress pings prevent the trip.
         let progress = Arc::new(Notify::new());
@@ -1122,7 +1125,10 @@ mod tests {
         let p = progress.clone();
         let ds = drain_started.clone();
         let drive = async move {
-            // Pinger: 4 pings 25ms apart, then drain_started at 120ms.
+            // Pinger: 4 pings 25 virtual ms apart, then drain_started.
+            // Under start_paused the 25/40 ms values are ordering inputs
+            // (which timer fires first on the virtual clock), not
+            // wall-clock margins.
             for _ in 0..4 {
                 p.notify_one();
                 tokio::time::sleep(Duration::from_millis(25)).await;

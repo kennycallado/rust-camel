@@ -44,6 +44,7 @@ camel-component-log.workspace = true
 camel-language-api.workspace = true
 opentelemetry = { workspace = true }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 wat = "1"
 zeroize.workspace = true
